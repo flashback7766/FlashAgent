@@ -1,0 +1,17 @@
+[package]
+name = "flashagent-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cosmic-text = { workspace = true }
+thiserror = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
+swash = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }

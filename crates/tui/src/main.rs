@@ -1,0 +1,3671 @@
+//! Terminal client binary: wires backend → loop → tools → permissions and
+//! renders through `flashagent_tui`. Runs the stack in-process (svc IPC is a
+//! later milestone).
+
+use std::io::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use anyhow::Result;
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use flashagent_core::{
+    build_system_prompt, AgentLoop, AppConfig, ContextUsage, Decision, DoneReason, LlmSource,
+    LoopConfig, LoopEvent, PermissionMode, PermissionState, PermissionedTools, SystemPromptConfig,
+};
+use flashagent_llm::{ChatMessage, LlmBackend};
+use flashagent_tools::{BuiltinTools, BuiltinToolsConfig};
+use flashagent_tui::{
+    clip_ansi, pad_box_row, restore_line_color,
+    visible_width, welcome_card_with_thinking, welcome_card_with_thinking_animated, AutocompletePopup, ChatView, ConfirmSelect,
+    ContextModal, LineKind, PrefillTracker, ReasoningExpansion, RenderLine, SamplingAction, SamplingView,
+    SelectItem, SelectMenu, SettingsAction, SettingsView, TuiGate, TuiQuestionGate, SPINNER,
+};
+
+#[derive(Default, Clone)]
+struct QuestionUiState {
+    selected_index: usize,
+    write_in_text: String,
+    is_writing: bool,
+    selected_indices: std::collections::BTreeSet<usize>,
+}
+
+/// [`LlmSource`] over the OpenAI-compatible backend.
+struct BackendSource(flashagent_llm::OpenAiCompat);
+
+impl BackendSource {
+    fn profile(&self) -> Option<flashagent_llm::thinking::ThinkingProfile> {
+        self.0.profile()
+    }
+
+    fn discovery(&self) -> Option<flashagent_llm::ServerDiscovery> {
+        self.0.discovery()
+    }
+
+    #[allow(dead_code)]
+    fn model(&self) -> String {
+        self.0.model()
+    }
+
+    fn set_model(&self, model: impl Into<String>) {
+        self.0.set_model(model);
+    }
+
+    async fn discover_server(&self) -> Option<flashagent_llm::ServerDiscovery> {
+        self.0.discover_server().await
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmSource for BackendSource {
+    async fn turn(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[flashagent_llm::ToolSpec],
+    ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError>
+    {
+        self.0.stream(messages, tools).await
+    }
+
+    async fn turn_with_options(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[flashagent_llm::ToolSpec],
+        options: &flashagent_llm::TurnOptions,
+    ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError>
+    {
+        self.0.stream_with_options(messages, tools, options).await
+    }
+}
+
+enum UiEvent {
+    Loop(LoopEvent),
+    Key(KeyCode, KeyModifiers),
+    Paste(String),
+    Mouse(MouseEvent),
+    Finished(Result<(Vec<ChatMessage>, DoneReason), String>),
+    ServerDiscovered(flashagent_llm::ServerDiscovery),
+    BackgroundRecap {
+        turn_id: u64,
+        recap: String,
+        suggestion: Option<String>,
+    },
+}
+
+fn color(kind: LineKind) -> crossterm::style::Color {
+    // Truecolor dark warm aesthetic (M3 Expressive / Charcoal & Amber / Sand).
+    match kind {
+        LineKind::User => crossterm::style::Color::Rgb { r: 245, g: 240, b: 232 },
+        LineKind::Assistant => crossterm::style::Color::Rgb { r: 232, g: 227, b: 218 },
+        LineKind::Reasoning => crossterm::style::Color::Rgb { r: 140, g: 135, b: 130 },
+        LineKind::Tool => crossterm::style::Color::Rgb { r: 135, g: 185, b: 205 },
+        LineKind::ToolError => crossterm::style::Color::Rgb { r: 230, g: 110, b: 95 },
+        LineKind::Diff => crossterm::style::Color::Rgb { r: 145, g: 205, b: 140 },
+        LineKind::System => crossterm::style::Color::Rgb { r: 225, g: 175, b: 95 },
+    }
+}
+
+/// Print-and-forget renderer: settled lines are
+/// printed to the terminal scrollback once and never redrawn; only the live
+/// tail (streaming line, open tool, approval card, input) is repainted each
+/// frame by cursoring up over it. Native scrollback works for free.
+struct Renderer {
+    /// Lines of the live tail currently on screen (to erase next frame).
+    tail_height: u16,
+    prev_width: u16,
+    /// How many settled lines have already been printed to the scrollback.
+    printed_settled: usize,
+    /// Last rendered thinking mode — a flip needs a full repaint (settled
+    /// reasoning was printed in the other form and must not linger).
+    prev_expansion: Option<ReasoningExpansion>,
+    /// Explicit request to clear and repaint all settled lines (e.g. in-place notice update).
+    needs_reprint: bool,
+    /// Distance in lines from the top of the tail down to the input prompt line.
+    prev_cursor_tail_offset: u16,
+    /// Vertical scroll offset (lines scrolled back from the bottom). 0 = anchored to bottom.
+    scroll_offset: usize,
+}
+
+/// Everything the frame renderer needs beyond the chat itself.
+struct FrameState<'a> {
+    input: &'a str,
+    model: &'a str,
+    context_window: Option<&'a str>,
+    cwd: &'a str,
+    mode: PermissionMode,
+    is_goal_active: bool,
+    tip: Option<&'a str>,
+    tip_animated: Option<&'a str>,
+    /// Formatted turn stats (prompt tokens · tg · mtp) to display right-aligned on Line 2.
+    turn_stats: Option<&'a str>,
+    thinking_effort: &'a str,
+    reasoning_expand: ReasoningExpansion,
+    tick_n: usize,
+    running: bool,
+    /// Seconds since turn start (for the working status line).
+    elapsed_secs: u64,
+    /// Number of tokens generated strictly by the model in this turn.
+    model_tokens: usize,
+    /// Speed of token generation over a rolling 3-second window (tg_3s).
+    tokens_per_sec: f64,
+    /// Prompt cache reuse ratio (f_keep) from latest turn if reported.
+    f_keep: Option<f64>,
+    confirm_selection: Decision,
+    question_state: Option<&'a QuestionUiState>,
+    custom_placeholder: Option<&'a str>,
+    suggested_prompt: Option<&'a str>,
+    copy_toast: Option<&'a str>,
+    prefill_status: Option<&'a str>,
+    ttft_display: Option<&'a str>,
+}
+
+/// Tracks tokens generated strictly by the model in the current turn and
+/// calculates generation speeds (tg and tg_3s), prompt tokens, prefill speed / TTFT,
+/// and speculative decoding stats (MTP).
+struct TokenTracker {
+    model: String,
+    total_model_tokens: usize,
+    window: std::collections::VecDeque<(std::time::Instant, usize)>,
+    last_f_keep: Option<f64>,
+    turn_start_time: Option<std::time::Instant>,
+    first_token_time: Option<std::time::Instant>,
+    last_token_time: Option<std::time::Instant>,
+    active_duration: std::time::Duration,
+    prompt_tokens: Option<usize>,
+    last_tg: Option<f64>,
+    last_mtp: Option<flashagent_llm::MtpStats>,
+    last_ttft: Option<std::time::Duration>,
+    last_prefill_speed: Option<f64>,
+    prefill_tracker: PrefillTracker,
+    is_running: bool,
+}
+
+impl TokenTracker {
+    fn new(model: String) -> Self {
+        Self {
+            model,
+            total_model_tokens: 0,
+            window: std::collections::VecDeque::new(),
+            last_f_keep: None,
+            turn_start_time: None,
+            first_token_time: None,
+            last_token_time: None,
+            active_duration: std::time::Duration::ZERO,
+            prompt_tokens: None,
+            last_tg: None,
+            last_mtp: None,
+            last_ttft: None,
+            last_prefill_speed: None,
+            prefill_tracker: PrefillTracker::load_or_default(),
+            is_running: false,
+        }
+    }
+
+    fn on_turn_start(&mut self, model: String, estimated_prompt_tokens: usize) {
+        self.model = model;
+        self.total_model_tokens = 0;
+        self.window.clear();
+        self.turn_start_time = Some(std::time::Instant::now());
+        self.first_token_time = None;
+        self.last_token_time = None;
+        self.active_duration = std::time::Duration::ZERO;
+        self.prompt_tokens = if estimated_prompt_tokens > 0 {
+            Some(estimated_prompt_tokens)
+        } else {
+            None
+        };
+        self.last_tg = None;
+        self.last_mtp = None;
+        self.last_ttft = None;
+        self.last_prefill_speed = None;
+        self.is_running = true;
+    }
+
+    fn on_delta(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if self.first_token_time.is_none() {
+            self.first_token_time = Some(now);
+            if let Some(start) = self.turn_start_time {
+                let ttft = now.duration_since(start);
+                self.last_ttft = Some(ttft);
+                let prompt = self.prompt_tokens.unwrap_or(0);
+                let cached = (self.last_f_keep.unwrap_or(0.0) * prompt as f64) as usize;
+                let eval = prompt.saturating_sub(cached).max(1);
+                let spd = eval as f64 / ttft.as_secs_f64().max(0.001);
+                self.last_prefill_speed = Some(spd);
+                self.prefill_tracker.record(&self.model, prompt, cached, ttft);
+            }
+        }
+        if let Some(last) = self.last_token_time {
+            let dt = now.duration_since(last);
+            if dt < std::time::Duration::from_millis(1500) {
+                self.active_duration += dt;
+            }
+        }
+        self.last_token_time = Some(now);
+
+        let count = flashagent_llm::count_tokens(&self.model, text).max(1);
+        self.total_model_tokens += count;
+        self.window.push_back((now, count));
+    }
+
+    fn on_usage(&mut self, usage: &flashagent_llm::Usage) {
+        if let (Some(c), Some(p)) = (usage.cached, usage.prompt) {
+            if p > 0 {
+                self.last_f_keep = Some((c as f64 / p as f64).clamp(0.0, 1.0));
+                if let Some(ttft) = self.last_ttft {
+                    self.prefill_tracker.record(&self.model, p as usize, c as usize, ttft);
+                    let eval = (p as usize).saturating_sub(c as usize).max(1);
+                    self.last_prefill_speed = Some(eval as f64 / ttft.as_secs_f64().max(0.001));
+                }
+            }
+        }
+        if let Some(p) = usage.prompt {
+            if p > 0 {
+                self.prompt_tokens = Some(p as usize);
+            }
+        }
+        if let Some(mtp) = usage.mtp {
+            self.last_mtp = Some(mtp);
+        }
+        if let Some(c) = usage.completion {
+            if c > 0 {
+                let comp = c as usize;
+                if comp > self.total_model_tokens {
+                    let diff = comp - self.total_model_tokens;
+                    let now = std::time::Instant::now();
+                    if self.first_token_time.is_none() {
+                        self.first_token_time = Some(now);
+                    }
+                    if let Some(last) = self.last_token_time {
+                        let dt = now.duration_since(last);
+                        if dt < std::time::Duration::from_millis(1500) {
+                            self.active_duration += dt;
+                        }
+                    }
+                    self.last_token_time = Some(now);
+                    self.window.push_back((now, diff));
+                    self.total_model_tokens = comp;
+                } else if comp < self.total_model_tokens {
+                    self.total_model_tokens = comp;
+                }
+            }
+        }
+    }
+
+    fn tg(&self) -> Option<f64> {
+        if self.is_running {
+            if self.total_model_tokens == 0 {
+                return None;
+            }
+            let secs = self.active_duration.as_secs_f64();
+            if secs >= 0.1 {
+                Some(self.total_model_tokens as f64 / secs)
+            } else if let Some(first) = self.first_token_time {
+                let elapsed = std::time::Instant::now().duration_since(first).as_secs_f64();
+                if elapsed >= 0.2 {
+                    Some(self.total_model_tokens as f64 / elapsed)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            self.last_tg
+        }
+    }
+
+    fn on_finished(&mut self) {
+        self.is_running = false;
+        if self.total_model_tokens > 0 {
+            let secs = self.active_duration.as_secs_f64();
+            if secs >= 0.05 {
+                self.last_tg = Some(self.total_model_tokens as f64 / secs);
+            } else if let (Some(first), Some(last)) = (self.first_token_time, self.last_token_time) {
+                let dt = last.duration_since(first).as_secs_f64();
+                if dt >= 0.05 {
+                    self.last_tg = Some(self.total_model_tokens as f64 / dt);
+                }
+            }
+        }
+    }
+
+    fn tg_3s(&mut self) -> f64 {
+        let now = std::time::Instant::now();
+        let cutoff = now.checked_sub(std::time::Duration::from_secs(3)).unwrap_or(now);
+
+        while let Some(&(t, _)) = self.window.front() {
+            if t < cutoff {
+                self.window.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        if self.window.is_empty() {
+            return 0.0;
+        }
+
+        let sum: usize = self.window.iter().map(|(_, n)| *n).sum();
+        let earliest = self.window.front().map(|(t, _)| *t).unwrap_or(now);
+        let dt = now.duration_since(earliest).as_secs_f64().max(0.25);
+        sum as f64 / dt
+    }
+
+    fn format_stats(&self) -> Option<String> {
+        let mut parts = Vec::new();
+
+        if let Some(p) = self.prompt_tokens {
+            if p > 0 {
+                let p_str = flashagent_core::ContextUsage::format_used_tokens(p);
+                parts.push(format!("\x1b[38;2;160;175;200m{p_str} prompt\x1b[0m"));
+            }
+        }
+
+        if let Some(ttft) = self.last_ttft {
+            let spd_str = if let Some(spd) = self.last_prefill_speed {
+                if spd >= 1000.0 {
+                    format!("{:.1}k t/s prefill", spd / 1000.0)
+                } else {
+                    format!("{:.0} t/s prefill", spd)
+                }
+            } else {
+                "prefill".to_string()
+            };
+            parts.push(format!("\x1b[38;2;120;220;140m⚡ TTFT {:.2}s ({spd_str})\x1b[0m", ttft.as_secs_f64()));
+        }
+
+        let speed = if self.is_running {
+            self.tg()
+        } else {
+            self.last_tg
+        };
+
+        if let Some(s) = speed {
+            if s > 0.0 {
+                parts.push(format!("\x1b[38;2;145;205;140m{:.1} tg\x1b[0m", s));
+            }
+        }
+
+        if let Some(mtp) = &self.last_mtp {
+            if mtp.total_draft_tokens > 0 {
+                let rate = mtp.acceptance_rate();
+                parts.push(format!("\x1b[38;2;225;175;95mmtp: {:.0}%\x1b[0m", rate));
+            }
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" \x1b[38;2;100;95;90m·\x1b[0m "))
+        }
+    }
+
+    fn live_prefill_status(&self) -> Option<String> {
+        if self.is_running && self.first_token_time.is_none() {
+            let start = self.turn_start_time?;
+            let elapsed = start.elapsed();
+            let prompt = self.prompt_tokens.unwrap_or(500);
+            let cached = (self.last_f_keep.unwrap_or(0.0) * prompt as f64) as usize;
+            Some(self.prefill_tracker.format_live_prefill(&self.model, prompt, cached, elapsed))
+        } else {
+            None
+        }
+    }
+
+    fn ttft_display(&self) -> Option<String> {
+        let ttft = self.last_ttft?;
+        let spd = self.last_prefill_speed?;
+        let speed_str = if spd >= 1000.0 {
+            format!("{:.1}k t/s", spd / 1000.0)
+        } else {
+            format!("{:.0} t/s", spd)
+        };
+        Some(format!("\x1b[38;2;120;220;140m⚡ TTFT {:.2}s ({speed_str})\x1b[0m", ttft.as_secs_f64()))
+    }
+}
+
+impl Renderer {
+    fn new() -> Self {
+        Self {
+            tail_height: 0,
+            prev_width: 0,
+            printed_settled: 0,
+            prev_expansion: None,
+            needs_reprint: false,
+            prev_cursor_tail_offset: 0,
+            scroll_offset: 0,
+        }
+    }
+
+    fn request_reprint(&mut self) {
+        self.needs_reprint = true;
+    }
+
+    fn scroll_up(&mut self, lines: usize, max_scroll: usize) {
+        self.scroll_offset = (self.scroll_offset + lines).min(max_scroll);
+        self.needs_reprint = true;
+    }
+
+    fn scroll_down(&mut self, lines: usize) {
+        let old = self.scroll_offset;
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        if old != self.scroll_offset {
+            self.needs_reprint = true;
+        }
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        if self.scroll_offset > 0 {
+            self.scroll_offset = 0;
+            self.needs_reprint = true;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn frame(
+        &mut self,
+        chat: &ChatView,
+        gate: &TuiGate,
+        question_gate: &TuiQuestionGate,
+        effort_menu: Option<&SelectMenu<String>>,
+        model_menu: Option<&SelectMenu<String>>,
+        settings_view: Option<&SettingsView>,
+        sampling_view: Option<&SamplingView>,
+        context_modal: Option<&ContextModal>,
+        autocomplete: Option<&AutocompletePopup>,
+        context_usage: &ContextUsage,
+        st: FrameState<'_>,
+    ) {
+        let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
+        let width = width as usize;
+        let resized = self.prev_width != width as u16;
+        self.prev_width = width as u16;
+        let toggled = self.prev_expansion != Some(st.reasoning_expand);
+        self.prev_expansion = Some(st.reasoning_expand);
+
+        // On resize the scrollback already contains old-width lines; when the
+        // thinking mode flips or an existing notice is updated in place, settled
+        // reasoning was printed in the other form. Both need everything printed afresh.
+        let reprint_all = resized || toggled || self.needs_reprint;
+        self.needs_reprint = false;
+
+        let (settled, live) = chat.render_split(width.saturating_sub(1), st.reasoning_expand);
+        let mut tail: Vec<RenderLine> = live;
+
+        let inner_w = width.saturating_sub(2);
+        let border_color = "\x1b[38;2;95;90;85m";
+        let reset = "\x1b[0m";
+
+        let input_line_idx;
+        let mut custom_cursor_col: Option<u16> = None;
+
+        if let Some(req) = gate.pending() {
+            // Morph the composer into the approval card!
+            let tool_styled = format!("\x1b[1;38;2;225;175;95m{}\x1b[0m", req.tool);
+            let title = format!(" Confirm: {tool_styled} ");
+            let vis_title_len = visible_width(&title);
+            let dash_w = inner_w.saturating_sub(vis_title_len + 2);
+
+            tail.push((
+                LineKind::System,
+                format!("{border_color}╭─{title}{}╮{reset}", "─".repeat(dash_w)),
+            ));
+
+            if let Some(cmd) = req.args_json.trim().strip_prefix("{\"command\":\"").and_then(|s| s.strip_suffix("\"}")) {
+                let cmd_clipped = clip_ansi(cmd, inner_w.saturating_sub(4));
+                tail.push((
+                    LineKind::System,
+                    pad_box_row(&format!(" \x1b[38;2;160;155;145mcommand:\x1b[0m \x1b[1;38;2;240;235;225m{cmd_clipped}\x1b[0m"), width),
+                ));
+            } else if let Some(path) = req.args_json.trim().strip_prefix("{\"path\":\"").and_then(|s| s.split('"').next()) {
+                let path_clipped = clip_ansi(path, inner_w.saturating_sub(4));
+                tail.push((
+                    LineKind::System,
+                    pad_box_row(&format!(" \x1b[38;2;160;155;145mtarget:\x1b[0m \x1b[1;38;2;240;235;225m{path_clipped}\x1b[0m"), width),
+                ));
+            }
+
+            if let Some(ref diff) = req.diff {
+                for line in diff.lines().take(6) {
+                    let (color, prefix) = if line.starts_with('+') {
+                        ("\x1b[38;2;145;205;140m", "+")
+                    } else if line.starts_with('-') {
+                        ("\x1b[38;2;225;115;105m", "-")
+                    } else {
+                        ("\x1b[38;2;135;130;125m", " ")
+                    };
+                    let line_clean = line.trim_start_matches('+').trim_start_matches('-').trim_start_matches(' ');
+                    let line_clipped = clip_ansi(line_clean, inner_w.saturating_sub(6));
+                    tail.push((
+                        LineKind::System,
+                        pad_box_row(&format!("  {color}{prefix} {line_clipped}\x1b[0m"), width),
+                    ));
+                }
+            }
+
+            let allow_btn = if st.confirm_selection == Decision::Allow {
+                "\x1b[1;38;2;225;175;95m[► Allow (Enter)]\x1b[0m"
+            } else {
+                "\x1b[38;2;160;155;145m[ Allow (Enter) ]\x1b[0m"
+            };
+            let always_btn = "\x1b[38;2;160;155;145m[ Always (a) ]\x1b[0m";
+            let deny_btn = if st.confirm_selection == Decision::Deny {
+                "\x1b[1;38;2;225;115;105m[► Deny (d / Esc)]\x1b[0m"
+            } else {
+                "\x1b[38;2;160;155;145m[ Deny (d / Esc) ]\x1b[0m"
+            };
+            tail.push((
+                LineKind::System,
+                pad_box_row(&format!(" {allow_btn}   {always_btn}   {deny_btn}"), width),
+            ));
+
+            input_line_idx = tail.len();
+            tail.push((
+                LineKind::System,
+                format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
+            ));
+            custom_cursor_col = Some(0);
+        } else if let Some(req) = question_gate.pending() {
+            // Morph the composer into the question card!
+            let title = " Question from FlashAgent ";
+            let vis_title_len = visible_width(title);
+            let dash_w = inner_w.saturating_sub(vis_title_len + 2);
+
+            tail.push((
+                LineKind::System,
+                format!("{border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
+            ));
+
+            let q_clipped = clip_ansi(&req.question, inner_w.saturating_sub(4));
+            tail.push((
+                LineKind::System,
+                pad_box_row(&format!(" \x1b[1;38;2;240;235;225m{q_clipped}\x1b[0m"), width),
+            ));
+
+            let q_state = st.question_state;
+            let sel_idx = q_state.map(|s| s.selected_index).unwrap_or(0);
+            let is_writing = q_state.map(|s| s.is_writing).unwrap_or(false);
+            let write_text = q_state.map(|s| s.write_in_text.as_str()).unwrap_or("");
+            let mut typing_line_idx = None;
+
+            if let Some(ref opts) = req.options {
+                let total_choices = opts.len();
+                for (i, opt) in opts.iter().enumerate() {
+                    let num = i + 1;
+                    let is_sel = !is_writing && sel_idx == i;
+                    let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+                    let opt_clipped = clip_ansi(opt, inner_w.saturating_sub(14));
+                    let opt_styled = if req.multi_select {
+                        let checked = q_state.map(|s| s.selected_indices.contains(&i)).unwrap_or(false);
+                        let check_box = if checked {
+                            "\x1b[1;38;2;145;205;140m[x]\x1b[0m"
+                        } else {
+                            "\x1b[38;2;135;130;125m[ ]\x1b[0m"
+                        };
+                        if is_sel {
+                            format!("{check_box} \x1b[1;38;2;225;175;95m{num}. {opt_clipped}\x1b[0m")
+                        } else {
+                            format!("{check_box} \x1b[38;2;200;195;185m{num}. {opt_clipped}\x1b[0m")
+                        }
+                    } else {
+                        if is_sel {
+                            format!("\x1b[1;38;2;225;175;95m{num}. {opt_clipped}\x1b[0m")
+                        } else {
+                            format!("\x1b[38;2;200;195;185m{num}. {opt_clipped}\x1b[0m")
+                        }
+                    };
+                    tail.push((LineKind::System, pad_box_row(&format!("  {ptr} {opt_styled}"), width)));
+                }
+
+                let write_num = total_choices + 1;
+                let is_write_sel = is_writing || sel_idx == total_choices;
+                let write_ptr = if is_write_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+                if is_writing {
+                    typing_line_idx = Some(tail.len());
+                    tail.push((
+                        LineKind::User,
+                        pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. Custom (write-in):\x1b[0m \x1b[1;38;2;240;235;225m{write_text}█\x1b[0m"), width),
+                    ));
+                    tail.push((
+                        LineKind::System,
+                        pad_box_row("   \x1b[38;2;135;130;125m[Enter] Submit write-in · [Esc] Back to choices\x1b[0m", width),
+                    ));
+                } else {
+                    let write_styled = if is_write_sel {
+                        format!("\x1b[1;38;2;225;175;95m{write_num}. Other (Type custom answer)\x1b[0m")
+                    } else {
+                        format!("\x1b[38;2;160;155;145m{write_num}. Other (Type custom answer)\x1b[0m")
+                    };
+                    tail.push((LineKind::System, pad_box_row(&format!("  {write_ptr} {write_styled}"), width)));
+                    if req.multi_select {
+                        tail.push((
+                            LineKind::System,
+                            pad_box_row("   \x1b[38;2;135;130;125m[Space] Toggle [x] · [1-N / ↑↓] Select · [Enter] Confirm · [Esc] Cancel\x1b[0m", width),
+                        ));
+                    } else {
+                        tail.push((
+                            LineKind::System,
+                            pad_box_row("   \x1b[38;2;135;130;125m[1-N / ↑↓] Select · [Enter] Confirm · [Esc] Cancel\x1b[0m", width),
+                        ));
+                    }
+                }
+            } else {
+                typing_line_idx = Some(tail.len());
+                tail.push((
+                    LineKind::User,
+                    pad_box_row(&format!("  \x1b[1;38;2;225;175;95m❯\x1b[0m \x1b[1;38;2;240;235;225m{write_text}█\x1b[0m"), width),
+                ));
+                tail.push((
+                    LineKind::System,
+                    pad_box_row("   \x1b[38;2;135;130;125m[Enter] Submit answer · [Esc] Cancel\x1b[0m", width),
+                ));
+            }
+
+            input_line_idx = typing_line_idx.unwrap_or(tail.len().saturating_sub(1));
+            if typing_line_idx.is_some() {
+                custom_cursor_col = Some(((write_text.chars().count() + 6) as u16).min(width.saturating_sub(2) as u16));
+            } else {
+                custom_cursor_col = Some(4);
+            }
+
+            tail.push((
+                LineKind::System,
+                format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
+            ));
+        } else if let Some(sm) = sampling_view {
+            // Morph composer into Sampling Parameters menu
+            tail.extend(sm.render(width));
+            input_line_idx = tail.len().saturating_sub(1);
+            custom_cursor_col = Some(0);
+        } else if let Some(settings) = settings_view {
+            // Morph composer into Settings tab
+            tail.extend(settings.render(width));
+            input_line_idx = tail.len().saturating_sub(1);
+            custom_cursor_col = Some(0);
+        } else if let Some(menu) = model_menu {
+            // Morph composer into Model selection menu
+            tail.extend(menu.render(width));
+            input_line_idx = tail.len().saturating_sub(1);
+            custom_cursor_col = Some(0);
+        } else if let Some(menu) = effort_menu {
+            // Morph composer into Thinking effort menu
+            tail.extend(menu.render(width));
+            input_line_idx = tail.len().saturating_sub(1);
+            custom_cursor_col = Some(0);
+        } else if let Some(modal) = context_modal {
+            // Morph composer into Context breakdown modal
+            tail.extend(modal.render(width));
+            input_line_idx = tail.len().saturating_sub(1);
+            custom_cursor_col = Some(0);
+        } else {
+            // Standard input box
+            tail.push((
+                LineKind::System,
+                format!("{border_color}╭{}╮{reset}", "─".repeat(inner_w)),
+            ));
+
+            // Line 1: Input line with breathing prompt icon `❯` and placeholder if empty
+            input_line_idx = tail.len();
+            let cycle = (st.tick_n % 28) as f32 / 28.0;
+            let phase = (cycle * std::f32::consts::PI * 2.0).sin() * 0.5 + 0.5;
+            let r = (210.0 + phase * 45.0) as u8;
+            let g = (150.0 + phase * 55.0) as u8;
+            let b = (75.0 + phase * 40.0) as u8;
+            let prompt_styled = format!("\x1b[1;38;2;{r};{g};{b}m❯\x1b[0m");
+            let input_row_content = if st.input.is_empty() {
+                if let Some(prefill) = st.prefill_status {
+                    format!(" {prompt_styled}  {prefill}")
+                } else if st.running {
+                    let dots = match (st.tick_n / 4) % 3 {
+                        0 => ".  ",
+                        1 => ".. ",
+                        _ => "...",
+                    };
+                    format!(" {prompt_styled} \x1b[38;2;135;130;125mWorking on task{dots}\x1b[0m")
+                } else if let Some(custom) = st.custom_placeholder {
+                    format!(" {prompt_styled}  \x1b[38;2;135;140;155m{custom}\x1b[0m")
+                } else if let Some(sug) = st.suggested_prompt {
+                    format!(" {prompt_styled}  \x1b[38;2;155;160;175m{sug}\x1b[0m \x1b[38;2;100;105;120m(→ to use)\x1b[0m")
+                } else {
+                    format!(" {prompt_styled}  \x1b[38;2;135;130;125mAsk FlashAgent to do anything...\x1b[0m")
+                }
+            } else {
+                format!(" {prompt_styled} {}", st.input)
+            };
+            tail.push((LineKind::User, pad_box_row(&input_row_content, width)));
+
+            // Bottom border of input box
+            tail.push((
+                LineKind::System,
+                format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
+            ));
+        }
+
+        // Autocomplete popup under composer
+        if let Some(ac) = autocomplete {
+            tail.extend(ac.render(width));
+        }
+
+        // 3-Line persistent footer under composer
+        // Line 1: Action hint / hotkeys
+        let left_hint = if let Some(toast) = st.copy_toast {
+            format!("  \x1b[1;38;2;135;215;165m{toast}\x1b[0m")
+        } else if gate.pending().is_some() {
+            "  \x1b[38;2;135;130;125menter — allow · a — always · d / esc — deny\x1b[0m".to_string()
+        } else if let Some(req) = question_gate.pending() {
+            if req.multi_select {
+                "  \x1b[38;2;135;130;125mSpace — toggle [x] · 1-N / ↑↓ — select · enter — confirm · esc — cancel\x1b[0m".to_string()
+            } else {
+                "  \x1b[38;2;135;130;125m↑/↓ / 1-N — select · enter — confirm · esc — cancel\x1b[0m".to_string()
+            }
+        } else if sampling_view.is_some() {
+            "  \x1b[38;2;135;130;125mtype digits/./- · ←/→ adjust · ↑/↓ navigate · enter apply · esc back\x1b[0m".to_string()
+        } else if settings_view.is_some() {
+            "  \x1b[38;2;135;130;125m↑/↓ — item · enter — open menu/change · esc — close\x1b[0m".to_string()
+        } else if model_menu.is_some() {
+            "  \x1b[38;2;135;130;125m↑/↓ — select model · enter — switch · esc — cancel\x1b[0m".to_string()
+        } else if effort_menu.is_some() {
+            "  \x1b[38;2;135;130;125m↑/↓ — select effort · enter — apply · esc — cancel\x1b[0m".to_string()
+        } else if context_modal.is_some() {
+            "  \x1b[38;2;135;130;125mf1 / enter / esc — close context breakdown\x1b[0m".to_string()
+        } else if autocomplete.is_some() {
+            "  \x1b[38;2;135;130;125mtab — complete · ↑/↓ — select · enter — send · esc — dismiss\x1b[0m".to_string()
+        } else if st.running {
+            let cache_str = if let Some(fk) = st.f_keep {
+                format!(" \x1b[38;2;75;99;130m·\x1b[0m \x1b[38;2;120;220;140m⚡ cache {:.0}%\x1b[0m", fk * 100.0)
+            } else {
+                String::new()
+            };
+            let ttft_str = if let Some(spd_str) = st.ttft_display {
+                format!(" \x1b[38;2;75;99;130m·\x1b[0m {spd_str}")
+            } else {
+                String::new()
+            };
+            format!(
+                "  {} \x1b[38;2;168;199;250mTokens - \x1b[1;38;2;235;240;250m{}\x1b[0m \x1b[38;2;194;231;255m({:.1}/s)\x1b[0m{cache_str}{ttft_str} \x1b[38;2;75;99;130m·\x1b[0m \x1b[38;2;155;165;180m{}s\x1b[0m \x1b[38;2;135;130;125m· tab/f1-f5 menus · enter to steer · esc to interrupt\x1b[0m",
+                SPINNER[st.tick_n % SPINNER.len()],
+                st.model_tokens,
+                st.tokens_per_sec,
+                st.elapsed_secs,
+            )
+        } else {
+            "  \x1b[38;2;135;130;125menter — send · tab — settings · f1 — context · f2 — verbose · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · ctrl+c/v · esc — quit\x1b[0m".to_string()
+        };
+        tail.push((LineKind::System, left_hint));
+
+        // Line 2: Animated Tip and right-aligned turn stats (prompt tokens · tg · mtp)
+        let default_tip = "Press Tab or type /settings to configure FlashAgent";
+        let raw_tip = if let Some(anim) = st.tip_animated {
+            format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m {anim}")
+        } else {
+            let tip_content = st.tip.unwrap_or(default_tip);
+            format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{tip_content}\x1b[0m")
+        };
+
+        let tip_row = if let Some(stats_str) = st.turn_stats {
+            let stats_vis = visible_width(stats_str);
+            let tip_vis = visible_width(&raw_tip);
+            if tip_vis + stats_vis + 3 <= width {
+                let pad = " ".repeat(width.saturating_sub(tip_vis + stats_vis + 1));
+                format!("{raw_tip}{pad}{stats_str}")
+            } else if width > stats_vis + 10 {
+                let budget = width.saturating_sub(stats_vis + 3);
+                let clipped_tip = clip_ansi(&raw_tip, budget);
+                let pad = " ".repeat(width.saturating_sub(visible_width(&clipped_tip) + stats_vis + 1));
+                format!("{clipped_tip}{pad}{stats_str}")
+            } else {
+                clip_ansi(&raw_tip, width.saturating_sub(2))
+            }
+        } else {
+            clip_ansi(&raw_tip, width.saturating_sub(2))
+        };
+        tail.push((LineKind::System, tip_row));
+
+        // Line 3: System Status sub-line and right-aligned context gauge
+        let model_val = if st.model.is_empty() { "default" } else { st.model };
+        let raw_model_display = match st.context_window {
+            Some(ctx) if !ctx.is_empty() => format!("{model_val} ({ctx})"),
+            _ => model_val.to_string(),
+        };
+        let max_model_len = (inner_w / 3).max(20);
+        let model_display = flashagent_tui::truncate_middle(&raw_model_display, max_model_len);
+
+        let expand_status = if st.reasoning_expand.all {
+            " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: all]\x1b[0m"
+        } else if st.reasoning_expand.last {
+            " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: last]\x1b[0m"
+        } else {
+            ""
+        };
+        let cwd_clean = if st.cwd.starts_with('~') && !st.cwd.starts_with("~/") && st.cwd.len() > 1 {
+            format!("~/{}", &st.cwd[1..])
+        } else {
+            st.cwd.to_string()
+        };
+        let max_cwd_len = (inner_w / 4).max(16);
+        let cwd_display = flashagent_tui::truncate_middle(&cwd_clean, max_cwd_len);
+
+        let mode_label = if st.is_goal_active {
+            "\x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m".to_string()
+        } else {
+            format!("\x1b[38;2;145;205;140m[{}]\x1b[0m", st.mode.label())
+        };
+
+        let f_keep_str = if let Some(fk) = st.f_keep {
+            format!(" \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;120;220;140mcache: {:.0}%\x1b[0m", fk * 100.0)
+        } else {
+            String::new()
+        };
+        let left_meta = format!(
+            "  \x1b[38;2;160;155;145m{model_display}\x1b[0m \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;140;135;130m{cwd_display}\x1b[0m \x1b[38;2;100;95;90m·\x1b[0m {mode_label} \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;225;175;95mthinking: {}\x1b[0m{f_keep_str}{expand_status}",
+            st.thinking_effort,
+        );
+
+        let gauge_str = context_usage.format_compact_gauge(10);
+        let left_vis = visible_width(&left_meta);
+        let gauge_vis = visible_width(&gauge_str);
+        let status_row = if left_vis + gauge_vis + 3 <= width {
+            let pad = " ".repeat(width.saturating_sub(left_vis + gauge_vis + 1));
+            format!("{left_meta}{pad}{gauge_str}")
+        } else {
+            let budget = width.saturating_sub(gauge_vis + 3);
+            let clipped_left = clip_ansi(&left_meta, budget);
+            let pad = " ".repeat(width.saturating_sub(visible_width(&clipped_left) + gauge_vis + 1));
+            format!("{clipped_left}{pad}{gauge_str}")
+        };
+        tail.push((LineKind::System, status_row));
+
+        // When scroll_offset > 0, render shifted history view
+        if self.scroll_offset > 0 {
+            let mut all_lines: Vec<RenderLine> = settled.clone();
+            all_lines.extend(tail.clone());
+            let total_len = all_lines.len();
+            let view_h = (height as usize).saturating_sub(2).max(5);
+            let end = total_len.saturating_sub(self.scroll_offset);
+            let start = end.saturating_sub(view_h);
+            let visible_slice = &all_lines[start..end];
+
+            let mut out = String::from("\x1b[H\x1b[2J");
+            let mut first = true;
+            for (kind, text) in visible_slice {
+                if !first {
+                    out.push_str("\r\n");
+                }
+                first = false;
+                let clipped = clip_ansi(text, width);
+                let prefix = crossterm::style::SetForegroundColor(color(*kind)).to_string();
+                out.push_str(&prefix);
+                out.push_str(&restore_line_color(&clipped, &prefix));
+                out.push_str("\x1b[39m");
+            }
+            out.push_str("\r\n");
+            let scroll_status = format!(
+                " \x1b[7m ↑ Scrolled up {} lines (↓ / Esc / PageDown / type to return) \x1b[0m",
+                self.scroll_offset
+            );
+            out.push_str(&clip_ansi(&scroll_status, width));
+            crossterm::queue!(
+                std::io::stdout(),
+                crossterm::cursor::MoveToColumn(0),
+                crossterm::style::Print(out),
+            )
+            .ok();
+            std::io::stdout().flush().ok();
+            return;
+        }
+
+        let mut out = String::new();
+        if reprint_all {
+            // Full repaint: home + clear, then reprint including settled.
+            out.push_str("\x1b[H\x1b[2J");
+        } else {
+            // Move cursor up into the top of the previous tail, erase down.
+            if self.prev_cursor_tail_offset > 0 {
+                out.push_str(&format!("\x1b[{}F", self.prev_cursor_tail_offset));
+            } else {
+                out.push('\r');
+            }
+            out.push_str("\x1b[J"); // clear from cursor down
+        }
+
+        let mut first = true;
+        let mut print_line = |out: &mut String, kind: &LineKind, text: &str| {
+            if !first {
+                out.push_str("\r\n");
+            }
+            first = false;
+            // HARD CAP: any tail line longer than the terminal width would
+            // wrap physically and desync tail_height (the duplication bug).
+            let clipped = clip_ansi(text, width);
+            let prefix = crossterm::style::SetForegroundColor(color(*kind)).to_string();
+            out.push_str(&prefix);
+            out.push_str(&restore_line_color(&clipped, &prefix));
+            out.push_str("\x1b[39m");
+        };
+        if reprint_all {
+            for (k, t) in &settled {
+                print_line(&mut out, k, t);
+            }
+            self.printed_settled = settled.len();
+        } else if settled.len() > self.printed_settled {
+            // Newly frozen lines print once; they never repaint.
+            for (k, t) in &settled[self.printed_settled..] {
+                print_line(&mut out, k, t);
+            }
+            self.printed_settled = settled.len();
+        }
+        for (k, t) in &tail {
+            print_line(&mut out, k, t);
+        }
+        self.tail_height = tail.len() as u16;
+        self.prev_cursor_tail_offset = input_line_idx as u16;
+
+        let lift_up = (tail.len() - 1 - input_line_idx) as u16;
+        let cursor_col = custom_cursor_col.unwrap_or_else(|| ((st.input.chars().count() + 4) as u16).min(width.saturating_sub(2) as u16));
+        crossterm::queue!(
+            std::io::stdout(),
+            crossterm::cursor::MoveToColumn(0),
+            crossterm::style::Print(out),
+            crossterm::cursor::MoveUp(lift_up),
+            crossterm::cursor::MoveToColumn(cursor_col),
+        )
+        .ok();
+        std::io::stdout().flush().ok();
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut config = AppConfig::load();
+    let mut force_setup = false;
+    let mut skip_trust = false;
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--url" => {
+                if let Some(val) = args.next() {
+                    config.backend_url = val;
+                }
+            }
+            "--model" => {
+                if let Some(val) = args.next() {
+                    config.model = val;
+                }
+            }
+            "--setup" => force_setup = true,
+            "-y" | "--yes" => skip_trust = true,
+            "-h" | "--help" => {
+                println!("FlashAgent TUI\n\nUsage: flashagent-tui [OPTIONS]\n\nOptions:\n  --model <name>       Specify LLM model name\n  --url <endpoint>     API endpoint (default: http://localhost:1234/v1)\n  --setup              Run first-time setup wizard\n  -y, --yes            Skip directory trust confirmation\n  -h, --help           Show this help message");
+                return Ok(());
+            }
+            other => anyhow::bail!("usage: flashagent-tui [--model <name>] [--url http://host/v1] [--setup] [-y|--yes] (got {other})"),
+        }
+    }
+
+    use std::io::IsTerminal;
+    if (!config.setup_completed || force_setup) && std::io::stdout().is_terminal() {
+        let completed = flashagent_tui::run_wizard(&mut config).await.unwrap_or(false);
+        if !completed {
+            return Ok(());
+        }
+    }
+
+    let api_key = config.api_key.clone().or_else(|| std::env::var("FLASHAGENT_API_KEY").ok());
+    let url = config.backend_url.clone();
+    let mut model = config.model.clone();
+
+    if std::env::var("FLASHAGENT_TRUST_DIR").is_ok() {
+        skip_trust = true;
+    }
+
+    // Spawn server discovery in background immediately so it collects
+    // models, context window, and thinking presets concurrently while the user interacts with the startup screen.
+    let backend_initial = flashagent_llm::OpenAiCompat::new(&url, &model, api_key.clone());
+    let discovery_task = tokio::spawn(async move {
+        backend_initial.discover_server().await
+    });
+
+    let mut cwd = std::env::current_dir()?;
+
+    if config.is_directory_trusted(&cwd) {
+        skip_trust = true;
+    }
+
+    // Prompt user for directory trust / change working directory / quit
+    if !skip_trust && std::io::stdout().is_terminal() {
+        let action = flashagent_tui::startup::run_trust_screen(&mut cwd).await?;
+        if action == flashagent_tui::StartupAction::Quit {
+            discovery_task.abort();
+            return Ok(());
+        }
+        config.trust_directory(&cwd);
+        let _ = config.save();
+    }
+
+    // Process-lifetime objects: leaked once, so the spawned loop task can hold
+    // &'static references (the process is the session).
+    let backend = flashagent_llm::OpenAiCompat::new(&url, &model, api_key);
+    let discovery = discovery_task.await.unwrap_or(None);
+
+    // If model was not specified, auto-detect loaded model or first available model
+    if model.is_empty() {
+        if let Some(ref disc) = discovery {
+            if let Some(ref active) = disc.active_model {
+                model = active.id.clone();
+            } else if let Some(first) = disc.models.first() {
+                model = first.id.clone();
+            }
+        }
+    } else if let Some(ref disc) = discovery {
+        // If user specified substring/fuzzy model name, align with full ID
+        if let Some(matched) = disc.models.iter().find(|m| m.id == model || m.id.contains(&model) || model.contains(&m.id)) {
+            model = matched.id.clone();
+        }
+    }
+    backend.set_model(&model);
+    config.model = model.clone();
+
+    if model.is_empty() {
+        anyhow::bail!(
+            "No model specified and could not connect to LLM server at {url} to auto-detect a loaded model.\n\
+             Please start your server (e.g. LM Studio on port 1234) or run with --model <name> or --setup."
+        );
+    }
+
+    let active_model_info = discovery.as_ref().and_then(|d| {
+        d.models.iter().find(|m| m.id == model).cloned()
+    });
+
+    let context_display = active_model_info.as_ref().and_then(|m| m.context_display());
+    let context_capacity = active_model_info
+        .as_ref()
+        .and_then(|m| m.context_length.or(m.max_context_length))
+        .unwrap_or(131_072);
+
+    let available_models: Vec<String> = discovery
+        .as_ref()
+        .map(|d| d.models.iter().map(|m| m.id.clone()).collect())
+        .unwrap_or_default();
+
+    let profile = backend.profile().or_else(|| active_model_info.as_ref().map(|m| m.thinking.clone()));
+
+    let initial_effort = if !config.thinking_effort.is_empty() && config.thinking_effort != "default" {
+        config.thinking_effort.clone()
+    } else if let Some(ref p) = profile {
+        if !p.supported {
+            "off".to_string()
+        } else {
+            "auto".to_string()
+        }
+    } else {
+        "auto".to_string()
+    };
+    let source: Arc<BackendSource> = Arc::new(BackendSource(backend));
+    let home_str = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    let cwd_display = if !home_str.is_empty() {
+        cwd.strip_prefix(&home_str)
+            .map(|rel| {
+                let s = rel.to_string_lossy();
+                if s.is_empty() {
+                    "~".to_string()
+                } else {
+                    format!("~/{}", s.trim_start_matches('/'))
+                }
+            })
+            .unwrap_or_else(|_| cwd.display().to_string())
+    } else {
+        cwd.display().to_string()
+    };
+
+    let gate = TuiGate::new();
+    let question_gate = TuiQuestionGate::new();
+    let state = Arc::new(PermissionState::new(config.permission_mode, gate.clone()));
+    let tools_arc: Arc<BuiltinTools> = Arc::new(BuiltinTools::new(BuiltinToolsConfig {
+        cwd: cwd.clone(),
+        brave_api_key: None,
+        question_gate: Some(question_gate.clone()),
+        is_goal_mode: None,
+        toolset_profile: Some(config.toolset_profile),
+        web_enabled: Some(config.free_search),
+        context_window: Some(context_capacity),
+    })?);
+    // The parent sees the built-in toolset plus `spawn_agent` (subagents).
+    let composite = flashagent_tools::agent_tools(tools_arc.clone(), source.clone(), state.clone());
+    let perm: &'static PermissionedTools =
+        Box::leak(Box::new(PermissionedTools::new(Arc::new(composite), Some(tools_arc.clone()), state.clone())));
+
+    // Memory injection: project + global docs into the first user message.
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_default();
+    let docs = flashagent_core::collect(&cwd, &home.join(".flashagent"));
+    let memory_block = flashagent_core::injection_block(&docs, 2000);
+    let memory_docs = docs.len();
+
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::cursor::Show,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen,
+        );
+        let _ = crossterm::terminal::disable_raw_mode();
+        default_hook(info);
+    }));
+
+    enable_raw_mode()?;
+    // Plain conhost needs VT mode enabled or ANSI codes print literally
+    #[cfg(windows)]
+    let _ = crossterm::terminal::enable_virtual_terminal_processing();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture,
+    );
+    let result = run_app(AppContext {
+        config,
+        source,
+        perm,
+        gate,
+        question_gate,
+        tools_arc,
+        memory_block,
+        memory_docs,
+        model,
+        context_display,
+        context_capacity,
+        cwd_display,
+        initial_effort,
+        available_models,
+    })
+    .await;
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::cursor::MoveToColumn(0),
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    );
+    disable_raw_mode()?;
+    #[cfg(windows)]
+    let _ = crossterm::terminal::disable_virtual_terminal_processing();
+    result
+}
+
+struct AppContext {
+    config: AppConfig,
+    source: Arc<BackendSource>,
+    perm: &'static PermissionedTools,
+    gate: Arc<TuiGate>,
+    question_gate: Arc<TuiQuestionGate>,
+    tools_arc: Arc<BuiltinTools>,
+    memory_block: String,
+    memory_docs: usize,
+    model: String,
+    context_display: Option<String>,
+    context_capacity: usize,
+    cwd_display: String,
+    initial_effort: String,
+    available_models: Vec<String>,
+}
+
+fn build_model_menu(source: &BackendSource) -> Option<SelectMenu<String>> {
+    let disc = source.discovery()?;
+    if disc.models.is_empty() {
+        return None;
+    }
+    let url = disc.base_url.to_lowercase();
+    let is_lm_studio = url.contains("1234") || url.contains("lmstudio");
+    let has_loaded = disc.models.iter().any(|m| m.is_loaded);
+    let models: Vec<_> = if is_lm_studio && has_loaded {
+        disc.models.iter().filter(|m| m.is_loaded).collect()
+    } else {
+        disc.models.iter().collect()
+    };
+
+    let mut items = Vec::new();
+    for m in models {
+        let summary = m.capabilities_summary();
+        let load_tag = if m.is_loaded { "● loaded" } else { "○ available" };
+        let desc = format!("{load_tag} · {summary}");
+        items.push(SelectItem::with_description(m.id.clone(), desc, m.id.clone()));
+    }
+    Some(SelectMenu::new("Select Model", items))
+}
+
+fn build_effort_menu(source: &BackendSource) -> SelectMenu<String> {
+    let mut items = Vec::new();
+    items.push(SelectItem::with_description(
+        "auto",
+        "Auto (dynamically adjusts thinking per turn)",
+        "auto".to_string(),
+    ));
+    if let Some(prof) = source.profile() {
+        if prof.supported && !prof.presets.is_empty() {
+            for p in &prof.presets {
+                let desc = match p.to_lowercase().as_str() {
+                    "off" | "disabled" | "none" | "false" | "0" => "Disable internal reasoning",
+                    "low" | "minimal" | "min" | "fast" => "Fast response, low thinking budget",
+                    "medium" | "standard" => "Balanced reasoning depth and speed",
+                    "high" | "deep" => "Full reasoning exploration",
+                    "xhigh" | "extra-high" => "Maximum thinking budget for difficult tasks",
+                    "on" | "enabled" | "true" | "1" => "Enable internal reasoning",
+                    _ => "API model preset",
+                };
+                items.push(SelectItem::with_description(p.clone(), desc, p.clone()));
+            }
+        } else if !prof.supported {
+            items.push(SelectItem::with_description("off", "Reasoning unsupported by this endpoint", "off".to_string()));
+        }
+    }
+    if items.len() == 1 {
+        items.push(SelectItem::with_description("off", "Disable reasoning", "off".to_string()));
+        items.push(SelectItem::with_description("low", "Minimal reasoning budget", "low".to_string()));
+        items.push(SelectItem::with_description("medium", "Balanced reasoning depth", "medium".to_string()));
+        items.push(SelectItem::with_description("high", "Deep reasoning exploration", "high".to_string()));
+    }
+    SelectMenu::new("Select Thinking Effort", items)
+}
+
+fn thinking_summary_str(source: &BackendSource, current_effort: &str) -> String {
+    if let Some(ref p) = source.profile() {
+        if p.supported && !p.presets.is_empty() {
+            format!("{} [{}]", current_effort, p.presets.join(", "))
+        } else if !p.supported {
+            "disabled (unsupported)".to_string()
+        } else {
+            current_effort.to_string()
+        }
+    } else {
+        current_effort.to_string()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_welcome_card_if_before_user_msg(
+    chat: &mut ChatView,
+    renderer: &mut Renderer,
+    model: &str,
+    cwd_display: &str,
+    mode_str: &str,
+    memory_docs: usize,
+    source: &BackendSource,
+    current_effort: &str,
+    context_display: Option<&str>,
+) {
+    refresh_welcome_card_animated(
+        chat, renderer, model, cwd_display, mode_str, memory_docs, source, current_effort, context_display, 0,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_welcome_card_animated(
+    chat: &mut ChatView,
+    renderer: &mut Renderer,
+    model: &str,
+    cwd_display: &str,
+    mode_str: &str,
+    memory_docs: usize,
+    source: &BackendSource,
+    current_effort: &str,
+    context_display: Option<&str>,
+    tick_n: usize,
+) {
+    if !chat.has_user_message() {
+        let (term_w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+        let th_sum = thinking_summary_str(source, current_effort);
+        let card = welcome_card_with_thinking_animated(
+            model,
+            cwd_display,
+            mode_str,
+            memory_docs,
+            Some(&th_sum),
+            context_display,
+            term_w as usize,
+            tick_n,
+        );
+        chat.update_welcome_card(card);
+        renderer.request_reprint();
+    }
+}
+
+async fn run_app(ctx: AppContext) -> Result<()> {
+    let AppContext {
+        config: mut app_config,
+        source,
+        perm,
+        gate,
+        question_gate,
+        tools_arc,
+        memory_block,
+        memory_docs,
+        model,
+        context_display,
+        context_capacity,
+        cwd_display,
+        initial_effort,
+        mut available_models,
+    } = ctx;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut question_ui_state = QuestionUiState::default();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
+
+    // Keyboard and mouse reader thread: crossterm is blocking, tokio is async.
+    {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            loop {
+                match crossterm::event::read() {
+                    Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => {
+                        if tx.send(UiEvent::Key(k.code, k.modifiers)).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(Event::Paste(s)) => {
+                        if tx.send(UiEvent::Paste(s)).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(Event::Mouse(m)) => {
+                        if tx.send(UiEvent::Mouse(m)).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => return,
+                }
+            }
+        });
+    }
+
+    let system_prompt_config = SystemPromptConfig::new()
+        .with_cwd(&cwd_display)
+        .with_platform(std::env::consts::OS)
+        .with_model(&model)
+        .with_effort(&initial_effort);
+    let system_prompt_text = build_system_prompt(&system_prompt_config);
+    let mut history: Vec<ChatMessage> = vec![ChatMessage::system(system_prompt_text)];
+    let mut input = String::new();
+    let mut custom_placeholder: Option<String> = None;
+    let mut suggested_prompt: Option<String> = None;
+    let mut tip_animator = flashagent_tui::tips::TipAnimator::new();
+    let mut input_history: Vec<String> = Vec::new();
+    let mut history_index: Option<usize> = None;
+    let mut current_draft = String::new();
+    let mut confirm_select = ConfirmSelect::new();
+    let mut chat = ChatView::default();
+    let mut running = false;
+    let mut active_turn_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
+    let mut turn_counter: u64 = 0;
+    let mut all_expanded = false;
+    let mut last_expanded = false;
+    let mut current_model = model;
+    let mut current_context = context_display;
+    let mut current_effort = initial_effort;
+    let mut effort_menu: Option<SelectMenu<String>> = None;
+    let mut model_menu: Option<SelectMenu<String>> = None;
+    let mut settings_view: Option<SettingsView> = None;
+    let mut sampling_view: Option<SamplingView> = None;
+    let mut context_modal: Option<ContextModal> = None;
+    let mut context_usage = ContextUsage::new(context_capacity);
+    update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+    let mut autocomplete_idx = 0usize;
+    let mut tick_n = 0usize;
+    let mut renderer = Renderer::new();
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(80));
+    let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(3));
+
+    let (term_w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+    let mode_str = format!("{:?}", perm.state().mode());
+    let thinking_summary = if let Some(ref p) = source.profile() {
+        if p.supported && !p.presets.is_empty() {
+            format!("{} [{}]", current_effort, p.presets.join(", "))
+        } else if !p.supported {
+            "disabled (unsupported)".to_string()
+        } else {
+            current_effort.clone()
+        }
+    } else {
+        current_effort.clone()
+    };
+    for (k, line) in welcome_card_with_thinking(
+        &current_model,
+        &cwd_display,
+        &mode_str,
+        memory_docs,
+        Some(&thinking_summary),
+        current_context.as_deref(),
+        term_w as usize,
+    ) {
+        chat.push_line(k, line);
+    }
+
+    let mut turn_started: Option<std::time::Instant> = None;
+    let mut token_tracker = TokenTracker::new(current_model.clone());
+    let mut max_steps: Option<u32> = app_config.max_steps;
+    #[derive(Clone)]
+    struct SavedGoalState {
+        mode: PermissionMode,
+        effort: String,
+        max_steps: Option<u32>,
+        task: String,
+    }
+    let mut goal_state: Option<SavedGoalState> = None;
+    let mut copy_toast: Option<(String, std::time::Instant)> = None;
+    let mut last_ctrl_c: Option<std::time::Instant> = None;
+
+    loop {
+        let autocomplete = if !running
+            && input.starts_with('/')
+            && effort_menu.is_none()
+            && model_menu.is_none()
+            && settings_view.is_none()
+            && sampling_view.is_none()
+            && context_modal.is_none()
+            && gate.pending().is_none()
+            && question_gate.pending().is_none()
+        {
+            AutocompletePopup::for_input(&input, std::path::Path::new("."), autocomplete_idx)
+        } else {
+            None
+        };
+
+        let (term_w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+        let tip_rendered = tip_animator.render_line(tick_n, (term_w as usize).saturating_sub(10));
+
+        if let Some((_, instant)) = copy_toast {
+            if instant.elapsed().as_secs_f32() >= 2.5 {
+                copy_toast = None;
+            }
+        }
+        let active_toast = copy_toast.as_ref().map(|(msg, _)| msg.as_str());
+        let stats_str = token_tracker.format_stats();
+        let live_prefill = token_tracker.live_prefill_status();
+        let ttft_display = token_tracker.ttft_display();
+
+        renderer.frame(
+            &chat,
+            &gate,
+            &question_gate,
+            effort_menu.as_ref(),
+            model_menu.as_ref(),
+            settings_view.as_ref(),
+            sampling_view.as_ref(),
+            context_modal.as_ref(),
+            autocomplete.as_ref(),
+            &context_usage,
+            FrameState {
+                input: &input,
+                mode: perm.state().mode(),
+                is_goal_active: goal_state.is_some(),
+                tip: Some(tip_animator.tip_text),
+                tip_animated: Some(&tip_rendered),
+                turn_stats: stats_str.as_deref(),
+                thinking_effort: &current_effort,
+                reasoning_expand: ReasoningExpansion {
+                    all: all_expanded,
+                    last: last_expanded,
+                },
+                tick_n,
+                running,
+                elapsed_secs: turn_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                model_tokens: token_tracker.total_model_tokens,
+                tokens_per_sec: token_tracker.tg_3s(),
+                f_keep: token_tracker.last_f_keep,
+                model: &current_model,
+                context_window: current_context.as_deref(),
+                cwd: &cwd_display,
+                confirm_selection: confirm_select.decision(),
+                question_state: Some(&question_ui_state),
+                custom_placeholder: custom_placeholder.as_deref(),
+                suggested_prompt: suggested_prompt.as_deref(),
+                copy_toast: active_toast,
+                prefill_status: live_prefill.as_deref(),
+                ttft_display: ttft_display.as_deref(),
+            },
+        );
+
+        let ev = tokio::select! {
+            Some(ev) = rx.recv() => {
+                tick_n += 1;
+                ev
+            }
+            _ = tick.tick() => {
+                tick_n += 1;
+                tip_animator.tick();
+                if !running && !chat.has_user_message() && (tick_n % 50 == 46 || tick_n % 50 == 48) {
+                    refresh_welcome_card_animated(
+                        &mut chat,
+                        &mut renderer,
+                        &current_model,
+                        &cwd_display,
+                        &mode_str,
+                        memory_docs,
+                        &source,
+                        &current_effort,
+                        current_context.as_deref(),
+                        tick_n,
+                    );
+                }
+                continue;
+            }
+            _ = check_interval.tick() => {
+                let source_bg = source.clone();
+                let tx_bg = tx.clone();
+                tokio::spawn(async move {
+                    if let Some(disc) = source_bg.discover_server().await {
+                        let _ = tx_bg.send(UiEvent::ServerDiscovered(disc));
+                    }
+                });
+                continue;
+            }
+        };
+
+        match ev {
+            UiEvent::BackgroundRecap { turn_id, recap, suggestion } => {
+                if turn_id == turn_counter && active_turn_handle.is_none() {
+                    chat.update_or_push_turn_system("recap:", &format!("  \x1b[38;2;155;165;180mrecap:\x1b[0m \x1b[38;2;225;230;240m{recap}\x1b[0m"));
+                    if input.is_empty() {
+                        suggested_prompt = suggestion;
+                    }
+                    renderer.request_reprint();
+                }
+            }
+            UiEvent::ServerDiscovered(disc) => {
+                let url = disc.base_url.to_lowercase();
+                let is_lm_studio = url.contains("1234") || url.contains("lmstudio");
+                let has_loaded = disc.models.iter().any(|m| m.is_loaded);
+                available_models = if is_lm_studio && has_loaded {
+                    disc.models.iter().filter(|m| m.is_loaded).map(|m| m.id.clone()).collect()
+                } else {
+                    disc.models.iter().map(|m| m.id.clone()).collect()
+                };
+                if let Some(active) = disc.active_model {
+                    let new_ctx_len = active.context_length.or(active.max_context_length).unwrap_or(131_072);
+                    let new_ctx_disp = active.context_display();
+                    let model_changed = active.id != current_model;
+                    let ctx_changed = context_usage.total_capacity != new_ctx_len || current_context != new_ctx_disp;
+
+                    if model_changed || ctx_changed {
+                        let old_m = current_model.clone();
+                        let old_ctx_len = context_usage.total_capacity;
+                        current_model = active.id.clone();
+                        current_context = new_ctx_disp;
+                        context_usage.total_capacity = new_ctx_len.max(1024);
+                        tools_arc.set_context_window(Some(new_ctx_len));
+                        source.set_model(&current_model);
+                        update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+
+                        if model_changed {
+                            app_config.model = current_model.clone();
+                            let _ = app_config.save();
+                            if !active.thinking.supported {
+                                current_effort = "off".to_string();
+                            } else if current_effort == "off" || current_effort.is_empty() {
+                                current_effort = "auto".to_string();
+                            }
+                        }
+
+                        let ctx_tag = current_context.as_deref().unwrap_or("");
+                        refresh_welcome_card_if_before_user_msg(
+                            &mut chat,
+                            &mut renderer,
+                            &current_model,
+                            &cwd_display,
+                            &format!("{:?}", perm.state().mode()),
+                            memory_docs,
+                            &source,
+                            &current_effort,
+                            current_context.as_deref(),
+                        );
+
+                        if model_changed {
+                            let msg = format!(
+                                "Server active model switched: {old_m} -> {current_model}"
+                            );
+                            custom_placeholder = Some(msg);
+                            suggested_prompt = None;
+                        } else if ctx_changed {
+                            let old_formatted = ContextUsage::format_tokens(old_ctx_len);
+                            let new_formatted = ContextUsage::format_tokens(new_ctx_len);
+                            let msg = format!(
+                                "Model context capacity: {old_formatted} -> {new_formatted} ({ctx_tag})"
+                            );
+                            custom_placeholder = Some(msg);
+                            suggested_prompt = None;
+                        }
+                        renderer.request_reprint();
+                    }
+                }
+            }
+            UiEvent::Loop(e) => {
+                match &e {
+                    LoopEvent::TurnDelta(text) => {
+                        token_tracker.on_delta(text);
+                    }
+                    LoopEvent::ReasoningDelta(text) => {
+                        token_tracker.on_delta(text);
+                    }
+                    LoopEvent::ToolStarted { name, args_json, .. } => {
+                        token_tracker.on_delta(name);
+                        token_tracker.on_delta(args_json);
+                    }
+                    LoopEvent::Usage(u) => {
+                        token_tracker.on_usage(u);
+                    }
+                    _ => {}
+                }
+                chat.on_event(&e);
+                if chat.take_needs_reprint() {
+                    renderer.request_reprint();
+                }
+                update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+            }
+            UiEvent::Finished(res) => {
+                running = false;
+                turn_started = None;
+                active_turn_handle = None;
+                active_steer_tx = None;
+                cancel.store(false, Ordering::Relaxed);
+                token_tracker.on_finished();
+
+                // Roll back any temporary goal state
+                if let Some(saved) = goal_state.take() {
+                    tools_arc.set_goal_mode(false);
+                    perm.state().set_mode(saved.mode);
+                    current_effort = saved.effort.clone();
+                    max_steps = saved.max_steps;
+                    chat.push_system(&format!(
+                        "[Goal \"{}\" finished · Restored mode to {} and thinking to {}]",
+                        flashagent_tui::truncate_middle(&saved.task, 40),
+                        saved.mode.label(),
+                        saved.effort
+                    ));
+                    renderer.request_reprint();
+                }
+
+                match res {
+                    Ok((h, reason)) => {
+                        history = h;
+                        update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+
+                        if reason == DoneReason::Cancelled {
+                            suggested_prompt = None;
+                            let is_ru = history.iter().rev().find(|m| m.role == flashagent_llm::Role::User).map(|m| m.content.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))).unwrap_or(false);
+                            let interrupt_msg = if is_ru { "Запрос прерван пользователем" } else { "Request interrupted by user" };
+                            custom_placeholder = Some(interrupt_msg.to_string());
+                            renderer.request_reprint();
+                        } else {
+                            // Auto-compact context when reaching 90% capacity
+                            if context_usage.percentage() >= 90.0 && history.len() > 3 {
+                                let source_compact = source.clone();
+                                if let Some(freed) = compact_context(&source_compact, &mut history, None).await {
+                                    update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                    custom_placeholder = Some(format!("Context auto-compacted (~{} freed)", ContextUsage::format_tokens(freed)));
+                                }
+                            }
+
+                            // Clear any existing ghost suggestion.
+                            // No hardcoded or heuristic fallback strings for recap or write-in suggestions:
+                            // they are ONLY shown if and when dynamically generated by the background LLM task.
+                            suggested_prompt = None;
+                            renderer.request_reprint();
+
+                            // Asynchronously ask LLM in background for refined recap & contextual suggestion
+                            let source_bg = source.clone();
+                            let tx_bg = tx.clone();
+                            let history_bg = history.clone();
+                            let turn_id = turn_counter;
+                            tokio::spawn(async move {
+                                if let Some((llm_recap, llm_suggestion)) = generate_llm_recap_and_suggestion(&source_bg, &history_bg).await {
+                                    let _ = tx_bg.send(UiEvent::BackgroundRecap {
+                                        turn_id,
+                                        recap: llm_recap,
+                                        suggestion: llm_suggestion,
+                                    });
+                                }
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        chat.on_event(&LoopEvent::Done(DoneReason::Failed));
+                        chat.push_user(&format!("[error: {e}]"));
+                        suggested_prompt = None;
+                        custom_placeholder = None;
+                        renderer.request_reprint();
+                    }
+                }
+            }
+            UiEvent::Mouse(m) => {
+                let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
+                let total_chat_lines = chat.render_split((width as usize).saturating_sub(1), ReasoningExpansion { all: all_expanded, last: last_expanded }).0.len() + 15;
+                let max_scroll = total_chat_lines.saturating_sub(height as usize);
+                if let Some(ref mut menu) = model_menu {
+                    match m.kind {
+                        MouseEventKind::ScrollUp => menu.up(),
+                        MouseEventKind::ScrollDown => menu.down(),
+                        _ => {}
+                    }
+                    renderer.request_reprint();
+                } else if let Some(ref mut menu) = effort_menu {
+                    match m.kind {
+                        MouseEventKind::ScrollUp => menu.up(),
+                        MouseEventKind::ScrollDown => menu.down(),
+                        _ => {}
+                    }
+                    renderer.request_reprint();
+                } else {
+                    match m.kind {
+                        MouseEventKind::ScrollUp => {
+                            renderer.scroll_up(3, max_scroll);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            renderer.scroll_down(3);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            UiEvent::Paste(pasted) => {
+                let sanitized = pasted.replace("\r\n", " ").replace(['\n', '\r'], " ");
+                if !sanitized.is_empty() {
+                    if question_gate.pending().is_some() {
+                        question_ui_state.write_in_text.push_str(&sanitized);
+                    } else if let Some(ref mut sm) = sampling_view {
+                        for ch in sanitized.chars() {
+                            sm.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);
+                        }
+                    } else if effort_menu.is_none() && model_menu.is_none() && settings_view.is_none() && context_modal.is_none() {
+                        input.push_str(&sanitized);
+                        history_index = None;
+                        autocomplete_idx = 0;
+                    }
+                    renderer.request_reprint();
+                }
+            }
+            UiEvent::Key(code, mods) => {
+                // If settings view is open, it captures all keyboard input
+                if let Some(ref mut settings) = settings_view {
+                    let action = settings.handle_key(code, mods);
+                    match action {
+                        SettingsAction::Close => {
+                            let old_model = current_model.clone();
+                            let old_effort = current_effort.clone();
+                            let old_mode = perm.state().mode();
+                            let mut changes = Vec::new();
+                            if settings.config.permission_mode != old_mode {
+                                changes.push(format!("mode ({})", settings.config.permission_mode.label()));
+                            }
+                            if settings.config.model != old_model {
+                                changes.push(format!("model ({})", settings.config.model));
+                            }
+                            if settings.config.thinking_effort != old_effort {
+                                changes.push(format!("thinking ({})", settings.config.thinking_effort));
+                            }
+
+                            if changes.len() == 1 && settings.config.permission_mode != old_mode {
+                                custom_placeholder = Some(format!("Permission mode set to: {}", settings.config.permission_mode.label()));
+                            } else if !changes.is_empty() {
+                                custom_placeholder = Some(format!("Settings updated: {}", changes.join(", ")));
+                            }
+                            suggested_prompt = None;
+
+                            app_config = settings.config.clone();
+                            let _ = app_config.save();
+                            tools_arc.set_toolset_profile(app_config.toolset_profile);
+                            if app_config.model != current_model {
+                                current_model = app_config.model.clone();
+                                source.set_model(&current_model);
+                            }
+                            perm.state().set_mode(app_config.permission_mode);
+                            current_effort = app_config.thinking_effort.clone();
+                            settings_view = None;
+                            refresh_welcome_card_if_before_user_msg(
+                                &mut chat,
+                                &mut renderer,
+                                &current_model,
+                                &cwd_display,
+                                &format!("{:?}", perm.state().mode()),
+                                memory_docs,
+                                &source,
+                                &current_effort,
+                                current_context.as_deref(),
+                            );
+                            renderer.request_reprint();
+                        }
+                        SettingsAction::DiscoverModels => {
+                            app_config = settings.config.clone();
+                            let _ = app_config.save();
+                            if let Some(disc) = source.discover_server().await {
+                                settings.available_models = disc.models.into_iter().map(|m| m.id).collect();
+                            }
+                            renderer.request_reprint();
+                        }
+                        SettingsAction::RunToolTest => {
+                            settings.tool_test_status = Some("Tool calling test passed".into());
+                            renderer.request_reprint();
+                        }
+                        SettingsAction::OpenModelMenu => {
+                            app_config = settings.config.clone();
+                            let _ = app_config.save();
+                            settings_view = None;
+                            if let Some(mut menu) = build_model_menu(&source) {
+                                menu.select_by_value(&current_model);
+                                model_menu = Some(menu);
+                            } else {
+                                chat.push_system("[No models discovered from server]");
+                            }
+                            renderer.request_reprint();
+                        }
+                        SettingsAction::OpenEffortMenu => {
+                            app_config = settings.config.clone();
+                            let _ = app_config.save();
+                            settings_view = None;
+                            let mut menu = build_effort_menu(&source);
+                            menu.select_by_value(&current_effort);
+                            effort_menu = Some(menu);
+                            renderer.request_reprint();
+                        }
+                        SettingsAction::OpenWizard => {
+                            app_config = settings.config.clone();
+                            let _ = app_config.save();
+                            settings_view = None;
+                            let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
+                            let completed = flashagent_tui::run_wizard(&mut app_config).await.unwrap_or(false);
+                            let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
+                            if completed {
+                                current_model = app_config.model.clone();
+                                source.set_model(&current_model);
+                                current_effort = app_config.thinking_effort.clone();
+                                perm.state().set_mode(app_config.permission_mode);
+                                refresh_welcome_card_if_before_user_msg(
+                                    &mut chat,
+                                    &mut renderer,
+                                    &current_model,
+                                    &cwd_display,
+                                    &format!("{:?}", perm.state().mode()),
+                                    memory_docs,
+                                    &source,
+                                    &current_effort,
+                                    current_context.as_deref(),
+                                );
+                            }
+                            renderer.request_reprint();
+                        }
+                        SettingsAction::OpenSamplingMenu => {
+                            app_config = settings.config.clone();
+                            let _ = app_config.save();
+                            settings_view = None;
+                            sampling_view = Some(SamplingView::new(&app_config));
+                            renderer.request_reprint();
+                        }
+                        SettingsAction::None => {
+                            renderer.request_reprint();
+                        }
+                    }
+                    continue;
+                }
+
+                // If sampling parameters view is open, it captures all keyboard input
+                if let Some(ref mut sm) = sampling_view {
+                    let action = sm.handle_key(code, mods);
+                    match action {
+                        SamplingAction::Close => {
+                            sampling_view = None;
+                            renderer.request_reprint();
+                        }
+                        SamplingAction::SaveAndClose => {
+                            sm.apply_to_config(&mut app_config);
+                            let _ = app_config.save();
+                            sampling_view = None;
+                            custom_placeholder = Some("Sampling parameters updated".to_string());
+                            suggested_prompt = None;
+                            renderer.request_reprint();
+                        }
+                        SamplingAction::None => {
+                            renderer.request_reprint();
+                        }
+                    }
+                    continue;
+                }
+
+                // If context modal is open, F1, Enter, Esc or 'q' closes it
+                if context_modal.is_some() {
+                    if matches!(code, KeyCode::F(1) | KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q')) {
+                        context_modal = None;
+                        renderer.request_reprint();
+                    }
+                    continue;
+                }
+
+                // If model selection menu is open, it captures navigation
+                if let Some(ref mut menu) = model_menu {
+                    match code {
+                        KeyCode::Up => menu.up(),
+                        KeyCode::Down => menu.down(),
+                        KeyCode::PageUp => menu.page_up(),
+                        KeyCode::PageDown => menu.page_down(),
+                        KeyCode::Backspace => menu.pop_filter_char(),
+                        KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
+                            menu.push_filter_char(c);
+                        }
+                        KeyCode::Enter => {
+                            if let Some(val) = menu.selected_value() {
+                                current_model = val.clone();
+                                app_config.model = current_model.clone();
+                                let _ = app_config.save();
+                                source.set_model(&current_model);
+                                if let Some(disc) = source.discovery() {
+                                    if let Some(m) = disc.models.iter().find(|m| m.id == current_model) {
+                                        current_context = m.context_display();
+                                        if !m.thinking.supported {
+                                            current_effort = "off".to_string();
+                                        } else if current_effort == "off" || current_effort.is_empty() {
+                                            current_effort = "auto".to_string();
+                                        }
+                                    }
+                                }
+                                refresh_welcome_card_if_before_user_msg(
+                                    &mut chat,
+                                    &mut renderer,
+                                    &current_model,
+                                    &cwd_display,
+                                    &format!("{:?}", perm.state().mode()),
+                                    memory_docs,
+                                    &source,
+                                    &current_effort,
+                                    current_context.as_deref(),
+                                );
+                                custom_placeholder = Some(format!("Switched active model to: {current_model}"));
+                                suggested_prompt = None;
+                                renderer.request_reprint();
+                            }
+                            model_menu = None;
+                        }
+                        KeyCode::Esc => {
+                            model_menu = None;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // If effort selection menu is open, it captures navigation
+                if let Some(ref mut menu) = effort_menu {
+                    match code {
+                        KeyCode::Up => menu.up(),
+                        KeyCode::Down => menu.down(),
+                        KeyCode::Enter => {
+                            if let Some(val) = menu.selected_value() {
+                                current_effort = val.clone();
+                                refresh_welcome_card_if_before_user_msg(
+                                    &mut chat,
+                                    &mut renderer,
+                                    &current_model,
+                                    &cwd_display,
+                                    &format!("{:?}", perm.state().mode()),
+                                    memory_docs,
+                                    &source,
+                                    &current_effort,
+                                    current_context.as_deref(),
+                                );
+                                custom_placeholder = Some(format!("Thinking effort set to: {current_effort}"));
+                                suggested_prompt = None;
+                                renderer.request_reprint();
+                            }
+                            effort_menu = None;
+                        }
+                        KeyCode::Esc => {
+                            effort_menu = None;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                if let Some(req) = question_gate.pending() {
+                    match code {
+                        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('с') | KeyCode::Char('С')
+                            if mods.contains(KeyModifiers::CONTROL) => return Ok(()),
+                        KeyCode::Esc => {
+                            if req.options.is_some() && question_ui_state.is_writing {
+                                question_ui_state.is_writing = false;
+                            } else {
+                                question_ui_state = QuestionUiState::default();
+                                question_gate.cancel();
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(ref opts) = req.options {
+                                let total_choices = opts.len();
+                                if question_ui_state.is_writing {
+                                    let answer = std::mem::take(&mut question_ui_state.write_in_text);
+                                    let trimmed = answer.trim().to_string();
+                                    if !trimmed.is_empty() {
+                                        if req.multi_select && !question_ui_state.selected_indices.is_empty() {
+                                            let mut chosen: Vec<String> = question_ui_state.selected_indices.iter().filter_map(|&i| opts.get(i).cloned()).collect();
+                                            chosen.push(trimmed);
+                                            question_ui_state = QuestionUiState::default();
+                                            question_gate.respond(chosen.join(", "), true);
+                                        } else {
+                                            question_ui_state = QuestionUiState::default();
+                                            question_gate.respond(trimmed, true);
+                                        }
+                                    }
+                                } else if question_ui_state.selected_index == total_choices {
+                                    question_ui_state.is_writing = true;
+                                    question_ui_state.write_in_text.clear();
+                                } else if req.multi_select {
+                                    let mut chosen: Vec<String> = question_ui_state.selected_indices.iter().filter_map(|&i| opts.get(i).cloned()).collect();
+                                    if chosen.is_empty() && question_ui_state.selected_index < total_choices {
+                                        chosen.push(opts[question_ui_state.selected_index].clone());
+                                    }
+                                    question_ui_state = QuestionUiState::default();
+                                    question_gate.respond(chosen.join(", "), false);
+                                } else if question_ui_state.selected_index < total_choices {
+                                    let chosen = opts[question_ui_state.selected_index].clone();
+                                    question_ui_state = QuestionUiState::default();
+                                    question_gate.respond(chosen, false);
+                                }
+                            } else {
+                                let answer = std::mem::take(&mut question_ui_state.write_in_text);
+                                let trimmed = answer.trim().to_string();
+                                question_ui_state = QuestionUiState::default();
+                                question_gate.respond(trimmed, true);
+                            }
+                        }
+                        KeyCode::Up => {
+                            if !question_ui_state.is_writing {
+                                if let Some(ref opts) = req.options {
+                                    let total = opts.len() + 1;
+                                    if question_ui_state.selected_index == 0 {
+                                        question_ui_state.selected_index = total.saturating_sub(1);
+                                    } else {
+                                        question_ui_state.selected_index -= 1;
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Down => {
+                            if !question_ui_state.is_writing {
+                                if let Some(ref opts) = req.options {
+                                    let total = opts.len() + 1;
+                                    question_ui_state.selected_index = (question_ui_state.selected_index + 1) % total;
+                                }
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if question_ui_state.is_writing || req.options.is_none() {
+                                question_ui_state.write_in_text.pop();
+                            }
+                        }
+                        KeyCode::Char(' ') if req.multi_select && !question_ui_state.is_writing => {
+                            if let Some(ref opts) = req.options {
+                                let total_choices = opts.len();
+                                if question_ui_state.selected_index < total_choices {
+                                    let idx = question_ui_state.selected_index;
+                                    if question_ui_state.selected_indices.contains(&idx) {
+                                        question_ui_state.selected_indices.remove(&idx);
+                                    } else {
+                                        question_ui_state.selected_indices.insert(idx);
+                                    }
+                                } else {
+                                    question_ui_state.is_writing = true;
+                                    question_ui_state.write_in_text.clear();
+                                }
+                            }
+                        }
+                        KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
+                            if question_ui_state.is_writing || req.options.is_none() {
+                                question_ui_state.write_in_text.push(c);
+                            } else if let Some(ref opts) = req.options {
+                                let total = opts.len() + 1;
+                                if let Some(d) = c.to_digit(10) {
+                                    let idx = (d as usize).saturating_sub(1);
+                                    if idx < opts.len() {
+                                        if req.multi_select {
+                                            if question_ui_state.selected_indices.contains(&idx) {
+                                                question_ui_state.selected_indices.remove(&idx);
+                                            } else {
+                                                question_ui_state.selected_indices.insert(idx);
+                                            }
+                                        }
+                                        question_ui_state.selected_index = idx;
+                                    } else if idx == total - 1 {
+                                        question_ui_state.selected_index = idx;
+                                        question_ui_state.is_writing = true;
+                                        question_ui_state.write_in_text.clear();
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    renderer.request_reprint();
+                    continue;
+                }
+
+                if gate.pending().is_some() {
+                    match code {
+                        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('с') | KeyCode::Char('С')
+                            if mods.contains(KeyModifiers::CONTROL) => return Ok(()),
+                        KeyCode::Esc
+                        | KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Char('в') | KeyCode::Char('В') => {
+                            gate.respond(Decision::Deny);
+                            confirm_select = ConfirmSelect::new();
+                        }
+                        KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('ф') | KeyCode::Char('Ф') => {
+                            if let Some(req) = gate.pending() {
+                                perm.state().allow_tool_always(&req.tool);
+                            }
+                            gate.respond(Decision::Allow);
+                            confirm_select = ConfirmSelect::new();
+                        }
+                        KeyCode::Enter => {
+                            gate.respond(confirm_select.decision());
+                            confirm_select = ConfirmSelect::new();
+                        }
+                        KeyCode::Left => {
+                            confirm_select.left();
+                        }
+                        KeyCode::Right => {
+                            confirm_select.right();
+                        }
+                        KeyCode::Tab | KeyCode::Up | KeyCode::Down => {
+                            confirm_select.toggle();
+                        }
+                        _ => {}
+                    }
+                    renderer.request_reprint();
+                    continue;
+                }
+
+                // --- Chat History Scrolling & Navigation ---
+                if matches!(code, KeyCode::PageUp) {
+                    let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
+                    let total_chat_lines = chat.render_split((width as usize).saturating_sub(1), ReasoningExpansion { all: all_expanded, last: last_expanded }).0.len() + 15;
+                    let max_scroll = total_chat_lines.saturating_sub(height as usize);
+                    renderer.scroll_up((height as usize / 2).max(5), max_scroll);
+                    continue;
+                }
+                if matches!(code, KeyCode::PageDown) {
+                    let (_, height) = crossterm::terminal::size().unwrap_or((100, 24));
+                    renderer.scroll_down((height as usize / 2).max(5));
+                    continue;
+                }
+                if matches!(code, KeyCode::Home) && renderer.scroll_offset > 0 {
+                    let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
+                    let total_chat_lines = chat.render_split((width as usize).saturating_sub(1), ReasoningExpansion { all: all_expanded, last: last_expanded }).0.len() + 15;
+                    let max_scroll = total_chat_lines.saturating_sub(height as usize);
+                    renderer.scroll_up(max_scroll, max_scroll);
+                    continue;
+                }
+                if matches!(code, KeyCode::End) && renderer.scroll_offset > 0 {
+                    renderer.scroll_to_bottom();
+                    continue;
+                }
+                if matches!(code, KeyCode::Esc) && renderer.scroll_offset > 0 {
+                    renderer.scroll_to_bottom();
+                    continue;
+                }
+                // Shift+Up, Ctrl+Up, Alt+Up -> scroll chat up.
+                // If already scrolled up (scroll_offset > 0), plain Up also scrolls chat up!
+                if (matches!(code, KeyCode::Up) && (mods.contains(KeyModifiers::SHIFT) || mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT)))
+                    || (renderer.scroll_offset > 0 && matches!(code, KeyCode::Up))
+                {
+                    let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
+                    let total_chat_lines = chat.render_split((width as usize).saturating_sub(1), ReasoningExpansion { all: all_expanded, last: last_expanded }).0.len() + 15;
+                    let max_scroll = total_chat_lines.saturating_sub(height as usize);
+                    renderer.scroll_up(2, max_scroll);
+                    continue;
+                }
+                // Shift+Down, Ctrl+Down, Alt+Down -> scroll chat down.
+                // If already scrolled up (scroll_offset > 0), plain Down also scrolls chat down!
+                if (matches!(code, KeyCode::Down) && (mods.contains(KeyModifiers::SHIFT) || mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT)))
+                    || (renderer.scroll_offset > 0 && matches!(code, KeyCode::Down))
+                {
+                    renderer.scroll_down(2);
+                    continue;
+                }
+
+                if renderer.scroll_offset > 0 && matches!(code, KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Enter) {
+                    renderer.scroll_to_bottom();
+                }
+
+                match code {
+                    KeyCode::Esc => {
+                        if running {
+                            cancel.store(true, Ordering::Relaxed);
+                            if let Some(handle) = active_turn_handle.take() {
+                                handle.abort();
+                            }
+                            active_steer_tx = None;
+                            running = false;
+                            turn_started = None;
+                            if let Some(saved) = goal_state.take() {
+                                tools_arc.set_goal_mode(false);
+                                perm.state().set_mode(saved.mode);
+                                current_effort = saved.effort.clone();
+                                max_steps = saved.max_steps;
+                            }
+                            chat.on_event(&flashagent_core::LoopEvent::Done(flashagent_core::DoneReason::Cancelled));
+                            suggested_prompt = None;
+                            let is_ru = history.iter().rev().find(|m| m.role == flashagent_llm::Role::User).map(|m| m.content.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))).unwrap_or(false);
+                            let interrupt_msg = if is_ru { "Запрос прерван пользователем" } else { "Request interrupted by user" };
+                            custom_placeholder = Some(interrupt_msg.to_string());
+                            renderer.request_reprint();
+                        } else if !input.is_empty() {
+                            input.clear();
+                            autocomplete_idx = 0;
+                            history_index = None;
+                            renderer.request_reprint();
+                        } else if suggested_prompt.is_some() || custom_placeholder.is_some() {
+                            suggested_prompt = None;
+                            custom_placeholder = None;
+                            renderer.request_reprint();
+                        } else {
+                            return Ok(());
+                        }
+                    }
+                    // F1: toggle context modal
+                    KeyCode::F(1) => {
+                        if context_modal.is_some() {
+                            context_modal = None;
+                        } else {
+                            effort_menu = None;
+                            model_menu = None;
+                            settings_view = None;
+                            sampling_view = None;
+                            context_modal = Some(ContextModal::new(context_usage.clone()));
+                        }
+                        renderer.request_reprint();
+                    }
+
+                    // Ctrl+C / Ctrl+Shift+C (Latin 'c'/'C', Cyrillic 'с'/'С')
+                    KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('с') | KeyCode::Char('С')
+                        if mods.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if running {
+                            cancel.store(true, Ordering::Relaxed);
+                            if let Some(handle) = active_turn_handle.take() {
+                                handle.abort();
+                            }
+                            active_steer_tx = None;
+                            running = false;
+                            turn_started = None;
+                            if let Some(saved) = goal_state.take() {
+                                tools_arc.set_goal_mode(false);
+                                perm.state().set_mode(saved.mode);
+                                current_effort = saved.effort.clone();
+                                max_steps = saved.max_steps;
+                            }
+                            chat.on_event(&flashagent_core::LoopEvent::Done(flashagent_core::DoneReason::Cancelled));
+                            suggested_prompt = None;
+                            let is_ru = history.iter().rev().find(|m| m.role == flashagent_llm::Role::User).map(|m| m.content.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))).unwrap_or(false);
+                            let interrupt_msg = if is_ru { "Запрос прерван пользователем" } else { "Request interrupted by user" };
+                            custom_placeholder = Some(interrupt_msg.to_string());
+                            renderer.request_reprint();
+                        } else {
+                            let now = std::time::Instant::now();
+                            let is_double_tap = last_ctrl_c.map(|t| now.duration_since(t).as_millis() < 1200).unwrap_or(false);
+                            last_ctrl_c = Some(now);
+
+                            if !input.is_empty() {
+                                flashagent_tui::clipboard::set_clipboard_text(&input);
+                                copy_toast = Some(("Copied input to clipboard".to_string(), now));
+                                renderer.request_reprint();
+                            } else if let Some(text) = chat.last_assistant_text() {
+                                if is_double_tap {
+                                    return Ok(());
+                                }
+                                flashagent_tui::clipboard::set_clipboard_text(&text);
+                                copy_toast = Some(("Copied assistant response (press Ctrl+C again to exit)".to_string(), now));
+                                renderer.request_reprint();
+                            } else {
+                                return Ok(());
+                            }
+                        }
+                    }
+
+                    // Ctrl+V / Ctrl+Shift+V (Latin 'v'/'V', Cyrillic 'м'/'М'): paste from clipboard
+                    KeyCode::Char('v') | KeyCode::Char('V') | KeyCode::Char('м') | KeyCode::Char('М')
+                        if mods.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if let Some(text) = flashagent_tui::clipboard::get_clipboard_text() {
+                            let sanitized = text.replace("\r\n", " ").replace(['\n', '\r'], " ");
+                            if !sanitized.is_empty() {
+                                input.push_str(&sanitized);
+                                history_index = None;
+                                autocomplete_idx = 0;
+                                renderer.request_reprint();
+                            }
+                        }
+                    }
+
+                    // Ctrl+D: exit on empty input when idle
+                    KeyCode::Char('d') | KeyCode::Char('D')
+                        if mods.contains(KeyModifiers::CONTROL) && input.is_empty() && !running =>
+                    {
+                        return Ok(());
+                    }
+
+                    // Ctrl+R / Ctrl+Shift+R (Latin 'r'/'R', Cyrillic 'к'/'К'): regenerate last response from scratch
+                    KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('к') | KeyCode::Char('К')
+                        if mods.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if !running
+                            && gate.pending().is_none()
+                            && question_gate.pending().is_none()
+                            && effort_menu.is_none()
+                            && model_menu.is_none()
+                            && settings_view.is_none()
+                            && sampling_view.is_none()
+                            && context_modal.is_none()
+                        {
+                            if let Some(user_idx) = history.iter().rposition(|m| m.role == flashagent_llm::Role::User) {
+                                history.truncate(user_idx + 1);
+                                chat.truncate_to_last_user();
+                                renderer.scroll_to_bottom();
+                                renderer.printed_settled = 0;
+                                renderer.prev_expansion = None;
+                                renderer.request_reprint();
+                                update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                cancel.store(false, Ordering::Relaxed);
+                                suggested_prompt = None;
+                                custom_placeholder = None;
+                                last_expanded = false;
+                                running = true;
+                                turn_started = Some(std::time::Instant::now());
+                                token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
+                                source.set_model(&current_model);
+                                let turn_opts = build_turn_options(&app_config, &current_effort);
+                                turn_counter += 1;
+                                let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+                                active_steer_tx = Some(steer_tx);
+                                active_turn_handle = Some(spawn_turn(
+                                    cancel.clone(),
+                                    source.clone(),
+                                    perm,
+                                    history.clone(),
+                                    max_steps,
+                                    turn_opts,
+                                    tx.clone(),
+                                    steer_rx,
+                                ));
+                            } else {
+                                let now = std::time::Instant::now();
+                                copy_toast = Some(("No previous turn to regenerate".to_string(), now));
+                                renderer.request_reprint();
+                            }
+                        }
+                    }
+
+                    // F2: cycle reasoning expansion mode (none -> last -> all -> none)
+                    KeyCode::F(2) => {
+                        if !last_expanded && !all_expanded {
+                            last_expanded = true;
+                            all_expanded = false;
+                        } else if last_expanded && !all_expanded {
+                            last_expanded = false;
+                            all_expanded = true;
+                        } else {
+                            last_expanded = false;
+                            all_expanded = false;
+                        }
+                        renderer.request_reprint();
+                    }
+
+                    // ALT + O (or Alt + E, Alt + щ, Alt + у): expand / collapse ALL thinking blocks permanently
+                    KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char('щ') | KeyCode::Char('Щ')
+                    | KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Char('у') | KeyCode::Char('У')
+                        if mods.contains(KeyModifiers::ALT) =>
+                    {
+                        all_expanded = !all_expanded;
+                        if all_expanded {
+                            last_expanded = false;
+                        }
+                        renderer.request_reprint();
+                    }
+
+                    // CTRL + O (or Ctrl + E, Ctrl + щ, Ctrl + у): expand / collapse LAST thinking block temporarily
+                    KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char('щ') | KeyCode::Char('Щ')
+                    | KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Char('у') | KeyCode::Char('У')
+                        if mods.contains(KeyModifiers::CONTROL) =>
+                    {
+                        last_expanded = !last_expanded;
+                        if last_expanded {
+                            all_expanded = false;
+                        }
+                        renderer.request_reprint();
+                    }
+
+                    // F4 or CTRL + T or ALT + T (or Cyrillic е / Е): open Thinking Effort menu
+                    KeyCode::F(4)
+                    | KeyCode::Char('t') | KeyCode::Char('T') | KeyCode::Char('е') | KeyCode::Char('Е')
+                        if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) || matches!(code, KeyCode::F(4)) =>
+                    {
+                        let mut menu = build_effort_menu(&source);
+                        menu.select_by_value(&current_effort);
+                        effort_menu = Some(menu);
+                    }
+
+                    // F3 or CTRL + M or ALT + M (or Cyrillic ь / Ь): open Model menu
+                    KeyCode::F(3)
+                    | KeyCode::Char('m') | KeyCode::Char('M') | KeyCode::Char('ь') | KeyCode::Char('Ь')
+                        if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) || matches!(code, KeyCode::F(3)) =>
+                    {
+                        if let Some(mut menu) = build_model_menu(&source) {
+                            menu.select_by_value(&current_model);
+                            model_menu = Some(menu);
+                        } else {
+                            chat.push_system("[No models discovered from server]");
+                        }
+                    }
+
+                    // F5: open Sampling Parameters menu
+                    KeyCode::F(5) => {
+                        if sampling_view.is_some() {
+                            sampling_view = None;
+                        } else {
+                            effort_menu = None;
+                            model_menu = None;
+                            settings_view = None;
+                            context_modal = None;
+                            sampling_view = Some(SamplingView::new(&app_config));
+                        }
+                        renderer.request_reprint();
+                    }
+
+                    // Mode cycling with Shift+Tab (both KeyCode::BackTab and Tab+Shift)
+                    KeyCode::BackTab | KeyCode::Tab if matches!(code, KeyCode::BackTab) || mods.contains(KeyModifiers::SHIFT) => {
+                        let next_mode = perm.state().mode().next();
+                        perm.state().set_mode(next_mode);
+                        refresh_welcome_card_if_before_user_msg(
+                            &mut chat,
+                            &mut renderer,
+                            &current_model,
+                            &cwd_display,
+                            next_mode.label(),
+                            memory_docs,
+                            &source,
+                            &current_effort,
+                            current_context.as_deref(),
+                        );
+                        custom_placeholder = Some(format!("Permission mode set to: {}", next_mode.label()));
+                        suggested_prompt = None;
+                        renderer.request_reprint();
+                    }
+                    // Tab on empty input: toggle settings tab
+                    KeyCode::Tab if input.is_empty() && gate.pending().is_none() && effort_menu.is_none() && model_menu.is_none() && sampling_view.is_none() => {
+                        if settings_view.is_some() {
+                            settings_view = None;
+                        } else {
+                            settings_view = Some(SettingsView::new(app_config.clone(), available_models.clone()));
+                        }
+                        renderer.request_reprint();
+                    }
+                    // Tab: complete autocomplete suggestion if input starts with `/`, or toggle approval choice when pending
+                    KeyCode::Tab if gate.pending().is_some() => {
+                        confirm_select.toggle();
+                    }
+                    KeyCode::Tab if input.starts_with('/') => {
+                        if let Some(ac) = AutocompletePopup::for_input(&input, std::path::Path::new("."), autocomplete_idx) {
+                            input = ac.complete_input(&input);
+                            autocomplete_idx = 0;
+                        }
+                    }
+                    // Arrow navigation for approval card, autocomplete popup, and prompt history
+                    KeyCode::Left => {
+                        if gate.pending().is_some() {
+                            confirm_select.left();
+                        }
+                    }
+                    KeyCode::Right => {
+                        if gate.pending().is_some() {
+                            confirm_select.right();
+                        } else if !running && input.is_empty() {
+                            if let Some(sug) = suggested_prompt.take() {
+                                input = sug;
+                                renderer.request_reprint();
+                            }
+                        }
+                    }
+                    KeyCode::Up => {
+                        if gate.pending().is_some() {
+                            confirm_select.toggle();
+                        } else if !running && input.starts_with('/') {
+                            if let Some(ac) = AutocompletePopup::for_input(&input, std::path::Path::new("."), autocomplete_idx) {
+                                if autocomplete_idx == 0 {
+                                    autocomplete_idx = ac.items.len().saturating_sub(1);
+                                } else {
+                                    autocomplete_idx -= 1;
+                                }
+                            }
+                        } else if !running && !input_history.is_empty() {
+                            match history_index {
+                                None => {
+                                    current_draft = input.clone();
+                                    let idx = input_history.len() - 1;
+                                    history_index = Some(idx);
+                                    input = input_history[idx].clone();
+                                }
+                                Some(idx) if idx > 0 => {
+                                    let new_idx = idx - 1;
+                                    history_index = Some(new_idx);
+                                    input = input_history[new_idx].clone();
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    KeyCode::Down => {
+                        if gate.pending().is_some() {
+                            confirm_select.toggle();
+                        } else if !running && input.starts_with('/') {
+                            if let Some(ac) = AutocompletePopup::for_input(&input, std::path::Path::new("."), autocomplete_idx) {
+                                autocomplete_idx = (autocomplete_idx + 1) % ac.items.len();
+                            }
+                        } else if !running {
+                            if let Some(idx) = history_index {
+                                if idx + 1 < input_history.len() {
+                                    let new_idx = idx + 1;
+                                    history_index = Some(new_idx);
+                                    input = input_history[new_idx].clone();
+                                } else {
+                                    history_index = None;
+                                    input = std::mem::take(&mut current_draft);
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Backspace if gate.pending().is_none() => {
+                        input.pop();
+                        history_index = None;
+                        autocomplete_idx = 0;
+                    }
+                    KeyCode::Enter => {
+                        custom_placeholder = None;
+                        suggested_prompt = None;
+                        if gate.pending().is_some() {
+                            gate.respond(confirm_select.decision());
+                            confirm_select = ConfirmSelect::new();
+                        } else if !input.is_empty() && running {
+                            if let Some(ref steer_tx) = active_steer_tx {
+                                let text = std::mem::take(&mut input);
+                                if input_history.last() != Some(&text) {
+                                    input_history.push(text.clone());
+                                }
+                                history_index = None;
+                                current_draft.clear();
+                                let _ = steer_tx.send(text);
+                                custom_placeholder = Some("Steering injected".to_string());
+                                renderer.request_reprint();
+                            }
+                        } else if !input.is_empty() && !running {
+                            let trimmed = input.trim();
+                            if trimmed == "/help" || trimmed == "/?" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                chat.push_system(
+                                    "Commands & Skills (Tab to autocomplete):\n\
+                                     • /goal <task>           — launch fully autonomous execution with max reasoning\n\
+                                     • /settings (or Tab)     — open settings configuration tab\n\
+                                     • /context               — show detailed context window breakdown\n\
+                                     • /verbose [all|last|off] — toggle verbose mode (or press F2 / Alt+O / Ctrl+O)\n\
+                                     • /effort (or /t)        — choose thinking effort preset (or press F4 / Ctrl+T)\n\
+                                     • /model  (or /m)        — choose and switch model (or press F3)\n\
+                                     • /mode [plan|man|edits|all] — switch permission mode (or press Shift+Tab)\n\
+                                     • /clear                 — clear chat scrollback\n\
+                                     • /regenerate (or Ctrl+R) — regenerate last model response from scratch\n\
+                                     • /skill:<name>          — invoke a skill from .agents/skills/\n\
+                                     • Tab                    — autocomplete popup or settings tab\n\
+                                     • Esc                    — dismiss suggestions / interrupt / quit"
+                                );
+                                continue;
+                            }
+
+                            if trimmed == "/goal" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                chat.push_system(
+                                    "Autonomous Goal Mode:\n\
+                                     Usage: /goal <task description>\n\
+                                     Example: /goal Refactor error handling in core crate and run test suite\n\
+                                     In goal mode, FlashAgent lifts all permission gates, maximizes reasoning, and executes autonomously without human interruption until complete."
+                                );
+                                continue;
+                            } else if let Some(task) = trimmed.strip_prefix("/goal ") {
+                                let task_desc = task.trim().to_string();
+                                input.clear();
+                                autocomplete_idx = 0;
+
+                                // Save previous state to roll back upon goal completion
+                                goal_state = Some(SavedGoalState {
+                                    mode: perm.state().mode(),
+                                    effort: current_effort.clone(),
+                                    max_steps,
+                                    task: task_desc.clone(),
+                                });
+
+                                // Lift restrictions for autonomous execution
+                                perm.state().set_mode(PermissionMode::Bypass);
+                                current_effort = "high".to_string();
+                                let goal_max_steps: Option<u32> = Some(250);
+                                tools_arc.set_goal_mode(true);
+
+                                let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+                                let card_w = (w as usize).saturating_sub(4).clamp(44, 110);
+                                let inner_w = card_w.saturating_sub(2);
+                                let border_color = "\x1b[38;2;225;175;95m";
+                                let reset = "\x1b[0m";
+
+                                let title = format!(" Goal: {} ", flashagent_tui::truncate_middle(&task_desc, inner_w.saturating_sub(10)));
+                                let dash_count = inner_w.saturating_sub(title.chars().count() + 2);
+                                chat.push_line(LineKind::System, format!("{border_color}╭─\x1b[1;38;2;245;240;232m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)));
+                                let meta_line = "Mode: Autonomous · Permissions: Auto-Approved · Thinking: Max · Interruption: None";
+                                let pad_len = inner_w.saturating_sub(meta_line.chars().count() + 2);
+                                chat.push_line(LineKind::System, format!("{border_color}│{reset} \x1b[38;2;160;155;145m{meta_line}\x1b[0m{border_color}{}│{reset}", " ".repeat(pad_len)));
+                                chat.push_line(LineKind::System, format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)));
+
+                                chat.push_user(&format!("/goal {task_desc}"));
+
+                                let autonomous_directive = format!(
+                                    "[AUTONOMOUS GOAL DIRECTIVE]\n\
+                                     You are operating in fully autonomous /goal mode.\n\
+                                     Target goal: {}\n\n\
+                                     Autonomous Rules:\n\
+                                     1. Do NOT ask clarifying questions or seek user confirmation. All tool actions are pre-approved.\n\
+                                     2. Plan, research, edit, execute, and verify completely on your own.\n\
+                                     3. Thoroughly test and verify your changes before finishing.\n\
+                                     4. Conclude with a clear structured summary of what was accomplished.",
+                                    task_desc
+                                );
+
+                                let first = !history.iter().any(|m| m.role == flashagent_llm::Role::User);
+                                let content = if first && !memory_block.is_empty() {
+                                    format!("{memory_block}\n\n---\n\n{autonomous_directive}")
+                                } else {
+                                    autonomous_directive
+                                };
+                                history.push(ChatMessage::user(content));
+                                update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                cancel.store(false, Ordering::Relaxed);
+                                suggested_prompt = None;
+                                custom_placeholder = None;
+                                running = true;
+                                turn_started = Some(std::time::Instant::now());
+                                token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
+                                source.set_model(&current_model);
+                                let turn_opts = build_turn_options(&app_config, &current_effort);
+                                turn_counter += 1;
+                                let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+                                active_steer_tx = Some(steer_tx);
+                                active_turn_handle = Some(spawn_turn(
+                                    cancel.clone(),
+                                    source.clone(),
+                                    perm,
+                                    history.clone(),
+                                    goal_max_steps,
+                                    turn_opts,
+                                    tx.clone(),
+                                    steer_rx,
+                                ));
+                                continue;
+                            }
+
+                            if trimmed == "/settings" || trimmed == "/config" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                settings_view = Some(SettingsView::new(app_config.clone(), available_models.clone()));
+                                continue;
+                            }
+
+                            if trimmed == "/context" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                context_modal = Some(ContextModal::new(context_usage.clone()));
+                                continue;
+                            }
+
+                            if trimmed == "/clear" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                chat.clear();
+                                renderer.printed_settled = 0;
+                                renderer.prev_expansion = None;
+                                continue;
+                            }
+
+                            if trimmed == "/regenerate" || trimmed == "/retry" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                if let Some(user_idx) = history.iter().rposition(|m| m.role == flashagent_llm::Role::User) {
+                                    history.truncate(user_idx + 1);
+                                    chat.truncate_to_last_user();
+                                    renderer.scroll_to_bottom();
+                                    renderer.printed_settled = 0;
+                                    renderer.prev_expansion = None;
+                                    renderer.request_reprint();
+                                    update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                    cancel.store(false, Ordering::Relaxed);
+                                    suggested_prompt = None;
+                                    custom_placeholder = None;
+                                    last_expanded = false;
+                                    running = true;
+                                    turn_started = Some(std::time::Instant::now());
+                                    token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
+                                    source.set_model(&current_model);
+                                    let turn_opts = build_turn_options(&app_config, &current_effort);
+                                    turn_counter += 1;
+                                    let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+                                    active_steer_tx = Some(steer_tx);
+                                    active_turn_handle = Some(spawn_turn(
+                                        cancel.clone(),
+                                        source.clone(),
+                                        perm,
+                                        history.clone(),
+                                        max_steps,
+                                        turn_opts,
+                                        tx.clone(),
+                                        steer_rx,
+                                    ));
+                                } else {
+                                    chat.push_system("[No previous turn to regenerate]");
+                                    renderer.request_reprint();
+                                }
+                                continue;
+                            }
+
+                            if trimmed == "/effort" || trimmed == "/thinking" || trimmed == "/t" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                let mut menu = build_effort_menu(&source);
+                                menu.select_by_value(&current_effort);
+                                effort_menu = Some(menu);
+                                continue;
+                            } else if let Some(arg) = trimmed.strip_prefix("/effort ") {
+                                let arg_val = arg.trim().to_string();
+                                input.clear();
+                                autocomplete_idx = 0;
+                                current_effort = arg_val.clone();
+                                refresh_welcome_card_if_before_user_msg(
+                                    &mut chat,
+                                    &mut renderer,
+                                    &current_model,
+                                    &cwd_display,
+                                    &mode_str,
+                                    memory_docs,
+                                    &source,
+                                    &current_effort,
+                                    current_context.as_deref(),
+                                );
+                                custom_placeholder = Some(format!("Thinking effort set to: {arg_val}"));
+                                suggested_prompt = None;
+                                renderer.request_reprint();
+                                continue;
+                            }
+
+                            if trimmed == "/model" || trimmed == "/models" || trimmed == "/m" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                if let Some(mut menu) = build_model_menu(&source) {
+                                    menu.select_by_value(&current_model);
+                                    model_menu = Some(menu);
+                                } else {
+                                    chat.push_system("[No models discovered from server]");
+                                }
+                                continue;
+                            }
+
+                            if trimmed == "/sampling" || trimmed == "/params" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                sampling_view = Some(SamplingView::new(&app_config));
+                                continue;
+                            }
+
+                            if trimmed == "/mode" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                let next_mode = perm.state().mode().next();
+                                perm.state().set_mode(next_mode);
+                                refresh_welcome_card_if_before_user_msg(
+                                    &mut chat,
+                                    &mut renderer,
+                                    &current_model,
+                                    &cwd_display,
+                                    next_mode.label(),
+                                    memory_docs,
+                                    &source,
+                                    &current_effort,
+                                    current_context.as_deref(),
+                                );
+                                custom_placeholder = Some(format!("Permission mode set to: {}", next_mode.label()));
+                                suggested_prompt = None;
+                                renderer.request_reprint();
+                                continue;
+                            } else if let Some(arg) = trimmed.strip_prefix("/mode ") {
+                                let arg_val = arg.trim().to_lowercase();
+                                input.clear();
+                                autocomplete_idx = 0;
+                                let m = match arg_val.as_str() {
+                                    "planning" | "plan" => Some(PermissionMode::Planning),
+                                    "manual" | "man" => Some(PermissionMode::Manual),
+                                    "acceptedits" | "accept_edits" | "edits" | "auto" | "default" => Some(PermissionMode::AcceptEdits),
+                                    "bypass" | "accept_all" | "all" => Some(PermissionMode::Bypass),
+                                    _ => {
+                                        chat.push_system("[Usage: /mode planning | /mode manual | /mode edits | /mode all]");
+                                        None
+                                    }
+                                };
+                                if let Some(mode) = m {
+                                    perm.state().set_mode(mode);
+                                    refresh_welcome_card_if_before_user_msg(
+                                        &mut chat,
+                                        &mut renderer,
+                                        &current_model,
+                                        &cwd_display,
+                                        mode.label(),
+                                        memory_docs,
+                                        &source,
+                                        &current_effort,
+                                        current_context.as_deref(),
+                                    );
+                                    custom_placeholder = Some(format!("Permission mode set to: {}", mode.label()));
+                                    suggested_prompt = None;
+                                }
+                                renderer.request_reprint();
+                                continue;
+                            }
+
+                            if trimmed == "/compact" || trimmed.starts_with("/compact ") {
+                                let focus = trimmed.strip_prefix("/compact").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                                input.clear();
+                                autocomplete_idx = 0;
+                                custom_placeholder = Some("Compacting conversation context...".to_string());
+                                suggested_prompt = None;
+                                let stats_str = token_tracker.format_stats();
+                                renderer.frame(
+                                    &chat,
+                                    &gate,
+                                    &question_gate,
+                                    effort_menu.as_ref(),
+                                    model_menu.as_ref(),
+                                    settings_view.as_ref(),
+                                    sampling_view.as_ref(),
+                                    context_modal.as_ref(),
+                                    autocomplete.as_ref(),
+                                    &context_usage,
+                                    FrameState {
+                                        input: &input,
+                                        mode: perm.state().mode(),
+                                        is_goal_active: goal_state.is_some(),
+                                        tip: Some(tip_animator.tip_text),
+                                        tip_animated: Some(&tip_rendered),
+                                        turn_stats: stats_str.as_deref(),
+                                        thinking_effort: &current_effort,
+                                        reasoning_expand: ReasoningExpansion {
+                                            all: all_expanded,
+                                            last: last_expanded,
+                                        },
+                                        tick_n,
+                                        running,
+                                        elapsed_secs: turn_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                                        model_tokens: token_tracker.total_model_tokens,
+                                        tokens_per_sec: token_tracker.tg_3s(),
+                                        f_keep: token_tracker.last_f_keep,
+                                        model: &current_model,
+                                        context_window: current_context.as_deref(),
+                                        cwd: &cwd_display,
+                                        confirm_selection: confirm_select.decision(),
+                                        question_state: Some(&question_ui_state),
+                                        custom_placeholder: custom_placeholder.as_deref(),
+                                        suggested_prompt: suggested_prompt.as_deref(),
+                                        copy_toast: None,
+                                        prefill_status: None,
+                                        ttft_display: None,
+                                    },
+                                );
+                                if let Some(freed) = compact_context(&source, &mut history, focus.as_deref()).await {
+                                    update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                    custom_placeholder = Some(format!("Context compacted (~{} freed)", ContextUsage::format_tokens(freed)));
+                                } else {
+                                    custom_placeholder = Some("Context is already compact".to_string());
+                                }
+                                suggested_prompt = None;
+                                renderer.request_reprint();
+                                continue;
+                            }
+
+                            if trimmed == "/verbose" || trimmed == "/expand" || trimmed == "/think" || trimmed == "/o" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                if !last_expanded && !all_expanded {
+                                    last_expanded = true;
+                                    all_expanded = false;
+                                } else if last_expanded && !all_expanded {
+                                    last_expanded = false;
+                                    all_expanded = true;
+                                } else {
+                                    last_expanded = false;
+                                    all_expanded = false;
+                                }
+                                renderer.request_reprint();
+                                continue;
+                            } else if let Some(arg) = trimmed.strip_prefix("/verbose ")
+                                .or_else(|| trimmed.strip_prefix("/expand "))
+                                .or_else(|| trimmed.strip_prefix("/think "))
+                                .or_else(|| trimmed.strip_prefix("/o "))
+                            {
+                                let arg_val = arg.trim().to_string();
+                                input.clear();
+                                autocomplete_idx = 0;
+                                match arg_val.as_str() {
+                                    "all" => {
+                                        all_expanded = true;
+                                        last_expanded = false;
+                                    }
+                                    "last" => {
+                                        all_expanded = false;
+                                        last_expanded = true;
+                                    }
+                                    "off" | "none" | "collapse" => {
+                                        all_expanded = false;
+                                        last_expanded = false;
+                                    }
+                                    _ => {
+                                        chat.push_system("[Usage: /verbose all | /verbose last | /verbose off]");
+                                    }
+                                };
+                                renderer.request_reprint();
+                                continue;
+                            }
+
+                            // Check if the command invokes a skill (/skill:<name> or /<name>)
+                            let skill_name = if let Some(rest) = trimmed.strip_prefix("/skill:") {
+                                Some(rest.trim().to_string())
+                            } else if trimmed.starts_with('/') && !trimmed.contains(' ') {
+                                let cand = trimmed.trim_start_matches('/');
+                                let path = std::path::Path::new(".").join(".agents").join("skills").join(format!("{cand}.md"));
+                                if path.exists() {
+                                    Some(cand.to_string())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+
+                            if let Some(sname) = skill_name {
+                                let skill_path = std::path::Path::new(".").join(".agents").join("skills").join(format!("{sname}.md"));
+                                let skill_content = std::fs::read_to_string(&skill_path)
+                                    .unwrap_or_else(|_| format!("Execute skill: {sname}"));
+                                input.clear();
+                                autocomplete_idx = 0;
+                                chat.push_system(&format!("[Invoking skill: {sname}]"));
+                                chat.push_user(&format!("/skill:{sname}"));
+                                let prompt = format!("Execute skill: {sname}\n\nSkill Instructions:\n{skill_content}");
+                                history.push(ChatMessage::user(prompt));
+                                update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                cancel.store(false, Ordering::Relaxed);
+                                suggested_prompt = None;
+                                custom_placeholder = None;
+                                running = true;
+                                turn_started = Some(std::time::Instant::now());
+                                token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
+                                source.set_model(&current_model);
+                                let turn_opts = build_turn_options(&app_config, &current_effort);
+                                turn_counter += 1;
+                                let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+                                active_steer_tx = Some(steer_tx);
+                                active_turn_handle = Some(spawn_turn(
+                                    cancel.clone(),
+                                    source.clone(),
+                                    perm,
+                                    history.clone(),
+                                    max_steps,
+                                    turn_opts,
+                                    tx.clone(),
+                                    steer_rx,
+                                ));
+                                continue;
+                            }
+
+                            let text = std::mem::take(&mut input);
+                            if input_history.last() != Some(&text) {
+                                input_history.push(text.clone());
+                            }
+                            history_index = None;
+                            current_draft.clear();
+                            // Sending new prompt closes temporary last thinking block (Rule 4)
+                            last_expanded = false;
+
+                            chat.push_user(&text);
+                            let first = !history.iter().any(|m| m.role == flashagent_llm::Role::User);
+                            let content = if first && !memory_block.is_empty() {
+                                format!("{memory_block}\n\n---\n\n{text}")
+                            } else {
+                                text
+                            };
+                            history.push(ChatMessage::user(content));
+                            update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                            cancel.store(false, Ordering::Relaxed);
+                            suggested_prompt = None;
+                            custom_placeholder = None;
+                            running = true;
+                            turn_started = Some(std::time::Instant::now());
+                            token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
+                            source.set_model(&current_model);
+                            let turn_opts = build_turn_options(&app_config, &current_effort);
+                            turn_counter += 1;
+                            let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+                            active_steer_tx = Some(steer_tx);
+                            active_turn_handle = Some(spawn_turn(
+                                cancel.clone(),
+                                source.clone(),
+                                perm,
+                                history.clone(),
+                                max_steps,
+                                turn_opts,
+                                tx.clone(),
+                                steer_rx,
+                            ));
+                        }
+                    }
+                    KeyCode::Char(c)
+                        if gate.pending().is_none()
+                            && !mods.contains(KeyModifiers::CONTROL)
+                            && !mods.contains(KeyModifiers::ALT) =>
+                    {
+                        input.push(c);
+                        history_index = None;
+                        autocomplete_idx = 0;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn update_context_usage(
+    usage: &mut ContextUsage,
+    history: &[ChatMessage],
+    memory_block: &str,
+    chat: &ChatView,
+) {
+    let system_chars: usize = history
+        .iter()
+        .filter(|m| m.role == flashagent_llm::Role::System)
+        .map(|m| m.content.len())
+        .sum();
+    usage.system_tokens = (system_chars / 4).max(150);
+    usage.memory_tokens = memory_block.len() / 4;
+    usage.tools_tokens = 1250;
+
+    let (chat_user, chat_assistant, chat_reasoning, chat_tools) = chat.raw_content_chars();
+
+    let mut hist_user_chars = 0;
+    let mut hist_assistant_chars = 0;
+    for m in history {
+        match m.role {
+            flashagent_llm::Role::User => hist_user_chars += m.content.len(),
+            flashagent_llm::Role::Assistant => hist_assistant_chars += m.content.len(),
+            _ => {}
+        }
+    }
+
+    usage.user_tokens = hist_user_chars.max(chat_user) / 4;
+    usage.assistant_tokens = hist_assistant_chars.max(chat_assistant) / 4;
+    usage.reasoning_tokens = chat_reasoning / 4;
+    usage.tool_output_tokens = chat_tools / 4;
+}
+
+fn build_turn_options(
+    app_config: &flashagent_core::AppConfig,
+    effort: &str,
+) -> flashagent_llm::TurnOptions {
+    let mut opts = flashagent_llm::TurnOptions {
+        temperature: Some(app_config.temperature),
+        top_p: app_config.top_p,
+        top_k: app_config.top_k,
+        repeat_penalty: app_config.repeat_penalty,
+        presence_penalty: app_config.presence_penalty,
+        min_p: app_config.min_p,
+        ..Default::default()
+    };
+    if effort == "auto" || effort.is_empty() || effort == "default" {
+        opts.thinking = flashagent_llm::ThinkingEffort::Auto;
+        opts.custom_effort = None;
+    } else {
+        opts.custom_effort = Some(effort.to_string());
+        match effort.to_lowercase().as_str() {
+            "off" => opts.thinking = flashagent_llm::ThinkingEffort::Off,
+            "low" => opts.thinking = flashagent_llm::ThinkingEffort::Low,
+            "medium" => opts.thinking = flashagent_llm::ThinkingEffort::Medium,
+            "high" => opts.thinking = flashagent_llm::ThinkingEffort::High,
+            _ => {}
+        }
+    }
+    opts
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_turn(
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    source: Arc<BackendSource>,
+    perm: &'static PermissionedTools,
+    history: Vec<ChatMessage>,
+    max_steps: Option<u32>,
+    turn_opts: flashagent_llm::TurnOptions,
+    tx: tokio::sync::mpsc::UnboundedSender<UiEvent>,
+    steer_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> tokio::task::JoinHandle<()> {
+    cancel.store(false, Ordering::Relaxed);
+    tokio::spawn(async move {
+        let config = LoopConfig {
+            max_steps,
+            base_turn_options: turn_opts,
+            ..Default::default()
+        };
+        let loop_ = AgentLoop::with_steering(config, cancel, steer_rx);
+        let res = loop_
+            .run(source.as_ref(), perm, history, |ev| {
+                let _ = tx.send(UiEvent::Loop(ev));
+            })
+            .await;
+        let _ = tx.send(UiEvent::Finished(res.map_err(|e| e.to_string())));
+    })
+}
+
+fn extract_user_prompt(content: &str) -> &str {
+    if let Some((_mem, user_part)) = content.rsplit_once("\n\n---\n\n") {
+        user_part.trim()
+    } else {
+        content.trim()
+    }
+}
+
+
+
+async fn generate_llm_recap_and_suggestion(
+    source: &BackendSource,
+    history: &[ChatMessage],
+) -> Option<(String, Option<String>)> {
+    let last_user_idx = history.iter().rposition(|m| m.role == flashagent_llm::Role::User)?;
+    let user_msg = history.get(last_user_idx)?;
+    let user_prompt = extract_user_prompt(&user_msg.content);
+    let is_ru = user_prompt.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c));
+
+    let turn_messages = &history[last_user_idx..];
+    let assistant_msg = turn_messages.iter().rev().find(|m| m.role == flashagent_llm::Role::Assistant);
+    let asst_text = assistant_msg.map(|m| m.content.as_str()).unwrap_or("");
+    if asst_text.trim().is_empty() {
+        return None;
+    }
+
+    let user_snip = flashagent_tui::truncate_middle(user_prompt, 200);
+    let asst_snip = flashagent_tui::truncate_middle(asst_text, 600);
+
+    let system_prompt = if is_ru {
+        "Ты — аналитик диалога. Сформируй строго JSON со следующими полями:\n\
+        {\n  \
+          \"suggestion\": \"фраза следующего запроса ПОЛЬЗОВАТЕЛЯ к ассистенту в повелительном наклонении (например: «Расскажи об особенностях Swift», «Покажи примеры кода на Swift», «Объясни как устроена безопасность»). Строго от лица пользователя к ассистенту (повелительное наклонение)! Не пиши от лица ассистента («Какие примеры показать?»)! Не повторяй уже заданный вопрос!\",\n  \
+          \"recap\": \"краткий (1 короткое предложение) итог ответа в прошедшем времени\"\n\
+        }"
+    } else {
+        "You are a conversation analyzer. Return strictly JSON with the following fields:\n\
+        {\n  \
+          \"suggestion\": \"the next follow-up prompt FROM THE USER to the assistant in imperative mood (e.g. 'Show Swift code examples', 'Explain Swift features in detail', 'Explain how safety works'). Strictly from the user's perspective! Never write from the assistant's perspective! Do not repeat the existing query!\",\n  \
+          \"recap\": \"one concise past-tense sentence of what was explained or done\"\n\
+        }"
+    };
+
+    let user_turn_info = format!("Запрос пользователя: {user_snip}\nОтвет ассистента: {asst_snip}");
+    let query_messages = vec![
+        ChatMessage::system(system_prompt),
+        ChatMessage::user(user_turn_info),
+    ];
+
+    let turn_opts = flashagent_llm::TurnOptions {
+        thinking: flashagent_llm::ThinkingEffort::Off,
+        custom_effort: Some("off".to_string()),
+        temperature: Some(0.3),
+        max_tokens: Some(256),
+        ..Default::default()
+    };
+
+    let overall_task = async {
+        let mut stream = source.turn_with_options(&query_messages, &[], &turn_opts).await.ok()?;
+        use futures::StreamExt;
+        let mut collected = String::new();
+        while let Some(ev_res) = stream.next().await {
+            if let Ok(ev) = ev_res {
+                match ev {
+                    flashagent_llm::LlmEvent::TextDelta(delta) => {
+                        collected.push_str(&delta);
+                    }
+                    flashagent_llm::LlmEvent::Done(_) => break,
+                    _ => {}
+                }
+            }
+        }
+        parse_recap_and_suggestion_json(&collected)
+    };
+
+    // 25s timeout accommodates larger local models (e.g. 26B Gemma TTFT ~8s + generation ~5s)
+    tokio::time::timeout(std::time::Duration::from_secs(25), overall_task).await.ok()?
+}
+
+fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Option<String>)> {
+    let mut storage;
+    let mut text = raw.trim();
+
+    // Strip <thought>...</thought> or <think>...</think> if model emitted reasoning in text stream
+    if let Some(start_think) = text.find("<thought>") {
+        if let Some(end_think) = text.find("</thought>") {
+            let after = &text[end_think + "</thought>".len()..];
+            let before = &text[..start_think];
+            storage = format!("{before} {after}");
+            text = storage.trim();
+        }
+    }
+    if let Some(start_think) = text.find("<think>") {
+        if let Some(end_think) = text.find("</think>") {
+            let after = &text[end_think + "</think>".len()..];
+            let before = &text[..start_think];
+            storage = format!("{before} {after}");
+            text = storage.trim();
+        }
+    }
+
+    // Extract inside ```json ... ``` or ``` ... ``` if present
+    let candidate = if let Some(code_start) = text.find("```") {
+        let after_fence = &text[code_start + 3..];
+        let content_start = if after_fence.to_lowercase().starts_with("json") {
+            &after_fence[4..]
+        } else {
+            after_fence
+        };
+        if let Some(code_end) = content_start.find("```") {
+            &content_start[..code_end]
+        } else {
+            content_start
+        }
+    } else {
+        text
+    };
+
+    // Extract between outermost '{' and '}'
+    let json_str = if let (Some(first_brace), Some(last_brace)) = (candidate.find('{'), candidate.rfind('}')) {
+        if first_brace <= last_brace {
+            &candidate[first_brace..=last_brace]
+        } else {
+            candidate.trim()
+        }
+    } else {
+        candidate.trim()
+    };
+
+    let parsed: serde_json::Value = serde_json::from_str(json_str)
+        .ok()
+        .or_else(|| flashagent_llm::repair_json(json_str).and_then(|r| serde_json::from_str(&r).ok()))?;
+
+    let recap_raw = parsed.get("recap").and_then(|s| s.as_str())?;
+    let recap = recap_raw.trim().trim_matches('"').to_string();
+    if recap.is_empty() || is_generic_recap(&recap) {
+        return None;
+    }
+
+    let suggestion = parsed.get("suggestion")
+        .and_then(|s| s.as_str())
+        .and_then(sanitize_user_suggestion);
+
+    Some((recap, suggestion))
+}
+
+fn sanitize_user_suggestion(s: &str) -> Option<String> {
+    let mut trimmed = s.trim().trim_matches('"').trim_matches('\'').trim();
+    if trimmed.is_empty() || is_generic_suggestion(trimmed) {
+        return None;
+    }
+
+    // Strip Russian and ASCII quotes
+    trimmed = trimmed
+        .trim_matches('«')
+        .trim_matches('»')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim();
+
+    let mut text = trimmed.to_string();
+    let lower = text.to_lowercase();
+
+    // Convert assistant question or infinitive formulations into direct user imperatives
+    if lower.starts_with("какие примеры кода показать") || lower.starts_with("какие примеры показать") {
+        text = "Покажи примеры кода".to_string();
+    } else if lower.starts_with("хотите узнать подробнее о ") {
+        text = format!("Расскажи подробнее о {}", &trimmed[("хотите узнать подробнее о ").len()..]);
+    } else if lower.starts_with("хотите узнать ") {
+        text = format!("Расскажи {}", &trimmed[("хотите узнать ").len()..]);
+    } else if lower.starts_with("хочешь узнать подробнее о ") {
+        text = format!("Расскажи подробнее о {}", &trimmed[("хочешь узнать подробнее о ").len()..]);
+    } else if lower.starts_with("хочешь узнать ") {
+        text = format!("Расскажи {}", &trimmed[("хочешь узнать ").len()..]);
+    } else if lower.starts_with("рассказать мне ") {
+        text = format!("Расскажи мне {}", &trimmed[("рассказать мне ").len()..]);
+    } else if lower.starts_with("рассказать об ") {
+        text = format!("Расскажи об {}", &trimmed[("рассказать об ").len()..]);
+    } else if lower.starts_with("рассказать о ") {
+        text = format!("Расскажи о {}", &trimmed[("рассказать о ").len()..]);
+    } else if lower.starts_with("рассказать ") {
+        text = format!("Расскажи {}", &trimmed[("рассказать ").len()..]);
+    } else if lower.starts_with("показать мне ") {
+        text = format!("Покажи мне {}", &trimmed[("показать мне ").len()..]);
+    } else if lower.starts_with("показать примеры ") {
+        text = format!("Покажи примеры {}", &trimmed[("показать примеры ").len()..]);
+    } else if lower.starts_with("показать ") {
+        text = format!("Покажи {}", &trimmed[("показать ").len()..]);
+    } else if lower.starts_with("объяснить мне ") {
+        text = format!("Объясни мне {}", &trimmed[("объяснить мне ").len()..]);
+    } else if lower.starts_with("объяснить ") {
+        text = format!("Объясни {}", &trimmed[("объяснить ").len()..]);
+    } else if lower.starts_with("привести примеры ") {
+        text = format!("Приведи примеры {}", &trimmed[("привести примеры ").len()..]);
+    } else if lower.starts_with("узнать подробнее о ") {
+        text = format!("Расскажи подробнее о {}", &trimmed[("узнать подробнее о ").len()..]);
+    } else if lower.starts_with("узнать ") {
+        text = format!("Расскажи {}", &trimmed[("узнать ").len()..]);
+    } else if is_assistant_phrased(&text) {
+        return None;
+    }
+
+    // Capitalize first character
+    let mut chars = text.chars();
+    let first = chars.next()?;
+    let capitalized: String = first.to_uppercase().chain(chars).collect();
+
+    // Clean trailing punctuation (?, ., !) so it is an imperative prompt ready to send
+    let clean = capitalized
+        .trim_end_matches(['?', '.', '!', ' ', '"', '\'', '»', '«'])
+        .to_string();
+
+    if clean.is_empty() || is_generic_suggestion(&clean) {
+        None
+    } else {
+        Some(clean)
+    }
+}
+
+fn is_assistant_phrased(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.starts_with("какие ")
+        || lower.starts_with("какой ")
+        || lower.starts_with("что вам ")
+        || lower.starts_with("что тебе ")
+        || lower.starts_with("хотите ")
+        || lower.starts_with("хочешь ")
+        || lower.starts_with("показать ли ")
+        || lower.starts_with("рассказать ли ")
+        || lower.ends_with("показать?")
+        || lower.starts_with("would you ")
+        || lower.starts_with("do you want ")
+        || lower.starts_with("should i ")
+        || lower.starts_with("what examples ")
+}
+
+fn is_generic_recap(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("ответ сформирован")
+        || lower.contains("response generated")
+        || lower.contains("ответ предоставлен")
+        || lower.contains("answer provided")
+        || lower.contains("что дальше")
+        || lower.contains("what's next")
+}
+
+fn is_generic_suggestion(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let trimmed = lower.trim_matches(|c: char| c.is_whitespace() || c == '?' || c == '.' || c == '!' || c == '"' || c == '\'');
+    trimmed == "что дальше"
+        || trimmed == "what's next"
+        || trimmed == "what next"
+        || trimmed == "продолжить"
+        || trimmed == "continue"
+        || trimmed == "дальше"
+        || trimmed == "next"
+}
+
+async fn compact_context(
+    source: &BackendSource,
+    history: &mut Vec<ChatMessage>,
+    focus_prompt: Option<&str>,
+) -> Option<usize> {
+    use futures::StreamExt;
+
+    if history.len() <= 3 {
+        return None;
+    }
+
+    // Keep system message history[0], and the most recent 2 messages (split_idx..)
+    let split_idx = history.len().saturating_sub(2);
+    if split_idx <= 1 {
+        return None;
+    }
+
+    let before_tokens: usize = history.iter().map(|m| m.content.len() / 4 + 4).sum();
+
+    let mut to_compact = String::new();
+    for msg in &history[1..split_idx] {
+        let role_str = match msg.role {
+            flashagent_llm::Role::User => "User",
+            flashagent_llm::Role::Assistant => "Assistant",
+            flashagent_llm::Role::System => "System",
+            flashagent_llm::Role::Tool => "Tool",
+        };
+        let clean_content = if msg.role == flashagent_llm::Role::User {
+            extract_user_prompt(&msg.content)
+        } else {
+            msg.content.as_str()
+        };
+        to_compact.push_str(&format!("{role_str}: {}\n\n", clean_content));
+    }
+
+    let focus_text = if let Some(focus) = focus_prompt {
+        format!("\nSpecial user focus/instructions: preserve details regarding: {focus}\n")
+    } else {
+        String::new()
+    };
+
+    let summary_prompt = format!(
+        "You are an expert technical context compaction engine.\n\
+         Summarize the following conversation history concisely into clean structured notes.\n\
+         Preserve key technical decisions, architectural context, modified files, errors encountered, and user intents.\n\
+         Discard pleasantries, repetitive steps, and verbose tool dumps.\n\
+         {focus_text}\n\
+         Conversation to compact:\n\n\
+         {to_compact}\n\n\
+         Provide ONLY the structured technical summary."
+    );
+
+    let msgs = vec![
+        ChatMessage::system("You are a technical context compaction engine."),
+        ChatMessage::user(summary_prompt),
+    ];
+    let opts = flashagent_llm::TurnOptions {
+        thinking: flashagent_llm::ThinkingEffort::Off,
+        temperature: Some(0.2),
+        ..Default::default()
+    };
+
+    let summary = if let Ok(Ok(mut stream)) = tokio::time::timeout(
+        std::time::Duration::from_secs(12),
+        source.turn_with_options(&msgs, &[], &opts),
+    ).await {
+        let mut text = String::new();
+        while let Ok(Some(Ok(ev))) = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await {
+            if let flashagent_llm::LlmEvent::TextDelta(d) = ev {
+                text.push_str(&d);
+            }
+        }
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            trimmed.to_string()
+        } else {
+            fallback_summary(&history[1..split_idx])
+        }
+    } else {
+        fallback_summary(&history[1..split_idx])
+    };
+
+    let compacted_msg = ChatMessage::system(format!(
+        "[Compacted Conversation History]:\n{}",
+        summary
+    ));
+
+    let mut new_history = Vec::with_capacity(split_idx.min(2) + 2);
+    new_history.push(history[0].clone());
+    new_history.push(compacted_msg);
+    new_history.extend_from_slice(&history[split_idx..]);
+
+    let after_tokens: usize = new_history.iter().map(|m| m.content.len() / 4 + 4).sum();
+    *history = new_history;
+
+    let freed = before_tokens.saturating_sub(after_tokens);
+    Some(freed.max(1))
+}
+
+fn fallback_summary(messages: &[ChatMessage]) -> String {
+    let mut out = String::from("Previous conversation summary (auto-compacted):\n");
+    for (i, msg) in messages.iter().enumerate() {
+        let role = match msg.role {
+            flashagent_llm::Role::User => "User",
+            flashagent_llm::Role::Assistant => "Assistant",
+            flashagent_llm::Role::System => "System",
+            flashagent_llm::Role::Tool => "Tool",
+        };
+        let clean = if msg.role == flashagent_llm::Role::User {
+            extract_user_prompt(&msg.content)
+        } else {
+            msg.content.as_str()
+        };
+        let snippet = flashagent_tui::truncate_middle(clean, 120);
+        out.push_str(&format!("{}. {role}: {snippet}\n", i + 1));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_recap_and_suggestion_json() {
+        let raw = "```json\n{\"recap\": \"Объяснил концепцию Swift\", \"suggestion\": \"Показать код маскота\"}\n```";
+        let parsed = parse_recap_and_suggestion_json(raw);
+        assert_eq!(
+            parsed,
+            Some(("Объяснил концепцию Swift".to_string(), Some("Покажи код маскота".to_string())))
+        );
+
+        // Filters out generic filler
+        let generic = "{\"recap\": \"Ответ сформирован\", \"suggestion\": \"Что дальше?\"}";
+        assert_eq!(parse_recap_and_suggestion_json(generic), None);
+    }
+
+    #[test]
+    fn test_sanitize_user_suggestion_conversions() {
+        assert_eq!(
+            sanitize_user_suggestion("«Расскажи мне об особенностях Swift»"),
+            Some("Расскажи мне об особенностях Swift".to_string())
+        );
+        assert_eq!(
+            sanitize_user_suggestion("показать примеры кода на Swift"),
+            Some("Покажи примеры кода на Swift".to_string())
+        );
+        assert_eq!(
+            sanitize_user_suggestion("рассказать мне об особенностях Swift."),
+            Some("Расскажи мне об особенностях Swift".to_string())
+        );
+        assert_eq!(
+            sanitize_user_suggestion("Какие примеры кода показать?"),
+            Some("Покажи примеры кода".to_string())
+        );
+        assert_eq!(
+            sanitize_user_suggestion("Хотите узнать подробнее о безопасности памяти?"),
+            Some("Расскажи подробнее о безопасности памяти".to_string())
+        );
+        // Generic fillers are rejected
+        assert_eq!(sanitize_user_suggestion("Что дальше?"), None);
+        assert_eq!(sanitize_user_suggestion("Дальше"), None);
+        assert_eq!(sanitize_user_suggestion("Продолжить"), None);
+    }
+
+    #[test]
+    fn test_token_tracker_initial_state() {
+        let tracker = TokenTracker::new("default".to_string());
+        assert_eq!(tracker.format_stats(), None);
+    }
+
+    #[test]
+    fn test_token_tracker_turn_start_and_usage() {
+        let mut tracker = TokenTracker::new("default".to_string());
+        tracker.on_turn_start("default".to_string(), 17);
+
+        let stats = tracker.format_stats().expect("should have stats");
+        assert!(stats.contains("17 prompt"));
+
+        // Simulate usage with completion and MTP speculative decoding stats
+        let usage = flashagent_llm::Usage {
+            prompt: Some(17),
+            completion: Some(25),
+            cached: None,
+            mtp: Some(flashagent_llm::MtpStats {
+                total_draft_tokens: 16,
+                accepted_draft_tokens: 13,
+                rejected_draft_tokens: 3,
+            }),
+        };
+        tracker.on_usage(&usage);
+        tracker.last_tg = Some(24.3);
+        tracker.on_finished();
+
+        let formatted = tracker.format_stats().expect("should format stats");
+        assert!(formatted.contains("17 prompt"));
+        assert!(formatted.contains("24.3 tg"));
+        assert!(formatted.contains("mtp: 81%"));
+    }
+
+    #[test]
+    fn test_token_tracker_mtp_omitted_when_not_applicable() {
+        let mut tracker = TokenTracker::new("default".to_string());
+        tracker.on_turn_start("default".to_string(), 4920);
+
+        let usage = flashagent_llm::Usage {
+            prompt: Some(4920),
+            completion: Some(100),
+            cached: None,
+            mtp: None,
+        };
+        tracker.on_usage(&usage);
+        tracker.last_tg = Some(15.2);
+        tracker.on_finished();
+
+        let formatted = tracker.format_stats().expect("should format stats");
+        assert!(formatted.contains("4.9K prompt"));
+        assert!(formatted.contains("15.2 tg"));
+        assert!(!formatted.contains("mtp:"));
+    }
+}
+

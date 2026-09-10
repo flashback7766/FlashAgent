@@ -1,0 +1,27 @@
+[package]
+name = "flashagent-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "flashagent-tui"
+path = "src/main.rs"
+
+[dependencies]
+flashagent-core = { path = "../core" }
+flashagent-llm = { path = "../llm" }
+flashagent-tools = { path = "../tools" }
+futures = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+anyhow = { workspace = true }
+crossterm = "0.28"
+unicode-width = { workspace = true }
+arboard = "3.6.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
