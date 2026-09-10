@@ -418,9 +418,10 @@ mod tests {
     }
 
     #[test]
-    fn cyrillic_values_survive() {
-        let v = parsed(r#"{"задача": "собрать проект"}"#);
-        assert_eq!(v["задача"], "собрать проект");
+    fn unicode_values_survive() {
+        let v = parsed(r#"{"task": "build project", "note": "unicode check: ✨ / café"}"#);
+        assert_eq!(v["task"], "build project");
+        assert_eq!(v["note"], "unicode check: ✨ / café");
     }
 
     #[test]

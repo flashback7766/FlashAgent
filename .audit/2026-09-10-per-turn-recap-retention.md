@@ -17,7 +17,7 @@ Details:
 1. **Root Cause**:
    - `ChatView::update_or_push_system("recap:", ...)` was searching the entire chat lines history via `rposition`.
    - When turn 2 completed, it found the `recap:` system line from turn 1 and overwrote it in-place.
-   - Consequently, turn 1 showed turn 2's recap («Ассистент оценил удачное решение пользователя по возвращению предмета в функциональное состояние.»), while turn 2 displayed no recap.
+   - Consequently, turn 1 showed turn 2's recap ("Assistant acknowledged the successful solution to restore the component to working state."), while turn 2 displayed no recap.
 2. **Fix**:
    - Added `ChatView::update_or_push_turn_system(prefix, text)` in `crates/tui/src/lib.rs`.
    - Scopes prefix lookups exclusively to lines after the latest `LineKind::User` message (the current turn).

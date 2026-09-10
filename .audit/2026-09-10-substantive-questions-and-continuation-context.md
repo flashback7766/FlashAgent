@@ -2,7 +2,7 @@
 Decision: Fix auto thinking complexity classification for substantive questions and multi-turn task continuations
 
 Files touched:
-- crates/llm/src/thinking.rs (`analyze_turn_complexity` upgraded with context awareness for follow-up responses like "Да", "1", option selection; added detection of substantive/analytical questions with '?' and question words)
+- crates/llm/src/thinking.rs (`analyze_turn_complexity` upgraded with context awareness for follow-up responses like "Yes", "1", option selection; added detection of substantive/analytical questions with '?' and question words)
 
 Verification:
 1. `cargo test --workspace`

@@ -4,81 +4,178 @@ on:
   push:
     tags:
       - 'v*'
+      - 'b[0-9]*'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build-release:
-    name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact_name: flashagent
-            asset_name: flashagent-linux-x86_64.tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: flashagent-tui.exe
-            asset_name: flashagent-windows-x86_64.zip
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact_name: flashagent
-            asset_name: flashagent-macos-aarch64.tar.gz
+  build-linux:
+    name: Build Linux Packages (Arch, Debian, Void, AppImage, Tarball)
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin zstd libfuse2
+
+      - name: Download appimagetool
+        run: |
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O /tmp/appimagetool
+          chmod +x /tmp/appimagetool
+
+      - name: Compile and Package All Linux Distros
+        run: |
+          ./packaging/build-all.sh "${{ github.ref_name }}"
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts
+          path: dist/*
+
+  build-windows:
+    name: Build Windows (MSVC x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-pc-windows-msvc
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Build Release Binary
-        run: cargo build --release --target ${{ matrix.target }} -p flashagent-tui
+      - name: Build Windows Binary
+        env:
+          FLASHAGENT_VERSION: ${{ github.ref_name }}
+        run: cargo build --release --target x86_64-pc-windows-msvc -p flashagent-tui
 
-      - name: Package Binary (Unix)
-        if: matrix.os != 'windows-latest'
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar -czf ../../../${{ matrix.asset_name }} flashagent-tui
-          cd ../../..
-
-      - name: Package Binary (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Package Windows Zip
         shell: pwsh
         run: |
-          Compress-Archive -Path target/${{ matrix.target }}/release/flashagent-tui.exe -DestinationPath ${{ matrix.asset_name }}
+          $ver = "${{ github.ref_name }}"
+          mkdir dist
+          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/flashagent-tui.exe, README.md, LICENSE -DestinationPath "dist/flashagent-windows-$ver-x86_64.zip"
+          Copy-Item "dist/flashagent-windows-$ver-x86_64.zip" "dist/flashagent-windows-x86_64.zip"
 
-      - name: Upload Artifact
+      - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}
+          name: windows-artifact
+          path: dist/flashagent-windows-*.zip
+
+  build-macos:
+    name: Build macOS (Apple Silicon ARM64 & Intel x86_64)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build macOS Apple Silicon (ARM64)
+        env:
+          FLASHAGENT_VERSION: ${{ github.ref_name }}
+        run: cargo build --release --target aarch64-apple-darwin -p flashagent-tui
+
+      - name: Build macOS Intel (x86_64)
+        env:
+          FLASHAGENT_VERSION: ${{ github.ref_name }}
+        run: cargo build --release --target x86_64-apple-darwin -p flashagent-tui
+
+      - name: Package macOS Binaries
+        run: |
+          TAG="${{ github.ref_name }}"
+          mkdir dist
+          tar -czf "dist/flashagent-macos-${TAG}-aarch64.tar.gz" -C target/aarch64-apple-darwin/release flashagent-tui
+          tar -czf "dist/flashagent-macos-${TAG}-x86_64.tar.gz" -C target/x86_64-apple-darwin/release flashagent-tui
+          tar -czf dist/flashagent-macos-aarch64.tar.gz -C target/aarch64-apple-darwin/release flashagent-tui
+          tar -czf dist/flashagent-macos-x86_64.tar.gz -C target/x86_64-apple-darwin/release flashagent-tui
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: dist/*
 
   publish-release:
     name: Publish GitHub Release
-    needs: build-release
+    needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
+          merge-multiple: true
 
-      - name: Create Release
+      - name: Determine Release Type
+        id: release_type
+        shell: bash
+        run: |
+          if [[ "${{ github.ref_name }}" =~ ^b ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare Release Notes
+        id: release_notes
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          echo "title=FlashAgent ${TAG}" >> "$GITHUB_OUTPUT"
+
+          cat << 'EOF' > release_body.md
+          ## ⚡ FlashAgent Release
+
+          ### 🚀 Highlights
+          - **Multi-Platform Native Binaries**: Linux, Windows, macOS with zero runtime dependencies.
+          - **Pure Rust Performance**: < 7ms cold startup, < 10MB idle memory footprint, zero Electron.
+          - **Claude-Code Style Steering**: Responsive mid-flight soft-interrupts (< 50ms turnaround).
+          - **Periodic Background Updates**: Automatic background checks every 3–5 minutes with channel switching (`/channel`).
+          - **TUI Layout Symmetry & Compact Wrapping**: Symmetric welcome card and clean 2-line developer tip wrapping.
+          - **Local Model Support**: Native presets for LM Studio, llama.cpp, Ollama, and vLLM with throttled discovery.
+
+          ### 📦 Distribution Packages
+          - **Arch Linux**: `flashagent-bin-${TAG}-1-x86_64.pkg.tar.zst`
+          - **Debian / Ubuntu**: `flashagent_${TAG}-1_amd64.deb`
+          - **Universal Linux AppImage**: `FlashAgent-${TAG}-x86_64.AppImage`
+          - **Void Linux**: `flashagent-${TAG}-void-linux-x86_64.tar.gz`
+          - **Generic Linux**: `flashagent-${TAG}-linux-x86_64.tar.gz`
+          - **Windows**: `flashagent-windows-${TAG}-x86_64.zip`
+          - **macOS**: `flashagent-macos-${TAG}-aarch64.tar.gz` (Apple Silicon) / `flashagent-macos-${TAG}-x86_64.tar.gz` (Intel)
+          EOF
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-assets/**/*
+          name: ${{ steps.release_notes.outputs.title }}
+          body_path: release_body.md
+          files: release-assets/*
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.release_type.outputs.is_prerelease == 'true' }}
           generate_release_notes: true

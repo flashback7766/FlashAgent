@@ -228,7 +228,7 @@ impl AgentLoop {
 
             while let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
                 events(LoopEvent::SteeringInjected(steer_msg.clone()));
-                history.push(ChatMessage::user(format!("[STEERING DIRECTIVE]: {}", steer_msg)));
+                history.push(ChatMessage::user(steer_msg));
             }
 
             let mut stream = tokio::select! {
@@ -239,7 +239,7 @@ impl AgentLoop {
                 }
                 steer_msg = next_steer(&mut steer_rx) => {
                     events(LoopEvent::SteeringInjected(steer_msg.clone()));
-                    history.push(ChatMessage::user(format!("[STEERING DIRECTIVE]: {}", steer_msg)));
+                    history.push(ChatMessage::user(steer_msg));
                     continue;
                 }
             };
@@ -317,7 +317,7 @@ impl AgentLoop {
                     history.push(assistant_msg);
                 }
                 events(LoopEvent::SteeringInjected(steer_msg.clone()));
-                history.push(ChatMessage::user(format!("[STEERING DIRECTIVE]: {}", steer_msg)));
+                history.push(ChatMessage::user(steer_msg));
                 continue;
             }
 
@@ -338,7 +338,7 @@ impl AgentLoop {
             if calls.is_empty() {
                 if let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
                     events(LoopEvent::SteeringInjected(steer_msg.clone()));
-                    history.push(ChatMessage::user(format!("[STEERING DIRECTIVE]: {}", steer_msg)));
+                    history.push(ChatMessage::user(steer_msg));
                     continue;
                 }
 
@@ -411,7 +411,7 @@ impl AgentLoop {
 
             while let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
                 events(LoopEvent::SteeringInjected(steer_msg.clone()));
-                history.push(ChatMessage::user(format!("[STEERING DIRECTIVE]: {}", steer_msg)));
+                history.push(ChatMessage::user(steer_msg));
             }
 
             if self.config.max_tokens.is_some_and(|b| tokens_used >= b) {
@@ -482,7 +482,6 @@ pub fn extract_draft_from_steps(text: &str) -> Option<String> {
         "Final decision:",
         "Decision:",
         "Answer:",
-        "Ответ:",
     ];
     for line in text.lines().rev() {
         let t = line.trim();
@@ -713,13 +712,13 @@ mod tests {
 
     #[test]
     fn plain_text_completes_in_one_turn() {
-        let llm = MockLlm { turns: std::sync::Mutex::new(vec![text_turn("Привет!")]) };
+        let llm = MockLlm { turns: std::sync::Mutex::new(vec![text_turn("Hello!")]) };
         let tools = MockTools::new();
         let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
         let evs = std::sync::Mutex::new(Vec::new());
         let (history, done) = run_loop(&l, &llm, &tools, |e| evs.lock().unwrap().push(e));
         assert!(matches!(done, DoneReason::Completed));
-        assert!(evs.lock().unwrap().contains(&LoopEvent::TurnDelta("Привет!".into())));
+        assert!(evs.lock().unwrap().contains(&LoopEvent::TurnDelta("Hello!".into())));
         assert_eq!(history.len(), 2);
         assert!(tools.calls.lock().unwrap().is_empty());
     }
@@ -727,7 +726,7 @@ mod tests {
     #[test]
     fn single_tool_call_executes_and_loops() {
         let llm = MockLlm {
-            turns: std::sync::Mutex::new(vec![tool_turn("shell", "c1"), text_turn("готово")]),
+            turns: std::sync::Mutex::new(vec![tool_turn("shell", "c1"), text_turn("done")]),
         };
         let tools = MockTools::new();
         let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
@@ -772,7 +771,7 @@ mod tests {
         let llm = MockLlm {
             turns: std::sync::Mutex::new(vec![MockTurn {
                 events: vec![
-                    Ok(LlmEvent::TextDelta("полу".into())),
+                    Ok(LlmEvent::TextDelta("part".into())),
                     Err(LlmError::Stream("connection reset".into())),
                 ],
             }]),
@@ -844,8 +843,8 @@ mod tests {
         let llm = MockLlm {
             turns: std::sync::Mutex::new(vec![MockTurn {
                 events: vec![
-                    Ok(LlmEvent::ReasoningDelta("думаю".into())),
-                    Ok(LlmEvent::TextDelta("ответ".into())),
+                    Ok(LlmEvent::ReasoningDelta("thinking".into())),
+                    Ok(LlmEvent::TextDelta("answer".into())),
                     Ok(LlmEvent::Done(FinishReason::Stop)),
                 ],
             }]),
@@ -853,8 +852,8 @@ mod tests {
         let tools = MockTools::new();
         let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
         let (history, _done) = run_loop(&l, &llm, &tools, |_| {});
-        assert_eq!(history[1].reasoning.as_deref(), Some("думаю"));
-        assert_eq!(history[1].content, "ответ");
+        assert_eq!(history[1].reasoning.as_deref(), Some("thinking"));
+        assert_eq!(history[1].content, "answer");
     }
 
     #[test]
@@ -878,7 +877,7 @@ mod tests {
         }
 
         let llm = MockLlm {
-            turns: std::sync::Mutex::new(vec![tool_turn("shell", "c1"), text_turn("вижду данные")]),
+            turns: std::sync::Mutex::new(vec![tool_turn("shell", "c1"), text_turn("data received")]),
         };
         let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
         let (history, _done) = run_loop(&l, &llm, &InjectedTools, |_| {});
@@ -959,12 +958,12 @@ mod tests {
     #[test]
     fn test_detect_repetition_loop_catches_non_consecutive_phrases() {
         let text = "Response construction:\n\
-                    Перевернуть её. Тогда запаянный верх станет дном, а отсутствие дна — открытым верхом.\n\
+                    Turn it over. Then the sealed top becomes the bottom, and the open bottom becomes the top.\n\
                     Wait, if I am an AI assistant for coding, should I even answer riddles?\n\
                     Final decision:\n\
-                    Перевернуть её. Тогда запаянный верх станет дном, а отсутствие дна — открытым верхом.\n\
+                    Turn it over. Then the sealed top becomes the bottom, and the open bottom becomes the top.\n\
                     Wait, I don't need to translate my thought process into Russian.\n\
-                    \"Перевернуть её. Тогда запаянный верх станет дном, а отсутствие дна — открытым верхом.\"\n\
+                    \"Turn it over. Then the sealed top becomes the bottom, and the open bottom becomes the top.\"\n\
                     Wait, I'll check if there are any other interpretations.";
         assert!(detect_repetition_loop(text));
     }
@@ -972,11 +971,11 @@ mod tests {
     #[test]
     fn test_extract_draft_from_steps_final_decision() {
         let reasoning = "Let's analyze the riddle.\n\
-                         Final decision: Перевернуть её. Тогда запаянный верх станет дном.\n\
+                         Final decision: Turn it over. Then the sealed top becomes the bottom.\n\
                          Wait, let's verify.";
         assert_eq!(
             extract_draft_from_steps(reasoning),
-            Some("Перевернуть её. Тогда запаянный верх станет дном.".to_string())
+            Some("Turn it over. Then the sealed top becomes the bottom.".to_string())
         );
     }
 
@@ -988,12 +987,12 @@ mod tests {
 
         // Turn 1 stream with pending receiver to guarantee steering arrives mid-stream
         let (stream1_tx, mut stream1_rx) = tokio::sync::mpsc::unbounded_channel();
-        stream1_tx.send(Ok(LlmEvent::TextDelta("Начинаю писать код...".into()))).unwrap();
+        stream1_tx.send(Ok(LlmEvent::TextDelta("Starting to write code...".into()))).unwrap();
 
         // Turn 2 receives the steering directive and responds
         let pivoted_turn = MockTurn {
             events: vec![
-                Ok(LlmEvent::TextDelta("Понял, переключаюсь на postgres.".into())),
+                Ok(LlmEvent::TextDelta("Understood, switching to postgres.".into())),
                 Ok(LlmEvent::Done(FinishReason::Stop)),
             ],
         };
@@ -1036,11 +1035,11 @@ mod tests {
             l.run(
                 &llm,
                 &tools,
-                vec![ChatMessage::user("Напиши сервер")],
+                vec![ChatMessage::user("Write a server")],
                 |e| {
                     if matches!(e, LoopEvent::TurnDelta(_)) && !sent_steer.swap(true, Ordering::Relaxed) {
                         // Send steering on first text delta
-                        let _ = steer_tx_clone.send("Используй postgres вместо sqlite".into());
+                        let _ = steer_tx_clone.send("Use postgres instead of sqlite".into());
                     }
                     evs.lock().unwrap().push(e);
                 },
@@ -1061,11 +1060,11 @@ mod tests {
         // [3] Assistant pivoted response
         assert_eq!(history.len(), 4);
         assert_eq!(history[1].role, Role::Assistant);
-        assert_eq!(history[1].content, "Начинаю писать код...");
+        assert_eq!(history[1].content, "Starting to write code...");
         assert_eq!(history[2].role, Role::User);
-        assert!(history[2].content.contains("[STEERING DIRECTIVE]: Используй postgres вместо sqlite"));
+        assert_eq!(history[2].content, "Use postgres instead of sqlite");
         assert_eq!(history[3].role, Role::Assistant);
-        assert_eq!(history[3].content, "Понял, переключаюсь на postgres.");
+        assert_eq!(history[3].content, "Understood, switching to postgres.");
     }
 
     #[test]
@@ -1076,7 +1075,7 @@ mod tests {
         // Turn 1 executes a tool call
         let tool_turn = tool_turn("shell", "call_1");
         // Turn 2 responds after tool execution and steering
-        let final_turn = text_turn("Действие скорректировано.");
+        let final_turn = text_turn("Action adjusted.");
 
         let llm = MockLlm {
             turns: std::sync::Mutex::new(vec![tool_turn, final_turn]),
@@ -1093,11 +1092,11 @@ mod tests {
             l.run(
                 &llm,
                 &tools,
-                vec![ChatMessage::user("Запусти сборку")],
+                vec![ChatMessage::user("Run build")],
                 |e| {
                     if matches!(e, LoopEvent::ToolStarted { .. }) {
                         // While tool is running, send steering directive
-                        let _ = steer_tx_clone.send("После этого не запускай тесты".into());
+                        let _ = steer_tx_clone.send("Do not run tests after that".into());
                     }
                 },
             )
@@ -1119,8 +1118,8 @@ mod tests {
         assert_eq!(history[2].role, Role::Tool);
         assert_eq!(history[2].tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(history[3].role, Role::User);
-        assert!(history[3].content.contains("[STEERING DIRECTIVE]: После этого не запускай тесты"));
+        assert_eq!(history[3].content, "Do not run tests after that");
         assert_eq!(history[4].role, Role::Assistant);
-        assert_eq!(history[4].content, "Действие скорректировано.");
+        assert_eq!(history[4].content, "Action adjusted.");
     }
 }

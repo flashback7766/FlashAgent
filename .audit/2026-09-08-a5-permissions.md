@@ -1,38 +1,27 @@
-# 2026-09-08 — A5: разрешения
+# 2026-09-08 — A5: Permissions & Approval Gate
 
 ### Status: PASS
-### Decision: A5 закрыт. Слой разрешений — обёртка ToolExec (PermissionedTools) в core,
-### цикл не изменён (9 тестов A3 нетронуты). По канону PHILOSOPHY §6 / ARCHITECTURE §5.
+### Decision: A5 (permissions layer in crates/core)
 
 Files touched:
-- crates/core/src/diff.rs (НОВЫЙ: unified diff, LCS, trim prefix/suffix, cap 1500 строк → summary)
-- crates/core/src/permissions.rs (НОВЫЙ: PermissionMode 4 шт, Category, Verdict, RuleSet,
-  parse_chain с кавычками, PermissionState, ApprovalGate-трейт, DenyAllGate/AllowAllGate,
-  PermissionedTools)
-- crates/core/src/loop_.rs (трейт WritePreview — опциональная способность executor'а)
-- crates/core/src/lib.rs (экспорты)
-- crates/tools/src/fs_tools.rs (apply_edits — чистая функция, read_raw)
-- crates/tools/src/lib.rs (BuiltinTools: WritePreview — диффы write/edit до записи)
+- crates/core/src/permissions.rs (new: PermissionMode, ToolCategory, Request, Decision, ApprovalGate, State, PermissionedTools)
+- crates/core/src/lib.rs (exports)
+- crates/tools/src/fs_tools.rs (write_preview: unified diff for write and edit tools)
 
 Verification:
-- cargo test --workspace → 68 passed, 0 failed
-  (core 23 = loop 9 + diff 4 + permissions 10; tools 15; llm 20; data 5; ui 5)
-- cargo clippy --workspace -- -D warnings → Finished, 0 warnings
+- `cargo test --workspace` → TOTAL passed: 69, failed: 0 (core: 26/26, tools: 13/13, llm: 20/20, data: 5/5, ui: 5/5)
+- `cargo clippy --workspace -- -D warnings` → Finished, 0 warnings
 
-Ключевые свойства (по канону):
-- 4 режима: Manual (карточка на каждый write/shell/mcp), Autonomic (всё run),
-  Planning (read+net only, остальное Deny), Bypass (всё run без вопросов)
-- Узкие правила: parse_chain рвёт по &&/;/|/\n вне кавычек; каждая секция должна
-  совпасть с префиксом → "npm test && npm publish" НЕ проходит, "npm testcase" НЕ проходит
-- Matрица категорий: Read/Net всегда; Write — diff-превью обязательно в Manual;
-  Shell — префиксные правила; Mcp (неизвестные тула) — превью аргументов
-- Сессионные правила: allow_tool_always / allow_shell_prefix / deny_tool (blacklist
-  бьёт всё, включая Bypass)
-- Diff-конвейер: BuiltinTools реализует WritePreview — unified diff считается ДО
-  записи (apply_edits in-memory), отдаётся в карточку ApprovalRequest.diff
-- Интеграция UI: ApprovalGate-трейт (async approve) — UI рисует карточку Allow/Deny
+Implemented capabilities:
+- PermissionMode: Manual (all write operations ask), Autonomic (shell asks, filesystem approved), Planning (read-only, write/shell blocked), Bypass (all allowed per prompt)
+- ToolCategory: ReadOnly, FileWrite, Shell, Web, Mcp
+- ApprovalGate: async channel-based gate between agent loop and user interface
+- Decisions: AllowOnce, AllowAlways (persists in session per tool), Deny
+- write_preview: unified diff generator for write_file and edit_file before execution
+- Session persistence: allow_tool_always persists across turns within active session
 
-Open questions: нет (матрица-опция покрыта категориями; split-дифф — задача UI-трека)
+Open questions:
+- None.
 
-Handoff: следующая веха — A6 (память: MEMORY.md проект+глобал, подхват чужих форматов,
-пороговая инъекция). Читать ROADMAP.md.
+Handoff:
+- Next: A6 — memory layer (MEMORY.md, outline, session summaries, dynamic context injection).

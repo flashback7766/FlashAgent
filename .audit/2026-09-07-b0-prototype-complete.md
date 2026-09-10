@@ -1,43 +1,40 @@
-# 2026-09-07 — B0 этап 2: интерактивный прототип (сборка)
+# 2026-09-07 — B0 Phase 2: Interactive Prototype (Assembly)
 
-### Status: PASS (код) / PARTIAL (гейт в целом — ждёт вердикта владельца)
-### Decision: B0 (прототип рендера, гейт go/no-go)
+### Status: PASS (code) / PARTIAL (gate overall — awaiting owner verdict)
+### Decision: B0 (renderer prototype, go/no-go gate)
 
 Files touched:
 - crates/ui/Cargo.toml (+wgpu, winit, pollster, bytemuck, swash)
-- crates/ui/src/bin/b0.rs (новый, ~720 строк)
+- crates/ui/src/bin/b0.rs (new, ~720 lines)
 - Cargo.toml (workspace: +pollster, +swash)
 
 Verification:
 - `cargo clippy -p flashagent-ui --bins -- -D warnings` → Finished, 0 errors/warnings (exit 0)
 - `cargo test -p flashagent-ui` → 5 passed; 0 failed (exit 0)
 - `cargo build -p flashagent-ui --bins` → Finished (exit 0)
-- Запуск невозможен в песочнице (headless, нет Vulkan/GL): визуальная проверка — на машине владельца.
+- Launch impossible in sandbox (headless, no Vulkan/GL): visual check on owner machine.
 
-Что внутри b0.rs:
-- winit 0.30 окно + wgpu 27 пайплайн (треугольный список, alpha-blend, RGBA-атлас глифов 1024x2048)
-- cosmic-text шейпинг + swash растеризация, Mono/Proportional, живой композер
-- IME: Preedit (акцентный цвет + подчёркивание) / Commit
-- Spring-физика (k=170, c=14) морфа кнопки по клику
-- Зацикленные фоновые анимации (blink курсора, дыхание заголовка) параллельно
-- Cyrillic hint-строка, Esc/Enter/Backspace, DPR-скейлинг, Fifo vsync
-- Известное ограничение: wgpu 27 не даёт документированного into_static —
-  использован transmute lifetime surface с SAFETY-обоснованием (Window в App,
-  поле объявлено раньше Gpu, дропается позже). В боевом ui-крейте пересмотреть.
+Architecture inside b0.rs:
+- winit 0.30 window + wgpu 27 pipeline (triangle list, alpha-blend, RGBA glyph atlas 1024x2048)
+- cosmic-text shaping + swash rasterization, Mono/Proportional, live composer
+- IME: Preedit (accent color + underline) / Commit
+- Spring physics (k=170, c=14) button morph on click
+- Looping background animations (cursor blink, title pulse) in parallel
+- Cyrillic hint string, Esc/Enter/Backspace, DPR scaling, Fifo vsync
+- Known limitation: wgpu 27 lacks documented into_static — used transmute lifetime surface with SAFETY justification (Window in App, field declared before Gpu, dropped later).
 
 Open questions:
-- Вердикт гейта B0: FPS, ощущение текста, качество морфа — на машине владельца.
+- Gate B0 verdict: FPS, text rendering feel, morph quality — on owner machine.
 
 Handoff:
-- Владелец: `cargo run -p flashagent-ui --bin b0 --release` (Windows/Linux desktop).
-- При go: пометить B0 [x] в ROADMAP.md, стартовать B1 (кит M3 Expressive) и A0 параллельно.
+- Owner: `cargo run -p flashagent-ui --bin b0 --release` (Windows/Linux desktop).
+- On GO: mark B0 [x] in ROADMAP.md, start B1 (M3 Expressive kit) and A0 in parallel.
 
-## Addendum (после первого запуска владельца)
-- Владелец запустил прототип: окно, кириллица, композер, IME, spring-морф — работают.
-- Найдено: цвета выцветшие (sRGB-двойная конверсия). Фикс: выбор non-sRGB формата
-  поверхности (значения трактуются буквально). Применён, clippy strict зелёный.
-- Ждёт: повторный запуск владельцем + вердикт go/no-go по гейту B0.
+## Addendum (after owner initial run)
+- Owner ran prototype: window, Cyrillic, composer, IME, spring morph — functioning.
+- Discovered: colors faded (sRGB double-conversion). Fix: select non-sRGB surface format (values treated literally). Applied, clippy strict green.
+- Awaiting: second run by owner + go/no-go verdict on gate B0.
 
 ## Addendum 2
-- Цвета после фикса формата: подтверждено скриншотом (фон чёрный, кнопка M3-фиолетовая).
-- Найден баг: пробел не вставлялся (winit шлёт Named(Space), не Character). Исправлен.
+- Colors after format fix: confirmed via screenshot (black background, M3 purple button).
+- Bug found: space character was not inserted (winit sends Named(Space), not Character). Fixed.

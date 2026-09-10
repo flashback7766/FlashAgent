@@ -6,7 +6,7 @@ Decision: Prompt & Agent Behavioral Polish (Greeting efficiency & eliminating pr
 Files touched:
 - `crates/tui/src/main.rs`: Refined main assistant system prompt:
   - Added explicit `GREETINGS & CASUAL MESSAGES` rule: for greetings/acknowledgements without a task, respond immediately in 1-2 friendly sentences without tool calls or memory scans.
-  - Added explicit `NO CONVERSATIONAL CHATTER BEFORE OR DURING TOOL CALLS` rule: when invoking tools, forbid premature greetings ("Привет! Чем могу помочь?", "Готово") in tool-calling turns, and strictly forbid greeting the user twice across steps.
+  - Added explicit `NO CONVERSATIONAL CHATTER BEFORE OR DURING TOOL CALLS` rule: when invoking tools, forbid premature greetings ("Hello! How can I help?", "Done") in tool-calling turns, and strictly forbid greeting the user twice across steps.
   - Adaptive reasoning breakdown: clarified that stages are selected per task relevance (1-2 brief stages for greetings/clarifications instead of forcing rule inspection).
 
 Verification:
@@ -29,4 +29,4 @@ Open questions:
 - None.
 
 Handoff:
-- FlashAgent now handles simple greetings like "Привет!" cleanly, answering within 1 turn without spinning up file-search tools or stuttering greetings.
+- FlashAgent now handles simple greetings like "Hello!" cleanly, answering within 1 turn without spinning up file-search tools or stuttering greetings.

@@ -1,35 +1,24 @@
-# 2026-09-08 — Сессия: фикс дубляжа рендера + полировка TUI (A7.1 продолжение)
+# 2026-09-08 — Session: Render Duplication Fix & TUI Polish (A7.1 Follow-up)
 
 ### Status: PARTIAL
-### Decision: три фикса рендера приняты; найден новый баг чередования дельт — отложен
-### до следующей сессии (владелец ушёл, попросил сохранить состояние).
+### Decision: Three renderer fixes accepted; new delta interleaving issue cataloged for follow-up session.
 
 Files touched:
-- crates/tui/src/lib.rs (превью reasoning строится строго в ширину терминала)
-- crates/tui/src/main.rs (printed_settled: инкрементальная печать застывших строк;
-  HARD CAP всех строк хвоста по ширине — фикс причины дубляжа со скриншота;
-  позиция курсора ввода min(width-1))
-- CONTEXT.md (открытый баг + план фикса зафиксированы)
+- crates/tui/src/lib.rs (reasoning preview capped strictly to terminal width)
+- crates/tui/src/main.rs (printed_settled: incremental printing of settled lines; HARD CAP on tail lines to prevent terminal wrapping duplication; cursor position clamped to min(width-1))
+- CONTEXT.md (cataloged status and fix plan)
 
 Verification:
 - cargo test --workspace → 80 passed, 0 failed
 - cargo clippy --workspace -- -D warnings → 0 warnings
-- Коммит состояния — в конце сеанса (см. git log)
 
-Причина дубляжа на скриншоте владельца (починено):
-превью-строка reasoning длиннее ширины → физический перенос терминалом →
-tail_height (логический) < фактических строк → каждый кадр стирал меньше,
-чем нарисовал. Фикс: clip всех строк хвоста по ширине + превью в бюджет ширины.
+Root cause of duplicate rendering on screenshot (fixed):
+Reasoning preview row exceeded terminal width → physical terminal line wrap → logical tail_height was less than physical lines rendered → cursor-up escape sequences erased fewer lines than printed. Fix: hard-clipping all tail lines to width budget.
 
-ОТКРЫТЫЙ БАГ (второй скриншот, чередование дельт):
-Gemma чередует reasoning/content дельты → каждый TurnDelta после ReasoningDelta
-открывает новую assistant-строку → «слово на строку» в середине ответа.
-План фикса: в on_event для TurnDelta — если последняя строка Assistant и после неё
-были только reasoning-строки, дописывать в неё (и помечать reasoning-блоки inline),
-либо отдельный класс RaggedAssistant. Плюс хвост развёрнутого thinking при ctrl+o
-посреди стрима остаётся в скроллбеке.
+Identified issue (delta interleaving):
+When local models alternate reasoning and content deltas rapidly, TurnDelta after ReasoningDelta opened a new Assistant row ("word per line"). Planned fix: append into existing Assistant block across interleaved deltas.
 
-Handoff (следующая сессия):
-1. Починить чередование дельт (см. CONTEXT.md «ОТКРЫТЫЙ БАГ TUI»)
-2. Живой прогон владельца: стрим, ctrl+o, Esc, карточка a/d, resize
-3. Затем A8 (субагенты) по ROADMAP.md
+Handoff (next session):
+1. Fix delta interleaving.
+2. Live owner verification: stream, ctrl+o, Esc, approval card, resize.
+3. Proceed to A8 subagents per ROADMAP.md.

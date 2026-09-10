@@ -571,7 +571,7 @@ impl App {
         let mut color = COLOR_TITLE;
         color[3] = title_alpha;
         Self::draw_text(font_system, swash, atlas, &mut vs, screen, title, 20.0 * dpr, 24.0 * dpr, 24.0 * dpr, color, false, None);
-        let hint = "Печатай (кириллица / IME) · клик по кнопке — spring-морф · Enter — очистить · Esc — выход";
+        let hint = "Type (IME supported) · click button — spring morph · Enter — clear · Esc — exit";
         Self::draw_text(font_system, swash, atlas, &mut vs, screen, hint, 13.0 * dpr, 24.0 * dpr, 64.0 * dpr, COLOR_HINT, false, Some(screen.0 - 48.0 * dpr));
 
         // Composer + preedit + cursor.
@@ -602,7 +602,7 @@ impl App {
 
         // Button label (drawn after morph so it stays readable).
         let label_x = bx + (bw - 110.0 * dpr) / 2.0;
-        Self::draw_text(font_system, swash, atlas, &mut vs, screen, "Отправить ⏎", 15.0 * dpr, label_x, by + 12.0 * dpr, COLOR_TEXT, false, None);
+        Self::draw_text(font_system, swash, atlas, &mut vs, screen, "Send ⏎", 15.0 * dpr, label_x, by + 12.0 * dpr, COLOR_TEXT, false, None);
 
         // Upload and draw.
         let vbuf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -654,7 +654,7 @@ impl ApplicationHandler for App {
             return;
         }
         let window = match event_loop.create_window(
-            Window::default_attributes().with_title("FlashAgent B0 — прототип рендера"),
+            Window::default_attributes().with_title("FlashAgent B0 — Render Prototype"),
         ) {
             Ok(w) => w,
             Err(e) => {

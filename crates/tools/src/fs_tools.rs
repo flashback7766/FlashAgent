@@ -295,8 +295,9 @@ pub(crate) fn grep(
             let mut file_hits = Vec::new();
             for (i, line) in text.lines().enumerate() {
                 if re.is_match(line) {
-                    let rel = file.strip_prefix(cwd).unwrap_or(file).display();
-                    file_hits.push(format!("{rel}:{}:{}", i + 1, line.trim()));
+                    let rel = file.strip_prefix(cwd).unwrap_or(file);
+                    let rel_norm = rel.to_string_lossy().replace('\\', "/");
+                    file_hits.push(format!("{rel_norm}:{}:{}", i + 1, line.trim()));
                     if file_hits.len() >= 50 {
                         break;
                     }
@@ -329,10 +330,10 @@ mod tests {
         edit_file(
             &dir,
             "a.txt",
-            &[EditChunk { old_string: "two".into(), new_string: "два".into(), replace_all: false }],
+            &[EditChunk { old_string: "two".into(), new_string: "dos".into(), replace_all: false }],
         )
         .unwrap();
-        assert!(std::fs::read_to_string(dir.join("a.txt")).unwrap().contains("два"));
+        assert!(std::fs::read_to_string(dir.join("a.txt")).unwrap().contains("dos"));
 
         let err = edit_file(
             &dir,
@@ -356,14 +357,14 @@ mod tests {
     fn glob_and_grep_work() {
         let dir = tempdir();
         std::fs::create_dir_all(dir.join("sub")).unwrap();
-        std::fs::write(dir.join("sub/код.rs"), "fn главная() {}\nпривет мир\n").unwrap();
+        std::fs::write(dir.join("sub/code.rs"), "fn main() {}\nhello world\n").unwrap();
         std::fs::write(dir.join("top.txt"), "needle here\n").unwrap();
 
         let globs = glob_files(&dir, "**/*.rs").unwrap();
-        assert!(globs.contains("код.rs"));
+        assert!(globs.contains("code.rs"));
 
-        let hits = grep(&dir, "привет", None, false).unwrap();
-        assert!(hits.contains("sub/код.rs:2"));
+        let hits = grep(&dir, "hello", None, false).unwrap();
+        assert!(hits.contains("sub/code.rs:2"));
 
         let hits = grep(&dir, "NEEDLE", Some("*.txt"), true).unwrap();
         assert!(hits.contains("top.txt:1"));
@@ -383,11 +384,11 @@ mod tests {
     fn apply_edits_is_pure_and_validates() {
         let out = apply_edits("one\ntwo\n".into(), &[EditChunk {
             old_string: "two".into(),
-            new_string: "два".into(),
+            new_string: "dos".into(),
             replace_all: false,
         }])
         .unwrap();
-        assert_eq!(out, "one\nдва\n");
+        assert_eq!(out, "one\ndos\n");
         assert!(apply_edits("abc".into(), &[EditChunk {
             old_string: "zzz".into(),
             new_string: "y".into(),
@@ -413,6 +414,7 @@ mod tests {
             toolset_profile: None,
             web_enabled: None,
             context_window: None,
+            mcp_manager: None,
         })
         .unwrap();
 

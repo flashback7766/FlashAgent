@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 240" width="880" height="240">
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="card-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#161724"/>
+      <stop offset="50%" stop-color="#11121c"/>
+      <stop offset="100%" stop-color="#0b0c14"/>
+    </linearGradient>
+
+    <radialGradient id="ambient-cyan" cx="15%" cy="20%" r="50%">
+      <stop offset="0%" stop-color="#89b4fa" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#89b4fa" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="ambient-purple" cx="85%" cy="80%" r="50%">
+      <stop offset="0%" stop-color="#cba6f7" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#cba6f7" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Lightning Bolt Gradient -->
+    <linearGradient id="bolt-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#89dceb"/>
+      <stop offset="45%" stop-color="#89b4fa"/>
+      <stop offset="75%" stop-color="#cba6f7"/>
+      <stop offset="100%" stop-color="#f38ba8"/>
+    </linearGradient>
+
+    <!-- Title Typography Gradient -->
+    <linearGradient id="title-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="40%" stop-color="#ffffff"/>
+      <stop offset="70%" stop-color="#89dceb"/>
+      <stop offset="100%" stop-color="#cba6f7"/>
+    </linearGradient>
+
+    <linearGradient id="badge-border" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#89b4fa" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#cba6f7" stop-opacity="0.3"/>
+    </linearGradient>
+
+    <linearGradient id="icon-box-border" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#89b4fa" stop-opacity="0.5"/>
+      <stop offset="50%" stop-color="#45475a" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#cba6f7" stop-opacity="0.4"/>
+    </linearGradient>
+
+    <!-- Neon Glow Filter -->
+    <filter id="neon-glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur1"/>
+      <feGaussianBlur stdDeviation="18" result="blur2"/>
+      <feMerge>
+        <feMergeNode in="blur2"/>
+        <feMergeNode in="blur1"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Container Box -->
+  <rect x="2" y="2" width="876" height="236" rx="24" fill="url(#card-bg)" stroke="#2b2d42" stroke-width="2"/>
+  <rect x="2" y="2" width="876" height="236" rx="24" fill="url(#ambient-cyan)"/>
+  <rect x="2" y="2" width="876" height="236" rx="24" fill="url(#ambient-purple)"/>
+
+  <!-- Left Icon Emblem Box -->
+  <g transform="translate(42, 36)">
+    <rect width="168" height="168" rx="38" fill="#181825" stroke="url(#icon-box-border)" stroke-width="2.5"/>
+    <g transform="translate(84, 84) scale(0.65) translate(-128, -128)">
+      <path d="M142 28 L58 142 L124 142 L114 228 L198 114 L132 114 Z" fill="url(#bolt-grad)" filter="url(#neon-glow)"/>
+      <path d="M142 28 L58 142 L124 142 L114 228 L198 114 L132 114 Z" fill="url(#bolt-grad)"/>
+    </g>
+  </g>
+
+  <!-- Right Typography Section -->
+  <g transform="translate(244, 40)">
+    <!-- Pill Tag -->
+    <rect x="0" y="2" width="440" height="26" rx="13" fill="#181825" stroke="url(#badge-border)" stroke-width="1.2"/>
+    <text x="220" y="19" text-anchor="middle" fill="#89b4fa" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11" font-weight="700" letter-spacing="0.8">
+      ⚡ 100% NATIVE RUST · ZERO ELECTRON · LOCAL-FIRST
+    </text>
+
+    <!-- Main Title -->
+    <text x="0" y="80" fill="url(#title-grad)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Montserrat', Roboto, 'Helvetica Neue', sans-serif" font-size="54" font-weight="900" letter-spacing="3">
+      FLASHAGENT
+    </text>
+
+    <!-- Subtitle -->
+    <text x="2" y="118" fill="#cdd6f4" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="18" font-weight="500">
+      The Local-First, Blazing-Fast AI Coding Agent
+    </text>
+
+    <!-- Tech specs footer -->
+    <text x="2" y="148" fill="#7f849c" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="400">
+      &lt;15ms Cold Start · ~30MB RAM · LM Studio · Ollama · llama.cpp · vLLM
+    </text>
+  </g>
+</svg>

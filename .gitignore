@@ -10,6 +10,10 @@ flashagent-tui
 *.dll
 *.so
 *.dylib
+dist/
+packaging/arch/src/
+packaging/arch/pkg/
+packaging/arch/*.pkg.tar.zst
 
 # Local session databases & temporary files
 ~test_output.txt

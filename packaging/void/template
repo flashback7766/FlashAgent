@@ -1,0 +1,17 @@
+# Template file for 'flashagent'
+pkgname=flashagent
+version=0.1.0
+revision=1
+build_style=cargo
+short_desc="Fast, local-first autonomous AI coding agent in pure Rust"
+maintainer="flashback7766 <https://github.com/flashback7766>"
+license="MIT"
+homepage="https://github.com/flashback7766/FlashAgent"
+distfiles="https://github.com/flashback7766/FlashAgent/archive/refs/tags/v${version}.tar.gz"
+
+post_install() {
+	vlicense LICENSE
+	vbin target/${RUST_TARGET}/release/flashagent-tui flashagent
+	vinstall packaging/desktop/flashagent.desktop 644 usr/share/applications
+	vinstall packaging/desktop/flashagent.png 644 usr/share/icons/hicolor/256x256/apps
+}

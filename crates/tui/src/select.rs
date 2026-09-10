@@ -80,6 +80,7 @@ impl<T> SelectItem<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectMenu<T> {
     pub title: String,
+    pub noun: Option<String>,
     pub items: Vec<SelectItem<T>>,
     pub selected: usize,
     pub filter: String,
@@ -91,11 +92,18 @@ impl<T> SelectMenu<T> {
     pub fn new(title: impl Into<String>, items: Vec<SelectItem<T>>) -> Self {
         Self {
             title: title.into(),
+            noun: None,
             items,
             selected: 0,
             filter: String::new(),
             page_size: 10,
         }
+    }
+
+    /// Set custom noun for items counter (e.g. "options", "models").
+    pub fn with_noun(mut self, noun: impl Into<String>) -> Self {
+        self.noun = Some(noun.into());
+        self
     }
 
     /// Return 0-based indices of items matching the current search filter.
@@ -220,9 +228,19 @@ impl<T> SelectMenu<T> {
         let matches = self.filtered_indices();
         let total_matches = matches.len();
 
+        let item_noun = self.noun.as_deref().unwrap_or_else(|| {
+            if self.title.to_lowercase().contains("model") {
+                "models"
+            } else if self.title.to_lowercase().contains("effort") {
+                "options"
+            } else {
+                "items"
+            }
+        });
+
         // Top border with title, item counter, and live filter indicator
         let count_str = if self.filter.is_empty() {
-            format!("({} models)", self.items.len())
+            format!("({} {item_noun})", self.items.len())
         } else {
             format!("({total_matches}/{} · \"{}\")", self.items.len(), self.filter)
         };
@@ -235,7 +253,10 @@ impl<T> SelectMenu<T> {
         ));
 
         if matches.is_empty() {
-            lines.push((LineKind::System, pad_row("  \x1b[38;2;135;130;125m(No matching models found)\x1b[0m")));
+            lines.push((
+                LineKind::System,
+                pad_row(&format!("  \x1b[38;2;135;130;125m(No matching {item_noun} found)\x1b[0m")),
+            ));
         } else {
             let cur_pos = matches.iter().position(|&idx| idx == self.selected).unwrap_or(0);
             let page_size = self.page_size;
@@ -366,5 +387,25 @@ mod tests {
         assert_eq!(menu.selected, 10);
         menu.page_up();
         assert_eq!(menu.selected, 0);
+    }
+
+    #[test]
+    fn select_menu_noun_formatting() {
+        let effort_menu = SelectMenu::new(
+            "Select Thinking Effort",
+            vec![
+                SelectItem::new("auto", "auto"),
+                SelectItem::new("low", "low"),
+            ],
+        );
+        let effort_lines = effort_menu.render(80);
+        assert!(effort_lines.iter().any(|(_, t)| t.contains("(2 options)")));
+
+        let custom_menu = SelectMenu::new(
+            "Select Server",
+            vec![SelectItem::new("local", "local")],
+        ).with_noun("servers");
+        let custom_lines = custom_menu.render(80);
+        assert!(custom_lines.iter().any(|(_, t)| t.contains("(1 servers)")));
     }
 }

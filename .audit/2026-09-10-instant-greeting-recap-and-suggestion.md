@@ -18,9 +18,9 @@ Root Cause Identified & Resolved:
       return None;
   }
   ```
-  When the user sent "Привет!" or any conversational greeting, this check caused the function to immediately abort and return `None`. Consequently, no `recap:` block was added to the turn, and `suggested_prompt` remained `None`, leaving the input box with the empty default placeholder.
+  When the user sent "Hello!" or any conversational greeting, this check caused the function to immediately abort and return `None`. Consequently, no `recap:` block was added to the turn, and `suggested_prompt` remained `None`, leaving the input box with the empty default placeholder.
 - **Fix**:
-  1. Updated `generate_llm_recap_and_suggestion` so that greetings immediately receive an instant, zero-latency conversational recap ("Ассистент поприветствовал пользователя и готов к работе по проекту") and starter ghost suggestion ("Покажи структуру проекта").
+  1. Updated `generate_llm_recap_and_suggestion` so that greetings immediately receive an instant, zero-latency conversational recap ("Assistant greeted the user and is ready to work on the project") and starter ghost suggestion ("Show project structure").
   2. Bumped `max_tokens` for the background LLM recap query from 120 to 256 to ensure complex Russian JSON completions never get truncated before the closing curly brace.
   3. Added unit test `test_greeting_recap_and_suggestion_instant` confirming immediate recap and suggestion return.
 

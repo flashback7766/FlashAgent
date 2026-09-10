@@ -1,25 +1,22 @@
-# 2026-09-07 — B0 этап 1: текстовый слой (headless)
+# 2026-09-07 — B0 Phase 1: Text Layer (Headless)
 
 ### Status: PARTIAL
-### Decision: B0 (прототип рендера, гейт go/no-go)
+### Decision: B0 (renderer prototype, go/no-go gate)
 
 Files touched:
-- Cargo.toml (workspace, чистая перезапись после мусора от глитча)
-- crates/ui/Cargo.toml (новый)
-- crates/ui/src/lib.rs (новый)
-- crates/ui/src/text.rs (новый)
+- Cargo.toml (workspace, clean rewrite)
+- crates/ui/Cargo.toml (new)
+- crates/ui/src/lib.rs (new)
+- crates/ui/src/text.rs (new)
 
 Verification:
 - `cargo test -p flashagent-ui` → 5 passed; 0 failed (exit 0)
-  - latin/cyrillic shaping, метрики, wrap, RTL-bidi — все зелёные
+  - latin/cyrillic shaping, metrics, wrap, RTL-bidi — all green
 - `cargo clippy -p flashagent-ui -- -D warnings` → Finished, 0 warnings (exit 0)
 
 Open questions:
-- Окно + wgpu + IME + spring-морф не проверены: песочница headless, Vulkan-стека нет.
-  Визуальная половина B0 выполняется на машине владельца (Windows/Linux desktop).
+- Window + wgpu + IME + spring-morph unverified in headless sandbox (no Vulkan stack).
+  Visual portion of B0 runs on owner machine (Windows/Linux desktop).
 
 Handoff:
-- Следующий шаг: владелец запускает интерактивную часть прототипа локально,
-  либо (рекомендовано) я пишу самодостаточный `cargo run --bin prototype` —
-  winit-окно + wgpu + cosmic-text рендер + spring-морф — который владелец
-  запустит у себя и оценит. Гейт B0 закрывается его вердиктом.
+- Next step: owner runs interactive part of prototype locally, or (recommended) build self-contained `cargo run --bin prototype` — winit window + wgpu + cosmic-text render + spring morph. Gate B0 closes on owner verdict.

@@ -8,7 +8,7 @@ Eliminated system chat message clutter on user interruption (`Esc`):
    - In `crates/tui/src/main.rs`: Removed `chat.push_system("[Request interrupted by user]")`.
    - In `crates/tui/src/lib.rs`: Suppressed emitting `ChatLine::new(LineKind::System, "— Cancelled —")` in `ChatView::on_event` when `reason == DoneReason::Cancelled`.
 2. **Composer placeholder**:
-   - In `crates/tui/src/main.rs`: When interrupted via `Esc` or when `UiEvent::Finished` handles `DoneReason::Cancelled`, set `custom_placeholder = Some(interrupt_msg)` (Russian `"Запрос прерван пользователем"` / English `"Request interrupted by user"` depending on query language).
+   - In `crates/tui/src/main.rs`: When interrupted via `Esc` or when `UiEvent::Finished` handles `DoneReason::Cancelled`, set `custom_placeholder = Some(interrupt_msg)` (`"Request interrupted by user"`).
    - Displayed directly inside the input prompt field (`❯ Request interrupted by user`) in muted color without polluting conversation scrollback. Clears on user typing or Esc.
 
 ### Files touched:

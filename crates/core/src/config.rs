@@ -36,9 +36,9 @@ impl BackendPreset {
                 default_port: 8000,
             },
             Self {
-                name: "LocalAI".into(),
+                name: "llama.cpp".into(),
                 url: "http://localhost:8080/v1".into(),
-                description: "LocalAI all-in-one local inference endpoint".into(),
+                description: "Local llama.cpp (llama-server) OpenAI-compatible server".into(),
                 default_port: 8080,
             },
             Self {
@@ -203,6 +203,132 @@ pub struct AppConfig {
     /// Trusted working directories where trust confirmation is bypassed.
     #[serde(default)]
     pub trusted_directories: Vec<PathBuf>,
+    /// Update release channel (Beta / Stable).
+    #[serde(default = "default_update_channel")]
+    pub update_channel: UpdateChannel,
+    /// Whether background auto-check for updates is enabled.
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
+    /// Whether silent daily update notification check without auto-download is enabled.
+    #[serde(default = "default_true")]
+    pub silent_update_check: bool,
+    /// Whether animated swift mascot is shown in welcome card.
+    #[serde(default = "default_true")]
+    pub show_mascot: bool,
+    /// Whether rotating tips animation is enabled.
+    #[serde(default = "default_true")]
+    pub show_tips: bool,
+    /// Whether TTFT (Time To First Token) and prefill speed metrics are displayed.
+    #[serde(default = "default_true")]
+    pub show_ttft: bool,
+    /// Whether prompt/generation token counters are shown in status bar.
+    #[serde(default = "default_true")]
+    pub show_tokens: bool,
+    /// Whether clipboard and notification toasts are shown.
+    #[serde(default = "default_true")]
+    pub show_toasts: bool,
+    /// Whether reasoning/thinking accordion box is shown.
+    #[serde(default = "default_true")]
+    pub show_reasoning_accordion: bool,
+    /// Color theme name ("dark", "midnight", "monokai", "high_contrast", "monochrome", "ansi16").
+    #[serde(default = "default_theme")]
+    pub color_theme: String,
+    /// Approval gate policy: "destructive" (default), "all", "auto".
+    #[serde(default = "default_approval_mode")]
+    pub approval_mode: String,
+    /// Whether automatic context compaction (/compact) is enabled.
+    #[serde(default = "default_true")]
+    pub auto_compact_context: bool,
+    /// Warning threshold percent for context window usage (default 70).
+    #[serde(default = "default_warn_threshold")]
+    pub context_warn_threshold: usize,
+    /// Auto-compaction threshold percent for context window usage (default 90).
+    #[serde(default = "default_compact_threshold")]
+    pub context_compact_threshold: usize,
+    /// Whether sessions are automatically saved on exit.
+    #[serde(default = "default_true")]
+    pub auto_save_sessions: bool,
+    /// Preferred external editor command ($EDITOR, code, cursor, nvim).
+    #[serde(default = "default_editor")]
+    pub external_editor: String,
+    /// Whether compact git diff preview is shown before edits.
+    #[serde(default = "default_true")]
+    pub git_diff_preview: bool,
+    /// Whether smart commit message generation (/commit) is offered.
+    #[serde(default = "default_true")]
+    pub git_smart_commit: bool,
+    /// Number of network retry attempts for LLM requests (default 3).
+    #[serde(default = "default_retries")]
+    pub network_retries: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_theme() -> String {
+    "dark".to_string()
+}
+
+fn default_approval_mode() -> String {
+    "destructive".to_string()
+}
+
+fn default_warn_threshold() -> usize {
+    70
+}
+
+fn default_compact_threshold() -> usize {
+    90
+}
+
+fn default_editor() -> String {
+    "$EDITOR".to_string()
+}
+
+fn default_retries() -> usize {
+    3
+}
+
+fn default_update_channel() -> UpdateChannel {
+    let ver = option_env!("FLASHAGENT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+    if ver.starts_with('b') {
+        UpdateChannel::Beta
+    } else {
+        UpdateChannel::Stable
+    }
+}
+
+/// Release channel for application updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    #[default]
+    Beta,
+    Stable,
+}
+
+impl UpdateChannel {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Beta => Self::Stable,
+            Self::Stable => Self::Beta,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Beta => "Beta",
+            Self::Stable => "Stable",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Beta => "beta",
+            Self::Stable => "stable",
+        }
+    }
 }
 
 /// Toolset exposure profile for adjusting advertised tools and schemas.
@@ -254,6 +380,25 @@ impl Default for AppConfig {
             setup_completed: false,
             toolset_profile: ToolsetProfile::Auto,
             trusted_directories: Vec::new(),
+            update_channel: default_update_channel(),
+            auto_check_updates: true,
+            silent_update_check: true,
+            show_mascot: true,
+            show_tips: true,
+            show_ttft: true,
+            show_tokens: true,
+            show_toasts: true,
+            show_reasoning_accordion: true,
+            color_theme: "dark".to_string(),
+            approval_mode: "destructive".to_string(),
+            auto_compact_context: true,
+            context_warn_threshold: 70,
+            context_compact_threshold: 90,
+            auto_save_sessions: true,
+            external_editor: "$EDITOR".to_string(),
+            git_diff_preview: true,
+            git_smart_commit: true,
+            network_retries: 3,
         }
     }
 }

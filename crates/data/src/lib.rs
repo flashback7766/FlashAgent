@@ -315,24 +315,24 @@ mod tests {
     fn messages_append_and_list_in_order() {
         let store = Store::open_in_memory().unwrap();
         let s = store.create_session("chat", "").unwrap();
-        store.append_message(s, Role::User, "привет", None, None, None).unwrap();
+        store.append_message(s, Role::User, "hello", None, None, None).unwrap();
         store
-            .append_message(s, Role::Assistant, "ответ", Some("думаю"), Some(10), Some(5))
+            .append_message(s, Role::Assistant, "answer", Some("thinking"), Some(10), Some(5))
             .unwrap();
         let msgs = store.messages(s).unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, Role::User);
-        assert_eq!(msgs[1].reasoning.as_deref(), Some("думаю"));
+        assert_eq!(msgs[1].reasoning.as_deref(), Some("thinking"));
         assert_eq!(msgs[1].tokens_out, Some(5));
     }
 
     #[test]
-    fn fts_search_finds_cyrillic() {
+    fn fts_search_finds_words() {
         let store = Store::open_in_memory().unwrap();
         let s = store.create_session("chat", "").unwrap();
-        store.append_message(s, Role::User, "настройка вулкана в арче", None, None, None).unwrap();
+        store.append_message(s, Role::User, "configuring vulkan on arch linux", None, None, None).unwrap();
         store.append_message(s, Role::User, " unrelated ", None, None, None).unwrap();
-        let hits = store.search_messages("вулкана", 10).unwrap();
+        let hits = store.search_messages("vulkan", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].session_id, s);
     }

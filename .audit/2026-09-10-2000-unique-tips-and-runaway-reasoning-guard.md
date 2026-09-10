@@ -27,7 +27,7 @@ Details:
    - In `crates/core/src/prompt.rs`: added `NO RECURSIVE META-ANALYSIS OR OVERTHINKING` instruction: strictly forbidding the model from debating its role, re-evaluating already solved answers, or entering self-doubt loops ("Wait, ...", "Actually, ...", "What if...") once a conclusion is reached.
    - In `crates/core/src/loop_.rs`:
      * Extended `detect_repetition_loop` to detect non-consecutive substantive sentence/clause repetitions (3+ occurrences across paragraphs), immediately stopping runaway reasoning loops.
-     * Enhanced `extract_draft_from_steps` to recognize `Response construction:`, `Final decision:`, `Decision:`, `Answer:`, `Ответ:`.
+     * Enhanced `extract_draft_from_steps` to recognize `Response construction:`, `Final decision:`, `Decision:`, `Answer:`, `Response:`.
      * Added a fallback path: if `assistant_text` is empty because the loop broke during reasoning, FlashAgent extracts the already formulated decision from `assistant_reasoning` and outputs it directly to the user (or executes a 1-turn direct answer nudge with `thinking: Off`).
 
 3. **Background Recap & Ghost Suggestion Timeout Resilience (`crates/tui/src/main.rs`)**:

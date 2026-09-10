@@ -2176,6 +2176,72 @@ impl TipAnimator {
         };
         format!("\x1b[38;2;175;170;160m{clipped}\x1b[0m{caret}")
     }
+
+    /// Renders the animated tip lines with typewriter effect.
+    /// In compact terminals where the tip exceeds a single line, wraps onto a second line.
+    pub fn render_lines(&self, tick_n: usize, width: usize) -> Vec<String> {
+        let avail1 = width.saturating_sub(8); // "  Tip: " is 7 chars + 1 char margin
+        let avail2 = width.saturating_sub(8); // "       " is 7 chars indent + 1 char margin
+
+        if width < 30 || self.total_chars <= avail1 {
+            let single = self.render_line(tick_n, avail1);
+            return vec![format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m {single}")];
+        }
+
+        let (line1_full, line2_full) = split_tip_at_word_boundary(self.tip_text, avail1);
+        let l1_char_count = line1_full.chars().count();
+        let (visible_total, caret_on) = self.render_state(tick_n);
+        let caret = if caret_on {
+            "\x1b[1;38;2;225;175;95m▌\x1b[0m"
+        } else {
+            " "
+        };
+
+        if self.char_count <= l1_char_count {
+            let typed1 = visible_total;
+            vec![format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{typed1}\x1b[0m{caret}")]
+        } else {
+            let l2_start_char = self.tip_text.chars().count().saturating_sub(line2_full.chars().count());
+            let l2_typed_chars = self.char_count.saturating_sub(l2_start_char);
+            let typed2: String = line2_full.chars().take(l2_typed_chars).collect();
+            let clipped2 = if typed2.chars().count() > avail2 {
+                typed2.chars().take(avail2).collect::<String>()
+            } else {
+                typed2
+            };
+            vec![
+                format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{line1_full}\x1b[0m"),
+                format!("       \x1b[38;2;175;170;160m{clipped2}\x1b[0m{caret}"),
+            ]
+        }
+    }
+}
+
+/// Split tip text at a word boundary so that line 1 has at most `budget1` visible chars.
+pub fn split_tip_at_word_boundary(text: &str, budget1: usize) -> (&str, &str) {
+    if text.chars().count() <= budget1 {
+        return (text, "");
+    }
+    let mut last_space_byte = None;
+    for (current_char_count, (byte_idx, ch)) in text.char_indices().enumerate() {
+        if current_char_count > budget1 {
+            break;
+        }
+        if ch.is_whitespace() {
+            last_space_byte = Some(byte_idx);
+        }
+    }
+
+    if let Some(space_idx) = last_space_byte {
+        let l1 = &text[..space_idx];
+        let l2 = text[space_idx..].trim_start();
+        (l1, l2)
+    } else {
+        let split_byte = text.char_indices().nth(budget1).map(|(b, _)| b).unwrap_or(text.len());
+        let l1 = &text[..split_byte];
+        let l2 = text[split_byte..].trim_start();
+        (l1, l2)
+    }
 }
 
 #[cfg(test)]
@@ -2248,5 +2314,73 @@ mod tests {
             assert!(seen.insert(anim.tip_text), "Repeated tip found within first 100 deck items: {}", anim.tip_text);
         }
         assert_eq!(seen.len(), 101);
+    }
+
+    #[test]
+    fn test_split_tip_at_word_boundary() {
+        let short = "Short tip";
+        let (l1, l2) = split_tip_at_word_boundary(short, 20);
+        assert_eq!(l1, "Short tip");
+        assert_eq!(l2, "");
+
+        let exact = "Exact length test";
+        let (l1, l2) = split_tip_at_word_boundary(exact, exact.chars().count());
+        assert_eq!(l1, exact);
+        assert_eq!(l2, "");
+
+        let long = "Document file storage helpers the non-obvious design constraints and invariants in code comments.";
+        let (l1, l2) = split_tip_at_word_boundary(long, 50);
+        assert!(l1.chars().count() <= 50);
+        assert!(!l1.is_empty());
+        assert!(!l2.is_empty());
+        // Verify no space at start of line 2
+        assert!(!l2.starts_with(' '));
+        // Verify joined content matches original
+        let rejoined = format!("{l1} {l2}");
+        assert_eq!(rejoined, long);
+
+        // Test without any spaces
+        let no_spaces = "Supercalifragilisticexpialidocious";
+        let (l1, l2) = split_tip_at_word_boundary(no_spaces, 10);
+        assert_eq!(l1, "Supercalif");
+        assert_eq!(l2, "ragilisticexpialidocious");
+    }
+
+    #[test]
+    fn test_tip_animator_render_lines_compact_multiline() {
+        let mut anim = TipAnimator::new();
+        anim.tip_text = "Document file storage helpers the non-obvious design constraints and invariants in code comments.";
+        anim.total_chars = anim.tip_text.chars().count();
+        anim.phase = TipPhase::Typing;
+
+        // Wide terminal: fits on 1 line
+        let lines_wide = anim.render_lines(0, 160);
+        assert_eq!(lines_wide.len(), 1);
+        assert!(lines_wide[0].contains("Tip:"));
+
+        // Compact terminal (e.g. 70 columns): exceeds 1 line
+        // When typing character 0: line 1 only
+        anim.char_count = 0;
+        let lines_c0 = anim.render_lines(0, 70);
+        assert_eq!(lines_c0.len(), 1);
+
+        // When typing line 1: still 1 line
+        anim.char_count = 20;
+        let lines_c20 = anim.render_lines(0, 70);
+        assert_eq!(lines_c20.len(), 1);
+
+        // When all characters are typed (holding phase): spans 2 lines
+        anim.char_count = anim.total_chars;
+        anim.phase = TipPhase::Holding;
+        let lines_holding = anim.render_lines(0, 70);
+        assert_eq!(lines_holding.len(), 2);
+        assert!(lines_holding[0].contains("Tip:"));
+        assert!(lines_holding[1].starts_with("       ")); // 7 space indent
+
+        // When erasing: line 2 erases first
+        anim.phase = TipPhase::Erasing;
+        anim.char_count = 20; // erased down into line 1
+        let lines_erasing = anim.render_lines(0, 70);
+        assert_eq!(lines_erasing.len(), 1); // line 2 is gone!
     }
 }

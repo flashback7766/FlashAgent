@@ -13,10 +13,10 @@ Verification:
 - `cargo build --release --bin flashagent-tui` (exit code: 0)
 
 Details:
-1. Sanitized ghost suggestions so that assistant inquiry phrasing and infinitive forms («хотите узнать подробнее о...», «рассказать об...», «показать примеры...») are converted into direct user imperative prompts ready to send:
-   - «Расскажи об особенностях Swift»
-   - «Покажи примеры кода на Swift»
-   - «Объясни устройство памяти в Swift»
+1. Sanitized ghost suggestions so that assistant inquiry phrasing and infinitive forms ("would you like to learn more about...", "tell about...", "show examples...") are converted into direct user imperative prompts ready to send:
+   - "Explain Swift features"
+   - "Show Swift code examples"
+   - "Explain memory layout in Swift"
    - Trailing punctuation (`?`, `.`, `!`) is stripped so suggestions format as actionable commands.
 2. In `crates/llm/src/openai.rs`, added thinking suppression for local / LM Studio endpoints even when `ThinkingProfile` is uninitialized or unsupported by default, ensuring models like Gemma 4 do not waste their 120-token completion budget on internal reasoning.
 3. Added unit tests in `crates/tui/src/main.rs` verifying sanitization, conversion of questions/infinitives into imperatives, and rejection of generic filler words.

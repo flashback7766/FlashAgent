@@ -210,12 +210,18 @@ impl SetupWizard {
         }
     }
 
+    fn sync_api_key(&mut self) {
+        let trimmed = self.api_key_input.trim().to_string();
+        self.config.api_key = if trimmed.is_empty() { None } else { Some(trimmed) };
+    }
+
     fn insert_api_key_char(&mut self, c: char) {
         if !self.api_key_input.is_char_boundary(self.api_key_cursor) {
             self.api_key_cursor = self.api_key_input.len();
         }
         self.api_key_input.insert(self.api_key_cursor, c);
         self.api_key_cursor += c.len_utf8();
+        self.sync_api_key();
     }
 
     fn backspace_api_key_char(&mut self) {
@@ -227,6 +233,7 @@ impl SetupWizard {
                 .unwrap_or(0);
             self.api_key_input.drain(prev_boundary..self.api_key_cursor);
             self.api_key_cursor = prev_boundary;
+            self.sync_api_key();
         }
     }
 
@@ -238,6 +245,34 @@ impl SetupWizard {
                 .map(|c| self.api_key_cursor + c.len_utf8())
                 .unwrap_or(self.api_key_input.len());
             self.api_key_input.drain(self.api_key_cursor..next_boundary);
+            self.sync_api_key();
+        }
+    }
+
+    /// Handles pasted text into active text fields (Custom backend URL, API key, model search).
+    pub fn handle_paste(&mut self, text: &str) {
+        for c in text.chars() {
+            if c == '\r' || c == '\n' {
+                continue;
+            }
+            match self.step {
+                0 if self.preset_idx == 5 => {
+                    self.insert_custom_char(c);
+                }
+                1 => {
+                    self.insert_api_key_char(c);
+                }
+                2 => {
+                    self.model_search.push(c);
+                    let new_filtered = self.filtered_indices();
+                    if !new_filtered.is_empty() && !new_filtered.contains(&self.model_idx) {
+                        let chosen_idx = new_filtered[0];
+                        self.model_idx = chosen_idx;
+                        self.config.model = self.available_models[chosen_idx].clone();
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -632,7 +667,7 @@ impl SetupWizard {
         let mut lines = Vec::new();
         let border_color = "\x1b[38;2;100;95;90m";
         let reset = "\x1b[0m";
-        let inner_w = (width.saturating_sub(6)).clamp(54, 110);
+        let inner_w = width.saturating_sub(6).clamp(20, 110);
 
         let title = format!(" FlashAgent First Start Setup ({}/5) ", self.step + 1);
         let dash_count = inner_w.saturating_sub(title.chars().count() + 1);
@@ -926,7 +961,81 @@ impl SetupWizard {
     }
 }
 
-/// Run interactive setup wizard in alternate screen.
+/// Run interactive setup wizard in alternate screen using an active event channel.
+/// Eliminates stdin contention with the main event reader thread during in-app execution.
+pub async fn run_wizard_channel(
+    config: &mut AppConfig,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::UiEvent>,
+) -> anyhow::Result<bool> {
+    use crossterm::{
+        cursor,
+        execute,
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen},
+    };
+
+    let mut stdout = std::io::stdout();
+    let _ = execute!(stdout, EnterAlternateScreen, cursor::Hide);
+
+    let mut wizard = SetupWizard::new(config.clone());
+
+    // Try probing default backend for models
+    let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
+    if let Some(disc) = backend.discover_server().await {
+        wizard.apply_discovered_models(disc.models);
+    }
+
+    let completed = loop {
+        let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
+        let lines = wizard.render(term_w as usize);
+
+        let mut buffer = String::from("\x1b[H\x1b[2J\r\n");
+        for line in lines {
+            buffer.push_str(&line);
+            buffer.push_str("\r\n");
+        }
+        let _ = stdout.write_all(buffer.as_bytes());
+        let _ = stdout.flush();
+
+        tokio::select! {
+            Some(ev) = rx.recv() => {
+                match ev {
+                    crate::UiEvent::Key(code, mods) => {
+                        let prev_step = wizard.step;
+                        if let Some(finished) = wizard.handle_key(code, mods) {
+                            break finished;
+                        }
+                        // Step transition probe: Step 1 (API Key) to Step 2 (Model selection)
+                        if prev_step == 1 && wizard.step == 2 {
+                            let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
+                            if let Some(disc) = backend.discover_server().await {
+                                wizard.apply_discovered_models(disc.models);
+                            } else {
+                                wizard.available_models.clear();
+                                wizard.discovered_models.clear();
+                                wizard.connection_status = Some("Could not reach backend (will use default)".to_string());
+                            }
+                        }
+                    }
+                    crate::UiEvent::Paste(text) => {
+                        wizard.handle_paste(&text);
+                    }
+                    crate::UiEvent::Resize(_, _) => {}
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    if completed {
+        *config = wizard.config;
+    }
+
+    let _ = execute!(stdout, cursor::Show, LeaveAlternateScreen);
+    // Raw mode is intentionally preserved since run_app remains active
+    Ok(completed)
+}
+
+/// Run interactive setup wizard in alternate screen (for standalone startup flow).
 pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
     use crossterm::{
         cursor,
@@ -935,8 +1044,6 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
     };
 
     enable_raw_mode()?;
-    #[cfg(windows)]
-    let _ = crossterm::terminal::enable_virtual_terminal_processing();
     let mut stdout = std::io::stdout();
     let _ = execute!(stdout, EnterAlternateScreen, cursor::Hide);
 
@@ -961,8 +1068,8 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
         let _ = stdout.flush();
 
         if crossterm::event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = crossterm::event::read()? {
-                if key.kind != KeyEventKind::Release {
+            match crossterm::event::read()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let prev_step = wizard.step;
                     if let Some(finished) = wizard.handle_key(key.code, key.modifiers) {
                         break finished;
@@ -979,6 +1086,10 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
                         }
                     }
                 }
+                Event::Paste(text) => {
+                    wizard.handle_paste(&text);
+                }
+                _ => {}
             }
         }
     };
@@ -989,8 +1100,6 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
 
     let _ = execute!(stdout, cursor::Show, LeaveAlternateScreen);
     disable_raw_mode()?;
-    #[cfg(windows)]
-    let _ = crossterm::terminal::disable_virtual_terminal_processing();
 
     Ok(completed)
 }
@@ -1273,5 +1382,33 @@ mod tests {
         assert!(rendered.contains("(1 loaded in LM Studio)"));
         assert!(rendered.contains("deepseek-r1-distill-qwen-14b"));
         assert!(rendered.contains("128k ctx · tools · thinking: on [off,on]"));
+    }
+
+    #[test]
+    fn test_wizard_handle_paste_instantly_updates_fields() {
+        let mut wizard = SetupWizard::new(AppConfig::default());
+        wizard.preset_idx = 5; // Custom backend
+
+        // Paste custom URL
+        wizard.handle_paste("http://192.168.1.50:8000/v1\r\n");
+        assert_eq!(wizard.custom_url, "http://192.168.1.50:8000/v1");
+        assert_eq!(wizard.config.backend_url, "http://192.168.1.50:8000/v1");
+
+        // Advance to step 1 (API key)
+        wizard.step = 1;
+        wizard.handle_paste("sk-paste-token-xyz");
+        assert_eq!(wizard.api_key_input, "sk-paste-token-xyz");
+        assert_eq!(wizard.config.api_key.as_deref(), Some("sk-paste-token-xyz"));
+
+        // Advance to step 2 (Model search)
+        wizard.step = 2;
+        wizard.available_models = vec![
+            "llama-3.1-8b-instruct".to_string(),
+            "deepseek-coder-v2".to_string(),
+            "qwen2.5-coder-7b".to_string(),
+        ];
+        wizard.handle_paste("coder");
+        assert_eq!(wizard.model_search, "coder");
+        assert_eq!(wizard.config.model, "deepseek-coder-v2");
     }
 }

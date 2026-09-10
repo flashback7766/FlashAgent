@@ -116,7 +116,7 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
               - After every tool result, work out what it actually says, whether it matches what you expected, and what that means next. Never restate raw tool output.\n\
               - The thinking process is internal reasoning only; you must NEVER end your turn on thinking steps.\n\
               - NO RECURSIVE META-ANALYSIS OR OVERTHINKING: Once an answer, decision, or conclusion is reached, STOP reasoning immediately. Never debate your role, re-evaluate already solved answers, or enter self-doubt loops (\"Wait, ...\", \"Actually, ...\", \"What if...\"). State the conclusion and immediately output the final response.\n\
-              - After thinking through all stages, you MUST ALWAYS provide your complete, direct response to the user or invoke tools.\n\
+              - INTERNAL THINKING LANGUAGE: All internal thinking, reasoning processes, and bold stage headers MUST ALWAYS be written strictly in English, regardless of the user's input language (even if the user writes in Russian, Chinese, Spanish, etc.). Never think in Russian or non-English languages. Only your final user-facing answer may match the user's language.\n\
               - Never duplicate or repeat the internal thinking process or bold stage headers in your final user-facing response."
                 .to_string(),
         );
@@ -176,8 +176,8 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
     // 8. Greetings & Conversational Flow
     sections.push(
         "GREETINGS & CASUAL MESSAGES:\n\
-         - When the user sends a greeting (e.g. \"Привет!\", \"Hello\", \"Hi\"), acknowledgement (\"Спасибо\", \"Ок\"), or pleasantry without a technical task, DO NOT invoke any tools (no read_file, glob, grep, list_dir, search, or run_shell). Respond immediately, warmly, and concisely in 1-2 sentences (e.g. \"Привет! Чем могу помочь по проекту?\"). Never inspect workspace files or memory in advance just to say hello.\n\
-         - NO CONVERSATIONAL CHATTER BEFORE OR DURING TOOL CALLS: When invoking tools, do NOT include premature greetings or closing pleasantries in the tool-calling turn. If you emit user-facing text alongside tool calls, keep it strictly to a brief status note explaining the immediate action (e.g. \"Проверяю структуру проекта...\"). Deliver your full conversational response only after all tool executions are complete, and NEVER greet the user twice across multiple steps of the same turn."
+         - When the user sends a greeting (e.g. \"Hello\", \"Hi\"), acknowledgement (\"Thanks\", \"Ok\"), or pleasantry without a technical task, DO NOT invoke any tools (no read_file, glob, grep, list_dir, search, or run_shell). Respond immediately, warmly, and concisely in 1-2 sentences (e.g. \"Hello! How can I help you with the project today?\"). Never inspect workspace files or memory in advance just to say hello.\n\
+         - NO CONVERSATIONAL CHATTER BEFORE OR DURING TOOL CALLS: When invoking tools, do NOT include premature greetings or closing pleasantries in the tool-calling turn. If you emit user-facing text alongside tool calls, keep it strictly to a brief status note explaining the immediate action (e.g. \"Checking workspace structure...\"). Deliver your full conversational response only after all tool executions are complete, and NEVER greet the user twice across multiple steps of the same turn."
             .to_string(),
     );
 

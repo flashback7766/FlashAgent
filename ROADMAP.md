@@ -1,55 +1,55 @@
-# FlashAgent — План перезаписи (вехи без дат)
+# FlashAgent — Roadmap (Dateless Milestones)
 
-> Порядок: два параллельных трека. Ядро проверяется TUI-клиентом, UI — прототипом рендера.
-> Статус вехи: [ ] / [~] / [x]. Обновляется по факту, без дат.
+> Sequence: two parallel tracks. Core engine is verified via the TUI client; UI is verified via the renderer prototype.
+> Milestone status: `[ ]` / `[~]` / `[x]`. Updated upon completion, without arbitrary calendar deadlines.
 
-## Трек A — Ядро
-- [x] **A0. Скелет workspace** — 9 крейтов, CI (Linux+Windows), clippy strict 0 warnings, MIT, README.
-- [x] **A1. Данные** — SQLite+FTS5 (bundled), sessions/messages, versioned миграции, FTS-триггеры, поиск по кириллице. 5/5 тестов.
-- [x] **A2. LLM-адаптер** — OpenAI-совместимый стрим, единый ToolCall, мультипарсер (Hermes/Mistral/bare JSON) с ремонтом, reasoning, usage+фолбэк. 20/20 тестов llm.
-- [x] **A3. Цикл** — AgentLoop поверх трейтов LlmSource/ToolExec, события для UI, cancel-флаг, 9/9 контрактных тестов (мульти-тул, обрыв, step/token лимиты, инъекции).
-- [x] **A4. Тулы** — 9 встроенных (read/write/edit-chunks/list_dir/glob/grep/run_shell/web_fetch/web_search), шелл-изоляция (фон, таймаут, живой вывод, task id). 13/13 тестов tools, 57 по воркспейсу. Адаптивные наборы — C-трек.
-- [x] **A5. Разрешения** — 4 режима, узкие shell-правила (parse_chain, кавычки, префикс-границы), diff-конвейер (WritePreview + unified diff до записи), сессионные правила, ApprovalGate для UI. 23 теста core (10 permissions + 4 diff), 68 по воркспейсу.
-- [x] **A6. Память** — два уровня, автоподхват MEMORY.md/CLAUDE.md/AGENTS.md, пороговая инъекция (целиком → outline + точечное чтение), блок помечен недоверенным. 5 тестов memory, 73 по воркспейсу.
- - [x] **A7. TUI** — терминальный клиент (crossterm): чат со стримом, карточки подтверждений с диффом (TuiGate), Esc-отмена, memory-инъекция. Смоук на Linux. 4 теста tui, 77 по воркспейсу.
- - [x] **A7.1. TUI polish** — print-and-forget (settled → скроллбек один раз), ctrl+o thinking-toggle, спиннер/статус-бар, Esc-interrupt, фикс чередования reasoning/content-дельт (параллельный стрим), settled_boundary = min(). 8 тестов tui, 81 по воркспейсу.
- - [x] **A8. Субагенты** — динамические роли, лимит параллелизма, ревью родителем, каналы между собой, наследование прав.
-- [ ] **A9. MCP** — клиент, менеджер, маркетплейс-реестр.
-- [ ] **A10. Автоном** — /goal, адаптивные слои, рамки (шаги/токены/время/запреты), снапшоты+коммиты, план+отчёт.
-- [ ] **A11. Остальные бэкенды** — Ollama, Anthropic, Mistral, DeepSeek, OpenRouter, пресеты.
-- [ ] **A12. Мигратор** — импорт из ~/.flashgent (сессии, конфиг).
+## Track A — Core Engine
+- [x] **A0. Workspace Skeleton** — 9 crates, CI (Linux + Windows), clippy strict with 0 warnings, MIT license, README.
+- [x] **A1. Data Layer** — SQLite + FTS5 (bundled), sessions/messages, versioned migrations, FTS triggers, Cyrillic/multilingual search. 5/5 tests.
+- [x] **A2. LLM Adapter** — OpenAI-compatible streaming, unified `ToolCall`, multi-parser (Hermes / Mistral / bare JSON) with self-healing JSON repair, reasoning, token usage with local fallback. 20/20 llm tests.
+- [x] **A3. Agent Loop** — `AgentLoop` built over abstract `LlmSource` / `ToolExec` traits, UI event streams, cancellation token, 9/9 contract tests (multi-tool calls, stream truncation, step/token budget limits, prompt injection safety).
+- [x] **A4. Tools** — 9 built-in tools (read / write / edit-chunks / list_dir / glob / grep / run_shell / web_fetch / web_search), process sandboxing (background execution, timeouts, live stream output, task id tracking). 13/13 tools tests, 57 workspace tests. Adaptive sets in Track C.
+- [x] **A5. Permissions** — 4 security modes, narrow shell command parsing (parse_chain, quote handling, prefix bounds), diff preview pipeline (WritePreview + unified diff before writing), session-scoped rules, ApprovalGate for UI. 23 core tests (10 permissions + 4 diff), 68 workspace tests.
+- [x] **A6. Memory** — Dual-tier memory, auto-discovery of MEMORY.md / CLAUDE.md / AGENTS.md, threshold-based context injection (full text → outline + targeted tool lookup), untrusted content block markers. 5 memory tests, 73 workspace tests.
+- [x] **A7. TUI Client** — Terminal client (crossterm): streaming chat, interactive confirmation cards with diffs (TuiGate), Esc cancellation, memory injection. Smoke-tested on Linux. 4 tui tests, 77 workspace tests.
+- [x] **A7.1. TUI Polish** — Print-and-forget renderer (settled lines flushed to scrollback once), ctrl+o thinking toggle, spinner/status bar, Esc interrupt, interleaved reasoning/content delta fix (parallel streaming), settled_boundary = min(). 8 tui tests, 81 workspace tests.
+- [x] **A8. Subagents** — Dynamic roles, concurrency limits, parent review gate, inter-subagent messaging channels, strict permission inheritance.
+- [x] **A9. MCP** — Client, manager, marketplace registry. Native stdio JSON-RPC 2.0 transport, project & global configuration manager, curated verifiable marketplace, ApprovalGate enforcement for non-read-only calls, TUI slash commands (/mcp, /mcp list, /mcp market, /mcp test, /mcp add, /mcp reload). 46 tools tests, 131 workspace tests.
+- [ ] **A10. Autonomous Goal Mode** — `/goal`, adaptive execution layers, task boundaries (steps/tokens/time/blacklist), filesystem snapshots + commits, live plan + final report.
+- [ ] **A11. Extended Backends** — Ollama, Anthropic, Mistral, DeepSeek, OpenRouter, configuration presets.
+- [ ] **A12. Migrator** — Import data and settings from legacy ~/.flashgent (sessions, config).
 
-## Трек B — UI (после прототипа)
-- [x] **B0. Прототип рендера (гейт)** — GO владельца: wgpu+cosmic-text+IME+spring-морф работают, цвета/пробел исправлены, clippy strict.
-- [ ] **B1. Кит M3 Expressive** — темы (light/dark/system, dynamic color), Material Symbols, типографика, spring-движок, зацикленные фоновые, опция снижения.
-- [ ] **B2. Каркас** — IPC-клиент, реконнект, сайдбар сессий с FTS-поиском, статус-лента, командная палитра.
-- [ ] **B3. Поток чата** — живой markdown, peek, группировка серий, Verbose/Transcript, скролл-якорь, авторост-композер с @// автодополнением.
-- [ ] **B4. Подтверждения** — карточки в потоке, дифф-рендер (unified/split/построчный/живой), центр проблем.
-- [ ] **B5. Субагенты UI** — дерево live-карточек + вкладки + оверлей.
-- [ ] **B6. Память UI** — редактор, два уровня, диффы, индикация подхвата.
-- [ ] **B7. MCP UI** — менеджер + маркетплейс + превью подтверждений.
-- [ ] **B8. Автоном UI** — /goal-рамки, живой план-документ, финальный отчёт.
-- [ ] **B9. Онбординг-мастер** — бэкенд → соединение → модель → тестовый тул-колл.
-- [ ] **B10. Полировка** — адаптивная плотность, настройки (GUI первичен), giant-session виртуализация, AccessKit-аудит.
+## Track B — Native UI (Post-Prototype)
+- [x] **B0. Renderer Prototype (Gate)** — Owner GO approved: wgpu + cosmic-text + IME + spring morphing verified, sRGB/color fix and spacebar handling resolved, clippy strict 0 warnings.
+- [ ] **B1. Material 3 Expressive Kit** — Themes (light/dark/system, dynamic palette), Material Symbols, typography scale, spring engine, ambient background loops, motion reduction toggle.
+- [ ] **B2. App Shell** — IPC client, auto-reconnect, session sidebar with FTS search, status ticker ribbon, command palette.
+- [ ] **B3. Conversation Stream** — Live markdown renderer, peek tool calls, batch grouping, Verbose / Transcript modes, scroll anchoring, auto-growing composer with @// autocomplete.
+- [ ] **B4. Permission Cards** — In-stream confirmation cards, diff renderer (unified / split / per-line / live), problem center.
+- [ ] **B5. Subagents UI** — Live card tree + dedicated subagent tabs + overlay HUD.
+- [ ] **B6. Memory UI** — Memory editor, dual tiers, diff inspector, active rules indicator.
+- [ ] **B7. MCP UI** — Server manager + marketplace browser + execution preview cards.
+- [ ] **B8. Goal UI** — `/goal` task envelope settings, live interactive plan document, final structured summary.
+- [ ] **B9. Onboarding Wizard** — Backend selection → connection check → model verification → test tool execution.
+- [ ] **B10. Polish** — Adaptive density, settings panel (GUI-first), virtualization for 100k+ message sessions, AccessKit accessibility audit.
 
-## Трек C — Продукт
-- [ ] **C0. Апдейтер** — Releases, Restart to Update, Stable/Beta.
-- [ ] **C1. Телеметрия** — opt-in счётчики, opt-in крэш-трейсы.
-- [ ] **C2. Доки** — mdBook сайт на GitHub Pages, rustdoc, рецепты MCP.
-- [ ] **C3. Релиз-упаковка** — инсталляторы (MSIX/NSIS + AppImage/deb/pacman), иконки, подписи.
-- [ ] **C4. Публичный запуск** — грамотное оформление репо: скриншоты/GIF, сравнение с аналогами, quickstart < 5 минут, good-first-issues, дискуссии.
-- [ ] **C5. Допиливания (Legacy Gems)** — портирование ключевых фишек из легаси (~/flashgent):
-  - **Argument Aliasing**: всеядность названий параметров тулов (`filePath`/`path`, `oldString`/`TargetContent`, `cmd`/`command`) в `flashagent-tools`.
-  - **AST Project Outline**: фоновый сканер символов (классы, функции, структуры, трейты) на Rust (`ignore` + regex) с инжекцией компактного контура в системный промпт.
-  - **Context Steering**: канал директив пользователя в `AgentLoop` во время стриминга/цикла без сброса задачи.
-  - **FileSnapshots & Workspace Rewind**: таблица `file_snapshots` в SQLite (`content_before`) для пошагового отката файлов на диске и усечения истории.
-  - **In-place продолжение (`continueResponse`)**: дожатие оборванного ответа в той же карточке ассистента без дублирования сообщений.
-  - **Глубокая защита от инъекций (`untrusted`)**: одноразовый `nonce` на сессию + зачистка управляющих токенов шаблонов (`neutralise`) + сигнатурная детекция попыток угона.
-  - **Пакетное редактирование (`multi-file edits`)**: расширение `edit_file` на массив файлов `files: [{ path, edits }]`.
-  - **Автоименование сессии**: фоновый микро-запрос к модели после 1-го ответа (надежно работает даже при выключенной параллелизации тулов).
-  - **UX-метки для UI**: скользящий спидометр скорости `tg_3s` (окно 3 сек) и командная палитра `Cmd/Ctrl+K`.
+## Track C — Product & Distribution
+- [x] **C0. Self-Updater** — GitHub Releases, Restart to Update, Stable / Beta channels. Background download, atomic binary replacement (dual-target system/user), channel switching (/channel), manual update (/update), in-app banner without interrupting session.
+- [ ] **C1. Telemetry** — Opt-in anonymous counters, opt-in crash stack traces.
+- [ ] **C2. Documentation** — mdBook documentation site on GitHub Pages, rustdoc, MCP guides and cookbooks.
+- [ ] **C3. Release Packaging** — Native installers (MSIX / NSIS for Windows, AppImage / deb / pacman for Linux, dmg for macOS), application icons, code signatures.
+- [ ] **C4. Public Launch** — Repository presentation: demo screenshots and GIFs, feature comparison matrix, quickstart < 5 minutes, good-first-issues, GitHub discussions.
+- [ ] **C5. Legacy Gems** — Porting battle-tested capabilities from legacy ~/flashgent:
+  - **Argument Aliasing**: Tolerant tool parameter naming (`filePath`/`path`, `oldString`/`TargetContent`, `cmd`/`command`) in `flashagent-tools`.
+  - **AST Project Outline**: Background symbol indexing (classes, functions, structs, traits) in native Rust (`ignore` + regex) with compact project outline injection into system prompt.
+  - **Context Steering**: Mid-flight user directive injection channel into `AgentLoop` during streaming/execution without resetting context.
+  - **FileSnapshots & Workspace Rewind**: Persistent `file_snapshots` table in SQLite (`content_before`) for step-by-step filesystem rewinds and history truncation.
+  - **In-place Continuation (`continueResponse`)**: Seamless completion of truncated responses within the same assistant message card without message duplication.
+  - **Deep Prompt Injection Hardening (`untrusted`)**: Per-session cryptographic nonce + template control token neutralisation + signature-based prompt hijacking detection.
+  - **Batch Multi-File Editing**: Extending `edit_file` with batch file array support (`files: [{ path, edits }]`).
+  - **Automatic Session Titling**: Asynchronous background micro-query to LLM after turn 1 to title the conversation.
+  - **UI Telemetry Markers**: Rolling generation speedometer `tg_3s` (3-second window) and command palette `Cmd/Ctrl+K`.
 
-## Правила работы
-- Одна веха = ветка = проверяемый результат. Порядок внутри трека — по номерам.
-- Гейт B0 обязателен: без зелёного прототипа Трек B не стартует.
-- Верификация каждой вехи: `cargo test && cargo clippy -- -D warnings`, для UI — golden-кадры.
+## Execution Rules
+- One milestone = one branch = verifiable outcome. Sequence within tracks follows milestone numbering.
+- Gate B0 is mandatory: Track B does not proceed without a validated prototype.
+- Verification for every milestone: `cargo test && cargo clippy -- -D warnings` (UI: golden frames).

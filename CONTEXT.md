@@ -1,107 +1,65 @@
-# FlashAgent — Context for AI Agents (compaction-safe)
+# FlashAgent — Context for AI Agents (Compaction-Safe)
 
-> Цель этого файла: любой новый агент (или этот же после компактирования контекста)
-> читает его и продолжает работу без потери нити. Обновлять при каждом закрытии вехи.
+> Purpose of this file: any new agent (or this same agent following context window compaction)
+> reads this document to immediately resume work without losing context or intent. Update upon closing every milestone.
 
-## Что это за проект
-Полная перезапись flashgent (Electron, legacy в /home/flashback/flashgent-dev) в
-**~/FlashAgent**: локальный агент-усилитель с /goal-автономом, Rust-ядро +
-собственный wgpu-рендер (M3 Expressive), без Electron/веба. Открытый продукт (MIT).
+## What is This Project
+A complete rewrite of flashgent (Electron, legacy in `/home/flashback/flashgent-dev`) into
+**`~/FlashAgent`**: a fast, local-first agent amplifier with `/goal` autonomy, a native Rust core +
+custom hardware-accelerated wgpu renderer (Material 3 Expressive), zero Electron, zero web views. Open source (MIT).
 
-## Иерархия истины (читать в этом порядке)
-1. PHILOSOPHY.md — канон, ЧТО и ЗАЧЕМ (~110 решений владельца, менять только с его явного указания)
-2. ARCHITECTURE.md — КАК: 9 крейтов, границы, протоколы
-3. ROADMAP.md — вехи и статусы (A=ядро, B=UI, C=продукт)
-4. .agents/rules/ — code_quality, token_discipline, execution_loop
-5. .audit/ — журнал сеансов (append-only), одна запись = один сеанс
-6. CONTEXT.md (этот файл) — быстрый вход + текущее состояние
+## Hierarchy of Truth (Read in this strict order)
+1. `PHILOSOPHY.md` — The Canon: WHAT and WHY (~110 explicit owner decisions; modify only with explicit instruction from the owner)
+2. `ARCHITECTURE.md` — HOW: 9 crates, strict crate boundaries, protocols
+3. `ROADMAP.md` — Milestones and statuses (A = Core, B = UI, C = Product)
+4. `.agents/rules/` — `code_quality`, `token_discipline`, `execution_loop`
+5. `.audit/` — Audit trail log (append-only), one record per work session
+6. `CONTEXT.md` (this file) — Rapid orientation + current runtime state
 
-## Стек (решено окончательно)
-Rust 1.85+, workspace из 9 крейтов: core (цикл), llm (бэкенды+парсеры),
-tools (тулы+MCP), data (SQLite+FTS5), proto (IPC), svc (сервис tokio),
-ui (wgpu+cosmic-text+M3E), tui (терминал-клиент), app (entry).
-LLM: OpenAI-совместимые бэкенды (любые локальные и удалённые endpoints: LM Studio,
-Ollama, vLLM, OpenRouter и любые совместимые модели). llama.cpp встроенный — отдельная фаза позже.
-Лицензия MIT. Релизы: GitHub Releases, Stable+Beta. Телеметрия opt-in счётчики.
+## Stack (Definitively Decided)
+Rust 1.85+, Cargo workspace of 9 crates: `core` (agent loop), `llm` (backends + parsers),
+`tools` (tools + MCP), `data` (SQLite + FTS5), `proto` (IPC schemas), `svc` (tokio service runtime),
+`ui` (wgpu + cosmic-text + M3E), `tui` (terminal client), `app` (entrypoint).
+LLM: OpenAI-compatible endpoints (any local or remote endpoints: LM Studio,
+Ollama, vLLM, OpenRouter, Gemini, and any compatible models). Embedded llama.cpp is a separate phase later.
+License: MIT. Releases: GitHub Releases, Stable + Beta channels. Telemetry: strictly opt-in anonymous counters.
 
-## Статус (обновляй!)
-- B0 гейт рендера: ✅ PASS — владелец дал GO (прототип b0.rs: окно, кириллица, IME,
-  spring-морф; фикс цветов = non-sRGB 8-bit формат; фикс пробела = Named(Space))
-- A0 скелет: ✅ | A1 данные: ✅ 5/5 | A2 LLM: ✅ 20/20 | A3 цикл: ✅ 9/9 | A4 тулы: ✅ 13/13 |
-  A5 разрешения: ✅ 14 (10 permissions + 4 diff) | A6 память: ✅ 5 | A7 TUI: ✅ 4 |
-  A8 субагенты: ✅ (core::subagents + tools::subagents)
-- Воркспейс: 92 passed, 0 failed, clippy --workspace -- -D warnings чисто
-- СЛЕДУЮЩАЯ ВЕХА: A9 — MCP (клиент, менеджер, маркетплейс-реестр).
-- Баг TUI (чередование reasoning/content-дельт) ИСПРАВЛЕН 2026-09-08:
-  reasoning и контент стримятся параллельно (ReasoningDelta не закрывает
-  assistant-строку и наоборот); settled_boundary = min() живых индексов;
-  свёрнутый reasoning — всегда одна preview-строка (нет остатка в скроллбеке
-  при ctrl+o). Тест interleaved_reasoning_keeps_assistant_line. Владельцу:
-  визуальный прогон с LM Studio перед A8.
-- Доп. фиксы A7.1 по фидбеку владельца (2026-09-08, kitty): truecolor вместо
-  палитры (38;2 вместо 38;5 — тему терминала больше не трогает), clip_ansi
-  (неразрывные ANSI при клиппинге), restore_line_color (цвет строки
-  восстанавливается после вложенного md()-форматирования), ctrl+o toggle-back
-  (полный repaint при перевороте), превью reasoning = полширины. 85 тестов.
-- Свёрнутый reasoning показывает ТЕКУЩИЙ этап мышления (reasoning_stage:
-  последний матч `N. Title:` / `* Title:`), авто-смена по стриму, фоллбек —
-  первая строка. Баг «после md()-форматирования строка белеет» исправлен
-  (restore_line_color).
-- Системный промпт введён: Role::System + ChatMessage::system() в llm,
-  TUI кладёт шаблон Thinking Process (5 шагов) в history[0] — стабилизация
-  формата размышлений gemma-4-e2b + гарантия работы детектора этапов.
-- Раскладка TUI: собственная эстетичная глифовая система
-  (авторское отличие): ◈/◆/◇ для тулов (в полёте/ок/ошибка), ↳ для
-  суб-строк и reasoning, braille-спиннер ⠋⠙⠹, рамка ввода ╭──╮+
-  ╰──╯ с футер-хинтом, статус с таймером Ns · esc to interrupt,
-  welcome с нумерованными tips. Тул-строка — как вызов функции:
-  `◆ grep(x)` + `↳ ran — N char(s)`. 85 тестов.
-- Сделано в A7.1 (print-and-forget рендерер): settled → скроллбек один раз
-  (printed_settled), live-хвост перерисовка \x1b[{n}F+\x1b[J, HARD CAP строк по ширине
-  (фикс дубляжа), превью reasoning в ширину, md() bold/code, спиннер ·✢✳✶✻✽,
-  ✓/✗ тул одной строкой, Esc = interrupt + маркер, ctrl+o = thinking toggle.
-- Заметка A7/A7.1: TUI in-process (BackendSource → AgentLoop → PermissionedTools →
-  BuiltinTools); svc/IPC — отдельная веха. Рендер — print-and-forget: settled строки в скроллбек один раз, live-хвост перерисовывается; ctrl+o —
-  thinking, md() bold/code, спиннер ·✢✳✶✻✽, ✓/✗ тула одной строкой, Esc = interrupt.
-  Владелец прогоняет: cargo run -p flashagent-tui -- --model <имя> --url http://localhost:1234/v1
-- Архитектурная заметка A5: разрешения — обёртка PermissionedTools поверх ToolExec
-  (core::permissions), цикл не знает про них; UI-интеграция — трейт ApprovalGate;
-  диффы — WritePreview на executor'е + core::diff::unified.
-- Архитектурная заметка A8 (субагенты): core::subagents — AgentRole (имя+промпт+
-  тулы-подмножество), SubagentSpec (роль+задача+лимиты), SubagentHost (оркестратор,
-  mpsc-каналы по id, live-счётчик), SubagentTool (тул spawn_agent, результат =
-  Role::Tool), SubagentToolFactory. tools::subagents — ToolSubset (ограничение
-  тулов), BuiltinSubagentFactory (PermissionedTools поверх BuiltinTools с общим
-  PermissionState), CompositeTools + agent_tools (объединение BuiltinTools +
-  spawn_agent). Наследование прав: субагент использует тот же PermissionState,
-  НИКОГДА не расширяет (канон PHILOSOPHY §6-7). Рефакторинг: PermissionedTools
-  теперь владеет Arc<dyn ToolExec> (раньше заимствовал), ToolExec::as_any добавлен.
-  В TUI source стал Arc<BackendSource>, spawn_turn берёт Arc.
+## Current Project Status
+- B0 UI Renderer Gate: ✅ PASS — Owner approved GO (prototype `b0.rs`: window, CJK/Cyrillic IME,
+  spring morphing; color fidelity fixed via non-sRGB 8-bit format; spacebar handled via `Named(Space)`)
+- A0 Skeleton: ✅ | A1 Data Layer: ✅ 5/5 | A2 LLM Adapter: ✅ 20/20 | A3 Loop: ✅ 9/9 | A4 Tools: ✅ 13/13 |
+  A5 Permissions: ✅ 14 (10 permissions + 4 diff) | A6 Memory: ✅ 5 | A7 TUI: ✅ 4 |
+  A8 Subagents: ✅ (core::subagents + tools::subagents)
+- Self-Updater Engine: ✅ (Dual-target user/system atomic replacement, periodic 4m background polling, `/channel` switching, `/update`)
+- Workspace Test Suite: 92 passed, 0 failed, `cargo clippy --workspace -- -D warnings` completely clean.
+- NEXT MILESTONE: A9 — MCP (client, manager, marketplace registry).
+- TUI Polish Notes:
+  Parallel streaming of reasoning and content (interleaved reasoning/content deltas fixed);
+  settled_boundary = min() across active indices; collapsed reasoning preserves preview line.
+  Truecolor ANSI rendering, non-breaking ANSI clipping, composer morphing, F-key shortcuts (F1 Context, F2 Reasoning, F3 Models, F4 Thinking, F5 Sampling, Shift+Tab Mode).
 
-## Верификация (обязательна перед закрытием любой вехи)
-```
+## Verification (Mandatory before closing any milestone)
+```bash
 cargo test --workspace
 cargo clippy --workspace -- -D warnings
 ```
-UI дополнительно golden-кадры позже. Никогда не закрывать веху без реального вывода.
+UI additionally requires golden frames. Never close a milestone without real command execution output in the audit log.
 
-## Критичные решения, которые легко сломать
-- Границы крейтов: core НЕ знает HTTP/SQL/UI (трейты LlmSource/ToolExec)
-- Инъекции: tool-результат всегда Role::Tool, тест hostile_tool_result_stays_in_tool_role
-- sRGB: surface формат non-sRGB 8-bit (Bgra8Unorm/Rgba8Unorm), иначе цвета выцветают
-- Пробел в winit: Key::Named(NamedKey::Space), не Character
-- wgpu 27: into_static нет, transmute с SAFETY (Window в App живёт дольше Gpu)
-- FTS5 schema_version хранится TEXT
-- Usage парсится до choices; сканер текстовых тулов НЕ в HTTP-потоке (подключается в цикле при необходимости)
+## Critical Invariants (Do Not Break)
+- Crate Boundaries: `core` NEVER knows HTTP, SQL, or UI (abstract traits `LlmSource` / `ToolExec`).
+- Injection Protection: tool execution results are always wrapped as `Role::Tool` (untrusted).
+- Surface Color Format: use non-sRGB 8-bit (`Bgra8Unorm` / `Rgba8Unorm`) to avoid washed out colors.
+- Spacebar Key Handling in winit: `Key::Named(NamedKey::Space)`.
+- wgpu 27: `into_static` unavailable; use safe lifetime transmute for Window in App.
+- SQLite FTS5 `schema_version`: stored as `TEXT`.
+- Token Usage: parsed before choices; text tool scanner is decoupled from HTTP stream.
 
-## Окружение
-- Песочница агента: headless Linux (Vulkan нет), запуск GUI невозможен — только
-  компиляция/тесты. Визуальные проверки делает владелец на своей машине.
-- Владелец: Windows, PowerShell (разделитель `;`), русский язык. Открыт OpenRouter.
-- Известная проблема: обрывы стриминга API — после обрыва продолжать с текущего места,
-  сверяясь с .audit/ и ROADMAP.md, не переделывая закрытое.
+## Environment
+- Agent Sandbox: Headless Linux (x86_64, non-root user).
+- Owner System: Windows, PowerShell, multi-lingual.
+- API Stream Resilience: on stream disconnects, resume from current position using `.audit/` and `ROADMAP.md`.
 
-## Стиль работы с владельцем
-- Не задавать несколько БЛОКОВ вопросов за раз (один ask_question = один батч)
-- Вехи без дат; скоуп = веха; «ещё заодно» = нарушение
-- Отчёты структурой: Status/Decision/Files/Verification/Open questions/Handoff
+## Collaboration Guidelines
+- Single focused question batches when soliciting user input.
+- Dateless milestones; scope strictly bounded by milestone description ("while we are at it" is forbidden).
+- Structured handoffs: Status / Decision / Files / Verification / Open questions / Handoff.

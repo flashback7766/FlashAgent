@@ -22,8 +22,8 @@ Files touched:
 
 2. **Refined Turn Recaps & Context-Aware Suggestions**:
    - Extracted clean user prompts (`extract_user_prompt`) by stripping prepended system/memory blocks before analyzing language (`is_ru`) and generating recaps.
-   - Fixed language mismatch where English greetings (e.g. `Hi!`) mistakenly produced Russian recaps (`Действия по запросу завершены`) and inappropriate pleasantries (`Спасибо (→ to use)`).
-   - For greetings, system now generates informative suggestions (e.g. `"Explain the project"` / `"Расскажи о проекте"`), preventing useless or awkward ghost replies.
+   - Fixed language mismatch where English greetings (e.g. `Hi!`) mistakenly produced non-contextual recaps (`Task actions completed`) and inappropriate pleasantries (`Thank you (→ to use)`).
+   - For greetings, system now generates informative suggestions (e.g. `"Explain the project"`), preventing useless or awkward ghost replies.
 
 3. **Human-Like Code Craftsmanship**:
    - Injected pragmatic senior engineer instructions into `.agents/rules/code_quality.md`, `subagents.rs`, and the core system prompt in `main.rs`.

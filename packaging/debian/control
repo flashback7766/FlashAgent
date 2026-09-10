@@ -1,0 +1,11 @@
+Package: flashagent
+Version: 0.1.0-1
+Section: devel
+Priority: optional
+Architecture: amd64
+Maintainer: flashback7766 <https://github.com/flashback7766>
+Depends: libc6 (>= 2.34)
+Description: Fast, local-first autonomous AI coding agent in pure Rust
+ FlashAgent is an ultra-fast, local-first autonomous AI coding assistant
+ built from scratch in 100% pure Rust. Features mid-flight steering,
+ model prefill tracking, zero Chromium overhead, and multi-tier security.

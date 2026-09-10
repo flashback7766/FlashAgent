@@ -68,19 +68,63 @@ fn read_if_present(dir: &Path, name: &str, kind: MemoryKind) -> Option<MemoryDoc
     Some(MemoryDoc { path, kind, content })
 }
 
-/// Collect memory docs: project files in priority order, then the global one.
+/// Collect memory docs: project files and rule directories in priority order, then the global one.
+/// Priority hierarchy: .flashagent/rules/ > .agents/rules/ > AGENTS.md / CLAUDE.md / MEMORY.md > ~/.flashagent/rules/ > ~/.flashagent/MEMORY.md
 /// Never fails: unreadable/absent files are skipped.
 pub fn collect(project_dir: &Path, global_dir: &Path) -> Vec<MemoryDoc> {
     let mut docs = Vec::new();
-    for name in PROJECT_FILENAMES {
+
+    // 1. Project rules directory: .flashagent/rules/ and .agents/rules/
+    for rules_subdir in &[".flashagent/rules", ".agents/rules"] {
+        let rdir = project_dir.join(rules_subdir);
+        if let Ok(entries) = std::fs::read_dir(rdir) {
+            let mut paths: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+            paths.sort();
+            for p in paths {
+                if p.extension().is_some_and(|ext| ext == "md") {
+                    if let Ok(content) = std::fs::read_to_string(&p) {
+                        docs.push(MemoryDoc {
+                            path: p,
+                            kind: MemoryKind::Project,
+                            content,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Project root memory and rule files
+    for name in &["MEMORY.md", "CLAUDE.md", "AGENTS.md", ".cursorrules"] {
         let kind = if *name == "MEMORY.md" { MemoryKind::Project } else { MemoryKind::Foreign };
         if let Some(d) = read_if_present(project_dir, name, kind) {
             docs.push(d);
         }
     }
+
+    // 3. User-global rules directory: ~/.flashagent/rules/
+    let global_rules = global_dir.join("rules");
+    if let Ok(entries) = std::fs::read_dir(global_rules) {
+        let mut paths: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        paths.sort();
+        for p in paths {
+            if p.extension().is_some_and(|ext| ext == "md") {
+                if let Ok(content) = std::fs::read_to_string(&p) {
+                    docs.push(MemoryDoc {
+                        path: p,
+                        kind: MemoryKind::Global,
+                        content,
+                    });
+                }
+            }
+        }
+    }
+
+    // 4. User-global MEMORY.md
     if let Some(d) = read_if_present(global_dir, GLOBAL_FILENAME, MemoryKind::Global) {
         docs.push(d);
     }
+
     docs
 }
 
@@ -156,16 +200,16 @@ mod tests {
     #[test]
     fn collect_reads_all_levels_and_skips_missing() {
         let proj = tempdir("collect");
-        fs::write(proj.join("MEMORY.md"), "# Проект\nцель проекта\n").unwrap();
+        fs::write(proj.join("MEMORY.md"), "# Project\nproject goals\n").unwrap();
         fs::write(proj.join("CLAUDE.md"), "# Foreign rules\nbe terse\n").unwrap();
         // AGENTS.md absent on purpose.
         let glob = tempdir("collect");
-        fs::write(glob.join("MEMORY.md"), "# Глобал\nя предпочитаю краткость\n").unwrap();
+        fs::write(glob.join("MEMORY.md"), "# Global\nprefer brevity\n").unwrap();
 
         let docs = collect(&proj, &glob);
         assert_eq!(docs.len(), 3);
         assert_eq!(docs[0].kind, MemoryKind::Project);
-        assert!(docs[0].content.contains("Проект"));
+        assert!(docs[0].content.contains("Project"));
         assert_eq!(docs[1].kind, MemoryKind::Foreign);
         assert_eq!(docs[2].kind, MemoryKind::Global);
 
@@ -176,8 +220,8 @@ mod tests {
 
     #[test]
     fn outline_takes_heading_lines() {
-        let o = outline("# A\n text\n## B-кириллица\nmore");
-        assert_eq!(o, vec!["# A", "## B-кириллица"]);
+        let o = outline("# A\n text\n## B-section\nmore");
+        assert_eq!(o, vec!["# A", "## B-section"]);
         assert!(outline("no headings here").is_empty());
     }
 
@@ -186,24 +230,24 @@ mod tests {
         let docs = vec![MemoryDoc {
             path: PathBuf::from("/p/MEMORY.md"),
             kind: MemoryKind::Project,
-            content: "# Цель\nделать хорошо".into(),
+            content: "# Goal\nbuild high quality software".into(),
         }];
         let block = injection_block(&docs, 4000);
         assert!(block.contains("# Memory"));
-        assert!(block.contains("делать хорошо"));
+        assert!(block.contains("build high quality software"));
         assert!(block.contains("project memory"));
         assert!(!block.contains("outline only"));
     }
 
     #[test]
     fn over_budget_docs_degrade_to_outline() {
-        let big_body = "строка контента для веса токенов\n".repeat(200);
-        let big = format!("# Большой документ\n## Раздел 1\n{big_body}");
+        let big_body = "content line for token weight\n".repeat(200);
+        let big = format!("# Large Document\n## Section 1\n{big_body}");
         let docs = vec![
             MemoryDoc {
                 path: PathBuf::from("/p/MEMORY.md"),
                 kind: MemoryKind::Project,
-                content: "# Малый\nвлезает".into(),
+                content: "# Small\nfits in context".into(),
             },
             MemoryDoc {
                 path: PathBuf::from("/p/CLAUDE.md"),
@@ -213,10 +257,10 @@ mod tests {
         ];
         let block = injection_block(&docs, 200);
         // Small one is whole.
-        assert!(block.contains("влезает"));
+        assert!(block.contains("fits in context"));
         // Big one is outline-only.
         assert!(block.contains("outline only"));
-        assert!(block.contains("## Раздел 1"));
+        assert!(block.contains("## Section 1"));
         assert!(!block.contains(big_body.trim()));
         assert!(block.contains("read_file"));
     }
@@ -224,5 +268,29 @@ mod tests {
     #[test]
     fn empty_docs_produce_empty_block() {
         assert_eq!(injection_block(&[], 4000), "");
+    }
+
+    #[test]
+    fn test_collect_rules_hierarchy() {
+        let proj = tempdir("rules_hier");
+        let fa_rules = proj.join(".flashagent").join("rules");
+        fs::create_dir_all(&fa_rules).unwrap();
+        fs::write(fa_rules.join("01_rule.md"), "# Rule 1\nPrimary rule").unwrap();
+        fs::write(proj.join("AGENTS.md"), "# AGENTS\nCanon rules").unwrap();
+        fs::write(proj.join("MEMORY.md"), "# Project Memory\nProject details").unwrap();
+
+        let glob = tempdir("rules_hier_glob");
+        let glob_rules = glob.join("rules");
+        fs::create_dir_all(&glob_rules).unwrap();
+        fs::write(glob_rules.join("user_pref.md"), "# User Pref\nBrevity").unwrap();
+
+        let docs = collect(&proj, &glob);
+        assert_eq!(docs.len(), 4);
+        assert!(docs[0].path.ends_with("01_rule.md"));
+        assert_eq!(docs[0].kind, MemoryKind::Project);
+        assert!(docs[1].path.ends_with("MEMORY.md"));
+        assert!(docs[2].path.ends_with("AGENTS.md"));
+        assert!(docs[3].path.ends_with("user_pref.md"));
+        assert_eq!(docs[3].kind, MemoryKind::Global);
     }
 }

@@ -570,13 +570,13 @@ mod tests {
     #[test]
     fn scanner_hermes_format() {
         let mut s = TextToolScanner::default();
-        let out = s.feed("Думаю... <tool_call>{\"name\":\"shell\",\"arguments\":{\"cmd\":\"ls\"}}</tool_call> готово");
+        let out = s.feed("Thinking... <tool_call>{\"name\":\"shell\",\"arguments\":{\"cmd\":\"ls\"}}</tool_call> done");
         assert_eq!(
             out,
             vec![
-                ScannerEvent::Text("Думаю... ".into()),
+                ScannerEvent::Text("Thinking... ".into()),
                 ScannerEvent::ToolCall { name: "shell".into(), args_json: r#"{"cmd":"ls"}"#.into() },
-                ScannerEvent::Text(" готово".into()),
+                ScannerEvent::Text(" done".into()),
             ]
         );
     }
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn scanner_does_not_eat_plain_code_fences() {
         let mut s = TextToolScanner::default();
-        let out = s.feed("Смотри:\n```rust\n{\"name\": \"not_a_tool\", \"x\": 1}\n```\nконец");
+        let out = s.feed("Look:\n```rust\n{\"name\": \"not_a_tool\", \"x\": 1}\n```\nend");
         let text = out.iter().map(|e| match e {
             ScannerEvent::Text(t) => t.as_str(),
             ScannerEvent::ToolCall { .. } => "TOOL",

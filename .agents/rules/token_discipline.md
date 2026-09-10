@@ -1,6 +1,6 @@
 # Token Discipline
 
-- Grep/поиск перед чтением. Целевые срезы вместо полных файлов (файл целиком — только < 100 строк).
-- Параллельные независимые вызовы инструментов в один ход.
-- Правки — хирургические contiguous chunks; полная перезапись только для новых файлов.
-- Отчёты в handoff — структурой (Status/Decision/Files/Verification), без прозы.
+- Grep / search before reading. Target slices instead of dumping full files (full file view only when < 100 lines).
+- Parallel independent tool calls within a single turn.
+- Edits via surgical contiguous chunks; full overwrite only for brand new files.
+- Handoff reports must be structured (Status / Decision / Files / Verification), no conversational fluff.

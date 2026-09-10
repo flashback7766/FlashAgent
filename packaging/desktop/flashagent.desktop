@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=FlashAgent
+Comment=Fast, local-first autonomous AI coding agent in pure Rust
+Exec=flashagent-tui
+Icon=flashagent
+Terminal=true
+Type=Application
+Categories=Development;Utility;
+Keywords=ai;agent;coding;terminal;rust;

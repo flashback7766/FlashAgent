@@ -19,6 +19,7 @@ pub struct OpenAiCompat {
     client: reqwest::Client,
     profile: std::sync::Arc<std::sync::RwLock<Option<crate::thinking::ThinkingProfile>>>,
     discovery: std::sync::Arc<std::sync::RwLock<Option<crate::thinking::ServerDiscovery>>>,
+    working_models_url: std::sync::Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl OpenAiCompat {
@@ -34,6 +35,7 @@ impl OpenAiCompat {
                 .unwrap_or_default(),
             profile: std::sync::Arc::new(std::sync::RwLock::new(None)),
             discovery: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            working_models_url: std::sync::Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -70,12 +72,30 @@ impl OpenAiCompat {
     /// or standard `/v1/models`.
     pub async fn discover_server(&self) -> Option<crate::thinking::ServerDiscovery> {
         let root = self.base_url.strip_suffix("/v1").unwrap_or(&self.base_url);
-        let urls_to_try = [
-            format!("{root}/api/v1/models"),
-            format!("{root}/api/v0/models"),
-            format!("{}/models", self.base_url),
-            format!("{root}/models"),
-        ];
+        let cached_url = self.working_models_url.read().ok().and_then(|u| u.clone());
+
+        let urls_to_try: Vec<String> = if let Some(ref url) = cached_url {
+            let mut list = vec![url.clone()];
+            let defaults = [
+                format!("{root}/api/v1/models"),
+                format!("{root}/api/v0/models"),
+                format!("{}/models", self.base_url),
+                format!("{root}/models"),
+            ];
+            for d in defaults {
+                if &d != url {
+                    list.push(d);
+                }
+            }
+            list
+        } else {
+            vec![
+                format!("{root}/api/v1/models"),
+                format!("{root}/api/v0/models"),
+                format!("{}/models", self.base_url),
+                format!("{root}/models"),
+            ]
+        };
 
         for url in urls_to_try {
             let mut req = self.client.get(&url).timeout(std::time::Duration::from_secs(2));
@@ -87,6 +107,9 @@ impl OpenAiCompat {
                     if let Ok(val) = resp.json::<serde_json::Value>().await {
                         let models = crate::thinking::parse_server_models(&val);
                         if !models.is_empty() {
+                            if let Ok(mut lock) = self.working_models_url.write() {
+                                *lock = Some(url);
+                            }
                             let current_model = self.model();
                             // Pick active model:
                             // 1. Current model if it matches an entry and is loaded in server memory
@@ -279,9 +302,10 @@ impl OpenAiCompat {
                 // For local / LM Studio endpoints without an explicit thinking profile,
                 // proactively suppress thinking so models like Gemma 4 / Qwen don't spend limited token budgets on thinking.
                 body["reasoning"] = serde_json::json!("off");
+                body["reasoning_effort"] = serde_json::json!("none");
                 body["enable_thinking"] = serde_json::json!(false);
-                body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
-                body["chat_template_config"] = serde_json::json!({ "enable_thinking": false });
+                body["chat_template_kwargs"] = serde_json::json!({ "thinking": false, "enable_thinking": false });
+                body["chat_template_config"] = serde_json::json!({ "thinking": false, "enable_thinking": false });
             }
         }
 
@@ -479,12 +503,12 @@ mod tests {
         assert_eq!(body_lm_default["reasoning"], "on");
         assert_eq!(body_lm_default["enable_thinking"], true);
 
-        // Auto mode (TurnOptions::default()): for "Привет!", dynamically selects "off"
+        // Auto mode (TurnOptions::default()): for "Hello!", dynamically selects "off"
         let sys_template = "You are FlashAgent. REASONING INSTRUCTIONS:\n- break down into bold stages\n\nTASK EXECUTION:\n- write clean code";
         let body_lm_auto_hi = b_lm.body(
             &[
                 ChatMessage::system(sys_template),
-                ChatMessage::user("Привет!"),
+                ChatMessage::user("Hello!"),
             ],
             &[],
             &crate::types::TurnOptions::default(),
@@ -500,7 +524,7 @@ mod tests {
         let body_lm_auto_code = b_lm.body(
             &[
                 ChatMessage::system(sys_template),
-                ChatMessage::user("Напиши функцию парсинга на Rust"),
+                ChatMessage::user("Write a parser function in Rust"),
             ],
             &[],
             &crate::types::TurnOptions::default(),

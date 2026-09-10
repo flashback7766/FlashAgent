@@ -54,6 +54,12 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/compact", "Compact conversation context (optional: /compact <focus instructions>)", AutocompleteCategory::Command),
         AutocompleteItem::new("/regenerate", "Regenerate the last assistant response from scratch (or press Ctrl+R)", AutocompleteCategory::Command),
         AutocompleteItem::new("/retry", "Retry and regenerate the last assistant response from scratch (Ctrl+R)", AutocompleteCategory::Command),
+        AutocompleteItem::new("/update", "Check and apply FlashAgent updates in-place", AutocompleteCategory::Command),
+        AutocompleteItem::new("/channel", "Switch release channel: /channel <stable|beta>", AutocompleteCategory::Command),
+        AutocompleteItem::new("/diff", "Preview unstaged git changes and diff stat", AutocompleteCategory::Command),
+        AutocompleteItem::new("/commit", "Review changes and commit with /commit <message>", AutocompleteCategory::Command),
+        AutocompleteItem::new("/editor", "Open external editor (nano/vim/code) to craft prompt", AutocompleteCategory::Command),
+        AutocompleteItem::new("/export", "Export chat session to markdown, HTML, or JSONL", AutocompleteCategory::Command),
     ]
 }
 
@@ -77,7 +83,7 @@ pub fn sub_commands(input: &str) -> Option<Vec<AutocompleteItem>> {
     } else if lower.starts_with("/mode ") || lower == "/mode" {
         Some(vec![
             AutocompleteItem::new("/mode manual", "Require confirmation for file writes and shell", AutocompleteCategory::Command),
-            AutocompleteItem::new("/mode autonomic", "Automatic execution with prompts on critical actions", AutocompleteCategory::Command),
+            AutocompleteItem::new("/mode edits", "Auto-approve file edits, ask on shell commands", AutocompleteCategory::Command),
             AutocompleteItem::new("/mode planning", "Read-only planning mode (modifications blocked)", AutocompleteCategory::Command),
             AutocompleteItem::new("/mode bypass", "Bypass all approval gates (full autonomy)", AutocompleteCategory::Command),
         ])
@@ -85,6 +91,14 @@ pub fn sub_commands(input: &str) -> Option<Vec<AutocompleteItem>> {
         Some(vec![
             AutocompleteItem::new("/mcp list", "List configured and connected MCP servers", AutocompleteCategory::Command),
             AutocompleteItem::new("/mcp market", "Browse vetted MCP marketplace extensions", AutocompleteCategory::Command),
+            AutocompleteItem::new("/mcp test", "Test connection and discover tools for an MCP server", AutocompleteCategory::Command),
+            AutocompleteItem::new("/mcp add", "Add and scaffold a curated MCP extension from marketplace", AutocompleteCategory::Command),
+            AutocompleteItem::new("/mcp reload", "Reload MCP configurations and restart active servers", AutocompleteCategory::Command),
+        ])
+    } else if lower.starts_with("/channel ") || lower == "/channel" {
+        Some(vec![
+            AutocompleteItem::new("/channel beta", "Switch to Beta channel (latest features & pre-releases)", AutocompleteCategory::Command),
+            AutocompleteItem::new("/channel stable", "Switch to Stable channel (official releases)", AutocompleteCategory::Command),
         ])
     } else if lower.starts_with("/compact ") || lower == "/compact" {
         Some(vec![

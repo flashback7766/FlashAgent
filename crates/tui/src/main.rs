@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use flashagent_core::{
@@ -20,9 +20,9 @@ use flashagent_llm::{ChatMessage, LlmBackend};
 use flashagent_tools::{BuiltinTools, BuiltinToolsConfig};
 use flashagent_tui::{
     clip_ansi, pad_box_row, restore_line_color,
-    visible_width, welcome_card_with_thinking, welcome_card_with_thinking_animated, AutocompletePopup, ChatView, ConfirmSelect,
+    visible_width, welcome_card_responsive_opts, AutocompletePopup, ChatView, ConfirmSelect,
     ContextModal, LineKind, PrefillTracker, ReasoningExpansion, RenderLine, SamplingAction, SamplingView,
-    SelectItem, SelectMenu, SettingsAction, SettingsView, TuiGate, TuiQuestionGate, SPINNER,
+    SelectItem, SelectMenu, SettingsAction, SettingsView, TuiGate, TuiQuestionGate, UiEvent, SPINNER,
 };
 
 #[derive(Default, Clone)]
@@ -81,20 +81,6 @@ impl LlmSource for BackendSource {
     }
 }
 
-enum UiEvent {
-    Loop(LoopEvent),
-    Key(KeyCode, KeyModifiers),
-    Paste(String),
-    Mouse(MouseEvent),
-    Finished(Result<(Vec<ChatMessage>, DoneReason), String>),
-    ServerDiscovered(flashagent_llm::ServerDiscovery),
-    BackgroundRecap {
-        turn_id: u64,
-        recap: String,
-        suggestion: Option<String>,
-    },
-}
-
 fn color(kind: LineKind) -> crossterm::style::Color {
     // Truecolor dark warm aesthetic (M3 Expressive / Charcoal & Amber / Sand).
     match kind {
@@ -129,7 +115,7 @@ struct Renderer {
     scroll_offset: usize,
 }
 
-/// Everything the frame renderer needs beyond the chat itself.
+#[allow(dead_code)]
 struct FrameState<'a> {
     input: &'a str,
     model: &'a str,
@@ -139,8 +125,9 @@ struct FrameState<'a> {
     is_goal_active: bool,
     tip: Option<&'a str>,
     tip_animated: Option<&'a str>,
-    /// Formatted turn stats (prompt tokens · tg · mtp) to display right-aligned on Line 2.
-    turn_stats: Option<&'a str>,
+    tip_lines: Option<&'a [String]>,
+    /// Token tracker to dynamically compute turn stats fitting into available space without truncating tips.
+    token_tracker: Option<&'a TokenTracker>,
     thinking_effort: &'a str,
     reasoning_expand: ReasoningExpansion,
     tick_n: usize,
@@ -160,6 +147,8 @@ struct FrameState<'a> {
     copy_toast: Option<&'a str>,
     prefill_status: Option<&'a str>,
     ttft_display: Option<&'a str>,
+    update_banner: Option<&'a str>,
+    context_warn_threshold: usize,
 }
 
 /// Tracks tokens generated strictly by the model in the current turn and
@@ -359,27 +348,46 @@ impl TokenTracker {
         sum as f64 / dt
     }
 
+    #[allow(dead_code)]
     fn format_stats(&self) -> Option<String> {
+        self.format_stats_width(120)
+    }
+
+    fn format_stats_width(&self, budget: usize) -> Option<String> {
+        if budget < 10 {
+            return None;
+        }
+
         let mut parts = Vec::new();
 
         if let Some(p) = self.prompt_tokens {
-            if p > 0 {
+            if p > 0 && budget >= 45 {
                 let p_str = flashagent_core::ContextUsage::format_used_tokens(p);
-                parts.push(format!("\x1b[38;2;160;175;200m{p_str} prompt\x1b[0m"));
+                if budget >= 60 {
+                    parts.push(format!("\x1b[38;2;160;175;200m{p_str} prompt\x1b[0m"));
+                } else {
+                    parts.push(format!("\x1b[38;2;160;175;200m{p_str}\x1b[0m"));
+                }
             }
         }
 
         if let Some(ttft) = self.last_ttft {
-            let spd_str = if let Some(spd) = self.last_prefill_speed {
-                if spd >= 1000.0 {
-                    format!("{:.1}k t/s prefill", spd / 1000.0)
+            if budget >= 60 {
+                let spd_str = if let Some(spd) = self.last_prefill_speed {
+                    if spd >= 1000.0 {
+                        format!("{:.1}k t/s prefill", spd / 1000.0)
+                    } else {
+                        format!("{:.0} t/s prefill", spd)
+                    }
                 } else {
-                    format!("{:.0} t/s prefill", spd)
-                }
+                    "prefill".to_string()
+                };
+                parts.push(format!("\x1b[38;2;120;220;140m⚡ TTFT {:.2}s ({spd_str})\x1b[0m", ttft.as_secs_f64()));
+            } else if budget >= 30 {
+                parts.push(format!("\x1b[38;2;120;220;140m⚡ TTFT {:.2}s\x1b[0m", ttft.as_secs_f64()));
             } else {
-                "prefill".to_string()
-            };
-            parts.push(format!("\x1b[38;2;120;220;140m⚡ TTFT {:.2}s ({spd_str})\x1b[0m", ttft.as_secs_f64()));
+                parts.push(format!("\x1b[38;2;120;220;140m⚡ {:.2}s\x1b[0m", ttft.as_secs_f64()));
+            }
         }
 
         let speed = if self.is_running {
@@ -389,22 +397,45 @@ impl TokenTracker {
         };
 
         if let Some(s) = speed {
-            if s > 0.0 {
+            if s > 0.0 && budget >= 18 {
                 parts.push(format!("\x1b[38;2;145;205;140m{:.1} tg\x1b[0m", s));
             }
         }
 
         if let Some(mtp) = &self.last_mtp {
-            if mtp.total_draft_tokens > 0 {
+            if mtp.total_draft_tokens > 0 && budget >= 35 {
                 let rate = mtp.acceptance_rate();
-                parts.push(format!("\x1b[38;2;225;175;95mmtp: {:.0}%\x1b[0m", rate));
+                if budget >= 50 {
+                    parts.push(format!("\x1b[38;2;225;175;95mmtp: {:.0}%\x1b[0m", rate));
+                } else {
+                    parts.push(format!("\x1b[38;2;225;175;95m{:.0}%\x1b[0m", rate));
+                }
             }
         }
 
         if parts.is_empty() {
             None
         } else {
-            Some(parts.join(" \x1b[38;2;100;95;90m·\x1b[0m "))
+            let joined = parts.join(" \x1b[38;2;100;95;90m·\x1b[0m ");
+            if visible_width(&joined) <= budget {
+                Some(joined)
+            } else {
+                let mut fallback_parts = Vec::new();
+                if let Some(ttft) = self.last_ttft {
+                    fallback_parts.push(format!("\x1b[38;2;120;220;140m⚡ {:.2}s\x1b[0m", ttft.as_secs_f64()));
+                }
+                if let Some(s) = speed {
+                    if s > 0.0 {
+                        fallback_parts.push(format!("\x1b[38;2;145;205;140m{:.1} tg\x1b[0m", s));
+                    }
+                }
+                let fallback = fallback_parts.join(" \x1b[38;2;100;95;90m·\x1b[0m ");
+                if visible_width(&fallback) <= budget && !fallback.is_empty() {
+                    Some(fallback)
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -468,7 +499,40 @@ impl Renderer {
             self.needs_reprint = true;
         }
     }
+}
 
+fn format_status_left(
+    running: bool,
+    is_goal_active: bool,
+    mode_label: &str,
+    token_tracker: Option<&TokenTracker>,
+    budget: usize,
+    expand_status: &str,
+) -> String {
+    if running {
+        let mode_str = if is_goal_active {
+            "\x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m".to_string()
+        } else {
+            format!("\x1b[38;2;145;205;140m[{mode_label}]\x1b[0m")
+        };
+        format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;168;199;250mGenerating response...\x1b[0m{expand_status}")
+    } else if let Some(stats) = token_tracker.and_then(|tt| tt.format_stats_width(budget)) {
+        if is_goal_active {
+            format!("  \x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m \x1b[38;2;100;95;90m·\x1b[0m {stats}{expand_status}")
+        } else {
+            format!("  {stats}{expand_status}")
+        }
+    } else {
+        let mode_str = if is_goal_active {
+            "\x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m".to_string()
+        } else {
+            format!("\x1b[38;2;145;205;140m[{mode_label}]\x1b[0m")
+        };
+        format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;140;135;130mReady\x1b[0m{expand_status}")
+    }
+}
+
+impl Renderer {
     #[allow(clippy::too_many_arguments)]
     fn frame(
         &mut self,
@@ -497,7 +561,7 @@ impl Renderer {
         let reprint_all = resized || toggled || self.needs_reprint;
         self.needs_reprint = false;
 
-        let (settled, live) = chat.render_split(width.saturating_sub(1), st.reasoning_expand);
+        let (settled, live) = chat.render_split(width, st.reasoning_expand);
         let mut tail: Vec<RenderLine> = live;
 
         let inner_w = width.saturating_sub(2);
@@ -730,10 +794,10 @@ impl Renderer {
                         _ => "...",
                     };
                     format!(" {prompt_styled} \x1b[38;2;135;130;125mWorking on task{dots}\x1b[0m")
-                } else if let Some(custom) = st.custom_placeholder {
-                    format!(" {prompt_styled}  \x1b[38;2;135;140;155m{custom}\x1b[0m")
                 } else if let Some(sug) = st.suggested_prompt {
                     format!(" {prompt_styled}  \x1b[38;2;155;160;175m{sug}\x1b[0m \x1b[38;2;100;105;120m(→ to use)\x1b[0m")
+                } else if let Some(custom) = st.custom_placeholder {
+                    format!(" {prompt_styled}  \x1b[38;2;135;140;155m{custom}\x1b[0m")
                 } else {
                     format!(" {prompt_styled}  \x1b[38;2;135;130;125mAsk FlashAgent to do anything...\x1b[0m")
                 }
@@ -796,47 +860,60 @@ impl Renderer {
                 st.tokens_per_sec,
                 st.elapsed_secs,
             )
+        } else if let Some(banner) = st.update_banner {
+            format!("  \x1b[1;38;2;120;220;140m{banner}\x1b[0m")
         } else {
-            "  \x1b[38;2;135;130;125menter — send · tab — settings · f1 — context · f2 — verbose · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · ctrl+c/v · esc — quit\x1b[0m".to_string()
+            // Responsive footer shortcuts adapting cleanly to any terminal width:
+            if width >= 140 {
+                "  \x1b[38;2;135;130;125menter — send · tab — settings · f1 — context · f2 — verbose · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · ctrl+c/v · esc — quit\x1b[0m".to_string()
+            } else if width >= 115 {
+                "  \x1b[38;2;135;130;125menter — send · tab — settings · f1 — context · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · esc — quit\x1b[0m".to_string()
+            } else if width >= 92 {
+                "  \x1b[38;2;135;130;125menter — send · tab — settings · f3 — model · f4 — effort · f5 — sampling · esc — quit\x1b[0m".to_string()
+            } else if width >= 68 {
+                "  \x1b[38;2;135;130;125menter — send · tab — settings · f3 — model · esc — quit\x1b[0m".to_string()
+            } else {
+                "  \x1b[38;2;135;130;125menter — send · tab — menu · esc — quit\x1b[0m".to_string()
+            }
         };
         tail.push((LineKind::System, left_hint));
 
-        // Line 2: Animated Tip and right-aligned turn stats (prompt tokens · tg · mtp)
-        let default_tip = "Press Tab or type /settings to configure FlashAgent";
-        let raw_tip = if let Some(anim) = st.tip_animated {
-            format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m {anim}")
-        } else {
-            let tip_content = st.tip.unwrap_or(default_tip);
-            format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{tip_content}\x1b[0m")
-        };
-
-        let tip_row = if let Some(stats_str) = st.turn_stats {
-            let stats_vis = visible_width(stats_str);
-            let tip_vis = visible_width(&raw_tip);
-            if tip_vis + stats_vis + 3 <= width {
-                let pad = " ".repeat(width.saturating_sub(tip_vis + stats_vis + 1));
-                format!("{raw_tip}{pad}{stats_str}")
-            } else if width > stats_vis + 10 {
-                let budget = width.saturating_sub(stats_vis + 3);
-                let clipped_tip = clip_ansi(&raw_tip, budget);
-                let pad = " ".repeat(width.saturating_sub(visible_width(&clipped_tip) + stats_vis + 1));
-                format!("{clipped_tip}{pad}{stats_str}")
-            } else {
-                clip_ansi(&raw_tip, width.saturating_sub(2))
+        // Line 2: Dedicated Developer Tip across full terminal width (wraps to 2 lines in compact terminals)
+        if let Some(lines) = st.tip_lines {
+            for line in lines {
+                let tip_row = clip_ansi(line, width.saturating_sub(2));
+                tail.push((LineKind::System, tip_row));
             }
+        } else if let Some(anim) = st.tip_animated {
+            let raw_tip = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m {anim}");
+            let tip_row = clip_ansi(&raw_tip, width.saturating_sub(2));
+            tail.push((LineKind::System, tip_row));
         } else {
-            clip_ansi(&raw_tip, width.saturating_sub(2))
-        };
-        tail.push((LineKind::System, tip_row));
+            let default_tip = "Press Tab or type /settings to configure FlashAgent";
+            let tip_content = st.tip.unwrap_or(default_tip);
+            let avail1 = width.saturating_sub(8);
+            if width >= 30 && tip_content.chars().count() > avail1 {
+                let (l1, l2) = flashagent_tui::tips::split_tip_at_word_boundary(tip_content, avail1);
+                let row1 = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{l1}\x1b[0m");
+                let row2 = format!("       \x1b[38;2;175;170;160m{l2}\x1b[0m");
+                tail.push((LineKind::System, clip_ansi(&row1, width.saturating_sub(2))));
+                tail.push((LineKind::System, clip_ansi(&row2, width.saturating_sub(2))));
+            } else {
+                let raw_tip = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{tip_content}\x1b[0m");
+                let tip_row = clip_ansi(&raw_tip, width.saturating_sub(2));
+                tail.push((LineKind::System, tip_row));
+            }
+        }
 
-        // Line 3: System Status sub-line and right-aligned context gauge
-        let model_val = if st.model.is_empty() { "default" } else { st.model };
-        let raw_model_display = match st.context_window {
-            Some(ctx) if !ctx.is_empty() => format!("{model_val} ({ctx})"),
-            _ => model_val.to_string(),
+        // Line 3: Turn telemetry & performance metrics on the left, context gauge on the right
+        let gauge_base = context_usage.format_compact_gauge(10);
+        let gauge_str = if st.context_warn_threshold > 0 && context_usage.percentage() >= st.context_warn_threshold as f32 {
+            format!("\x1b[1;38;2;245;140;80m⚠ High Ctx ({:.0}%)\x1b[0m {gauge_base}", context_usage.percentage())
+        } else {
+            gauge_base
         };
-        let max_model_len = (inner_w / 3).max(20);
-        let model_display = flashagent_tui::truncate_middle(&raw_model_display, max_model_len);
+        let gauge_vis = visible_width(&gauge_str);
+        let budget = width.saturating_sub(gauge_vis + 4);
 
         let expand_status = if st.reasoning_expand.all {
             " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: all]\x1b[0m"
@@ -845,39 +922,23 @@ impl Renderer {
         } else {
             ""
         };
-        let cwd_clean = if st.cwd.starts_with('~') && !st.cwd.starts_with("~/") && st.cwd.len() > 1 {
-            format!("~/{}", &st.cwd[1..])
-        } else {
-            st.cwd.to_string()
-        };
-        let max_cwd_len = (inner_w / 4).max(16);
-        let cwd_display = flashagent_tui::truncate_middle(&cwd_clean, max_cwd_len);
 
-        let mode_label = if st.is_goal_active {
-            "\x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m".to_string()
-        } else {
-            format!("\x1b[38;2;145;205;140m[{}]\x1b[0m", st.mode.label())
-        };
-
-        let f_keep_str = if let Some(fk) = st.f_keep {
-            format!(" \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;120;220;140mcache: {:.0}%\x1b[0m", fk * 100.0)
-        } else {
-            String::new()
-        };
-        let left_meta = format!(
-            "  \x1b[38;2;160;155;145m{model_display}\x1b[0m \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;140;135;130m{cwd_display}\x1b[0m \x1b[38;2;100;95;90m·\x1b[0m {mode_label} \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;225;175;95mthinking: {}\x1b[0m{f_keep_str}{expand_status}",
-            st.thinking_effort,
+        let left_telemetry = format_status_left(
+            st.running,
+            st.is_goal_active,
+            st.mode.label(),
+            st.token_tracker,
+            budget,
+            expand_status,
         );
 
-        let gauge_str = context_usage.format_compact_gauge(10);
-        let left_vis = visible_width(&left_meta);
-        let gauge_vis = visible_width(&gauge_str);
+        let left_vis = visible_width(&left_telemetry);
         let status_row = if left_vis + gauge_vis + 3 <= width {
             let pad = " ".repeat(width.saturating_sub(left_vis + gauge_vis + 1));
-            format!("{left_meta}{pad}{gauge_str}")
+            format!("{left_telemetry}{pad}{gauge_str}")
         } else {
-            let budget = width.saturating_sub(gauge_vis + 3);
-            let clipped_left = clip_ansi(&left_meta, budget);
+            let clip_budget = width.saturating_sub(gauge_vis + 3);
+            let clipped_left = clip_ansi(&left_telemetry, clip_budget);
             let pad = " ".repeat(width.saturating_sub(visible_width(&clipped_left) + gauge_vis + 1));
             format!("{clipped_left}{pad}{gauge_str}")
         };
@@ -925,7 +986,13 @@ impl Renderer {
         let mut out = String::new();
         if reprint_all {
             // Full repaint: home + clear, then reprint including settled.
-            out.push_str("\x1b[H\x1b[2J");
+            // When on the initial welcome screen, also purge scrollback (\x1b[3J) so
+            // terminal emulator reflow lines from window resize are wiped completely.
+            if !chat.has_user_message() {
+                out.push_str("\x1b[3J\x1b[H\x1b[2J");
+            } else {
+                out.push_str("\x1b[H\x1b[2J");
+            }
         } else {
             // Move cursor up into the top of the previous tail, erase down.
             if self.prev_cursor_tail_offset > 0 {
@@ -987,6 +1054,7 @@ async fn main() -> Result<()> {
     let mut config = AppConfig::load();
     let mut force_setup = false;
     let mut skip_trust = false;
+    let mut resume_session_id = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -1000,13 +1068,62 @@ async fn main() -> Result<()> {
                     config.model = val;
                 }
             }
+            "-v" | "--version" => {
+                println!("FlashAgent {}", flashagent_svc::updater::current_version());
+                return Ok(());
+            }
+            "--resume" => {
+                if let Some(val) = args.next() {
+                    resume_session_id = Some(val);
+                } else {
+                    anyhow::bail!("--resume requires a session ID");
+                }
+            }
+            "--update" => {
+                if flashagent_svc::updater::is_dev_mode() {
+                    println!("In-app updater is disabled in development mode (running from source repository or cargo target build).");
+                    println!("To update your dev build, pull latest git commits and run `cargo build --release`.");
+                    return Ok(());
+                }
+                println!("Checking for updates on {} channel...", config.update_channel.label());
+                match flashagent_svc::updater::check_for_updates(config.update_channel, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
+                    Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, is_downgrade, .. }) => {
+                        let op = if is_downgrade { "Downgrading" } else { "Updating" };
+                        println!("{op} FlashAgent to {target} (downloading {asset_name})...");
+                        let path = flashagent_svc::updater::download_and_apply(&download_url, &asset_name).await?;
+                        println!("Update successfully installed to {}", path.display());
+                    }
+                    Ok(flashagent_svc::updater::UpdateStatus::UpToDate { current, channel }) => {
+                        println!("FlashAgent {current} is already up to date on {} channel.", channel.label());
+                    }
+                    Err(e) => {
+                        eprintln!("Update check failed: {e}");
+                    }
+                }
+                return Ok(());
+            }
+            "--channel" => {
+                if let Some(val) = args.next() {
+                    match val.to_lowercase().as_str() {
+                        "stable" | "v" => config.update_channel = flashagent_core::config::UpdateChannel::Stable,
+                        "beta" | "b" => config.update_channel = flashagent_core::config::UpdateChannel::Beta,
+                        other => anyhow::bail!("invalid channel: {other} (use stable or beta)"),
+                    }
+                    let _ = config.save();
+                    println!("Release channel set to {}", config.update_channel.label());
+                    return Ok(());
+                } else {
+                    println!("Current channel: {}", config.update_channel.label());
+                    return Ok(());
+                }
+            }
             "--setup" => force_setup = true,
             "-y" | "--yes" => skip_trust = true,
             "-h" | "--help" => {
-                println!("FlashAgent TUI\n\nUsage: flashagent-tui [OPTIONS]\n\nOptions:\n  --model <name>       Specify LLM model name\n  --url <endpoint>     API endpoint (default: http://localhost:1234/v1)\n  --setup              Run first-time setup wizard\n  -y, --yes            Skip directory trust confirmation\n  -h, --help           Show this help message");
+                println!("FlashAgent TUI\n\nUsage: flashagent-tui [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Specify LLM model name\n  --url <endpoint>     API endpoint (default: http://localhost:1234/v1)\n  --setup              Run first-time setup wizard\n  --resume <id>        Resume a previously saved chat session\n  -y, --yes            Skip directory trust confirmation\n  -h, --help           Show this help message");
                 return Ok(());
             }
-            other => anyhow::bail!("usage: flashagent-tui [--model <name>] [--url http://host/v1] [--setup] [-y|--yes] (got {other})"),
+            other => anyhow::bail!("usage: flashagent-tui [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--setup] [--resume <id>] [-y|--yes] (got {other})"),
         }
     }
 
@@ -1127,6 +1244,12 @@ async fn main() -> Result<()> {
 
     let gate = TuiGate::new();
     let question_gate = TuiQuestionGate::new();
+    let mcp_manager = flashagent_tools::mcp::McpManager::new(cwd.clone());
+    let mcp_bg = mcp_manager.clone();
+    tokio::spawn(async move {
+        mcp_bg.start_enabled_servers().await;
+    });
+
     let state = Arc::new(PermissionState::new(config.permission_mode, gate.clone()));
     let tools_arc: Arc<BuiltinTools> = Arc::new(BuiltinTools::new(BuiltinToolsConfig {
         cwd: cwd.clone(),
@@ -1136,6 +1259,7 @@ async fn main() -> Result<()> {
         toolset_profile: Some(config.toolset_profile),
         web_enabled: Some(config.free_search),
         context_window: Some(context_capacity),
+        mcp_manager: Some(mcp_manager.clone()),
     })?);
     // The parent sees the built-in toolset plus `spawn_agent` (subagents).
     let composite = flashagent_tools::agent_tools(tools_arc.clone(), source.clone(), state.clone());
@@ -1158,13 +1282,20 @@ async fn main() -> Result<()> {
             LeaveAlternateScreen,
         );
         let _ = crossterm::terminal::disable_raw_mode();
+        let log_content = format!(
+            "FlashAgent Crash Report\nVersion: {}\nTime: {:?}\nPanic: {}\nBacktrace:\n{:?}\n\nPlease report this issue at: https://github.com/flashback7766/FlashAgent/issues\n",
+            flashagent_svc::updater::current_version(),
+            std::time::SystemTime::now(),
+            info,
+            std::backtrace::Backtrace::capture()
+        );
+        let _ = std::fs::write("crash.log", log_content);
+        eprintln!("\x1b[1;38;2;245;120;120mFlashAgent encountered an unexpected crash.\x1b[0m");
+        eprintln!("Crash report written to ./crash.log. Please submit an issue at: https://github.com/flashback7766/FlashAgent/issues");
         default_hook(info);
     }));
 
     enable_raw_mode()?;
-    // Plain conhost needs VT mode enabled or ANSI codes print literally
-    #[cfg(windows)]
-    let _ = crossterm::terminal::enable_virtual_terminal_processing();
     let _ = crossterm::execute!(
         std::io::stdout(),
         EnterAlternateScreen,
@@ -1186,6 +1317,7 @@ async fn main() -> Result<()> {
         cwd_display,
         initial_effort,
         available_models,
+        resume_session_id,
     })
     .await;
     let _ = crossterm::execute!(
@@ -1196,9 +1328,10 @@ async fn main() -> Result<()> {
         LeaveAlternateScreen
     );
     disable_raw_mode()?;
-    #[cfg(windows)]
-    let _ = crossterm::terminal::disable_virtual_terminal_processing();
-    result
+    if let Ok(Some(ref saved_id)) = result {
+        println!("Session saved. To resume next time: flashagent-tui --resume {saved_id}");
+    }
+    result.map(|_| ())
 }
 
 struct AppContext {
@@ -1216,6 +1349,7 @@ struct AppContext {
     cwd_display: String,
     initial_effort: String,
     available_models: Vec<String>,
+    resume_session_id: Option<String>,
 }
 
 fn build_model_menu(source: &BackendSource) -> Option<SelectMenu<String>> {
@@ -1239,7 +1373,7 @@ fn build_model_menu(source: &BackendSource) -> Option<SelectMenu<String>> {
         let desc = format!("{load_tag} · {summary}");
         items.push(SelectItem::with_description(m.id.clone(), desc, m.id.clone()));
     }
-    Some(SelectMenu::new("Select Model", items))
+    Some(SelectMenu::new("Select Model", items).with_noun("models"))
 }
 
 fn build_effort_menu(source: &BackendSource) -> SelectMenu<String> {
@@ -1273,7 +1407,7 @@ fn build_effort_menu(source: &BackendSource) -> SelectMenu<String> {
         items.push(SelectItem::with_description("medium", "Balanced reasoning depth", "medium".to_string()));
         items.push(SelectItem::with_description("high", "Deep reasoning exploration", "high".to_string()));
     }
-    SelectMenu::new("Select Thinking Effort", items)
+    SelectMenu::new("Select Thinking Effort", items).with_noun("options")
 }
 
 fn thinking_summary_str(source: &BackendSource, current_effort: &str) -> String {
@@ -1290,6 +1424,155 @@ fn thinking_summary_str(source: &BackendSource, current_effort: &str) -> String 
     }
 }
 
+#[derive(Debug, Clone)]
+enum UpdateNotice {
+    Available { version: String, asset_name: String, download_url: String },
+    Ready { version: String },
+    UpToDate { version: String },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedToolCall {
+    id: String,
+    name: String,
+    args_json: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedMessage {
+    role: String,
+    content: String,
+    reasoning: Option<String>,
+    tool_call_id: Option<String>,
+    tool_calls: Vec<SavedToolCall>,
+}
+
+impl From<&ChatMessage> for SavedMessage {
+    fn from(m: &ChatMessage) -> Self {
+        Self {
+            role: m.role.as_str().to_string(),
+            content: m.content.clone(),
+            reasoning: m.reasoning.clone(),
+            tool_call_id: m.tool_call_id.clone(),
+            tool_calls: m
+                .tool_calls
+                .iter()
+                .map(|tc| SavedToolCall {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    args_json: tc.args_json.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<SavedMessage> for ChatMessage {
+    fn from(m: SavedMessage) -> Self {
+        let role = match m.role.as_str() {
+            "system" => flashagent_llm::Role::System,
+            "assistant" => flashagent_llm::Role::Assistant,
+            "tool" => flashagent_llm::Role::Tool,
+            _ => flashagent_llm::Role::User,
+        };
+        Self {
+            role,
+            content: m.content,
+            reasoning: m.reasoning,
+            tool_call_id: m.tool_call_id,
+            tool_calls: m
+                .tool_calls
+                .into_iter()
+                .map(|tc| flashagent_llm::ToolCall {
+                    id: tc.id,
+                    name: tc.name,
+                    args_json: tc.args_json,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedSession {
+    id: String,
+    timestamp: u64,
+    model: String,
+    cwd: String,
+    messages: Vec<SavedMessage>,
+}
+
+fn flashagent_home_dir() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".flashagent"))
+}
+
+fn save_session_file(session_id: &str, model: &str, cwd: &str, history: &[ChatMessage]) -> Option<std::path::PathBuf> {
+    let base_dir = flashagent_home_dir()?.join("sessions");
+    let _ = std::fs::create_dir_all(&base_dir);
+    let path = base_dir.join(format!("{session_id}.json"));
+    let saved = SavedSession {
+        id: session_id.to_string(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        model: model.to_string(),
+        cwd: cwd.to_string(),
+        messages: history.iter().map(SavedMessage::from).collect(),
+    };
+    if let Ok(data) = serde_json::to_string_pretty(&saved) {
+        if std::fs::write(&path, data).is_ok() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::io::Result<String> {
+    let editor = if !preferred_editor.is_empty() {
+        preferred_editor.to_string()
+    } else {
+        std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| "nano".to_string())
+    };
+
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join(format!("flashagent_prompt_{}.md", std::process::id()));
+    std::fs::write(&temp_file, initial_text)?;
+
+    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::cursor::Show,
+        crossterm::event::DisableMouseCapture,
+        crossterm::terminal::LeaveAlternateScreen
+    );
+
+    let status = std::process::Command::new(&editor)
+        .arg(&temp_file)
+        .status();
+
+    let _ = crossterm::terminal::enable_raw_mode();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::cursor::Hide,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    );
+
+    let result = match status {
+        Ok(s) if s.success() => std::fs::read_to_string(&temp_file).unwrap_or_else(|_| initial_text.to_string()),
+        _ => initial_text.to_string(),
+    };
+
+    let _ = std::fs::remove_file(&temp_file);
+    Ok(result)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn refresh_welcome_card_if_before_user_msg(
     chat: &mut ChatView,
@@ -1301,9 +1584,10 @@ fn refresh_welcome_card_if_before_user_msg(
     source: &BackendSource,
     current_effort: &str,
     context_display: Option<&str>,
+    show_mascot: bool,
 ) {
     refresh_welcome_card_animated(
-        chat, renderer, model, cwd_display, mode_str, memory_docs, source, current_effort, context_display, 0,
+        chat, renderer, model, cwd_display, mode_str, memory_docs, source, current_effort, context_display, 0, None, show_mascot,
     );
 }
 
@@ -1319,26 +1603,33 @@ fn refresh_welcome_card_animated(
     current_effort: &str,
     context_display: Option<&str>,
     tick_n: usize,
+    width_override: Option<usize>,
+    show_mascot: bool,
 ) {
     if !chat.has_user_message() {
-        let (term_w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+        let (term_w, term_h) = {
+            let (w, h) = crossterm::terminal::size().unwrap_or((100, 24));
+            (width_override.unwrap_or(w as usize), h as usize)
+        };
         let th_sum = thinking_summary_str(source, current_effort);
-        let card = welcome_card_with_thinking_animated(
+        let card = welcome_card_responsive_opts(
             model,
             cwd_display,
             mode_str,
             memory_docs,
             Some(&th_sum),
             context_display,
-            term_w as usize,
+            term_w,
+            term_h,
             tick_n,
+            show_mascot,
         );
         chat.update_welcome_card(card);
         renderer.request_reprint();
     }
 }
 
-async fn run_app(ctx: AppContext) -> Result<()> {
+async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let AppContext {
         config: mut app_config,
         source,
@@ -1354,6 +1645,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
         cwd_display,
         initial_effort,
         mut available_models,
+        resume_session_id,
     } = ctx;
     let cancel = Arc::new(AtomicBool::new(false));
     let mut question_ui_state = QuestionUiState::default();
@@ -1380,6 +1672,11 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                             return;
                         }
                     }
+                    Ok(Event::Resize(w, h)) => {
+                        if tx.send(UiEvent::Resize(w, h)).is_err() {
+                            return;
+                        }
+                    }
                     Ok(_) => {}
                     Err(_) => return,
                 }
@@ -1397,6 +1694,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
     let mut input = String::new();
     let mut custom_placeholder: Option<String> = None;
     let mut suggested_prompt: Option<String> = None;
+    let mut latest_suggestion: Option<String> = None;
     let mut tip_animator = flashagent_tui::tips::TipAnimator::new();
     let mut input_history: Vec<String> = Vec::new();
     let mut history_index: Option<usize> = None;
@@ -1424,8 +1722,64 @@ async fn run_app(ctx: AppContext) -> Result<()> {
     let mut renderer = Renderer::new();
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(80));
     let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(3));
+    check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let is_discovering = Arc::new(AtomicBool::new(false));
+    let session_id = resume_session_id.clone().unwrap_or_else(|| {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("session_{ts}")
+    });
 
-    let (term_w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+    let mut update_banner: Option<String> = None;
+    let mut pending_update: Option<(String, String, String)> = None;
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
+    let (channel_watch_tx, mut channel_watch_rx) = tokio::sync::watch::channel(app_config.update_channel);
+    if app_config.auto_check_updates && !flashagent_svc::updater::is_dev_mode() {
+        let update_tx_clone = update_tx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(flashagent_svc::updater::BACKGROUND_UPDATE_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let ch = *channel_watch_rx.borrow();
+                        if let Ok(Some(target_ver)) = flashagent_svc::updater::check_and_apply_background(ch).await {
+                            let _ = update_tx_clone.send(UpdateNotice::Ready { version: target_ver });
+                            break;
+                        }
+                    }
+                    changed = channel_watch_rx.changed() => {
+                        if changed.is_ok() {
+                            let ch = *channel_watch_rx.borrow();
+                            interval.reset();
+                            if let Ok(Some(target_ver)) = flashagent_svc::updater::check_and_apply_background(ch).await {
+                                let _ = update_tx_clone.send(UpdateNotice::Ready { version: target_ver });
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    } else if app_config.silent_update_check && !flashagent_svc::updater::is_dev_mode() {
+        let silent_tx_clone = update_tx.clone();
+        let ch = app_config.update_channel;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            if let Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, .. }) =
+                flashagent_svc::updater::check_for_updates(ch, flashagent_svc::updater::DEFAULT_RELEASES_API).await
+            {
+                let _ = silent_tx_clone.send(UpdateNotice::Available { version: target, asset_name, download_url });
+            }
+        });
+    }
+
+    let (term_w, term_h) = crossterm::terminal::size().unwrap_or((100, 24));
+    let mut last_term_size = (term_w, term_h);
     let mode_str = format!("{:?}", perm.state().mode());
     let thinking_summary = if let Some(ref p) = source.profile() {
         if p.supported && !p.presets.is_empty() {
@@ -1438,7 +1792,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
     } else {
         current_effort.clone()
     };
-    for (k, line) in welcome_card_with_thinking(
+    let initial_card = welcome_card_responsive_opts(
         &current_model,
         &cwd_display,
         &mode_str,
@@ -1446,8 +1800,37 @@ async fn run_app(ctx: AppContext) -> Result<()> {
         Some(&thinking_summary),
         current_context.as_deref(),
         term_w as usize,
-    ) {
-        chat.push_line(k, line);
+        term_h as usize,
+        0,
+        app_config.show_mascot,
+    );
+    chat.update_welcome_card(initial_card);
+
+    if let Some(ref resume_id) = resume_session_id {
+        if let Some(home) = flashagent_home_dir() {
+            let session_path = home.join("sessions").join(format!("{resume_id}.json"));
+            if let Ok(content) = std::fs::read_to_string(&session_path) {
+                if let Ok(saved) = serde_json::from_str::<SavedSession>(&content) {
+                    for saved_msg in saved.messages {
+                        let msg: ChatMessage = saved_msg.into();
+                        match msg.role {
+                            flashagent_llm::Role::User => {
+                                chat.push_user(&msg.content);
+                                history.push(msg);
+                            }
+                            flashagent_llm::Role::Assistant => {
+                                chat.push_assistant(&msg.content);
+                                history.push(msg);
+                            }
+                            _ => {
+                                history.push(msg);
+                            }
+                        }
+                    }
+                    chat.push_system(&format!("Resumed session '{resume_id}' ({} messages loaded).", history.len()));
+                }
+            }
+        }
     }
 
     let mut turn_started: Option<std::time::Instant> = None;
@@ -1464,7 +1847,18 @@ async fn run_app(ctx: AppContext) -> Result<()> {
     let mut copy_toast: Option<(String, std::time::Instant)> = None;
     let mut last_ctrl_c: Option<std::time::Instant> = None;
 
-    loop {
+    macro_rules! finish {
+        () => {
+            if app_config.auto_save_sessions && !history.is_empty() {
+                save_session_file(&session_id, &current_model, &cwd_display, &history)
+                    .map(|_| session_id.clone())
+            } else {
+                None
+            }
+        };
+    }
+
+    'main_loop: loop {
         let autocomplete = if !running
             && input.starts_with('/')
             && effort_menu.is_none()
@@ -1480,8 +1874,27 @@ async fn run_app(ctx: AppContext) -> Result<()> {
             None
         };
 
-        let (term_w, _) = crossterm::terminal::size().unwrap_or((100, 24));
-        let tip_rendered = tip_animator.render_line(tick_n, (term_w as usize).saturating_sub(10));
+        let (term_w, term_h) = crossterm::terminal::size().unwrap_or((100, 24));
+        if (term_w, term_h) != last_term_size {
+            last_term_size = (term_w, term_h);
+            if !chat.has_user_message() {
+                refresh_welcome_card_animated(
+                    &mut chat,
+                    &mut renderer,
+                    &current_model,
+                    &cwd_display,
+                    &mode_str,
+                    memory_docs,
+                    &source,
+                    &current_effort,
+                    current_context.as_deref(),
+                    tick_n,
+                    Some(term_w as usize),
+                    app_config.show_mascot,
+                );
+            }
+        }
+        let tip_lines = tip_animator.render_lines(tick_n, term_w as usize);
 
         if let Some((_, instant)) = copy_toast {
             if instant.elapsed().as_secs_f32() >= 2.5 {
@@ -1489,9 +1902,9 @@ async fn run_app(ctx: AppContext) -> Result<()> {
             }
         }
         let active_toast = copy_toast.as_ref().map(|(msg, _)| msg.as_str());
-        let stats_str = token_tracker.format_stats();
         let live_prefill = token_tracker.live_prefill_status();
         let ttft_display = token_tracker.ttft_display();
+        let tg_speed = token_tracker.tg_3s();
 
         renderer.frame(
             &chat,
@@ -1508,9 +1921,10 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                 input: &input,
                 mode: perm.state().mode(),
                 is_goal_active: goal_state.is_some(),
-                tip: Some(tip_animator.tip_text),
-                tip_animated: Some(&tip_rendered),
-                turn_stats: stats_str.as_deref(),
+                tip: if app_config.show_tips { Some(tip_animator.tip_text) } else { None },
+                tip_animated: None,
+                tip_lines: if app_config.show_tips { Some(&tip_lines) } else { None },
+                token_tracker: if app_config.show_tokens { Some(&token_tracker) } else { None },
                 thinking_effort: &current_effort,
                 reasoning_expand: ReasoningExpansion {
                     all: all_expanded,
@@ -1519,9 +1933,9 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                 tick_n,
                 running,
                 elapsed_secs: turn_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                model_tokens: token_tracker.total_model_tokens,
-                tokens_per_sec: token_tracker.tg_3s(),
-                f_keep: token_tracker.last_f_keep,
+                model_tokens: if app_config.show_tokens { token_tracker.total_model_tokens } else { 0 },
+                tokens_per_sec: if app_config.show_tokens { tg_speed } else { 0.0 },
+                f_keep: if app_config.show_tokens { token_tracker.last_f_keep } else { None },
                 model: &current_model,
                 context_window: current_context.as_deref(),
                 cwd: &cwd_display,
@@ -1529,13 +1943,40 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                 question_state: Some(&question_ui_state),
                 custom_placeholder: custom_placeholder.as_deref(),
                 suggested_prompt: suggested_prompt.as_deref(),
-                copy_toast: active_toast,
-                prefill_status: live_prefill.as_deref(),
-                ttft_display: ttft_display.as_deref(),
+                copy_toast: if app_config.show_toasts { active_toast } else { None },
+                prefill_status: if app_config.show_ttft { live_prefill.as_deref() } else { None },
+                ttft_display: if app_config.show_ttft { ttft_display.as_deref() } else { None },
+                update_banner: update_banner.as_deref(),
+                context_warn_threshold: app_config.context_warn_threshold,
             },
         );
 
         let ev = tokio::select! {
+            Some(notice) = update_rx.recv() => {
+                match notice {
+                    UpdateNotice::Available { version, asset_name, download_url } => {
+                        pending_update = Some((version.clone(), asset_name, download_url));
+                        update_banner = Some(format!("Update Available: {version} · Press Ctrl+U to install"));
+                        if let Some(ref mut s) = settings_view {
+                            s.update_check_status = Some(format!("Available: {version} (Press Ctrl+U)"));
+                        }
+                    }
+                    UpdateNotice::Ready { version } => {
+                        pending_update = None;
+                        update_banner = Some(format!("Update Ready: {version} · Restart FlashAgent"));
+                        if let Some(ref mut s) = settings_view {
+                            s.update_check_status = Some(format!("Ready: {version} (restart to apply)"));
+                        }
+                    }
+                    UpdateNotice::UpToDate { version } => {
+                        if let Some(ref mut s) = settings_view {
+                            s.update_check_status = Some(format!("Up to date ({version})"));
+                        }
+                    }
+                }
+                renderer.request_reprint();
+                continue;
+            }
             Some(ev) = rx.recv() => {
                 tick_n += 1;
                 ev
@@ -1543,7 +1984,12 @@ async fn run_app(ctx: AppContext) -> Result<()> {
             _ = tick.tick() => {
                 tick_n += 1;
                 tip_animator.tick();
-                if !running && !chat.has_user_message() && (tick_n % 50 == 46 || tick_n % 50 == 48) {
+                let current_term_size = crossterm::terminal::size().unwrap_or((100, 24));
+                let term_resized = current_term_size != last_term_size;
+                if term_resized {
+                    last_term_size = current_term_size;
+                }
+                if !running && !chat.has_user_message() && (term_resized || tick_n % 50 == 46 || tick_n % 50 == 48) {
                     refresh_welcome_card_animated(
                         &mut chat,
                         &mut renderer,
@@ -1555,29 +2001,45 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                         &current_effort,
                         current_context.as_deref(),
                         tick_n,
+                        Some(current_term_size.0 as usize),
+                        app_config.show_mascot,
                     );
+                }
+                if term_resized {
+                    renderer.request_reprint();
                 }
                 continue;
             }
             _ = check_interval.tick() => {
-                let source_bg = source.clone();
-                let tx_bg = tx.clone();
-                tokio::spawn(async move {
-                    if let Some(disc) = source_bg.discover_server().await {
-                        let _ = tx_bg.send(UiEvent::ServerDiscovered(disc));
-                    }
-                });
+                if !running && !is_discovering.load(Ordering::Relaxed) {
+                    is_discovering.store(true, Ordering::Relaxed);
+                    let source_bg = source.clone();
+                    let tx_bg = tx.clone();
+                    let flag = is_discovering.clone();
+                    tokio::spawn(async move {
+                        if let Some(disc) = source_bg.discover_server().await {
+                            let _ = tx_bg.send(UiEvent::ServerDiscovered(disc));
+                        }
+                        flag.store(false, Ordering::Relaxed);
+                    });
+                }
                 continue;
             }
         };
 
         match ev {
             UiEvent::BackgroundRecap { turn_id, recap, suggestion } => {
-                if turn_id == turn_counter && active_turn_handle.is_none() {
-                    chat.update_or_push_turn_system("recap:", &format!("  \x1b[38;2;155;165;180mrecap:\x1b[0m \x1b[38;2;225;230;240m{recap}\x1b[0m"));
-                    if input.is_empty() {
+                let formatted = format!("  \x1b[38;2;155;165;180mrecap:\x1b[0m \x1b[38;2;225;230;240m{recap}\x1b[0m");
+                if turn_id == turn_counter {
+                    chat.update_or_push_turn_system("recap:", &formatted);
+                    latest_suggestion = suggestion.clone();
+                    custom_placeholder = None;
+                    if input.is_empty() && active_turn_handle.is_none() {
                         suggested_prompt = suggestion;
                     }
+                    renderer.request_reprint();
+                } else if turn_id < turn_counter {
+                    chat.attach_turn_recap(turn_id, &formatted);
                     renderer.request_reprint();
                 }
             }
@@ -1627,6 +2089,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                             &source,
                             &current_effort,
                             current_context.as_deref(),
+                            app_config.show_mascot,
                         );
 
                         if model_changed {
@@ -1701,18 +2164,24 @@ async fn run_app(ctx: AppContext) -> Result<()> {
 
                         if reason == DoneReason::Cancelled {
                             suggested_prompt = None;
-                            let is_ru = history.iter().rev().find(|m| m.role == flashagent_llm::Role::User).map(|m| m.content.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))).unwrap_or(false);
-                            let interrupt_msg = if is_ru { "Запрос прерван пользователем" } else { "Request interrupted by user" };
+                            let interrupt_msg = "Request interrupted by user";
                             custom_placeholder = Some(interrupt_msg.to_string());
                             renderer.request_reprint();
                         } else {
-                            // Auto-compact context when reaching 90% capacity
-                            if context_usage.percentage() >= 90.0 && history.len() > 3 {
+                            // Auto-compact context when reaching threshold capacity
+                            if app_config.auto_compact_context
+                                && context_usage.percentage() >= app_config.context_compact_threshold as f32
+                                && history.len() > 3
+                            {
                                 let source_compact = source.clone();
                                 if let Some(freed) = compact_context(&source_compact, &mut history, None).await {
                                     update_context_usage(&mut context_usage, &history, &memory_block, &chat);
                                     custom_placeholder = Some(format!("Context auto-compacted (~{} freed)", ContextUsage::format_tokens(freed)));
                                 }
+                            }
+
+                            if app_config.auto_save_sessions {
+                                save_session_file(&session_id, &current_model, &cwd_display, &history);
                             }
 
                             // Clear any existing ghost suggestion.
@@ -1742,13 +2211,33 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                         chat.push_user(&format!("[error: {e}]"));
                         suggested_prompt = None;
                         custom_placeholder = None;
-                        renderer.request_reprint();
                     }
                 }
             }
+            UiEvent::Resize(cols, rows) => {
+                let term_resized = (cols, rows) != last_term_size;
+                last_term_size = (cols, rows);
+                if !chat.has_user_message() && term_resized {
+                    refresh_welcome_card_animated(
+                        &mut chat,
+                        &mut renderer,
+                        &current_model,
+                        &cwd_display,
+                        &mode_str,
+                        memory_docs,
+                        &source,
+                        &current_effort,
+                        current_context.as_deref(),
+                        tick_n,
+                        Some(cols as usize),
+                        app_config.show_mascot,
+                    );
+                }
+                renderer.request_reprint();
+            }
             UiEvent::Mouse(m) => {
                 let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
-                let total_chat_lines = chat.render_split((width as usize).saturating_sub(1), ReasoningExpansion { all: all_expanded, last: last_expanded }).0.len() + 15;
+                let total_chat_lines = chat.render_split(width as usize, ReasoningExpansion { all: all_expanded, last: last_expanded }).0.len() + 15;
                 let max_scroll = total_chat_lines.saturating_sub(height as usize);
                 if let Some(ref mut menu) = model_menu {
                     match m.kind {
@@ -1840,6 +2329,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                 &source,
                                 &current_effort,
                                 current_context.as_deref(),
+                                app_config.show_mascot,
                             );
                             renderer.request_reprint();
                         }
@@ -1880,9 +2370,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                             app_config = settings.config.clone();
                             let _ = app_config.save();
                             settings_view = None;
-                            let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
-                            let completed = flashagent_tui::run_wizard(&mut app_config).await.unwrap_or(false);
-                            let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
+                            let completed = flashagent_tui::run_wizard_channel(&mut app_config, &mut rx).await.unwrap_or(false);
                             if completed {
                                 current_model = app_config.model.clone();
                                 source.set_model(&current_model);
@@ -1898,6 +2386,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                     &source,
                                     &current_effort,
                                     current_context.as_deref(),
+                                    app_config.show_mascot,
                                 );
                             }
                             renderer.request_reprint();
@@ -1907,6 +2396,42 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                             let _ = app_config.save();
                             settings_view = None;
                             sampling_view = Some(SamplingView::new(&app_config));
+                            renderer.request_reprint();
+                        }
+                        SettingsAction::CheckUpdatesNow => {
+                            if flashagent_svc::updater::is_dev_mode() {
+                                settings.update_check_status = Some("Dev mode: updates disabled (source build)".into());
+                            } else {
+                                settings.update_check_status = Some("Checking GitHub releases...".into());
+                                let ch = settings.config.update_channel;
+                                let update_tx_clone = update_tx.clone();
+                                tokio::spawn(async move {
+                                    match flashagent_svc::updater::check_for_updates(ch, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
+                                        Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, .. }) => {
+                                            let _ = update_tx_clone.send(UpdateNotice::Available { version: target, asset_name, download_url });
+                                        }
+                                        Ok(flashagent_svc::updater::UpdateStatus::UpToDate { current, .. }) => {
+                                            let _ = update_tx_clone.send(UpdateNotice::UpToDate { version: current });
+                                        }
+                                        Err(e) => {
+                                            let _ = update_tx_clone.send(UpdateNotice::UpToDate { version: format!("Error: {e}") });
+                                        }
+                                    }
+                                });
+                            }
+                            renderer.request_reprint();
+                        }
+                        SettingsAction::OpenMcpMenu => {
+                            app_config = settings.config.clone();
+                            let _ = app_config.save();
+                            settings_view = None;
+                            let mgr = tools_arc.mcp_manager();
+                            let paths = mgr.loaded_paths();
+                            let statuses = mgr.server_status_list().await;
+                            let (w, _) = crossterm::terminal::size().unwrap_or((80, 24));
+                            for line in flashagent_tui::mcp_view::render_mcp_overview(&paths, &statuses, w as usize) {
+                                chat.push_line(LineKind::System, line);
+                            }
                             renderer.request_reprint();
                         }
                         SettingsAction::None => {
@@ -1985,6 +2510,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                     &source,
                                     &current_effort,
                                     current_context.as_deref(),
+                                    app_config.show_mascot,
                                 );
                                 custom_placeholder = Some(format!("Switched active model to: {current_model}"));
                                 suggested_prompt = None;
@@ -2018,6 +2544,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                     &source,
                                     &current_effort,
                                     current_context.as_deref(),
+                                    app_config.show_mascot,
                                 );
                                 custom_placeholder = Some(format!("Thinking effort set to: {current_effort}"));
                                 suggested_prompt = None;
@@ -2035,8 +2562,8 @@ async fn run_app(ctx: AppContext) -> Result<()> {
 
                 if let Some(req) = question_gate.pending() {
                     match code {
-                        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('с') | KeyCode::Char('С')
-                            if mods.contains(KeyModifiers::CONTROL) => return Ok(()),
+                        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('\u{0441}') | KeyCode::Char('\u{0421}')
+                            if mods.contains(KeyModifiers::CONTROL) => break 'main_loop,
                         KeyCode::Esc => {
                             if req.options.is_some() && question_ui_state.is_writing {
                                 question_ui_state.is_writing = false;
@@ -2157,14 +2684,14 @@ async fn run_app(ctx: AppContext) -> Result<()> {
 
                 if gate.pending().is_some() {
                     match code {
-                        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('с') | KeyCode::Char('С')
-                            if mods.contains(KeyModifiers::CONTROL) => return Ok(()),
+                        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('\u{0441}') | KeyCode::Char('\u{0421}')
+                            if mods.contains(KeyModifiers::CONTROL) => break 'main_loop,
                         KeyCode::Esc
-                        | KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Char('в') | KeyCode::Char('В') => {
+                        | KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Char('\u{0432}') | KeyCode::Char('\u{0412}') => {
                             gate.respond(Decision::Deny);
                             confirm_select = ConfirmSelect::new();
                         }
-                        KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('ф') | KeyCode::Char('Ф') => {
+                        KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('\u{0444}') | KeyCode::Char('\u{0424}') => {
                             if let Some(req) = gate.pending() {
                                 perm.state().allow_tool_always(&req.tool);
                             }
@@ -2193,7 +2720,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                 // --- Chat History Scrolling & Navigation ---
                 if matches!(code, KeyCode::PageUp) {
                     let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
-                    let total_chat_lines = chat.render_split((width as usize).saturating_sub(1), ReasoningExpansion { all: all_expanded, last: last_expanded }).0.len() + 15;
+                    let total_chat_lines = chat.render_split(width as usize, ReasoningExpansion { all: all_expanded, last: last_expanded }).0.len() + 15;
                     let max_scroll = total_chat_lines.saturating_sub(height as usize);
                     renderer.scroll_up((height as usize / 2).max(5), max_scroll);
                     continue;
@@ -2205,7 +2732,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                 }
                 if matches!(code, KeyCode::Home) && renderer.scroll_offset > 0 {
                     let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
-                    let total_chat_lines = chat.render_split((width as usize).saturating_sub(1), ReasoningExpansion { all: all_expanded, last: last_expanded }).0.len() + 15;
+                    let total_chat_lines = chat.render_split(width as usize, ReasoningExpansion { all: all_expanded, last: last_expanded }).0.len() + 15;
                     let max_scroll = total_chat_lines.saturating_sub(height as usize);
                     renderer.scroll_up(max_scroll, max_scroll);
                     continue;
@@ -2224,7 +2751,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                     || (renderer.scroll_offset > 0 && matches!(code, KeyCode::Up))
                 {
                     let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
-                    let total_chat_lines = chat.render_split((width as usize).saturating_sub(1), ReasoningExpansion { all: all_expanded, last: last_expanded }).0.len() + 15;
+                    let total_chat_lines = chat.render_split(width as usize, ReasoningExpansion { all: all_expanded, last: last_expanded }).0.len() + 15;
                     let max_scroll = total_chat_lines.saturating_sub(height as usize);
                     renderer.scroll_up(2, max_scroll);
                     continue;
@@ -2260,21 +2787,24 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                             }
                             chat.on_event(&flashagent_core::LoopEvent::Done(flashagent_core::DoneReason::Cancelled));
                             suggested_prompt = None;
-                            let is_ru = history.iter().rev().find(|m| m.role == flashagent_llm::Role::User).map(|m| m.content.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))).unwrap_or(false);
-                            let interrupt_msg = if is_ru { "Запрос прерван пользователем" } else { "Request interrupted by user" };
+                            let interrupt_msg = "Request interrupted by user";
                             custom_placeholder = Some(interrupt_msg.to_string());
                             renderer.request_reprint();
                         } else if !input.is_empty() {
                             input.clear();
                             autocomplete_idx = 0;
                             history_index = None;
+                            if latest_suggestion.is_some() {
+                                suggested_prompt = latest_suggestion.clone();
+                            }
                             renderer.request_reprint();
                         } else if suggested_prompt.is_some() || custom_placeholder.is_some() {
                             suggested_prompt = None;
+                            latest_suggestion = None;
                             custom_placeholder = None;
                             renderer.request_reprint();
                         } else {
-                            return Ok(());
+                            break 'main_loop;
                         }
                     }
                     // F1: toggle context modal
@@ -2291,8 +2821,8 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                         renderer.request_reprint();
                     }
 
-                    // Ctrl+C / Ctrl+Shift+C (Latin 'c'/'C', Cyrillic 'с'/'С')
-                    KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('с') | KeyCode::Char('С')
+                    // Ctrl+C / Ctrl+Shift+C (handles both Latin and alternate physical keycodes)
+                    KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('\u{0441}') | KeyCode::Char('\u{0421}')
                         if mods.contains(KeyModifiers::CONTROL) =>
                     {
                         if running {
@@ -2311,8 +2841,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                             }
                             chat.on_event(&flashagent_core::LoopEvent::Done(flashagent_core::DoneReason::Cancelled));
                             suggested_prompt = None;
-                            let is_ru = history.iter().rev().find(|m| m.role == flashagent_llm::Role::User).map(|m| m.content.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))).unwrap_or(false);
-                            let interrupt_msg = if is_ru { "Запрос прерван пользователем" } else { "Request interrupted by user" };
+                            let interrupt_msg = "Request interrupted by user";
                             custom_placeholder = Some(interrupt_msg.to_string());
                             renderer.request_reprint();
                         } else {
@@ -2326,19 +2855,19 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                 renderer.request_reprint();
                             } else if let Some(text) = chat.last_assistant_text() {
                                 if is_double_tap {
-                                    return Ok(());
+                                    break 'main_loop;
                                 }
                                 flashagent_tui::clipboard::set_clipboard_text(&text);
                                 copy_toast = Some(("Copied assistant response (press Ctrl+C again to exit)".to_string(), now));
                                 renderer.request_reprint();
                             } else {
-                                return Ok(());
+                                break 'main_loop;
                             }
                         }
                     }
 
-                    // Ctrl+V / Ctrl+Shift+V (Latin 'v'/'V', Cyrillic 'м'/'М'): paste from clipboard
-                    KeyCode::Char('v') | KeyCode::Char('V') | KeyCode::Char('м') | KeyCode::Char('М')
+                    // Ctrl+V / Ctrl+Shift+V: paste from clipboard (supports alternative keyboard layouts)
+                    KeyCode::Char('v') | KeyCode::Char('V') | KeyCode::Char('\u{043c}') | KeyCode::Char('\u{041c}')
                         if mods.contains(KeyModifiers::CONTROL) =>
                     {
                         if let Some(text) = flashagent_tui::clipboard::get_clipboard_text() {
@@ -2356,11 +2885,11 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                     KeyCode::Char('d') | KeyCode::Char('D')
                         if mods.contains(KeyModifiers::CONTROL) && input.is_empty() && !running =>
                     {
-                        return Ok(());
+                        break 'main_loop;
                     }
 
-                    // Ctrl+R / Ctrl+Shift+R (Latin 'r'/'R', Cyrillic 'к'/'К'): regenerate last response from scratch
-                    KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('к') | KeyCode::Char('К')
+                    // Ctrl+R / Ctrl+Shift+R: regenerate last response from scratch (supports alternative keyboard layouts)
+                    KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('\u{043a}') | KeyCode::Char('\u{041a}')
                         if mods.contains(KeyModifiers::CONTROL) =>
                     {
                         if !running
@@ -2425,9 +2954,8 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                         renderer.request_reprint();
                     }
 
-                    // ALT + O (or Alt + E, Alt + щ, Alt + у): expand / collapse ALL thinking blocks permanently
-                    KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char('щ') | KeyCode::Char('Щ')
-                    | KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Char('у') | KeyCode::Char('У')
+                    // ALT + O: expand / collapse ALL thinking blocks permanently (supports alternative keyboard layouts)
+                    KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char('\u{0449}') | KeyCode::Char('\u{0429}')
                         if mods.contains(KeyModifiers::ALT) =>
                     {
                         all_expanded = !all_expanded;
@@ -2437,9 +2965,8 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                         renderer.request_reprint();
                     }
 
-                    // CTRL + O (or Ctrl + E, Ctrl + щ, Ctrl + у): expand / collapse LAST thinking block temporarily
-                    KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char('щ') | KeyCode::Char('Щ')
-                    | KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Char('у') | KeyCode::Char('У')
+                    // CTRL + O: expand / collapse LAST thinking block temporarily (supports alternative keyboard layouts)
+                    KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char('\u{0449}') | KeyCode::Char('\u{0429}')
                         if mods.contains(KeyModifiers::CONTROL) =>
                     {
                         last_expanded = !last_expanded;
@@ -2449,9 +2976,66 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                         renderer.request_reprint();
                     }
 
-                    // F4 or CTRL + T or ALT + T (or Cyrillic е / Е): open Thinking Effort menu
+                    // CTRL + E: launch external editor on current input buffer
+                    KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Char('\u{0443}') | KeyCode::Char('\u{0423}')
+                        if mods.contains(KeyModifiers::CONTROL) && !running =>
+                    {
+                        match open_in_external_editor(&input, &app_config.external_editor) {
+                            Ok(edited) => {
+                                input = edited;
+                                autocomplete_idx = 0;
+                            }
+                            Err(err) => {
+                                chat.push_system(&format!("Failed to launch external editor: {err}"));
+                            }
+                        }
+                        renderer.request_reprint();
+                    }
+
+                    // CTRL + U: download & apply pending update or check for updates
+                    KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Char('\u{0433}') | KeyCode::Char('\u{0413}')
+                        if mods.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if let Some((target_ver, asset_name, download_url)) = pending_update.clone() {
+                            chat.push_system(&format!("Downloading update {target_ver}..."));
+                            renderer.request_reprint();
+                            let update_tx_clone = update_tx.clone();
+                            tokio::spawn(async move {
+                                if flashagent_svc::updater::download_and_apply(&download_url, &asset_name).await.is_ok() {
+                                    let _ = update_tx_clone.send(UpdateNotice::Ready { version: target_ver });
+                                }
+                            });
+                        } else if !flashagent_svc::updater::is_dev_mode() {
+                            chat.push_system(&format!("Checking for updates on {} channel...", app_config.update_channel.label()));
+                            renderer.request_reprint();
+                            let update_tx_clone = update_tx.clone();
+                            let ch = app_config.update_channel;
+                            tokio::spawn(async move {
+                                match flashagent_svc::updater::check_for_updates(ch, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
+                                    Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, .. }) => {
+                                        let _ = update_tx_clone.send(UpdateNotice::Available {
+                                            version: target,
+                                            asset_name,
+                                            download_url,
+                                        });
+                                    }
+                                    Ok(flashagent_svc::updater::UpdateStatus::UpToDate { current, .. }) => {
+                                        let _ = update_tx_clone.send(UpdateNotice::UpToDate {
+                                            version: current,
+                                        });
+                                    }
+                                    Err(_) => {}
+                                }
+                            });
+                        } else {
+                            chat.push_system("[Auto-updater is disabled in dev mode]");
+                            renderer.request_reprint();
+                        }
+                    }
+
+                    // F4 or CTRL + T or ALT + T: open Thinking Effort menu (supports alternative keyboard layouts)
                     KeyCode::F(4)
-                    | KeyCode::Char('t') | KeyCode::Char('T') | KeyCode::Char('е') | KeyCode::Char('Е')
+                    | KeyCode::Char('t') | KeyCode::Char('T') | KeyCode::Char('\u{0435}') | KeyCode::Char('\u{0415}')
                         if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) || matches!(code, KeyCode::F(4)) =>
                     {
                         let mut menu = build_effort_menu(&source);
@@ -2459,9 +3043,9 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                         effort_menu = Some(menu);
                     }
 
-                    // F3 or CTRL + M or ALT + M (or Cyrillic ь / Ь): open Model menu
+                    // F3 or CTRL + M or ALT + M: open Model menu (supports alternative keyboard layouts)
                     KeyCode::F(3)
-                    | KeyCode::Char('m') | KeyCode::Char('M') | KeyCode::Char('ь') | KeyCode::Char('Ь')
+                    | KeyCode::Char('m') | KeyCode::Char('M') | KeyCode::Char('\u{044c}') | KeyCode::Char('\u{042c}')
                         if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) || matches!(code, KeyCode::F(3)) =>
                     {
                         if let Some(mut menu) = build_model_menu(&source) {
@@ -2500,6 +3084,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                             &source,
                             &current_effort,
                             current_context.as_deref(),
+                            app_config.show_mascot,
                         );
                         custom_placeholder = Some(format!("Permission mode set to: {}", next_mode.label()));
                         suggested_prompt = None;
@@ -2535,6 +3120,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                             confirm_select.right();
                         } else if !running && input.is_empty() {
                             if let Some(sug) = suggested_prompt.take() {
+                                latest_suggestion = None;
                                 input = sug;
                                 renderer.request_reprint();
                             }
@@ -2546,9 +3132,9 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                         } else if !running && input.starts_with('/') {
                             if let Some(ac) = AutocompletePopup::for_input(&input, std::path::Path::new("."), autocomplete_idx) {
                                 if autocomplete_idx == 0 {
-                                    autocomplete_idx = ac.items.len().saturating_sub(1);
+                                     autocomplete_idx = ac.items.len().saturating_sub(1);
                                 } else {
-                                    autocomplete_idx -= 1;
+                                     autocomplete_idx -= 1;
                                 }
                             }
                         } else if !running && !input_history.is_empty() {
@@ -2592,10 +3178,14 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                         input.pop();
                         history_index = None;
                         autocomplete_idx = 0;
+                        if input.is_empty() && latest_suggestion.is_some() {
+                            suggested_prompt = latest_suggestion.clone();
+                        }
                     }
                     KeyCode::Enter => {
                         custom_placeholder = None;
                         suggested_prompt = None;
+                        latest_suggestion = None;
                         if gate.pending().is_some() {
                             gate.respond(confirm_select.decision());
                             confirm_select = ConfirmSelect::new();
@@ -2608,7 +3198,6 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                 history_index = None;
                                 current_draft.clear();
                                 let _ = steer_tx.send(text);
-                                custom_placeholder = Some("Steering injected".to_string());
                                 renderer.request_reprint();
                             }
                         } else if !input.is_empty() && !running {
@@ -2625,6 +3214,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                      • /effort (or /t)        — choose thinking effort preset (or press F4 / Ctrl+T)\n\
                                      • /model  (or /m)        — choose and switch model (or press F3)\n\
                                      • /mode [plan|man|edits|all] — switch permission mode (or press Shift+Tab)\n\
+                                     • /mcp [list|market|test] — manage Model Context Protocol servers and marketplace\n\
                                      • /clear                 — clear chat scrollback\n\
                                      • /regenerate (or Ctrl+R) — regenerate last model response from scratch\n\
                                      • /skill:<name>          — invoke a skill from .agents/skills/\n\
@@ -2809,6 +3399,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                     &source,
                                     &current_effort,
                                     current_context.as_deref(),
+                                    app_config.show_mascot,
                                 );
                                 custom_placeholder = Some(format!("Thinking effort set to: {arg_val}"));
                                 suggested_prompt = None;
@@ -2850,6 +3441,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                     &source,
                                     &current_effort,
                                     current_context.as_deref(),
+                                    app_config.show_mascot,
                                 );
                                 custom_placeholder = Some(format!("Permission mode set to: {}", next_mode.label()));
                                 suggested_prompt = None;
@@ -2864,6 +3456,10 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                     "manual" | "man" => Some(PermissionMode::Manual),
                                     "acceptedits" | "accept_edits" | "edits" | "auto" | "default" => Some(PermissionMode::AcceptEdits),
                                     "bypass" | "accept_all" | "all" => Some(PermissionMode::Bypass),
+                                    "autonomic" => {
+                                        chat.push_system("[Autonomic mode is temporary and activated exclusively during `/goal <task>` execution]");
+                                        None
+                                    }
                                     _ => {
                                         chat.push_system("[Usage: /mode planning | /mode manual | /mode edits | /mode all]");
                                         None
@@ -2881,9 +3477,206 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                         &source,
                                         &current_effort,
                                         current_context.as_deref(),
+                                        app_config.show_mascot,
                                     );
                                     custom_placeholder = Some(format!("Permission mode set to: {}", mode.label()));
                                     suggested_prompt = None;
+                                }
+                                renderer.request_reprint();
+                                continue;
+                            }
+
+                            if trimmed == "/update" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                if flashagent_svc::updater::is_dev_mode() {
+                                    chat.push_system("  \x1b[38;2;225;175;95mAuto-updater is disabled in dev mode\x1b[0m (running from source repository / cargo build).\n  To update your dev build, pull latest git commits and run `cargo build --release`.");
+                                    continue;
+                                }
+                                let channel = app_config.update_channel;
+                                chat.push_system(&format!("Checking for updates on {} channel...", channel.label()));
+                                let update_tx_clone = update_tx.clone();
+                                tokio::spawn(async move {
+                                    match flashagent_svc::updater::check_for_updates(channel, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
+                                        Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, .. }) => {
+                                            let _ = update_tx_clone.send(UpdateNotice::Available {
+                                                version: target,
+                                                asset_name,
+                                                download_url,
+                                            });
+                                        }
+                                        Ok(flashagent_svc::updater::UpdateStatus::UpToDate { current, .. }) => {
+                                            let _ = update_tx_clone.send(UpdateNotice::UpToDate {
+                                                version: current,
+                                            });
+                                        }
+                                        Err(_) => {}
+                                    }
+                                });
+                                continue;
+                            }
+
+                            if trimmed == "/channel" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                chat.push_system(&format!(
+                                    "Current release channel: \x1b[1m{}\x1b[0m\nUsage: /channel <stable|beta>\n• /channel stable — Official stable releases (v*)\n• /channel beta   — Latest beta pre-releases (b*)",
+                                    app_config.update_channel.label()
+                                ));
+                                continue;
+                            } else if let Some(arg) = trimmed.strip_prefix("/channel ") {
+                                let choice = arg.trim().to_lowercase();
+                                input.clear();
+                                autocomplete_idx = 0;
+                                let target_ch = match choice.as_str() {
+                                    "stable" | "v" => Some(flashagent_core::config::UpdateChannel::Stable),
+                                    "beta" | "b" => Some(flashagent_core::config::UpdateChannel::Beta),
+                                    _ => None,
+                                };
+                                if let Some(ch) = target_ch {
+                                    app_config.update_channel = ch;
+                                    let _ = app_config.save();
+                                    chat.push_system(&format!(
+                                        "Switched to \x1b[1m{}\x1b[0m channel. Checking for releases in background...",
+                                        ch.label()
+                                    ));
+                                    if !flashagent_svc::updater::is_dev_mode() {
+                                        if channel_watch_tx.receiver_count() > 0 {
+                                            let _ = channel_watch_tx.send(ch);
+                                        } else {
+                                            let update_tx_clone = update_tx.clone();
+                                            tokio::spawn(async move {
+                                                if let Ok(Some(target_ver)) = flashagent_svc::updater::check_and_apply_background(ch).await {
+                                                    let _ = update_tx_clone.send(UpdateNotice::Ready { version: target_ver });
+                                                }
+                                            });
+                                        }
+                                    }
+                                } else {
+                                    chat.push_system("Invalid channel. Choose either: /channel stable or /channel beta");
+                                }
+                                continue;
+                            }
+
+                            if trimmed == "/mcp" || trimmed == "/mcp help" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                let mgr = tools_arc.mcp_manager();
+                                let paths = mgr.loaded_paths();
+                                let statuses = mgr.server_status_list().await;
+                                let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+                                for line in flashagent_tui::mcp_view::render_mcp_overview(&paths, &statuses, w as usize) {
+                                    chat.push_line(LineKind::System, line);
+                                }
+                                renderer.request_reprint();
+                                continue;
+                            }
+
+                            if trimmed == "/mcp list" || trimmed == "/mcp ls" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                let mgr = tools_arc.mcp_manager();
+                                let statuses = mgr.server_status_list().await;
+                                let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+                                for line in flashagent_tui::mcp_view::render_mcp_server_list(&statuses, w as usize) {
+                                    chat.push_line(LineKind::System, line);
+                                }
+                                renderer.request_reprint();
+                                continue;
+                            }
+
+                            if trimmed == "/mcp market" || trimmed == "/mcp marketplace" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                let items = flashagent_tools::mcp::get_marketplace();
+                                let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+                                for line in flashagent_tui::mcp_view::render_mcp_marketplace(items, w as usize) {
+                                    chat.push_line(LineKind::System, line);
+                                }
+                                renderer.request_reprint();
+                                continue;
+                            }
+
+                            if let Some(target) = trimmed.strip_prefix("/mcp test ") {
+                                let server_name = target.trim().to_string();
+                                input.clear();
+                                autocomplete_idx = 0;
+                                chat.push_system(&format!("Testing MCP server '{}'...", server_name));
+                                let mgr = tools_arc.mcp_manager();
+                                match mgr.test_server(&server_name).await {
+                                    Ok(report) => {
+                                        let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+                                        for line in flashagent_tui::mcp_view::render_mcp_test_report(&report, w as usize) {
+                                            chat.push_line(LineKind::System, line);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        chat.push_system(&format!("\x1b[38;2;245;120;120mMCP server '{server_name}' test failed:\x1b[0m\n{e}"));
+                                    }
+                                }
+                                renderer.request_reprint();
+                                continue;
+                            } else if trimmed == "/mcp test" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                chat.push_system("Usage: /mcp test <server_name>\nExample: /mcp test sqlite");
+                                continue;
+                            }
+
+                            if let Some(target) = trimmed.strip_prefix("/mcp add ") {
+                                let id = target.trim().to_string();
+                                input.clear();
+                                autocomplete_idx = 0;
+                                if let Some(item) = flashagent_tools::mcp::find_marketplace_item(&id) {
+                                    let cfg = flashagent_tools::mcp::scaffold_config(item);
+                                    match flashagent_tools::mcp::save_server_to_project(std::path::Path::new("."), item.id, cfg) {
+                                        Ok(path) => {
+                                            let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+                                            for line in flashagent_tui::mcp_view::render_mcp_add_success(item, &path, w as usize) {
+                                                chat.push_line(LineKind::System, line);
+                                            }
+                                            // Start in background
+                                            let mgr = tools_arc.mcp_manager();
+                                            let server_id = item.id.to_string();
+                                            tokio::spawn(async move {
+                                                let _ = mgr.reload().await;
+                                                let _ = mgr.start_server(&server_id).await;
+                                            });
+                                        }
+                                        Err(e) => {
+                                            chat.push_system(&format!("\x1b[38;2;245;120;120mFailed to save MCP configuration:\x1b[0m {e}"));
+                                        }
+                                    }
+                                } else {
+                                    chat.push_system(&format!("Unknown marketplace extension: '{id}'. Type /mcp market to see available items."));
+                                }
+                                renderer.request_reprint();
+                                continue;
+                            } else if trimmed == "/mcp add" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                chat.push_system("Usage: /mcp add <marketplace_id>\nExample: /mcp add sqlite\nType /mcp market to browse extensions.");
+                                continue;
+                            }
+
+                            if trimmed == "/mcp reload" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                chat.push_system("Reloading MCP configurations and restarting servers...");
+                                let mgr = tools_arc.mcp_manager();
+                                match mgr.reload().await {
+                                    Ok(()) => {
+                                        let statuses = mgr.server_status_list().await;
+                                        let active = statuses.iter().filter(|s| s.state == flashagent_tools::mcp::ServerConnectionState::Active).count();
+                                        let tools: usize = statuses.iter().map(|s| s.tool_count).sum();
+                                        chat.push_system(&format!(
+                                            "\x1b[38;2;135;220;145m✔ MCP reload complete:\x1b[0m {} active server(s), {} discovered tool(s).",
+                                            active, tools
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        chat.push_system(&format!("\x1b[38;2;245;120;120mMCP reload failed:\x1b[0m {e}"));
+                                    }
                                 }
                                 renderer.request_reprint();
                                 continue;
@@ -2895,7 +3688,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                 autocomplete_idx = 0;
                                 custom_placeholder = Some("Compacting conversation context...".to_string());
                                 suggested_prompt = None;
-                                let stats_str = token_tracker.format_stats();
+                                let tg_speed = token_tracker.tg_3s();
                                 renderer.frame(
                                     &chat,
                                     &gate,
@@ -2912,8 +3705,9 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                         mode: perm.state().mode(),
                                         is_goal_active: goal_state.is_some(),
                                         tip: Some(tip_animator.tip_text),
-                                        tip_animated: Some(&tip_rendered),
-                                        turn_stats: stats_str.as_deref(),
+                                        tip_animated: None,
+                                        tip_lines: Some(&tip_lines),
+                                        token_tracker: Some(&token_tracker),
                                         thinking_effort: &current_effort,
                                         reasoning_expand: ReasoningExpansion {
                                             all: all_expanded,
@@ -2923,7 +3717,7 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                         running,
                                         elapsed_secs: turn_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
                                         model_tokens: token_tracker.total_model_tokens,
-                                        tokens_per_sec: token_tracker.tg_3s(),
+                                        tokens_per_sec: tg_speed,
                                         f_keep: token_tracker.last_f_keep,
                                         model: &current_model,
                                         context_window: current_context.as_deref(),
@@ -2935,6 +3729,8 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                         copy_toast: None,
                                         prefill_status: None,
                                         ttft_display: None,
+                                        update_banner: update_banner.as_deref(),
+                                        context_warn_threshold: app_config.context_warn_threshold,
                                     },
                                 );
                                 if let Some(freed) = compact_context(&source, &mut history, focus.as_deref()).await {
@@ -2988,6 +3784,123 @@ async fn run_app(ctx: AppContext) -> Result<()> {
                                         chat.push_system("[Usage: /verbose all | /verbose last | /verbose off]");
                                     }
                                 };
+                                renderer.request_reprint();
+                                continue;
+                            }
+
+                            if trimmed == "/exit" || trimmed == "/quit" || trimmed == "/q" {
+                                break 'main_loop;
+                            }
+
+                            if trimmed == "/editor" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                match open_in_external_editor("", &app_config.external_editor) {
+                                    Ok(edited) => {
+                                        input = edited;
+                                    }
+                                    Err(err) => {
+                                        chat.push_system(&format!("Failed to launch external editor: {err}"));
+                                    }
+                                }
+                                renderer.request_reprint();
+                                continue;
+                            }
+
+                            if trimmed == "/diff" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                match std::process::Command::new("git").args(["diff", "--stat"]).output() {
+                                    Ok(out) => {
+                                        let s = String::from_utf8_lossy(&out.stdout);
+                                        if s.trim().is_empty() {
+                                            chat.push_system("[Git working tree clean — no unstaged changes]");
+                                        } else {
+                                            chat.push_system(&format!("Git diff summary:\n{}", s.trim_end()));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        chat.push_system(&format!("Failed to run git diff: {e}"));
+                                    }
+                                }
+                                renderer.request_reprint();
+                                continue;
+                            }
+
+                            if trimmed == "/commit" || trimmed.starts_with("/commit ") {
+                                let msg_arg = trimmed.strip_prefix("/commit ").map(|s| s.trim().to_string()).unwrap_or_default();
+                                input.clear();
+                                autocomplete_idx = 0;
+                                let commit_msg = if !msg_arg.is_empty() {
+                                    msg_arg.to_string()
+                                } else {
+                                    let ts = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs())
+                                        .unwrap_or(0);
+                                    format!("chore: checkpoint update ({ts})")
+                                };
+                                match std::process::Command::new("git").args(["commit", "-m", &commit_msg]).output() {
+                                    Ok(out) if out.status.success() => {
+                                        let s = String::from_utf8_lossy(&out.stdout);
+                                        chat.push_system(&format!("Git commit succeeded:\n{}", s.trim_end()));
+                                    }
+                                    Ok(out) => {
+                                        let err = String::from_utf8_lossy(&out.stderr);
+                                        let s = String::from_utf8_lossy(&out.stdout);
+                                        chat.push_system(&format!("Git commit status:\n{}{}", s, err));
+                                    }
+                                    Err(e) => {
+                                        chat.push_system(&format!("Failed to run git commit: {e}"));
+                                    }
+                                }
+                                renderer.request_reprint();
+                                continue;
+                            }
+
+                            if trimmed == "/export" || trimmed.starts_with("/export ") {
+                                let format_arg = trimmed.strip_prefix("/export ").map(|s| s.trim().to_lowercase()).unwrap_or_else(|| "md".to_string());
+                                input.clear();
+                                autocomplete_idx = 0;
+                                let filename = match format_arg.as_str() {
+                                    "html" => format!("session_{session_id}.html"),
+                                    "jsonl" | "json" => format!("session_{session_id}.jsonl"),
+                                    _ => format!("session_{session_id}.md"),
+                                };
+                                let content = match format_arg.as_str() {
+                                    "html" => {
+                                        let mut html = String::from("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>FlashAgent Session</title><style>body{font-family:sans-serif;max-width:800px;margin:2rem auto;line-height:1.6;background:#1e1e2e;color:#cdd6f4;}pre{background:#181825;padding:1rem;border-radius:6px;overflow-x:auto;}h3{color:#89b4fa;}</style></head><body>");
+                                        for m in &history {
+                                            let role = m.role.as_str();
+                                            let escaped = m.content.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+                                            html.push_str(&format!("<h3>Role: {role}</h3><pre>{escaped}</pre>"));
+                                        }
+                                        html.push_str("</body></html>");
+                                        html
+                                    }
+                                    "jsonl" | "json" => {
+                                        let mut buf = String::new();
+                                        for m in &history {
+                                            let saved = SavedMessage::from(m);
+                                            if let Ok(line) = serde_json::to_string(&saved) {
+                                                buf.push_str(&line);
+                                                buf.push('\n');
+                                            }
+                                        }
+                                        buf
+                                    }
+                                    _ => {
+                                        let mut md = format!("# FlashAgent Session Export\n- **Session ID**: `{session_id}`\n- **Model**: `{current_model}`\n\n---\n\n");
+                                        for m in &history {
+                                            md.push_str(&format!("### {}\n\n{}\n\n", m.role.as_str().to_uppercase(), m.content));
+                                        }
+                                        md
+                                    }
+                                };
+                                match std::fs::write(&filename, content) {
+                                    Ok(_) => chat.push_system(&format!("Exported conversation to: \x1b[1m{filename}\x1b[0m")),
+                                    Err(e) => chat.push_system(&format!("Failed to export conversation: {e}")),
+                                }
                                 renderer.request_reprint();
                                 continue;
                             }
@@ -3097,6 +4010,8 @@ async fn run_app(ctx: AppContext) -> Result<()> {
             }
         }
     }
+
+    Ok(finish!())
 }
 
 fn update_context_usage(
@@ -3206,7 +4121,6 @@ async fn generate_llm_recap_and_suggestion(
     let last_user_idx = history.iter().rposition(|m| m.role == flashagent_llm::Role::User)?;
     let user_msg = history.get(last_user_idx)?;
     let user_prompt = extract_user_prompt(&user_msg.content);
-    let is_ru = user_prompt.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c));
 
     let turn_messages = &history[last_user_idx..];
     let assistant_msg = turn_messages.iter().rev().find(|m| m.role == flashagent_llm::Role::Assistant);
@@ -3218,21 +4132,15 @@ async fn generate_llm_recap_and_suggestion(
     let user_snip = flashagent_tui::truncate_middle(user_prompt, 200);
     let asst_snip = flashagent_tui::truncate_middle(asst_text, 600);
 
-    let system_prompt = if is_ru {
-        "Ты — аналитик диалога. Сформируй строго JSON со следующими полями:\n\
-        {\n  \
-          \"suggestion\": \"фраза следующего запроса ПОЛЬЗОВАТЕЛЯ к ассистенту в повелительном наклонении (например: «Расскажи об особенностях Swift», «Покажи примеры кода на Swift», «Объясни как устроена безопасность»). Строго от лица пользователя к ассистенту (повелительное наклонение)! Не пиши от лица ассистента («Какие примеры показать?»)! Не повторяй уже заданный вопрос!\",\n  \
-          \"recap\": \"краткий (1 короткое предложение) итог ответа в прошедшем времени\"\n\
-        }"
-    } else {
+    let system_prompt =
         "You are a conversation analyzer. Return strictly JSON with the following fields:\n\
         {\n  \
           \"suggestion\": \"the next follow-up prompt FROM THE USER to the assistant in imperative mood (e.g. 'Show Swift code examples', 'Explain Swift features in detail', 'Explain how safety works'). Strictly from the user's perspective! Never write from the assistant's perspective! Do not repeat the existing query!\",\n  \
           \"recap\": \"one concise past-tense sentence of what was explained or done\"\n\
-        }"
-    };
+        }\n\
+        Do NOT generate any internal thinking or explanations. Start immediately with { and return only valid JSON.";
 
-    let user_turn_info = format!("Запрос пользователя: {user_snip}\nОтвет ассистента: {asst_snip}");
+    let user_turn_info = format!("User prompt: {user_snip}\nAssistant response: {asst_snip}");
     let query_messages = vec![
         ChatMessage::system(system_prompt),
         ChatMessage::user(user_turn_info),
@@ -3240,9 +4148,9 @@ async fn generate_llm_recap_and_suggestion(
 
     let turn_opts = flashagent_llm::TurnOptions {
         thinking: flashagent_llm::ThinkingEffort::Off,
-        custom_effort: Some("off".to_string()),
-        temperature: Some(0.3),
-        max_tokens: Some(256),
+        custom_effort: Some("none".to_string()),
+        temperature: Some(0.2),
+        max_tokens: Some(512),
         ..Default::default()
     };
 
@@ -3250,22 +4158,30 @@ async fn generate_llm_recap_and_suggestion(
         let mut stream = source.turn_with_options(&query_messages, &[], &turn_opts).await.ok()?;
         use futures::StreamExt;
         let mut collected = String::new();
+        let mut reasoning_collected = String::new();
         while let Some(ev_res) = stream.next().await {
             if let Ok(ev) = ev_res {
                 match ev {
                     flashagent_llm::LlmEvent::TextDelta(delta) => {
                         collected.push_str(&delta);
                     }
+                    flashagent_llm::LlmEvent::ReasoningDelta(delta) => {
+                        reasoning_collected.push_str(&delta);
+                    }
                     flashagent_llm::LlmEvent::Done(_) => break,
                     _ => {}
                 }
             }
         }
-        parse_recap_and_suggestion_json(&collected)
+        if let Some(parsed) = parse_recap_and_suggestion_json(&collected) {
+            Some(parsed)
+        } else {
+            parse_recap_and_suggestion_json(&reasoning_collected)
+        }
     };
 
-    // 25s timeout accommodates larger local models (e.g. 26B Gemma TTFT ~8s + generation ~5s)
-    tokio::time::timeout(std::time::Duration::from_secs(25), overall_task).await.ok()?
+    // 90s timeout accommodates larger local models (e.g. 26B Gemma TTFT ~8s + generation ~5s, slow CPU inference, or heavy load)
+    tokio::time::timeout(std::time::Duration::from_secs(90), overall_task).await.ok()?
 }
 
 fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Option<String>)> {
@@ -3353,40 +4269,34 @@ fn sanitize_user_suggestion(s: &str) -> Option<String> {
     let lower = text.to_lowercase();
 
     // Convert assistant question or infinitive formulations into direct user imperatives
-    if lower.starts_with("какие примеры кода показать") || lower.starts_with("какие примеры показать") {
-        text = "Покажи примеры кода".to_string();
-    } else if lower.starts_with("хотите узнать подробнее о ") {
-        text = format!("Расскажи подробнее о {}", &trimmed[("хотите узнать подробнее о ").len()..]);
-    } else if lower.starts_with("хотите узнать ") {
-        text = format!("Расскажи {}", &trimmed[("хотите узнать ").len()..]);
-    } else if lower.starts_with("хочешь узнать подробнее о ") {
-        text = format!("Расскажи подробнее о {}", &trimmed[("хочешь узнать подробнее о ").len()..]);
-    } else if lower.starts_with("хочешь узнать ") {
-        text = format!("Расскажи {}", &trimmed[("хочешь узнать ").len()..]);
-    } else if lower.starts_with("рассказать мне ") {
-        text = format!("Расскажи мне {}", &trimmed[("рассказать мне ").len()..]);
-    } else if lower.starts_with("рассказать об ") {
-        text = format!("Расскажи об {}", &trimmed[("рассказать об ").len()..]);
-    } else if lower.starts_with("рассказать о ") {
-        text = format!("Расскажи о {}", &trimmed[("рассказать о ").len()..]);
-    } else if lower.starts_with("рассказать ") {
-        text = format!("Расскажи {}", &trimmed[("рассказать ").len()..]);
-    } else if lower.starts_with("показать мне ") {
-        text = format!("Покажи мне {}", &trimmed[("показать мне ").len()..]);
-    } else if lower.starts_with("показать примеры ") {
-        text = format!("Покажи примеры {}", &trimmed[("показать примеры ").len()..]);
-    } else if lower.starts_with("показать ") {
-        text = format!("Покажи {}", &trimmed[("показать ").len()..]);
-    } else if lower.starts_with("объяснить мне ") {
-        text = format!("Объясни мне {}", &trimmed[("объяснить мне ").len()..]);
-    } else if lower.starts_with("объяснить ") {
-        text = format!("Объясни {}", &trimmed[("объяснить ").len()..]);
-    } else if lower.starts_with("привести примеры ") {
-        text = format!("Приведи примеры {}", &trimmed[("привести примеры ").len()..]);
-    } else if lower.starts_with("узнать подробнее о ") {
-        text = format!("Расскажи подробнее о {}", &trimmed[("узнать подробнее о ").len()..]);
-    } else if lower.starts_with("узнать ") {
-        text = format!("Расскажи {}", &trimmed[("узнать ").len()..]);
+    if lower.starts_with("would you like to see examples of ") {
+        text = format!("Show code examples of {}", &trimmed["would you like to see examples of ".len()..]);
+    } else if lower.starts_with("would you like to see ") {
+        text = format!("Show {}", &trimmed["would you like to see ".len()..]);
+    } else if lower.starts_with("would you like to know more about ") {
+        text = format!("Explain more about {}", &trimmed["would you like to know more about ".len()..]);
+    } else if lower.starts_with("would you like to know ") {
+        text = format!("Explain {}", &trimmed["would you like to know ".len()..]);
+    } else if lower.starts_with("do you want to know more about ") {
+        text = format!("Explain more about {}", &trimmed["do you want to know more about ".len()..]);
+    } else if lower.starts_with("do you want to know ") {
+        text = format!("Explain {}", &trimmed["do you want to know ".len()..]);
+    } else if lower.starts_with("tell me about ") {
+        text = format!("Tell me about {}", &trimmed["tell me about ".len()..]);
+    } else if lower.starts_with("show me ") {
+        text = format!("Show me {}", &trimmed["show me ".len()..]);
+    } else if lower.starts_with("show code examples of ") {
+        text = format!("Show code examples of {}", &trimmed["show code examples of ".len()..]);
+    } else if lower.starts_with("show examples ") {
+        text = format!("Show examples {}", &trimmed["show examples ".len()..]);
+    } else if lower.starts_with("explain to me ") {
+        text = format!("Explain to me {}", &trimmed["explain to me ".len()..]);
+    } else if lower.starts_with("explain ") {
+        text = format!("Explain {}", &trimmed["explain ".len()..]);
+    } else if lower.starts_with("give examples of ") {
+        text = format!("Give examples of {}", &trimmed["give examples of ".len()..]);
+    } else if lower.starts_with("learn more about ") {
+        text = format!("Explain more about {}", &trimmed["learn more about ".len()..]);
     } else if is_assistant_phrased(&text) {
         return None;
     }
@@ -3410,40 +4320,28 @@ fn sanitize_user_suggestion(s: &str) -> Option<String> {
 
 fn is_assistant_phrased(text: &str) -> bool {
     let lower = text.to_lowercase();
-    lower.starts_with("какие ")
-        || lower.starts_with("какой ")
-        || lower.starts_with("что вам ")
-        || lower.starts_with("что тебе ")
-        || lower.starts_with("хотите ")
-        || lower.starts_with("хочешь ")
-        || lower.starts_with("показать ли ")
-        || lower.starts_with("рассказать ли ")
-        || lower.ends_with("показать?")
-        || lower.starts_with("would you ")
+    lower.starts_with("would you ")
         || lower.starts_with("do you want ")
         || lower.starts_with("should i ")
         || lower.starts_with("what examples ")
+        || lower.starts_with("which ")
+        || lower.starts_with("what would ")
+        || lower.ends_with("show?")
 }
 
 fn is_generic_recap(text: &str) -> bool {
     let lower = text.to_lowercase();
-    lower.contains("ответ сформирован")
-        || lower.contains("response generated")
-        || lower.contains("ответ предоставлен")
+    lower.contains("response generated")
         || lower.contains("answer provided")
-        || lower.contains("что дальше")
         || lower.contains("what's next")
 }
 
 fn is_generic_suggestion(text: &str) -> bool {
     let lower = text.to_lowercase();
     let trimmed = lower.trim_matches(|c: char| c.is_whitespace() || c == '?' || c == '.' || c == '!' || c == '"' || c == '\'');
-    trimmed == "что дальше"
-        || trimmed == "what's next"
+    trimmed == "what's next"
         || trimmed == "what next"
-        || trimmed == "продолжить"
         || trimmed == "continue"
-        || trimmed == "дальше"
         || trimmed == "next"
 }
 
@@ -3572,45 +4470,42 @@ mod tests {
 
     #[test]
     fn test_parse_recap_and_suggestion_json() {
-        let raw = "```json\n{\"recap\": \"Объяснил концепцию Swift\", \"suggestion\": \"Показать код маскота\"}\n```";
+        let raw = "```json\n{\"recap\": \"Explained Swift concepts\", \"suggestion\": \"Show mascot code\"}\n```";
         let parsed = parse_recap_and_suggestion_json(raw);
         assert_eq!(
             parsed,
-            Some(("Объяснил концепцию Swift".to_string(), Some("Покажи код маскота".to_string())))
+            Some(("Explained Swift concepts".to_string(), Some("Show mascot code".to_string())))
         );
 
         // Filters out generic filler
-        let generic = "{\"recap\": \"Ответ сформирован\", \"suggestion\": \"Что дальше?\"}";
+        let generic = "{\"recap\": \"Response generated\", \"suggestion\": \"What's next?\"}";
         assert_eq!(parse_recap_and_suggestion_json(generic), None);
     }
 
     #[test]
     fn test_sanitize_user_suggestion_conversions() {
         assert_eq!(
-            sanitize_user_suggestion("«Расскажи мне об особенностях Swift»"),
-            Some("Расскажи мне об особенностях Swift".to_string())
+            sanitize_user_suggestion("«Tell me about Swift features»"),
+            Some("Tell me about Swift features".to_string())
         );
         assert_eq!(
-            sanitize_user_suggestion("показать примеры кода на Swift"),
-            Some("Покажи примеры кода на Swift".to_string())
+            sanitize_user_suggestion("show code examples of Swift"),
+            Some("Show code examples of Swift".to_string())
         );
         assert_eq!(
-            sanitize_user_suggestion("рассказать мне об особенностях Swift."),
-            Some("Расскажи мне об особенностях Swift".to_string())
+            sanitize_user_suggestion("tell me about Swift features."),
+            Some("Tell me about Swift features".to_string())
         );
         assert_eq!(
-            sanitize_user_suggestion("Какие примеры кода показать?"),
-            Some("Покажи примеры кода".to_string())
-        );
-        assert_eq!(
-            sanitize_user_suggestion("Хотите узнать подробнее о безопасности памяти?"),
-            Some("Расскажи подробнее о безопасности памяти".to_string())
+            sanitize_user_suggestion("Would you like to know more about memory safety?"),
+            Some("Explain more about memory safety".to_string())
         );
         // Generic fillers are rejected
-        assert_eq!(sanitize_user_suggestion("Что дальше?"), None);
-        assert_eq!(sanitize_user_suggestion("Дальше"), None);
-        assert_eq!(sanitize_user_suggestion("Продолжить"), None);
+        assert_eq!(sanitize_user_suggestion("What's next?"), None);
+        assert_eq!(sanitize_user_suggestion("Next"), None);
+        assert_eq!(sanitize_user_suggestion("Continue"), None);
     }
+
 
     #[test]
     fn test_token_tracker_initial_state() {
@@ -3666,6 +4561,49 @@ mod tests {
         assert!(formatted.contains("4.9K prompt"));
         assert!(formatted.contains("15.2 tg"));
         assert!(!formatted.contains("mtp:"));
+    }
+
+    #[test]
+    fn test_format_status_left_running_does_not_duplicate_metrics() {
+        let mut tracker = TokenTracker::new("default".to_string());
+        tracker.on_turn_start("default".to_string(), 4920);
+        let usage = flashagent_llm::Usage {
+            prompt: Some(4920),
+            completion: Some(100),
+            cached: None,
+            mtp: None,
+        };
+        tracker.on_usage(&usage);
+        tracker.last_tg = Some(44.4);
+        tracker.last_ttft = Some(std::time::Duration::from_millis(1770));
+
+        // When running is true, Line 3 must show "Generating response..." and NOT duplicate prompt tokens or TTFT
+        let status = format_status_left(true, false, "Normal", Some(&tracker), 80, "");
+        assert!(status.contains("Generating response..."));
+        assert!(status.contains("[Normal]"));
+        assert!(!status.contains("4.9K"));
+        assert!(!status.contains("TTFT"));
+        assert!(!status.contains("44.4 tg"));
+
+        // When running is false, Line 3 displays the completed turn telemetry
+        tracker.on_finished();
+        let status_done = format_status_left(false, false, "Normal", Some(&tracker), 80, "");
+        assert!(status_done.contains("4.9K prompt"));
+        assert!(status_done.contains("TTFT 1.77s"));
+        assert!(status_done.contains("44.4 tg"));
+        assert!(!status_done.contains("Generating response..."));
+    }
+
+    #[test]
+    fn test_format_status_left_goal_active_modes() {
+        let tracker = TokenTracker::new("default".to_string());
+        let status_running = format_status_left(true, true, "Autonomous", Some(&tracker), 80, "");
+        assert!(status_running.contains("[Goal: Autonomous]"));
+        assert!(status_running.contains("Generating response..."));
+
+        let status_ready = format_status_left(false, true, "Autonomous", None, 80, "");
+        assert!(status_ready.contains("[Goal: Autonomous]"));
+        assert!(status_ready.contains("Ready"));
     }
 }
 

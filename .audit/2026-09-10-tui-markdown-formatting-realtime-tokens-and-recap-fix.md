@@ -26,10 +26,10 @@ Decision: Polish TUI markdown rendering (tables, headings, lists), real-time con
   - Updated `KeyCode::Esc` so clearing typed text restores the suggestion placeholder.
   - Fixed `build_turn_recap_and_suggestion`:
     - Only treats text as asking questions if `ask_user` tool was called or if the assistant response was short (< 400 chars) and primarily asked a question.
-    - Detects project overview requests ("Расскажи о проекте", "объясни", "о проекте") and produces accurate recaps (`"Предоставлен подробный обзор проекта «FlashAgent»"`) and suggestions (`"Архитектура проекта"`).
+    - Detects project overview requests ("Explain the project", "overview") and produces accurate recaps (`"Provided detailed overview of the FlashAgent project"`) and suggestions (`"Project architecture"`).
     - Improved `extract_choices_from_question_text` to parse options from numbered items with colons.
 - `crates/llm/src/thinking.rs`:
-  - Added "проект", "расскажи", "объясни", "explain", "describe", "overview" to `has_tech_keywords` so exploratory project questions are not classified as `TaskComplexity::Minimal`.
+  - Added "explain", "describe", "overview", "architecture" to `has_tech_keywords` so exploratory project questions are not classified as `TaskComplexity::Minimal`.
 
 ### Verification:
 1. `cargo test --workspace`

@@ -1,17 +1,17 @@
 # Code Quality — Rust
 
-- `#![deny(warnings)]` дух: clippy strict, без allow без причины-комментария.
-- Никаких `unwrap()`/`expect()` вне тестов и инициализации до логирования. Ошибки — `thiserror` для библиотек, `anyhow` только в бинарниках.
-- Границы крейтов нерушимы: `core` не знает про HTTP/SQL/UI. Нарушение = ошибка архитектуры.
-- Все публичные API задокументированы (`///`, rustdoc проходит без warnings).
-- Каналы/events строго типизированы: никаких «JSON-строка на всё».
-- Тулы и промпты — данные, не код: наборы инструментов конфигурируемы по окну контекста.
-- Контент из инструментов = недоверенный по построению (тип-обёртка `Untrusted<T>`), системные инструкции внутри него не интерпретируются.
-- Три похожие строки лучше преждевременной абстракции. Никакого мёртвого кода.
+- `#![deny(warnings)]` ethos: strict clippy, no `allow` without an explanatory comment.
+- No `unwrap()` / `expect()` outside of tests and pre-logger initialization. Errors use `thiserror` for libraries and `anyhow` exclusively in binaries.
+- Crate boundaries are inviolable: `core` knows nothing of HTTP, SQL, or UI. Any breach is an architectural flaw.
+- All public APIs documented (`///`, rustdoc passes with zero warnings).
+- Strongly typed channels and events: no generic "JSON-string-for-everything".
+- Tools and prompts are data, not code: toolsets adapt dynamically based on context window limits.
+- Tool output is untrusted by design (`Untrusted<T>` wrapper); embedded system instructions are never executed.
+- Three similar lines are preferable to premature abstraction. No dead code.
 
 ## Human-Like Code Craftsmanship
-- Пиши код как опытный, прагматичный сеньор-разработчик: чисто, элегантно, идиоматично и понятно с первого взгляда.
-- Комментарии должны быть краткими, но очень ёмкими и понятными. Объясняй «почему» и неочевидные тонкости (инварианты, неочевидные краевые случаи, архитектурные решения), а не то, что очевидно из кода. Никаких шаблонных очевидных комментариев.
-- Без AI-слопа: избегай раздутых шаблонных обёрток, избыточной вложенности и лишних слоёв абстракции.
-- Плоский поток управления: early return, guard clauses, отсутствие глубоких `if/else` лестниц.
-- Естественные, читаемые имена типов, функций и переменных, точно передающие замысел.
+- Write code like an experienced, pragmatic senior engineer: clean, elegant, idiomatic, and immediately understandable.
+- Comments must be concise, punchy, and meaningful. Explain "why" and non-obvious subtleties (invariants, non-trivial edge cases, architectural trade-offs), not what is already evident from reading the code. No boilerplate or redundant comments.
+- Zero AI-slop: avoid bloated wrapper types, excessive nesting, and unnecessary layers of indirection.
+- Flat control flow: early returns, guard clauses, no deep `if/else` ladders.
+- Natural, expressive names for types, functions, and variables that precisely communicate intent.

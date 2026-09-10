@@ -1,7 +1,7 @@
-# 2026-09-07 — A2: LLM-адаптер
+# 2026-09-07 — A2: LLM Adapter
 
 ### Status: PASS
-### Decision: A2 (LLM-слой)
+### Decision: A2 (LLM Layer)
 
 Files touched:
 - Cargo.toml (+reqwest rustls, futures, async-trait)
@@ -11,24 +11,18 @@ Verification:
 - `cargo test --workspace` → TOTAL passed: 30, failed: 0 (llm: 20/20)
 - `cargo clippy --workspace -- -D warnings` → Finished, 0 warnings
 
-Что внутри:
-- types.rs: Role/ToolCall/ToolSpec/ChatMessage/Usage/FinishReason/LlmEvent — единые
-  протокол-независимые типы; estimate_tokens (фолбэк подсчёта токенов)
-- repair.rs: ремонт JSON — умные кавычки, трейлинг-запятые, закрытие строк/скобок,
-  дополнение обрезанных литералов (tru→true)
-- parse.rs: SseDecoder (сплит-чанки), ChunkParser (текст/reasoning/тулы/usage/finish),
-  TextToolScanner (Hermes/Mistral/bare JSON, hold-back частичных маркеров,
-  код-фенсы не едятся как тулы)
-- openai.rs: LlmBackend trait + OpenAiCompat (LM Studio/Ollama/vLLM/OpenRouter),
-  bearer-ключ, таймаут, статусные ошибки
+Contents:
+- types.rs: Role/ToolCall/ToolSpec/ChatMessage/Usage/FinishReason/LlmEvent — unified protocol-agnostic types; estimate_tokens (fallback token estimation)
+- repair.rs: JSON repair — smart quotes, trailing commas, closing unclosed strings/brackets, repairing truncated literals (tru→true)
+- parse.rs: SseDecoder (split chunks), ChunkParser (text/reasoning/tools/usage/finish), TextToolScanner (Hermes/Mistral/bare JSON, hold-back of partial markers, code fences preserved)
+- openai.rs: LlmBackend trait + OpenAiCompat (LM Studio/Ollama/vLLM/OpenRouter), bearer key, timeout, HTTP status error handling
 
-Зафиксированные дизайнерские решения:
-- Usage парсится ДО choices и может приходить в любом чанке
-- Сканер текстовых тулов пока НЕ встроен в HTTP-поток — подключается в A3 в цикле,
-  когда станет ясно, какой бэкенд не отдаёт нативные тулы
+Recorded design decisions:
+- Usage parsed BEFORE choices and can arrive in any chunk
+- Text tool scanner not yet embedded into HTTP stream — wired into A3 loop when backend tool capabilities are negotiated
 
 Open questions:
-- Нет.
+- None.
 
 Handoff:
-- Следующая: A3 — агентный цикл поверх LlmBackend + контрактные тесты на мок-LLM.
+- Next: A3 — agent loop on top of LlmBackend + contract tests on mock LLM.

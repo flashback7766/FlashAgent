@@ -12,6 +12,7 @@ path = "src/main.rs"
 flashagent-core = { path = "../core" }
 flashagent-llm = { path = "../llm" }
 flashagent-tools = { path = "../tools" }
+flashagent-svc = { path = "../svc" }
 futures = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }

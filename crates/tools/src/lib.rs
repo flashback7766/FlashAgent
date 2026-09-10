@@ -9,6 +9,7 @@ pub mod ask_user;
 pub mod env_tools;
 pub mod fs_tools;
 pub mod git;
+pub mod mcp;
 pub mod memory_tools;
 pub mod outline;
 pub mod patch;
@@ -117,6 +118,8 @@ pub struct BuiltinToolsConfig {
     pub web_enabled: Option<bool>,
     /// Discovered model context window size (PHILOSOPHY.md §9: adaptive toolset).
     pub context_window: Option<usize>,
+    /// Optional MCP manager coordinating external Model Context Protocol servers.
+    pub mcp_manager: Option<Arc<mcp::McpManager>>,
 }
 
 /// The built-in toolset. One instance per session, shared across the loop.
@@ -130,6 +133,7 @@ pub struct BuiltinTools {
     toolset_profile: std::sync::RwLock<ToolsetProfile>,
     web_enabled: Arc<AtomicBool>,
     context_window: Arc<std::sync::RwLock<Option<usize>>>,
+    mcp_manager: Arc<mcp::McpManager>,
 }
 
 impl BuiltinTools {
@@ -139,6 +143,9 @@ impl BuiltinTools {
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| ToolError::Other(format!("http client: {e}")))?;
+        let mcp_manager = config
+            .mcp_manager
+            .unwrap_or_else(|| mcp::McpManager::new(config.cwd.clone()));
         Ok(Self {
             cwd: config.cwd,
             shells: ShellRegistry::new(),
@@ -149,7 +156,13 @@ impl BuiltinTools {
             toolset_profile: std::sync::RwLock::new(config.toolset_profile.unwrap_or(ToolsetProfile::Auto)),
             web_enabled: Arc::new(AtomicBool::new(config.web_enabled.unwrap_or(false))),
             context_window: Arc::new(std::sync::RwLock::new(config.context_window)),
+            mcp_manager,
         })
+    }
+
+    /// Return reference to the active MCP manager.
+    pub fn mcp_manager(&self) -> Arc<mcp::McpManager> {
+        self.mcp_manager.clone()
     }
 
     /// Set or update the active autonomous goal mode flag.
@@ -300,7 +313,13 @@ impl BuiltinTools {
                     web::search_free(&self.http, &a.query, a.count.unwrap_or(5)).await
                 }
             }
-            other => Err(ToolError::Other(format!("unknown tool: {other}"))),
+            other => {
+                if other.starts_with("mcp__") || self.mcp_manager.has_tool(other) {
+                    self.mcp_manager.call_tool(other, &call.args_json).await
+                } else {
+                    Err(ToolError::Other(format!("unknown tool: {other}")))
+                }
+            }
         }
     }
 
@@ -460,6 +479,9 @@ impl ToolExec for BuiltinTools {
             }
         }
 
+        // MCP tools (dynamically discovered from active MCP servers)
+        specs.extend(self.mcp_manager.get_all_tool_specs());
+
         specs
     }
 
@@ -578,6 +600,7 @@ mod tests {
             toolset_profile: None,
             web_enabled: None,
             context_window: None,
+            mcp_manager: None,
         })
         .unwrap();
         for args in ["{ not json", "", r#"{"path": 42}"#] {
@@ -603,6 +626,7 @@ mod tests {
             toolset_profile: None,
             web_enabled: None,
             context_window: None,
+            mcp_manager: None,
         })
         .unwrap();
         let out = tools
@@ -626,6 +650,7 @@ mod tests {
             toolset_profile: Some(ToolsetProfile::Auto),
             web_enabled: None,
             context_window: None,
+            mcp_manager: None,
         })
         .unwrap();
         let specs_auto = tools_auto.specs();
@@ -649,6 +674,7 @@ mod tests {
             toolset_profile: Some(ToolsetProfile::Compact),
             web_enabled: None,
             context_window: None,
+            mcp_manager: None,
         })
         .unwrap();
         let specs_compact = tools_compact.specs();
@@ -668,6 +694,7 @@ mod tests {
             toolset_profile: Some(ToolsetProfile::Auto),
             web_enabled: Some(false),
             context_window: None,
+            mcp_manager: None,
         })
         .unwrap();
         let out = tools.execute(&ToolCall {
@@ -696,6 +723,7 @@ mod tests {
             toolset_profile: Some(ToolsetProfile::Auto),
             web_enabled: Some(false),
             context_window: Some(32_000), // ~32k ultra-minimum -> compact
+            mcp_manager: None,
         })
         .unwrap();
         let specs = tools.specs();

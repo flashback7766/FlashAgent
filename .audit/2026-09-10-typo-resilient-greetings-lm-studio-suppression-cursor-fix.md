@@ -1,9 +1,9 @@
 ### Status: PASS
-Decision: Fix greeting reasoning trigger on typo 'Привет!Ё', suppress thinking tokens in LM Studio payload with 'reasoning_effort: none', and align composer ghost suggestion cursor
+Decision: Fix greeting reasoning trigger on typo / trailing key artifacts, suppress thinking tokens in LM Studio payload with 'reasoning_effort: none', and align composer ghost suggestion cursor
 
 Files touched:
 - `crates/llm/src/thinking.rs`:
-  - Added `pub fn is_greeting_text(prompt: &str) -> bool` with robust word tokenization and layout typo resilience (handling trailing keys like Russian `Ё` / `ё` from Shift+1 key proximity in `Привет!Ё`).
+  - Added `pub fn is_greeting_text(prompt: &str) -> bool` with robust word tokenization and layout typo resilience (handling trailing keys from key proximity).
   - Integrated `is_greeting_text` into `ThinkingProfile::analyze_turn_complexity` ensuring `TaskComplexity::Minimal` for all greeting variations while strictly distinguishing coding/task instructions.
   - Updated `ThinkingProfile::apply_to_request` for `ThinkingProtocol::LmStudio` and `ReasoningEffort`: when effort is `off`/disabled, send `reasoning_effort: "none"` alongside boolean flags (`enable_thinking: false`), because LM Studio's `/v1/chat/completions` requires `reasoning_effort: "none"` to suppress `<thought>` generation. When enabled with `on`, map to `reasoning_effort: "high"`.
   - Added model architecture heuristics in `parse_server_models` Check 1 and Check 2 for `gemma-4` and `gemma4`.
@@ -11,8 +11,8 @@ Files touched:
 - `crates/llm/src/lib.rs`:
   - Re-exported `is_greeting_text` for consumption by `flashagent-tui`.
 - `crates/tui/src/main.rs`:
-  - Replaced manual greeting matching in `build_turn_recap_and_suggestion` with canonical `flashagent_llm::is_greeting_text`, ensuring proper recap ("Ответил на приветствие пользователя") and suggestion ("Расскажи о проекте") even with typos like `Привет!Ё`.
-  - Adjusted composer input row rendering when `input.is_empty()` to insert space before placeholders and ghost suggestions, preventing the solid block cursor at column 4 from overlapping the first character of the ghost text (e.g. `Ч` in `Что дальше?`).
+  - Replaced manual greeting matching in `build_turn_recap_and_suggestion` with canonical `flashagent_llm::is_greeting_text`, ensuring proper recap ("Greeted the user") and suggestion ("Explain the project").
+  - Adjusted composer input row rendering when `input.is_empty()` to insert space before placeholders and ghost suggestions, preventing the solid block cursor at column 4 from overlapping the first character of the ghost text (e.g. `W` in `What next?`).
   - Added unit test `test_build_turn_recap_and_suggestion_greeting_with_typo`.
 
 Verification:
@@ -26,7 +26,7 @@ Verification:
    Exit code: 0
    Output: Finished `release` profile [optimized] in 13.80s.
 4. Live LM Studio API verification against `gemma-4-e2b-it-qat@q4_k_xl`:
-   - Request with `"reasoning_effort": "none"` generated 0 reasoning tokens (`reasoning_tokens: 0`, instant response `"Привет! Чем могу помочь? 😊"`).
+   - Request with `"reasoning_effort": "none"` generated 0 reasoning tokens (`reasoning_tokens: 0`, instant response `"Hello! How can I help?"`).
 
 Open questions:
 - None.

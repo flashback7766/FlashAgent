@@ -13,7 +13,7 @@ pub mod permissions;
 pub mod prompt;
 pub mod subagents;
 
-pub use config::{AppConfig, BackendPreset, SamplingPreset, ToolsetProfile};
+pub use config::{AppConfig, BackendPreset, SamplingPreset, ToolsetProfile, UpdateChannel};
 pub use context_usage::ContextUsage;
 pub use diff::unified;
 pub use loop_::{AgentLoop, DoneReason, LoopConfig, LoopError, LoopEvent, LlmSource, ToolExec, ToolOutput, WritePreview};

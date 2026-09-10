@@ -24,7 +24,7 @@ If a proposed feature contradicts [PHILOSOPHY.md](PHILOSOPHY.md), it will be pol
 ### Prerequisites
 - **Rust 1.85+** (`rustup update stable`)
 - Linux, macOS, or Windows
-- A local LLM server (e.g. [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.ai), or [vLLM](https://github.com/vllm-project/vllm)) or an OpenAI-compatible API key.
+- A local LLM server (e.g. [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.ai), [llama.cpp](https://github.com/ggerganov/llama.cpp), or [vLLM](https://github.com/vllm-project/vllm)) or an OpenAI-compatible API key.
 
 ### Building & Testing
 ```bash

@@ -27,9 +27,9 @@ Files touched:
   - Updated effort selection menu to display `"auto"` at the top as `"Auto (dynamically adjusts thinking per turn)"`.
   - Rebuilt recap logic (`build_turn_recap_and_suggestion`):
     - Reads tool calls directly from messages rather than searching text.
-    - Formats clear "Action + Purpose" summaries (e.g. "Был изменен main.rs и проверена сборка в терминале для реализации ядра программы", "Ответил на приветствие пользователя", "Изучены файлы проекта для анализа контекста и решения задачи").
-    - Strictly forbids empty robot summaries like "Ответ сформирован".
-    - Added programmatic safety filter `is_generic_recap` to reject LLM summaries returning "Ответ сформирован" / "Response generated" and fall back to clean deterministic summaries.
+    - Formats clear "Action + Purpose" summaries (e.g. "Modified main.rs and verified terminal build to implement the core program", "Greeted the user", "Inspected project files to analyze context and solve the task").
+    - Strictly forbids empty robot summaries like "Response generated".
+    - Added programmatic safety filter `is_generic_recap` to reject LLM summaries returning "Response generated" / "Response generated" and fall back to clean deterministic summaries.
 
 Verification:
 1. `cargo clippy --workspace -- -D warnings`:
@@ -65,4 +65,4 @@ Open questions:
 Handoff:
 - `auto` mode is enabled by default across config, settings, and TUI.
 - LLM turns dynamically receive reasoning effort (`off` on simple greetings, `on`/`high` on coding/debug).
-- Recaps clearly describe what was done and why, never falling back to "Ответ сформирован".
+- Recaps clearly describe what was done and why, never falling back to "Response generated".

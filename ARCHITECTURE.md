@@ -1,85 +1,85 @@
-# FlashAgent — Архитектура
+# FlashAgent — Architecture
 
-> КАК строим. Источник ЧТО и ЗАЧЕМ — PHILOSOPHY.md. Порядок работ — ROADMAP.md.
+> HOW we build. Source of WHAT and WHY is `PHILOSOPHY.md`. Sequence of execution is `ROADMAP.md`.
 
-## 1. Модель процессов
+## 1. Process Model
 
 ```
-┌─────────────┐   IPC (локальный)   ┌──────────────────┐
-│  UI-процесс  │ ◄────────────────► │  Ядро-сервис      │
-│  flashagent- │   события/команды  │  flashagent-svc   │
-│  ui (wgpu)   │                    │  цикл, тулы, БД   │──► LLM-бэкенды (HTTP)
-└─────────────┘                    └──────────────────┘──► MCP-серверы
+┌─────────────┐   Local IPC         ┌──────────────────┐
+│  UI Process  │ ◄────────────────► │  Core Service    │
+│  flashagent- │   events/commands  │  flashagent-svc  │
+│  ui (wgpu)   │                    │  loop, tools, DB │──► LLM Backends (HTTP)
+└─────────────┘                    └──────────────────┘──► MCP Servers
        ▲                                   ▲
-       │ тот же протокол                   │ шелл-процессы (изолированы)
+       │ same protocol                     │ shell processes (sandboxed)
 ┌──────┴──────┐                            ▼
-│ TUI-клиент  │                    SQLite + FTS5
+│ TUI Client  │                    SQLite + FTS5
 └─────────────┘
 ```
 
-- Падение UI не убивает задачу: сервис продолжает цикл, UI переподключается и восстанавливает состояние из БД + replay событий.
-- Транспорт IPC: named pipes (Windows) / Unix domain socket (Linux), framing length-prefix, сериализация — serde JSON (старт) с местом под postcard позже.
-- TUI — тот же протокол, тот же сервис: ядро тестируется без GUI с первого дня.
+- A UI crash never kills the task: the background service continues the agent loop, and the UI reconnects, restoring full state from SQLite plus event replay.
+- IPC Transport: Named pipes (Windows) / Unix domain sockets (Linux/macOS), length-prefix framing, serialization via serde JSON initially (with room for postcard binary serialization later).
+- TUI uses the exact same protocol and core service: the core engine is validated without a GUI from day one.
 
-## 2. Workspace (Cargo)
+## 2. Workspace (Cargo Crates)
 
-| Крейт | Ответственность |
+| Crate | Responsibility |
 |---|---|
-| `core` | Агентный цикл, режимы, разрешения, субагенты, память, autonomy-слои. Не знает про HTTP и UI. |
-| `llm` | Трейт `LlmBackend`, адаптеры (OpenAI-совместимый, Ollama, Anthropic, Mistral, DeepSeek, OpenRouter…), единый `ToolCall`, парсеры, reasoning, usage. |
-| `tools` | Трейт `Tool`, встроенные наборы (адаптивные по окну контекста), MCP-клиент, реестр-маркетплейс. |
-| `data` | SQLite+FTS5, миграции, сессии, память, экспорт, мигратор из ~/.flashgent. |
-| `proto` | Контракт IPC: команды UI→ядро, события ядро→UI, Zod-аналог — serde со строгими типами, versioned. |
-| `svc` | Бинарник сервиса: tokio-рантайм, шелл-изоляция, снапшоты, updater, телеметрия. |
-| `ui` | wgpu-рендер, cosmic-text/parley, M3 Expressive кит, spring-движок, AccessKit, IME. |
-| `tui` | Тонкий терминальный клиент ядра. |
-| `app` | Главный бинарник: поднимает/находит сервис, запускает UI. |
+| `core` | Agent loop, modes, permissions, subagents, memory, autonomy layers. Zero dependencies on HTTP, SQL, or UI. |
+| `llm` | `LlmBackend` trait, adapters (OpenAI-compatible, Ollama, Anthropic, Mistral, DeepSeek, OpenRouter…), unified `ToolCall`, parsers, reasoning stream, token usage. |
+| `tools` | `Tool` trait, built-in toolsets (adaptive by context window size), MCP client, registry/marketplace. |
+| `data` | SQLite + FTS5, schema migrations, sessions, memory, export, legacy data migrator from ~/.flashgent. |
+| `proto` | IPC protocol contract: UI→Core commands, Core→UI events, strongly typed and versioned serde schemas. |
+| `svc` | Core service binary: tokio runtime, shell isolation, filesystem snapshots, updater engine, telemetry. |
+| `ui` | wgpu hardware renderer, cosmic-text/parley, Material 3 Expressive component kit, spring physics engine, AccessKit, IME. |
+| `tui` | Lightweight terminal client connected to the core engine. |
+| `app` | Main entrypoint binary: manages service lifecycle and launches the native UI. |
 
-Правило зависимостей: `core` не зависит ни от `llm`, ни от `ui` — цикл получает трейты. `ui` не знает о существовании HTTP и SQL.
+Dependency Rule: `core` does not depend on `llm` or `ui` — the loop consumes abstract traits. `ui` knows nothing of HTTP or SQL.
 
-## 3. LLM-слой
+## 3. LLM Layer
 
-- Трейт: `stream(request) -> Stream<Event>`; события: `TextDelta`, `ReasoningDelta`, `ToolCallChunk`, `Usage`, `Error`, `Done`.
-- Единый `ToolCall { id, name, args_json }`; адаптеры протоколов: нативные tool calls, XML-текст, NDJSON-блоки. Мультипарсер с ремонтом JSON — общий, до адаптеров.
-- Reasoning: `reasoning_content`/`<think>` — полная поддержка, хранится, рендерится серым/Transcript.
-- Токены: usage из API, фолбэк — локальная оценка (tiktoken-таблицы).
-- Поддержка любых совместимых бэкендов. Пресеты = конфиг, не код.
+- Trait: `stream(request) -> Stream<Event>`; event stream variants: `TextDelta`, `ReasoningDelta`, `ToolCallChunk`, `Usage`, `Error`, `Done`.
+- Unified `ToolCall { id, name, args_json }`; protocol adapters: native JSON tool calls, XML tags, NDJSON blocks. A shared multi-parser with self-healing JSON repair handles normalization prior to adapters.
+- Reasoning: `reasoning_content` / `<think>` tags — first-class support, stored in history, rendered muted grey in stream and complete in Transcript.
+- Tokens: reported usage from API with local fallback estimation (tiktoken lookup tables).
+- Universal compatibility with any OpenAI-compatible endpoint. Backend presets are configuration, not hardcoded logic.
 
-## 4. Инструменты и MCP
+## 4. Tools and MCP
 
-- Адаптивные наборы: `ultra (~32k)` / `core (~64k)` / `full` — выбираются по контексту модели, переопределяются пользователем.
-- MCP: клиент на `rmcp`, менеджер в настройках, маркетплейс из верифицируемого JSON-реестра в репо, non-read-only вызовы — подтверждение с превью аргументов.
+- Adaptive toolsets: `ultra (~32k)` / `core (~64k)` / `full` — dynamically chosen based on model context limits, overrideable by user.
+- MCP: client powered by `rmcp`, settings manager, marketplace curated from a verifiable JSON registry in repo. Non-read-only calls require confirmation with argument preview.
 
-## 5. Разрешения и безопасность
+## 5. Permissions and Safety
 
-- Режимы: Manual / Autonomic / Planning / Bypass + опциональная матрица по категориям (read/write/shell/net/mcp).
-- Правила Allow: узкие (префикс-совпадение команд с разбором цепочек `&&`, `;`, `|`; `npm test` не покрывает `npm publish`).
-- Запись файлов: обязательный diff-просмотр (unified/split, построчный выбор, живой дифф).
-- Субагенты: наследуют права родителя, расширение запрещено архитектурно (права — часть контекста исполнения, не промпта).
-- Автоном: снапшот файлов на задачу + git-коммит на веху; рамки — шаги/токены/время/чёрный список.
-- Инъекции: контент тула — всегда недоверенный (аналог wrapUntrusted), системные указания внутри данных игнорируются по построению.
+- Four primary modes: Manual / Autonomic / Planning / Bypass + optional category matrix (`read` / `write` / `shell` / `net` / `mcp`).
+- Allow rules: narrow execution rules (command prefix matching with full parsing of `&&`, `;`, `|` chains; e.g. `npm test` never covers `npm publish`).
+- File writes: mandatory diff preview before writing (unified / split view, per-line selection, live diff).
+- Subagents: inherit parent permissions strictly; privilege escalation is architecturally prevented (permissions reside in execution context, not model prompts).
+- Autonomous mode: filesystem snapshot per task + git commit per milestone; bounded by step limits, token budgets, execution timeouts, and action blacklists.
+- Prompt injection protection: tool content is unconditionally treated as untrusted (`Untrusted<T>`); system directives embedded inside data payloads are ignored by design.
 
-## 6. Память
+## 6. Memory
 
-- Два уровня: проектная `MEMORY.md` + глобальная `~/.flashagent/MEMORY.md`; автоподхват внешних файлов правил `CLAUDE.md`/`AGENTS.md`.
-- Инъекция: целиком с порогом, иначе оглавление + точечное чтение инструментом.
-- Запись с подтверждением (в Manual), авто (в Autonomic); диффы памяти видны в UI.
+- Dual-tier architecture: project-level `MEMORY.md` + global `~/.flashagent/MEMORY.md`; automatic discovery of external rule files (`CLAUDE.md`, `AGENTS.md`).
+- Context injection: full inclusion when within budget; otherwise table of contents with targeted tool-based lookup.
+- Modification: requires explicit confirmation in Manual mode, automated in Autonomic mode; memory diffs clearly rendered in UI.
 
-## 7. Рендер (самый рискованный слой)
+## 7. Renderer (Highest-Risk Layer)
 
-- wgpu + cosmic-text/parley. Слой виджетов M3 Expressive свой: кнопки-морфы, mini-panels, динамический цвет.
-- Анимации: глобальный spring-движок; таймлайн-планировщик; зацикленные фоновые; параллельные; master-опция отключения.
-- Кадрирование: present по изменению (sleep-кадры), vsync/VRR, FPS = частота монитора, live-переключение, fractional DPI.
-- IME через winit с первого дня; AccessKit с первого дня; Material Symbols; Noto Emoji; шрифты в бандле + пользовательские TTF/OTF.
-- Валидация: недельный прототип (окно + cosmic-text + композер с кириллицей + один spring-морф) до коммита в основной код.
+- wgpu + cosmic-text / parley. Bespoke Material 3 Expressive widget system: morphing buttons, mini-panels, dynamic color schemes.
+- Animations: global spring physics engine; timeline scheduler; non-distracting ambient background loops; parallel transitions; master toggle to reduce/disable motion.
+- Frame scheduling: present on change (sleep frames), vsync / VRR, render rate matching monitor native Hz, dynamic display switching, crisp fractional DPI scaling.
+- Text input: IME via winit from day one; AccessKit accessibility from day one; Material Symbols; Noto Emoji; bundled typography with custom TTF/OTF support.
+- Validation gate: 1-week isolated prototype (window + cosmic-text + composer with Cyrillic/IME + single spring morph) prior to committing to main codebase.
 
-## 8. Обновления и телеметрия
+## 8. Updates and Telemetry
 
-- GitHub Releases: проверка → скачивание → проверка хэша/подписи → «Restart to Update» → замена на следующем запуске. Каналы Stable/Beta.
-- Телеметрия: opt-in счётчики (запуски, версия, ОС, бэкенды/тулы), крэши — opt-in стек-трейсы. Без содержимого сессий.
+- GitHub Releases: check → download → verify checksum/signature → "Restart to Update" banner → atomic replacement on next launch. Stable and Beta channels.
+- Telemetry: opt-in operational counters (launch count, version, OS, backend/tools), opt-in crash stack traces. Zero session logs or user data sent.
 
-## 9. Тестирование
+## 9. Testing and Quality Assurance
 
-- Контрактные тесты цикла: мок-LLM сервер, сценарии — обрыв стрима, мусорный JSON, инъекции, незакрытые блоки, мульти-тул-коллы. Детерминированно.
-- Золотые трассы: записанные сессии как регрессионный эталон парсеров.
-- UI: golden-кадры рендера, тесты layout. `cargo test` + CI GitHub Actions (Linux + Windows).
+- Loop contract tests: deterministic mock LLM server exercising edge cases (stream drops, corrupted JSON, prompt injections, unclosed blocks, multi-tool executions).
+- Golden traces: recorded conversation sessions serving as regression benchmarks for parsers.
+- UI: golden render frames and layout constraint tests. `cargo test` + CI on GitHub Actions across Linux and Windows.

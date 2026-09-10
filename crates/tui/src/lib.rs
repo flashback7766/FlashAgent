@@ -6,13 +6,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flashagent_core::{ApprovalGate, ApprovalRequest, Decision, LoopEvent};
+use flashagent_core::{ApprovalGate, ApprovalRequest, Decision, DoneReason, LoopEvent};
 use parking_lot::Mutex;
 use unicode_width::UnicodeWidthChar;
 
 pub mod autocomplete;
 pub mod clipboard;
 pub mod context_modal;
+pub mod mcp_view;
 pub mod prefill;
 pub mod sampling;
 pub mod select;
@@ -27,8 +28,29 @@ pub use sampling::{SamplingAction, SamplingView};
 pub use select::{ConfirmSelect, SelectItem, SelectMenu};
 pub use settings::{SettingsAction, SettingsView};
 pub use startup::{StartupAction, TrustScreen, TrustScreenMode};
-pub use wizard::{run_wizard, SetupWizard};
+pub use tips::{split_tip_at_word_boundary, TipAnimator};
+pub use wizard::{run_wizard, run_wizard_channel, SetupWizard};
 pub use ReasoningExpansion as VerboseMode;
+
+use crossterm::event::{KeyCode, KeyModifiers, MouseEvent};
+use flashagent_llm::{ChatMessage, ServerDiscovery};
+
+/// Events dispatched to the TUI event loop.
+#[derive(Debug)]
+pub enum UiEvent {
+    Loop(LoopEvent),
+    Key(KeyCode, KeyModifiers),
+    Paste(String),
+    Mouse(MouseEvent),
+    Resize(u16, u16),
+    Finished(Result<(Vec<ChatMessage>, DoneReason), String>),
+    ServerDiscovered(ServerDiscovery),
+    BackgroundRecap {
+        turn_id: u64,
+        recap: String,
+        suggestion: Option<String>,
+    },
+}
 
 /// Kind of a rendered chat line — drives terminal colors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,6 +442,49 @@ impl ChatView {
         }
     }
 
+    /// Attaches or updates a recap for a specific turn ID (1-indexed based on user turns).
+    /// If subsequent turns already exist, the recap is placed at the end of that specific turn,
+    /// right before the next user turn begins.
+    pub fn attach_turn_recap(&mut self, turn_id: u64, recap_text: &str) {
+        self.settled_cache.lock().boundary = 0;
+        let user_indices: Vec<usize> = self
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.kind == LineKind::User)
+            .map(|(i, _)| i)
+            .collect();
+
+        if user_indices.is_empty() {
+            self.update_or_push_turn_system("recap:", recap_text);
+            return;
+        }
+
+        let target_turn_idx = (turn_id as usize).saturating_sub(1);
+        if target_turn_idx >= user_indices.len() {
+            self.update_or_push_turn_system("recap:", recap_text);
+            return;
+        }
+
+        let start_user = user_indices[target_turn_idx];
+        let end_idx = if target_turn_idx + 1 < user_indices.len() {
+            user_indices[target_turn_idx + 1]
+        } else {
+            self.lines.len()
+        };
+
+        let turn_slice = &mut self.lines[start_user..end_idx];
+        if let Some(rel_pos) = turn_slice
+            .iter()
+            .rposition(|l| l.kind == LineKind::System && strip_ansi(&l.text).trim_start().starts_with("recap:"))
+        {
+            turn_slice[rel_pos].text = recap_text.to_string();
+        } else {
+            self.lines
+                .insert(end_idx, ChatLine::new(LineKind::System, recap_text.to_string()));
+        }
+    }
+
     /// Replaces the initial welcome card lines with fresh lines, keeping any subsequent notices.
     pub fn update_welcome_card(&mut self, new_card: Vec<RenderLine>) {
         if self.has_user_message() {
@@ -462,6 +527,13 @@ impl ChatView {
     pub fn push_user(&mut self, text: &str) {
         self.streaming = None;
         self.lines.push(ChatLine::new(LineKind::User, text.to_string()));
+    }
+
+    /// Assistant response message.
+    pub fn push_assistant(&mut self, text: &str) {
+        self.streaming = None;
+        self.streaming_reasoning = None;
+        self.lines.push(ChatLine::new(LineKind::Assistant, text.to_string()));
     }
 
     /// Feed one loop event.
@@ -880,10 +952,7 @@ impl ChatView {
                     let secs = self.reasoning_start.take().map(|t| t.elapsed().as_secs()).unwrap_or(1);
                     self.lines[i].reasoning_secs = Some(secs);
                 }
-                self.lines.push(ChatLine::new(
-                    LineKind::User,
-                    format!("  \x1b[1;38;2;225;175;95m❯\x1b[0m \x1b[1;38;2;240;235;225m{directive}\x1b[0m \x1b[38;2;225;175;95m[Steering]\x1b[0m"),
-                ));
+                self.lines.push(ChatLine::new(LineKind::User, directive));
                 self.needs_reprint = true;
             }
             LoopEvent::Done(reason) => {
@@ -1296,6 +1365,13 @@ impl ChatView {
                 continue;
             }
 
+            let is_box_border = line.kind == LineKind::System
+                && (line.text.contains('╭') || line.text.contains('╰') || line.text.contains('├') || line.text.contains('│'));
+            if is_box_border {
+                target.push((line.kind, clip_ansi(&line.text, width)));
+                continue;
+            }
+
             let wrapped = wrap(&line.text, if line.kind == LineKind::User { width - 2 } else { width });
             for (j, chunk) in wrapped.into_iter().enumerate() {
                 let text = match line.kind {
@@ -1468,89 +1544,35 @@ pub fn reasoning_stage(text: &str) -> Option<String> {
         if lower.contains("final") || lower.contains("answer") || lower.contains("solution") || lower.contains("respond to") {
             return Some("Formulating Response".to_string());
         }
-        if lower.contains("respond in russian") {
-            return Some("Formulating Russian response".to_string());
-        }
-        if lower.contains("respond in english") {
+        if lower.contains("respond in english") || lower.contains("respond in text") {
             return Some("Formulating English response".to_string());
         }
 
-        // 3. Russian action keywords
-        if lower.contains("результат поиска") || lower.contains("найден") {
-            return Some("Анализ результатов поиска".to_string());
-        }
-        if lower.contains("содержимое файла") || lower.contains("прочитал") {
-            return Some("Анализ содержимого файлов".to_string());
-        }
-        if lower.contains("правк") || lower.contains("изменит") || lower.contains("редактир") {
-            return Some("Планирование правок".to_string());
-        }
-        if lower.contains("тест") || lower.contains("сборк") || lower.contains("проверк") {
-            return Some("Верификация решения".to_string());
-        }
-        if lower.contains("следующий шаг") || lower.contains("план") {
-            return Some("Планирование следующих шагов".to_string());
-        }
-        if lower.contains("сформулировать ответ") {
-            return Some("Формирование ответа".to_string());
-        }
-
-        // 4. Broader code & architecture
-        if lower.contains("проект") || lower.contains("архитектур") || lower.contains("стек") || lower.contains("вех") {
-            return Some("Анализ структуры проекта".to_string());
-        }
-        if lower.contains("код") || lower.contains("файл") {
-            return Some("Анализ кода".to_string());
-        }
-
-        // 5. Initial request understanding (placed LAST so specific tool/code actions take priority)
+        // 3. Initial request understanding (placed after specific tool/code actions)
         if lower.contains("user said") || lower.contains("user wants") || lower.contains("user asked") {
             return Some("Understanding user request".to_string());
-        }
-        if lower.contains("пользователь") || lower.contains("запрос") {
-            return Some("Понимание запроса".to_string());
-        }
-
-        for l in text.lines() {
-            let tr = l.trim().trim_start_matches(|c: char| !c.is_alphabetic());
-            if tr.len() >= 5 && tr.len() <= 45 && !tr.starts_with("http") {
-                let first_clause = tr.split('.').next().unwrap_or(tr).trim();
-                if first_clause.chars().count() >= 5 && first_clause.chars().count() <= 45 {
-                    return Some(first_clause.to_string());
-                }
-            }
         }
     }
     last
 }
 
 /// Helper to derive an intuitive stage name from the most recently executed tool.
-pub fn derive_stage_from_tool(last_tool_group: Option<&ToolGroupKind>, is_ru: bool) -> String {
+pub fn derive_stage_from_tool(last_tool_group: Option<&ToolGroupKind>) -> String {
     match last_tool_group {
         Some(ToolGroupKind::Explore { files, searches, .. }) => {
             if *searches > 0 && *files == 0 {
-                if is_ru { "Анализ результатов поиска" } else { "Evaluating Search Results" }.to_string()
+                "Evaluating Search Results".to_string()
             } else if *files > 0 && *searches == 0 {
-                if is_ru { "Анализ содержимого файлов" } else { "Analyzing File Contents" }.to_string()
+                "Analyzing File Contents".to_string()
             } else {
-                if is_ru { "Анализ файлов и поиска" } else { "Evaluating Explored Context" }.to_string()
+                "Evaluating Explored Context".to_string()
             }
         }
-        Some(ToolGroupKind::Command { .. }) => {
-            if is_ru { "Оценка вывода команды" } else { "Evaluating Command Output" }.to_string()
-        }
-        Some(ToolGroupKind::Edit { .. }) => {
-            if is_ru { "Проверка изменений" } else { "Verifying Code Changes" }.to_string()
-        }
-        Some(ToolGroupKind::Subagent { .. }) => {
-            if is_ru { "Оценка работы субагента" } else { "Evaluating Subagent Output" }.to_string()
-        }
-        Some(ToolGroupKind::Memory { .. }) => {
-            if is_ru { "Анализ памяти проекта" } else { "Reviewing Project Memory" }.to_string()
-        }
-        _ => {
-            if is_ru { "Оценка данных" } else { "Evaluating Tool Results" }.to_string()
-        }
+        Some(ToolGroupKind::Command { .. }) => "Evaluating Command Output".to_string(),
+        Some(ToolGroupKind::Edit { .. }) => "Verifying Code Changes".to_string(),
+        Some(ToolGroupKind::Subagent { .. }) => "Evaluating Subagent Output".to_string(),
+        Some(ToolGroupKind::Memory { .. }) => "Reviewing Project Memory".to_string(),
+        _ => "Evaluating Tool Results".to_string(),
     }
 }
 
@@ -1564,9 +1586,6 @@ pub fn resolve_reasoning_stage(
     last_tool_group: Option<&ToolGroupKind>,
     tools_executed: usize,
 ) -> String {
-    let is_ru = text.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))
-        || prior_stages.iter().any(|s| s.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c)));
-
     let raw_stage = reasoning_stage(text);
 
     let is_initial_like = |s: &str| {
@@ -1576,29 +1595,22 @@ pub fn resolve_reasoning_stage(
             || lower.contains("analyze the request")
             || lower.contains("determine the goal")
             || lower.contains("identify the goal")
-            || lower.contains("понимание")
-            || lower.contains("анализ задачи")
-            || lower.contains("анализ запроса")
     };
 
     let stage = if let Some(parsed) = raw_stage {
         if tools_executed > 0 && is_initial_like(&parsed) {
-            derive_stage_from_tool(last_tool_group, is_ru)
+            derive_stage_from_tool(last_tool_group)
         } else {
             parsed
         }
     } else if tools_executed == 0 {
-        if is_ru {
-            "Анализ задачи".to_string()
-        } else {
-            "Analyzing Request".to_string()
-        }
+        "Analyzing Request".to_string()
     } else {
-        derive_stage_from_tool(last_tool_group, is_ru)
+        derive_stage_from_tool(last_tool_group)
     };
 
     if prior_stages.iter().any(|p| p.eq_ignore_ascii_case(&stage)) {
-        let candidates_en = [
+        let candidates = [
             "Evaluating Search Results",
             "Deepening Code Search",
             "Analyzing File Contents",
@@ -1608,17 +1620,6 @@ pub fn resolve_reasoning_stage(
             "Verifying Solution",
             "Formulating Response",
         ];
-        let candidates_ru = [
-            "Анализ результатов поиска",
-            "Углубленный поиск кода",
-            "Анализ содержимого файлов",
-            "Синтез данных",
-            "Планирование реализации",
-            "Уточнение решения",
-            "Верификация решения",
-            "Формирование ответа",
-        ];
-        let candidates = if is_ru { &candidates_ru[..] } else { &candidates_en[..] };
 
         for candidate in candidates {
             if !prior_stages.iter().any(|p| p.eq_ignore_ascii_case(candidate)) {
@@ -1926,6 +1927,52 @@ pub fn welcome_card_with_thinking_animated(
     width: usize,
     tick_n: usize,
 ) -> Vec<RenderLine> {
+    welcome_card_responsive(model, cwd, mode, memory_docs, thinking, context_window, width, 24, tick_n)
+}
+
+/// Fully responsive startup welcome banner adapting to both terminal width and height.
+/// In standard (24-row) and compact terminals, lines are kept constrained so the card and pet
+/// are 100% visible and never scroll off-screen.
+#[allow(clippy::too_many_arguments)]
+pub fn welcome_card_responsive(
+    model: &str,
+    cwd: &str,
+    mode: &str,
+    memory_docs: usize,
+    thinking: Option<&str>,
+    context_window: Option<&str>,
+    width: usize,
+    height: usize,
+    tick_n: usize,
+) -> Vec<RenderLine> {
+    welcome_card_responsive_opts(
+        model,
+        cwd,
+        mode,
+        memory_docs,
+        thinking,
+        context_window,
+        width,
+        height,
+        tick_n,
+        true,
+    )
+}
+
+/// Responsive welcome banner with customizable feature options.
+#[allow(clippy::too_many_arguments)]
+pub fn welcome_card_responsive_opts(
+    model: &str,
+    cwd: &str,
+    mode: &str,
+    memory_docs: usize,
+    thinking: Option<&str>,
+    context_window: Option<&str>,
+    width: usize,
+    height: usize,
+    tick_n: usize,
+    show_mascot: bool,
+) -> Vec<RenderLine> {
     let mut lines = Vec::new();
     let username = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
@@ -1938,7 +1985,18 @@ pub fn welcome_card_with_thinking_animated(
 
     let th_str = thinking.unwrap_or("High");
     let ctx_short = context_window.unwrap_or("128k");
-    let mascot = mascot_swift_lines_animated(tick_n);
+    let mascot = if show_mascot {
+        mascot_swift_lines_animated(tick_n)
+    } else {
+        [
+            "".to_string(),
+            format!("{M3_PRI_B}⚡ FlashAgent Engine ⚡{RESET}"),
+            format!("{M3_MUT}Local-first AI Pair Programmer{RESET}"),
+            format!("{M3_MUT}Ultra-low latency inference{RESET}"),
+            "".to_string(),
+            "".to_string(),
+        ]
+    };
 
     let cwd_clean = if cwd.starts_with('~') && !cwd.starts_with("~/") && cwd.len() > 1 {
         format!("~/{}", &cwd[1..])
@@ -1946,16 +2004,30 @@ pub fn welcome_card_with_thinking_animated(
         cwd.to_string()
     };
 
-    if width >= 76 {
+    let cur_ver = flashagent_svc::updater::current_version();
+    let ver_disp = if cur_ver.starts_with('v') || cur_ver.starts_with('b') {
+        cur_ver.to_string()
+    } else {
+        format!("v{cur_ver}")
+    };
+
+    if width >= 56 && height >= 18 {
         // Two-column modular layout in Material 3 Light Blue
-        // Balanced proportions: max width 104, with the mascot pane proportionally expanded
-        let card_w = (width.saturating_sub(2)).clamp(76, 104);
-        let w1: usize = ((card_w * 44) / 100).clamp(36, 46);
+        let card_w = if width >= 76 {
+            width.clamp(76, 104)
+        } else {
+            width
+        };
+        let w1: usize = if card_w >= 76 {
+            ((card_w * 44) / 100).clamp(36, 46)
+        } else {
+            ((card_w * 40) / 100).clamp(24, 32)
+        };
         let w2: usize = card_w.saturating_sub(w1 + 3);
 
-        let t_left_vis = ">_ FlashAgent v0.1.0";
+        let t_left_vis = format!(">_ FlashAgent {ver_disp}");
         let d1 = w1.saturating_sub(t_left_vis.chars().count() + 3);
-        let t_left_colored = format!("{M3_PRI_B}>_ FlashAgent{RESET} {M3_LGT}v0.1.0{RESET}");
+        let t_left_colored = format!("{M3_PRI_B}>_ FlashAgent{RESET} {M3_LGT}{ver_disp}{RESET}");
 
         let t_r1_vis = "System & Context";
         let d2 = w2.saturating_sub(t_r1_vis.chars().count() + 3);
@@ -2031,56 +2103,61 @@ pub fn welcome_card_with_thinking_animated(
         }
         lines.push((LineKind::System, bot));
     } else {
-        // Single-column responsive stack for narrow screens (< 76 columns)
-        let inner_w = (width.saturating_sub(4)).clamp(36, 72);
-        let t_left_vis = ">_ FlashAgent v0.1.0";
+        // Compact single-column layout for compact or narrow screens (< 56 cols or < 18 rows)
+        // Scaled to never overflow vertical height or horizontal bounds
+        let inner_w = width.saturating_sub(2).min(74);
+        let t_left_vis = format!(">_ FlashAgent {ver_disp}");
         let d1 = inner_w.saturating_sub(t_left_vis.chars().count() + 3);
-        let t_left_colored = format!("{M3_PRI_B}>_ FlashAgent{RESET} {M3_LGT}v0.1.0{RESET}");
+        let t_left_colored = format!("{M3_PRI_B}>_ FlashAgent{RESET} {M3_LGT}{ver_disp}{RESET}");
         let top = format!("{M3_BRD}╭─{RESET} {t_left_colored} {M3_BRD}{}╮{RESET}", "─".repeat(d1));
-
-        let t_r1_vis = "System & Context";
-        let d2 = inner_w.saturating_sub(t_r1_vis.chars().count() + 3);
-        let t_r1_colored = format!("{M3_LGT_B}{t_r1_vis}{RESET}");
-        let div1 = format!("{M3_BRD}├─{RESET} {t_r1_colored} {M3_BRD}{}┤{RESET}", "─".repeat(d2));
-
-        let t_r2_vis = "Quick Commands";
-        let d3 = inner_w.saturating_sub(t_r2_vis.chars().count() + 3);
-        let t_r2_colored = format!("{M3_LGT_B}{t_r2_vis}{RESET}");
-        let div2 = format!("{M3_BRD}├─{RESET} {t_r2_colored} {M3_BRD}{}┤{RESET}", "─".repeat(d3));
-
         let bot = format!("{M3_BRD}╰{}╯{RESET}", "─".repeat(inner_w));
 
-        let model_meta = truncate_middle(model, 14);
+        let model_meta = truncate_middle(model, 16);
         let left_meta = format!("{M3_PRI}{model_meta}{RESET} {M3_MUT}·{RESET} {M3_LGT}{th_str}{RESET} {M3_MUT}·{RESET} {M3_ICE}{ctx_short}{RESET}");
         let cwd_meta = format!("{M3_MUT}{}{RESET}", truncate_middle(&cwd_clean, inner_w.saturating_sub(4)));
 
         lines.push((LineKind::System, top));
         lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(&format!("{M3_TXT_B}Welcome back {M3_ICE}{username_clean}{M3_TXT_B}!{RESET}"), inner_w))));
-        lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell("", inner_w))));
-        for m in &mascot {
-            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(m, inner_w))));
+
+        if show_mascot {
+            if height >= 20 {
+                for m in &mascot {
+                    lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(m, inner_w))));
+                }
+            } else {
+                let is_blink = (tick_n % 50 == 46) || (tick_n % 50 == 47);
+                let eyes = if is_blink { "\x1b[38;2;194;231;255m▄\x1b[0m" } else { "\x1b[1;38;2;255;255;255m●\x1b[0m" };
+                let c_ice = "\x1b[38;2;194;231;255m";
+                let c_pri = "\x1b[38;2;138;180;248m";
+                let reset = "\x1b[0m";
+                let mini = [
+                    format!("{c_ice}▄███▄{reset}"),
+                    format!("{c_pri}▄█{eyes}{c_pri}█{eyes}█▄{reset}"),
+                    format!("{c_ice}█ █{reset}"),
+                ];
+                for m in &mini {
+                    lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(m, inner_w))));
+                }
+            }
         }
-        lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell("", inner_w))));
+
         lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(&left_meta, inner_w))));
         lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(&cwd_meta, inner_w))));
 
-        lines.push((LineKind::System, div1));
-        let model_val = truncate_middle(model, inner_w.saturating_sub(13));
-        let ctx_val = truncate_middle(context_window.unwrap_or("128k capacity"), inner_w.saturating_sub(13));
-        let mode_val = truncate_middle(mode, inner_w.saturating_sub(13));
-        lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_MUT}Model:   {RESET} {M3_TXT_B}{model_val}{RESET}"), inner_w))));
-        lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_MUT}Context: {RESET} {M3_ICE}{ctx_val}{RESET}"), inner_w))));
-        lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_MUT}Mode:    {RESET} {M3_LGT}{mode_val}{RESET}"), inner_w))));
-        lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_MUT}Memory:  {RESET} {M3_TXT}{memory_docs}{RESET} {M3_MUT}active doc(s){RESET}"), inner_w))));
-
-        lines.push((LineKind::System, div2));
-        lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}for autonomy{RESET}"), inner_w))));
-        lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET} {M3_MUT}·{RESET} {M3_ICE}Esc{RESET} {M3_MUT}quit{RESET}"), inner_w))));
-        lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_ICE}F1..F5{RESET} {M3_MUT}function hotkeys{RESET}"), inner_w))));
+        if height >= 14 {
+            let div_cmd = format!("{M3_BRD}├─{RESET} {M3_LGT_B}Quick Commands{RESET} {M3_BRD}{}┤{RESET}", "─".repeat(inner_w.saturating_sub(17)));
+            lines.push((LineKind::System, div_cmd));
+            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}for autonomy{RESET}"), inner_w))));
+            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET} {M3_MUT}·{RESET} {M3_ICE}Esc{RESET} {M3_MUT}quit{RESET} {M3_MUT}·{RESET} {M3_ICE}F1..F5{RESET} {M3_MUT}hotkeys{RESET}"), inner_w))));
+        } else {
+            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal{RESET} {M3_MUT}·{RESET} {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET} {M3_MUT}·{RESET} {M3_ICE}Esc{RESET} {M3_MUT}quit{RESET}"), inner_w))));
+        }
         lines.push((LineKind::System, bot));
     }
 
-    lines.push((LineKind::System, String::new()));
+    if height >= 14 {
+        lines.push((LineKind::System, String::new()));
+    }
     lines
 }
 
@@ -2676,9 +2753,9 @@ mod tests {
     #[test]
     fn chat_view_accumulates_stream_and_tools() {
         let mut v = ChatView::default();
-        v.push_user("привет");
-        v.on_event(&LoopEvent::TurnDelta("При".into()));
-        v.on_event(&LoopEvent::TurnDelta("вет!".into()));
+        v.push_user("hello");
+        v.on_event(&LoopEvent::TurnDelta("Hel".into()));
+        v.on_event(&LoopEvent::TurnDelta("lo!".into()));
         v.on_event(&LoopEvent::ToolStarted {
             id: "t1".into(),
             name: "grep".into(),
@@ -2688,8 +2765,8 @@ mod tests {
         v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
 
         let lines = v.render(80);
-        assert!(lines.iter().any(|(k, t)| *k == LineKind::User && t.contains(&format!("{GLYPH_PROMPT} привет"))));
-        assert!(lines.iter().any(|(k, t)| *k == LineKind::Assistant && t.contains("Привет!")));
+        assert!(lines.iter().any(|(k, t)| *k == LineKind::User && t.contains(&format!("{GLYPH_PROMPT} hello"))));
+        assert!(lines.iter().any(|(k, t)| *k == LineKind::Assistant && t.contains("Hello!")));
         assert!(lines.iter().any(|(k, t)| *k == LineKind::Tool && (t.contains("Explored") || t.contains("Searched") || t.contains("Grep") || t.contains('x'))));
         assert!(!lines.iter().any(|(k, t)| *k == LineKind::System && t.contains("Completed")));
     }
@@ -2697,14 +2774,18 @@ mod tests {
     #[test]
     fn welcome_card_and_visible_width() {
         let card = welcome_card("gpt-4", Some("32k ctx"), "/home/user/repo", "Manual", 2, Some("high"), 80);
-        assert!(card.iter().any(|(_, t)| t.contains(">_ FlashAgent") && t.contains("v0.1.0")));
+        let cur_ver = flashagent_svc::updater::current_version();
+        assert!(card.iter().any(|(_, t)| t.contains(">_ FlashAgent") && (t.contains(cur_ver) || t.contains("v0.1.0"))));
 
         let card80 = welcome_card("qwen3.6-35b-a3b-mtp", Some("128k ctx"), "/home/user/repo", "Manual", 2, Some("high"), 80);
+        let card100 = welcome_card("qwen3.6-35b-a3b-mtp", Some("128k ctx"), "/home/user/repo", "Manual", 2, Some("high"), 100);
         let card120 = welcome_card("qwen3.6-35b-a3b-mtp", Some("128k ctx"), "/home/user/repo", "Manual", 2, Some("high"), 120);
         let w80 = visible_width(&card80[0].1);
+        let w100 = visible_width(&card100[0].1);
         let w120 = visible_width(&card120[0].1);
         assert!(w120 > w80);
-        assert_eq!(w80, 78);
+        assert_eq!(w80, 80);
+        assert_eq!(w100, 100);
         assert_eq!(w120, 104);
 
         let raw = "\x1b[1;38;2;255;0;0mHello World\x1b[0m";
@@ -2862,7 +2943,7 @@ mod tests {
     #[test]
     fn long_lines_wrap_within_width() {
         let mut v = ChatView::default();
-        v.push_user(&"слово ".repeat(40));
+        v.push_user(&"word ".repeat(40));
         let lines = v.render(40);
         assert!(lines.len() > 1);
         for (_, l) in &lines {
@@ -2893,38 +2974,38 @@ mod tests {
     #[test]
     fn reasoning_deltas_merge_into_one_block() {
         let mut v = ChatView::default();
-        for w in ["думаю", " о", " задаче"] {
+        for w in ["thinking", " about", " task"] {
             v.on_event(&LoopEvent::ReasoningDelta(w.into()));
         }
-        v.on_event(&LoopEvent::TurnDelta("Ответ".into()));
-        v.on_event(&LoopEvent::TurnDelta(" готов".into()));
+        v.on_event(&LoopEvent::TurnDelta("Response".into()));
+        v.on_event(&LoopEvent::TurnDelta(" ready".into()));
 
         let lines = v.render(80);
         let reasoning: Vec<_> = lines.iter().filter(|(k, _)| *k == LineKind::Reasoning).collect();
         assert_eq!(reasoning.len(), 3, "reasoning rendered as boxed container: {reasoning:?}");
         assert!(reasoning[0].1.contains("Thinking"));
-        assert!(reasoning[1].1.contains("думаю о задаче"));
+        assert!(reasoning[1].1.contains("thinking about task"));
         assert!(reasoning[2].1.contains('╰'));
         let assistant: Vec<_> = lines.iter().filter(|(k, _)| *k == LineKind::Assistant).collect();
         assert_eq!(assistant.len(), 1);
-        assert!(assistant[0].1.contains("Ответ готов"));
+        assert!(assistant[0].1.contains("Response ready"));
     }
 
     #[test]
     fn interleaved_reasoning_keeps_assistant_line() {
         let mut v = ChatView::default();
-        v.on_event(&LoopEvent::TurnDelta("При".into()));
-        v.on_event(&LoopEvent::ReasoningDelta("думаю".into()));
-        v.on_event(&LoopEvent::TurnDelta("вет!".into()));
-        v.on_event(&LoopEvent::ReasoningDelta(" ещё".into()));
-        v.on_event(&LoopEvent::TurnDelta(" Всё хорошо".into()));
+        v.on_event(&LoopEvent::TurnDelta("Hel".into()));
+        v.on_event(&LoopEvent::ReasoningDelta("thinking".into()));
+        v.on_event(&LoopEvent::TurnDelta("lo!".into()));
+        v.on_event(&LoopEvent::ReasoningDelta(" more".into()));
+        v.on_event(&LoopEvent::TurnDelta(" All good".into()));
 
         let assistant: Vec<_> = v.lines.iter().filter(|l| l.kind == LineKind::Assistant).collect();
         assert_eq!(assistant.len(), 1, "no per-word fragmentation");
-        assert_eq!(assistant[0].text, "Привет! Всё хорошо");
+        assert_eq!(assistant[0].text, "Hello! All good");
         let reasoning: Vec<_> = v.lines.iter().filter(|l| l.kind == LineKind::Reasoning).collect();
         assert_eq!(reasoning.len(), 1, "reasoning deltas merge into one block");
-        assert_eq!(reasoning[0].text, "думаю ещё");
+        assert_eq!(reasoning[0].text, "thinking more");
         // The assistant line is still live (appends continue after reasoning).
         assert_eq!(v.streaming, Some(0));
         assert_eq!(v.settled_boundary(), 0);
@@ -2963,7 +3044,7 @@ mod tests {
         assert_eq!(reasoning_stage(t_user).as_deref(), Some("Displaying Runtime Context"));
 
         // Fallback: free-form reasoning has no labels.
-        assert_eq!(reasoning_stage("просто думаю о задаче вслух"), None);
+        assert_eq!(reasoning_stage("just thinking about task aloud"), None);
         // A bare `Note: ...` sentence is not a step (no number/bullet).
         assert_eq!(reasoning_stage("Note: this is just a long sentence with a colon"), None);
     }
@@ -2985,7 +3066,7 @@ mod tests {
 
         // Fallback: free-form reasoning shows clean status without dumping sentences.
         let mut v2 = ChatView::default();
-        v2.on_event(&LoopEvent::ReasoningDelta("свободные размышления о задаче".into()));
+        v2.on_event(&LoopEvent::ReasoningDelta("freeform thoughts about task".into()));
         let (_, live2) = v2.render_split(100, false);
         assert!(live2.iter().any(|(_, t)| (t.contains("Thinking") || t.contains("Thought")) && (t.contains('›') || t.contains('>'))));
         v2.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
@@ -2997,8 +3078,8 @@ mod tests {
     fn restore_line_color_reapplies_after_embedded_resets() {
         let prefix = "\x1b[38;2;120;120;120m";
         // bold span closes with a full reset — color must come back after it.
-        let s = restore_line_color(&format!("{prefix}до\x1b[1mжирный\x1b[0mпосле"), prefix);
-        assert!(s.contains("\x1b[0m\x1b[38;2;120;120;120mпосле"));
+        let s = restore_line_color(&format!("{prefix}before\x1b[1mbold\x1b[0mafter"), prefix);
+        assert!(s.contains("\x1b[0m\x1b[38;2;120;120;120mafter"));
         // foreground-only reset (from md code spans) re-applied too.
         let s2 = restore_line_color("a\x1b[39mb", prefix);
         assert!(s2.ends_with("\x1b[39m\x1b[38;2;120;120;120mb"));
@@ -3271,47 +3352,47 @@ mod tests {
 
     #[test]
     fn test_render_markdown_tables_headings_and_lists() {
-        let md_input = "## Стек\n\n\
-                        | Слой | Решение |\n\
+        let md_input = "## Stack\n\n\
+                        | Layer | Decision |\n\
                         |---|---|\n\
-                        | Ядро | Rust |\n\
+                        | Core | Rust |\n\
                         | UI | wgpu |\n\n\
-                        ## Архитектура\n\
-                        - Первый пункт\n\
-                        - Второй пункт с **жирным** текстом";
+                        ## Architecture\n\
+                        - First item\n\
+                        - Second item with **bold** text";
 
         let rendered = render_markdown_text(md_input, 80);
         let joined = rendered.join("\n");
 
         // Headings must NOT have raw ##
-        assert!(!joined.contains("## Стек"));
-        assert!(joined.contains("◈ Стек"));
-        assert!(joined.contains("◈ Архитектура"));
+        assert!(!joined.contains("## Stack"));
+        assert!(joined.contains("◈ Stack"));
+        assert!(joined.contains("◈ Architecture"));
 
         // Tables must have unicode box drawing borders and header
         assert!(joined.contains('╭'));
         assert!(joined.contains('├'));
         assert!(joined.contains('╰'));
-        assert!(joined.contains("Слой"));
-        assert!(joined.contains("Решение"));
-        assert!(joined.contains("Ядро"));
+        assert!(joined.contains("Layer"));
+        assert!(joined.contains("Decision"));
+        assert!(joined.contains("Core"));
         assert!(joined.contains("Rust"));
 
         // Lists must have bullets
         assert!(joined.contains('•'));
-        assert!(joined.contains("Первый пункт"));
-        assert!(joined.contains("Второй пункт"));
+        assert!(joined.contains("First item"));
+        assert!(joined.contains("Second item"));
     }
 
     #[test]
     fn test_render_markdown_table_exact_border_alignment() {
-        let md_input = "| Крейт | Задача |\n\
+        let md_input = "| Crate | Responsibility |\n\
                         |---|---|\n\
-                        | core | Агентный цикл, режимы, разрешения, субагенты, память |\n\
-                        | llm | Трейт `LlmBackend`, адаптеры (OpenAI-совместимый), мультипарсер |\n\
-                        | tools | 9 встроенных тулов, МСР-клиент, реестр |\n\
-                        | data | SQLite + FTS5, сессии, миграции |\n\
-                        | app | Главный бинарник |";
+                        | core | Agent loop, modes, permissions, subagents, memory |\n\
+                        | llm | Trait `LlmBackend`, adapters (OpenAI-compatible), multiparser |\n\
+                        | tools | 9 builtin tools, MCP client, registry |\n\
+                        | data | SQLite + FTS5, sessions, migrations |\n\
+                        | app | Main binary |";
 
         let rendered = render_markdown_text(md_input, 100);
         assert!(!rendered.is_empty());
@@ -3348,15 +3429,15 @@ mod tests {
 
     #[test]
     fn test_render_markdown_advanced_lists_multiline_and_tasks() {
-        let md_input = r#"- [x] Задача 1 выполнена
-- [ ] Задача 2 в процессе
-1. **Ядро системы**:
-   Полная реализация агентного цикла и памяти.
-2. **Модуль LLM**:
-   Поддержка стриминга и кэширования префиксов.
-- Уровень 1
-  - Уровень 2
-1) Альтернативная нумерация"#;
+        let md_input = r#"- [x] Task 1 completed
+- [ ] Task 2 in progress
+1. **Core system**:
+   Full implementation of agent loop and memory.
+2. **LLM module**:
+   Streaming and prefix caching support.
+- Level 1
+  - Level 2
+1) Alternative numbering"#;
 
         let rendered = render_markdown_text(md_input, 80);
         let joined = rendered.join("\n");
@@ -3370,7 +3451,7 @@ mod tests {
         assert!(joined.contains('◦'));
 
         // Continuation lines properly grouped and aligned
-        assert!(joined.contains("Полная реализация агентного цикла"));
+        assert!(joined.contains("Full implementation of agent loop"));
 
         // Numbered list with paren supported
         assert!(joined.contains("1)"));
@@ -3523,6 +3604,86 @@ mod tests {
         // Check directory card
         assert!(plain_expanded.contains("Analyzed 📁 .audit"));
         assert!(plain_expanded.contains("📄 2026-09-07-a0-skeleton.md"));
+    }
+
+    #[test]
+    fn test_attach_turn_recap_preserves_turn_order() {
+        let mut chat = ChatView::default();
+        chat.push_user("First question");
+        chat.on_event(&LoopEvent::TurnDelta("First answer".into()));
+        chat.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
+
+        chat.push_user("Second question");
+        chat.on_event(&LoopEvent::TurnDelta("Second answer".into()));
+
+        // Late recap arriving for turn 1
+        chat.attach_turn_recap(1, "recap: explained first question in detail");
+
+        let (settled, live) = chat.render_split(80, false);
+        let all: Vec<_> = settled.into_iter().chain(live).collect();
+        let full_text = all.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
+
+        assert!(full_text.contains("recap: explained first question in detail"));
+        let recap_pos = full_text.find("recap: explained first question in detail").unwrap();
+        let second_user_pos = full_text.find("Second question").unwrap();
+        assert!(recap_pos < second_user_pos, "Historical recap must attach before second user turn");
+    }
+
+    #[test]
+    fn test_welcome_card_responsive_scales_to_terminal_dimensions() {
+        // 1. Standard 80x24: 2 columns, height <= 14
+        let card_80x24 = welcome_card_responsive(
+            "test-model",
+            "/home/user/project",
+            "Accept Edits",
+            3,
+            Some("auto"),
+            Some("128k"),
+            80,
+            24,
+            0,
+        );
+        assert!(card_80x24.len() <= 14, "Standard card must be at most 14 lines, got {}", card_80x24.len());
+        for line in &card_80x24 {
+            let width = visible_width(&line.1);
+            assert!(width <= 80, "Line width {} exceeds terminal width 80", width);
+        }
+
+        // 2. Compact 50x16: single column, height <= 14
+        let card_50x16 = welcome_card_responsive(
+            "test-model",
+            "/home/user/project",
+            "Accept Edits",
+            3,
+            Some("auto"),
+            Some("128k"),
+            50,
+            16,
+            0,
+        );
+        assert!(card_50x16.len() <= 14, "Compact card must be at most 14 lines, got {}", card_50x16.len());
+        for line in &card_50x16 {
+            let width = visible_width(&line.1);
+            assert!(width <= 50, "Line width {} exceeds terminal width 50", width);
+        }
+
+        // 3. Ultra-compact 36x12: single column with minimal companion, height <= 12
+        let card_36x12 = welcome_card_responsive(
+            "test-model",
+            "/home/user/project",
+            "Accept Edits",
+            3,
+            Some("auto"),
+            Some("128k"),
+            36,
+            12,
+            0,
+        );
+        assert!(card_36x12.len() <= 12, "Ultra compact card must be at most 12 lines, got {}", card_36x12.len());
+        for line in &card_36x12 {
+            let width = visible_width(&line.1);
+            assert!(width <= 36, "Line width {} exceeds terminal width 36", width);
+        }
     }
 }
 

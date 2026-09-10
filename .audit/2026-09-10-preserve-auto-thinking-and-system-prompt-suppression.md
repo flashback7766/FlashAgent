@@ -16,7 +16,7 @@ Root Causes Identified & Resolved:
 1. **Background Discovery Trampled `auto`**:
    - In `crates/tui/src/main.rs` (`UiEvent::ServerDiscovered` and F3 model menu), whenever `model_changed` occurred (e.g. user loaded `gemma-4-26b-a4b-it@iq4_nl` in LM Studio), FlashAgent ran `current_effort = active.thinking.default_preset` (`"on"`).
    - This trampled the default/configured `"auto"` mode into `"on"`, as shown in the user's screenshot (`thinking: on`).
-   - In `thinking: on`, every query (even "Привет!") forced the model to think.
+   - In `thinking: on`, every query (even "Hello!") forced the model to think.
    - **Fix**: Updated both `ServerDiscovered` and F3 menu selection to preserve `"auto"` mode if thinking is supported, only setting `"off"` if unsupported.
 2. **System Prompt Adaptation for Zero-Reasoning Turns**:
    - When thinking is resolved to `"off"` (such as for greetings in `auto` mode), in addition to setting API flags (`enable_thinking: false`, `reasoning: "off"`, `reasoning_effort: "none"`), the system prompt now dynamically replaces `REASONING INSTRUCTIONS:` with `<|think_off|>THINKING DISABLED: ... Answer directly.`

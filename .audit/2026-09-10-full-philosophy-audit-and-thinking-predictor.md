@@ -23,9 +23,9 @@ Verification:
    Output: Finished `release` profile [optimized] target(s) in 9.11s.
 4. Live interactive end-to-end testing in `tmux` with loaded model `gemma-4-e2b-it-qat@q4_k_xl`:
    - Startup directory trust dialog -> Enter accepted.
-   - Greeting "Привет!" -> thinking collapsed cleanly into 1 compact line `Thought: Checking project rules (2s) ›`, immediate response "Привет! Чем могу помочь по проекту?", suggested followup prompt.
-   - Technical query "В чем разница между String и &str в Rust?" -> thinking labeled `Thought: Synthesizing Solution (5s) ›`, accurate Rust differentiation.
-   - Tool execution "Выведи список файлов и папок в текущей директории с помощью list_dir" -> model executed `list_dir` natively, returned accurate workspace listing with `recap`.
+   - Greeting "Hello!" -> thinking collapsed cleanly into 1 compact line `Thought: Checking project rules (2s) ›`, immediate response "Hello! How can I help with the project?", suggested followup prompt.
+   - Technical query "What is the difference between String and &str in Rust?" -> thinking labeled `Thought: Synthesizing Solution (5s) ›`, accurate Rust differentiation.
+   - Tool execution "List files and directories in current directory using list_dir" -> model executed `list_dir` natively, returned accurate workspace listing with `recap`.
    - Menus: F4 (Thinking Effort) accurately displayed dynamic LM Studio options ["auto", "off", "on"], F5 (Sampling) displayed all MTP & Coding presets.
    - Autonomous `/goal` command -> entered Goal card, auto-approved permissions, executed `env_info`, completed, and restored mode to Accept Edits and thinking to auto.
 

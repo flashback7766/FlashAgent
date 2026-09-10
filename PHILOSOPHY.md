@@ -1,127 +1,127 @@
-# FlashAgent — Манифест философии
+# FlashAgent — Philosophy Manifesto
 
-> Канонический документ. Все будущие агенты и разработчики опираются на него.
-> Решение высшей силы: этот файл определяет ЧТО и ЗАЧЕМ; ARCHITECTURE.md — КАК; ROADMAP.md — В КАКОМ ПОРЯДКЕ.
+> Canonical document. All future agents and developers must adhere to it.
+> Highest authority rule: this file defines WHAT and WHY; ARCHITECTURE.md defines HOW; ROADMAP.md defines IN WHAT ORDER.
 
-## 1. Суть продукта
+## 1. Product Essence
 
-FlashAgent — **локальный агент-усилитель**: человек ведёт, агент ускоряет.
-Одна команда `/goal` превращает его в **полностью автономного агента** с рамками, заданными задачей.
+FlashAgent is a **local agent-amplifier**: human leads, agent accelerates.
+A single `/goal` command transforms it into a **fully autonomous agent** bounded by the task envelope.
 
-- По умолчанию: усиленный интерактивный чат с инструментами.
-- `/goal`: автоном — адаптивные слои поверх единого ядра (простая задача → реактивный цикл; сложная → план → вехи → самопроверка → отчёт).
-- Восемь режимов разрешений на выбор: Manual / Autonomic / Planning / Bypass (+ матрица разрешений по категориям действий как опция).
+- Default: amplified interactive chat with tools.
+- `/goal`: autonomous — adaptive execution layers built over a unified core (simple task → reactive loop; complex task → plan → milestones → self-verification → structured summary).
+- Eight permission modes available: Manual / Autonomic / Planning / Bypass (+ optional granular permission matrix across action categories).
 
-## 2. Неприемлемое (анти-философия)
+## 2. Unacceptable (Anti-Philosophy)
 
-Срезано как класс:
-1. **Раздутость фич** — фича существует только если служит ядру «человек → задача → результат».
-2. **Нестабильный tool calling** — вызов инструмента не может быть лотереей.
-3. **Electron** — мёртв. Ни веб-рендеринга, ни Chromium в бандле.
-4. **Грубые UX-детали** — каждый микровзаимодействие доведено до M3 Expressive.
+Eliminated by design:
+1. **Feature bloat** — a feature exists only if it directly serves the core loop: "human → task → result".
+2. **Flaky tool calling** — calling a tool must never be a lottery.
+3. **Electron** — dead. No web views, no bundled Chromium.
+4. **Crude UX details** — every micro-interaction refined to Material 3 Expressive standards.
 
-## 3. Локальность и сеть
+## 3. Locality and Network
 
-Всё локально по умолчанию. ЯВНО разрешённые сетевые вещи (только opt-in):
-- OTA-обновления: GitHub Releases, кнопка «Restart to Update», применение на следующем запуске.
-- MCP-серверы, добавленные пользователем (подтверждение с превью аргументов для non-read-only).
-- Анонимная opt-in статистика: счётчики запусков, версия, ОС, бэкенды/тулы. Никакого содержимого сессий. Крэши — opt-in, только стек-трейсы, никаких дампов памяти.
-- Веб-инструменты агента (web_fetch/web_search), когда пользователь их включил.
+Everything is local by default. EXPLICITLY permitted network operations (opt-in only):
+- OTA updates: GitHub Releases, "Restart to Update" button, applied on the subsequent launch.
+- MCP servers configured by the user (confirmation required with argument preview for non-read-only actions).
+- Anonymous opt-in telemetry: launch counter, version, OS, active backends/tools. Zero session content. Crash reports: opt-in, sanitized stack traces only, no memory dumps.
+- Agent web tools (`web_fetch`/`web_search`), only when explicitly enabled by the user.
 
-## 4. Стек (решено окончательно)
+## 4. Technology Stack (Definitively Decided)
 
-| Слой | Решение |
+| Layer | Decision |
 |---|---|
-| Ядро | **Rust** (tokio, serde, rusqlite) |
-| UI | **Собственный wgpu-рендер** — дизайн первичнее фреймворка |
-| Текст | **cosmic-text/parley** — шейпинг, CJK, RTL, эмодзи, лигатуры |
-| Тема | **Material 3 Expressive, полная**: каждая кнопка может раскрываться в мини-панель, классные цвета, иконки |
-| Шрифты | Бандл: пропорциональный (Roboto Flex/Inter) + моно (JetBrains Mono) + возможность подключить свои TTF/OTF. Эмодзи — встроенные Noto Emoji |
-| Иконки | **Material Symbols** |
-| Данные | **SQLite + FTS5** |
-| Процессы | **UI-процесс + ядро-сервис** через IPC; падение UI не убивает задачу |
-| Инференс | HTTP-бэкенды сейчас (любые OpenAI-совместимые endpoints: LM Studio, Ollama, vLLM, OpenRouter, Gemini и любые другие модели без исключений), **llama.cpp встроенный — отдельная фаза после идеальной работы приложения**; там же — grammar/constrained generation для tool calling |
-| TUI | Тонкий TUI-клиент того же ядра (тестирование и терминальные пользователи) |
-| Лицензия | **MIT** |
-| Документация | Сайт из репо (mdBook на GitHub Pages); README — короткий вход |
-| Релизы | Stable + Beta каналы, SemVer с первого дня |
-| i18n | i18n-фреймворк с первого дня, EN-only на старте, RU потом |
+| Core | **Rust** (tokio, serde, rusqlite) |
+| UI | **Custom wgpu renderer** — design takes precedence over generic frameworks |
+| Text | **cosmic-text / parley** — font shaping, CJK, RTL, emoji, ligatures |
+| Theme | **Material 3 Expressive, full**: every button can expand into a mini-panel, expressive palette, iconography |
+| Fonts | Bundled: proportional (Roboto Flex/Inter) + monospace (JetBrains Mono) + user TTF/OTF loading. Emoji: embedded Noto Emoji |
+| Icons | **Material Symbols** |
+| Data | **SQLite + FTS5** |
+| Processes | **UI process + core service** via IPC; a UI crash never interrupts the active task |
+| Inference | HTTP backends currently (any OpenAI-compatible endpoint: LM Studio, Ollama, vLLM, OpenRouter, Gemini, and any other model without exception); **embedded llama.cpp — separate milestone after core app runs flawlessly**; paired with grammar/constrained generation for tool calling |
+| TUI | Lightweight TUI client connected to the same core (for automated testing and terminal enthusiasts) |
+| License | **MIT** |
+| Documentation | Repository-generated site (mdBook on GitHub Pages); concise entrypoint in README |
+| Releases | Stable + Beta channels, SemVer from day one |
+| i18n | i18n framework from day one, English-only at launch, Russian/multilingual later |
 
-## 5. Tool calling — надёжность святое
+## 5. Tool Calling — Reliability is Sacred
 
-- Единый внутренний тип `ToolCall` + **адаптеры протоколов**: нативные tool calls, XML, текстовый NDJSON. Один и тот же однострочный JSON воспринимается всеми путями.
-- Мультипарсер вылизан до предела сейчас; грамматика/семплинг — когда встроим llama.cpp.
-- Контрактные тесты цикла: мок-LLM сервер со сценариями (обрыв стрима, мусорный JSON, инъекции, незакрытые блоки). Детерминированно, без реальной модели.
+- Unified internal `ToolCall` data structure + **protocol adapters**: native JSON tool calls, XML tags, NDJSON blocks. The same single-line JSON format is parsed across all ingress channels.
+- Multi-parser hardened and resilient right now; formal grammar sampling integrated when llama.cpp is embedded.
+- Contract test suite: mock LLM server testing edge scenarios (stream truncation, malformed JSON, prompt injections, unclosed blocks). Deterministic, zero reliance on live models.
 
-## 6. Модель разрешений
+## 6. Permission Model
 
-- Режимы: Manual / Autonomic / Planning / Bypass; индикатор режима в композере, клик — выбор; `/goal` переключает в автоном с показом рамок.
-- Подтверждения: карточка Allow/Always/Deny в потоке; Always с узкими правилами (npm test ≠ npm publish); сессионные правила; **обязательный diff-просмотр перед записью файла**.
-- Права субагентов: наследуются от родителя, **без расширения**.
+- Modes: Manual / Autonomic / Planning / Bypass; mode selector in composer, click to cycle; `/goal` activates autonomic mode displaying explicit boundaries.
+- Confirmations: Allow / Always / Deny interactive card in stream; Always uses narrow prefix rules (`npm test` ≠ `npm publish`); session-scoped rules; **mandatory diff preview prior to file modifications**.
+- Subagent permissions: strictly inherited from parent, **privilege escalation is architecturally forbidden**.
 
-## 7. Автоном (/goal)
+## 7. Autonomous Execution (/goal)
 
-- Рамки задачи: лимит шагов, бюджет токенов, лимит времени, чёрный список действий.
-- Отчёт: живой план-документ в UI + финальный структурированный отчёт (сделано / не успено / проверить вручную).
-- Безопасность файлов: снапшот на задачу + git-коммит на веху.
-- Субагенты: полная динамическая система — динамические роли, параллелизм с лимитом, ревью родителем, связь между собой; UI — дерево с live-карточками, вкладки субагентов и оверлей.
+- Task envelope: step count limit, token budget, execution timeout, action blacklist.
+- Reporting: live plan document in UI + final structured report (completed / omitted / manual verification required).
+- File safety: pre-task filesystem snapshot + milestone git commits.
+- Subagents: fully dynamic orchestration — dynamic roles, concurrency throttling, parent review gate, inter-agent messaging; UI: interactive tree with live cards, subagent tabs, and overlay HUD.
 
-## 8. Память
+## 8. Memory
 
-- Проектная память (MEMORY.md в папке проекта) + глобальная (~/.flashagent/MEMORY.md).
-- **Автоподхват** внешних файлов правил MEMORY.md, CLAUDE.md, AGENTS.md.
-- Запись памяти с подтверждением пользователя (авто — в автономе).
-- В контекст: целиком, если влезает; иначе заголовки + точечное чтение.
-- UI: редактор памяти, два уровня, диффы изменений, индикация подхваченных правил.
+- Project memory (`MEMORY.md` in repository root) + global memory (`~/.flashagent/MEMORY.md`).
+- **Auto-discovery** of external rule files: `MEMORY.md`, `CLAUDE.md`, `AGENTS.md`.
+- Memory modifications require user confirmation (automatic in autonomic mode).
+- Context injection: injected whole when budget allows; otherwise outlines with targeted tool inspection.
+- UI: memory editor, dual-tier view, change diffs, indicator for detected rule files.
 
-## 9. Набор инструментов
+## 9. Toolset
 
-Адаптивный: **автовыбор по размеру контекста модели** (ультраминимум ~32k, минимум ~64k, расширенный на больших окнах). MCP добавляет остальное.
+Adaptive: **auto-selected based on the model's context window** (ultra-minimal ~32k, core ~64k, expanded on large context models). User MCP servers provide additional tools.
 
-## 10. UI-философия
+## 10. UI Philosophy
 
-- Дизайн: **M3 Expressive, реализованная буквально** — свой wgpu-рендер.
-- Анимации: **очень богатые**, всех четырёх классов: spring-физика, постоянные фоновые (зациклены, не мешают чтению), морфинг состояний (Stop↔Send, разворачивание диффов), полное отключение по опции.
-- Всё анимировано, зацикленно и параллельно.
-- Плотность адаптивная (compact/comfortable).
-- Поток тулов: живой peek + группировка серий + режимы **Verbose** (мысли серым текстом, код-блоки на всю ширину, несворачиваемые) и **Transcript** (то же, но блоки тулов как в обычном режиме).
-- Скролл: автоскролл с якорем, плавный, запоминание позиции.
-- Композер: авторост с лимитом + полноценное редактирование.
-- Статус агента: одна строка-лента (действие, токены, скорость, контекст).
-- Клавиатура: полная; мышь и тачскрин равноправно удобны.
-- Ошибки: карточка в потоке с Повторить + центр проблем.
-- Режимы отображения субагентов: дерево live-карточек, вкладки, счётчик с оверлеем.
-- Сессии: сайдбар с FTS5-поиском.
-- MCP: менеджер в настройках + полный маркетплейс + подтверждение с превью.
-- Диффы: единый рендер + split-вид + построчный выбор + живой дифф.
-- Стрим: живой markdown-рендер на лету.
-- Reasoning-модели: полная поддержка (reasoning_content/thinking), в потоке серым, в Transcript полностью.
-- Токены: точные из API, фолбэк — tiktoken-таблицы.
-- Первый запуск: **мастер онбординга** (бэкенд, соединение, модель, тестовый тул-колл).
+- Design: **M3 Expressive, implemented literally** — custom wgpu renderer.
+- Animations: **rich visual feedback**, all four classes: spring physics, continuous ambient background loops (subtle, non-distracting), state morphs (Stop ↔ Send, diff expansion), master disable toggle.
+- Fully animated, looped, and parallel rendering.
+- Adaptive density (compact / comfortable).
+- Tool stream: live peek + sequential batching + **Verbose** mode (thoughts in muted grey, full-width non-collapsible code blocks) and **Transcript** mode (same, with standard tool cards).
+- Scrolling: anchor auto-scroll, smooth physics, scroll position retention.
+- Composer: auto-expanding with height cap + full editing support.
+- Agent status: single ticker ribbon (current action, tokens, generation speed, context usage).
+- Keyboard: complete shortcut coverage; mouse and touchscreen equally ergonomic.
+- Error handling: inline error card with Retry action + dedicated diagnostics pane.
+- Subagent visualization: live card tree, dedicated tabs, counter with overlay.
+- Sessions: sidebar with instant FTS5 search.
+- MCP: settings manager + integrated marketplace + confirmation preview cards.
+- Diffs: unified renderer + split view + line-by-line selection + live diffing.
+- Streaming: live markdown rendering on the fly.
+- Reasoning models: first-class support (`reasoning_content`/`thinking`), rendered muted grey in stream, full in Transcript.
+- Tokens: accurate counters from backend API, local fallback via tiktoken estimation.
+- First launch: **onboarding wizard** (backend selection, connection check, model verification, test tool call).
 
-## 11. Производительность (требования)
+## 11. Performance Requirements
 
-- Запуск < 1 сек.
-- FPS = частота монитора (не 120, а сколько ГЦ есть), **полная поддержка VRR / LTPO / переключения монитора в реальном времени**; кадры не генерируются без изменений (sleep-кадры).
-- Fractional DPI (125/150%) без мыла; live-переключение мониторов.
-- Гигантские сессии (100k+ сообщений) скроллятся без лагов.
-- RAM: заметно легче Electron (~100-200 МБ без модели), без жёсткой цифры — не блокирующий критерий.
-- IME (кириллица, CJK) — с первого дня. AccessKit — с первого дня.
+- Cold start < 1s.
+- FPS = monitor refresh rate (native Hz, full VRR / LTPO / live display hotplug support); zero frames rendered without changes (sleep frames).
+- Fractional DPI scaling (125%, 150%) with subpixel sharpness; live display switching.
+- Massive sessions (100k+ messages) scroll without dropped frames.
+- RAM: noticeably lighter than Electron (~100-200 MB without model), soft target, non-blocking.
+- IME (Cyrillic, CJK) from day one. AccessKit accessibility from day one.
 
-## 12. Процесс перезаписи
+## 12. Rewrite Strategy
 
-- Старый flashgent (Electron): **фриз**, частичное развитие как legacy-ветка. Донор выстраданных кусков (парсеры, safety).
-- Новый репозиторий `flashagent`. Название продукта: **FlashAgent**.
-- Порядок: **два трека параллельно** — ядро (проверяется через TUI) и UI-прототип рендера (самый рискованный элемент — сначала недельный прототип: wgpu-окно, cosmic-text, композер с кириллицей, один spring-морфинг; оценка до коммита в основной репо).
-- Переписываем по слоям снизу.
-- Мигратор данных из ~/.flashgent (сессии, конфиг) при первом запуске.
-- v1 = (1) я сам переключился на ежедневное использование, (2) публичный релиз, оформленный настолько грамотно, чтобы люди замечали и тестировали, (3) живое сообщество (звёзды, сторонние MCP и темы).
-- Темп: вехи без дат. Навык владельца: понимание английского и синтаксиса любых языков (common sense); Rust/wgpu — всё в новинку, план учитывает время на обучение.
+- Old flashgent (Electron): **frozen**, preserved partially as legacy reference. Source of battle-tested components (parsers, safety guards).
+- New repository: `flashagent`. Product brand: **FlashAgent**.
+- Roadmap strategy: **two parallel tracks** — core engine (validated via TUI) and UI renderer prototype (highest-risk component — initially a one-week prototype: wgpu window, cosmic-text, composer with Cyrillic/IME, one spring morph; evaluate before committing to main repo).
+- Rewrite bottom-up layer by layer.
+- Automatic data migration from `~/.flashgent` (sessions, configuration) on first launch.
+- v1 milestone criteria: (1) author switches to daily production use, (2) public release polished sufficiently to attract active community adoption, (3) thriving ecosystem (GitHub stars, third-party MCPs and themes).
+- Cadence: milestones without rigid calendar deadlines.
 
-## 13. Что от агента после манифеста
+## 13. Agent Instructions Post-Manifesto
 
-1. Манифест (этот файл) → 2. ARCHITECTURE.md + ROADMAP.md (детальные, на уровне «можно отдать любому ИИ-агенту») с **переработанной системой скиллов и системой хранения Project audit** → 3. Код: ядро + UI-прототип по трекам, с проверками владельца на каждом шаге.
+1. Manifesto (this file) → 2. ARCHITECTURE.md + ROADMAP.md (detailed specifications ready for autonomous handoff) with **overhauled skills system and structured project audit** → 3. Code: core engine + UI prototype tracks, with owner verification at every step.
 
-## 14. Приложение: полный список зафиксированных решений
+## 14. Appendix: Complete Registry of Decisions
 
-Из опроса (9 блоков, ~110 решений), сводка выше полна; источники — ответы владельца в этой сессии. При противоречии: этот файл > память агента.
+Derived from the architectural inquiry (9 categories, ~110 explicit decisions), summarized fully above. In case of conflict: this document takes precedence over agent memory.

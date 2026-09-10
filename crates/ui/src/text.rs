@@ -77,8 +77,8 @@ mod tests {
     }
 
     #[test]
-    fn cyrillic_shapes_and_measures() {
-        let m = measure_line("Привет, ФлэшАгент", 16.0).expect("fonts present");
+    fn unicode_multilingual_shapes_and_measures() {
+        let m = measure_line("Bonjour le monde, Grüß Gott", 16.0).expect("fonts present");
         assert!(m.width > 0.0);
         assert!(m.glyph_count >= 16);
     }

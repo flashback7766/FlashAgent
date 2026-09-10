@@ -258,7 +258,7 @@ mod tests {
     fn estimate_is_monotonic_and_nonzero() {
         assert_eq!(estimate_tokens(""), 0);
         assert!(estimate_tokens("hello world") > 0);
-        assert!(estimate_tokens("привет мир дружба") > 0);
+        assert!(estimate_tokens("hello world friendship") > 0);
         assert!(estimate_tokens("a short") < estimate_tokens("a much longer sentence with words"));
     }
 }

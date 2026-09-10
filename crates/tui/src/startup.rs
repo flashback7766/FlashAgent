@@ -55,7 +55,7 @@ impl TrustScreen {
         match &mut self.mode {
             TrustScreenMode::Select => match code {
                 KeyCode::Esc => Some(StartupAction::Quit),
-                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('с') | KeyCode::Char('С')
+                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('\u{0441}') | KeyCode::Char('\u{0421}')
                     if mods.contains(KeyModifiers::CONTROL) =>
                 {
                     Some(StartupAction::Quit)
@@ -99,7 +99,7 @@ impl TrustScreen {
                     self.mode = TrustScreenMode::Select;
                     None
                 }
-                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('с') | KeyCode::Char('С')
+                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('\u{0441}') | KeyCode::Char('\u{0421}')
                     if mods.contains(KeyModifiers::CONTROL) =>
                 {
                     Some(StartupAction::Quit)
@@ -260,8 +260,6 @@ pub async fn run_trust_screen(cwd: &mut PathBuf) -> anyhow::Result<StartupAction
     use std::io::Write;
 
     enable_raw_mode()?;
-    #[cfg(windows)]
-    let _ = crossterm::terminal::enable_virtual_terminal_processing();
     let mut stdout = std::io::stdout();
     let _ = execute!(stdout, EnterAlternateScreen, cursor::Hide);
 
@@ -296,8 +294,6 @@ pub async fn run_trust_screen(cwd: &mut PathBuf) -> anyhow::Result<StartupAction
 
     let _ = execute!(stdout, cursor::Show, LeaveAlternateScreen);
     disable_raw_mode()?;
-    #[cfg(windows)]
-    let _ = crossterm::terminal::disable_virtual_terminal_processing();
 
     Ok(res)
 }

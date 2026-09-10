@@ -318,8 +318,8 @@ impl ThinkingProfile {
                 if is_off {
                     body["reasoning"] = serde_json::json!("off");
                     body["enable_thinking"] = serde_json::json!(false);
-                    body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
-                    body["chat_template_config"] = serde_json::json!({ "enable_thinking": false });
+                    body["chat_template_kwargs"] = serde_json::json!({ "thinking": false, "enable_thinking": false });
+                    body["chat_template_config"] = serde_json::json!({ "thinking": false, "enable_thinking": false });
                     if !is_binary_on_off {
                         let off_val = if self.presets.iter().any(|p| p.eq_ignore_ascii_case("off")) {
                             "off"
@@ -408,32 +408,27 @@ pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskCo
                 .to_lowercase();
 
             // 1. Direct user brevity overrides: explicitly instructed not to think or answer in one line
-            let is_explicit_brevity = p_lower.contains("без мыслей")
-                || p_lower.contains("без рассуждений")
-                || p_lower.contains("не думай")
-                || p_lower.contains("ответь коротко")
-                || p_lower.contains("ответь одной строкой")
-                || p_lower.contains("без лишних слов")
-                || p_lower.contains("no thinking")
+            let is_explicit_brevity = p_lower.contains("no thinking")
                 || p_lower.contains("don't think")
                 || p_lower.contains("no reasoning")
                 || p_lower.contains("concise")
                 || p_lower.contains("one line")
-                || p_lower.contains("briefly");
+                || p_lower.contains("briefly")
+                || p_lower.contains("short answer")
+                || p_lower.contains("without thinking")
+                || p_lower.contains("without reasoning");
             if is_explicit_brevity {
                 return TaskComplexity::Minimal;
             }
 
             // 2. Direct user deep reasoning overrides: explicitly instructed to reason or think deeply
-            let is_explicit_deep = p_lower.contains("подумай")
-                || p_lower.contains("поразмышляй")
-                || p_lower.contains("проанализируй подробно")
-                || p_lower.contains("рассуждай пошагово")
-                || p_lower.contains("think step by step")
+            let is_explicit_deep = p_lower.contains("think step by step")
                 || p_lower.contains("deep reasoning")
                 || p_lower.contains("think deeply")
                 || p_lower.contains("reason carefully")
-                || p_lower.contains("full analysis");
+                || p_lower.contains("full analysis")
+                || p_lower.contains("analyze thoroughly")
+                || p_lower.contains("detailed analysis");
             if is_explicit_deep {
                 return TaskComplexity::High;
             }
@@ -445,7 +440,6 @@ pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskCo
             let is_confirmation_or_choice = matches!(
                 clean_lower.as_str(),
                 "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
-                | "да" | "нет" | "ок" | "окей" | "хорошо" | "делай" | "продолжай" | "погнали" | "давай" | "согласен" | "ладно" | "плюс" | "го"
                 | "yes" | "no" | "y" | "n" | "ok" | "okay" | "sure" | "proceed" | "continue" | "go" | "do it" | "agree"
             );
 
@@ -458,9 +452,7 @@ pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskCo
                         || m.content.contains('?')
                         || m.content.contains("```")
                         || m.content.contains("error")
-                        || m.content.contains("ошибк")
                         || m.content.contains("test")
-                        || m.content.contains("тест")
                         || m.content.contains("fn ")
                         || m.content.contains("struct ")
                         || m.content.contains("diff")
@@ -473,35 +465,7 @@ pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskCo
             }
 
             // 5. Technical task keywords & actions
-            let has_tech_keywords = p_lower.contains("напиши")
-                || p_lower.contains("создай")
-                || p_lower.contains("исправь")
-                || p_lower.contains("почини")
-                || p_lower.contains("отрефактори")
-                || p_lower.contains("рефактор")
-                || p_lower.contains("перепиши")
-                || p_lower.contains("добавь")
-                || p_lower.contains("удали")
-                || p_lower.contains("запусти")
-                || p_lower.contains("проверь")
-                || p_lower.contains("сборк")
-                || p_lower.contains("ошибк")
-                || p_lower.contains("паник")
-                || p_lower.contains("баг")
-                || p_lower.contains("тест")
-                || p_lower.contains("архитектур")
-                || p_lower.contains("проект")
-                || p_lower.contains("памят")
-                || p_lower.contains("поток")
-                || p_lower.contains("сервер")
-                || p_lower.contains("клиент")
-                || p_lower.contains("запрос")
-                || p_lower.contains("баз")
-                || p_lower.contains("алгоритм")
-                || p_lower.contains("оптимиз")
-                || p_lower.contains("расскажи")
-                || p_lower.contains("объясни")
-                || p_lower.contains("explain")
+            let has_tech_keywords = p_lower.contains("explain")
                 || p_lower.contains("describe")
                 || p_lower.contains("overview")
                 || p_lower.contains("implement")
@@ -515,9 +479,19 @@ pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskCo
                 || p_lower.contains("build")
                 || p_lower.contains("test")
                 || p_lower.contains("write")
+                || p_lower.contains("create")
                 || p_lower.contains("modify")
+                || p_lower.contains("update")
+                || p_lower.contains("delete")
+                || p_lower.contains("remove")
+                || p_lower.contains("run")
+                || p_lower.contains("check")
+                || p_lower.contains("verify")
                 || p_lower.contains("server")
+                || p_lower.contains("client")
+                || p_lower.contains("request")
                 || p_lower.contains("memory")
+                || p_lower.contains("thread")
                 || p_lower.contains("database")
                 || p_lower.contains("borrow")
                 || p_lower.contains("architecture")
@@ -526,21 +500,6 @@ pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskCo
 
             // 6. Substantive / analytical question indicators
             let is_substantive_question = (prompt.contains('?')
-                || p_lower.starts_with("как ")
-                || p_lower.starts_with("почему ")
-                || p_lower.starts_with("зачем ")
-                || p_lower.starts_with("в чем ")
-                || p_lower.starts_with("в чём ")
-                || p_lower.starts_with("что такое ")
-                || p_lower.starts_with("что лучше ")
-                || p_lower.starts_with("что ")
-                || p_lower.starts_with("какой ")
-                || p_lower.starts_with("какая ")
-                || p_lower.starts_with("какие ")
-                || p_lower.starts_with("где ")
-                || p_lower.starts_with("когда ")
-                || p_lower.starts_with("сравни ")
-                || p_lower.contains("разниц")
                 || p_lower.starts_with("how ")
                 || p_lower.starts_with("why ")
                 || p_lower.starts_with("what is ")
@@ -738,23 +697,15 @@ pub fn is_greeting_text(prompt: &str) -> bool {
     let is_exact = matches!(
         clean_lower.as_str(),
         "hi" | "hello" | "hey" | "howdy" | "sup" | "yo" | "bye" | "goodbye" | "cya" | "see ya"
-        | "привет" | "приветик" | "приветствую" | "здравствуйте" | "здравствуй"
-        | "ку" | "хай" | "хей" | "салам" | "салам алейкум" | "салют" | "здорово" | "здарова"
-        | "йо" | "йоу" | "хеллоу" | "доброе утро" | "добрый день" | "добрый вечер" | "доброй ночи"
-        | "доброго времени" | "доброго времени суток" | "пока" | "до свидания" | "до скорого"
         | "thanks" | "thank you" | "thx" | "cool" | "nice" | "great" | "awesome" | "cheers"
-        | "спасибо" | "спасибки" | "благодарю" | "от души" | "сяп" | "спс" | "пасиб" | "пасибо"
-        | "супер" | "отлично" | "кайф" | "круто" | "класс" | "молодец" | "красава"
-        | "кто ты" | "как дела" | "как жизнь" | "как ты" | "как оно" | "что делаешь"
-        | "что ты такое" | "что умеешь" | "че как" | "чё как" | "help" | "помощь" | "помоги"
-        | "who are you" | "how are you" | "what can you do" | "what are you doing" | "what's up" | "whats up"
+        | "help" | "who are you" | "how are you" | "what can you do" | "what are you doing" | "what's up" | "whats up"
+        | "good morning" | "good afternoon" | "good evening" | "good night"
     );
     if is_exact {
         return true;
     }
 
-    // Word tokenization (splits on any non-alphanumeric character, handling punctuation and
-    // common keyboard layout typo tails like 'Ё' or 'ё' after '!' in 'Привет!Ё')
+    // Word tokenization (splits on any non-alphanumeric character)
     let words: Vec<&str> = raw
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
@@ -767,21 +718,14 @@ pub fn is_greeting_text(prompt: &str) -> bool {
     let first = words[0].to_lowercase();
     let is_greeting_head = matches!(
         first.as_str(),
-        "привет" | "приветик" | "приветствую" | "здравствуйте" | "здравствуй"
-        | "хай" | "хей" | "салют" | "ку" | "салам" | "здарова" | "здорово"
-        | "йо" | "йоу" | "хеллоу" | "hello" | "hi" | "hey" | "howdy" | "sup"
+        "hello" | "hi" | "hey" | "howdy" | "sup" | "yo"
     );
 
-    let is_greeting_phrase = first == "добрый" || first == "доброе" || first == "доброй" || first == "доброго"
-        || first == "good";
+    let is_greeting_phrase = first == "good";
 
     if is_greeting_head || is_greeting_phrase {
-        // Single word greeting like "Привет!" or "Hi!"
+        // Single word greeting like "Hi!"
         if words.len() == 1 {
-            return true;
-        }
-        // Accidental single-character trailing typo (e.g. 'ё' from 'Привет!Ё' due to Shift+1 layout key proximity)
-        if words.len() == 2 && words[1].chars().count() == 1 {
             return true;
         }
         // Conversational greeting if all subsequent words are pleasantry words
@@ -789,12 +733,10 @@ pub fn is_greeting_text(prompt: &str) -> bool {
             let wl = w.to_lowercase();
             matches!(
                 wl.as_str(),
-                "друг" | "бро" | "чел" | "агент" | "flashagent" | "всем" | "все"
-                | "день" | "утро" | "вечер" | "ночи" | "суток" | "времени" | "алейкум"
-                | "как" | "дела" | "жизнь" | "ты" | "оно" | "нового" | "что" | "делаешь"
-                | "умеешь" | "можешь" | "чем" | "занимаешься" | "там"
-                | "there" | "all" | "everyone" | "friend" | "bro" | "agent" | "today"
+                "there" | "all" | "everyone" | "friend" | "bro" | "agent" | "today"
                 | "how" | "are" | "you" | "is" | "it" | "going" | "up" | "doing"
+                | "what" | "new"
+                | "morning" | "afternoon" | "evening" | "night" | "day"
             )
         });
         if is_all_pleasantry && words.len() <= 6 {
@@ -1161,11 +1103,11 @@ mod tests {
         use crate::types::{ChatMessage, Role};
 
         // 1. Simple greeting
-        let msg_hello = vec![ChatMessage::user("Привет!")];
+        let msg_hello = vec![ChatMessage::user("Hello!")];
         assert_eq!(analyze_turn_complexity(&msg_hello), TaskComplexity::Minimal);
 
         // 2. Casual acknowledgement
-        let msg_ok = vec![ChatMessage::user("спасибо, ок")];
+        let msg_ok = vec![ChatMessage::user("thanks, ok")];
         assert_eq!(analyze_turn_complexity(&msg_ok), TaskComplexity::Minimal);
 
         // 3. Simple greeting with memory block
@@ -1173,7 +1115,7 @@ mod tests {
         assert_eq!(analyze_turn_complexity(&msg_mem), TaskComplexity::Minimal);
 
         // 4. Code editing request
-        let msg_code = vec![ChatMessage::user("Напиши функцию парсинга JSON в Rust")];
+        let msg_code = vec![ChatMessage::user("Write a JSON parsing function in Rust")];
         assert_eq!(analyze_turn_complexity(&msg_code), TaskComplexity::High);
 
         // 5. Tool execution error
@@ -1197,74 +1139,66 @@ mod tests {
         assert_eq!(analyze_turn_complexity(&msg_tool_ok), TaskComplexity::Low);
 
         // 7. Substantive technical question with '?'
-        let msg_q_tech = vec![ChatMessage::user("Как устроен borrow checker в Rust?")];
+        let msg_q_tech = vec![ChatMessage::user("How does the borrow checker work in Rust?")];
         assert_eq!(analyze_turn_complexity(&msg_q_tech), TaskComplexity::High);
 
         // 8. General question without tech keywords
-        let msg_q_gen = vec![ChatMessage::user("Что такое DNS?")];
+        let msg_q_gen = vec![ChatMessage::user("What is DNS?")];
         assert_eq!(analyze_turn_complexity(&msg_q_gen), TaskComplexity::Medium);
 
-        // 9. User answering agent's question ("Да") in ongoing task
+        // 9. User answering agent's question ("Yes") in ongoing task
         let msg_continuation = vec![
-            ChatMessage::user("Исправь ошибку компиляции"),
-            ChatMessage::assistant("Найдена ошибка типов. Исправить её прямо сейчас?"),
-            ChatMessage::user("Да"),
+            ChatMessage::user("Fix compilation error"),
+            ChatMessage::assistant("Found type error. Fix it now?"),
+            ChatMessage::user("Yes"),
         ];
         assert_eq!(analyze_turn_complexity(&msg_continuation), TaskComplexity::High);
 
         // 10. User picking option "1" in ongoing task
         let msg_choice = vec![
-            ChatMessage::user("Настрой БД"),
-            ChatMessage::assistant("1) SQLite\n2) PostgreSQL\nКакой вариант выбрать?"),
+            ChatMessage::user("Setup database"),
+            ChatMessage::assistant("1) SQLite\n2) PostgreSQL\nWhich option to choose?"),
             ChatMessage::user("1"),
         ];
         assert_eq!(analyze_turn_complexity(&msg_choice), TaskComplexity::High);
 
         // 11. User explicit brevity override
-        let msg_brevity = vec![ChatMessage::user("Назови столицу Франции, ответь одной строкой без рассуждений")];
+        let msg_brevity = vec![ChatMessage::user("Name the capital of France, answer in one line without reasoning")];
         assert_eq!(analyze_turn_complexity(&msg_brevity), TaskComplexity::Minimal);
 
         // 12. User explicit deep reasoning override
-        let msg_deep = vec![ChatMessage::user("Подумай пошагово и сравни B-деревья и LSM-деревья")];
+        let msg_deep = vec![ChatMessage::user("Think step by step and compare B-trees and LSM-trees")];
         assert_eq!(analyze_turn_complexity(&msg_deep), TaskComplexity::High);
 
-        // 13. Slang greeting
-        let msg_slang = vec![ChatMessage::user("Салам алейкум!")];
+        // 13. Casual greeting
+        let msg_slang = vec![ChatMessage::user("What's up bro!")];
         assert_eq!(analyze_turn_complexity(&msg_slang), TaskComplexity::Minimal);
 
-        // 14. Typo / keyboard layout trailing artifact greetings
-        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Привет!Ё")]), TaskComplexity::Minimal);
-        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Привет!ё")]), TaskComplexity::Minimal);
-        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("привет)))")]), TaskComplexity::Minimal);
-        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Хай!")]), TaskComplexity::Minimal);
-        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("ку!")]), TaskComplexity::Minimal);
-        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Ку")]), TaskComplexity::Minimal);
-        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Доброго времени суток")]), TaskComplexity::Minimal);
-        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Привет! Чем занимаешься?")]), TaskComplexity::Minimal);
+        // 14. Casual / conversational greeting variants
+        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Hello!")]), TaskComplexity::Minimal);
+        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Hi there")]), TaskComplexity::Minimal);
+        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Hey!")]), TaskComplexity::Minimal);
+        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Good morning")]), TaskComplexity::Minimal);
+        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Hello! What are you doing?")]), TaskComplexity::Minimal);
     }
 
     #[test]
     fn test_is_greeting_text_variants() {
-        assert!(is_greeting_text("Привет!Ё"));
-        assert!(is_greeting_text("Привет!ё"));
-        assert!(is_greeting_text("Привет!"));
-        assert!(is_greeting_text("привет)))"));
-        assert!(is_greeting_text("Хай!"));
-        assert!(is_greeting_text("ку"));
-        assert!(is_greeting_text("Йо"));
-        assert!(is_greeting_text("Салют!"));
-        assert!(is_greeting_text("Доброго времени суток"));
+        assert!(is_greeting_text("Hello!"));
+        assert!(is_greeting_text("Hi there"));
+        assert!(is_greeting_text("Hey!"));
+        assert!(is_greeting_text("Good morning"));
         assert!(is_greeting_text("Hello there"));
         assert!(is_greeting_text("Hi!"));
-        assert!(is_greeting_text("Спасибо"));
-        assert!(is_greeting_text("Благодарю!"));
-        assert!(is_greeting_text("Кто ты?"));
-        assert!(is_greeting_text("Как дела?"));
+        assert!(is_greeting_text("Thanks"));
+        assert!(is_greeting_text("Thank you!"));
+        assert!(is_greeting_text("Who are you?"));
+        assert!(is_greeting_text("How are you?"));
 
         // Must not classify coding tasks as pure greetings
-        assert!(!is_greeting_text("Привет, напиши мне веб-сервер на Rust"));
+        assert!(!is_greeting_text("Hello, write me a web server in Rust"));
         assert!(!is_greeting_text("fn main() { println!(); }"));
-        assert!(!is_greeting_text("Исправь баг в коде"));
+        assert!(!is_greeting_text("Fix bug in code"));
     }
 
     #[test]
@@ -1321,10 +1255,10 @@ mod tests {
             default_preset: Some("on".to_string()),
         };
 
-        let hello = vec![ChatMessage::user("Привет")];
+        let hello = vec![ChatMessage::user("Hello")];
         assert_eq!(binary_prof.resolve_dynamic(&hello), Some("off"));
 
-        let code = vec![ChatMessage::user("Исправь ошибку компиляции в main.rs")];
+        let code = vec![ChatMessage::user("Fix compilation error in main.rs")];
         assert_eq!(binary_prof.resolve_dynamic(&code), Some("on"));
 
         // Tiered profile (e.g. low/medium/high)

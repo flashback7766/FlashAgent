@@ -86,7 +86,15 @@ impl Category {
             | "memory_remove" => Category::Write,
             "run_shell" => Category::Shell,
             "web_fetch" | "web_search" => Category::Net,
-            _ => Category::Mcp,
+            other => {
+                if let Some(action) = other.strip_prefix("mcp__").and_then(|r| r.split("__").nth(1)) {
+                    let prefixes = ["read", "get", "list", "search", "fetch", "inspect", "find", "query", "describe", "count"];
+                    if prefixes.iter().any(|&p| action == p || action.starts_with(&format!("{p}_")) || action.starts_with(&format!("{p}-"))) {
+                        return Category::Read;
+                    }
+                }
+                Category::Mcp
+            }
         }
     }
 }
@@ -588,4 +596,48 @@ mod tests {
         assert_eq!(state_accept_edits.decide(&call("patch_file", "{}"), None), Verdict::Allow);
         assert_eq!(state_accept_edits.decide(&call("memory_create", "{}"), None), Verdict::Allow);
     }
+
+    #[test]
+    fn test_mcp_categories_and_approval_gate() {
+        // Read-only actions are classified as Category::Read
+        assert_eq!(Category::from_tool("mcp__sqlite__read_query"), Category::Read);
+        assert_eq!(Category::from_tool("mcp__github__get_issue"), Category::Read);
+        assert_eq!(Category::from_tool("mcp__github__list_repos"), Category::Read);
+        assert_eq!(Category::from_tool("mcp__brave__search"), Category::Read);
+
+        // Mutating/external actions are classified as Category::Mcp
+        assert_eq!(Category::from_tool("mcp__sqlite__execute_mutation"), Category::Mcp);
+        assert_eq!(Category::from_tool("mcp__github__create_issue"), Category::Mcp);
+        assert_eq!(Category::from_tool("mcp__docker__restart_container"), Category::Mcp);
+
+        // Planning mode: read-only MCP allowed, non-read MCP denied
+        let state_plan = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
+        assert_eq!(state_plan.decide(&call("mcp__sqlite__read_query", "{}"), None), Verdict::Allow);
+        assert_eq!(
+            state_plan.decide(&call("mcp__sqlite__execute_mutation", "{}"), None),
+            Verdict::Deny("external tools are not available in planning mode".into())
+        );
+
+        // Manual mode: non-read MCP requires approval
+        let state_man = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
+        assert_eq!(
+            state_man.decide(&call("mcp__github__create_issue", "{}"), None),
+            Verdict::NeedApproval { diff: None }
+        );
+
+        // AcceptEdits mode: non-read MCP still requires approval (never bypassed automatically)
+        let state_edits = PermissionState::new(PermissionMode::AcceptEdits, Arc::new(DenyAllGate));
+        assert_eq!(
+            state_edits.decide(&call("mcp__docker__restart_container", "{}"), None),
+            Verdict::NeedApproval { diff: None }
+        );
+
+        // Bypass mode: allowed
+        let state_bypass = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
+        assert_eq!(
+            state_bypass.decide(&call("mcp__docker__restart_container", "{}"), None),
+            Verdict::Allow
+        );
+    }
 }
+

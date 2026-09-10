@@ -1,13 +1,13 @@
 # Audit: Regenerate Last Response on Ctrl+R
 
 ### Status: PASS
-Decision: Feature Implementation — add ability to regenerate the last model response from scratch via keyboard shortcut `Ctrl+R` (and Cyrillic equivalent `Ctrl+К`), as well as `/regenerate` and `/retry` slash commands.
+Decision: Feature Implementation — add ability to regenerate the last model response from scratch via keyboard shortcut `Ctrl+R` (and layout fallback), as well as `/regenerate` and `/retry` slash commands.
 
 Files touched:
 - `crates/tui/src/lib.rs`: added `ChatView::truncate_to_last_user` method; added unit test `test_chat_view_truncate_to_last_user`; added `Ctrl+R regen` hint to welcome card quick commands box.
 - `crates/tui/src/tips.rs`: added tip explaining `Ctrl+R` regeneration in `TIPS_POOL`.
 - `crates/tui/src/autocomplete.rs`: added `/regenerate` and `/retry` commands to `builtin_commands`.
-- `crates/tui/src/main.rs`: implemented `Ctrl+R` (and `Ctrl+К`) key event handler to truncate history and chat back to the last user message, reset renderer scroll and settled lines, update context usage, and re-spawn turn from scratch; implemented `/regenerate` and `/retry` slash commands; updated `/help` text and Line 1 status bar footer hint.
+- `crates/tui/src/main.rs`: implemented `Ctrl+R` key event handler to truncate history and chat back to the last user message, reset renderer scroll and settled lines, update context usage, and re-spawn turn from scratch; implemented `/regenerate` and `/retry` slash commands; updated `/help` text and Line 1 status bar footer hint.
 
 Verification:
 - `cargo test --workspace` (exit code: 0, all 190+ tests passed)

@@ -196,7 +196,11 @@ mod tests {
 
     #[tokio::test]
     async fn nonzero_exit_is_error_with_output() {
-        let err = run_foreground("echo bad >&2; exit 3", Duration::from_secs(10)).await.unwrap_err();
+        #[cfg(windows)]
+        let cmd = "echo bad 1>&2 & exit 3";
+        #[cfg(not(windows))]
+        let cmd = "echo bad >&2; exit 3";
+        let err = run_foreground(cmd, Duration::from_secs(10)).await.unwrap_err();
         assert!(err.to_string().contains("exit code: 3"));
         assert!(err.to_string().contains("bad"));
     }
