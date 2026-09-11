@@ -3,6 +3,15 @@
 Beta builds are numbered `bNNN` and ship on the rolling `beta` pre-release.
 Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
+## Unreleased
+
+- The command is just `flashagent`. Packages, tarballs, the AppImage and the
+  installers no longer add a `flashagent-tui` alias (reinstalling removes the
+  old one); in-app hints use the new name. The empty `crates/app` is gone.
+- External (MCP) tools run without approval only when your `.mcp.json` marks
+  them `read_only` / lists them in `read_only_tools`. Tool names like `get_*`
+  and the server's own `readOnlyHint` no longer skip the approval card.
+
 ## b233 — end-to-end audit
 
 A full audit that traced every user-visible feature from key press to model,

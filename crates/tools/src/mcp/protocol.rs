@@ -141,7 +141,9 @@ pub struct McpTool {
 
 impl McpTool {
     /// True if tool is annotated as explicitly read-only.
-    pub fn is_read_only(&self) -> bool {
+    /// What the server claims; informational only — never used for
+    /// permissions (see `McpManager::is_tool_read_only`).
+    pub fn claims_read_only(&self) -> bool {
         self.annotations.as_ref().and_then(|a| a.read_only).unwrap_or(false)
     }
 }
@@ -242,7 +244,7 @@ mod tests {
         let res: ToolsListResult = serde_json::from_str(raw).expect("parse tools list");
         assert_eq!(res.tools.len(), 1);
         assert_eq!(res.tools[0].name, "read_query");
-        assert!(res.tools[0].is_read_only());
+        assert!(res.tools[0].claims_read_only());
     }
 
     #[test]

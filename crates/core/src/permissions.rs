@@ -78,6 +78,9 @@ pub enum Category {
 
 impl Category {
     /// Classify by tool name; unknown names are treated as MCP (external).
+    /// An external tool's name never makes it a read: a server chooses its
+    /// own names, so only the user's config can vouch for it (see
+    /// [`PermissionState::set_read_only_hint`]).
     pub fn from_tool(tool: &str) -> Self {
         match tool {
             "read_file" | "list_dir" | "glob" | "grep" | "outline_file" | "git_status" | "git_diff"
@@ -89,15 +92,7 @@ impl Category {
             | "memory_remove" => Category::Write,
             "run_shell" => Category::Shell,
             "web_fetch" | "web_search" => Category::Net,
-            other => {
-                if let Some(action) = other.strip_prefix("mcp__").and_then(|r| r.split("__").nth(1)) {
-                    let prefixes = ["read", "get", "list", "search", "fetch", "inspect", "find", "query", "describe", "count"];
-                    if prefixes.iter().any(|&p| action == p || action.starts_with(&format!("{p}_")) || action.starts_with(&format!("{p}-"))) {
-                        return Category::Read;
-                    }
-                }
-                Category::Mcp
-            }
+            _ => Category::Mcp,
         }
     }
 }
@@ -282,9 +277,9 @@ fn shell_command(args_json: &str) -> Option<String> {
     flashagent_llm::effective_args(args_json, "run_shell")?.get("command")?.as_str().map(str::to_string)
 }
 
-/// Authoritative "is this external tool read-only?" answer supplied by the
-/// layer that knows the tool (MCP config `read_only`/`read_only_tools`, server
-/// `readOnlyHint` annotations). `core` stays protocol-free.
+/// "Did the user mark this external tool read-only?" — answered by the layer
+/// that owns the config (MCP `read_only` / `read_only_tools` in `.mcp.json`).
+/// `core` stays protocol-free.
 pub type ReadOnlyHint = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// Mutable permission state: mode + session rules + the approval gate.
@@ -810,45 +805,28 @@ mod tests {
 
     #[test]
     fn test_mcp_categories_and_approval_gate() {
-        // Read-only actions are classified as Category::Read
-        assert_eq!(Category::from_tool("mcp__sqlite__read_query"), Category::Read);
-        assert_eq!(Category::from_tool("mcp__github__get_issue"), Category::Read);
-        assert_eq!(Category::from_tool("mcp__github__list_repos"), Category::Read);
-        assert_eq!(Category::from_tool("mcp__brave__search"), Category::Read);
-
-        // Mutating/external actions are classified as Category::Mcp
-        assert_eq!(Category::from_tool("mcp__sqlite__execute_mutation"), Category::Mcp);
-        assert_eq!(Category::from_tool("mcp__github__create_issue"), Category::Mcp);
+        // Names never vouch for an external tool: `get_*`/`read_*` are still MCP.
+        assert_eq!(Category::from_tool("mcp__sqlite__read_query"), Category::Mcp);
+        assert_eq!(Category::from_tool("mcp__github__get_issue"), Category::Mcp);
         assert_eq!(Category::from_tool("mcp__docker__restart_container"), Category::Mcp);
 
-        // Planning mode: read-only MCP allowed, non-read MCP denied
+        // Planning: external tools refused unless the config marks them read-only.
         let state_plan = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
+        assert!(matches!(state_plan.decide(&call("mcp__sqlite__read_query", "{}"), None), Verdict::Deny(_)));
+        state_plan.set_read_only_hint(Arc::new(|name: &str| name == "mcp__sqlite__read_query"));
         assert_eq!(state_plan.decide(&call("mcp__sqlite__read_query", "{}"), None), Verdict::Allow);
-        assert_eq!(
-            state_plan.decide(&call("mcp__sqlite__execute_mutation", "{}"), None),
-            Verdict::Deny("external tools are not available in planning mode".into())
-        );
+        assert!(matches!(state_plan.decide(&call("mcp__sqlite__execute_mutation", "{}"), None), Verdict::Deny(_)));
 
-        // Manual mode: non-read MCP requires approval
-        let state_man = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
-        assert_eq!(
-            state_man.decide(&call("mcp__github__create_issue", "{}"), None),
-            Verdict::NeedApproval { diff: None }
-        );
+        // Manual / AcceptEdits: unmarked external tools always ask.
+        for mode in [PermissionMode::Manual, PermissionMode::AcceptEdits] {
+            let state = PermissionState::new(mode, Arc::new(DenyAllGate));
+            assert_eq!(state.decide(&call("mcp__github__get_issue", "{}"), None), Verdict::NeedApproval { diff: None });
+        }
 
-        // AcceptEdits mode: non-read MCP still requires approval (never bypassed automatically)
-        let state_edits = PermissionState::new(PermissionMode::AcceptEdits, Arc::new(DenyAllGate));
-        assert_eq!(
-            state_edits.decide(&call("mcp__docker__restart_container", "{}"), None),
-            Verdict::NeedApproval { diff: None }
-        );
-
-        // Bypass mode: allowed
+        // Bypass: allowed.
         let state_bypass = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
-        assert_eq!(
-            state_bypass.decide(&call("mcp__docker__restart_container", "{}"), None),
-            Verdict::Allow
-        );
+        assert_eq!(state_bypass.decide(&call("mcp__docker__restart_container", "{}"), None), Verdict::Allow);
     }
+
 }
 

@@ -105,14 +105,14 @@ flashagent --url http://localhost:11434/v1 --model qwen2.5-coder:32b   # one-off
 
 | Mode | File edits | Shell | External (MCP) tools |
 | :--- | :--- | :--- | :--- |
-| **Planning** | refused | refused (unless allowed by a rule) | read-only only |
-| **Manual** | ask, with diff | ask | ask (read-only ones run) |
-| **Accept Edits** (default) | run | ask | ask (read-only ones run) |
+| **Planning** | refused | refused (unless allowed by a rule) | only tools you marked `read_only` |
+| **Manual** | ask, with diff | ask | ask (`read_only` ones run) |
+| **Accept Edits** (default) | run | ask | ask (`read_only` ones run) |
 | **Accept All** | run | run | run |
 
 Reads are always allowed. Approval cards offer **Allow**, **Always** and **Deny**; "Always" on a shell command stores a narrow per-command rule for the session.
 
-**MCP** — add servers in `.mcp.json` (project) or `~/.flashagent/mcp.json` (global), browse a small vetted marketplace with `/mcp market`, install with `/mcp add <id>`, test with `/mcp test <name>`. Mark a server or individual tools `read_only` to skip approval for them; servers' own `readOnlyHint` annotations are honoured too.
+**MCP** — add servers in `.mcp.json` (project) or `~/.flashagent/mcp.json` (global), browse a small vetted marketplace with `/mcp market`, install with `/mcp add <id>`, test with `/mcp test <name>`. Mark a server or individual tools `read_only` to skip approval for them — only your config can do that; a server's own claims (tool names, `readOnlyHint`) never bypass an approval card.
 
 ```json
 {
