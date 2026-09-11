@@ -1,11 +1,12 @@
 //! The agent tool loop: stream a turn, execute tool calls, feed results back,
 //! repeat — until the model stops or a guardrail trips.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flashagent_llm::{ChatMessage, LlmError, LlmEvent, Role, ToolCall, ToolSpec};
+use flashagent_llm::{ChatMessage, LlmError, LlmEvent, Role, ScannerEvent, TextToolScanner, ToolCall, ToolSpec};
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use thiserror::Error;
@@ -206,10 +207,15 @@ impl AgentLoop {
         mut events: impl FnMut(LoopEvent),
     ) -> Result<(Vec<ChatMessage>, DoneReason), LoopError> {
         let specs = tools.specs();
+        let known_tools: HashSet<String> = specs.iter().map(|s| s.name.clone()).collect();
         let mut tokens_used: i64 = 0;
         let mut stall_nudges: usize = 0;
+        // Index of the scratchpad reply a stall nudge answered: that reply and
+        // the nudge itself are loop plumbing, not conversation, and are dropped
+        // once the model produces a real turn.
+        let mut nudged_at: Option<usize> = None;
         let mut turn_opts = self.config.base_turn_options.clone();
-        let mut steer_rx = self.steer_rx.lock().unwrap().take();
+        let mut steer_rx = self.steer_rx.lock().unwrap_or_else(|p| p.into_inner()).take();
 
         let mut step: u32 = 0;
         loop {
@@ -248,8 +254,14 @@ impl AgentLoop {
             let mut assistant_reasoning = String::new();
             let mut calls: Vec<ToolCall> = Vec::new();
             let mut open_args: Vec<String> = Vec::new();
-            let turn_failed: Option<LlmError> = None;
+            // Tool calls the model wrote as text (Hermes tags, [TOOL_CALLS],
+            // bare JSON) because the server did not parse them natively.
+            let mut scanner = TextToolScanner::default();
+            let mut text_calls: Vec<ToolCall> = Vec::new();
             let mut steered_mid_stream: Option<String> = None;
+            // The server stopped at max_tokens: any tool call may have been cut
+            // off mid-arguments, and JSON repair would happily "complete" it.
+            let mut truncated = false;
 
             loop {
                 let item = tokio::select! {
@@ -258,6 +270,9 @@ impl AgentLoop {
                         None => break,
                     },
                     _ = wait_cancel(&self.cancel) => {
+                        // Keep what the user already saw on screen; any
+                        // half-streamed tool calls are dropped (never run).
+                        push_partial_assistant(&mut history, assistant_text, assistant_reasoning);
                         events(LoopEvent::Done(DoneReason::Cancelled));
                         return Ok((history, DoneReason::Cancelled));
                     }
@@ -268,8 +283,9 @@ impl AgentLoop {
                 };
                 match item? {
                     LlmEvent::TextDelta(t) => {
-                        assistant_text.push_str(&t);
-                        events(LoopEvent::TurnDelta(t));
+                        for ev in scanner.feed(&t) {
+                            absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
+                        }
                         if detect_repetition_loop(&assistant_text) {
                             clean_repetition_loop(&mut assistant_text);
                             break;
@@ -300,22 +316,15 @@ impl AgentLoop {
                         tokens_used += u.prompt.unwrap_or(0) + u.completion.unwrap_or(0);
                         events(LoopEvent::Usage(u));
                     }
-                    LlmEvent::Done(_) => {}
+                    LlmEvent::Done(reason) => truncated |= reason == flashagent_llm::FinishReason::Length,
                 }
             }
-            let _ = turn_failed;
+            for ev in scanner.finish() {
+                absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
+            }
 
             if let Some(steer_msg) = steered_mid_stream {
-                if !assistant_text.is_empty() || !assistant_reasoning.is_empty() {
-                    let assistant_msg = ChatMessage {
-                        role: Role::Assistant,
-                        content: assistant_text,
-                        reasoning: if assistant_reasoning.is_empty() { None } else { Some(assistant_reasoning) },
-                        tool_call_id: None,
-                        tool_calls: Vec::new(),
-                    };
-                    history.push(assistant_msg);
-                }
+                push_partial_assistant(&mut history, assistant_text, assistant_reasoning);
                 events(LoopEvent::SteeringInjected(steer_msg.clone()));
                 history.push(ChatMessage::user(steer_msg));
                 continue;
@@ -324,6 +333,27 @@ impl AgentLoop {
             // Assemble args.
             for (i, call) in calls.iter_mut().enumerate() {
                 call.args_json = open_args[i].clone();
+            }
+            // A call without a name cannot be dispatched and would poison the
+            // history sent back to the server; drop it.
+            calls.retain(|c| !c.name.trim().is_empty());
+            // Native calls win: servers that parse tool calls sometimes still
+            // echo the markup in the text channel.
+            if calls.is_empty() {
+                calls = text_calls;
+            }
+            // Tool results are matched to calls by id; servers that omit ids
+            // (or send duplicates) would otherwise break that pairing.
+            let mut seen_ids = HashSet::new();
+            for (i, call) in calls.iter_mut().enumerate() {
+                if call.id.trim().is_empty() || !seen_ids.insert(call.id.clone()) {
+                    call.id = format!("call_{step}_{i}");
+                    seen_ids.insert(call.id.clone());
+                }
+            }
+
+            if let Some(at) = nudged_at.take() {
+                history.drain(at..(at + 2).min(history.len()));
             }
 
             let assistant_msg = ChatMessage {
@@ -353,9 +383,8 @@ impl AgentLoop {
                     stall_nudges += 1;
                     turn_opts.thinking = flashagent_llm::ThinkingEffort::Low;
                     turn_opts.custom_effort = None;
-                    history.push(ChatMessage::user(
-                        "Please provide your direct, final answer to my request now. Do not repeat the thinking process; output only your final response.",
-                    ));
+                    nudged_at = Some(history.len() - 1);
+                    history.push(ChatMessage::user(STALL_NUDGE));
                     continue;
                 }
 
@@ -374,9 +403,8 @@ impl AgentLoop {
                         stall_nudges += 1;
                         turn_opts.thinking = flashagent_llm::ThinkingEffort::Off;
                         turn_opts.custom_effort = Some("none".to_string());
-                        history.push(ChatMessage::user(
-                            "Please provide your direct, final answer to my request now. Do not repeat the thinking process; output only your final response.",
-                        ));
+                        nudged_at = Some(history.len() - 1);
+                        history.push(ChatMessage::user(STALL_NUDGE));
                         continue;
                     }
                 }
@@ -385,9 +413,28 @@ impl AgentLoop {
                 return Ok((history, DoneReason::Completed));
             }
 
-            // Execute tools, feed results back.
-            for call in &calls {
+            // Never run a call whose arguments may be cut short (a truncated
+            // path or command is a different path or command).
+            if truncated {
+                for call in &calls {
+                    events(LoopEvent::ToolStarted { id: call.id.clone(), name: call.name.clone(), args_json: call.args_json.clone() });
+                    events(LoopEvent::ToolFinished {
+                        id: call.id.clone(),
+                        is_error: true,
+                        result_len: TRUNCATED_RESULT.len(),
+                        result: Some(TRUNCATED_RESULT.to_string()),
+                    });
+                    history.push(ChatMessage::tool_result(call.id.clone(), TRUNCATED_RESULT));
+                }
+                continue;
+            }
+
+            // Execute tools, feed results back. Every call recorded in the
+            // assistant message must get a tool result — even on cancel — or
+            // the next request is rejected by strict servers.
+            for (i, call) in calls.iter().enumerate() {
                 if self.cancel.load(Ordering::Relaxed) {
+                    answer_cancelled(&mut history, &calls[i..]);
                     events(LoopEvent::Done(DoneReason::Cancelled));
                     return Ok((history, DoneReason::Cancelled));
                 }
@@ -395,6 +442,13 @@ impl AgentLoop {
                 let out = tokio::select! {
                     out = tools.execute(call) => out,
                     _ = wait_cancel(&self.cancel) => {
+                        events(LoopEvent::ToolFinished {
+                            id: call.id.clone(),
+                            is_error: true,
+                            result_len: CANCELLED_RESULT.len(),
+                            result: Some(CANCELLED_RESULT.to_string()),
+                        });
+                        answer_cancelled(&mut history, &calls[i..]);
                         events(LoopEvent::Done(DoneReason::Cancelled));
                         return Ok((history, DoneReason::Cancelled));
                     }
@@ -420,6 +474,59 @@ impl AgentLoop {
             }
         }
     }
+}
+
+/// Sent when the model ended its turn on thinking alone.
+const STALL_NUDGE: &str = "Please provide your direct, final answer to my request now. Do not repeat the thinking process; output only your final response.";
+
+/// Tool result recorded for calls the user interrupted.
+const CANCELLED_RESULT: &str = "cancelled by user before completion";
+
+/// Tool result for calls emitted in a turn that hit the output token limit.
+const TRUNCATED_RESULT: &str = "not executed: your output hit the token limit while writing this call, so its arguments may be incomplete. Send the call again, shorter if needed (e.g. split a large write).";
+
+fn answer_cancelled(history: &mut Vec<ChatMessage>, pending: &[ToolCall]) {
+    for call in pending {
+        history.push(ChatMessage::tool_result(call.id.clone(), CANCELLED_RESULT));
+    }
+}
+
+fn push_partial_assistant(history: &mut Vec<ChatMessage>, text: String, reasoning: String) {
+    if text.is_empty() && reasoning.is_empty() {
+        return;
+    }
+    history.push(ChatMessage {
+        role: Role::Assistant,
+        content: text,
+        reasoning: (!reasoning.is_empty()).then_some(reasoning),
+        tool_call_id: None,
+        tool_calls: Vec::new(),
+    });
+}
+
+/// Route one scanner event: plain text streams to the UI; a text-embedded tool
+/// call is queued when it names an advertised tool, otherwise its markup goes
+/// back into the text untouched (a JSON example in prose is not a call).
+fn absorb_scanned(
+    ev: ScannerEvent,
+    known_tools: &HashSet<String>,
+    text: &mut String,
+    calls: &mut Vec<ToolCall>,
+    events: &mut impl FnMut(LoopEvent),
+) {
+    let shown = match ev {
+        ScannerEvent::ToolCall { name, args_json, .. } if known_tools.contains(&name) => {
+            calls.push(ToolCall { id: String::new(), name, args_json });
+            return;
+        }
+        ScannerEvent::ToolCall { raw, .. } => raw,
+        ScannerEvent::Text(t) => t,
+    };
+    if shown.is_empty() {
+        return;
+    }
+    text.push_str(&shown);
+    events(LoopEvent::TurnDelta(shown));
 }
 
 /// Returns true if `text` is empty or consists purely of internal thinking/planning
@@ -926,17 +1033,245 @@ mod tests {
                 Ok(LlmEvent::Done(FinishReason::Stop)),
             ],
         };
-        let llm = MockLlm {
-            turns: std::sync::Mutex::new(vec![scratchpad_turn, final_answer_turn]),
-        };
+        let llm = RecordingLlm::new(vec![scratchpad_turn, final_answer_turn]);
         let tools = MockTools::new();
         let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
         let (history, done) = run_loop(&l, &llm, &tools, |_| {});
         assert!(matches!(done, DoneReason::Completed));
-        assert_eq!(history.len(), 4);
-        assert_eq!(history[2].role, Role::User);
-        assert!(history[2].content.contains("Please provide your direct, final answer"));
-        assert_eq!(history[3].content, "Here is the final direct answer.");
+        // The model was nudged on the second request...
+        let requests = llm.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].last().unwrap().content.contains("Please provide your direct, final answer"));
+        // ...but the nudge and the stalled scratchpad are plumbing: the kept
+        // history reads as a normal exchange, so regenerate/recap/resume see
+        // the user's real prompt as the last user message.
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].content, "x");
+        assert_eq!(history[1].content, "Here is the final direct answer.");
+    }
+
+    /// Scripted LLM that also records every message list it was sent.
+    struct RecordingLlm {
+        turns: std::sync::Mutex<Vec<MockTurn>>,
+        requests: std::sync::Mutex<Vec<Vec<ChatMessage>>>,
+    }
+
+    impl RecordingLlm {
+        fn new(turns: Vec<MockTurn>) -> Self {
+            Self { turns: std::sync::Mutex::new(turns), requests: std::sync::Mutex::new(Vec::new()) }
+        }
+    }
+
+    #[async_trait]
+    impl LlmSource for RecordingLlm {
+        async fn turn(
+            &self,
+            messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+            self.requests.lock().unwrap().push(messages.to_vec());
+            let turn = self.turns.lock().unwrap().remove(0);
+            Ok(Box::pin(futures::stream::iter(turn.events)))
+        }
+    }
+
+    /// Every assistant tool call must be answered by a tool message before
+    /// the next non-tool message — the invariant strict servers enforce.
+    fn assert_protocol_valid(history: &[ChatMessage]) {
+        let mut i = 0;
+        while i < history.len() {
+            let m = &history[i];
+            if m.role == Role::Assistant && !m.tool_calls.is_empty() {
+                for call in &m.tool_calls {
+                    i += 1;
+                    let answer = history.get(i).unwrap_or_else(|| panic!("call {} left unanswered", call.id));
+                    assert_eq!(answer.role, Role::Tool);
+                    assert_eq!(answer.tool_call_id.as_deref(), Some(call.id.as_str()));
+                }
+            }
+            i += 1;
+        }
+    }
+
+    #[test]
+    fn cancel_during_tool_execution_answers_every_call() {
+        struct SlowTools;
+        #[async_trait]
+        impl ToolExec for SlowTools {
+            async fn execute(&self, _call: &ToolCall) -> ToolOutput {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                ToolOutput { content: "late".into(), is_error: false }
+            }
+            fn specs(&self) -> Vec<ToolSpec> {
+                vec![]
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![MockTurn {
+                events: vec![
+                    Ok(LlmEvent::ToolCallDelta { index: 0, id: Some("a".into()), name: Some("shell".into()), args_delta: "{}".into() }),
+                    Ok(LlmEvent::ToolCallDelta { index: 1, id: Some("b".into()), name: Some("shell".into()), args_delta: "{}".into() }),
+                    Ok(LlmEvent::Done(FinishReason::ToolUse)),
+                ],
+            }]),
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let l = AgentLoop::new(LoopConfig::default(), cancel.clone());
+        let flip = cancel.clone();
+        let (history, done) = run_loop(&l, &llm, &SlowTools, move |e| {
+            if matches!(e, LoopEvent::ToolStarted { .. }) {
+                flip.store(true, Ordering::Relaxed);
+            }
+        });
+        assert_eq!(done, DoneReason::Cancelled);
+        assert_protocol_valid(&history);
+        assert_eq!(history.iter().filter(|m| m.role == Role::Tool).count(), 2);
+    }
+
+    #[test]
+    fn cancel_mid_stream_keeps_partial_text_and_drops_unfinished_calls() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<LlmEvent, LlmError>>();
+        tx.send(Ok(LlmEvent::TextDelta("half an ans".into()))).unwrap();
+        tx.send(Ok(LlmEvent::ToolCallDelta { index: 0, id: Some("c".into()), name: Some("shell".into()), args_delta: "{\"com".into() }))
+            .unwrap();
+        struct Pending(std::sync::Mutex<Option<BoxStream<'static, Result<LlmEvent, LlmError>>>>);
+        #[async_trait]
+        impl LlmSource for Pending {
+            async fn turn(&self, _m: &[ChatMessage], _t: &[ToolSpec]) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+                Ok(self.0.lock().unwrap().take().unwrap())
+            }
+        }
+        let stream: BoxStream<'static, Result<LlmEvent, LlmError>> =
+            Box::pin(futures::stream::poll_fn(move |cx| rx.poll_recv(cx)));
+        let llm = Pending(std::sync::Mutex::new(Some(stream)));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let l = AgentLoop::new(LoopConfig::default(), cancel.clone());
+        let flip = cancel.clone();
+        let tools = MockTools::new();
+        let (history, done) = run_loop(&l, &llm, &tools, move |e| {
+            if matches!(e, LoopEvent::TurnDelta(_)) {
+                flip.store(true, Ordering::Relaxed);
+            }
+        });
+        drop(tx);
+        assert_eq!(done, DoneReason::Cancelled);
+        assert_eq!(history.last().unwrap().content, "half an ans");
+        assert!(history.last().unwrap().tool_calls.is_empty());
+        assert!(tools.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn text_embedded_tool_call_is_executed_and_history_stays_native() {
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![
+                MockTurn {
+                    events: vec![
+                        Ok(LlmEvent::TextDelta("Checking. <tool_call>{\"name\":\"shell\",".into())),
+                        Ok(LlmEvent::TextDelta("\"arguments\":{\"command\":\"ls\"}}</tool_call>".into())),
+                        Ok(LlmEvent::Done(FinishReason::Stop)),
+                    ],
+                },
+                text_turn("done"),
+            ]),
+        };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let evs = std::sync::Mutex::new(Vec::new());
+        let (history, done) = run_loop(&l, &llm, &tools, |e| evs.lock().unwrap().push(e));
+        assert_eq!(done, DoneReason::Completed);
+        let calls = tools.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert!(calls[0].args_json.contains("ls"));
+        // The markup never reaches the screen or the stored text...
+        let shown: String = evs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                LoopEvent::TurnDelta(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!shown.contains("<tool_call>"), "shown: {shown}");
+        assert_eq!(history[1].content.trim(), "Checking.");
+        // ...and the call is stored as a native call with a synthesized id.
+        assert_eq!(history[1].tool_calls.len(), 1);
+        assert!(!history[1].tool_calls[0].id.is_empty());
+        assert_protocol_valid(&history);
+    }
+
+    #[test]
+    fn json_in_prose_naming_unknown_tool_stays_text() {
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![MockTurn {
+                events: vec![
+                    Ok(LlmEvent::TextDelta("Example payload:\n{\"name\": \"Alice\", \"age\": 3}".into())),
+                    Ok(LlmEvent::Done(FinishReason::Stop)),
+                ],
+            }]),
+        };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let (history, done) = run_loop(&l, &llm, &tools, |_| {});
+        assert_eq!(done, DoneReason::Completed);
+        assert!(tools.calls.lock().unwrap().is_empty());
+        assert!(history[1].content.contains("\"Alice\""));
+    }
+
+    #[test]
+    fn calls_cut_off_by_the_length_limit_are_not_executed() {
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![
+                MockTurn {
+                    events: vec![
+                        Ok(LlmEvent::ToolCallDelta {
+                            index: 0,
+                            id: Some("c".into()),
+                            name: Some("shell".into()),
+                            args_delta: r#"{"command":"rm -rf /home/user/pro"#.into(),
+                        }),
+                        Ok(LlmEvent::Done(FinishReason::Length)),
+                    ],
+                },
+                text_turn("ok, retrying"),
+            ]),
+        };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let (history, done) = run_loop(&l, &llm, &tools, |_| {});
+        assert_eq!(done, DoneReason::Completed);
+        assert!(tools.calls.lock().unwrap().is_empty(), "a truncated call must never run");
+        assert_protocol_valid(&history);
+        assert!(history[2].content.contains("not executed"));
+    }
+
+    #[test]
+    fn missing_and_duplicate_call_ids_are_made_unique() {
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![
+                MockTurn {
+                    events: vec![
+                        Ok(LlmEvent::ToolCallDelta { index: 0, id: Some(String::new()), name: Some("shell".into()), args_delta: "{}".into() }),
+                        Ok(LlmEvent::ToolCallDelta { index: 1, id: Some(String::new()), name: Some("shell".into()), args_delta: "{}".into() }),
+                        Ok(LlmEvent::ToolCallDelta { index: 2, id: None, name: None, args_delta: String::new() }),
+                        Ok(LlmEvent::Done(FinishReason::ToolUse)),
+                    ],
+                },
+                text_turn("ok"),
+            ]),
+        };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let (history, _) = run_loop(&l, &llm, &tools, |_| {});
+        let ids: Vec<&str> = history[1].tool_calls.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids.len(), 2, "the nameless call is dropped");
+        assert_ne!(ids[0], ids[1]);
+        assert!(ids.iter().all(|id| !id.is_empty()));
+        assert_protocol_valid(&history);
     }
 
     #[test]

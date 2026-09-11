@@ -270,6 +270,7 @@ impl McpModal {
                         let st_badge = match &s.state {
                             ServerConnectionState::Active => "\x1b[38;2;135;220;145m● active\x1b[0m",
                             ServerConnectionState::Disabled => "\x1b[38;2;135;130;125m○ disabled\x1b[0m",
+                            ServerConnectionState::Stopped => "\x1b[38;2;225;175;95m○ stopped\x1b[0m",
                             ServerConnectionState::Error(_) => "\x1b[38;2;245;120;120m✕ error\x1b[0m",
                         };
                         let row = if is_sel {
@@ -409,6 +410,7 @@ pub fn render_mcp_server_list(servers: &[ServerStatus], width: usize) -> Vec<Str
             let (status_bullet, status_label) = match &s.state {
                 ServerConnectionState::Active => (TEXT_GREEN, format!("Active ({} tools)", s.tool_count)),
                 ServerConnectionState::Disabled => (TEXT_MUTED, "Disabled".to_string()),
+                ServerConnectionState::Stopped => (TEXT_MUTED, "Stopped (starts on first use)".to_string()),
                 ServerConnectionState::Error(err) => (TEXT_RED, format!("Error: {err}")),
             };
 

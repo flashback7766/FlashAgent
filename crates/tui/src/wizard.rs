@@ -1158,8 +1158,7 @@ mod tests {
 
     #[test]
     fn test_wizard_cloud_mandatory_api_key() {
-        let mut cfg = AppConfig::default();
-        cfg.backend_url = "https://openrouter.ai/api/v1".to_string();
+        let cfg = AppConfig { backend_url: "https://openrouter.ai/api/v1".to_string(), ..AppConfig::default() };
         let mut wizard = SetupWizard::new(cfg);
         wizard.step = 1; // On API key step
 
@@ -1312,8 +1311,7 @@ mod tests {
 
     #[test]
     fn test_wizard_preserves_existing_custom_url() {
-        let mut cfg = AppConfig::default();
-        cfg.backend_url = "http://10.0.0.5:1234/v1".to_string();
+        let cfg = AppConfig { backend_url: "http://10.0.0.5:1234/v1".to_string(), ..AppConfig::default() };
 
         let wizard = SetupWizard::new(cfg);
         assert_eq!(wizard.preset_idx, 5);
@@ -1326,8 +1324,7 @@ mod tests {
 
     #[test]
     fn test_wizard_lm_studio_loaded_models_filtering_and_capabilities() {
-        let mut cfg = AppConfig::default();
-        cfg.backend_url = "http://127.0.0.1:1234/v1".to_string();
+        let cfg = AppConfig { backend_url: "http://127.0.0.1:1234/v1".to_string(), ..AppConfig::default() };
 
         let mut wizard = SetupWizard::new(cfg);
         assert!(wizard.is_lm_studio());

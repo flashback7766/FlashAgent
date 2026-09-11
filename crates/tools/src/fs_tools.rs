@@ -396,7 +396,7 @@ mod tests {
         }])
         .is_err());
         // Original text untouched on error (purity).
-        assert_eq!(apply_edits("a".repeat(10).into(), &[]).unwrap(), "a".repeat(10));
+        assert_eq!(apply_edits("a".repeat(10), &[]).unwrap(), "a".repeat(10));
     }
 
     #[test]

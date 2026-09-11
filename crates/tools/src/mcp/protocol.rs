@@ -98,10 +98,10 @@ impl Default for InitializeParams {
     fn default() -> Self {
         Self {
             protocol_version: MCP_PROTOCOL_VERSION.into(),
-            capabilities: serde_json::json!({
-                "roots": { "listChanged": true },
-                "sampling": {}
-            }),
+            // We implement no client-side features (roots, sampling); a
+            // server must not be told otherwise or it will wait on requests
+            // we never answer.
+            capabilities: serde_json::json!({}),
             client_info: McpClientInfo::default(),
         }
     }
@@ -121,7 +121,9 @@ pub struct InitializeResult {
 /// MCP Tool annotation flags (e.g. read-only status).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct McpToolAnnotations {
-    #[serde(rename = "readOnly", default)]
+    /// MCP spec name is `readOnlyHint`; `readOnly` is accepted for servers
+    /// that shipped the draft spelling.
+    #[serde(rename = "readOnlyHint", alias = "readOnly", default)]
     pub read_only: Option<bool>,
 }
 

@@ -20,7 +20,14 @@ pub struct OpenAiCompat {
     profile: std::sync::Arc<std::sync::RwLock<Option<crate::thinking::ThinkingProfile>>>,
     discovery: std::sync::Arc<std::sync::RwLock<Option<crate::thinking::ServerDiscovery>>>,
     working_models_url: std::sync::Arc<std::sync::RwLock<Option<String>>>,
+    /// Extra attempts after a transport failure (connection refused/reset)
+    /// before any response arrived. HTTP errors and mid-stream drops are not
+    /// retried: the request may already have had effects on the server.
+    max_retries: std::sync::atomic::AtomicUsize,
 }
+
+/// How many times a 400 may teach us a new request shape before we give up.
+const MAX_ADAPTIVE_RETRIES: u8 = 2;
 
 impl OpenAiCompat {
     /// Create a backend pointed at e.g. `http://localhost:1234/v1`.
@@ -29,14 +36,29 @@ impl OpenAiCompat {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key,
             model: std::sync::Arc::new(std::sync::RwLock::new(model.into())),
+            // No total timeout: a long generation on a slow local model can
+            // legitimately stream for many minutes. An idle read timeout
+            // catches a server that stopped sending instead.
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(600))
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(Duration::from_secs(300))
                 .build()
                 .unwrap_or_default(),
             profile: std::sync::Arc::new(std::sync::RwLock::new(None)),
             discovery: std::sync::Arc::new(std::sync::RwLock::new(None)),
             working_models_url: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            max_retries: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Base URL this backend talks to.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Retry budget for transport failures (the `network_retries` setting).
+    pub fn set_max_retries(&self, retries: usize) {
+        self.max_retries.store(retries, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Return the currently active model ID.
@@ -351,37 +373,42 @@ impl crate::LlmBackend for OpenAiCompat {
         tools: &[ToolSpec],
         options: &crate::types::TurnOptions,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let mut req = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .json(&self.body(messages, tools, options));
-        if let Some(key) = &self.api_key {
-            req = req.bearer_auth(key);
-        }
-        let resp = req.send().await?;
-        if !resp.status().is_success() {
+        let mut options = options.clone();
+        let mut adaptive_retries = 0u8;
+        let resp = loop {
+            let resp = self.send_with_retries(&self.body(messages, tools, &options)).await?;
+            if resp.status().is_success() {
+                break resp;
+            }
             let status = resp.status().as_u16();
             let body_text = resp.text().await.unwrap_or_default();
-
-            // On 400 Bad Request, adapt to supported presets from server feedback or fallback:
-            if status == 400 {
-                if let Some(learned_profile) = crate::thinking::ThinkingProfile::parse_api_error(&body_text) {
-                    let has_presets = !learned_profile.presets.is_empty() && learned_profile.supported;
+            // A 400 often means the server rejected an optional field (a
+            // thinking preset, a sampling knob). Learn from it and retry, but
+            // only a bounded number of times: a 400 for any other reason
+            // (context overflow, malformed history) would otherwise loop forever.
+            if status != 400 || adaptive_retries >= MAX_ADAPTIVE_RETRIES {
+                return Err(LlmError::Status { status, body: body_text });
+            }
+            adaptive_retries += 1;
+            match crate::thinking::ThinkingProfile::parse_api_error(&body_text) {
+                Some(learned) if Some(&learned) != self.profile().as_ref() => {
                     if let Ok(mut lock) = self.profile.write() {
-                        *lock = Some(learned_profile.clone());
-                    }
-                    if has_presets {
-                        // Immediately retry with learned profile!
-                        return Box::pin(self.stream_with_options(messages, tools, options)).await;
-                    } else {
-                        // Server does not support thinking; retry without parameters
-                        return Box::pin(self.stream(messages, tools)).await;
+                        *lock = Some(learned);
                     }
                 }
-                return Box::pin(self.stream(messages, tools)).await;
+                // Nothing new to learn about thinking: drop the non-standard
+                // sampling fields some strict endpoints refuse.
+                _ => {
+                    options = crate::types::TurnOptions {
+                        thinking: options.thinking,
+                        custom_effort: options.custom_effort.clone(),
+                        temperature: options.temperature,
+                        max_tokens: options.max_tokens,
+                        ..Default::default()
+                    };
+                }
             }
-            return Err(LlmError::Status { status, body: body_text });
-        }
+        };
 
         let (tx, rx) = mpsc::channel::<Result<LlmEvent, LlmError>>(256);
         tokio::spawn(async move {
@@ -393,6 +420,13 @@ impl crate::LlmBackend for OpenAiCompat {
                 match chunk {
                     Ok(bytes) => {
                         for payload in sse.feed(&bytes) {
+                            // Servers report failures that happen after the
+                            // 200 (context overflow, model crash) as an
+                            // `error` object inside the stream.
+                            if let Some(msg) = stream_error(&payload) {
+                                let _ = tx.send(Err(LlmError::Stream(msg))).await;
+                                return;
+                            }
                             for ev in parser.feed(&payload) {
                                 // Native tool-call deltas pass through; if the
                                 // model emits tool calls as text instead, the
@@ -425,9 +459,97 @@ impl crate::LlmBackend for OpenAiCompat {
     }
 }
 
+impl OpenAiCompat {
+    async fn send_with_retries(&self, body: &serde_json::Value) -> Result<reqwest::Response, LlmError> {
+        let retries = self.max_retries.load(std::sync::atomic::Ordering::Relaxed);
+        let mut attempt = 0usize;
+        loop {
+            let mut req = self.client.post(format!("{}/chat/completions", self.base_url)).json(body);
+            if let Some(key) = &self.api_key {
+                req = req.bearer_auth(key);
+            }
+            match req.send().await {
+                Ok(resp) => return Ok(resp),
+                Err(e) if attempt < retries && (e.is_connect() || e.is_timeout()) => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+}
+
+/// Error message carried by an in-stream `{"error": ...}` payload, if any.
+fn stream_error(payload: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let err = v.get("error")?;
+    Some(match err {
+        serde_json::Value::String(s) => s.clone(),
+        other => other
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| other.to_string()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LlmBackend;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// One-shot HTTP server answering every request with `status` + `body`;
+    /// returns its base URL and a request counter.
+    async fn canned_server(status: &'static str, body: &'static str) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits2 = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                hits2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = vec![0u8; 65536];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        (format!("http://{addr}/v1"), hits)
+    }
+
+    #[tokio::test]
+    async fn persistent_400_is_retried_a_bounded_number_of_times() {
+        // "[3]" looks like a preset list to the error parser — the exact shape
+        // that used to recurse forever.
+        let (url, hits) = canned_server("400 Bad Request", r#"{"error":"invalid messages[3].content"}"#).await;
+        let b = OpenAiCompat::new(url, "m", None);
+        let res = b.stream(&[ChatMessage::user("hi")], &[]).await;
+        assert!(matches!(res, Err(LlmError::Status { status: 400, .. })));
+        assert!(hits.load(std::sync::atomic::Ordering::SeqCst) <= 1 + MAX_ADAPTIVE_RETRIES as usize);
+    }
+
+    #[tokio::test]
+    async fn in_stream_error_payload_surfaces_as_error() {
+        let (url, _) = canned_server(
+            "200 OK",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"par\"}}]}\n\ndata: {\"error\":{\"message\":\"context length exceeded\"}}\n\n",
+        )
+        .await;
+        let b = OpenAiCompat::new(url, "m", None);
+        let mut stream = b.stream(&[ChatMessage::user("hi")], &[]).await.unwrap();
+        let mut saw_err = None;
+        while let Some(item) = stream.next().await {
+            if let Err(e) = item {
+                saw_err = Some(e.to_string());
+            }
+        }
+        assert!(saw_err.is_some_and(|e| e.contains("context length exceeded")));
+    }
 
     #[test]
     fn body_includes_tools_and_stream() {

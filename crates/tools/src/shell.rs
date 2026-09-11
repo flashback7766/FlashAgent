@@ -1,6 +1,7 @@
 //! Shell execution: foreground with timeout, background with task ids and a
-//! live output buffer. Processes are always spawned detached from the tool
-//! call's lifetime — a killed or timed-out task never wedges the loop.
+//! live output buffer. Every command runs in its own process group so a
+//! timeout, a kill or a cancelled turn takes down the whole pipeline — not
+//! just `sh` while its children keep running and keep our pipes open.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -68,8 +69,44 @@ fn shell_command(cmd: &str) -> tokio::process::Command {
         c.arg("-c").arg(cmd);
         c
     };
-    c.stdout(Stdio::piped()).stderr(Stdio::piped());
+    c.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+    #[cfg(unix)]
+    c.process_group(0);
     c
+}
+
+/// Kill the whole process group led by `pid` (the `sh` we spawned).
+fn kill_tree(child: &mut Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: plain syscall on a pid we spawned; a stale pid only yields ESRCH.
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
+    }
+    let _ = child.start_kill();
+}
+
+/// Kills the process tree if the foreground call is dropped before the
+/// command finished — i.e. the user cancelled the turn.
+struct TreeGuard(Option<Child>);
+
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            kill_tree(child);
+        }
+    }
+}
+
+/// Wait for the output pumps, but not forever: a backgrounded grandchild
+/// (`server &`) inherits the pipes and would hold them open indefinitely.
+async fn drain_pumps(p1: tokio::task::JoinHandle<()>, p2: tokio::task::JoinHandle<()>) -> bool {
+    tokio::time::timeout(Duration::from_millis(500), async {
+        let _ = tokio::join!(p1, p2);
+    })
+    .await
+    .is_ok()
 }
 
 /// Run a command to completion (or timeout). Non-zero exit is an error whose
@@ -82,15 +119,26 @@ pub async fn run_foreground(cmd: &str, timeout: Duration) -> Result<String, Tool
     let buffer = Arc::new(Mutex::new(String::new()));
     let p1 = tokio::spawn(pump(stdout, buffer.clone()));
     let p2 = tokio::spawn(pump(stderr, buffer.clone()));
+    let mut guard = TreeGuard(Some(child));
 
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(res) => res.map_err(|e| ToolError::Other(format!("wait: {e}")))?,
+    let waited = match guard.0.as_mut() {
+        Some(child) => tokio::time::timeout(timeout, child.wait()).await,
+        None => return Err(ToolError::Other("spawn: lost child handle".into())),
+    };
+    let status = match waited {
+        Ok(res) => {
+            // Finished on its own: whatever it backgrounded may keep running.
+            guard.0 = None;
+            res.map_err(|e| ToolError::Other(format!("wait: {e}")))?
+        }
         Err(_) => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            let _ = tokio::join!(p1, p2);
-            let guard = buffer.lock();
-            let out = tail_str(&guard, 4000);
+            if let Some(mut child) = guard.0.take() {
+                kill_tree(&mut child);
+                let _ = child.wait().await;
+            }
+            drain_pumps(p1, p2).await;
+            let out = buffer.lock();
+            let out = tail_str(&out, 4000);
             return Err(ToolError::Other(format!(
                 "timeout after {}s, process killed. partial output:\n{}",
                 timeout.as_secs(),
@@ -99,16 +147,16 @@ pub async fn run_foreground(cmd: &str, timeout: Duration) -> Result<String, Tool
         }
     };
 
-    let _ = tokio::join!(p1, p2);
-
-    let guard = buffer.lock();
-    let out = tail_str(&guard, 16_000);
+    let complete = drain_pumps(p1, p2).await;
+    let out = buffer.lock();
+    let out = tail_str(&out, 16_000);
     let out = if out.trim().is_empty() { "(no output)" } else { out };
+    let note = if complete { "" } else { "\n[a background process still holds the output pipe; later output is not captured]" };
     if status.success() {
-        Ok(format!("exit code: 0\noutput:\n{out}"))
+        Ok(format!("exit code: 0\noutput:\n{out}{note}"))
     } else {
         Err(ToolError::Other(format!(
-            "exit code: {}\noutput:\n{out}",
+            "exit code: {}\noutput:\n{out}{note}",
             status.code().unwrap_or(-1)
         )))
     }
@@ -172,7 +220,7 @@ impl ShellRegistry {
         let mut task = tasks
             .remove(&id)
             .ok_or_else(|| ToolError::Other(format!("no such background task: {id}")))?;
-        let _ = task.child.start_kill();
+        kill_tree(&mut task.child);
         let _ = task.child.try_wait();
         let guard = task.buffer.lock();
         let output = tail_str(&guard, 4000);
@@ -209,6 +257,38 @@ mod tests {
     async fn timeout_kills_process() {
         let err = run_foreground("sleep 5", Duration::from_millis(150)).await.unwrap_err();
         assert!(err.to_string().contains("timeout after 0s"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_the_whole_pipeline_promptly() {
+        // `sh` forks `sleep`; killing only `sh` would leave `sleep` holding
+        // the pipe and the call would block for the full 30s.
+        let started = std::time::Instant::now();
+        let err = run_foreground("sleep 30; echo never", Duration::from_millis(200)).await.unwrap_err();
+        assert!(err.to_string().contains("timeout"));
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn backgrounded_grandchild_does_not_hang_the_call() {
+        let started = std::time::Instant::now();
+        let out = run_foreground("echo ready; sleep 30 &", Duration::from_secs(20)).await.unwrap();
+        assert!(out.contains("ready"));
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_the_call_kills_the_process_tree() {
+        let marker = std::env::temp_dir().join(format!("fa-shell-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let cmd = format!("sleep 1; touch {}", marker.display());
+        // The loop drops the tool future when the user cancels.
+        let _ = tokio::time::timeout(Duration::from_millis(100), run_foreground(&cmd, Duration::from_secs(30))).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!marker.exists(), "cancelled command kept running");
     }
 
     #[tokio::test]

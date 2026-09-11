@@ -163,17 +163,14 @@ impl ChunkParser {
                         .map(str::to_string)
                         .or_else(|| self.tool_names[index].clone());
                     self.tool_names[index] = name.clone();
-                    let args = call
-                        .get("function")
-                        .and_then(|f| f.get("arguments"))
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    events.push(LlmEvent::ToolCallDelta {
-                        index,
-                        id,
-                        name,
-                        args_delta: args.to_string(),
-                    });
+                    // Some shims (Ollama, older vLLM) send the arguments as a
+                    // JSON object instead of the spec's string.
+                    let args_delta = match call.get("function").and_then(|f| f.get("arguments")) {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(Value::Null) | None => String::new(),
+                        Some(other) => other.to_string(),
+                    };
+                    events.push(LlmEvent::ToolCallDelta { index, id, name, args_delta });
                 }
             }
             if let Some(finish) = choice.get("finish_reason").and_then(Value::as_str) {
@@ -200,6 +197,9 @@ pub enum ScannerEvent {
         name: String,
         /// Repaired JSON arguments.
         args_json: String,
+        /// The markup exactly as the model wrote it, so a caller that rejects
+        /// the call (unknown tool name) can put the text back verbatim.
+        raw: String,
     },
 }
 
@@ -228,28 +228,14 @@ impl TextToolScanner {
                 out.push(ScannerEvent::Text(text));
                 continue;
             }
-            if let Some((body, consumed)) = self.find_hermes() {
-                self.buf.drain(..consumed);
-                if let Some(call) = self.parse_body(&body) {
-                    out.push(ScannerEvent::ToolCall { name: call.0, args_json: call.1 });
-                }
+            let found = self
+                .find_hermes()
+                .or_else(|| self.find_mistral())
+                .or_else(|| if self.inside_code_fence() { None } else { self.find_bare() });
+            if let Some((body, consumed)) = found {
+                let raw: String = self.buf.drain(..consumed).collect();
+                out.push(self.call_or_text(&body, raw));
                 continue;
-            }
-            if let Some((body, consumed)) = self.find_mistral() {
-                self.buf.drain(..consumed);
-                if let Some(call) = self.parse_body(&body) {
-                    out.push(ScannerEvent::ToolCall { name: call.0, args_json: call.1 });
-                }
-                continue;
-            }
-            if !self.inside_code_fence() {
-                if let Some((body, consumed)) = self.find_bare() {
-                    self.buf.drain(..consumed);
-                    if let Some(call) = self.parse_body(&body) {
-                        out.push(ScannerEvent::ToolCall { name: call.0, args_json: call.1 });
-                    }
-                    continue;
-                }
             }
             break;
         }
@@ -261,6 +247,34 @@ impl TextToolScanner {
             out.push(ScannerEvent::Text(text));
         }
         out
+    }
+
+    /// Flush whatever is still held back once the stream has ended. An
+    /// unterminated block gets one repair attempt (models often stop right
+    /// before `</tool_call>`); anything unparseable comes back as plain text,
+    /// never silently dropped.
+    pub fn finish(&mut self) -> Vec<ScannerEvent> {
+        let bare = !self.inside_code_fence() && self.find_bare_start() == Some(self.buf.len() - self.buf.trim_start().len());
+        let rest = std::mem::take(&mut self.buf);
+        if rest.trim().is_empty() {
+            return if rest.is_empty() { Vec::new() } else { vec![ScannerEvent::Text(rest)] };
+        }
+        let trimmed = rest.trim_start();
+        let body = trimmed
+            .strip_prefix(START_HERMES)
+            .or_else(|| trimmed.strip_prefix(START_MISTRAL))
+            .or_else(|| bare.then_some(trimmed));
+        match body {
+            Some(b) => vec![self.call_or_text(strip_partial_close(b), rest.clone())],
+            None => vec![ScannerEvent::Text(rest)],
+        }
+    }
+
+    fn call_or_text(&self, body: &str, raw: String) -> ScannerEvent {
+        match self.parse_body(body) {
+            Some((name, args_json)) => ScannerEvent::ToolCall { name, args_json, raw },
+            None => ScannerEvent::Text(raw),
+        }
     }
 
     /// Emit buffered text that precedes a recognized marker; None when the
@@ -501,6 +515,18 @@ impl TextToolScanner {
     }
 }
 
+/// Drop a closing `</tool_call>` (complete or cut off mid-marker) from the end
+/// of an unterminated block body.
+fn strip_partial_close(body: &str) -> &str {
+    let body = body.trim_end();
+    if let Some(pos) = body.rfind("</") {
+        if END_HERMES.starts_with(&body[pos..]) {
+            return body[..pos].trim_end();
+        }
+    }
+    body
+}
+
 fn is_tool_call_start(s: &str) -> bool {
     let trimmed = s.trim_start();
     let candidates = [
@@ -561,6 +587,44 @@ mod tests {
     }
 
     #[test]
+    fn chunk_parser_accepts_object_arguments() {
+        let mut p = ChunkParser::default();
+        let ev = p.feed(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":{"path":"a.rs"}}}]}}]}"#);
+        assert!(matches!(
+            ev.first(),
+            Some(LlmEvent::ToolCallDelta { args_delta, .. }) if args_delta == r#"{"path":"a.rs"}"#
+        ));
+    }
+
+    #[test]
+    fn scanner_finish_recovers_unterminated_block_and_keeps_plain_text() {
+        let mut s = TextToolScanner::default();
+        let mut out = s.feed("Let me look. <tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.rs\"}}</tool_");
+        out.extend(s.finish());
+        assert!(out.iter().any(|e| matches!(e, ScannerEvent::ToolCall { name, .. } if name == "read_file")));
+        assert_eq!(out.first(), Some(&ScannerEvent::Text("Let me look. ".into())));
+
+        let mut s = TextToolScanner::default();
+        let mut out = s.feed("<tool_call>not json at all");
+        out.extend(s.finish());
+        assert_eq!(out, vec![ScannerEvent::Text("<tool_call>not json at all".into())]);
+    }
+
+    #[test]
+    fn scanner_unparseable_block_returns_raw_text() {
+        let mut s = TextToolScanner::default();
+        let out = s.feed("<tool_call>@@@</tool_call> after");
+        let text: String = out
+            .iter()
+            .map(|e| match e {
+                ScannerEvent::Text(t) => t.clone(),
+                ScannerEvent::ToolCall { raw, .. } => raw.clone(),
+            })
+            .collect();
+        assert_eq!(text, "<tool_call>@@@</tool_call> after");
+    }
+
+    #[test]
     fn chunk_parser_finish_reason_tool_use() {
         let mut p = ChunkParser::default();
         let ev = p.feed(r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#);
@@ -575,7 +639,11 @@ mod tests {
             out,
             vec![
                 ScannerEvent::Text("Thinking... ".into()),
-                ScannerEvent::ToolCall { name: "shell".into(), args_json: r#"{"cmd":"ls"}"#.into() },
+                ScannerEvent::ToolCall {
+                    name: "shell".into(),
+                    args_json: r#"{"cmd":"ls"}"#.into(),
+                    raw: r#"<tool_call>{"name":"shell","arguments":{"cmd":"ls"}}</tool_call>"#.into(),
+                },
                 ScannerEvent::Text(" done".into()),
             ]
         );
@@ -639,7 +707,7 @@ mod tests {
         let out = s.feed("\n{\"name\": \"ask_user\", \"question\": \"What language?\", \"options\": [\"Python\", \"Rust\"]}");
         assert!(out.iter().any(|e| matches!(
             e,
-            ScannerEvent::ToolCall { name, args_json } if name == "ask_user" && args_json.contains("What language?") && args_json.contains("Python")
+            ScannerEvent::ToolCall { name, args_json, .. } if name == "ask_user" && args_json.contains("What language?") && args_json.contains("Python")
         )));
     }
 
@@ -649,7 +717,7 @@ mod tests {
         let out = s.feed("\n{\"ask_user\": {\"question\": \"Pick one\", \"options\": [\"A\", \"B\"]}}");
         assert!(out.iter().any(|e| matches!(
             e,
-            ScannerEvent::ToolCall { name, args_json } if name == "ask_user" && args_json.contains("Pick one")
+            ScannerEvent::ToolCall { name, args_json, .. } if name == "ask_user" && args_json.contains("Pick one")
         )));
     }
 
@@ -659,7 +727,7 @@ mod tests {
         let out = s.feed("\n{'name': 'ask_user', 'arguments': {'question': 'Ready?', 'multi_select': False}}");
         assert!(out.iter().any(|e| matches!(
             e,
-            ScannerEvent::ToolCall { name, args_json } if name == "ask_user" && args_json.contains("\"multi_select\":false")
+            ScannerEvent::ToolCall { name, args_json, .. } if name == "ask_user" && args_json.contains("\"multi_select\":false")
         )));
     }
 

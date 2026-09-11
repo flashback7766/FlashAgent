@@ -20,6 +20,8 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerConnectionState {
     Active,
+    /// Enabled in config but not running (not started yet or stopped).
+    Stopped,
     Disabled,
     Error(String),
 }
@@ -51,6 +53,9 @@ pub struct McpManager {
     cwd: PathBuf,
     configs: RwLock<HashMap<String, McpServerConfig>>,
     clients: RwLock<HashMap<String, Arc<McpClient>>>,
+    /// Why the last start attempt of a server failed, shown instead of a
+    /// misleading "Disabled" for servers that are enabled but broken.
+    start_errors: RwLock<HashMap<String, String>>,
     loaded_paths: RwLock<Vec<PathBuf>>,
 }
 
@@ -62,6 +67,7 @@ impl McpManager {
             cwd,
             configs: RwLock::new(configs),
             clients: RwLock::new(HashMap::new()),
+            start_errors: RwLock::new(HashMap::new()),
             loaded_paths: RwLock::new(loaded_paths),
         })
     }
@@ -92,6 +98,19 @@ impl McpManager {
 
     /// Start or obtain a running MCP server client.
     pub async fn start_server(&self, name: &str) -> Result<Arc<McpClient>, String> {
+        let res = self.try_start_server(name).await;
+        match &res {
+            Ok(_) => {
+                self.start_errors.write().remove(name);
+            }
+            Err(e) => {
+                self.start_errors.write().insert(name.to_string(), e.clone());
+            }
+        }
+        res
+    }
+
+    async fn try_start_server(&self, name: &str) -> Result<Arc<McpClient>, String> {
         // Check if already active and alive
         let existing = { self.clients.read().get(name).cloned() };
         if let Some(existing) = existing {
@@ -144,6 +163,7 @@ impl McpManager {
         }
 
         // 2. Re-read config files
+        self.start_errors.write().clear();
         let (configs, paths) = load_mcp_configs(&self.cwd);
         *self.configs.write() = configs;
         *self.loaded_paths.write() = paths;
@@ -248,20 +268,18 @@ impl McpManager {
             Err(e) => return Err(ToolError::Other(format!("Failed to connect to MCP server '{server_name}': {e}"))),
         };
 
-        // Parse arguments JSON into Value
+        // Parse arguments JSON into Value. Unparseable arguments are an
+        // error for the model to fix — silently calling the tool with no
+        // arguments would run it with defaults the model never chose.
         let args_val: Option<Value> = if args_json.trim().is_empty() {
             None
         } else {
-            match serde_json::from_str(args_json.trim()) {
-                Ok(v) => Some(v),
-                Err(_) => {
-                    // Try self-healing JSON repair
-                    if let Some(repaired) = flashagent_llm::repair_json(args_json.trim()) {
-                        serde_json::from_str(&repaired).ok()
-                    } else {
-                        None
-                    }
-                }
+            let parsed = serde_json::from_str(args_json.trim()).ok().or_else(|| {
+                flashagent_llm::repair_json(args_json.trim()).and_then(|r| serde_json::from_str(&r).ok())
+            });
+            match parsed {
+                Some(v) => Some(v),
+                None => return Err(ToolError::Other(format!("invalid JSON arguments for {qualified_tool}: {args_json}"))),
             }
         };
 
@@ -281,6 +299,7 @@ impl McpManager {
     pub async fn server_status_list(&self) -> Vec<ServerStatus> {
         let configs = self.configs.read().clone();
         let clients = self.clients.read().clone();
+        let errors = self.start_errors.read().clone();
         let mut list = Vec::new();
 
         for (name, cfg) in configs {
@@ -298,8 +317,10 @@ impl McpManager {
                         Vec::new(),
                     )
                 }
+            } else if let Some(err) = errors.get(&name) {
+                (ServerConnectionState::Error(err.clone()), 0, Vec::new())
             } else {
-                (ServerConnectionState::Disabled, 0, Vec::new())
+                (ServerConnectionState::Stopped, 0, Vec::new())
             };
 
             list.push(ServerStatus {

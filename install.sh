@@ -182,7 +182,23 @@ elif [ "${TARGET_CHANNEL}" != "beta" ] && [ "${TARGET_CHANNEL}" != "prerelease" 
   fi
 fi
 
-# Strategy 3: Latest pre-release / beta fallback
+# Strategy 3: the rolling `beta` pre-release. It is edited in place for every
+# beta build, so it keeps its old creation date and is NOT first in the list.
+if [ -z "${DOWNLOAD_URL}" ]; then
+  RELEASE_JSON=$(http_fetch "https://api.github.com/repos/${REPO}/releases/tags/beta" 2>/dev/null || true)
+  if [ -n "${RELEASE_JSON}" ]; then
+    DOWNLOAD_URL=$(echo "${RELEASE_JSON}" | grep -o "https://[^\"]*${ASSET_PATTERN}" | head -n 1 || true)
+  fi
+  if [ -z "${DOWNLOAD_URL}" ]; then
+    EXPANDED_HTML=$(http_fetch "https://github.com/${REPO}/releases/expanded_assets/beta" 2>/dev/null || true)
+    DOWNLOAD_REL=$(echo "${EXPANDED_HTML}" | grep -o "/${REPO}/releases/download/[^\"]*${ASSET_PATTERN}" | head -n 1 || true)
+    if [ -n "${DOWNLOAD_REL}" ]; then
+      DOWNLOAD_URL="https://github.com${DOWNLOAD_REL}"
+    fi
+  fi
+fi
+
+# Strategy 4: newest pre-release in the release list
 if [ -z "${DOWNLOAD_URL}" ]; then
   RELEASE_JSON=$(http_fetch "https://api.github.com/repos/${REPO}/releases" 2>/dev/null || true)
   if [ -n "${RELEASE_JSON}" ]; then

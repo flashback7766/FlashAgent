@@ -739,6 +739,7 @@ dependencies = [
  "flashagent-llm",
  "futures",
  "glob",
+ "libc",
  "parking_lot",
  "rayon",
  "regex",

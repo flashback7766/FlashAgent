@@ -115,9 +115,9 @@ impl SettingsView {
         match self.active_tab {
             SettingsTab::General => 6,
             SettingsTab::Updates => 4,
-            SettingsTab::Aesthetics => 7,
+            SettingsTab::Aesthetics => 5,
             SettingsTab::Reasoning => 7,
-            SettingsTab::Tools => 6,
+            SettingsTab::Tools => 3,
         }
     }
 
@@ -262,37 +262,27 @@ impl SettingsView {
             },
             SettingsTab::Aesthetics => match self.selected_index {
                 0 => {
-                    self.cycle_theme();
-                    self.is_dirty = true;
-                    SettingsAction::None
-                }
-                1 => {
                     self.config.show_mascot = !self.config.show_mascot;
                     self.is_dirty = true;
                     SettingsAction::None
                 }
-                2 => {
+                1 => {
                     self.config.show_tips = !self.config.show_tips;
                     self.is_dirty = true;
                     SettingsAction::None
                 }
-                3 => {
+                2 => {
                     self.config.show_ttft = !self.config.show_ttft;
                     self.is_dirty = true;
                     SettingsAction::None
                 }
-                4 => {
+                3 => {
                     self.config.show_tokens = !self.config.show_tokens;
                     self.is_dirty = true;
                     SettingsAction::None
                 }
-                5 => {
+                4 => {
                     self.config.show_toasts = !self.config.show_toasts;
-                    self.is_dirty = true;
-                    SettingsAction::None
-                }
-                6 => {
-                    self.config.show_reasoning_accordion = !self.config.show_reasoning_accordion;
                     self.is_dirty = true;
                     SettingsAction::None
                 }
@@ -334,23 +324,8 @@ impl SettingsView {
                     self.is_dirty = true;
                     SettingsAction::None
                 }
-                1 => {
-                    self.cycle_approval_mode();
-                    self.is_dirty = true;
-                    SettingsAction::None
-                }
-                2 => {
-                    self.config.git_diff_preview = !self.config.git_diff_preview;
-                    self.is_dirty = true;
-                    SettingsAction::None
-                }
-                3 => {
-                    self.config.git_smart_commit = !self.config.git_smart_commit;
-                    self.is_dirty = true;
-                    SettingsAction::None
-                }
-                4 => SettingsAction::OpenMcpMenu,
-                5 => SettingsAction::RunToolTest,
+                1 => SettingsAction::OpenMcpMenu,
+                2 => SettingsAction::RunToolTest,
                 _ => SettingsAction::None,
             },
         }
@@ -373,13 +348,11 @@ impl SettingsView {
                 _ => {}
             },
             SettingsTab::Aesthetics => match self.selected_index {
-                0 => self.cycle_theme(),
-                1 => self.config.show_mascot = !self.config.show_mascot,
-                2 => self.config.show_tips = !self.config.show_tips,
-                3 => self.config.show_ttft = !self.config.show_ttft,
-                4 => self.config.show_tokens = !self.config.show_tokens,
-                5 => self.config.show_toasts = !self.config.show_toasts,
-                6 => self.config.show_reasoning_accordion = !self.config.show_reasoning_accordion,
+                0 => self.config.show_mascot = !self.config.show_mascot,
+                1 => self.config.show_tips = !self.config.show_tips,
+                2 => self.config.show_ttft = !self.config.show_ttft,
+                3 => self.config.show_tokens = !self.config.show_tokens,
+                4 => self.config.show_toasts = !self.config.show_toasts,
                 _ => {}
             },
             SettingsTab::Reasoning => match self.selected_index {
@@ -392,13 +365,11 @@ impl SettingsView {
                 6 => self.cycle_network_retries(),
                 _ => {}
             },
-            SettingsTab::Tools => match self.selected_index {
-                0 => self.config.toolset_profile = self.config.toolset_profile.next(),
-                1 => self.cycle_approval_mode(),
-                2 => self.config.git_diff_preview = !self.config.git_diff_preview,
-                3 => self.config.git_smart_commit = !self.config.git_smart_commit,
-                _ => {}
-            },
+            SettingsTab::Tools => {
+                if self.selected_index == 0 {
+                    self.config.toolset_profile = self.config.toolset_profile.next();
+                }
+            }
         }
         self.is_dirty = true;
         let _ = self.config.save();
@@ -434,16 +405,6 @@ impl SettingsView {
             .map(|i| (i + 1) % editors.len())
             .unwrap_or(0);
         self.config.external_editor = editors[next_idx].to_string();
-        self.is_dirty = true;
-    }
-
-    fn cycle_theme(&mut self) {
-        let themes = ["dark", "midnight", "monokai", "high_contrast", "monochrome", "ansi16"];
-        let cur = self.config.color_theme.as_str();
-        let next_idx = themes.iter().position(|&t| t == cur)
-            .map(|i| (i + 1) % themes.len())
-            .unwrap_or(0);
-        self.config.color_theme = themes[next_idx].to_string();
         self.is_dirty = true;
     }
 
@@ -487,16 +448,6 @@ impl SettingsView {
             .map(|i| (i + 1) % retries.len())
             .unwrap_or(0);
         self.config.network_retries = retries[next_idx];
-        self.is_dirty = true;
-    }
-
-    fn cycle_approval_mode(&mut self) {
-        let modes = ["destructive", "all", "auto"];
-        let cur = self.config.approval_mode.as_str();
-        let next_idx = modes.iter().position(|&m| m == cur)
-            .map(|i| (i + 1) % modes.len())
-            .unwrap_or(0);
-        self.config.approval_mode = modes[next_idx].to_string();
         self.is_dirty = true;
     }
 
@@ -562,13 +513,11 @@ impl SettingsView {
                 ("Check Updates Now", self.update_check_status.clone().unwrap_or_else(|| "Check GitHub Releases API now".into())),
             ],
             SettingsTab::Aesthetics => vec![
-                ("Color Theme *", format!("{} (restart required)", self.config.color_theme.to_uppercase())),
                 ("Swift Mascot", if self.config.show_mascot { "Enabled (animated)".into() } else { "Disabled".into() }),
                 ("Developer Tips", if self.config.show_tips { "Enabled (rotating deck)".into() } else { "Disabled".into() }),
                 ("TTFT & Prefill Speed", if self.config.show_ttft { "Enabled (lightning badge)".into() } else { "Disabled".into() }),
                 ("Token Counters", if self.config.show_tokens { "Enabled (prompt/gen count)".into() } else { "Disabled".into() }),
                 ("Clipboard Toasts", if self.config.show_toasts { "Enabled".into() } else { "Disabled".into() }),
-                ("Reasoning Accordion", if self.config.show_reasoning_accordion { "Enabled (collapsible)".into() } else { "Disabled (inline)".into() }),
             ],
             SettingsTab::Reasoning => vec![
                 ("Thinking Effort", self.config.thinking_effort.clone()),
@@ -576,18 +525,11 @@ impl SettingsView {
                 ("Temperature", format!("{:.2}", self.config.temperature)),
                 ("Context Alert", if self.config.context_warn_threshold > 0 { format!("Warn at {}%", self.config.context_warn_threshold) } else { "Disabled".into() }),
                 ("Auto-Compact History", if self.config.auto_compact_context { format!("Enabled (at {}%)", self.config.context_compact_threshold) } else { "Disabled".into() }),
-                ("Free Web Search *", if self.config.free_search { "Enabled".into() } else { "Disabled (local-first)".into() }),
-                ("Network Retries *", format!("{} attempts", self.config.network_retries)),
+                ("Web Tools", if self.config.free_search { "Enabled (web_fetch, web_search)".into() } else { "Disabled (local-first)".into() }),
+                ("Network Retries", format!("{} retries on connection failure", self.config.network_retries)),
             ],
             SettingsTab::Tools => vec![
                 ("Toolset Profile", self.config.toolset_profile.label().to_string()),
-                ("Approval Policy", match self.config.approval_mode.as_str() {
-                    "all" => "All Dangerous Tools",
-                    "auto" => "Auto-Approve Everything",
-                    _ => "Destructive Only (rm/format)",
-                }.to_string()),
-                ("Git Diff Preview", if self.config.git_diff_preview { "Enabled (compact diff)".into() } else { "Disabled".into() }),
-                ("Git Smart Commit", if self.config.git_smart_commit { "Enabled (/commit)".into() } else { "Disabled".into() }),
                 ("MCP Manager", "Overview & Server Registry".into()),
                 ("Run Tool Test", self.tool_test_status.clone().unwrap_or_else(|| "Probe function calling".into())),
             ],
@@ -611,10 +553,7 @@ impl SettingsView {
             lines.push((LineKind::System, pad_row(&format!("{ptr} {label_styled} {val_styled}"))));
         }
 
-        let has_restart_items = matches!(
-            self.active_tab,
-            SettingsTab::General | SettingsTab::Updates | SettingsTab::Aesthetics | SettingsTab::Reasoning
-        );
+        let has_restart_items = matches!(self.active_tab, SettingsTab::General | SettingsTab::Updates);
         if has_restart_items {
             lines.push((
                 LineKind::System,
@@ -682,14 +621,18 @@ mod tests {
         assert_eq!(view.active_tab, SettingsTab::Aesthetics);
         assert_eq!(view.selected_index, 0);
 
-        // Cycle theme
-        assert_eq!(view.config.color_theme, "dark");
+        // Toggle the mascot (first Aesthetics item)
+        assert!(view.config.show_mascot);
         view.handle_key(KeyCode::Right, KeyModifiers::empty());
-        assert_eq!(view.config.color_theme, "midnight");
+        assert!(!view.config.show_mascot);
 
-        // Jump to Tools via '5'
+        // Jump to Tools via '5'; its items all reach real actions
         view.handle_key(KeyCode::Char('5'), KeyModifiers::empty());
         assert_eq!(view.active_tab, SettingsTab::Tools);
+        view.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(view.handle_key(KeyCode::Enter, KeyModifiers::empty()), SettingsAction::OpenMcpMenu);
+        view.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(view.handle_key(KeyCode::Enter, KeyModifiers::empty()), SettingsAction::RunToolTest);
 
         // Esc closes and saves
         let act = view.handle_key(KeyCode::Esc, KeyModifiers::empty());
