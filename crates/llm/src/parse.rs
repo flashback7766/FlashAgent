@@ -206,11 +206,19 @@ pub enum ScannerEvent {
 /// Extracts tool calls embedded in plain text, for models without native
 /// tool-calling. Recognized formats:
 /// - Hermes/Qwen: `<tool_call>{"name":...,"arguments":{...}}</tool_call>`
-/// - Mistral: `[TOOL_CALLS][{...}]`
+/// - Mistral: `[TOOL_CALLS][{...}, ...]`
 /// - Bare JSON object whose first key is `"name"` (typical degenerate output)
+///
+/// Anything inside a ``` code fence is display text, never a call — the fence
+/// state is tracked across deltas, since the opening fence is usually flushed
+/// long before the JSON after it arrives.
 #[derive(Default)]
 pub struct TextToolScanner {
     buf: String,
+    /// A code fence opened in text already flushed and not closed yet.
+    fence_open: bool,
+    /// The last flushed character was not a newline.
+    mid_line: bool,
 }
 
 const START_HERMES: &str = "<tool_call>";
@@ -225,16 +233,18 @@ impl TextToolScanner {
         loop {
             // Flush plain text sitting before the next marker first.
             if let Some(text) = self.take_leading_text() {
-                out.push(ScannerEvent::Text(text));
+                self.emit_text(text, &mut out);
                 continue;
             }
-            let found = self
-                .find_hermes()
-                .or_else(|| self.find_mistral())
-                .or_else(|| if self.inside_code_fence() { None } else { self.find_bare() });
+            let found = self.find_hermes().or_else(|| self.find_mistral()).or_else(|| self.find_bare());
             if let Some((body, consumed)) = found {
                 let raw: String = self.buf.drain(..consumed).collect();
-                out.push(self.call_or_text(&body, raw));
+                for ev in self.calls_or_text(&body, raw) {
+                    match ev {
+                        ScannerEvent::Text(t) => self.emit_text(t, &mut out),
+                        call => out.push(call),
+                    }
+                }
                 continue;
             }
             break;
@@ -244,111 +254,142 @@ impl TextToolScanner {
         let flush_len = self.buf.len() - keep;
         if flush_len > 0 {
             let text = self.buf.drain(..flush_len).collect::<String>();
-            out.push(ScannerEvent::Text(text));
+            self.emit_text(text, &mut out);
         }
         out
     }
 
-    /// Flush whatever is still held back once the stream has ended. An
-    /// unterminated block gets one repair attempt (models often stop right
-    /// before `</tool_call>`); anything unparseable comes back as plain text,
-    /// never silently dropped.
+    /// Flush whatever is still held back once the stream has ended. A block
+    /// missing only its closing tag still counts (models often stop right
+    /// before `</tool_call>`) — but only when its JSON is complete: a body cut
+    /// off mid-arguments would be "completed" by repair into something the
+    /// model never wrote. Everything else comes back as text, never dropped.
     pub fn finish(&mut self) -> Vec<ScannerEvent> {
-        let bare = !self.inside_code_fence() && self.find_bare_start() == Some(self.buf.len() - self.buf.trim_start().len());
         let rest = std::mem::take(&mut self.buf);
-        if rest.trim().is_empty() {
-            return if rest.is_empty() { Vec::new() } else { vec![ScannerEvent::Text(rest)] };
+        if rest.is_empty() {
+            return Vec::new();
         }
         let trimmed = rest.trim_start();
-        let body = trimmed
-            .strip_prefix(START_HERMES)
-            .or_else(|| trimmed.strip_prefix(START_MISTRAL))
-            .or_else(|| bare.then_some(trimmed));
+        let body = (!self.fence_open)
+            .then(|| trimmed.strip_prefix(START_HERMES).or_else(|| trimmed.strip_prefix(START_MISTRAL)))
+            .flatten()
+            .map(strip_partial_close)
+            .filter(|b| is_complete_json(b));
+        let mut out = Vec::new();
         match body {
-            Some(b) => vec![self.call_or_text(strip_partial_close(b), rest.clone())],
-            None => vec![ScannerEvent::Text(rest)],
+            Some(b) => {
+                for ev in self.calls_or_text(b, rest.clone()) {
+                    match ev {
+                        ScannerEvent::Text(t) => self.emit_text(t, &mut out),
+                        call => out.push(call),
+                    }
+                }
+            }
+            None => self.emit_text(rest, &mut out),
         }
+        out
     }
 
-    fn call_or_text(&self, body: &str, raw: String) -> ScannerEvent {
-        match self.parse_body(body) {
-            Some((name, args_json)) => ScannerEvent::ToolCall { name, args_json, raw },
-            None => ScannerEvent::Text(raw),
+    fn emit_text(&mut self, text: String, out: &mut Vec<ScannerEvent>) {
+        if text.is_empty() {
+            return;
+        }
+        self.fence_open = self.fence_open_after(&text);
+        self.mid_line = !text.ends_with('\n');
+        out.push(ScannerEvent::Text(text));
+    }
+
+    /// Fence state after `text`, starting from the flushed state. Only a
+    /// fence at the start of a line counts (inline triple backticks do not).
+    fn fence_open_after(&self, text: &str) -> bool {
+        let bytes = text.as_bytes();
+        let mut open = self.fence_open;
+        let mut line_start = !self.mid_line;
+        for i in 0..bytes.len() {
+            if line_start && bytes[i..].starts_with(b"```") {
+                open = !open;
+            }
+            line_start = bytes[i] == b'\n';
+        }
+        open
+    }
+
+    /// Whether buffer offset `pos` sits inside a code fence.
+    fn in_fence_at(&self, pos: usize) -> bool {
+        self.fence_open_after(&self.buf[..pos])
+    }
+
+    /// First occurrence of `pat` in the buffer that is outside any fence.
+    fn find_outside_fence(&self, pat: &str) -> Option<usize> {
+        self.buf.match_indices(pat).map(|(p, _)| p).find(|&p| !self.in_fence_at(p))
+    }
+
+    fn calls_or_text(&self, body: &str, raw: String) -> Vec<ScannerEvent> {
+        match parse_calls(body) {
+            Some(calls) if calls.len() == 1 => {
+                let (name, args_json) = calls.into_iter().next().unwrap_or_default();
+                vec![ScannerEvent::ToolCall { name, args_json, raw }]
+            }
+            // Several calls in one block (Mistral arrays): each carries its
+            // own element as raw text, so a rejected one reads back sensibly.
+            Some(calls) if !calls.is_empty() => calls
+                .into_iter()
+                .map(|(name, args_json)| {
+                    let raw = serde_json::json!({ "name": name, "arguments": serde_json::from_str::<Value>(&args_json).unwrap_or(Value::Null) }).to_string();
+                    ScannerEvent::ToolCall { name, args_json, raw }
+                })
+                .collect(),
+            _ => vec![ScannerEvent::Text(raw)],
         }
     }
 
     /// Emit buffered text that precedes a recognized marker; None when the
     /// buffer starts with a marker (or no complete marker is present).
     fn take_leading_text(&mut self) -> Option<String> {
-        let markers = [START_HERMES, START_MISTRAL, "```tool_calls", "```tool_call"];
-        let mut best: Option<usize> = None;
-        for m in markers {
-            if let Some(p) = self.buf.find(m) {
-                best = Some(match best {
-                    Some(b) => b.min(p),
-                    None => p,
-                });
-            }
-        }
-        // A bare-JSON candidate also cuts the text (whitespace-tolerant).
-        if best.is_none() && !self.inside_code_fence() {
-            if let Some(p) = self.find_bare_start() {
-                best = Some(p);
-            }
-        }
-        let cut = best?;
+        let markers = [START_HERMES, START_MISTRAL];
+        let cut = markers
+            .iter()
+            .filter_map(|m| self.find_outside_fence(m))
+            .chain(self.find_bare_start())
+            .min()?;
         if cut == 0 {
             return None;
         }
         Some(self.buf.drain(..cut).collect())
     }
 
-    /// Offset of a bare-JSON candidate (`{` + whitespace + `"name"` or tool key), either
-    /// at buffer start or right after a newline. None when absent.
+    /// Offset of a bare-JSON candidate (`{` + whitespace + `"name"` or tool
+    /// key) at the start of a line and outside fences. None when absent.
     fn find_bare_start(&self) -> Option<usize> {
-        let candidates = [0usize, self.buf.find('\n').map(|p| p + 1).unwrap_or(usize::MAX)];
-        for start in candidates {
+        let line_starts = std::iter::once(0)
+            .filter(|_| !self.mid_line)
+            .chain(self.buf.match_indices('\n').map(|(p, _)| p + 1));
+        for start in line_starts {
             if start >= self.buf.len() {
                 continue;
             }
             let rest = &self.buf[start..];
-            let trimmed = rest.trim_start();
-            let lead = rest.len() - trimmed.len();
-            if let Some(after) = trimmed.strip_prefix('{') {
-                if is_tool_call_start(after) {
-                    return Some(start + lead);
-                }
+            let trimmed = rest.trim_start_matches([' ', '\t']);
+            let at = start + (rest.len() - trimmed.len());
+            if trimmed.strip_prefix('{').is_some_and(is_tool_call_start) && !self.in_fence_at(at) {
+                return Some(at);
             }
         }
         None
-    }
-
-    /// True while an odd number of ``` fences has been seen (we never treat
-    /// fenced content as tool markup — it is display code).
-    fn inside_code_fence(&self) -> bool {
-        let mut fences = 0usize;
-        let mut rest = self.buf.as_str();
-        while let Some(p) = rest.find("\n```") {
-            fences += 1;
-            rest = &rest[p + 1..];
-        }
-        if self.buf.starts_with("```") {
-            fences += 1;
-        }
-        fences % 2 == 1
     }
 
     /// Bytes we must not flush yet. Entire buffer is held when a tool-call
     /// block is open (marker seen, close not yet arrived) — its content is
     /// markup, not display text. Otherwise only a partial-marker suffix.
     fn hold_back(&self) -> usize {
-        let hermes_open = self.buf.find(START_HERMES).is_some() && self.buf.find(END_HERMES).is_none();
-        let mistral_open = self.buf.find(START_MISTRAL).is_some() && self.find_mistral().is_none();
-        let bare_open = !self.inside_code_fence() && self.find_bare_start().is_some() && self.find_bare().is_none();
-        if hermes_open || mistral_open || bare_open || self.starts_with_block() {
+        let hermes_open = self.find_outside_fence(START_HERMES).is_some() && self.find_hermes().is_none();
+        let mistral_open = self.find_outside_fence(START_MISTRAL).is_some() && self.find_mistral().is_none();
+        let bare_open = self.find_bare_start().is_some() && self.find_bare().is_none();
+        if hermes_open || mistral_open || bare_open {
             return self.buf.len();
         }
-        let markers = [START_HERMES, END_HERMES, START_MISTRAL, "\"name\"", "\"ask_user\""];
+        // "```" too: a fence split across deltas must be seen whole.
+        let markers = [START_HERMES, END_HERMES, START_MISTRAL, "\"name\"", "\"ask_user\"", "```"];
         let mut hold = 0usize;
         for m in markers {
             for skip in 1..m.len() {
@@ -357,162 +398,153 @@ impl TextToolScanner {
                 }
             }
         }
+        // A trailing "{" at a line start may be the head of a bare call.
+        if self.buf.ends_with('{') && (self.buf.len() == 1 || self.buf.ends_with("\n{")) {
+            hold = hold.max(1);
+        }
         hold.min(self.buf.len())
-    }
-
-    fn starts_with_block(&self) -> bool {
-        self.buf.trim_start().starts_with(START_HERMES)
     }
 
     /// Hermes tag pair; returns (body, consumed).
     fn find_hermes(&self) -> Option<(String, usize)> {
-        let start = self.buf.find(START_HERMES)? + START_HERMES.len();
-        let end = self.buf[start..].find(END_HERMES)? + start;
-        let body = self.buf[start..end].trim().to_string();
+        let start = self.find_outside_fence(START_HERMES)?;
+        if start != 0 {
+            return None;
+        }
+        let body_start = START_HERMES.len();
+        let end = self.buf[body_start..].find(END_HERMES)? + body_start;
+        let body = self.buf[body_start..end].trim().to_string();
         Some((body, end + END_HERMES.len()))
     }
 
-    /// Mistral prefix + trailing JSON array/object.
+    /// Mistral prefix + the complete JSON array (or object) after it.
     fn find_mistral(&self) -> Option<(String, usize)> {
-        let start = self.buf.find(START_MISTRAL)? + START_MISTRAL.len();
-        let rest = &self.buf[start..];
-        let arr_start = rest.find('[')?;
-        // Consume to the matching close bracket of the first element object.
-        let mut depth = 0i32;
-        let mut in_str = false;
-        let mut esc = false;
-        for (i, c) in rest[arr_start..].char_indices() {
-            match c {
-                '"' if !esc => in_str = !in_str,
-                '\\' if in_str => esc = !esc,
-                _ => esc = false,
-            }
-            if in_str {
-                continue;
-            }
-            match c {
-                '[' | '{' => depth += 1,
-                ']' | '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        let body = rest[arr_start..=arr_start + i].to_string();
-                        let consumed = start + arr_start + i + 1;
-                        return Some((body, consumed));
-                    }
-                }
-                _ => {}
-            }
+        let start = self.find_outside_fence(START_MISTRAL)?;
+        if start != 0 {
+            return None;
         }
-        None
+        let rest = &self.buf[START_MISTRAL.len()..];
+        let open = rest.find(['[', '{'])?;
+        let len = balanced_len(&rest[open..])?;
+        Some((rest[open..open + len].to_string(), START_MISTRAL.len() + open + len))
     }
 
     /// Bare JSON object starting at a line beginning with `{` + tool indicator.
     fn find_bare(&self) -> Option<(String, usize)> {
         let start = self.find_bare_start()?;
-        let trimmed = &self.buf[start..];
-        let mut depth = 0i32;
-        let mut in_str = false;
-        let mut esc = false;
-        for (i, c) in trimmed.char_indices() {
+        if start != 0 {
+            return None;
+        }
+        let len = balanced_len(&self.buf)?;
+        Some((self.buf[..len].to_string(), len))
+    }
+}
+
+/// Byte length of the leading balanced JSON value (`{..}` or `[..]`), string
+/// aware; None while it is still open.
+fn balanced_len(text: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    for (i, c) in text.char_indices() {
+        if in_str {
             match c {
-                '"' if !esc => in_str = !in_str,
-                '\\' if in_str => esc = !esc,
+                '\\' if !esc => esc = true,
+                '"' if !esc => in_str = false,
                 _ => esc = false,
             }
-            if in_str {
-                continue;
-            }
-            match c {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        let body = trimmed[..=i].to_string();
-                        let consumed = start + i + 1;
-                        return Some((body, consumed));
-                    }
-                }
-                _ => {}
-            }
+            continue;
         }
-        None
+        match c {
+            '"' => in_str = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + c.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// True when `body` is one complete JSON value (possibly needing only
+/// cosmetic repair such as single quotes or trailing commas).
+fn is_complete_json(body: &str) -> bool {
+    let body = body.trim();
+    balanced_len(body).is_some_and(|len| body[len..].trim().is_empty())
+}
+
+/// Parse a block body into calls. An array yields one call per element and
+/// fails as a whole if any element is not a call.
+fn parse_calls(body: &str) -> Option<Vec<(String, String)>> {
+    let repaired = repair_json(body.trim())?;
+    let v: Value = serde_json::from_str(&repaired).ok()?;
+    match v {
+        Value::Array(items) => items.into_iter().map(parse_call_object).collect(),
+        other => parse_call_object(other).map(|c| vec![c]),
+    }
+}
+
+/// One call from a JSON object. Handles `name`+`arguments`, `name`+
+/// `parameters`, the OpenAI `function` wrapper, single-key tool wrappers like
+/// `{"ask_user": {...}}`, and flat properties directly on the object.
+fn parse_call_object(v: Value) -> Option<(String, String)> {
+    let mut obj = v.as_object()?.clone();
+
+    // Format A: OpenAI function wrapper {"function": {"name": ..., "arguments": ...}}
+    if let Some(func) = obj.get("function").and_then(Value::as_object) {
+        let name = func.get("name").and_then(Value::as_str)?.to_string();
+        let args = func.get("arguments").or_else(|| func.get("parameters"));
+        let args_json = match args {
+            Some(Value::String(s)) => repair_json(s).unwrap_or_else(|| s.clone()),
+            Some(Value::Object(o)) => serde_json::to_string(o).unwrap_or_default(),
+            Some(other) => other.to_string(),
+            None => "{}".to_string(),
+        };
+        return Some((name, args_json));
     }
 
-    /// Parse a JSON body into (name, repaired args). Handles `name`+`arguments`,
-    /// `name`+`parameters`, OpenAI `function` wrapper, single-key tool wrappers
-    /// like `{"ask_user": {...}}`, and flat properties directly on the object.
-    fn parse_body(&self, body: &str) -> Option<(String, String)> {
-        let cleaned = body
-            .trim()
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .trim();
-        let repaired = repair_json(cleaned)?;
-        let mut v: Value = serde_json::from_str(&repaired).ok()?;
-        if let Some(arr) = v.as_array() {
-            if let Some(first) = arr.first() {
-                v = first.clone();
+    // Format B: Standard {"name": "...", "arguments": ...}
+    let name_opt = obj
+        .remove("name")
+        .or_else(|| obj.remove("tool"))
+        .and_then(|v| v.as_str().map(str::to_string));
+
+    if let Some(name) = name_opt {
+        let args = obj
+            .remove("arguments")
+            .or_else(|| obj.remove("args"))
+            .or_else(|| obj.remove("parameters"));
+        let args_json = match args {
+            Some(Value::String(s)) => repair_json(&s).unwrap_or(s),
+            Some(Value::Object(o)) => serde_json::to_string(&o).unwrap_or_default(),
+            Some(other) => other.to_string(),
+            None => {
+                // Remaining keys (e.g. {"question": "...", "options": [...]})
+                // ARE the tool arguments.
+                obj.remove("id");
+                obj.remove("type");
+                serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
             }
-        }
-        let mut obj = v.as_object()?.clone();
-
-        // Format A: OpenAI function wrapper {"function": {"name": ..., "arguments": ...}}
-        if let Some(func) = obj.get("function").and_then(Value::as_object) {
-            let name = func.get("name").and_then(Value::as_str)?.to_string();
-            let args = func.get("arguments").or_else(|| func.get("parameters"));
-            let args_json = match args {
-                Some(Value::String(s)) => repair_json(s).unwrap_or_else(|| s.clone()),
-                Some(Value::Object(o)) => serde_json::to_string(o).unwrap_or_default(),
-                Some(other) => other.to_string(),
-                None => "{}".to_string(),
-            };
-            return Some((name, args_json));
-        }
-
-        // Format B: Standard {"name": "...", "arguments": ...}
-        let name_opt = obj
-            .remove("name")
-            .or_else(|| obj.remove("tool"))
-            .and_then(|v| v.as_str().map(str::to_string));
-
-        if let Some(name) = name_opt {
-            let args = obj
-                .remove("arguments")
-                .or_else(|| obj.remove("args"))
-                .or_else(|| obj.remove("parameters"));
-            let args_json = match args {
-                Some(Value::String(s)) => repair_json(&s).unwrap_or(s),
-                Some(Value::Object(o)) => serde_json::to_string(&o).unwrap_or_default(),
-                Some(other) => other.to_string(),
-                None => {
-                    // If obj still has keys (e.g. {"question": "...", "options": [...]}),
-                    // these remaining keys ARE the tool arguments!
-                    obj.remove("id");
-                    obj.remove("type");
-                    if !obj.is_empty() {
-                        serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
-                    } else {
-                        "{}".to_string()
-                    }
-                }
-            };
-            return Some((name, args_json));
-        }
-
-        // Format C: Single-key object where key is tool name: {"ask_user": {"question": "..."}}
-        if obj.len() == 1 {
-            let (k, val) = obj.iter().next()?;
-            let name = k.clone();
-            let args_json = match val {
-                Value::Object(o) => serde_json::to_string(o).unwrap_or_default(),
-                Value::String(s) => repair_json(s).unwrap_or_else(|| s.clone()),
-                other => other.to_string(),
-            };
-            return Some((name, args_json));
-        }
-
-        None
+        };
+        return Some((name, args_json));
     }
+
+    // Format C: Single-key object where key is tool name: {"ask_user": {"question": "..."}}
+    if obj.len() == 1 {
+        let (k, val) = obj.iter().next()?;
+        let args_json = match val {
+            Value::Object(o) => serde_json::to_string(o).unwrap_or_default(),
+            Value::String(s) => repair_json(s).unwrap_or_else(|| s.clone()),
+            other => other.to_string(),
+        };
+        return Some((k.clone(), args_json));
+    }
+
+    None
 }
 
 /// Drop a closing `</tool_call>` (complete or cut off mid-marker) from the end
@@ -608,6 +640,56 @@ mod tests {
         let mut out = s.feed("<tool_call>not json at all");
         out.extend(s.finish());
         assert_eq!(out, vec![ScannerEvent::Text("<tool_call>not json at all".into())]);
+    }
+
+    fn scan(chunks: &[&str]) -> (String, Vec<String>) {
+        let mut s = TextToolScanner::default();
+        let mut events = Vec::new();
+        for c in chunks {
+            events.extend(s.feed(c));
+        }
+        events.extend(s.finish());
+        let mut text = String::new();
+        let mut calls = Vec::new();
+        for e in events {
+            match e {
+                ScannerEvent::Text(t) => text.push_str(&t),
+                ScannerEvent::ToolCall { name, .. } => calls.push(name),
+            }
+        }
+        (text, calls)
+    }
+
+    #[test]
+    fn fenced_examples_are_never_calls_even_when_streamed_in_pieces() {
+        let example = "{\"name\": \"write_file\", \"arguments\": {\"path\": \"README.md\", \"content\": \"\"}}";
+        let (text, calls) = scan(&["Example:\n```json\n", example, "\n```\nDone."]);
+        assert!(calls.is_empty(), "fenced example executed: {calls:?}");
+        assert!(text.contains(example), "fenced example vanished from the answer: {text}");
+
+        let hermes = "<tool_call>{\"name\":\"run_shell\",\"arguments\":{\"command\":\"rm -rf /\"}}</tool_call>";
+        let (text, calls) = scan(&["Format:\n``", "`\n", hermes, "\n```\n"]);
+        assert!(calls.is_empty(), "fenced Hermes example executed: {calls:?}");
+        assert!(text.contains(hermes));
+
+        // After the fence closes, real calls work again.
+        let (_, calls) = scan(&["```\ncode\n```\n", "<tool_call>{\"name\":\"read_file\",\"arguments\":{}}</tool_call>"]);
+        assert_eq!(calls, vec!["read_file".to_string()]);
+    }
+
+    #[test]
+    fn truncated_blocks_are_not_completed_by_repair() {
+        let (text, calls) = scan(&["<tool_call>{\"name\":\"write_file\",\"arguments\":{\"path\":\"src/main.rs\",\"content\":\"fn main() {\\n let x = compute("]);
+        assert!(calls.is_empty());
+        assert!(text.contains("compute("));
+        let (_, calls) = scan(&["\n{\"name\": \"read_file\""]);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn mistral_block_yields_every_call() {
+        let (_, calls) = scan(&[r#"[TOOL_CALLS][{"name":"read_file","arguments":{"path":"a"}},{"name":"read_file","arguments":{"path":"b"}}]"#]);
+        assert_eq!(calls, vec!["read_file".to_string(), "read_file".to_string()]);
     }
 
     #[test]

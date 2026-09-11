@@ -271,13 +271,11 @@ impl McpManager {
         // Parse arguments JSON into Value. Unparseable arguments are an
         // error for the model to fix — silently calling the tool with no
         // arguments would run it with defaults the model never chose.
+        // Same resolver as the approval card, so what was approved is sent.
         let args_val: Option<Value> = if args_json.trim().is_empty() {
             None
         } else {
-            let parsed = serde_json::from_str(args_json.trim()).ok().or_else(|| {
-                flashagent_llm::repair_json(args_json.trim()).and_then(|r| serde_json::from_str(&r).ok())
-            });
-            match parsed {
+            match flashagent_llm::effective_args(args_json, qualified_tool) {
                 Some(v) => Some(v),
                 None => return Err(ToolError::Other(format!("invalid JSON arguments for {qualified_tool}: {args_json}"))),
             }

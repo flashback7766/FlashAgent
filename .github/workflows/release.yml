@@ -163,14 +163,16 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ steps.channel.outputs.version }}
+          CHANNEL_TAG: ${{ steps.channel.outputs.tag }}
         run: |
+          if [ "${CHANNEL_TAG}" = "beta" ]; then CHANNEL_ENV="FLASHAGENT_CHANNEL=beta "; else CHANNEL_ENV=""; fi
           cat > release_body.md << EOF
           ## FlashAgent ${VERSION}
 
           Local-first AI coding agent in native Rust. Full change list: [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/CHANGELOG.md).
 
           ### Install
-          - **Linux / macOS**: \`curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | FLASHAGENT_CHANNEL=beta bash\`
+          - **Linux / macOS**: \`curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | ${CHANNEL_ENV}bash\`
           - **Windows**: \`irm https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.ps1 | iex\`
           - **Already installed**: \`flashagent --update\` (downloads are verified against \`SHA256SUMS\`)
 

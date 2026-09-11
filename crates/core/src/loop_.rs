@@ -130,9 +130,25 @@ pub enum DoneReason {
 /// in the stream, never a silent drop.
 #[derive(Debug, Error)]
 pub enum LoopError {
-    /// The model backend failed.
-    #[error("llm: {0}")]
-    Llm(#[from] LlmError),
+    /// The model backend failed. `history` is everything the run produced up
+    /// to the failure (tool results included, partial text kept), so callers
+    /// never lose turns whose side effects already happened.
+    #[error("llm: {source}")]
+    Llm {
+        /// The backend error.
+        source: LlmError,
+        /// Conversation as of the failure; protocol-valid.
+        history: Vec<ChatMessage>,
+    },
+}
+
+impl LoopError {
+    /// The conversation as of the failure.
+    pub fn into_history(self) -> Vec<ChatMessage> {
+        match self {
+            LoopError::Llm { history, .. } => history,
+        }
+    }
 }
 
 /// The agent loop itself. One instance per run; `cancel` flips it off
@@ -210,10 +226,9 @@ impl AgentLoop {
         let known_tools: HashSet<String> = specs.iter().map(|s| s.name.clone()).collect();
         let mut tokens_used: i64 = 0;
         let mut stall_nudges: usize = 0;
-        // Index of the scratchpad reply a stall nudge answered: that reply and
-        // the nudge itself are loop plumbing, not conversation, and are dropped
-        // once the model produces a real turn.
-        let mut nudged_at: Option<usize> = None;
+        // A stalled scratchpad reply plus the nudge answering it: sent with
+        // the next request only, never stored — loop plumbing, not conversation.
+        let mut transient: Vec<ChatMessage> = Vec::new();
         let mut turn_opts = self.config.base_turn_options.clone();
         let mut steer_rx = self.steer_rx.lock().unwrap_or_else(|p| p.into_inner()).take();
 
@@ -235,10 +250,18 @@ impl AgentLoop {
             while let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
                 events(LoopEvent::SteeringInjected(steer_msg.clone()));
                 history.push(ChatMessage::user(steer_msg));
+                transient.clear();
             }
 
-            let mut stream = tokio::select! {
-                res = llm.turn_with_options(&history, &specs, &turn_opts) => res?,
+            let with_nudge: Vec<ChatMessage>;
+            let request: &[ChatMessage] = if transient.is_empty() {
+                &history
+            } else {
+                with_nudge = [history.as_slice(), transient.as_slice()].concat();
+                &with_nudge
+            };
+            let opened = tokio::select! {
+                res = llm.turn_with_options(request, &specs, &turn_opts) => res,
                 _ = wait_cancel(&self.cancel) => {
                     events(LoopEvent::Done(DoneReason::Cancelled));
                     return Ok((history, DoneReason::Cancelled));
@@ -246,8 +269,13 @@ impl AgentLoop {
                 steer_msg = next_steer(&mut steer_rx) => {
                     events(LoopEvent::SteeringInjected(steer_msg.clone()));
                     history.push(ChatMessage::user(steer_msg));
+                    transient.clear();
                     continue;
                 }
+            };
+            let mut stream = match opened {
+                Ok(stream) => stream,
+                Err(source) => return Err(LoopError::Llm { source, history }),
             };
             turn_opts = self.config.base_turn_options.clone();
             let mut assistant_text = String::new();
@@ -281,7 +309,14 @@ impl AgentLoop {
                         break;
                     }
                 };
-                match item? {
+                let item = match item {
+                    Ok(item) => item,
+                    Err(source) => {
+                        push_partial_assistant(&mut history, assistant_text, assistant_reasoning);
+                        return Err(LoopError::Llm { source, history });
+                    }
+                };
+                match item {
                     LlmEvent::TextDelta(t) => {
                         for ev in scanner.feed(&t) {
                             absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
@@ -324,6 +359,7 @@ impl AgentLoop {
             }
 
             if let Some(steer_msg) = steered_mid_stream {
+                transient.clear();
                 push_partial_assistant(&mut history, assistant_text, assistant_reasoning);
                 events(LoopEvent::SteeringInjected(steer_msg.clone()));
                 history.push(ChatMessage::user(steer_msg));
@@ -345,16 +381,13 @@ impl AgentLoop {
             // Tool results are matched to calls by id; servers that omit ids
             // (or send duplicates) would otherwise break that pairing.
             let mut seen_ids = HashSet::new();
-            for (i, call) in calls.iter_mut().enumerate() {
-                if call.id.trim().is_empty() || !seen_ids.insert(call.id.clone()) {
-                    call.id = format!("call_{step}_{i}");
-                    seen_ids.insert(call.id.clone());
+            for call in calls.iter_mut() {
+                while call.id.trim().is_empty() || !seen_ids.insert(call.id.clone()) {
+                    call.id = synth_call_id();
                 }
             }
 
-            if let Some(at) = nudged_at.take() {
-                history.drain(at..(at + 2).min(history.len()));
-            }
+            transient.clear();
 
             let assistant_msg = ChatMessage {
                 role: Role::Assistant,
@@ -383,8 +416,7 @@ impl AgentLoop {
                     stall_nudges += 1;
                     turn_opts.thinking = flashagent_llm::ThinkingEffort::Low;
                     turn_opts.custom_effort = None;
-                    nudged_at = Some(history.len() - 1);
-                    history.push(ChatMessage::user(STALL_NUDGE));
+                    transient = history.pop().into_iter().chain([ChatMessage::user(STALL_NUDGE)]).collect();
                     continue;
                 }
 
@@ -403,8 +435,7 @@ impl AgentLoop {
                         stall_nudges += 1;
                         turn_opts.thinking = flashagent_llm::ThinkingEffort::Off;
                         turn_opts.custom_effort = Some("none".to_string());
-                        nudged_at = Some(history.len() - 1);
-                        history.push(ChatMessage::user(STALL_NUDGE));
+                        transient = history.pop().into_iter().chain([ChatMessage::user(STALL_NUDGE)]).collect();
                         continue;
                     }
                 }
@@ -474,6 +505,26 @@ impl AgentLoop {
             }
         }
     }
+}
+
+/// A fresh tool-call id: 9 alphanumeric characters (the shape Mistral chat
+/// templates insist on), unique for the life of the process.
+fn synth_call_id() -> String {
+    use std::sync::atomic::AtomicU64;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut n = seed.rotate_left(17) ^ NEXT.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    (0..9)
+        .map(|_| {
+            let c = ALPHABET[(n % ALPHABET.len() as u64) as usize] as char;
+            n /= ALPHABET.len() as u64;
+            c
+        })
+        .collect()
 }
 
 /// Sent when the model ended its turn on thinking alone.
@@ -1220,6 +1271,60 @@ mod tests {
         assert_eq!(done, DoneReason::Completed);
         assert!(tools.calls.lock().unwrap().is_empty());
         assert!(history[1].content.contains("\"Alice\""));
+    }
+
+    #[test]
+    fn backend_error_keeps_the_steps_that_already_ran() {
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![
+                tool_turn("shell", "c1"),
+                MockTurn {
+                    events: vec![
+                        Ok(LlmEvent::TextDelta("partial".into())),
+                        Err(LlmError::Stream("context length exceeded".into())),
+                    ],
+                },
+            ]),
+        };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt.block_on(l.run(&llm, &tools, vec![ChatMessage::user("x")], |_| {})).unwrap_err();
+        assert!(err.to_string().contains("context length exceeded"));
+        let history = err.into_history();
+        // The tool ran (side effects happened), so the model must remember it.
+        assert_eq!(history[1].tool_calls.len(), 1);
+        assert_eq!(history[2].role, Role::Tool);
+        assert_eq!(history.last().unwrap().content, "partial");
+        assert_protocol_valid(&history);
+    }
+
+    #[test]
+    fn stall_nudge_never_lands_in_history_even_when_cancelled() {
+        struct StallThenHang(std::sync::Mutex<u32>);
+        #[async_trait]
+        impl LlmSource for StallThenHang {
+            async fn turn(&self, _m: &[ChatMessage], _t: &[ToolSpec]) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+                let mut n = self.0.lock().unwrap();
+                *n += 1;
+                if *n == 1 {
+                    Ok(Box::pin(futures::stream::iter(vec![Ok(LlmEvent::Done(FinishReason::Stop))])))
+                } else {
+                    Ok(Box::pin(futures::stream::pending()))
+                }
+            }
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let l = AgentLoop::new(LoopConfig::default(), cancel.clone());
+        let flip = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            flip.store(true, Ordering::Relaxed);
+        });
+        let tools = MockTools::new();
+        let (history, done) = run_loop(&l, &StallThenHang(std::sync::Mutex::new(0)), &tools, |_| {});
+        assert_eq!(done, DoneReason::Cancelled);
+        assert!(history.iter().all(|m| m.content != STALL_NUDGE), "nudge leaked: {history:?}");
     }
 
     #[test]

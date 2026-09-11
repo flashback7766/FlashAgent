@@ -608,7 +608,7 @@ impl Renderer {
             // The user is approving exactly this: show it whatever the JSON
             // formatting, and never let model-supplied escape codes restyle
             // or hide part of it.
-            let args = parse_card_args(&req.args_json);
+            let args = flashagent_llm::effective_args(&req.args_json, &req.tool).unwrap_or_default();
             let field = |k: &str| args.get(k).and_then(|v| v.as_str()).map(card_safe);
             let label_row = |label: &str, value: &str| {
                 pad_box_row(
@@ -616,18 +616,18 @@ impl Renderer {
                     width,
                 )
             };
-            if let Some(cmd) = field("command") {
-                let lines: Vec<&str> = cmd.lines().collect();
-                for (i, line) in lines.iter().take(4).enumerate() {
-                    tail.push((LineKind::System, label_row(if i == 0 { "command:" } else { "        " }, line)));
-                }
-                if lines.len() > 4 {
-                    tail.push((LineKind::System, label_row("        ", &format!("... {} more line(s)", lines.len() - 4))));
-                }
+            let value_w = inner_w.saturating_sub(14).max(20);
+            let (label, value) = if let Some(cmd) = field("command") {
+                ("command:", cmd)
             } else if let Some(path) = field("path") {
-                tail.push((LineKind::System, label_row("target:", &path)));
+                ("target:", path)
             } else if args.as_object().is_some_and(|o| !o.is_empty()) {
-                tail.push((LineKind::System, label_row("args:", &card_safe(&args.to_string()))));
+                ("args:", card_safe(&args.to_string()))
+            } else {
+                ("", String::new())
+            };
+            for (i, row) in card_rows(&value, value_w, 6).iter().enumerate() {
+                tail.push((LineKind::System, label_row(if i == 0 { label } else { "        " }, row)));
             }
 
             if let Some(ref diff) = req.diff {
@@ -1892,8 +1892,13 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             // system message mid-history breaks strict chat
                             // templates (Gemma, Qwen).
                             flashagent_llm::Role::System => {
-                                if let Some(pos) = msg.content.find(COMPACTED_MARK) {
-                                    history[0].content.push_str(&msg.content[pos..]);
+                                // Current sessions keep the summary inside the
+                                // system prompt; older ones stored it as its own
+                                // system message. Both carry the marker title.
+                                let title = COMPACTED_MARK.trim_start();
+                                if let Some(pos) = msg.content.find(title) {
+                                    history[0].content.push_str(COMPACTED_MARK);
+                                    history[0].content.push_str(msg.content[pos + title.len()..].trim_start());
                                 }
                             }
                             flashagent_llm::Role::Tool => history.push(msg),
@@ -2080,6 +2085,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     turn_started = None;
                     cancel_requested = None;
                     aborted_turn = Some(turn_counter);
+                    close_dangling_user(&mut history, "[turn aborted by the user]");
                     token_tracker.on_finished();
                     if let Some(saved) = goal_state.take() {
                         tools_arc.set_goal_mode(false);
@@ -2228,7 +2234,11 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     }
                 }
             }
-            UiEvent::Loop(e) => {
+            UiEvent::Loop { turn_id, event: e } => {
+                // Late events of a turn that was aborted or superseded.
+                if turn_id != turn_counter || aborted_turn == Some(turn_id) {
+                    continue;
+                }
                 match &e {
                     LoopEvent::TurnDelta(text) => {
                         token_tracker.on_delta(text);
@@ -2285,6 +2295,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
 
                         if reason == DoneReason::Cancelled {
+                            close_dangling_user(&mut history, "[interrupted by the user before replying]");
                             suggested_prompt = None;
                             let interrupt_msg = "Request interrupted by user";
                             custom_placeholder = Some(interrupt_msg.to_string());
@@ -2328,7 +2339,11 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             });
                         }
                     }
-                    Err(e) => {
+                    Err((e, h)) => {
+                        // Keep the steps that already ran (and changed files).
+                        history = h;
+                        close_dangling_user(&mut history, "[no reply: the model backend failed]");
+                        update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
                         chat.on_event(&LoopEvent::Done(DoneReason::Failed));
                         chat.push_line(LineKind::ToolError, format!("Error: {e}"));
                         chat.push_system("Press Ctrl+R to retry the last prompt.");
@@ -4407,11 +4422,12 @@ fn spawn_turn(
         };
         let loop_ = AgentLoop::with_steering(config, cancel, steer_rx);
         let res = loop_
-            .run(source.as_ref(), perm, history, |ev| {
-                let _ = tx.send(UiEvent::Loop(ev));
+            .run(source.as_ref(), perm, history, |event| {
+                let _ = tx.send(UiEvent::Loop { turn_id, event });
             })
             .await;
-        let _ = tx.send(UiEvent::Finished { turn_id, result: res.map_err(|e| e.to_string()) });
+        let result = res.map_err(|e| (e.to_string(), e.into_history()));
+        let _ = tx.send(UiEvent::Finished { turn_id, result });
     })
 }
 
@@ -4784,6 +4800,15 @@ fn fallback_summary(messages: &[ChatMessage], prior: Option<&str>) -> String {
     out
 }
 
+/// Strict chat templates (Gemma, Mistral) demand alternating user/assistant
+/// turns; a turn that ended before any reply would leave two user messages
+/// in a row once the next prompt is sent.
+fn close_dangling_user(history: &mut Vec<ChatMessage>, note: &str) {
+    if history.last().is_some_and(|m| m.role == flashagent_llm::Role::User) {
+        history.push(ChatMessage::assistant(note));
+    }
+}
+
 /// Skill file for `name`: the project's `.agents/skills` first, then the
 /// user's `~/.flashagent/skills` (the same places autocomplete lists).
 fn find_skill_file(name: &str) -> Option<std::path::PathBuf> {
@@ -4827,13 +4852,40 @@ fn persisted_from_view(view: &AppConfig, persisted: &AppConfig, shown_mode: Perm
     cfg
 }
 
-/// Tool arguments for the approval card, repaired the same way the tool
-/// layer reads them.
-fn parse_card_args(args_json: &str) -> serde_json::Value {
-    serde_json::from_str(args_json)
-        .ok()
-        .or_else(|| flashagent_llm::repair_json(args_json).and_then(|r| serde_json::from_str(&r).ok()))
-        .unwrap_or_default()
+/// Rows of an approval-card value: wrapped (never silently clipped), with
+/// long whitespace runs made visible — padding must not push the tail of a
+/// command (`... | sh`) out of sight — and an explicit note when rows run out.
+fn card_rows(value: &str, width: usize, max_rows: usize) -> Vec<String> {
+    let mut shown = String::new();
+    for line in value.lines() {
+        if !shown.is_empty() {
+            shown.push('\u{21b5}'); // ↵ marks a real newline
+        }
+        let mut spaces = 0usize;
+        for c in line.chars().chain(std::iter::once('\0')) {
+            if c == ' ' {
+                spaces += 1;
+                continue;
+            }
+            if spaces > 3 {
+                shown.push_str(&format!(" \u{2423}x{spaces} "));
+            } else {
+                shown.push_str(&" ".repeat(spaces));
+            }
+            spaces = 0;
+            if c != '\0' {
+                shown.push(c);
+            }
+        }
+    }
+    let chars: Vec<char> = shown.chars().collect();
+    let mut rows: Vec<String> = chars.chunks(width.max(1)).map(|c| c.iter().collect()).collect();
+    if rows.len() > max_rows {
+        let hidden: usize = rows[max_rows - 1..].iter().map(|r| r.chars().count()).sum();
+        rows.truncate(max_rows - 1);
+        rows.push(format!("... {hidden} more characters (not shown; deny if unsure)"));
+    }
+    rows
 }
 
 /// Model-supplied text made safe to print: control characters (ANSI
@@ -4967,12 +5019,25 @@ mod tests {
 
     #[test]
     fn approval_card_shows_commands_whatever_the_json_formatting() {
-        let spaced = parse_card_args("{ \"command\" : \"cargo test\" , \"timeout_ms\": 5 }");
+        let spaced = flashagent_llm::effective_args("{ \"command\" : \"cargo test\" , \"timeout_ms\": 5 }", "run_shell").unwrap();
         assert_eq!(spaced.get("command").and_then(|v| v.as_str()), Some("cargo test"));
-        let pythonish = parse_card_args("{'command': 'ls -la'}");
+        let pythonish = flashagent_llm::effective_args("{'command': 'ls -la'}", "run_shell").unwrap();
         assert_eq!(pythonish.get("command").and_then(|v| v.as_str()), Some("ls -la"));
         // An escape sequence in a command is displayed, never executed.
         assert!(!card_safe("echo \u{1b}[8mhidden").contains('\u{1b}'));
+    }
+
+    #[test]
+    fn approval_card_never_hides_the_tail_of_a_command() {
+        let padded = format!("cargo test{}| sh", " ".repeat(200));
+        let rows = card_rows(&padded, 40, 6);
+        let joined = rows.join("");
+        assert!(joined.contains("| sh"), "{rows:?}");
+        assert!(joined.contains("x200"));
+        let long = "x".repeat(1000);
+        let rows = card_rows(&long, 40, 6);
+        assert_eq!(rows.len(), 6);
+        assert!(rows[5].contains("more characters"));
     }
 
     #[test]

@@ -36,6 +36,26 @@ pub struct McpClient {
     child: Arc<tokio::sync::Mutex<Option<Child>>>,
 }
 
+/// A request still waiting for its response.
+struct Outstanding<'a> {
+    client: &'a McpClient,
+    id: u64,
+    answered: bool,
+}
+
+impl Drop for Outstanding<'_> {
+    fn drop(&mut self) {
+        if self.answered {
+            return;
+        }
+        self.client.pending.lock().remove(&self.id);
+        let _ = self.client.notify(
+            "notifications/cancelled",
+            Some(serde_json::json!({ "requestId": self.id, "reason": "cancelled by client" })),
+        );
+    }
+}
+
 impl McpClient {
     /// Spawn an MCP server process over stdio.
     pub fn spawn(
@@ -204,20 +224,22 @@ impl McpClient {
 
         let (tx, rx) = oneshot::channel();
         self.pending.lock().insert(id, tx);
+        // Until a response arrives, dropping this (timeout, or the turn being
+        // cancelled mid-call) forgets the request and tells the server.
+        let mut outstanding = Outstanding { client: self, id, answered: false };
 
         self.stdin_tx
             .send(json_str)
             .map_err(|_| format!("MCP server '{}' stdin channel closed", self.name))?;
 
-        match tokio::time::timeout(timeout, rx).await {
+        let result = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(val))) => Ok(val),
             Ok(Ok(Err(err))) => Err(format!("MCP error (code {}): {}", err.code, err.message)),
             Ok(Err(_)) => Err(format!("MCP server '{}' closed response channel", self.name)),
-            Err(_) => {
-                self.pending.lock().remove(&id);
-                Err(format!("MCP request '{method}' to '{}' timed out after {:?}", self.name, timeout))
-            }
-        }
+            Err(_) => return Err(format!("MCP request '{method}' to '{}' timed out after {:?}", self.name, timeout)),
+        };
+        outstanding.answered = true;
+        result
     }
 
     /// Send a JSON-RPC notification (no response expected).

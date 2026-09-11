@@ -29,7 +29,7 @@ License: MIT. Releases: GitHub Releases, Stable + Beta channels. Telemetry: stri
 - Track A: A0–A9 closed. A10 `/goal` is PARTIAL: Accept All + max effort + 250-step cap + ask_user/memory
   writes disabled + mode restore. Not implemented: snapshots, milestone commits, token/time budgets, blacklist, live plan, final report.
 - Track C: C0 self-updater closed (checksum verification via `SHA256SUMS` added in b233).
-- Workspace tests: 273 passed; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean.
+- Workspace tests: 284 passed; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean.
 - What the product actually is today: `crates/tui` runs the whole stack in-process. `crates/svc` only holds the
   updater, `crates/proto` and `crates/app` are placeholders, and `crates/data` (SQLite/FTS5) is not used by the
   TUI — sessions are JSON files in `~/.flashagent/sessions/`.
@@ -52,7 +52,9 @@ UI additionally requires golden frames. Never close a milestone without real com
 - wgpu 27: `into_static` unavailable; use safe lifetime transmute for Window in App.
 - SQLite FTS5 `schema_version`: stored as `TEXT`.
 - Token Usage: parsed before choices; text tool scanner is decoupled from HTTP stream (it runs in `core::loop_`).
-- Every assistant tool call in history must be answered by a tool message, also on cancel; only one system message.
+- Every assistant tool call in history must be answered by a tool message, also on cancel; only one system message;
+  never two user messages in a row (a turn without a reply is closed with an assistant note).
+- Tool arguments are read through `flashagent_llm::effective_args` everywhere (permissions, card, preview, tools, MCP).
 - Esc/Ctrl+C cancel cooperatively (the loop returns its history); hard abort is a 3 s fallback.
 
 ## Environment
