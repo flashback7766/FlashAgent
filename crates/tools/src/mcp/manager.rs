@@ -203,30 +203,15 @@ impl McpManager {
         specs
     }
 
-    /// Check if a qualified tool name is classified as read-only.
+    /// Whether the user's config marks this tool read-only (`read_only` on
+    /// the server or the tool listed in `read_only_tools`). Server-supplied
+    /// annotations are deliberately ignored: a server must not be able to
+    /// declare its own tools safe to run without approval.
     pub fn is_tool_read_only(&self, qualified_tool: &str) -> bool {
-        let (server_name, tool_name) = match self.parse_tool_name(qualified_tool) {
-            Some(pair) => pair,
-            None => return false,
+        let Some((server_name, tool_name)) = self.parse_tool_name(qualified_tool) else {
+            return false;
         };
-
-        // 1. Check server configuration flags
-        if let Some(cfg) = self.configs.read().get(&server_name) {
-            if cfg.is_tool_read_only(&tool_name) {
-                return true;
-            }
-        }
-
-        // 2. Check MCP tool annotations from server
-        if let Some(client) = self.clients.read().get(&server_name) {
-            for t in client.tools() {
-                if t.name == tool_name && t.is_read_only() {
-                    return true;
-                }
-            }
-        }
-
-        false
+        self.configs.read().get(&server_name).is_some_and(|cfg| cfg.is_tool_read_only(&tool_name))
     }
 
     /// True if the tool name belongs to an MCP server or matches `mcp__`.

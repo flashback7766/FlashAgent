@@ -375,7 +375,7 @@ done
         assert_eq!(init.server_info.name, "strict");
         let tools = client.tools();
         assert_eq!(tools.len(), 1);
-        assert!(tools[0].is_read_only(), "readOnlyHint must be honoured");
+        assert!(tools[0].claims_read_only(), "readOnlyHint must be parsed");
         client.kill().await;
     }
 

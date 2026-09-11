@@ -3,6 +3,21 @@
 > Sequence: two parallel tracks. Core engine is verified via the TUI client; UI is verified via the renderer prototype.
 > Milestone status: `[ ]` / `[~]` / `[x]`. Updated upon completion, without arbitrary calendar deadlines.
 
+## Road to v1.0 (current focus)
+
+The product for v1 is the terminal app (`flashagent`). Work lands in this
+order; nothing else starts until these are done. A milestone is closed only
+when its user path has been run end to end (scenario test or live run), not
+when unit tests pass.
+
+- [x] **V1. One command** — binary is `flashagent` everywhere; `flashagent-tui` alias and the empty `app` crate removed.
+- [x] **V2. MCP trust from config only** — only `read_only` / `read_only_tools` in `.mcp.json` skip approval; tool names and server `readOnlyHint` no longer do.
+- [ ] **V3. `/goal` budgets and report** — step / token / time limits set on the command and shown live; structured final report (done / skipped / verify by hand). Snapshots and milestone commits move to v1.x.
+- [ ] **V4. TUI structure** — split `crates/tui/src/main.rs` (event loop, commands, rendering, updater, sessions) into modules without behaviour changes.
+- [ ] **V5. Scenario tests** — scripted mock-LLM server + headless TUI driver covering the core paths (tool turn, approval, cancel, compact, resume, MCP, goal) in CI.
+- [ ] **V6. Tool-calling benchmark** — reproducible probe across popular local models; results table in README; first-run tool test.
+- [ ] **V7. Fewer heuristics** — prefer capabilities the server reports (reasoning presets, context, tool support) over name-based guessing.
+
 ## Track A — Core Engine
 - [x] **A0. Workspace Skeleton** — 9 crates, CI (Linux + Windows), clippy strict with 0 warnings, MIT license, README.
 - [x] **A1. Data Layer** — SQLite + FTS5 (bundled), sessions/messages, versioned migrations, FTS triggers, Cyrillic/multilingual search. 5/5 tests. *Not yet consumed by the TUI (sessions are JSON files); wiring lands with B2.*
@@ -19,7 +34,9 @@
 - [ ] **A11. Extended Backends** — Ollama, Anthropic, Mistral, DeepSeek, OpenRouter, configuration presets.
 - [ ] **A12. Migrator** — Import data and settings from legacy ~/.flashgent (sessions, config).
 
-## Track B — Native UI (Post-Prototype)
+## Track B — Native UI (postponed to v2)
+
+> Decided 2026-09-11: v1 ships the terminal app only. The B0 prototype stays in `crates/ui`; B1–B10 resume after v1.0.
 - [x] **B0. Renderer Prototype (Gate)** — Owner GO approved: wgpu + cosmic-text + IME + spring morphing verified, sRGB/color fix and spacebar handling resolved, clippy strict 0 warnings.
 - [ ] **B1. Material 3 Expressive Kit** — Themes (light/dark/system, dynamic palette), Material Symbols, typography scale, spring engine, ambient background loops, motion reduction toggle.
 - [ ] **B2. App Shell** — IPC client, auto-reconnect, session sidebar with FTS search, status ticker ribbon, command palette.
