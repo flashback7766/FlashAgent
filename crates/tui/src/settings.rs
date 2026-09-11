@@ -502,28 +502,29 @@ impl SettingsView {
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
         let mut lines = Vec::new();
-        let inner_w = width.saturating_sub(4).max(36);
+        let box_w = width.saturating_sub(6).clamp(52, 100);
+        let inner_text_w = box_w.saturating_sub(2);
         let border_color = "\x1b[38;2;160;155;145m";
         let reset = "\x1b[0m";
 
         let pad_row = |content: &str| -> String {
-            let clipped = if crate::visible_width(content) > inner_w {
-                crate::clip_ansi(content, inner_w)
+            let clipped = if crate::visible_width(content) > inner_text_w {
+                crate::clip_ansi(content, inner_text_w)
             } else {
                 content.to_string()
             };
             let clipped_vis = crate::visible_width(&clipped);
-            let pad = " ".repeat(inner_w.saturating_sub(clipped_vis));
+            let pad = " ".repeat(inner_text_w.saturating_sub(clipped_vis));
             format!("  {border_color}│{reset} {clipped}{pad} {border_color}│{reset}")
         };
 
         // Header
         let title_styled = " \x1b[1;38;2;225;175;95mFlashAgent Settings Wizard\x1b[0m \x1b[38;2;160;155;145m(Tab 1-5 to switch)\x1b[0m ";
         let title_vis = crate::visible_width(title_styled);
-        let border_dashes = inner_w.saturating_sub(title_vis);
+        let dashes = box_w.saturating_sub(title_vis + 1);
         lines.push((
             LineKind::System,
-            format!("  {border_color}╭─{title_styled}{}╮{reset}", "─".repeat(border_dashes.saturating_sub(1))),
+            format!("  {border_color}╭─{title_styled}{}╮{reset}", "─".repeat(dashes)),
         ));
 
         // Tab navigation bar
@@ -540,14 +541,14 @@ impl SettingsView {
         lines.push((LineKind::System, pad_row(&tabs_line)));
         lines.push((
             LineKind::System,
-            format!("  {border_color}├{}┤{reset}", "─".repeat(inner_w + 2)),
+            format!("  {border_color}├{}┤{reset}", "─".repeat(box_w)),
         ));
 
         // Tab items list
-        let max_val_w = inner_w.saturating_sub(28);
+        let max_val_w = inner_text_w.saturating_sub(28);
         let items: Vec<(&str, String)> = match self.active_tab {
             SettingsTab::General => vec![
-                ("Backend URL", if self.editing_url { format!("{}█", self.url_input) } else { self.config.backend_url.clone() }),
+                ("Backend URL *", if self.editing_url { format!("{}█", self.url_input) } else { self.config.backend_url.clone() }),
                 ("Active Model", if self.config.model.is_empty() { "(auto-detected)".to_string() } else { self.config.model.clone() }),
                 ("Permission Mode", self.config.permission_mode.label().to_string()),
                 ("Auto-Save Sessions", if self.config.auto_save_sessions { "Enabled (auto-resume)".into() } else { "Disabled".into() }),
@@ -555,13 +556,13 @@ impl SettingsView {
                 ("Setup Wizard", "Launch initial configuration wizard".into()),
             ],
             SettingsTab::Updates => vec![
-                ("Auto-Check Updates", if self.config.auto_check_updates { "Enabled (every 4m)".into() } else { "Disabled (manual only)".into() }),
+                ("Auto-Check Updates *", if self.config.auto_check_updates { "Enabled (every 4m)".into() } else { "Disabled (manual only)".into() }),
                 ("Release Channel", self.config.update_channel.label().to_string()),
                 ("Silent Daily Notice", if self.config.silent_update_check { "Enabled (status bar notice)".into() } else { "Disabled".into() }),
                 ("Check Updates Now", self.update_check_status.clone().unwrap_or_else(|| "Check GitHub Releases API now".into())),
             ],
             SettingsTab::Aesthetics => vec![
-                ("Color Theme", self.config.color_theme.to_uppercase()),
+                ("Color Theme *", format!("{} (restart required)", self.config.color_theme.to_uppercase())),
                 ("Swift Mascot", if self.config.show_mascot { "Enabled (animated)".into() } else { "Disabled".into() }),
                 ("Developer Tips", if self.config.show_tips { "Enabled (rotating deck)".into() } else { "Disabled".into() }),
                 ("TTFT & Prefill Speed", if self.config.show_ttft { "Enabled (lightning badge)".into() } else { "Disabled".into() }),
@@ -575,8 +576,8 @@ impl SettingsView {
                 ("Temperature", format!("{:.2}", self.config.temperature)),
                 ("Context Alert", if self.config.context_warn_threshold > 0 { format!("Warn at {}%", self.config.context_warn_threshold) } else { "Disabled".into() }),
                 ("Auto-Compact History", if self.config.auto_compact_context { format!("Enabled (at {}%)", self.config.context_compact_threshold) } else { "Disabled".into() }),
-                ("Free Web Search (DDG)", if self.config.free_search { "Enabled".into() } else { "Disabled (local-first)".into() }),
-                ("Network Retries", format!("{} attempts", self.config.network_retries)),
+                ("Free Web Search *", if self.config.free_search { "Enabled".into() } else { "Disabled (local-first)".into() }),
+                ("Network Retries *", format!("{} attempts", self.config.network_retries)),
             ],
             SettingsTab::Tools => vec![
                 ("Toolset Profile", self.config.toolset_profile.label().to_string()),
@@ -598,24 +599,36 @@ impl SettingsView {
             let val = crate::truncate_middle(val_raw, max_val_w);
             let (label_styled, val_styled) = if is_sel {
                 (
-                    format!("\x1b[1;38;2;240;235;225m{:<22}\x1b[0m", label),
+                    format!("\x1b[1;38;2;240;235;225m{:<24}\x1b[0m", label),
                     format!("\x1b[1;38;2;225;175;95m{val}\x1b[0m"),
                 )
             } else {
                 (
-                    format!("\x1b[38;2;160;155;145m{:<22}\x1b[0m", label),
+                    format!("\x1b[38;2;160;155;145m{:<24}\x1b[0m", label),
                     format!("\x1b[38;2;200;195;185m{val}\x1b[0m"),
                 )
             };
             lines.push((LineKind::System, pad_row(&format!("{ptr} {label_styled} {val_styled}"))));
         }
 
-        lines.push((LineKind::System, pad_row("")));
+        let has_restart_items = matches!(
+            self.active_tab,
+            SettingsTab::General | SettingsTab::Updates | SettingsTab::Aesthetics | SettingsTab::Reasoning
+        );
+        if has_restart_items {
+            lines.push((
+                LineKind::System,
+                pad_row("\x1b[38;2;225;175;95m* Marked options require app restart to take effect\x1b[0m"),
+            ));
+        } else {
+            lines.push((LineKind::System, pad_row("")));
+        }
+
         lines.push((LineKind::System, pad_row("\x1b[38;2;135;130;125mTab/1-5 switch tab · ↑/↓ navigate · Enter/←/→ toggle value · Esc save & return\x1b[0m")));
 
         lines.push((
             LineKind::System,
-            format!("  {border_color}└{}┘{reset}", "─".repeat(inner_w + 2)),
+            format!("  {border_color}╰{}╯{reset}", "─".repeat(box_w)),
         ));
 
         lines
@@ -681,5 +694,35 @@ mod tests {
         // Esc closes and saves
         let act = view.handle_key(KeyCode::Esc, KeyModifiers::empty());
         assert_eq!(act, SettingsAction::Close);
+    }
+
+    #[test]
+    fn test_settings_wizard_borders_closed_and_consistent() {
+        let cfg = AppConfig::default();
+        let view = SettingsView::new(cfg, vec!["model-a".into()]);
+
+        for width in [60, 80, 100, 120] {
+            let rendered = view.render(width);
+            assert!(!rendered.is_empty());
+            let expected_w = crate::visible_width(&rendered[0].1);
+            assert!(expected_w <= width, "Row width {expected_w} exceeds terminal width {width}");
+
+            for (idx, line) in rendered.iter().enumerate() {
+                let row_w = crate::visible_width(&line.1);
+                assert_eq!(
+                    row_w, expected_w,
+                    "Row {idx} width {row_w} does not match expected {expected_w} at terminal width {width}"
+                );
+                // Verify every line terminates with a closed right border
+                let clean = &line.1;
+                assert!(
+                    clean.ends_with("╮\x1b[0m")
+                        || clean.ends_with("┤\x1b[0m")
+                        || clean.ends_with("│\x1b[0m")
+                        || clean.ends_with("╯\x1b[0m"),
+                    "Row {idx} is missing a closed right border: {clean}"
+                );
+            }
+        }
     }
 }

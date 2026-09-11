@@ -23,6 +23,7 @@ pub mod tips;
 pub mod wizard;
 pub use autocomplete::{AutocompleteCategory, AutocompleteItem, AutocompletePopup};
 pub use context_modal::ContextModal;
+pub use mcp_view::{McpModal, McpModalAction, McpViewTab};
 pub use prefill::{BucketStats, ContextBucket, ModelPrefillProfile, PrefillTracker};
 pub use sampling::{SamplingAction, SamplingView};
 pub use select::{ConfirmSelect, SelectItem, SelectMenu};
@@ -2746,6 +2747,38 @@ impl flashagent_tools::QuestionGate for TuiQuestionGate {
     }
 }
 
+/// Renders a closed, beautiful session saved card for display upon application exit.
+pub fn render_session_saved_card(session_id: &str, width: usize) -> Vec<String> {
+    let box_w = width.saturating_sub(6).clamp(52, 90);
+    let inner_text_w = box_w.saturating_sub(2);
+    let border_color = "\x1b[38;2;225;175;95m";
+    let reset = "\x1b[0m";
+
+    let title_styled = " \x1b[1;38;2;225;175;95mSession Saved\x1b[0m ";
+    let title_vis = visible_width(title_styled);
+    let dashes = box_w.saturating_sub(title_vis + 1);
+    let top = format!("  {border_color}╭─{title_styled}{}╮{reset}", "─".repeat(dashes));
+
+    let resume_cmd = format!("flashagent-tui --resume {session_id}");
+    let msg = if inner_text_w >= 66 {
+        format!("To resume next time: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m")
+    } else {
+        format!("Resume: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m")
+    };
+    let msg_clipped = if visible_width(&msg) > inner_text_w {
+        clip_ansi(&msg, inner_text_w)
+    } else {
+        msg
+    };
+    let msg_vis = visible_width(&msg_clipped);
+    let pad = " ".repeat(inner_text_w.saturating_sub(msg_vis));
+    let body = format!("  {border_color}│{reset} {msg_clipped}{reset}{pad} {border_color}│{reset}");
+
+    let bottom = format!("  {border_color}╰{}╯{reset}", "─".repeat(box_w));
+
+    vec![top, body, bottom]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3685,5 +3718,27 @@ mod tests {
             assert!(width <= 36, "Line width {} exceeds terminal width 36", width);
         }
     }
+
+    #[test]
+    fn test_render_session_saved_card_closed_borders() {
+        for w in [60, 80, 100, 120] {
+            let card = render_session_saved_card("session_1789119858", w);
+            assert_eq!(card.len(), 3);
+            let expected_w = visible_width(&card[0]);
+            assert!(expected_w <= w, "Card width {expected_w} exceeds terminal width {w}");
+            for (idx, line) in card.iter().enumerate() {
+                assert_eq!(
+                    visible_width(line),
+                    expected_w,
+                    "Line {idx} width mismatch at terminal width {w}"
+                );
+            }
+            assert!(card[0].ends_with("╮\x1b[0m"));
+            assert!(card[1].ends_with("│\x1b[0m"));
+            assert!(card[2].ends_with("╯\x1b[0m"));
+            assert!(card[1].contains("session_1789119858"));
+        }
+    }
 }
+
 

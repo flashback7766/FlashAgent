@@ -19,10 +19,11 @@ use flashagent_core::{
 use flashagent_llm::{ChatMessage, LlmBackend};
 use flashagent_tools::{BuiltinTools, BuiltinToolsConfig};
 use flashagent_tui::{
-    clip_ansi, pad_box_row, restore_line_color,
+    clip_ansi, pad_box_row, render_session_saved_card, restore_line_color,
     visible_width, welcome_card_responsive_opts, AutocompletePopup, ChatView, ConfirmSelect,
-    ContextModal, LineKind, PrefillTracker, ReasoningExpansion, RenderLine, SamplingAction, SamplingView,
-    SelectItem, SelectMenu, SettingsAction, SettingsView, TuiGate, TuiQuestionGate, UiEvent, SPINNER,
+    ContextModal, LineKind, McpModal, McpModalAction, McpViewTab, PrefillTracker, ReasoningExpansion,
+    RenderLine, SamplingAction, SamplingView, SelectItem, SelectMenu, SettingsAction, SettingsView,
+    TuiGate, TuiQuestionGate, UiEvent, SPINNER,
 };
 
 #[derive(Default, Clone)]
@@ -480,6 +481,26 @@ impl Renderer {
         self.needs_reprint = true;
     }
 
+    fn clear_tail(&mut self) {
+        if self.tail_height > 0 {
+            let mut out = String::new();
+            if self.prev_cursor_tail_offset > 0 {
+                out.push_str(&format!("\x1b[{}F", self.prev_cursor_tail_offset));
+            } else {
+                out.push('\r');
+            }
+            out.push_str("\x1b[J");
+            let _ = crossterm::queue!(
+                std::io::stdout(),
+                crossterm::cursor::MoveToColumn(0),
+                crossterm::style::Print(out),
+            );
+            let _ = std::io::stdout().flush();
+            self.tail_height = 0;
+            self.prev_cursor_tail_offset = 0;
+        }
+    }
+
     fn scroll_up(&mut self, lines: usize, max_scroll: usize) {
         self.scroll_offset = (self.scroll_offset + lines).min(max_scroll);
         self.needs_reprint = true;
@@ -544,6 +565,7 @@ impl Renderer {
         settings_view: Option<&SettingsView>,
         sampling_view: Option<&SamplingView>,
         context_modal: Option<&ContextModal>,
+        mcp_modal: Option<&McpModal>,
         autocomplete: Option<&AutocompletePopup>,
         context_usage: &ContextUsage,
         st: FrameState<'_>,
@@ -769,6 +791,11 @@ impl Renderer {
             tail.extend(modal.render(width));
             input_line_idx = tail.len().saturating_sub(1);
             custom_cursor_col = Some(0);
+        } else if let Some(modal) = mcp_modal {
+            // Morph composer into MCP modal
+            tail.extend(modal.render(width));
+            input_line_idx = tail.len().saturating_sub(1);
+            custom_cursor_col = Some(0);
         } else {
             // Standard input box
             tail.push((
@@ -840,6 +867,8 @@ impl Renderer {
             "  \x1b[38;2;135;130;125m↑/↓ — select effort · enter — apply · esc — cancel\x1b[0m".to_string()
         } else if context_modal.is_some() {
             "  \x1b[38;2;135;130;125mf1 / enter / esc — close context breakdown\x1b[0m".to_string()
+        } else if mcp_modal.is_some() {
+            "  \x1b[38;2;135;130;125mtab/1-3 — switch tab · ↑/↓ — navigate · enter — select · esc — close\x1b[0m".to_string()
         } else if autocomplete.is_some() {
             "  \x1b[38;2;135;130;125mtab — complete · ↑/↓ — select · enter — send · esc — dismiss\x1b[0m".to_string()
         } else if st.running {
@@ -1329,7 +1358,13 @@ async fn main() -> Result<()> {
     );
     disable_raw_mode()?;
     if let Ok(Some(ref saved_id)) = result {
-        println!("Session saved. To resume next time: flashagent-tui --resume {saved_id}");
+        let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
+        let card = render_session_saved_card(saved_id, term_w as usize);
+        println!();
+        for line in card {
+            println!("{line}");
+        }
+        println!();
     }
     result.map(|_| ())
 }
@@ -1715,6 +1750,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let mut settings_view: Option<SettingsView> = None;
     let mut sampling_view: Option<SamplingView> = None;
     let mut context_modal: Option<ContextModal> = None;
+    let mut mcp_modal: Option<McpModal> = None;
     let mut context_usage = ContextUsage::new(context_capacity);
     update_context_usage(&mut context_usage, &history, &memory_block, &chat);
     let mut autocomplete_idx = 0usize;
@@ -1866,6 +1902,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             && settings_view.is_none()
             && sampling_view.is_none()
             && context_modal.is_none()
+            && mcp_modal.is_none()
             && gate.pending().is_none()
             && question_gate.pending().is_none()
         {
@@ -1915,6 +1952,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             settings_view.as_ref(),
             sampling_view.as_ref(),
             context_modal.as_ref(),
+            mcp_modal.as_ref(),
             autocomplete.as_ref(),
             &context_usage,
             FrameState {
@@ -2274,7 +2312,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         for ch in sanitized.chars() {
                             sm.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);
                         }
-                    } else if effort_menu.is_none() && model_menu.is_none() && settings_view.is_none() && context_modal.is_none() {
+                    } else if effort_menu.is_none() && model_menu.is_none() && settings_view.is_none() && context_modal.is_none() && mcp_modal.is_none() {
                         input.push_str(&sanitized);
                         history_index = None;
                         autocomplete_idx = 0;
@@ -2428,10 +2466,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             let mgr = tools_arc.mcp_manager();
                             let paths = mgr.loaded_paths();
                             let statuses = mgr.server_status_list().await;
-                            let (w, _) = crossterm::terminal::size().unwrap_or((80, 24));
-                            for line in flashagent_tui::mcp_view::render_mcp_overview(&paths, &statuses, w as usize) {
-                                chat.push_line(LineKind::System, line);
-                            }
+                            mcp_modal = Some(McpModal::new(paths, statuses, McpViewTab::Overview));
                             renderer.request_reprint();
                         }
                         SettingsAction::None => {
@@ -2469,6 +2504,65 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     if matches!(code, KeyCode::F(1) | KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q')) {
                         context_modal = None;
                         renderer.request_reprint();
+                    }
+                    continue;
+                }
+
+                // If MCP modal is open, it captures navigation and actions
+                if let Some(ref mut modal) = mcp_modal {
+                    match modal.handle_key(code, mods) {
+                        McpModalAction::Close => {
+                            mcp_modal = None;
+                            renderer.request_reprint();
+                        }
+                        McpModalAction::Reload => {
+                            let mgr = tools_arc.mcp_manager();
+                            let _ = mgr.reload().await;
+                            modal.servers = mgr.server_status_list().await;
+                            modal.status_message = Some("Reloaded MCP configurations".to_string());
+                            renderer.request_reprint();
+                        }
+                        McpModalAction::TestServer(name) => {
+                            modal.status_message = Some(format!("Testing {name}..."));
+                            renderer.request_reprint();
+                            let mgr = tools_arc.mcp_manager();
+                            match mgr.test_server(&name).await {
+                                Ok(report) => {
+                                    let ver = report.server_version.as_deref().unwrap_or("1.0.0");
+                                    let lat = format!("{:.1}ms", report.latency.as_secs_f64() * 1000.0);
+                                    modal.status_message = Some(format!("✔ {name} connected (v{ver}, {lat}, {} tools)", report.tools.len()));
+                                }
+                                Err(e) => {
+                                    modal.status_message = Some(format!("✕ {name} failed: {e}"));
+                                }
+                            }
+                            modal.servers = mgr.server_status_list().await;
+                            renderer.request_reprint();
+                        }
+                        McpModalAction::InstallMarketplace(id) => {
+                            if let Some(item) = flashagent_tools::mcp::find_marketplace_item(&id) {
+                                let cfg = flashagent_tools::mcp::scaffold_config(item);
+                                match flashagent_tools::mcp::save_server_to_project(std::path::Path::new("."), item.id, cfg) {
+                                    Ok(path) => {
+                                        modal.status_message = Some(format!("✔ Added {} to {}", item.name, path.display()));
+                                        let mgr = tools_arc.mcp_manager();
+                                        let server_id = item.id.to_string();
+                                        let mgr_clone = mgr.clone();
+                                        tokio::spawn(async move {
+                                            let _ = mgr_clone.reload().await;
+                                            let _ = mgr_clone.start_server(&server_id).await;
+                                        });
+                                    }
+                                    Err(e) => {
+                                        modal.status_message = Some(format!("✕ Failed to install {id}: {e}"));
+                                    }
+                                }
+                            }
+                            renderer.request_reprint();
+                        }
+                        McpModalAction::None => {
+                            renderer.request_reprint();
+                        }
                     }
                     continue;
                 }
@@ -2798,6 +2892,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 suggested_prompt = latest_suggestion.clone();
                             }
                             renderer.request_reprint();
+                        } else if mcp_modal.is_some() {
+                            mcp_modal = None;
+                            renderer.request_reprint();
                         } else if suggested_prompt.is_some() || custom_placeholder.is_some() {
                             suggested_prompt = None;
                             latest_suggestion = None;
@@ -2816,6 +2913,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             model_menu = None;
                             settings_view = None;
                             sampling_view = None;
+                            mcp_modal = None;
                             context_modal = Some(ContextModal::new(context_usage.clone()));
                         }
                         renderer.request_reprint();
@@ -3065,6 +3163,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             model_menu = None;
                             settings_view = None;
                             context_modal = None;
+                            mcp_modal = None;
                             sampling_view = Some(SamplingView::new(&app_config));
                         }
                         renderer.request_reprint();
@@ -3091,10 +3190,11 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         renderer.request_reprint();
                     }
                     // Tab on empty input: toggle settings tab
-                    KeyCode::Tab if input.is_empty() && gate.pending().is_none() && effort_menu.is_none() && model_menu.is_none() && sampling_view.is_none() => {
+                    KeyCode::Tab if input.is_empty() && gate.pending().is_none() && effort_menu.is_none() && model_menu.is_none() && sampling_view.is_none() && mcp_modal.is_none() => {
                         if settings_view.is_some() {
                             settings_view = None;
                         } else {
+                            mcp_modal = None;
                             settings_view = Some(SettingsView::new(app_config.clone(), available_models.clone()));
                         }
                         renderer.request_reprint();
@@ -3564,10 +3664,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 let mgr = tools_arc.mcp_manager();
                                 let paths = mgr.loaded_paths();
                                 let statuses = mgr.server_status_list().await;
-                                let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
-                                for line in flashagent_tui::mcp_view::render_mcp_overview(&paths, &statuses, w as usize) {
-                                    chat.push_line(LineKind::System, line);
-                                }
+                                effort_menu = None;
+                                model_menu = None;
+                                settings_view = None;
+                                sampling_view = None;
+                                context_modal = None;
+                                mcp_modal = Some(McpModal::new(paths, statuses, McpViewTab::Overview));
                                 renderer.request_reprint();
                                 continue;
                             }
@@ -3576,11 +3678,14 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 input.clear();
                                 autocomplete_idx = 0;
                                 let mgr = tools_arc.mcp_manager();
+                                let paths = mgr.loaded_paths();
                                 let statuses = mgr.server_status_list().await;
-                                let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
-                                for line in flashagent_tui::mcp_view::render_mcp_server_list(&statuses, w as usize) {
-                                    chat.push_line(LineKind::System, line);
-                                }
+                                effort_menu = None;
+                                model_menu = None;
+                                settings_view = None;
+                                sampling_view = None;
+                                context_modal = None;
+                                mcp_modal = Some(McpModal::new(paths, statuses, McpViewTab::Servers));
                                 renderer.request_reprint();
                                 continue;
                             }
@@ -3588,11 +3693,15 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             if trimmed == "/mcp market" || trimmed == "/mcp marketplace" {
                                 input.clear();
                                 autocomplete_idx = 0;
-                                let items = flashagent_tools::mcp::get_marketplace();
-                                let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
-                                for line in flashagent_tui::mcp_view::render_mcp_marketplace(items, w as usize) {
-                                    chat.push_line(LineKind::System, line);
-                                }
+                                let mgr = tools_arc.mcp_manager();
+                                let paths = mgr.loaded_paths();
+                                let statuses = mgr.server_status_list().await;
+                                effort_menu = None;
+                                model_menu = None;
+                                settings_view = None;
+                                sampling_view = None;
+                                context_modal = None;
+                                mcp_modal = Some(McpModal::new(paths, statuses, McpViewTab::Marketplace));
                                 renderer.request_reprint();
                                 continue;
                             }
@@ -3698,6 +3807,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     settings_view.as_ref(),
                                     sampling_view.as_ref(),
                                     context_modal.as_ref(),
+                                    mcp_modal.as_ref(),
                                     autocomplete.as_ref(),
                                     &context_usage,
                                     FrameState {
@@ -4011,6 +4121,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         }
     }
 
+    renderer.clear_tail();
     Ok(finish!())
 }
 
