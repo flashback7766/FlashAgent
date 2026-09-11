@@ -6,3 +6,4 @@
 4. Failure → diagnose directly from compiler output, maximum 2 focused fix attempts per error, then stop and escalate to owner with exact output.
 5. Record in `.audit/` using the structure from `AGENTS.md`. Update milestone status in `ROADMAP.md`.
 6. Handoff to owner: what was done, how it was verified, what remains open.
+7. Never manually install, copy, or overwrite local user binaries (e.g. in `~/.local/bin/` or system PATH). Local installations are updated exclusively by the user or via the built-in updater.

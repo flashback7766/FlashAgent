@@ -23,3 +23,7 @@ When preparing releases on the Beta track (`b<number>`), every change MUST use t
 - The beta track continues until full completion and verification of **Tracks A and C**. (Track B is scheduled for v2.0.0).
 - Release `v1.0.0` (Stable) will occur **ONLY** after proven, battle-tested stability of a beta build with 100% completed functionality and roadmap plan.
 - In Stable releases, default update channel is `Stable`. In Beta builds, default update channel is `Beta`.
+
+## Local Binary Policy
+- Agents must **NEVER** manually copy, install, or overwrite executable files in user directories (`~/.local/bin/`, `/usr/local/bin/`, or any user PATH directory).
+- Binaries are built into project directories (`dist/`, `target/`) and published to GitHub Releases. The user or the in-app updater (`flashagent --update` / in-app background updater) is the sole mechanism for updating installed local binaries.
