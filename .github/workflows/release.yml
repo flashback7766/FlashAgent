@@ -71,12 +71,16 @@ jobs:
           mkdir dist
           Compress-Archive -Path target/x86_64-pc-windows-msvc/release/flashagent-tui.exe, README.md, LICENSE -DestinationPath "dist/flashagent-windows-$ver-x86_64.zip"
           Copy-Item "dist/flashagent-windows-$ver-x86_64.zip" "dist/flashagent-windows-x86_64.zip"
+          # Raw executable for the in-app updater, which never unpacks zips.
+          Copy-Item target/x86_64-pc-windows-msvc/release/flashagent-tui.exe "dist/flashagent-windows-x86_64.exe"
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-artifact
-          path: dist/flashagent-windows-*.zip
+          path: |
+            dist/flashagent-windows-*.zip
+            dist/flashagent-windows-*.exe
 
   build-macos:
     name: Build macOS (Apple Silicon ARM64 & Intel x86_64)
@@ -132,50 +136,71 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Determine Release Type
-        id: release_type
+      - name: Generate checksums
         shell: bash
         run: |
-          if [[ "${{ github.ref_name }}" =~ ^b ]]; then
-            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          cd release-assets
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Resolve channel
+        id: channel
+        shell: bash
+        run: |
+          VERSION="${{ github.ref_name }}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          # Beta builds (bNNN) publish to the rolling `beta` pre-release,
+          # stable versions (vX.Y.Z) to the rolling `stable` release.
+          if [[ "${VERSION}" =~ ^b[0-9]+$ ]]; then
+            echo "tag=beta" >> "$GITHUB_OUTPUT"
+            echo "flags=--prerelease --latest=false" >> "$GITHUB_OUTPUT"
           else
-            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "tag=stable" >> "$GITHUB_OUTPUT"
+            echo "flags=--latest" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Prepare Release Notes
-        id: release_notes
+      - name: Prepare release notes
         shell: bash
+        env:
+          VERSION: ${{ steps.channel.outputs.version }}
         run: |
-          TAG="${{ github.ref_name }}"
-          echo "title=FlashAgent ${TAG}" >> "$GITHUB_OUTPUT"
+          cat > release_body.md << EOF
+          ## FlashAgent ${VERSION}
 
-          cat << 'EOF' > release_body.md
-          ## ⚡ FlashAgent Release
+          Local-first AI coding agent in native Rust. Full change list: [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/CHANGELOG.md).
 
-          ### 🚀 Highlights
-          - **Multi-Platform Native Binaries**: Linux, Windows, macOS with zero runtime dependencies.
-          - **Pure Rust Performance**: < 7ms cold startup, < 10MB idle memory footprint, zero Electron.
-          - **Claude-Code Style Steering**: Responsive mid-flight soft-interrupts (< 50ms turnaround).
-          - **Periodic Background Updates**: Automatic background checks every 3–5 minutes with channel switching (`/channel`).
-          - **TUI Layout Symmetry & Compact Wrapping**: Symmetric welcome card and clean 2-line developer tip wrapping.
-          - **Local Model Support**: Native presets for LM Studio, llama.cpp, Ollama, and vLLM with throttled discovery.
+          ### Install
+          - **Linux / macOS**: \`curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | FLASHAGENT_CHANNEL=beta bash\`
+          - **Windows**: \`irm https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.ps1 | iex\`
+          - **Already installed**: \`flashagent --update\` (downloads are verified against \`SHA256SUMS\`)
 
-          ### 📦 Distribution Packages
-          - **Arch Linux**: `flashagent-bin-${TAG}-1-x86_64.pkg.tar.zst`
-          - **Debian / Ubuntu**: `flashagent_${TAG}-1_amd64.deb`
-          - **Universal Linux AppImage**: `FlashAgent-${TAG}-x86_64.AppImage`
-          - **Void Linux**: `flashagent-${TAG}-void-linux-x86_64.tar.gz`
-          - **Generic Linux**: `flashagent-${TAG}-linux-x86_64.tar.gz`
-          - **Windows**: `flashagent-windows-${TAG}-x86_64.zip`
-          - **macOS**: `flashagent-macos-${TAG}-aarch64.tar.gz` (Apple Silicon) / `flashagent-macos-${TAG}-x86_64.tar.gz` (Intel)
+          ### Packages
+          - Arch Linux: \`flashagent-bin-${VERSION}-1-x86_64.pkg.tar.zst\`
+          - Debian / Ubuntu: \`flashagent_${VERSION}-1_amd64.deb\`
+          - AppImage: \`FlashAgent-${VERSION}-x86_64.AppImage\`
+          - Void Linux: \`flashagent-${VERSION}-void-linux-x86_64.tar.gz\`
+          - Generic Linux: \`flashagent-${VERSION}-linux-x86_64.tar.gz\`
+          - Windows: \`flashagent-windows-${VERSION}-x86_64.zip\` (raw \`flashagent-windows-x86_64.exe\` for the updater)
+          - macOS: \`flashagent-macos-${VERSION}-aarch64.tar.gz\` (Apple Silicon) / \`flashagent-macos-${VERSION}-x86_64.tar.gz\` (Intel)
           EOF
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ steps.release_notes.outputs.title }}
-          body_path: release_body.md
-          files: release-assets/*
-          draft: false
-          prerelease: ${{ steps.release_type.outputs.is_prerelease == 'true' }}
-          generate_release_notes: true
+      - name: Publish to the rolling channel release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL_TAG: ${{ steps.channel.outputs.tag }}
+          VERSION: ${{ steps.channel.outputs.version }}
+          FLAGS: ${{ steps.channel.outputs.flags }}
+        run: |
+          # Recreated for every build: clients that list releases by creation
+          # date must see the channel release first, and no asset from an older
+          # build may linger next to the new ones. Each build stays reachable
+          # through its own version tag (git tag ${VERSION}).
+          gh release delete "${CHANNEL_TAG}" --yes --cleanup-tag --repo "${GITHUB_REPOSITORY}" || true
+          # shellcheck disable=SC2086
+          gh release create "${CHANNEL_TAG}" release-assets/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "FlashAgent ${VERSION}" \
+            --notes-file release_body.md \
+            ${FLAGS}

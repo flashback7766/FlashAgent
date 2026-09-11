@@ -40,8 +40,13 @@ pub enum UpdateStatus {
         is_downgrade: bool,
         asset_name: String,
         download_url: String,
+        /// `SHA256SUMS` asset of the same release, when published.
+        checksums_url: Option<String>,
     },
 }
+
+/// Name of the checksum manifest attached to every release.
+pub const CHECKSUMS_ASSET: &str = "SHA256SUMS";
 
 /// The official GitHub repository releases API endpoint.
 pub const DEFAULT_RELEASES_API: &str = "https://api.github.com/repos/flashback7766/FlashAgent/releases";
@@ -86,10 +91,13 @@ pub fn is_dev_mode() -> bool {
         }
     }
 
-    // 4. Source tree detection: Cargo.toml + crates/ directory in current working dir or its parents
+    // 4. Working inside the FlashAgent source tree itself. Only this repo:
+    // any git-tracked Rust project also has a Cargo.toml, and an installed
+    // binary must keep updating when the user works in one.
     if let Ok(mut dir) = std::env::current_dir() {
         loop {
-            if dir.join("Cargo.toml").is_file() && (dir.join("crates").is_dir() || dir.join(".git").is_dir()) {
+            let tui_manifest = dir.join("crates").join("tui").join("Cargo.toml");
+            if std::fs::read_to_string(&tui_manifest).is_ok_and(|m| m.contains("name = \"flashagent-tui\"")) {
                 return true;
             }
             if !dir.pop() {
@@ -108,29 +116,41 @@ pub fn is_dev_mode() -> bool {
     false
 }
 
-/// Filter releases for the requested channel.
-pub fn find_target_release(releases: &[GitHubRelease], channel: UpdateChannel) -> Option<&GitHubRelease> {
-    for rel in releases {
-        match channel {
-            UpdateChannel::Stable => {
-                // Stable: official release tag "release", or official release not marked as prerelease and non-beta
-                if rel.tag_name == "release"
-                    || (!rel.prerelease
-                        && rel.tag_name != "beta"
-                        && (rel.tag_name.starts_with('v') || !rel.tag_name.starts_with('b')))
-                {
-                    return Some(rel);
-                }
-            }
-            UpdateChannel::Beta => {
-                // Beta: rolling tag "beta", pre-release, or tag starts with 'b'
-                if rel.tag_name == "beta" || rel.prerelease || rel.tag_name.starts_with('b') {
-                    return Some(rel);
-                }
-            }
+fn on_channel(rel: &GitHubRelease, channel: UpdateChannel) -> bool {
+    match channel {
+        // Stable: the rolling `stable`/`release` tag, or any non-prerelease
+        // that is not a beta build.
+        UpdateChannel::Stable => {
+            rel.tag_name == "stable"
+                || rel.tag_name == "release"
+                || (!rel.prerelease && rel.tag_name != "beta" && (rel.tag_name.starts_with('v') || !rel.tag_name.starts_with('b')))
         }
+        // Beta: the rolling `beta` tag, a pre-release, or a `b<N>` tag.
+        UpdateChannel::Beta => rel.tag_name == "beta" || rel.prerelease || rel.tag_name.starts_with('b'),
     }
-    None
+}
+
+/// Sortable rank of a version string: `b233` → (233,0,0), `v1.2.3` → (1,2,3).
+fn version_rank(version: &str) -> Option<(u64, u64, u64)> {
+    if let Some(n) = version.strip_prefix('b') {
+        return n.parse().ok().map(|b| (b, 0, 0));
+    }
+    let mut parts = version.strip_prefix('v')?.split(['.', '-']).map(|p| p.parse::<u64>().ok());
+    Some((parts.next()??, parts.next().flatten().unwrap_or(0), parts.next().flatten().unwrap_or(0)))
+}
+
+/// The newest release on `channel`. Chosen by version, not by list position:
+/// GitHub lists by creation date, and a rolling `beta`/`stable` release that
+/// is edited in place keeps its old creation date.
+pub fn find_target_release(releases: &[GitHubRelease], channel: UpdateChannel) -> Option<&GitHubRelease> {
+    let candidates: Vec<&GitHubRelease> = releases.iter().filter(|r| on_channel(r, channel)).collect();
+    candidates
+        .iter()
+        .copied()
+        .filter_map(|r| version_rank(&extract_release_version(r)).map(|rank| (rank, r)))
+        .max_by_key(|(rank, _)| *rank)
+        .map(|(_, r)| r)
+        .or_else(|| candidates.first().copied())
 }
 
 /// Extract effective version string from release (from title like "FlashAgent b200", tag_name, or assets).
@@ -261,12 +281,18 @@ pub async fn check_for_updates(channel: UpdateChannel, api_url: &str) -> anyhow:
         let needs_update = (version != cur && version != format!("v{cur}")) || (tag != cur && tag != "beta" && tag != "release");
         if needs_update && version != cur {
             if let Some(asset) = find_platform_asset(&target_rel.assets) {
+                let checksums_url = target_rel
+                    .assets
+                    .iter()
+                    .find(|a| a.name == CHECKSUMS_ASSET)
+                    .map(|a| a.browser_download_url.clone());
                 return Ok(UpdateStatus::UpdateAvailable {
                     target: version.clone(),
                     channel,
                     is_downgrade: is_downgrade(cur, &version, channel),
                     asset_name: asset.name.clone(),
                     download_url: asset.browser_download_url.clone(),
+                    checksums_url,
                 });
             }
         }
@@ -289,19 +315,77 @@ pub fn extract_binary_bytes(asset_name: &str, payload: &[u8]) -> anyhow::Result<
 
         for entry in archive.entries()? {
             let mut entry = entry?;
+            // Only a regular file with the exact binary name: a symlink entry
+            // reads as zero bytes and would install an empty "binary".
+            if !entry.header().entry_type().is_file() {
+                continue;
+            }
             let path = entry.path()?;
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name == "flashagent" || name == "flashagent-tui" || name.starts_with("flashagent") {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            if matches!(name.as_str(), "flashagent-tui" | "flashagent") {
                 let mut binary_bytes = Vec::new();
                 std::io::Read::read_to_end(&mut entry, &mut binary_bytes)?;
+                if binary_bytes.is_empty() {
+                    anyhow::bail!("binary {name} in {asset_name} is empty");
+                }
                 return Ok(binary_bytes);
             }
         }
         anyhow::bail!("No executable binary found in archive {asset_name}");
     }
 
+    // Anything else that is an archive or a package must never be written in
+    // place of the executable (a .zip saved as flashagent.exe bricks the install).
+    const PACKAGES: [&str; 5] = [".zip", ".zst", ".deb", ".AppImage", ".tar.xz"];
+    if PACKAGES.iter().any(|ext| asset_name.ends_with(ext)) {
+        anyhow::bail!("{asset_name} is a package, not a binary; update with your package manager or the installer");
+    }
+
     // Direct binary payload
     Ok(payload.to_vec())
+}
+
+/// Hex SHA-256 recorded for `asset_name` in a `sha256sum`-format manifest.
+pub fn expected_checksum(manifest: &str, asset_name: &str) -> Option<String> {
+    manifest.lines().find_map(|line| {
+        let (hash, name) = line.split_once(char::is_whitespace)?;
+        let name = name.trim_start().trim_start_matches('*');
+        (name == asset_name).then(|| hash.to_ascii_lowercase())
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Verify `payload` against the release's checksum manifest. Releases that
+/// predate the manifest have none (`checksums_url` is `None`) and pass; a
+/// manifest that exists but lacks or contradicts the asset is a hard failure.
+pub async fn verify_checksum(
+    client: &reqwest::Client,
+    checksums_url: Option<&str>,
+    asset_name: &str,
+    payload: &[u8],
+) -> anyhow::Result<()> {
+    let Some(url) = checksums_url else {
+        return Ok(());
+    };
+    let resp = client.get(url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("could not fetch {CHECKSUMS_ASSET}: HTTP {}", resp.status());
+    }
+    let manifest = resp.text().await?;
+    let expected = expected_checksum(&manifest, asset_name)
+        .ok_or_else(|| anyhow::anyhow!("{asset_name} is not listed in {CHECKSUMS_ASSET}"))?;
+    let actual = sha256_hex(payload);
+    if actual != expected {
+        anyhow::bail!("checksum mismatch for {asset_name}: expected {expected}, got {actual}");
+    }
+    Ok(())
 }
 
 /// Test if the destination path can be written to by the current process.
@@ -395,14 +479,18 @@ pub fn atomic_replace_executable(target: &Path, new_binary_bytes: &[u8]) -> anyh
     Ok(())
 }
 
-/// Download asset payload and apply in-place update.
-pub async fn download_and_apply(download_url: &str, asset_name: &str) -> anyhow::Result<PathBuf> {
+/// Download asset payload, verify it against the release checksums, and
+/// apply the in-place update.
+pub async fn download_and_apply(download_url: &str, asset_name: &str, checksums_url: Option<&str>) -> anyhow::Result<PathBuf> {
     if is_dev_mode() {
         anyhow::bail!("In-app updater is disabled in development mode (running from source repository or cargo target build).");
     }
 
+    // Idle timeout rather than a total one: a 15 MB download on a slow link
+    // may take minutes but should never stall silently.
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(60))
         .user_agent(format!("FlashAgent-Updater/{}", current_version()))
         .build()?;
 
@@ -412,6 +500,7 @@ pub async fn download_and_apply(download_url: &str, asset_name: &str) -> anyhow:
     }
 
     let payload = resp.bytes().await?;
+    verify_checksum(&client, checksums_url, asset_name, &payload).await?;
     let binary_bytes = extract_binary_bytes(asset_name, &payload)?;
 
     let target_path = resolve_install_target()?;
@@ -429,8 +518,12 @@ pub async fn check_and_apply_background(channel: UpdateChannel) -> anyhow::Resul
 
     let status = check_for_updates(channel, DEFAULT_RELEASES_API).await?;
     match status {
-        UpdateStatus::UpdateAvailable { target, asset_name, download_url, .. } => {
-            download_and_apply(&download_url, &asset_name).await?;
+        // Never silently roll a newer beta back to an older published one
+        // (e.g. a locally built b233 while the release feed still says b218).
+        // Channel switches to Stable are explicit and still apply.
+        UpdateStatus::UpdateAvailable { is_downgrade: true, channel: UpdateChannel::Beta, .. } => Ok(None),
+        UpdateStatus::UpdateAvailable { target, asset_name, download_url, checksums_url, .. } => {
+            download_and_apply(&download_url, &asset_name, checksums_url.as_deref()).await?;
             Ok(Some(target))
         }
         UpdateStatus::UpToDate { .. } => Ok(None),
@@ -508,6 +601,24 @@ mod tests {
     }
 
     #[test]
+    fn newest_version_wins_over_list_order() {
+        let rel = |tag: &str, name: &str, pre: bool| GitHubRelease {
+            tag_name: tag.into(),
+            name: Some(name.into()),
+            prerelease: pre,
+            published_at: None,
+            body: None,
+            assets: vec![],
+        };
+        // GitHub order: newest *created* first. The rolling `beta` release was
+        // created long ago and later edited to b233.
+        let releases = vec![rel("b218", "FlashAgent b218", true), rel("b215", "FlashAgent b215", true), rel("beta", "FlashAgent b233", true)];
+        assert_eq!(find_target_release(&releases, UpdateChannel::Beta).unwrap().tag_name, "beta");
+        let stable = vec![rel("v1.0.0", "FlashAgent v1.0.0", false), rel("stable", "FlashAgent v1.2.0", false), rel("b300", "FlashAgent b300", true)];
+        assert_eq!(find_target_release(&stable, UpdateChannel::Stable).unwrap().tag_name, "stable");
+    }
+
+    #[test]
     fn test_is_downgrade_logic() {
         // Beta to Stable is always considered a downgrade to official release
         assert!(is_downgrade("b190", "v0.1.0", UpdateChannel::Stable));
@@ -539,6 +650,23 @@ mod tests {
 
         let extracted = extract_binary_bytes("flashagent-v0.1.0-linux-x86_64.tar.gz", &tar_gz_bytes).unwrap();
         assert_eq!(extracted, b"fake-elf-binary-content");
+    }
+
+    #[test]
+    fn packages_are_never_installed_as_the_binary() {
+        for name in ["flashagent-windows-b218-x86_64.zip", "flashagent_b218-1_amd64.deb", "FlashAgent-b218-x86_64.AppImage"] {
+            assert!(extract_binary_bytes(name, b"PK\x03\x04 not an exe").is_err(), "{name}");
+        }
+        assert_eq!(extract_binary_bytes("flashagent-linux-x86_64", b"\x7fELF").unwrap(), b"\x7fELF");
+    }
+
+    #[test]
+    fn checksum_manifest_lookup_and_digest() {
+        let manifest = "0f1e  flashagent-b233-linux-x86_64.tar.gz\nABCD *flashagent-windows-x86_64.exe\n";
+        assert_eq!(expected_checksum(manifest, "flashagent-b233-linux-x86_64.tar.gz").as_deref(), Some("0f1e"));
+        assert_eq!(expected_checksum(manifest, "flashagent-windows-x86_64.exe").as_deref(), Some("abcd"));
+        assert_eq!(expected_checksum(manifest, "missing"), None);
+        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     }
 
     #[test]

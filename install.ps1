@@ -109,7 +109,21 @@ if ($Version) {
     }
 }
 
-# Strategy 3: Latest pre-release / beta fallback
+# Strategy 3: the rolling `beta` pre-release (edited in place per build, so
+# it keeps an old creation date and is not first in the release list)
+if (-not $DownloadUrl) {
+    try {
+        $BetaRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/beta" -UseBasicParsing -Headers @{ "User-Agent" = "FlashAgent-Installer" }
+        foreach ($asset in $BetaRelease.assets) {
+            if ($asset.name -match "windows.*x86_64.*\.zip$") {
+                $DownloadUrl = $asset.browser_download_url
+                break
+            }
+        }
+    } catch {}
+}
+
+# Strategy 4: newest pre-release in the release list
 if (-not $DownloadUrl) {
     try {
         $ReleaseData = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases" -UseBasicParsing -Headers @{ "User-Agent" = "FlashAgent-Installer" }
@@ -130,7 +144,7 @@ if (-not $DownloadUrl) {
         # API failed / rate-limited -> Fallback to web scraping
     }
 
-    # Strategy 3b: GitHub web scraping fallback (immune to GitHub API rate limits)
+    # Strategy 4b: GitHub web scraping fallback (immune to GitHub API rate limits)
     if (-not $DownloadUrl) {
         try {
             $releasesHtml = (Invoke-WebRequest -Uri "https://github.com/$Repo/releases" -UseBasicParsing).Content

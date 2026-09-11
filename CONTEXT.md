@@ -24,19 +24,18 @@ LLM: OpenAI-compatible endpoints (any local or remote endpoints: LM Studio,
 Ollama, vLLM, OpenRouter, Gemini, and any compatible models). Embedded llama.cpp is a separate phase later.
 License: MIT. Releases: GitHub Releases, Stable + Beta channels. Telemetry: strictly opt-in anonymous counters.
 
-## Current Project Status
-- B0 UI Renderer Gate: ✅ PASS — Owner approved GO (prototype `b0.rs`: window, CJK/Cyrillic IME,
-  spring morphing; color fidelity fixed via non-sRGB 8-bit format; spacebar handled via `Named(Space)`)
-- A0 Skeleton: ✅ | A1 Data Layer: ✅ 5/5 | A2 LLM Adapter: ✅ 20/20 | A3 Loop: ✅ 9/9 | A4 Tools: ✅ 13/13 |
-  A5 Permissions: ✅ 14 (10 permissions + 4 diff) | A6 Memory: ✅ 5 | A7 TUI: ✅ 4 |
-  A8 Subagents: ✅ (core::subagents + tools::subagents)
-- Self-Updater Engine: ✅ (Dual-target user/system atomic replacement, periodic 4m background polling, `/channel` switching, `/update`)
-- Workspace Test Suite: 92 passed, 0 failed, `cargo clippy --workspace -- -D warnings` completely clean.
-- NEXT MILESTONE: A9 — MCP (client, manager, marketplace registry).
-- TUI Polish Notes:
-  Parallel streaming of reasoning and content (interleaved reasoning/content deltas fixed);
-  settled_boundary = min() across active indices; collapsed reasoning preserves preview line.
-  Truecolor ANSI rendering, non-breaking ANSI clipping, composer morphing, F-key shortcuts (F1 Context, F2 Reasoning, F3 Models, F4 Thinking, F5 Sampling, Shift+Tab Mode).
+## Current Project Status (b233, after the end-to-end audit — see `.audit/2026-09-11-e2e-audit-b233.md`)
+- B0 UI Renderer Gate: PASS (prototype `crates/ui/src/bin/b0.rs`; builds and runs its event loop; no golden frames exist yet).
+- Track A: A0–A9 closed. A10 `/goal` is PARTIAL: Accept All + max effort + 250-step cap + ask_user/memory
+  writes disabled + mode restore. Not implemented: snapshots, milestone commits, token/time budgets, blacklist, live plan, final report.
+- Track C: C0 self-updater closed (checksum verification via `SHA256SUMS` added in b233).
+- Workspace tests: 273 passed; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean.
+- What the product actually is today: `crates/tui` runs the whole stack in-process. `crates/svc` only holds the
+  updater, `crates/proto` and `crates/app` are placeholders, and `crates/data` (SQLite/FTS5) is not used by the
+  TUI — sessions are JSON files in `~/.flashagent/sessions/`.
+- Text-embedded tool calls (Hermes/Mistral/bare JSON) are executed by the loop since b233 (the parser used to be unwired).
+- Releases: build tags `bNNN` / `vX.Y.Z` trigger CI, which republishes the rolling `beta` pre-release or `stable` release.
+- NEXT MILESTONE: A10 remaining scope (see ROADMAP), or A11/A12.
 
 ## Verification (Mandatory before closing any milestone)
 ```bash
@@ -52,11 +51,13 @@ UI additionally requires golden frames. Never close a milestone without real com
 - Spacebar Key Handling in winit: `Key::Named(NamedKey::Space)`.
 - wgpu 27: `into_static` unavailable; use safe lifetime transmute for Window in App.
 - SQLite FTS5 `schema_version`: stored as `TEXT`.
-- Token Usage: parsed before choices; text tool scanner is decoupled from HTTP stream.
+- Token Usage: parsed before choices; text tool scanner is decoupled from HTTP stream (it runs in `core::loop_`).
+- Every assistant tool call in history must be answered by a tool message, also on cancel; only one system message.
+- Esc/Ctrl+C cancel cooperatively (the loop returns its history); hard abort is a 3 s fallback.
 
 ## Environment
-- Agent Sandbox: Headless Linux (x86_64, non-root user).
-- Owner System: Windows, PowerShell, multi-lingual.
+- Owner System: CachyOS Linux (Hyprland, fish shell); Windows and macOS are release targets.
+- Local runtime checks: LM Studio on `http://localhost:1234/v1` (e.g. `gemma-4-e2b-it-qat@q4_k_xl`).
 - API Stream Resilience: on stream disconnects, resume from current position using `.audit/` and `ROADMAP.md`.
 
 ## Collaboration Guidelines

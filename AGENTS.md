@@ -35,5 +35,5 @@ Base set is created progressively alongside milestones (`rust-core`, `ui-render`
 
 ## Verification
 - Core engine: `cargo test --workspace && cargo clippy --workspace -- -D warnings`
-- UI: the same + golden frames (`cargo test -p ui --features golden`)
+- UI: the same (`cargo test -p flashagent-ui`); golden frames are planned for B1 — no `golden` feature exists yet
 - No milestone is closed without the actual command execution output present in the audit log.

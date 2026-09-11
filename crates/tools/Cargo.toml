@@ -19,5 +19,8 @@ regex = "1"
 reqwest = { workspace = true }
 rayon = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

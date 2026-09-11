@@ -48,7 +48,7 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/model", "Open model selection menu or switch model", AutocompleteCategory::Command),
         AutocompleteItem::new("/verbose", "Toggle verbose mode for thoughts and tool calls (all, last, off)", AutocompleteCategory::Command),
         AutocompleteItem::new("/expand", "Toggle verbose mode for thoughts and tool calls (all, last, off)", AutocompleteCategory::Command),
-        AutocompleteItem::new("/mode", "Cycle permission mode (Manual, Auto, Planning, Bypass)", AutocompleteCategory::Command),
+        AutocompleteItem::new("/mode", "Cycle permission mode (Planning, Manual, Accept Edits, Accept All)", AutocompleteCategory::Command),
         AutocompleteItem::new("/goal", "Run autonomous task until goal is fully completed", AutocompleteCategory::Command),
         AutocompleteItem::new("/mcp", "List and manage Model Context Protocol servers", AutocompleteCategory::Command),
         AutocompleteItem::new("/compact", "Compact conversation context (optional: /compact <focus instructions>)", AutocompleteCategory::Command),
@@ -60,6 +60,8 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/commit", "Review changes and commit with /commit <message>", AutocompleteCategory::Command),
         AutocompleteItem::new("/editor", "Open external editor (nano/vim/code) to craft prompt", AutocompleteCategory::Command),
         AutocompleteItem::new("/export", "Export chat session to markdown, HTML, or JSONL", AutocompleteCategory::Command),
+        AutocompleteItem::new("/exit", "Save the session and quit", AutocompleteCategory::Command),
+        AutocompleteItem::new("/skills", "List skills from .agents/skills and ~/.flashagent/skills", AutocompleteCategory::Command),
     ]
 }
 
@@ -161,18 +163,6 @@ pub fn load_skills(cwd: &Path) -> Vec<AutocompleteItem> {
                 AutocompleteCategory::Skill,
             ));
         }
-    }
-
-    // Default fallback skills if none found on disk
-    if skills.is_empty() {
-        skills.push(AutocompleteItem::new("/skill:rust-core", "Build, test, or clippy verification of workspace", AutocompleteCategory::Skill));
-        skills.push(AutocompleteItem::new("/rust-core", "Build, test, or clippy verification of workspace", AutocompleteCategory::Skill));
-        skills.push(AutocompleteItem::new("/skill:ui-render", "UI text rendering and golden frame tests", AutocompleteCategory::Skill));
-        skills.push(AutocompleteItem::new("/ui-render", "UI text rendering and golden frame tests", AutocompleteCategory::Skill));
-        skills.push(AutocompleteItem::new("/skill:mcp", "MCP server configuration and protocol test", AutocompleteCategory::Skill));
-        skills.push(AutocompleteItem::new("/mcp-skill", "MCP server configuration and protocol test", AutocompleteCategory::Skill));
-        skills.push(AutocompleteItem::new("/skill:release", "Release checklist and audit verification", AutocompleteCategory::Skill));
-        skills.push(AutocompleteItem::new("/release", "Release checklist and audit verification", AutocompleteCategory::Skill));
     }
 
     skills

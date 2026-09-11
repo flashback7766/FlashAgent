@@ -38,7 +38,7 @@ fn parse_hunks(patch_text: &str) -> Result<Vec<Hunk>, ToolError> {
             }
 
             current_hunk = Some(Hunk {
-                old_start: start_line.max(1),
+                old_start: start_line,
                 old_lines: Vec::new(),
                 new_lines: Vec::new(),
             });
@@ -71,114 +71,65 @@ fn parse_hunks(patch_text: &str) -> Result<Vec<Hunk>, ToolError> {
     Ok(hunks)
 }
 
+/// Apply parsed hunks to `orig`, locating each hunk by its context/removed
+/// lines (tolerating line drift). Pure: shared by the tool and its preview.
+fn apply_hunks(orig: &str, hunks: &[Hunk], rel_path: &str) -> Result<String, ToolError> {
+    let mut file_lines: Vec<String> = orig.lines().map(str::to_string).collect();
+    // Hunks are applied top to bottom; each one shifts the lines below it.
+    let mut drift: isize = 0;
+    for (idx, hunk) in hunks.iter().enumerate() {
+        let expected_len = hunk.old_lines.len();
+        let anchored = (hunk.old_start as isize - 1 + drift).max(0) as usize;
+
+        if expected_len == 0 {
+            // Pure insertion (`@@ -N,0 +M,K @@`): no lines to locate; the
+            // old start names the line the insertion follows.
+            let at = (hunk.old_start as isize + drift).clamp(0, file_lines.len() as isize) as usize;
+            file_lines.splice(at..at, hunk.new_lines.iter().cloned());
+            drift += hunk.new_lines.len() as isize;
+            continue;
+        }
+
+        let matches_at = |i: usize| i + expected_len <= file_lines.len() && file_lines[i..i + expected_len] == hunk.old_lines[..];
+        let pos = if matches_at(anchored) {
+            anchored
+        } else {
+            (0..=file_lines.len().saturating_sub(expected_len)).find(|&i| matches_at(i)).ok_or_else(|| {
+                ToolError::Other(format!("hunk #{} failed to match target lines in '{rel_path}'", idx + 1))
+            })?
+        };
+        file_lines.splice(pos..pos + expected_len, hunk.new_lines.iter().cloned());
+        drift += hunk.new_lines.len() as isize - expected_len as isize;
+    }
+
+    let mut new_content = file_lines.join("\n");
+    if orig.ends_with('\n') && !new_content.is_empty() {
+        new_content.push('\n');
+    }
+    Ok(new_content)
+}
+
 /// Applies a unified diff patch to a target file.
 pub fn patch_file(cwd: &Path, rel_path: &str, patch_text: &str) -> Result<String, ToolError> {
     let full = cwd.join(rel_path);
     if !full.exists() {
         return Err(ToolError::Other(format!("target file not found: {rel_path}")));
     }
-
     let orig_content = std::fs::read_to_string(&full)
         .map_err(|e| ToolError::Other(format!("failed to read file '{rel_path}': {e}")))?;
-
     let hunks = parse_hunks(patch_text)?;
-    let mut file_lines: Vec<String> = orig_content.lines().map(str::to_string).collect();
-
-    // Apply hunks in reverse or with offset adjustment
-    // To handle line drift reliably, we apply each hunk by locating its old_lines in file_lines
-    for (idx, hunk) in hunks.iter().enumerate() {
-        let expected_len = hunk.old_lines.len();
-        if expected_len == 0 {
-            continue;
-        }
-
-        // Search starting near hunk.old_start - 1
-        let preferred_pos = hunk.old_start.saturating_sub(1);
-        let mut match_pos = None;
-
-        // Check exact position first
-        if preferred_pos + expected_len <= file_lines.len()
-            && file_lines[preferred_pos..preferred_pos + expected_len] == hunk.old_lines[..]
-        {
-            match_pos = Some(preferred_pos);
-        } else {
-            // Search nearby within file
-            for i in 0..=file_lines.len().saturating_sub(expected_len) {
-                if file_lines[i..i + expected_len] == hunk.old_lines[..] {
-                    match_pos = Some(i);
-                    break;
-                }
-            }
-        }
-
-        let pos = match_pos.ok_or_else(|| {
-            ToolError::Other(format!(
-                "hunk #{} failed to match target lines in '{rel_path}'",
-                idx + 1
-            ))
-        })?;
-
-        // Replace matched lines with hunk.new_lines
-        file_lines.splice(pos..pos + expected_len, hunk.new_lines.clone());
-    }
-
-    let mut new_content = file_lines.join("\n");
-    if orig_content.ends_with('\n') {
-        new_content.push('\n');
-    }
-
+    let new_content = apply_hunks(&orig_content, &hunks, rel_path)?;
     std::fs::write(&full, &new_content)
         .map_err(|e| ToolError::Other(format!("failed to write patched file '{rel_path}': {e}")))?;
-
-    Ok(format!(
-        "Successfully applied {} hunk(s) to '{rel_path}'",
-        hunks.len()
-    ))
+    Ok(format!("Successfully applied {} hunk(s) to '{rel_path}'", hunks.len()))
 }
 
 /// Computes the prospective new content for write preview.
 pub fn preview_patch(cwd: &Path, rel_path: &str, patch_text: &str) -> Option<String> {
-    let full = cwd.join(rel_path);
-    let orig_content = std::fs::read_to_string(&full).ok()?;
+    let orig_content = std::fs::read_to_string(cwd.join(rel_path)).ok()?;
     let hunks = parse_hunks(patch_text).ok()?;
-    let mut file_lines: Vec<String> = orig_content.lines().map(str::to_string).collect();
-
-    for hunk in &hunks {
-        let expected_len = hunk.old_lines.len();
-        if expected_len == 0 {
-            continue;
-        }
-        let preferred_pos = hunk.old_start.saturating_sub(1);
-        let mut match_pos = None;
-
-        if preferred_pos + expected_len <= file_lines.len()
-            && file_lines[preferred_pos..preferred_pos + expected_len] == hunk.old_lines[..]
-        {
-            match_pos = Some(preferred_pos);
-        } else {
-            for i in 0..=file_lines.len().saturating_sub(expected_len) {
-                if file_lines[i..i + expected_len] == hunk.old_lines[..] {
-                    match_pos = Some(i);
-                    break;
-                }
-            }
-        }
-
-        let pos = match_pos?;
-        file_lines.splice(pos..pos + expected_len, hunk.new_lines.clone());
-    }
-
-    let mut new_content = file_lines.join("\n");
-    if orig_content.ends_with('\n') {
-        new_content.push('\n');
-    }
-
-    Some(flashagent_core::unified(
-        Some(&orig_content),
-        &new_content,
-        rel_path,
-        3,
-    ))
+    let new_content = apply_hunks(&orig_content, &hunks, rel_path).ok()?;
+    Some(flashagent_core::unified(Some(&orig_content), &new_content, rel_path, 3))
 }
 
 #[cfg(test)]
@@ -197,5 +148,26 @@ mod tests {
 
         let updated = std::fs::read_to_string(&file).unwrap();
         assert_eq!(updated, "fn foo() -> i32 {\n    42\n}\n");
+    }
+
+    #[test]
+    fn pure_insertion_hunks_are_applied_not_skipped() {
+        let temp = crate::testing::tempdir();
+        std::fs::write(temp.join("a.txt"), "one\ntwo\n").unwrap();
+        // Insert at the top (-0,0) and after line 2 (-2,0).
+        let patch = "@@ -0,0 +1,1 @@\n+zero\n@@ -2,0 +4,1 @@\n+three\n";
+        patch_file(&temp, "a.txt", patch).unwrap();
+        assert_eq!(std::fs::read_to_string(temp.join("a.txt")).unwrap(), "zero\none\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn preview_matches_what_patch_writes() {
+        let temp = crate::testing::tempdir();
+        std::fs::write(temp.join("b.txt"), "a\nb\nc\n").unwrap();
+        let patch = "@@ -2,1 +2,1 @@\n-b\n+B\n";
+        let preview = preview_patch(&temp, "b.txt", patch).unwrap();
+        assert!(preview.contains("-b") && preview.contains("+B"));
+        patch_file(&temp, "b.txt", patch).unwrap();
+        assert_eq!(std::fs::read_to_string(temp.join("b.txt")).unwrap(), "a\nB\nc\n");
     }
 }

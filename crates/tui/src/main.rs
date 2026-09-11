@@ -605,18 +605,29 @@ impl Renderer {
                 format!("{border_color}╭─{title}{}╮{reset}", "─".repeat(dash_w)),
             ));
 
-            if let Some(cmd) = req.args_json.trim().strip_prefix("{\"command\":\"").and_then(|s| s.strip_suffix("\"}")) {
-                let cmd_clipped = clip_ansi(cmd, inner_w.saturating_sub(4));
-                tail.push((
-                    LineKind::System,
-                    pad_box_row(&format!(" \x1b[38;2;160;155;145mcommand:\x1b[0m \x1b[1;38;2;240;235;225m{cmd_clipped}\x1b[0m"), width),
-                ));
-            } else if let Some(path) = req.args_json.trim().strip_prefix("{\"path\":\"").and_then(|s| s.split('"').next()) {
-                let path_clipped = clip_ansi(path, inner_w.saturating_sub(4));
-                tail.push((
-                    LineKind::System,
-                    pad_box_row(&format!(" \x1b[38;2;160;155;145mtarget:\x1b[0m \x1b[1;38;2;240;235;225m{path_clipped}\x1b[0m"), width),
-                ));
+            // The user is approving exactly this: show it whatever the JSON
+            // formatting, and never let model-supplied escape codes restyle
+            // or hide part of it.
+            let args = parse_card_args(&req.args_json);
+            let field = |k: &str| args.get(k).and_then(|v| v.as_str()).map(card_safe);
+            let label_row = |label: &str, value: &str| {
+                pad_box_row(
+                    &format!(" \x1b[38;2;160;155;145m{label}\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m", clip_ansi(value, inner_w.saturating_sub(label.len() + 4))),
+                    width,
+                )
+            };
+            if let Some(cmd) = field("command") {
+                let lines: Vec<&str> = cmd.lines().collect();
+                for (i, line) in lines.iter().take(4).enumerate() {
+                    tail.push((LineKind::System, label_row(if i == 0 { "command:" } else { "        " }, line)));
+                }
+                if lines.len() > 4 {
+                    tail.push((LineKind::System, label_row("        ", &format!("... {} more line(s)", lines.len() - 4))));
+                }
+            } else if let Some(path) = field("path") {
+                tail.push((LineKind::System, label_row("target:", &path)));
+            } else if args.as_object().is_some_and(|o| !o.is_empty()) {
+                tail.push((LineKind::System, label_row("args:", &card_safe(&args.to_string()))));
             }
 
             if let Some(ref diff) = req.diff {
@@ -1116,10 +1127,10 @@ async fn main() -> Result<()> {
                 }
                 println!("Checking for updates on {} channel...", config.update_channel.label());
                 match flashagent_svc::updater::check_for_updates(config.update_channel, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
-                    Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, is_downgrade, .. }) => {
+                    Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, is_downgrade, checksums_url, .. }) => {
                         let op = if is_downgrade { "Downgrading" } else { "Updating" };
                         println!("{op} FlashAgent to {target} (downloading {asset_name})...");
-                        let path = flashagent_svc::updater::download_and_apply(&download_url, &asset_name).await?;
+                        let path = flashagent_svc::updater::download_and_apply(&download_url, &asset_name, checksums_url.as_deref()).await?;
                         println!("Update successfully installed to {}", path.display());
                     }
                     Ok(flashagent_svc::updater::UpdateStatus::UpToDate { current, channel }) => {
@@ -1199,6 +1210,7 @@ async fn main() -> Result<()> {
     // Process-lifetime objects: leaked once, so the spawned loop task can hold
     // &'static references (the process is the session).
     let backend = flashagent_llm::OpenAiCompat::new(&url, &model, api_key);
+    backend.set_max_retries(config.network_retries);
     let discovery = discovery_task.await.unwrap_or(None);
 
     // If model was not specified, auto-detect loaded model or first available model
@@ -1280,6 +1292,10 @@ async fn main() -> Result<()> {
     });
 
     let state = Arc::new(PermissionState::new(config.permission_mode, gate.clone()));
+    // MCP config `read_only`/`read_only_tools` and server readOnlyHint
+    // annotations decide what counts as a read for external tools.
+    let hint_mgr = mcp_manager.clone();
+    state.set_read_only_hint(Arc::new(move |tool: &str| hint_mgr.is_tool_read_only(tool)));
     let tools_arc: Arc<BuiltinTools> = Arc::new(BuiltinTools::new(BuiltinToolsConfig {
         cwd: cwd.clone(),
         brave_api_key: None,
@@ -1298,7 +1314,7 @@ async fn main() -> Result<()> {
     // Memory injection: project + global docs into the first user message.
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_default();
     let docs = flashagent_core::collect(&cwd, &home.join(".flashagent"));
-    let memory_block = flashagent_core::injection_block(&docs, 2000);
+    let memory_block = flashagent_core::injection_block(&docs, config.token_budget);
     let memory_docs = docs.len();
 
     let default_hook = std::panic::take_hook();
@@ -1318,9 +1334,16 @@ async fn main() -> Result<()> {
             info,
             std::backtrace::Backtrace::capture()
         );
-        let _ = std::fs::write("crash.log", log_content);
+        // Never into the user's project directory.
+        let log_path = flashagent_home_dir()
+            .map(|d| {
+                let _ = std::fs::create_dir_all(&d);
+                d.join("crash.log")
+            })
+            .unwrap_or_else(|| std::env::temp_dir().join("flashagent-crash.log"));
+        let _ = std::fs::write(&log_path, log_content);
         eprintln!("\x1b[1;38;2;245;120;120mFlashAgent encountered an unexpected crash.\x1b[0m");
-        eprintln!("Crash report written to ./crash.log. Please submit an issue at: https://github.com/flashback7766/FlashAgent/issues");
+        eprintln!("Crash report written to {}. Please submit an issue at: https://github.com/flashback7766/FlashAgent/issues", log_path.display());
         default_hook(info);
     }));
 
@@ -1461,9 +1484,10 @@ fn thinking_summary_str(source: &BackendSource, current_effort: &str) -> String 
 
 #[derive(Debug, Clone)]
 enum UpdateNotice {
-    Available { version: String, asset_name: String, download_url: String },
+    Available { version: String, asset_name: String, download_url: String, checksums_url: Option<String> },
     Ready { version: String },
     UpToDate { version: String },
+    Failed { error: String },
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1739,6 +1763,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let mut running = false;
     let mut active_turn_handle: Option<tokio::task::JoinHandle<()>> = None;
     let mut active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
+    // Set when the user interrupts: the loop is asked to stop cooperatively so
+    // it can hand back a consistent history; a hard abort is the fallback.
+    let mut cancel_requested: Option<std::time::Instant> = None;
+    let mut aborted_turn: Option<u64> = None;
     let mut turn_counter: u64 = 0;
     let mut all_expanded = false;
     let mut last_expanded = false;
@@ -1752,7 +1780,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let mut context_modal: Option<ContextModal> = None;
     let mut mcp_modal: Option<McpModal> = None;
     let mut context_usage = ContextUsage::new(context_capacity);
-    update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+    update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
     let mut autocomplete_idx = 0usize;
     let mut tick_n = 0usize;
     let mut renderer = Renderer::new();
@@ -1769,7 +1797,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     });
 
     let mut update_banner: Option<String> = None;
-    let mut pending_update: Option<(String, String, String)> = None;
+    let mut pending_update: Option<(String, String, String, Option<String>)> = None;
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
     let (channel_watch_tx, mut channel_watch_rx) = tokio::sync::watch::channel(app_config.update_channel);
     if app_config.auto_check_updates && !flashagent_svc::updater::is_dev_mode() {
@@ -1806,17 +1834,16 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         let ch = app_config.update_channel;
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-            if let Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, .. }) =
+            if let Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, checksums_url, .. }) =
                 flashagent_svc::updater::check_for_updates(ch, flashagent_svc::updater::DEFAULT_RELEASES_API).await
             {
-                let _ = silent_tx_clone.send(UpdateNotice::Available { version: target, asset_name, download_url });
+                let _ = silent_tx_clone.send(UpdateNotice::Available { version: target, asset_name, download_url, checksums_url });
             }
         });
     }
 
     let (term_w, term_h) = crossterm::terminal::size().unwrap_or((100, 24));
     let mut last_term_size = (term_w, term_h);
-    let mode_str = format!("{:?}", perm.state().mode());
     let thinking_summary = if let Some(ref p) = source.profile() {
         if p.supported && !p.presets.is_empty() {
             format!("{} [{}]", current_effort, p.presets.join(", "))
@@ -1831,7 +1858,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let initial_card = welcome_card_responsive_opts(
         &current_model,
         &cwd_display,
-        &mode_str,
+        perm.state().mode().label(),
         memory_docs,
         Some(&thinking_summary),
         current_context.as_deref(),
@@ -1851,20 +1878,33 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         let msg: ChatMessage = saved_msg.into();
                         match msg.role {
                             flashagent_llm::Role::User => {
-                                chat.push_user(&msg.content);
+                                chat.push_user(extract_user_prompt(&msg.content));
                                 history.push(msg);
                             }
                             flashagent_llm::Role::Assistant => {
-                                chat.push_assistant(&msg.content);
+                                if !msg.content.trim().is_empty() {
+                                    chat.push_assistant(&msg.content);
+                                }
                                 history.push(msg);
                             }
-                            _ => {
-                                history.push(msg);
+                            // The fresh system prompt (current cwd/model) wins;
+                            // only a compaction summary carries over. A second
+                            // system message mid-history breaks strict chat
+                            // templates (Gemma, Qwen).
+                            flashagent_llm::Role::System => {
+                                if let Some(pos) = msg.content.find(COMPACTED_MARK) {
+                                    history[0].content.push_str(&msg.content[pos..]);
+                                }
                             }
+                            flashagent_llm::Role::Tool => history.push(msg),
                         }
                     }
                     chat.push_system(&format!("Resumed session '{resume_id}' ({} messages loaded).", history.len()));
+                } else {
+                    chat.push_line(LineKind::ToolError, format!("Session file {} is unreadable; starting fresh.", session_path.display()));
                 }
+            } else {
+                chat.push_line(LineKind::ToolError, format!("No saved session '{resume_id}' in ~/.flashagent/sessions; starting fresh."));
             }
         }
     }
@@ -1920,7 +1960,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     &mut renderer,
                     &current_model,
                     &cwd_display,
-                    &mode_str,
+                    perm.state().mode().label(),
                     memory_docs,
                     &source,
                     &current_effort,
@@ -1992,8 +2032,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         let ev = tokio::select! {
             Some(notice) = update_rx.recv() => {
                 match notice {
-                    UpdateNotice::Available { version, asset_name, download_url } => {
-                        pending_update = Some((version.clone(), asset_name, download_url));
+                    UpdateNotice::Available { version, asset_name, download_url, checksums_url } => {
+                        pending_update = Some((version.clone(), asset_name, download_url, checksums_url));
                         update_banner = Some(format!("Update Available: {version} · Press Ctrl+U to install"));
                         if let Some(ref mut s) = settings_view {
                             s.update_check_status = Some(format!("Available: {version} (Press Ctrl+U)"));
@@ -2010,6 +2050,13 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         if let Some(ref mut s) = settings_view {
                             s.update_check_status = Some(format!("Up to date ({version})"));
                         }
+                        custom_placeholder = Some(format!("FlashAgent {version} is up to date"));
+                    }
+                    UpdateNotice::Failed { error } => {
+                        if let Some(ref mut s) = settings_view {
+                            s.update_check_status = Some(format!("Error: {error}"));
+                        }
+                        chat.push_line(LineKind::ToolError, format!("Update failed: {error}"));
                     }
                 }
                 renderer.request_reprint();
@@ -2022,6 +2069,28 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             _ = tick.tick() => {
                 tick_n += 1;
                 tip_animator.tick();
+                // The loop did not wind down in time (a tool ignoring
+                // cancellation): abort it. History keeps the prompt but not
+                // the partial turn, and the user is told so.
+                if running && cancel_requested.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(3)) {
+                    if let Some(handle) = active_turn_handle.take() {
+                        handle.abort();
+                    }
+                    running = false;
+                    turn_started = None;
+                    cancel_requested = None;
+                    aborted_turn = Some(turn_counter);
+                    token_tracker.on_finished();
+                    if let Some(saved) = goal_state.take() {
+                        tools_arc.set_goal_mode(false);
+                        perm.state().set_mode(saved.mode);
+                        current_effort = saved.effort.clone();
+                        max_steps = saved.max_steps;
+                    }
+                    chat.on_event(&flashagent_core::LoopEvent::Done(flashagent_core::DoneReason::Cancelled));
+                    custom_placeholder = Some("Turn aborted; its partial output was not kept in the model context".to_string());
+                    renderer.request_reprint();
+                }
                 let current_term_size = crossterm::terminal::size().unwrap_or((100, 24));
                 let term_resized = current_term_size != last_term_size;
                 if term_resized {
@@ -2033,7 +2102,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         &mut renderer,
                         &current_model,
                         &cwd_display,
-                        &mode_str,
+                        perm.state().mode().label(),
                         memory_docs,
                         &source,
                         &current_effort,
@@ -2068,7 +2137,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         match ev {
             UiEvent::BackgroundRecap { turn_id, recap, suggestion } => {
                 let formatted = format!("  \x1b[38;2;155;165;180mrecap:\x1b[0m \x1b[38;2;225;230;240m{recap}\x1b[0m");
-                if turn_id == turn_counter {
+                // `turn_id` is the ordinal of the user message the recap is
+                // about; regenerate and steering make turn_counter drift.
+                let current_turn = chat.user_turn_count() as u64;
+                if turn_id == current_turn {
                     chat.update_or_push_turn_system("recap:", &formatted);
                     latest_suggestion = suggestion.clone();
                     custom_placeholder = None;
@@ -2076,10 +2148,17 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         suggested_prompt = suggestion;
                     }
                     renderer.request_reprint();
-                } else if turn_id < turn_counter {
+                } else if turn_id < current_turn {
                     chat.attach_turn_recap(turn_id, &formatted);
                     renderer.request_reprint();
                 }
+            }
+            UiEvent::ToolTestResult(verdict) => {
+                match settings_view.as_mut() {
+                    Some(s) => s.tool_test_status = Some(verdict),
+                    None => chat.push_system(&format!("Tool test: {verdict}")),
+                }
+                renderer.request_reprint();
             }
             UiEvent::ServerDiscovered(disc) => {
                 let url = disc.base_url.to_lowercase();
@@ -2104,7 +2183,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         context_usage.total_capacity = new_ctx_len.max(1024);
                         tools_arc.set_context_window(Some(new_ctx_len));
                         source.set_model(&current_model);
-                        update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                        update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
 
                         if model_changed {
                             app_config.model = current_model.clone();
@@ -2122,7 +2201,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             &mut renderer,
                             &current_model,
                             &cwd_display,
-                            &format!("{:?}", perm.state().mode()),
+                            perm.state().mode().label(),
                             memory_docs,
                             &source,
                             &current_effort,
@@ -2170,13 +2249,18 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 if chat.take_needs_reprint() {
                     renderer.request_reprint();
                 }
-                update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
             }
-            UiEvent::Finished(res) => {
+            UiEvent::Finished { turn_id, result: res } => {
+                if turn_id != turn_counter || aborted_turn == Some(turn_id) {
+                    // A turn that was hard-aborted (or superseded) reporting late.
+                    continue;
+                }
                 running = false;
                 turn_started = None;
                 active_turn_handle = None;
                 active_steer_tx = None;
+                cancel_requested = None;
                 cancel.store(false, Ordering::Relaxed);
                 token_tracker.on_finished();
 
@@ -2198,7 +2282,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 match res {
                     Ok((h, reason)) => {
                         history = h;
-                        update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                        update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
 
                         if reason == DoneReason::Cancelled {
                             suggested_prompt = None;
@@ -2213,7 +2297,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             {
                                 let source_compact = source.clone();
                                 if let Some(freed) = compact_context(&source_compact, &mut history, None).await {
-                                    update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                    update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
                                     custom_placeholder = Some(format!("Context auto-compacted (~{} freed)", ContextUsage::format_tokens(freed)));
                                 }
                             }
@@ -2232,7 +2316,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             let source_bg = source.clone();
                             let tx_bg = tx.clone();
                             let history_bg = history.clone();
-                            let turn_id = turn_counter;
+                            let turn_id = chat.user_turn_count() as u64;
                             tokio::spawn(async move {
                                 if let Some((llm_recap, llm_suggestion)) = generate_llm_recap_and_suggestion(&source_bg, &history_bg).await {
                                     let _ = tx_bg.send(UiEvent::BackgroundRecap {
@@ -2246,9 +2330,11 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     }
                     Err(e) => {
                         chat.on_event(&LoopEvent::Done(DoneReason::Failed));
-                        chat.push_user(&format!("[error: {e}]"));
+                        chat.push_line(LineKind::ToolError, format!("Error: {e}"));
+                        chat.push_system("Press Ctrl+R to retry the last prompt.");
                         suggested_prompt = None;
                         custom_placeholder = None;
+                        renderer.request_reprint();
                     }
                 }
             }
@@ -2261,7 +2347,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         &mut renderer,
                         &current_model,
                         &cwd_display,
-                        &mode_str,
+                        perm.state().mode().label(),
                         memory_docs,
                         &source,
                         &current_effort,
@@ -2323,12 +2409,17 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             UiEvent::Key(code, mods) => {
                 // If settings view is open, it captures all keyboard input
                 if let Some(ref mut settings) = settings_view {
+                    // What the view was opened with (live session values).
+                    let shown_mode = goal_state.as_ref().map_or(perm.state().mode(), |g| g.mode);
+                    let shown_effort = goal_state.as_ref().map_or(current_effort.clone(), |g| g.effort.clone());
                     let action = settings.handle_key(code, mods);
                     match action {
                         SettingsAction::Close => {
                             let old_model = current_model.clone();
-                            let old_effort = current_effort.clone();
-                            let old_mode = perm.state().mode();
+                            let old_effort = shown_effort.clone();
+                            let old_mode = shown_mode;
+                            let chosen_mode = settings.config.permission_mode;
+                            let chosen_effort = settings.config.thinking_effort.clone();
                             let mut changes = Vec::new();
                             if settings.config.permission_mode != old_mode {
                                 changes.push(format!("mode ({})", settings.config.permission_mode.label()));
@@ -2347,22 +2438,34 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             }
                             suggested_prompt = None;
 
-                            app_config = settings.config.clone();
+                            app_config = persisted_from_view(&settings.config, &app_config, shown_mode, &shown_effort);
                             let _ = app_config.save();
                             tools_arc.set_toolset_profile(app_config.toolset_profile);
+                            tools_arc.set_web_enabled(app_config.free_search);
+                            source.0.set_max_retries(app_config.network_retries);
                             if app_config.model != current_model {
                                 current_model = app_config.model.clone();
                                 source.set_model(&current_model);
                             }
-                            perm.state().set_mode(app_config.permission_mode);
-                            current_effort = app_config.thinking_effort.clone();
+                            // During /goal the live mode/effort are the goal's;
+                            // edits apply to what the goal restores afterwards.
+                            match goal_state.as_mut() {
+                                Some(g) => {
+                                    g.mode = chosen_mode;
+                                    g.effort = chosen_effort;
+                                }
+                                None => {
+                                    perm.state().set_mode(chosen_mode);
+                                    current_effort = chosen_effort;
+                                }
+                            }
                             settings_view = None;
                             refresh_welcome_card_if_before_user_msg(
                                 &mut chat,
                                 &mut renderer,
                                 &current_model,
                                 &cwd_display,
-                                &format!("{:?}", perm.state().mode()),
+                                perm.state().mode().label(),
                                 memory_docs,
                                 &source,
                                 &current_effort,
@@ -2372,19 +2475,33 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             renderer.request_reprint();
                         }
                         SettingsAction::DiscoverModels => {
-                            app_config = settings.config.clone();
+                            app_config = persisted_from_view(&settings.config, &app_config, shown_mode, &shown_effort);
                             let _ = app_config.save();
-                            if let Some(disc) = source.discover_server().await {
-                                settings.available_models = disc.models.into_iter().map(|m| m.id).collect();
+                            // Probe the URL the user just typed, not the one
+                            // this session is connected to.
+                            let key = settings.config.api_key.clone().or_else(|| std::env::var("FLASHAGENT_API_KEY").ok());
+                            let probe = flashagent_llm::OpenAiCompat::new(&settings.config.backend_url, "", key);
+                            settings.available_models = match probe.discover_server().await {
+                                Some(disc) => disc.models.into_iter().map(|m| m.id).collect(),
+                                None => Vec::new(),
+                            };
+                            if settings.config.backend_url.trim_end_matches('/') != source.0.base_url() {
+                                custom_placeholder = Some("Backend URL saved; restart FlashAgent to connect to it".to_string());
                             }
                             renderer.request_reprint();
                         }
                         SettingsAction::RunToolTest => {
-                            settings.tool_test_status = Some("Tool calling test passed".into());
+                            settings.tool_test_status = Some(format!("Probing {current_model}..."));
+                            let source_bg = source.clone();
+                            let tx_bg = tx.clone();
+                            tokio::spawn(async move {
+                                let verdict = run_tool_call_probe(&source_bg).await;
+                                let _ = tx_bg.send(UiEvent::ToolTestResult(verdict));
+                            });
                             renderer.request_reprint();
                         }
                         SettingsAction::OpenModelMenu => {
-                            app_config = settings.config.clone();
+                            app_config = persisted_from_view(&settings.config, &app_config, shown_mode, &shown_effort);
                             let _ = app_config.save();
                             settings_view = None;
                             if let Some(mut menu) = build_model_menu(&source) {
@@ -2396,7 +2513,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             renderer.request_reprint();
                         }
                         SettingsAction::OpenEffortMenu => {
-                            app_config = settings.config.clone();
+                            app_config = persisted_from_view(&settings.config, &app_config, shown_mode, &shown_effort);
                             let _ = app_config.save();
                             settings_view = None;
                             let mut menu = build_effort_menu(&source);
@@ -2405,7 +2522,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             renderer.request_reprint();
                         }
                         SettingsAction::OpenWizard => {
-                            app_config = settings.config.clone();
+                            app_config = persisted_from_view(&settings.config, &app_config, shown_mode, &shown_effort);
                             let _ = app_config.save();
                             settings_view = None;
                             let completed = flashagent_tui::run_wizard_channel(&mut app_config, &mut rx).await.unwrap_or(false);
@@ -2419,7 +2536,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     &mut renderer,
                                     &current_model,
                                     &cwd_display,
-                                    &format!("{:?}", perm.state().mode()),
+                                    perm.state().mode().label(),
                                     memory_docs,
                                     &source,
                                     &current_effort,
@@ -2430,7 +2547,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             renderer.request_reprint();
                         }
                         SettingsAction::OpenSamplingMenu => {
-                            app_config = settings.config.clone();
+                            app_config = persisted_from_view(&settings.config, &app_config, shown_mode, &shown_effort);
                             let _ = app_config.save();
                             settings_view = None;
                             sampling_view = Some(SamplingView::new(&app_config));
@@ -2445,14 +2562,14 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 let update_tx_clone = update_tx.clone();
                                 tokio::spawn(async move {
                                     match flashagent_svc::updater::check_for_updates(ch, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
-                                        Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, .. }) => {
-                                            let _ = update_tx_clone.send(UpdateNotice::Available { version: target, asset_name, download_url });
+                                        Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, checksums_url, .. }) => {
+                                            let _ = update_tx_clone.send(UpdateNotice::Available { version: target, asset_name, download_url, checksums_url });
                                         }
                                         Ok(flashagent_svc::updater::UpdateStatus::UpToDate { current, .. }) => {
                                             let _ = update_tx_clone.send(UpdateNotice::UpToDate { version: current });
                                         }
                                         Err(e) => {
-                                            let _ = update_tx_clone.send(UpdateNotice::UpToDate { version: format!("Error: {e}") });
+                                            let _ = update_tx_clone.send(UpdateNotice::Failed { error: e.to_string() });
                                         }
                                     }
                                 });
@@ -2460,7 +2577,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             renderer.request_reprint();
                         }
                         SettingsAction::OpenMcpMenu => {
-                            app_config = settings.config.clone();
+                            app_config = persisted_from_view(&settings.config, &app_config, shown_mode, &shown_effort);
                             let _ = app_config.save();
                             settings_view = None;
                             let mgr = tools_arc.mcp_manager();
@@ -2599,7 +2716,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     &mut renderer,
                                     &current_model,
                                     &cwd_display,
-                                    &format!("{:?}", perm.state().mode()),
+                                    perm.state().mode().label(),
                                     memory_docs,
                                     &source,
                                     &current_effort,
@@ -2633,7 +2750,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     &mut renderer,
                                     &current_model,
                                     &cwd_display,
-                                    &format!("{:?}", perm.state().mode()),
+                                    perm.state().mode().label(),
                                     memory_docs,
                                     &source,
                                     &current_effort,
@@ -2656,8 +2773,19 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
 
                 if let Some(req) = question_gate.pending() {
                     match code {
+                        // Ctrl+C interrupts the turn, as everywhere else while it runs.
                         KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('\u{0441}') | KeyCode::Char('\u{0421}')
-                            if mods.contains(KeyModifiers::CONTROL) => break 'main_loop,
+                            if mods.contains(KeyModifiers::CONTROL) =>
+                        {
+                            question_ui_state = QuestionUiState::default();
+                            question_gate.cancel();
+                            if running && cancel_requested.is_none() {
+                                cancel.store(true, Ordering::Relaxed);
+                                cancel_requested = Some(std::time::Instant::now());
+                                active_steer_tx = None;
+                                custom_placeholder = Some("Interrupting...".to_string());
+                            }
+                        }
                         KeyCode::Esc => {
                             if req.options.is_some() && question_ui_state.is_writing {
                                 question_ui_state.is_writing = false;
@@ -2778,8 +2906,19 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
 
                 if gate.pending().is_some() {
                     match code {
+                        // Ctrl+C refuses the call and interrupts the turn.
                         KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('\u{0441}') | KeyCode::Char('\u{0421}')
-                            if mods.contains(KeyModifiers::CONTROL) => break 'main_loop,
+                            if mods.contains(KeyModifiers::CONTROL) =>
+                        {
+                            gate.respond(Decision::Deny);
+                            confirm_select = ConfirmSelect::new();
+                            if running && cancel_requested.is_none() {
+                                cancel.store(true, Ordering::Relaxed);
+                                cancel_requested = Some(std::time::Instant::now());
+                                active_steer_tx = None;
+                                custom_placeholder = Some("Interrupting...".to_string());
+                            }
+                        }
                         KeyCode::Esc
                         | KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Char('\u{0432}') | KeyCode::Char('\u{0412}') => {
                             gate.respond(Decision::Deny);
@@ -2787,7 +2926,14 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         }
                         KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('\u{0444}') | KeyCode::Char('\u{0424}') => {
                             if let Some(req) = gate.pending() {
-                                perm.state().allow_tool_always(&req.tool);
+                                // Narrow rules for shell (canon: `npm test` never
+                                // covers `npm publish`); tool-wide otherwise.
+                                let rules = perm.state().allow_always(&req);
+                                if rules.is_empty() {
+                                    chat.push_system("[Allowed once: this command cannot be saved as a narrow rule]");
+                                } else {
+                                    chat.push_system(&format!("[Always allowed this session: {}]", rules.join(", ")));
+                                }
                             }
                             gate.respond(Decision::Allow);
                             confirm_select = ConfirmSelect::new();
@@ -2866,23 +3012,16 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 match code {
                     KeyCode::Esc => {
                         if running {
-                            cancel.store(true, Ordering::Relaxed);
-                            if let Some(handle) = active_turn_handle.take() {
-                                handle.abort();
+                            // Cooperative: the loop answers pending tool calls,
+                            // keeps partial text and returns its history via
+                            // Finished, so model memory matches the screen.
+                            if cancel_requested.is_none() {
+                                cancel.store(true, Ordering::Relaxed);
+                                cancel_requested = Some(std::time::Instant::now());
+                                active_steer_tx = None;
+                                suggested_prompt = None;
+                                custom_placeholder = Some("Interrupting...".to_string());
                             }
-                            active_steer_tx = None;
-                            running = false;
-                            turn_started = None;
-                            if let Some(saved) = goal_state.take() {
-                                tools_arc.set_goal_mode(false);
-                                perm.state().set_mode(saved.mode);
-                                current_effort = saved.effort.clone();
-                                max_steps = saved.max_steps;
-                            }
-                            chat.on_event(&flashagent_core::LoopEvent::Done(flashagent_core::DoneReason::Cancelled));
-                            suggested_prompt = None;
-                            let interrupt_msg = "Request interrupted by user";
-                            custom_placeholder = Some(interrupt_msg.to_string());
                             renderer.request_reprint();
                         } else if !input.is_empty() {
                             input.clear();
@@ -2924,23 +3063,16 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         if mods.contains(KeyModifiers::CONTROL) =>
                     {
                         if running {
-                            cancel.store(true, Ordering::Relaxed);
-                            if let Some(handle) = active_turn_handle.take() {
-                                handle.abort();
+                            // Cooperative: the loop answers pending tool calls,
+                            // keeps partial text and returns its history via
+                            // Finished, so model memory matches the screen.
+                            if cancel_requested.is_none() {
+                                cancel.store(true, Ordering::Relaxed);
+                                cancel_requested = Some(std::time::Instant::now());
+                                active_steer_tx = None;
+                                suggested_prompt = None;
+                                custom_placeholder = Some("Interrupting...".to_string());
                             }
-                            active_steer_tx = None;
-                            running = false;
-                            turn_started = None;
-                            if let Some(saved) = goal_state.take() {
-                                tools_arc.set_goal_mode(false);
-                                perm.state().set_mode(saved.mode);
-                                current_effort = saved.effort.clone();
-                                max_steps = saved.max_steps;
-                            }
-                            chat.on_event(&flashagent_core::LoopEvent::Done(flashagent_core::DoneReason::Cancelled));
-                            suggested_prompt = None;
-                            let interrupt_msg = "Request interrupted by user";
-                            custom_placeholder = Some(interrupt_msg.to_string());
                             renderer.request_reprint();
                         } else {
                             let now = std::time::Instant::now();
@@ -3006,7 +3138,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 renderer.printed_settled = 0;
                                 renderer.prev_expansion = None;
                                 renderer.request_reprint();
-                                update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
                                 cancel.store(false, Ordering::Relaxed);
                                 suggested_prompt = None;
                                 custom_placeholder = None;
@@ -3028,6 +3160,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     turn_opts,
                                     tx.clone(),
                                     steer_rx,
+                                    turn_counter,
                                 ));
                             } else {
                                 let now = std::time::Instant::now();
@@ -3094,14 +3227,16 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Char('\u{0433}') | KeyCode::Char('\u{0413}')
                         if mods.contains(KeyModifiers::CONTROL) =>
                     {
-                        if let Some((target_ver, asset_name, download_url)) = pending_update.clone() {
+                        if let Some((target_ver, asset_name, download_url, checksums_url)) = pending_update.clone() {
                             chat.push_system(&format!("Downloading update {target_ver}..."));
                             renderer.request_reprint();
                             let update_tx_clone = update_tx.clone();
                             tokio::spawn(async move {
-                                if flashagent_svc::updater::download_and_apply(&download_url, &asset_name).await.is_ok() {
-                                    let _ = update_tx_clone.send(UpdateNotice::Ready { version: target_ver });
-                                }
+                                let notice = match flashagent_svc::updater::download_and_apply(&download_url, &asset_name, checksums_url.as_deref()).await {
+                                    Ok(_) => UpdateNotice::Ready { version: target_ver },
+                                    Err(e) => UpdateNotice::Failed { error: e.to_string() },
+                                };
+                                let _ = update_tx_clone.send(notice);
                             });
                         } else if !flashagent_svc::updater::is_dev_mode() {
                             chat.push_system(&format!("Checking for updates on {} channel...", app_config.update_channel.label()));
@@ -3110,11 +3245,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             let ch = app_config.update_channel;
                             tokio::spawn(async move {
                                 match flashagent_svc::updater::check_for_updates(ch, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
-                                    Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, .. }) => {
+                                    Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, checksums_url, .. }) => {
                                         let _ = update_tx_clone.send(UpdateNotice::Available {
                                             version: target,
                                             asset_name,
                                             download_url,
+                                            checksums_url,
                                         });
                                     }
                                     Ok(flashagent_svc::updater::UpdateStatus::UpToDate { current, .. }) => {
@@ -3122,7 +3258,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                             version: current,
                                         });
                                     }
-                                    Err(_) => {}
+                                    Err(e) => {
+                                        let _ = update_tx_clone.send(UpdateNotice::Failed { error: e.to_string() });
+                                    }
                                 }
                             });
                         } else {
@@ -3195,7 +3333,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             settings_view = None;
                         } else {
                             mcp_modal = None;
-                            settings_view = Some(SettingsView::new(app_config.clone(), available_models.clone()));
+                            let runtime_mode = goal_state.as_ref().map_or(perm.state().mode(), |g| g.mode);
+                            let effort = goal_state.as_ref().map_or(current_effort.as_str(), |g| g.effort.as_str());
+                            settings_view = Some(settings_for_runtime(&app_config, runtime_mode, effort, &current_model, &available_models));
                         }
                         renderer.request_reprint();
                     }
@@ -3314,12 +3454,19 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                      • /effort (or /t)        — choose thinking effort preset (or press F4 / Ctrl+T)\n\
                                      • /model  (or /m)        — choose and switch model (or press F3)\n\
                                      • /mode [plan|man|edits|all] — switch permission mode (or press Shift+Tab)\n\
-                                     • /mcp [list|market|test] — manage Model Context Protocol servers and marketplace\n\
+                                     • /mcp [list|market|test|add|reload] — manage Model Context Protocol servers\n\
+                                     • /sampling              — sampling parameters (or press F5)\n\
+                                     • /compact [focus]       — summarize older turns to free context\n\
                                      • /clear                 — clear chat scrollback\n\
                                      • /regenerate (or Ctrl+R) — regenerate last model response from scratch\n\
+                                     • /diff · /commit <msg>  — git diff --stat / commit staged changes\n\
+                                     • /export [md|html|jsonl] — write the conversation to a file\n\
+                                     • /editor (or Ctrl+E)    — compose the prompt in an external editor\n\
+                                     • /update · /channel <stable|beta> — updater and release channel\n\
                                      • /skill:<name>          — invoke a skill from .agents/skills/\n\
+                                     • /exit                  — save the session and quit\n\
                                      • Tab                    — autocomplete popup or settings tab\n\
-                                     • Esc                    — dismiss suggestions / interrupt / quit"
+                                     • Esc                    — dismiss suggestions / interrupt; quits on an empty prompt"
                                 );
                                 continue;
                             }
@@ -3388,7 +3535,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     autonomous_directive
                                 };
                                 history.push(ChatMessage::user(content));
-                                update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
                                 cancel.store(false, Ordering::Relaxed);
                                 suggested_prompt = None;
                                 custom_placeholder = None;
@@ -3409,21 +3556,42 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     turn_opts,
                                     tx.clone(),
                                     steer_rx,
+                                    turn_counter,
                                 ));
+                                continue;
+                            }
+
+                            if trimmed == "/skills" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                let skills = flashagent_tui::autocomplete::load_skills(std::path::Path::new("."));
+                                let listed: Vec<String> = skills
+                                    .iter()
+                                    .filter(|s| s.trigger.starts_with("/skill:"))
+                                    .map(|s| format!("  • {} — {}", s.trigger, s.description))
+                                    .collect();
+                                if listed.is_empty() {
+                                    chat.push_system("[No skills found. Add .agents/skills/<name>.md (project) or ~/.flashagent/skills/<name>.md (global).]");
+                                } else {
+                                    chat.push_system(&format!("Skills:\n{}", listed.join("\n")));
+                                }
+                                renderer.request_reprint();
                                 continue;
                             }
 
                             if trimmed == "/settings" || trimmed == "/config" {
                                 input.clear();
                                 autocomplete_idx = 0;
-                                settings_view = Some(SettingsView::new(app_config.clone(), available_models.clone()));
+                                let runtime_mode = goal_state.as_ref().map_or(perm.state().mode(), |g| g.mode);
+                                let effort = goal_state.as_ref().map_or(current_effort.as_str(), |g| g.effort.as_str());
+                                settings_view = Some(settings_for_runtime(&app_config, runtime_mode, effort, &current_model, &available_models));
                                 continue;
                             }
 
                             if trimmed == "/context" {
                                 input.clear();
                                 autocomplete_idx = 0;
-                                update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
                                 context_modal = Some(ContextModal::new(context_usage.clone()));
                                 continue;
                             }
@@ -3447,7 +3615,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     renderer.printed_settled = 0;
                                     renderer.prev_expansion = None;
                                     renderer.request_reprint();
-                                    update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                    update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
                                     cancel.store(false, Ordering::Relaxed);
                                     suggested_prompt = None;
                                     custom_placeholder = None;
@@ -3469,6 +3637,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         turn_opts,
                                         tx.clone(),
                                         steer_rx,
+                                        turn_counter,
                                     ));
                                 } else {
                                     chat.push_system("[No previous turn to regenerate]");
@@ -3485,16 +3654,26 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 effort_menu = Some(menu);
                                 continue;
                             } else if let Some(arg) = trimmed.strip_prefix("/effort ") {
-                                let arg_val = arg.trim().to_string();
+                                let arg_val = arg.trim().to_lowercase();
                                 input.clear();
                                 autocomplete_idx = 0;
+                                let mut known: Vec<String> = ["auto", "default", "off", "low", "medium", "high"].iter().map(|s| s.to_string()).collect();
+                                if let Some(p) = source.profile() {
+                                    known.extend(p.presets.iter().cloned());
+                                }
+                                if !known.contains(&arg_val) {
+                                    known.dedup();
+                                    chat.push_system(&format!("[Unknown effort '{arg_val}'. Available: {}]", known.join(", ")));
+                                    renderer.request_reprint();
+                                    continue;
+                                }
                                 current_effort = arg_val.clone();
                                 refresh_welcome_card_if_before_user_msg(
                                     &mut chat,
                                     &mut renderer,
                                     &current_model,
                                     &cwd_display,
-                                    &mode_str,
+                                    perm.state().mode().label(),
                                     memory_docs,
                                     &source,
                                     &current_effort,
@@ -3598,11 +3777,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 let update_tx_clone = update_tx.clone();
                                 tokio::spawn(async move {
                                     match flashagent_svc::updater::check_for_updates(channel, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
-                                        Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, .. }) => {
+                                        Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, checksums_url, .. }) => {
                                             let _ = update_tx_clone.send(UpdateNotice::Available {
                                                 version: target,
                                                 asset_name,
                                                 download_url,
+                                                checksums_url,
                                             });
                                         }
                                         Ok(flashagent_svc::updater::UpdateStatus::UpToDate { current, .. }) => {
@@ -3610,7 +3790,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                                 version: current,
                                             });
                                         }
-                                        Err(_) => {}
+                                        Err(e) => {
+                                            let _ = update_tx_clone.send(UpdateNotice::Failed { error: e.to_string() });
+                                        }
                                     }
                                 });
                                 continue;
@@ -3844,7 +4026,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     },
                                 );
                                 if let Some(freed) = compact_context(&source, &mut history, focus.as_deref()).await {
-                                    update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                    update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
                                     custom_placeholder = Some(format!("Context compacted (~{} freed)", ContextUsage::format_tokens(freed)));
                                 } else {
                                     custom_placeholder = Some("Context is already compact".to_string());
@@ -4016,31 +4198,26 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             }
 
                             // Check if the command invokes a skill (/skill:<name> or /<name>)
-                            let skill_name = if let Some(rest) = trimmed.strip_prefix("/skill:") {
-                                Some(rest.trim().to_string())
-                            } else if trimmed.starts_with('/') && !trimmed.contains(' ') {
-                                let cand = trimmed.trim_start_matches('/');
-                                let path = std::path::Path::new(".").join(".agents").join("skills").join(format!("{cand}.md"));
-                                if path.exists() {
-                                    Some(cand.to_string())
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            };
+                            let explicit_skill = trimmed.strip_prefix("/skill:").map(|rest| rest.trim().to_string());
+                            let skill_name = explicit_skill.clone().or_else(|| {
+                                let cand = trimmed.strip_prefix('/').filter(|c| !c.contains(' '))?;
+                                find_skill_file(cand).map(|_| cand.to_string())
+                            });
 
                             if let Some(sname) = skill_name {
-                                let skill_path = std::path::Path::new(".").join(".agents").join("skills").join(format!("{sname}.md"));
-                                let skill_content = std::fs::read_to_string(&skill_path)
-                                    .unwrap_or_else(|_| format!("Execute skill: {sname}"));
+                                let Some(skill_content) = find_skill_file(&sname).and_then(|p| std::fs::read_to_string(p).ok()) else {
+                                    input.clear();
+                                    chat.push_system(&format!("[Unknown skill '{sname}'. Type /skills to list available skills.]"));
+                                    renderer.request_reprint();
+                                    continue;
+                                };
                                 input.clear();
                                 autocomplete_idx = 0;
                                 chat.push_system(&format!("[Invoking skill: {sname}]"));
                                 chat.push_user(&format!("/skill:{sname}"));
                                 let prompt = format!("Execute skill: {sname}\n\nSkill Instructions:\n{skill_content}");
                                 history.push(ChatMessage::user(prompt));
-                                update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                                update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
                                 cancel.store(false, Ordering::Relaxed);
                                 suggested_prompt = None;
                                 custom_placeholder = None;
@@ -4061,6 +4238,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     turn_opts,
                                     tx.clone(),
                                     steer_rx,
+                                    turn_counter,
                                 ));
                                 continue;
                             }
@@ -4082,7 +4260,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 text
                             };
                             history.push(ChatMessage::user(content));
-                            update_context_usage(&mut context_usage, &history, &memory_block, &chat);
+                            update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
                             cancel.store(false, Ordering::Relaxed);
                             suggested_prompt = None;
                             custom_placeholder = None;
@@ -4103,6 +4281,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 turn_opts,
                                 tx.clone(),
                                 steer_rx,
+                                turn_counter,
                             ));
                         }
                     }
@@ -4130,6 +4309,7 @@ fn update_context_usage(
     history: &[ChatMessage],
     memory_block: &str,
     chat: &ChatView,
+    tools: &dyn flashagent_core::ToolExec,
 ) {
     let system_chars: usize = history
         .iter()
@@ -4138,24 +4318,39 @@ fn update_context_usage(
         .sum();
     usage.system_tokens = (system_chars / 4).max(150);
     usage.memory_tokens = memory_block.len() / 4;
-    usage.tools_tokens = 1250;
+    // What the model is actually sent: every advertised schema (MCP included).
+    usage.tools_tokens = tools
+        .specs()
+        .iter()
+        .map(|t| (t.name.len() + t.description.len() + t.parameters_json.len()) / 4 + 8)
+        .sum();
 
     let (chat_user, chat_assistant, chat_reasoning, chat_tools) = chat.raw_content_chars();
 
-    let mut hist_user_chars = 0;
-    let mut hist_assistant_chars = 0;
+    let (mut user, mut assistant, mut reasoning, mut tool_out) = (0usize, 0usize, 0usize, 0usize);
     for m in history {
         match m.role {
-            flashagent_llm::Role::User => hist_user_chars += m.content.len(),
-            flashagent_llm::Role::Assistant => hist_assistant_chars += m.content.len(),
-            _ => {}
+            flashagent_llm::Role::User => user += m.content.len(),
+            flashagent_llm::Role::Assistant => {
+                assistant += m.content.len() + m.tool_calls.iter().map(|c| c.args_json.len()).sum::<usize>();
+                reasoning += m.reasoning.as_ref().map_or(0, |r| r.len());
+            }
+            flashagent_llm::Role::Tool => tool_out += m.content.len(),
+            flashagent_llm::Role::System => {}
         }
     }
+    // The memory block rides inside the first user message; it is already
+    // counted once as memory.
+    if !memory_block.is_empty()
+        && history.iter().find(|m| m.role == flashagent_llm::Role::User).is_some_and(|m| m.content.starts_with(memory_block))
+    {
+        user = user.saturating_sub(memory_block.len());
+    }
 
-    usage.user_tokens = hist_user_chars.max(chat_user) / 4;
-    usage.assistant_tokens = hist_assistant_chars.max(chat_assistant) / 4;
-    usage.reasoning_tokens = chat_reasoning / 4;
-    usage.tool_output_tokens = chat_tools / 4;
+    usage.user_tokens = user.max(chat_user) / 4;
+    usage.assistant_tokens = assistant.max(chat_assistant) / 4;
+    usage.reasoning_tokens = reasoning.max(chat_reasoning) / 4;
+    usage.tool_output_tokens = tool_out.max(chat_tools) / 4;
 }
 
 fn build_turn_options(
@@ -4171,8 +4366,12 @@ fn build_turn_options(
         min_p: app_config.min_p,
         ..Default::default()
     };
-    if effort == "auto" || effort.is_empty() || effort == "default" {
+    if effort == "auto" || effort.is_empty() {
         opts.thinking = flashagent_llm::ThinkingEffort::Auto;
+        opts.custom_effort = None;
+    } else if effort == "default" {
+        // The server's own advertised default preset.
+        opts.thinking = flashagent_llm::ThinkingEffort::Default;
         opts.custom_effort = None;
     } else {
         opts.custom_effort = Some(effort.to_string());
@@ -4197,6 +4396,7 @@ fn spawn_turn(
     turn_opts: flashagent_llm::TurnOptions,
     tx: tokio::sync::mpsc::UnboundedSender<UiEvent>,
     steer_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    turn_id: u64,
 ) -> tokio::task::JoinHandle<()> {
     cancel.store(false, Ordering::Relaxed);
     tokio::spawn(async move {
@@ -4211,7 +4411,7 @@ fn spawn_turn(
                 let _ = tx.send(UiEvent::Loop(ev));
             })
             .await;
-        let _ = tx.send(UiEvent::Finished(res.map_err(|e| e.to_string())));
+        let _ = tx.send(UiEvent::Finished { turn_id, result: res.map_err(|e| e.to_string()) });
     })
 }
 
@@ -4456,6 +4656,9 @@ fn is_generic_suggestion(text: &str) -> bool {
         || trimmed == "next"
 }
 
+/// Marker that introduces the rolling summary inside the system message.
+const COMPACTED_MARK: &str = "\n\n[Compacted Conversation History]:\n";
+
 async fn compact_context(
     source: &BackendSource,
     history: &mut Vec<ChatMessage>,
@@ -4463,19 +4666,27 @@ async fn compact_context(
 ) -> Option<usize> {
     use futures::StreamExt;
 
-    if history.len() <= 3 {
-        return None;
-    }
-
-    // Keep system message history[0], and the most recent 2 messages (split_idx..)
-    let split_idx = history.len().saturating_sub(2);
+    // Keep the current turn intact, starting at its user message: cutting
+    // anywhere else can orphan tool results from their tool calls, or leave an
+    // assistant message first — both rejected by strict servers/templates.
+    let split_idx = history.iter().rposition(|m| m.role == flashagent_llm::Role::User)?;
     if split_idx <= 1 {
         return None;
     }
 
     let before_tokens: usize = history.iter().map(|m| m.content.len() / 4 + 4).sum();
 
+    // A previous summary lives in the system message; fold it in so repeated
+    // compaction never forgets older turns.
+    let (base_system, prior_summary) = match history[0].content.find(COMPACTED_MARK) {
+        Some(pos) => (history[0].content[..pos].to_string(), Some(history[0].content[pos + COMPACTED_MARK.len()..].to_string())),
+        None => (history[0].content.clone(), None),
+    };
+
     let mut to_compact = String::new();
+    if let Some(prior) = &prior_summary {
+        to_compact.push_str(&format!("Earlier summary:\n{prior}\n\n"));
+    }
     for msg in &history[1..split_idx] {
         let role_str = match msg.role {
             flashagent_llm::Role::User => "User",
@@ -4532,20 +4743,14 @@ async fn compact_context(
         if !trimmed.is_empty() {
             trimmed.to_string()
         } else {
-            fallback_summary(&history[1..split_idx])
+            fallback_summary(&history[1..split_idx], prior_summary.as_deref())
         }
     } else {
-        fallback_summary(&history[1..split_idx])
+        fallback_summary(&history[1..split_idx], prior_summary.as_deref())
     };
 
-    let compacted_msg = ChatMessage::system(format!(
-        "[Compacted Conversation History]:\n{}",
-        summary
-    ));
-
-    let mut new_history = Vec::with_capacity(split_idx.min(2) + 2);
-    new_history.push(history[0].clone());
-    new_history.push(compacted_msg);
+    let mut new_history = Vec::with_capacity(history.len() - split_idx + 1);
+    new_history.push(ChatMessage::system(format!("{base_system}{COMPACTED_MARK}{summary}")));
     new_history.extend_from_slice(&history[split_idx..]);
 
     let after_tokens: usize = new_history.iter().map(|m| m.content.len() / 4 + 4).sum();
@@ -4555,8 +4760,12 @@ async fn compact_context(
     Some(freed.max(1))
 }
 
-fn fallback_summary(messages: &[ChatMessage]) -> String {
+fn fallback_summary(messages: &[ChatMessage], prior: Option<&str>) -> String {
     let mut out = String::from("Previous conversation summary (auto-compacted):\n");
+    if let Some(prior) = prior {
+        out.push_str(prior.trim_end());
+        out.push('\n');
+    }
     for (i, msg) in messages.iter().enumerate() {
         let role = match msg.role {
             flashagent_llm::Role::User => "User",
@@ -4575,9 +4784,230 @@ fn fallback_summary(messages: &[ChatMessage]) -> String {
     out
 }
 
+/// Skill file for `name`: the project's `.agents/skills` first, then the
+/// user's `~/.flashagent/skills` (the same places autocomplete lists).
+fn find_skill_file(name: &str) -> Option<std::path::PathBuf> {
+    if name.is_empty() || name.contains(['/', '\\']) || name.contains("..") {
+        return None;
+    }
+    let file = format!("{name}.md");
+    let project = std::path::Path::new(".agents").join("skills").join(&file);
+    let global = flashagent_home_dir().map(|h| h.join("skills").join(&file));
+    std::iter::once(project).chain(global).find(|p| p.is_file())
+}
+
+/// A settings view that shows the live session state (mode, effort, model),
+/// not just the startup defaults stored in the config file.
+fn settings_for_runtime(
+    config: &AppConfig,
+    mode: PermissionMode,
+    effort: &str,
+    model: &str,
+    models: &[String],
+) -> SettingsView {
+    let mut cfg = config.clone();
+    cfg.permission_mode = mode;
+    cfg.thinking_effort = effort.to_string();
+    cfg.model = model.to_string();
+    SettingsView::new(cfg, models.to_vec())
+}
+
+/// The config to persist from a settings view. The view shows the live mode
+/// and effort; they become startup defaults only when the user changed them
+/// there — merely opening Settings mid-session (or during /goal's Accept All)
+/// must not silently make that the default for the next launch.
+fn persisted_from_view(view: &AppConfig, persisted: &AppConfig, shown_mode: PermissionMode, shown_effort: &str) -> AppConfig {
+    let mut cfg = view.clone();
+    if cfg.permission_mode == shown_mode {
+        cfg.permission_mode = persisted.permission_mode;
+    }
+    if cfg.thinking_effort == shown_effort {
+        cfg.thinking_effort = persisted.thinking_effort.clone();
+    }
+    cfg
+}
+
+/// Tool arguments for the approval card, repaired the same way the tool
+/// layer reads them.
+fn parse_card_args(args_json: &str) -> serde_json::Value {
+    serde_json::from_str(args_json)
+        .ok()
+        .or_else(|| flashagent_llm::repair_json(args_json).and_then(|r| serde_json::from_str(&r).ok()))
+        .unwrap_or_default()
+}
+
+/// Model-supplied text made safe to print: control characters (ANSI
+/// escapes included) are shown, not executed.
+fn card_safe(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() && c != '\n' { '\u{fffd}' } else { c })
+        .collect()
+}
+
+/// Settings → "Run Tool Test": ask the active model to call a probe tool and
+/// report whether a well-formed call came back — natively or as text markup
+/// that FlashAgent's scanner recovers.
+async fn run_tool_call_probe(source: &BackendSource) -> String {
+    use futures::StreamExt;
+    let probe = flashagent_llm::ToolSpec {
+        name: "report_status".into(),
+        description: "Report a numeric status code back to the test harness.".into(),
+        parameters_json: r#"{"type":"object","properties":{"code":{"type":"integer"}},"required":["code"]}"#.into(),
+    };
+    let messages = vec![
+        ChatMessage::system("You are a tool-calling test harness. Respond only by calling the provided tool."),
+        ChatMessage::user("Call the report_status tool with code 42."),
+    ];
+    let opts = flashagent_llm::TurnOptions {
+        thinking: flashagent_llm::ThinkingEffort::Off,
+        temperature: Some(0.0),
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    let run = async {
+        let mut stream = source.turn_with_options(&messages, std::slice::from_ref(&probe), &opts).await.map_err(|e| e.to_string())?;
+        let (mut name, mut args, mut text) = (String::new(), String::new(), String::new());
+        while let Some(ev) = stream.next().await {
+            match ev.map_err(|e| e.to_string())? {
+                flashagent_llm::LlmEvent::ToolCallDelta { name: Some(n), args_delta, .. } => {
+                    name = n;
+                    args.push_str(&args_delta);
+                }
+                flashagent_llm::LlmEvent::ToolCallDelta { args_delta, .. } => args.push_str(&args_delta),
+                flashagent_llm::LlmEvent::TextDelta(t) => text.push_str(&t),
+                _ => {}
+            }
+        }
+        Ok::<_, String>((name, args, text))
+    };
+    let (name, args, text) = match tokio::time::timeout(std::time::Duration::from_secs(120), run).await {
+        Err(_) => return "FAIL: no answer within 120s".into(),
+        Ok(Err(e)) => return format!("FAIL: {e}"),
+        Ok(Ok(parts)) => parts,
+    };
+    let secs = started.elapsed().as_secs_f32();
+    let (name, args, via) = if !name.is_empty() {
+        (name, args, "native")
+    } else {
+        let mut scanner = flashagent_llm::TextToolScanner::default();
+        let mut events = scanner.feed(&text);
+        events.extend(scanner.finish());
+        match events.into_iter().find_map(|e| match e {
+            flashagent_llm::ScannerEvent::ToolCall { name, args_json, .. } => Some((name, args_json)),
+            flashagent_llm::ScannerEvent::Text(_) => None,
+        }) {
+            Some((n, a)) => (n, a, "text markup"),
+            None => {
+                let snippet: String = text.trim().chars().take(60).collect();
+                return format!("FAIL: model replied with text, no tool call ({snippet:?})");
+            }
+        }
+    };
+    let code = serde_json::from_str::<serde_json::Value>(&args)
+        .ok()
+        .or_else(|| flashagent_llm::repair_json(&args).and_then(|r| serde_json::from_str(&r).ok()))
+        .and_then(|v| v.get("code").and_then(|c| c.as_i64()));
+    match (name == "report_status", code) {
+        (true, Some(42)) => format!("PASS: {via} tool call in {secs:.1}s"),
+        (true, _) => format!("PARTIAL: {via} call, wrong arguments {args}"),
+        (false, _) => format!("FAIL: called unknown tool '{name}'"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn offline_source() -> BackendSource {
+        // Nothing listens on port 9: every request fails fast, so compaction
+        // takes its offline fallback path.
+        BackendSource(flashagent_llm::OpenAiCompat::new("http://127.0.0.1:9/v1", "m", None))
+    }
+
+    #[tokio::test]
+    async fn compaction_never_orphans_tool_results_or_stacks_system_messages() {
+        let call = flashagent_llm::ToolCall { id: "c1".into(), name: "read_file".into(), args_json: "{}".into() };
+        let mut asst_call = ChatMessage::assistant("");
+        asst_call.tool_calls = vec![call];
+        let mut history = vec![
+            ChatMessage::system("SYSTEM PROMPT"),
+            ChatMessage::user("first question"),
+            ChatMessage::assistant("first answer"),
+            ChatMessage::user("read a file"),
+            asst_call,
+            ChatMessage::tool_result("c1", "file body"),
+            ChatMessage::assistant("here it is"),
+        ];
+        let freed = compact_context(&offline_source(), &mut history, None).await;
+        assert!(freed.is_some());
+        assert_eq!(history.iter().filter(|m| m.role == flashagent_llm::Role::System).count(), 1);
+        assert!(history[0].content.starts_with("SYSTEM PROMPT"));
+        assert!(history[0].content.contains("first question"));
+        // The kept region is the whole current turn, starting at its prompt.
+        assert_eq!(history[1].role, flashagent_llm::Role::User);
+        assert_eq!(history[1].content, "read a file");
+        assert_eq!(history[2].tool_calls.len(), 1);
+        assert_eq!(history[3].tool_call_id.as_deref(), Some("c1"));
+
+        // A second compaction keeps the earlier summary instead of dropping it.
+        history.push(ChatMessage::user("next"));
+        history.push(ChatMessage::assistant("ok"));
+        compact_context(&offline_source(), &mut history, None).await;
+        assert!(history[0].content.contains("first question"));
+        assert_eq!(history[0].content.matches(COMPACTED_MARK.trim()).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn single_turn_history_is_already_compact() {
+        let mut history = vec![ChatMessage::system("s"), ChatMessage::user("u"), ChatMessage::assistant("a")];
+        assert_eq!(compact_context(&offline_source(), &mut history, None).await, None);
+        assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn approval_card_shows_commands_whatever_the_json_formatting() {
+        let spaced = parse_card_args("{ \"command\" : \"cargo test\" , \"timeout_ms\": 5 }");
+        assert_eq!(spaced.get("command").and_then(|v| v.as_str()), Some("cargo test"));
+        let pythonish = parse_card_args("{'command': 'ls -la'}");
+        assert_eq!(pythonish.get("command").and_then(|v| v.as_str()), Some("ls -la"));
+        // An escape sequence in a command is displayed, never executed.
+        assert!(!card_safe("echo \u{1b}[8mhidden").contains('\u{1b}'));
+    }
+
+    #[test]
+    fn default_effort_means_the_server_default_preset() {
+        let cfg = AppConfig::default();
+        assert_eq!(build_turn_options(&cfg, "default").thinking, flashagent_llm::ThinkingEffort::Default);
+        assert_eq!(build_turn_options(&cfg, "auto").thinking, flashagent_llm::ThinkingEffort::Auto);
+        let high = build_turn_options(&cfg, "high");
+        assert_eq!(high.thinking, flashagent_llm::ThinkingEffort::High);
+        assert_eq!(high.custom_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn opening_settings_never_persists_the_live_mode_as_default() {
+        let persisted = AppConfig { permission_mode: PermissionMode::AcceptEdits, thinking_effort: "auto".into(), ..AppConfig::default() };
+        let view = settings_for_runtime(&persisted, PermissionMode::Bypass, "high", "m", &[]);
+        // Untouched: defaults stay as they were on disk.
+        let saved = persisted_from_view(&view.config, &persisted, PermissionMode::Bypass, "high");
+        assert_eq!(saved.permission_mode, PermissionMode::AcceptEdits);
+        assert_eq!(saved.thinking_effort, "auto");
+        // Changed in the view: that choice becomes the default.
+        let mut edited = view.config.clone();
+        edited.permission_mode = PermissionMode::Manual;
+        let saved = persisted_from_view(&edited, &persisted, PermissionMode::Bypass, "high");
+        assert_eq!(saved.permission_mode, PermissionMode::Manual);
+    }
+
+    #[test]
+    fn settings_open_on_live_session_state() {
+        let cfg = AppConfig { permission_mode: PermissionMode::AcceptEdits, thinking_effort: "auto".into(), ..AppConfig::default() };
+        let view = settings_for_runtime(&cfg, PermissionMode::Bypass, "high", "gemma", &[]);
+        assert_eq!(view.config.permission_mode, PermissionMode::Bypass);
+        assert_eq!(view.config.thinking_effort, "high");
+        assert_eq!(view.config.model, "gemma");
+    }
 
     #[test]
     fn test_parse_recap_and_suggestion_json() {

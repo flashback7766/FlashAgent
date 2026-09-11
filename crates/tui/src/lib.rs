@@ -44,8 +44,15 @@ pub enum UiEvent {
     Paste(String),
     Mouse(MouseEvent),
     Resize(u16, u16),
-    Finished(Result<(Vec<ChatMessage>, DoneReason), String>),
+    /// A turn ended. `turn_id` lets the UI drop results of a turn it has
+    /// already given up on (a hard-aborted cancel).
+    Finished {
+        turn_id: u64,
+        result: Result<(Vec<ChatMessage>, DoneReason), String>,
+    },
     ServerDiscovered(ServerDiscovery),
+    /// Outcome of the Settings → "Run Tool Test" probe.
+    ToolTestResult(String),
     BackgroundRecap {
         turn_id: u64,
         recap: String,
@@ -392,6 +399,11 @@ impl ChatView {
         std::mem::take(&mut self.needs_reprint)
     }
 
+    /// Number of user lines (prompts and steering directives) so far.
+    pub fn user_turn_count(&self) -> usize {
+        self.lines.iter().filter(|l| l.kind == LineKind::User).count()
+    }
+
     /// Check if any user message has been recorded.
     pub fn has_user_message(&self) -> bool {
         self.lines.iter().any(|l| l.kind == LineKind::User)
@@ -481,8 +493,19 @@ impl ChatView {
         {
             turn_slice[rel_pos].text = recap_text.to_string();
         } else {
-            self.lines
-                .insert(end_idx, ChatLine::new(LineKind::System, recap_text.to_string()));
+            self.insert_line(end_idx, ChatLine::new(LineKind::System, recap_text.to_string()));
+        }
+    }
+
+    /// Insert a line mid-conversation, keeping the live-line indices pointing
+    /// at the same lines. A recap for an earlier turn can land while the
+    /// current turn is still streaming or running a tool.
+    fn insert_line(&mut self, at: usize, line: ChatLine) {
+        self.lines.insert(at, line);
+        for idx in [&mut self.streaming, &mut self.streaming_reasoning, &mut self.open_tool].into_iter().flatten() {
+            if *idx >= at {
+                *idx += 1;
+            }
         }
     }
 
@@ -2661,11 +2684,27 @@ impl TuiGate {
 
     async fn wait_decision(&self) -> Decision {
         loop {
-            self.changed.notified().await;
+            // Register interest *before* checking: a respond() landing between
+            // the check and the await would otherwise be a lost wakeup.
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(d) = self.pending.lock().as_ref().and_then(|(_, d)| *d) {
                 return d;
             }
+            notified.await;
         }
+    }
+}
+
+/// Clears a gate's pending card when the waiting call goes away — also when
+/// the turn is cancelled mid-question, so the card never outlives its caller.
+struct ClearOnDrop<'a, T>(&'a Mutex<Option<T>>, &'a tokio::sync::Notify);
+
+impl<T> Drop for ClearOnDrop<'_, T> {
+    fn drop(&mut self) {
+        *self.0.lock() = None;
+        self.1.notify_waiters();
     }
 }
 
@@ -2673,11 +2712,9 @@ impl TuiGate {
 impl ApprovalGate for TuiGate {
     async fn approve(&self, req: &ApprovalRequest) -> Decision {
         *self.pending.lock() = Some((req.clone(), None));
+        let _clear = ClearOnDrop(&self.pending, &self.changed);
         self.changed.notify_waiters();
-        let d = self.wait_decision().await;
-        *self.pending.lock() = None;
-        self.changed.notify_waiters();
-        d
+        self.wait_decision().await
     }
 }
 
@@ -2722,10 +2759,13 @@ impl TuiQuestionGate {
 
     async fn wait_answer(&self) -> (String, bool) {
         loop {
-            self.changed.notified().await;
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(res) = self.pending.lock().as_ref().and_then(|(_, r)| r.clone()) {
                 return res;
             }
+            notified.await;
         }
     }
 }
@@ -2739,11 +2779,9 @@ impl flashagent_tools::QuestionGate for TuiQuestionGate {
             multi_select,
         };
         *self.pending.lock() = Some((req, None));
+        let _clear = ClearOnDrop(&self.pending, &self.changed);
         self.changed.notify_waiters();
-        let ans = self.wait_answer().await;
-        *self.pending.lock() = None;
-        self.changed.notify_waiters();
-        Ok(ans)
+        Ok(self.wait_answer().await)
     }
 }
 
@@ -2782,6 +2820,28 @@ pub fn render_session_saved_card(session_id: &str, width: usize) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn late_recap_for_an_earlier_turn_does_not_derail_the_live_turn() {
+        let mut chat = ChatView::default();
+        chat.push_user("first");
+        chat.on_event(&LoopEvent::TurnDelta("answer one".into()));
+        chat.on_event(&LoopEvent::Done(DoneReason::Completed));
+        chat.push_user("second");
+        chat.on_event(&LoopEvent::ToolStarted { id: "c".into(), name: "run_shell".into(), args_json: r#"{"command":"ls"}"#.into() });
+        // Turn 1's recap arrives while turn 2's tool is still running.
+        chat.attach_turn_recap(1, "recap: one");
+        chat.on_event(&LoopEvent::ToolFinished { id: "c".into(), is_error: false, result_len: 1, result: Some("x".into()) });
+        chat.on_event(&LoopEvent::TurnDelta("answer two".into()));
+        let (settled, live) = chat.render_split(100, ReasoningExpansion::default());
+        let text: Vec<String> = settled.iter().chain(live.iter()).map(|(_, l)| strip_ansi(l)).collect();
+        let joined = text.join("\n");
+        assert!(joined.contains("Ran ls"), "{joined}");
+        assert!(!joined.contains("Running ls"), "{joined}");
+        let user2 = text.iter().find(|l| l.contains("second")).unwrap();
+        assert!(!user2.contains("answer two"), "stream leaked into the user line: {user2}");
+        assert!(joined.find("recap: one").unwrap() < joined.find("second").unwrap());
+    }
 
     #[test]
     fn chat_view_accumulates_stream_and_tools() {
@@ -3740,5 +3800,6 @@ mod tests {
         }
     }
 }
+
 
 

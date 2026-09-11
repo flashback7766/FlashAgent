@@ -5,8 +5,8 @@
 
 ## Track A — Core Engine
 - [x] **A0. Workspace Skeleton** — 9 crates, CI (Linux + Windows), clippy strict with 0 warnings, MIT license, README.
-- [x] **A1. Data Layer** — SQLite + FTS5 (bundled), sessions/messages, versioned migrations, FTS triggers, Cyrillic/multilingual search. 5/5 tests.
-- [x] **A2. LLM Adapter** — OpenAI-compatible streaming, unified `ToolCall`, multi-parser (Hermes / Mistral / bare JSON) with self-healing JSON repair, reasoning, token usage with local fallback. 20/20 llm tests.
+- [x] **A1. Data Layer** — SQLite + FTS5 (bundled), sessions/messages, versioned migrations, FTS triggers, Cyrillic/multilingual search. 5/5 tests. *Not yet consumed by the TUI (sessions are JSON files); wiring lands with B2.*
+- [x] **A2. LLM Adapter** — OpenAI-compatible streaming, unified `ToolCall`, multi-parser (Hermes / Mistral / bare JSON) with self-healing JSON repair, reasoning, token usage with local fallback. 20/20 llm tests. *b233: the text multi-parser is now wired into the loop (it was unit-tested only); bounded 400 adaptation.*
 - [x] **A3. Agent Loop** — `AgentLoop` built over abstract `LlmSource` / `ToolExec` traits, UI event streams, cancellation token, 9/9 contract tests (multi-tool calls, stream truncation, step/token budget limits, prompt injection safety).
 - [x] **A4. Tools** — 9 built-in tools (read / write / edit-chunks / list_dir / glob / grep / run_shell / web_fetch / web_search), process sandboxing (background execution, timeouts, live stream output, task id tracking). 13/13 tools tests, 57 workspace tests. Adaptive sets in Track C.
 - [x] **A5. Permissions** — 4 security modes, narrow shell command parsing (parse_chain, quote handling, prefix bounds), diff preview pipeline (WritePreview + unified diff before writing), session-scoped rules, ApprovalGate for UI. 23 core tests (10 permissions + 4 diff), 68 workspace tests.
@@ -15,7 +15,7 @@
 - [x] **A7.1. TUI Polish** — Print-and-forget renderer (settled lines flushed to scrollback once), ctrl+o thinking toggle, spinner/status bar, Esc interrupt, interleaved reasoning/content delta fix (parallel streaming), settled_boundary = min(). 8 tui tests, 81 workspace tests.
 - [x] **A8. Subagents** — Dynamic roles, concurrency limits, parent review gate, inter-subagent messaging channels, strict permission inheritance.
 - [x] **A9. MCP** — Client, manager, marketplace registry. Native stdio JSON-RPC 2.0 transport, project & global configuration manager, curated verifiable marketplace, ApprovalGate enforcement for non-read-only calls, TUI slash commands (/mcp, /mcp list, /mcp market, /mcp test, /mcp add, /mcp reload). 46 tools tests, 131 workspace tests.
-- [ ] **A10. Autonomous Goal Mode** — `/goal`, adaptive execution layers, task boundaries (steps/tokens/time/blacklist), filesystem snapshots + commits, live plan + final report.
+- [~] **A10. Autonomous Goal Mode** — `/goal`, adaptive execution layers, task boundaries (steps/tokens/time/blacklist), filesystem snapshots + commits, live plan + final report. *Done: `/goal` entry, Accept All + max effort, 250-step cap, ask_user and memory writes disabled, mode/effort restore. Open: token/time budgets, blacklist, snapshots, milestone commits, live plan, final report.*
 - [ ] **A11. Extended Backends** — Ollama, Anthropic, Mistral, DeepSeek, OpenRouter, configuration presets.
 - [ ] **A12. Migrator** — Import data and settings from legacy ~/.flashgent (sessions, config).
 
@@ -33,7 +33,7 @@
 - [ ] **B10. Polish** — Adaptive density, settings panel (GUI-first), virtualization for 100k+ message sessions, AccessKit accessibility audit.
 
 ## Track C — Product & Distribution
-- [x] **C0. Self-Updater** — GitHub Releases, Restart to Update, Stable / Beta channels. Background download, atomic binary replacement (dual-target system/user), channel switching (/channel), manual update (/update), in-app banner without interrupting session.
+- [x] **C0. Self-Updater** — GitHub Releases, Restart to Update, Stable / Beta channels. Background download, atomic binary replacement (dual-target system/user), channel switching (/channel), manual update (/update), in-app banner without interrupting session. *b233: SHA256SUMS verification, newest-by-version selection, no background beta downgrades, packages never installed as binaries.*
 - [ ] **C1. Telemetry** — Opt-in anonymous counters, opt-in crash stack traces.
 - [ ] **C2. Documentation** — mdBook documentation site on GitHub Pages, rustdoc, MCP guides and cookbooks.
 - [ ] **C3. Release Packaging** — Native installers (MSIX / NSIS for Windows, AppImage / deb / pacman for Linux, dmg for macOS), application icons, code signatures.

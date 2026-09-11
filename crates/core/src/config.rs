@@ -510,10 +510,7 @@ mod tests {
     #[test]
     fn test_config_default_and_roundtrip() {
         let temp = std::env::temp_dir().join("test_flashagent_config.json");
-        let mut cfg = AppConfig::default();
-        cfg.model = "test-model".into();
-        cfg.language = "ru".into();
-        cfg.setup_completed = true;
+        let cfg = AppConfig { model: "test-model".into(), language: "ru".into(), setup_completed: true, ..Default::default() };
 
         cfg.save_to(&temp).expect("save should succeed");
         let loaded = AppConfig::load_from(&temp).expect("load should succeed");

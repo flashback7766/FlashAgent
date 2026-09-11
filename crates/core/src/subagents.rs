@@ -60,7 +60,7 @@ pub enum SubagentMsg {
     /// Plain text payload addressed by id.
     Text { from: String, to: String, body: String },
     /// Child finished; the final answer is the body.
-    Finished { from: String, body: String },
+    Finished { from: String, body: String, done: DoneReason },
     /// Parent instructs the child to stop.
     Cancel { to: String },
 }
@@ -142,6 +142,8 @@ impl SubagentHost {
         live.fetch_add(1, Ordering::Relaxed);
 
         let task = tokio::spawn(async move {
+            // Decrements even when the task is aborted mid-run.
+            let _live = LiveGuard(live);
             let tools = factory.build(&role, &role.tools);
             let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let config = LoopConfig { max_steps: Some(max_steps), max_tokens: None, ..Default::default() };
@@ -153,29 +155,43 @@ impl SubagentHost {
             ];
 
             let run = async {
-                let (final_history, done) = loop_
-                    .run(llm.as_ref(), tools.as_ref(), history, |_| {})
-                    .await
-                    .unwrap_or_else(|_| (vec![], DoneReason::Failed));
-                let answer = last_assistant_text(&final_history);
-                (answer, done)
+                match loop_.run(llm.as_ref(), tools.as_ref(), history, |_| {}).await {
+                    Ok((final_history, done)) => (last_assistant_text(&final_history), done),
+                    Err(e) => (format!("[subagent failed: {e}]"), DoneReason::Failed),
+                }
             };
 
             let (body, done) = if let Some(t) = timeout {
                 tokio::time::timeout(t, run)
                     .await
-                    .unwrap_or_else(|_| ("[subagent timed out]".to_string(), DoneReason::StepLimit))
+                    .unwrap_or_else(|_| ("[subagent timed out]".to_string(), DoneReason::Failed))
             } else {
                 run.await
             };
 
             let body = body.chars().take(max_output).collect();
-            let _ = tx.send(SubagentMsg::Finished { from: id2, body });
-            let _ = done;
-            live.fetch_sub(1, Ordering::Relaxed);
+            let _ = tx.send(SubagentMsg::Finished { from: id2, body, done });
         });
 
         SubagentHandle { id, rx, task }
+    }
+}
+
+struct LiveGuard(Arc<AtomicUsize>);
+
+impl Drop for LiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Aborts the child task when the parent stops waiting for it (the user
+/// cancelled the parent turn), so no orphaned subagent keeps running tools.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -239,18 +255,15 @@ impl ToolExec for SubagentTool {
         };
 
         let handle = self.host.spawn(spec);
-        // Wait for the child to finish (its channel yields Finished).
         let mut rx = handle.rx;
-        let mut answer = String::new();
+        let _child = AbortOnDrop(handle.task);
         while let Some(msg) = rx.recv().await {
-            if let SubagentMsg::Finished { body, .. } = msg {
-                answer = body;
-                break;
+            if let SubagentMsg::Finished { body, done, .. } = msg {
+                let is_error = !matches!(done, DoneReason::Completed);
+                return ToolOutput { content: body, is_error };
             }
         }
-        let _ = handle.task.await;
-
-        ToolOutput { content: answer, is_error: false }
+        ToolOutput { content: "[subagent exited without an answer]".into(), is_error: true }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -405,6 +418,34 @@ mod tests {
             .await;
         assert!(!out.is_error);
         assert_eq!(out.content, "child answer");
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_parent_call_aborts_the_child() {
+        struct Hang;
+        #[async_trait]
+        impl LlmSource for Hang {
+            async fn turn(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> Result<futures::stream::BoxStream<'static, Result<LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+                Ok(Box::pin(futures::stream::pending()))
+            }
+        }
+        let host = Arc::new(SubagentHost::new(Arc::new(Hang), Arc::new(Factory)));
+        let tool = SubagentTool::new(host.clone());
+        let call = ToolCall { id: "t".into(), name: "spawn_agent".into(), args_json: r#"{"task":"forever"}"#.into() };
+        // The parent loop drops the execute future when the user cancels.
+        let res = tokio::time::timeout(Duration::from_millis(50), tool.execute(&call)).await;
+        assert!(res.is_err());
+        for _ in 0..50 {
+            if host.live() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(host.live(), 0, "child must not outlive the cancelled parent call");
     }
 
     #[tokio::test]

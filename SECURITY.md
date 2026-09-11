@@ -4,10 +4,13 @@
 
 FlashAgent is under active development. Security updates are applied to the latest release on the `main` branch.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
-| < 0.1.0 | :x:                |
+| Version                         | Supported          |
+| ------------------------------- | ------------------ |
+| Latest beta (`bNNN`, `beta` release) | :white_check_mark: |
+| Latest stable (`vX.Y.Z`, from v1.0.0) | :white_check_mark: |
+| Older builds                    | :x:                |
+
+Release downloads are listed in each release's `SHA256SUMS`; the in-app updater refuses a binary whose checksum does not match.
 
 ## Reporting a Vulnerability
 

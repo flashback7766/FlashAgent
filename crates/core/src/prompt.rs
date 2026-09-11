@@ -142,7 +142,7 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
     sections.push(
         "TOOL DISCIPLINE & PARALLELISM:\n\
          - Direct Tool Invocation: Never narrate, announce, or describe tool calls in conversational text (e.g. NEVER write \"*Wait, I'll call list_dir.*\", \"I'll check the directory\", or \"Let me read the file\"). When you decide to use a tool, invoke the tool call directly.\n\
-         - Prefer dedicated tools over run_shell: use read_file instead of cat/head/tail/sed, write_file/apply_edits instead of echo redirection/sed/awk, glob_find instead of find/ls, and grep_search instead of grep/rg. Reserve run_shell exclusively for builds, tests, git, and genuine terminal operations that require shell execution.\n\
+         - Prefer dedicated tools over run_shell: use read_file instead of cat/head/tail/sed, write_file/edit_file instead of echo redirection/sed/awk, glob/list_dir instead of find/ls, and grep instead of grep/rg. Reserve run_shell exclusively for builds, tests, git, and genuine terminal operations that require shell execution.\n\
          - Parallelism: Request independent lookups in the same turn so they run together in parallel. If an operation depends on a previous result, run it sequentially."
             .to_string(),
     );
@@ -220,6 +220,10 @@ mod tests {
 
         // Dedicated tools vs run_shell
         assert!(prompt.contains("Prefer dedicated tools over run_shell"));
+        // Every tool the prompt steers toward must actually exist.
+        for phantom in ["apply_edits", "glob_find", "grep_search"] {
+            assert!(!prompt.contains(phantom), "prompt names non-existent tool {phantom}");
+        }
 
         // Actions & blast radius
         assert!(prompt.contains("Carefully consider reversibility and blast radius"));

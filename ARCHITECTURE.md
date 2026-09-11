@@ -2,6 +2,16 @@
 
 > HOW we build. Source of WHAT and WHY is `PHILOSOPHY.md`. Sequence of execution is `ROADMAP.md`.
 
+## 0. Implementation Status (b233)
+
+This document describes the target design. What exists today:
+
+- **Process model**: not split yet. `flashagent-tui` hosts loop, tools and permissions in one process; `proto` (IPC contract) and `app` (GUI entrypoint) are placeholders, `svc` contains only the updater.
+- **Data**: `crates/data` (SQLite + FTS5) is implemented and tested but not used by the TUI; sessions are JSON files in `~/.flashagent/sessions/`.
+- **LLM**: OpenAI-compatible backend only (A11 adds native adapters). The text tool-call parser runs inside `core::loop_`.
+- **Memory writes**: the `memory_*` tools go through the Write category; they are disabled during `/goal`.
+- **Renderer**: B0 prototype only (`crates/ui/src/bin/b0.rs`); no component kit, no golden frames yet.
+
 ## 1. Process Model
 
 ```

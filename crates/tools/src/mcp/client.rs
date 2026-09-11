@@ -55,6 +55,7 @@ impl McpClient {
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
         // Spawn process
         let mut child = cmd
@@ -96,6 +97,7 @@ impl McpClient {
 
         // 2. Background task for reading from stdout
         let pending_clone = pending.clone();
+        let reply_tx = stdin_tx.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
@@ -103,8 +105,29 @@ impl McpClient {
                 if trimmed.is_empty() {
                     continue;
                 }
+                let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
+                    continue;
+                };
+                // Server-to-client traffic (a request or notification carries
+                // `method`). Its ids live in the server's id space, so it must
+                // never be matched against our pending requests.
+                if let Some(method) = msg.get("method").and_then(Value::as_str) {
+                    if let Some(id) = msg.get("id").cloned() {
+                        let reply = if method == "ping" {
+                            serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": {} })
+                        } else {
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": { "code": -32601, "message": format!("method not supported by client: {method}") }
+                            })
+                        };
+                        let _ = reply_tx.send(reply.to_string());
+                    }
+                    continue;
+                }
 
-                if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(trimmed) {
+                if let Ok(resp) = serde_json::from_value::<JsonRpcResponse>(msg) {
                     if let Some(id_val) = resp.id {
                         let id_opt = id_val.as_u64().or_else(|| id_val.as_i64().map(|i| i as u64));
                         if let Some(id) = id_opt {
@@ -226,14 +249,27 @@ impl McpClient {
         Ok(init_result)
     }
 
-    /// Query and update the server's tools list.
+    /// Query and update the server's tools list, following pagination.
     pub async fn refresh_tools(&self, timeout: Duration) -> Result<Vec<McpTool>, String> {
-        let res_val = self.request("tools/list", Some(serde_json::json!({})), timeout).await?;
-        let list_res: ToolsListResult = serde_json::from_value(res_val)
-            .map_err(|e| format!("Invalid tools/list response: {e}"))?;
-
-        *self.tools.write() = list_res.tools.clone();
-        Ok(list_res.tools)
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        // Bounded: a server that keeps returning cursors must not spin us.
+        for _ in 0..32 {
+            let params = match &cursor {
+                Some(c) => serde_json::json!({ "cursor": c }),
+                None => serde_json::json!({}),
+            };
+            let res_val = self.request("tools/list", Some(params), timeout).await?;
+            let page: ToolsListResult = serde_json::from_value(res_val)
+                .map_err(|e| format!("Invalid tools/list response: {e}"))?;
+            tools.extend(page.tools);
+            match page.next_cursor {
+                Some(next) if !next.is_empty() => cursor = Some(next),
+                _ => break,
+            }
+        }
+        *self.tools.write() = tools.clone();
+        Ok(tools)
     }
 
     /// Call an MCP tool on this server.
@@ -282,16 +318,47 @@ impl McpClient {
     }
 }
 
-impl Drop for McpClient {
-    fn drop(&mut self) {
-        // Drop channels; child process will see EOF on stdin
-    }
-}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // The mock servers are bash scripts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn server_initiated_request_is_answered_and_never_resolves_ours() {
+        // The server fires its own request with id 1 (same number as our
+        // `initialize`) before answering. It must get an error reply and our
+        // pending request must wait for the real response.
+        let mock_script = r#"
+read -r line
+echo '{"jsonrpc":"2.0","id":1,"method":"roots/list"}'
+read -r reply
+case "$reply" in *'"error"'*) ;; *) exit 3;; esac
+echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"strict","version":"2"}}}'
+while IFS= read -r line; do
+  case "$line" in *tools/list*) echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"q","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true}}]}}';; esac
+done
+"#;
+        let client = McpClient::spawn(
+            "strict",
+            "bash",
+            &["-c".to_string(), mock_script.to_string()],
+            &HashMap::new(),
+            Path::new("."),
+        )
+        .expect("spawn mock");
+        let init = client.initialize(Duration::from_secs(5)).await.expect("initialize");
+        assert_eq!(init.server_info.name, "strict");
+        let tools = client.tools();
+        assert_eq!(tools.len(), 1);
+        assert!(tools[0].is_read_only(), "readOnlyHint must be honoured");
+        client.kill().await;
+    }
+
+    // The mock servers are bash scripts.
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_mcp_client_spawn_and_communication() {
         // Spawn a simple bash script that acts as an MCP server responding to initialize and tools/list
