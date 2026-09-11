@@ -7,12 +7,11 @@ arch=('x86_64')
 url="https://github.com/flashback7766/FlashAgent"
 license=('MIT')
 depends=('gcc-libs' 'glibc')
-provides=('flashagent' 'flashagent-tui')
+provides=('flashagent')
 conflicts=('flashagent')
 
 package() {
-    install -Dm755 "${srcdir}/flashagent-tui" "${pkgdir}/usr/bin/flashagent-tui"
-    ln -sf flashagent-tui "${pkgdir}/usr/bin/flashagent"
+    install -Dm755 "${srcdir}/flashagent" "${pkgdir}/usr/bin/flashagent"
     install -Dm644 "${srcdir}/flashagent.desktop" "${pkgdir}/usr/share/applications/flashagent.desktop"
     install -Dm644 "${srcdir}/flashagent.png" "${pkgdir}/usr/share/icons/hicolor/256x256/apps/flashagent.png"
     install -Dm644 "${srcdir}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"

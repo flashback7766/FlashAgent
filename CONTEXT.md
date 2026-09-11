@@ -10,16 +10,16 @@ custom hardware-accelerated wgpu renderer (Material 3 Expressive), zero Electron
 
 ## Hierarchy of Truth (Read in this strict order)
 1. `PHILOSOPHY.md` — The Canon: WHAT and WHY (~110 explicit owner decisions; modify only with explicit instruction from the owner)
-2. `ARCHITECTURE.md` — HOW: 9 crates, strict crate boundaries, protocols
+2. `ARCHITECTURE.md` — HOW: 8 crates, strict crate boundaries, protocols
 3. `ROADMAP.md` — Milestones and statuses (A = Core, B = UI, C = Product)
 4. `.agents/rules/` — `code_quality`, `token_discipline`, `execution_loop`
 5. `.audit/` — Audit trail log (append-only), one record per work session
 6. `CONTEXT.md` (this file) — Rapid orientation + current runtime state
 
 ## Stack (Definitively Decided)
-Rust 1.85+, Cargo workspace of 9 crates: `core` (agent loop), `llm` (backends + parsers),
+Rust 1.85+, Cargo workspace of 8 crates: `core` (agent loop), `llm` (backends + parsers),
 `tools` (tools + MCP), `data` (SQLite + FTS5), `proto` (IPC schemas), `svc` (tokio service runtime),
-`ui` (wgpu + cosmic-text + M3E), `tui` (terminal client), `app` (entrypoint).
+`ui` (wgpu + cosmic-text + M3E, v2), `tui` (terminal client; binary `flashagent`).
 LLM: OpenAI-compatible endpoints (any local or remote endpoints: LM Studio,
 Ollama, vLLM, OpenRouter, Gemini, and any compatible models). Embedded llama.cpp is a separate phase later.
 License: MIT. Releases: GitHub Releases, Stable + Beta channels. Telemetry: strictly opt-in anonymous counters.
@@ -31,7 +31,7 @@ License: MIT. Releases: GitHub Releases, Stable + Beta channels. Telemetry: stri
 - Track C: C0 self-updater closed (checksum verification via `SHA256SUMS` added in b233).
 - Workspace tests: 284 passed; `cargo clippy --workspace --all-targets --all-features -- -D warnings` clean.
 - What the product actually is today: `crates/tui` runs the whole stack in-process. `crates/svc` only holds the
-  updater, `crates/proto` and `crates/app` are placeholders, and `crates/data` (SQLite/FTS5) is not used by the
+  updater, `crates/proto` is a placeholder, and `crates/data` (SQLite/FTS5) is not used by the
   TUI — sessions are JSON files in `~/.flashagent/sessions/`.
 - Text-embedded tool calls (Hermes/Mistral/bare JSON) are executed by the loop since b233 (the parser used to be unwired).
 - Releases: build tags `bNNN` / `vX.Y.Z` trigger CI, which republishes the rolling `beta` pre-release or `stable` release.

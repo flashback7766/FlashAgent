@@ -2799,7 +2799,7 @@ pub fn render_session_saved_card(session_id: &str, width: usize) -> Vec<String> 
     let dashes = box_w.saturating_sub(title_vis + 1);
     let top = format!("  {border_color}╭─{title_styled}{}╮{reset}", "─".repeat(dashes));
 
-    let resume_cmd = format!("flashagent-tui --resume {session_id}");
+    let resume_cmd = format!("flashagent --resume {session_id}");
     let msg = if inner_text_w >= 66 {
         format!("To resume next time: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m")
     } else {

@@ -2,4 +2,4 @@
 SELF=$(readlink -f "$0")
 HERE=${SELF%/*}
 export PATH="${HERE}/usr/bin:${PATH}"
-exec "${HERE}/usr/bin/flashagent-tui" "$@"
+exec "${HERE}/usr/bin/flashagent" "$@"
