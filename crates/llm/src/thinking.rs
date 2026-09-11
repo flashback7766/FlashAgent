@@ -606,6 +606,12 @@ pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskCo
     /// Parse error responses from the API to learn supported presets on the fly.
     pub fn parse_api_error(error_body: &str) -> Option<Self> {
         let err = error_body.to_lowercase();
+        // Only an error about the thinking controls can teach presets; any
+        // other 400 ("invalid messages[3].content") must not be mined for
+        // bracketed lists.
+        if !["reasoning", "thinking", "effort", "supported settings"].iter().any(|k| err.contains(k)) {
+            return None;
+        }
 
         // Check if reasoning_effort / thinking is completely rejected by the server
         if err.contains("unrecognized request argument: reasoning_effort")

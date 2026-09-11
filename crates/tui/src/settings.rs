@@ -138,7 +138,6 @@ impl SettingsView {
                     if !trimmed.is_empty() {
                         self.config.backend_url = trimmed;
                         self.is_dirty = true;
-                        let _ = self.config.save();
                     }
                     self.editing_url = false;
                     return SettingsAction::DiscoverModels;
@@ -152,12 +151,9 @@ impl SettingsView {
         }
 
         match code {
-            KeyCode::Esc => {
-                if self.is_dirty {
-                    let _ = self.config.save();
-                }
-                SettingsAction::Close
-            }
+            // Persisting is the caller's job: this view holds live session
+            // values (mode, effort) that must not become defaults unasked.
+            KeyCode::Esc => SettingsAction::Close,
             KeyCode::Tab | KeyCode::Char(']') => {
                 self.active_tab = self.active_tab.next();
                 self.selected_index = 0;
@@ -372,7 +368,6 @@ impl SettingsView {
             }
         }
         self.is_dirty = true;
-        let _ = self.config.save();
     }
 
     fn cycle_backend_preset(&mut self) {

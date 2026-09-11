@@ -29,6 +29,26 @@ pub struct OpenAiCompat {
 /// How many times a 400 may teach us a new request shape before we give up.
 const MAX_ADAPTIVE_RETRIES: u8 = 2;
 
+/// Which optional request fields a body carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fields {
+    /// Thinking controls and every sampling knob.
+    All,
+    /// Thinking controls, but only standard sampling (temperature, max_tokens).
+    NoExtraSampling,
+    /// Only fields every OpenAI-compatible server accepts.
+    Standard,
+}
+
+impl Fields {
+    fn fewer(self) -> Self {
+        match self {
+            Fields::All => Fields::NoExtraSampling,
+            _ => Fields::Standard,
+        }
+    }
+}
+
 impl OpenAiCompat {
     /// Create a backend pointed at e.g. `http://localhost:1234/v1`.
     pub fn new(base_url: impl Into<String>, model: impl Into<String>, api_key: Option<String>) -> Self {
@@ -180,7 +200,12 @@ impl OpenAiCompat {
         self.profile()
     }
 
+    #[cfg(test)]
     fn body(&self, messages: &[ChatMessage], tools: &[ToolSpec], options: &crate::types::TurnOptions) -> serde_json::Value {
+        self.body_at(messages, tools, options, Fields::All)
+    }
+
+    fn body_at(&self, messages: &[ChatMessage], tools: &[ToolSpec], options: &crate::types::TurnOptions, fields: Fields) -> serde_json::Value {
         let current_model = self.model();
 
         let current_profile = self.profile.read().ok().and_then(|p| p.clone()).unwrap_or_default();
@@ -287,33 +312,39 @@ impl OpenAiCompat {
             "stream_options": { "include_usage": true },
         });
 
+        if let Some(t) = options.temperature {
+            body["temperature"] = serde_json::json!(t);
+        }
+        if let Some(mt) = options.max_tokens {
+            body["max_tokens"] = serde_json::json!(mt);
+        }
+        if fields == Fields::Standard {
+            return self.with_tools(body, tools);
+        }
+
         // Maximize prefix KV cache reuse (f_keep >= 0.9) on llama.cpp, LM Studio, vLLM and local endpoints
         if is_local_or_lmstudio {
             body["cache_prompt"] = serde_json::json!(true);
             body["prompt_cache"] = serde_json::json!(true);
         }
 
-        if let Some(t) = options.temperature {
-            body["temperature"] = serde_json::json!(t);
-        }
-        if let Some(p) = options.top_p {
-            body["top_p"] = serde_json::json!(p);
-        }
-        if let Some(k) = options.top_k {
-            body["top_k"] = serde_json::json!(k);
-        }
-        if let Some(rp) = options.repeat_penalty {
-            body["repeat_penalty"] = serde_json::json!(rp);
-            body["repetition_penalty"] = serde_json::json!(rp);
-        }
-        if let Some(pp) = options.presence_penalty {
-            body["presence_penalty"] = serde_json::json!(pp);
-        }
-        if let Some(mp) = options.min_p {
-            body["min_p"] = serde_json::json!(mp);
-        }
-        if let Some(mt) = options.max_tokens {
-            body["max_tokens"] = serde_json::json!(mt);
+        if fields == Fields::All {
+            if let Some(p) = options.top_p {
+                body["top_p"] = serde_json::json!(p);
+            }
+            if let Some(k) = options.top_k {
+                body["top_k"] = serde_json::json!(k);
+            }
+            if let Some(rp) = options.repeat_penalty {
+                body["repeat_penalty"] = serde_json::json!(rp);
+                body["repetition_penalty"] = serde_json::json!(rp);
+            }
+            if let Some(pp) = options.presence_penalty {
+                body["presence_penalty"] = serde_json::json!(pp);
+            }
+            if let Some(mp) = options.min_p {
+                body["min_p"] = serde_json::json!(mp);
+            }
         }
 
         if let Some(ref effort_str) = resolved_effort {
@@ -331,6 +362,10 @@ impl OpenAiCompat {
             }
         }
 
+        self.with_tools(body, tools)
+    }
+
+    fn with_tools(&self, mut body: serde_json::Value, tools: &[ToolSpec]) -> serde_json::Value {
         if !tools.is_empty() {
             body["tools"] = serde_json::Value::Array(
                 tools
@@ -373,40 +408,31 @@ impl crate::LlmBackend for OpenAiCompat {
         tools: &[ToolSpec],
         options: &crate::types::TurnOptions,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let mut options = options.clone();
+        // A 400 often means the server rejected an optional field. Adapt at
+        // most MAX_ADAPTIVE_RETRIES times: learn a thinking preset list when
+        // the error names one, otherwise fall back to fewer fields (all ->
+        // no extra sampling knobs -> standard fields only). A 400 for any
+        // other reason (context overflow, malformed history) then surfaces.
+        let mut fields = Fields::All;
         let mut adaptive_retries = 0u8;
         let resp = loop {
-            let resp = self.send_with_retries(&self.body(messages, tools, &options)).await?;
+            let resp = self.send_with_retries(&self.body_at(messages, tools, options, fields)).await?;
             if resp.status().is_success() {
                 break resp;
             }
             let status = resp.status().as_u16();
             let body_text = resp.text().await.unwrap_or_default();
-            // A 400 often means the server rejected an optional field (a
-            // thinking preset, a sampling knob). Learn from it and retry, but
-            // only a bounded number of times: a 400 for any other reason
-            // (context overflow, malformed history) would otherwise loop forever.
             if status != 400 || adaptive_retries >= MAX_ADAPTIVE_RETRIES {
                 return Err(LlmError::Status { status, body: body_text });
             }
             adaptive_retries += 1;
             match crate::thinking::ThinkingProfile::parse_api_error(&body_text) {
-                Some(learned) if Some(&learned) != self.profile().as_ref() => {
+                Some(learned) if fields == Fields::All && Some(&learned) != self.profile().as_ref() => {
                     if let Ok(mut lock) = self.profile.write() {
                         *lock = Some(learned);
                     }
                 }
-                // Nothing new to learn about thinking: drop the non-standard
-                // sampling fields some strict endpoints refuse.
-                _ => {
-                    options = crate::types::TurnOptions {
-                        thinking: options.thinking,
-                        custom_effort: options.custom_effort.clone(),
-                        temperature: options.temperature,
-                        max_tokens: options.max_tokens,
-                        ..Default::default()
-                    };
-                }
+                _ => fields = fields.fewer(),
             }
         };
 
@@ -470,7 +496,9 @@ impl OpenAiCompat {
             }
             match req.send().await {
                 Ok(resp) => return Ok(resp),
-                Err(e) if attempt < retries && (e.is_connect() || e.is_timeout()) => {
+                // Connection failures only: a timeout after connecting means
+                // the server may already be generating for this request.
+                Err(e) if attempt < retries && e.is_connect() => {
                     attempt += 1;
                     tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
                 }
@@ -483,7 +511,7 @@ impl OpenAiCompat {
 /// Error message carried by an in-stream `{"error": ...}` payload, if any.
 fn stream_error(payload: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
-    let err = v.get("error")?;
+    let err = v.get("error").filter(|e| !e.is_null())?;
     Some(match err {
         serde_json::Value::String(s) => s.clone(),
         other => other
@@ -531,6 +559,40 @@ mod tests {
         let res = b.stream(&[ChatMessage::user("hi")], &[]).await;
         assert!(matches!(res, Err(LlmError::Status { status: 400, .. })));
         assert!(hits.load(std::sync::atomic::Ordering::SeqCst) <= 1 + MAX_ADAPTIVE_RETRIES as usize);
+    }
+
+    #[tokio::test]
+    async fn unrelated_400_never_becomes_a_thinking_profile_and_fallback_drops_extras() {
+        // Rejects any body carrying `top_k` (like strict OpenAI-style APIs),
+        // with an error text that happens to contain a bracketed number.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 65536];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let resp = if req.contains("top_k") {
+                    let body = r#"{"error":"Unrecognized request argument: top_k (messages[3])"}"#;
+                    format!("HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
+                } else {
+                    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+                    format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        let b = OpenAiCompat::new(format!("http://{addr}/v1"), "m", None);
+        let opts = crate::types::TurnOptions { top_k: Some(20), temperature: Some(0.5), ..Default::default() };
+        let mut stream = b.stream_with_options(&[ChatMessage::user("hi")], &[], &opts).await.expect("recovers without top_k");
+        let mut text = String::new();
+        while let Some(Ok(ev)) = stream.next().await {
+            if let LlmEvent::TextDelta(t) = ev {
+                text.push_str(&t);
+            }
+        }
+        assert_eq!(text, "ok");
+        assert!(b.profile().is_none(), "learned a bogus profile: {:?}", b.profile());
     }
 
     #[tokio::test]

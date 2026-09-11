@@ -46,52 +46,13 @@ pub enum ToolError {
     Other(String),
 }
 
-fn parse_args<T: DeserializeOwned>(json: &str) -> Result<T, ToolError> {
-    let trimmed = json.trim();
-    let candidate = if trimmed.is_empty() { "{}" } else { trimmed };
-
-    // 1. Direct parse fast path
-    if let Ok(val) = serde_json::from_str::<T>(candidate) {
-        return Ok(val);
-    }
-
-    // 2. Self-healing JSON repair (Python dicts, unescaped quotes, trailing commas, fences)
-    let repaired = flashagent_llm::repair_json(candidate).unwrap_or_else(|| candidate.to_string());
-    if let Ok(val) = serde_json::from_str::<T>(&repaired) {
-        return Ok(val);
-    }
-
-    // 3. Unpack wrappers (e.g. {"arguments": {...}}, {"parameters": {...}}, or single-key wrappers)
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&repaired) {
-        if let Some(obj) = value.as_object() {
-            if let Some(args) = obj.get("arguments").or_else(|| obj.get("parameters")).or_else(|| obj.get("args")) {
-                if let Ok(val) = serde_json::from_value::<T>(args.clone()) {
-                    return Ok(val);
-                }
-                if let Some(s) = args.as_str() {
-                    if let Ok(val) = serde_json::from_str::<T>(s) {
-                        return Ok(val);
-                    }
-                    if let Some(r) = flashagent_llm::repair_json(s) {
-                        if let Ok(val) = serde_json::from_str::<T>(&r) {
-                            return Ok(val);
-                        }
-                    }
-                }
-            }
-            if obj.len() == 1 {
-                if let Some((_, inner)) = obj.iter().next() {
-                    if inner.is_object() {
-                        if let Ok(val) = serde_json::from_value::<T>(inner.clone()) {
-                            return Ok(val);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    serde_json::from_str::<T>(candidate).map_err(|e| ToolError::Other(format!("bad arguments: {e}")))
+/// Deserialize a call's arguments exactly as the permission layer and the
+/// approval card read them (`flashagent_llm::effective_args`): one shape, no
+/// fallback to a different part of the payload when the first read fails.
+fn parse_args<T: DeserializeOwned>(json: &str, tool: &str) -> Result<T, ToolError> {
+    let value = flashagent_llm::effective_args(json, tool)
+        .ok_or_else(|| ToolError::Other(format!("bad arguments: not a JSON object: {json}")))?;
+    serde_json::from_value(value).map_err(|e| ToolError::Other(format!("bad arguments: {e}")))
 }
 
 fn truncate_output(mut text: String) -> String {
@@ -197,7 +158,7 @@ impl BuiltinTools {
     /// Unified diff of what a write/edit call would change, or `None` when the
     /// call is not a write or the file state cannot be read.
     fn preview_for(&self, call: &ToolCall) -> Option<String> {
-        let v: serde_json::Value = serde_json::from_str(call.args_json.trim()).ok()?;
+        let v = flashagent_llm::effective_args(&call.args_json, &call.name)?;
         match call.name.as_str() {
             "write_file" => {
                 let path = v.get("path")?.as_str()?;
@@ -225,84 +186,84 @@ impl BuiltinTools {
     async fn dispatch(&self, call: &ToolCall) -> Result<String, ToolError> {
         match call.name.as_str() {
             "read_file" => {
-                let a: ReadArgs = parse_args(&call.args_json)?;
+                let a: ReadArgs = parse_args(&call.args_json, &call.name)?;
                 fs_tools::read_file(&self.cwd, &a.path, a.offset.unwrap_or(0), a.limit.unwrap_or(2000))
             }
             "write_file" => {
-                let a: WriteArgs = parse_args(&call.args_json)?;
+                let a: WriteArgs = parse_args(&call.args_json, &call.name)?;
                 fs_tools::write_file(&self.cwd, &a.path, &a.content)
             }
             "edit_file" => {
-                let a: EditArgs = parse_args(&call.args_json)?;
+                let a: EditArgs = parse_args(&call.args_json, &call.name)?;
                 fs_tools::edit_file(&self.cwd, &a.path, &a.edits)
             }
             "patch_file" => {
-                let a: PatchArgs = parse_args(&call.args_json)?;
+                let a: PatchArgs = parse_args(&call.args_json, &call.name)?;
                 patch::patch_file(&self.cwd, &a.path, &a.patch)
             }
             "list_dir" => {
-                let a: ListArgs = parse_args(&call.args_json)?;
+                let a: ListArgs = parse_args(&call.args_json, &call.name)?;
                 fs_tools::list_dir(&self.cwd, a.path.as_deref().unwrap_or("."))
             }
             "glob" => {
-                let a: GlobArgs = parse_args(&call.args_json)?;
+                let a: GlobArgs = parse_args(&call.args_json, &call.name)?;
                 fs_tools::glob_files(&self.cwd, &a.pattern)
             }
             "grep" => {
-                let a: GrepArgs = parse_args(&call.args_json)?;
+                let a: GrepArgs = parse_args(&call.args_json, &call.name)?;
                 fs_tools::grep(&self.cwd, &a.pattern, a.glob.as_deref(), a.case_insensitive)
             }
             "outline_file" => {
-                let a: OutlineArgs = parse_args(&call.args_json)?;
+                let a: OutlineArgs = parse_args(&call.args_json, &call.name)?;
                 outline::outline_file(&self.cwd, &a.path)
             }
             "git_status" => {
-                let a: GitStatusArgs = parse_args(&call.args_json)?;
+                let a: GitStatusArgs = parse_args(&call.args_json, &call.name)?;
                 git::git_status(&self.cwd, a.path.as_deref())
             }
             "git_diff" => {
-                let a: GitDiffArgs = parse_args(&call.args_json)?;
+                let a: GitDiffArgs = parse_args(&call.args_json, &call.name)?;
                 git::git_diff(&self.cwd, a.staged.unwrap_or(false), a.path.as_deref())
             }
             "run_shell" => {
-                let a: ShellArgs = parse_args(&call.args_json)?;
+                let a: ShellArgs = parse_args(&call.args_json, &call.name)?;
                 self.run_shell(a).await
             }
             "env_info" => {
                 env_tools::env_info(&self.cwd)
             }
             "ask_user" => {
-                let a: ask_user::AskUserArgs = parse_args(&call.args_json)?;
+                let a: ask_user::AskUserArgs = parse_args(&call.args_json, &call.name)?;
                 ask_user::run_ask_user(self.question_gate.as_ref(), &self.is_goal_mode, a).await
             }
             "memory_read" => {
-                let a: memory_tools::MemoryReadArgs = parse_args(&call.args_json)?;
+                let a: memory_tools::MemoryReadArgs = parse_args(&call.args_json, &call.name)?;
                 memory_tools::memory_read(&self.cwd, a)
             }
             "memory_create" => {
-                let a: memory_tools::MemoryWriteArgs = parse_args(&call.args_json)?;
+                let a: memory_tools::MemoryWriteArgs = parse_args(&call.args_json, &call.name)?;
                 memory_tools::memory_create(&self.cwd, &self.is_goal_mode, a)
             }
             "memory_update" => {
-                let a: memory_tools::MemoryWriteArgs = parse_args(&call.args_json)?;
+                let a: memory_tools::MemoryWriteArgs = parse_args(&call.args_json, &call.name)?;
                 memory_tools::memory_update(&self.cwd, &self.is_goal_mode, a)
             }
             "memory_remove" => {
-                let a: memory_tools::MemoryRemoveArgs = parse_args(&call.args_json)?;
+                let a: memory_tools::MemoryRemoveArgs = parse_args(&call.args_json, &call.name)?;
                 memory_tools::memory_remove(&self.cwd, &self.is_goal_mode, a)
             }
             "web_fetch" => {
                 if !self.web_enabled.load(Ordering::Relaxed) {
                     return Err(ToolError::Other("web_fetch is disabled by default per PHILOSOPHY.md §3 (local-first; web tools require explicit opt-in). Enable in settings/config.".into()));
                 }
-                let a: FetchArgs = parse_args(&call.args_json)?;
+                let a: FetchArgs = parse_args(&call.args_json, &call.name)?;
                 web::fetch_text(&self.http, &a.url).await
             }
             "web_search" => {
                 if !self.web_enabled.load(Ordering::Relaxed) {
                     return Err(ToolError::Other("web_search is disabled by default per PHILOSOPHY.md §3 (local-first; web tools require explicit opt-in). Enable in settings/config.".into()));
                 }
-                let a: SearchArgs = parse_args(&call.args_json)?;
+                let a: SearchArgs = parse_args(&call.args_json, &call.name)?;
                 if let Some(ref key) = self.brave_key {
                     if !key.is_empty() {
                         web::search(&self.http, key, &a.query, a.count.unwrap_or(5)).await
@@ -749,19 +710,19 @@ mod tests {
     fn parse_args_self_healing_python_dict_and_unwrapping() {
         // Test Python dict with single quotes
         let py_dict = "{'path': 'src/main.rs', 'offset': 10}";
-        let read: ReadArgs = parse_args(py_dict).unwrap();
+        let read: ReadArgs = parse_args(py_dict, "read_file").unwrap();
         assert_eq!(read.path, "src/main.rs");
         assert_eq!(read.offset, Some(10));
 
         // Test wrapped in {"arguments": {...}}
         let wrapped = r#"{"arguments": {"path": "src/lib.rs", "offset": 5}}"#;
-        let read2: ReadArgs = parse_args(wrapped).unwrap();
+        let read2: ReadArgs = parse_args(wrapped, "read_file").unwrap();
         assert_eq!(read2.path, "src/lib.rs");
         assert_eq!(read2.offset, Some(5));
 
         // Test single-key wrapper {"read_file": {"path": "README.md"}}
         let single_key = r#"{"read_file": {"path": "README.md"}}"#;
-        let read3: ReadArgs = parse_args(single_key).unwrap();
+        let read3: ReadArgs = parse_args(single_key, "read_file").unwrap();
         assert_eq!(read3.path, "README.md");
     }
 }

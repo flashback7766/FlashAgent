@@ -272,6 +272,20 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn timeout_leaves_no_descendant_running() {
+        // The bounded pipe drain alone would also return fast; this checks
+        // the process-group kill: the pipeline's next step must never run.
+        let marker = std::env::temp_dir().join(format!("fa-shell-timeout-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let cmd = format!("sleep 1; touch {}", marker.display());
+        let err = run_foreground(&cmd, Duration::from_millis(150)).await.unwrap_err();
+        assert!(err.to_string().contains("timeout"));
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!marker.exists(), "a descendant of the timed-out command kept running");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn backgrounded_grandchild_does_not_hang_the_call() {
         let started = std::time::Instant::now();
         let out = run_foreground("echo ready; sleep 30 &", Duration::from_secs(20)).await.unwrap();

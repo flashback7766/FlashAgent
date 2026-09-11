@@ -39,7 +39,8 @@ use flashagent_llm::{ChatMessage, ServerDiscovery};
 /// Events dispatched to the TUI event loop.
 #[derive(Debug)]
 pub enum UiEvent {
-    Loop(LoopEvent),
+    /// A loop event, tagged with the turn that produced it.
+    Loop { turn_id: u64, event: LoopEvent },
     Key(KeyCode, KeyModifiers),
     Paste(String),
     Mouse(MouseEvent),
@@ -48,7 +49,8 @@ pub enum UiEvent {
     /// already given up on (a hard-aborted cancel).
     Finished {
         turn_id: u64,
-        result: Result<(Vec<ChatMessage>, DoneReason), String>,
+        /// On failure: the error text and the history up to the failure.
+        result: Result<(Vec<ChatMessage>, DoneReason), (String, Vec<ChatMessage>)>,
     },
     ServerDiscovered(ServerDiscovery),
     /// Outcome of the Settings → "Run Tool Test" probe.

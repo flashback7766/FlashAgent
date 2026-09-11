@@ -49,6 +49,46 @@ pub fn repair_json(input: &str) -> Option<String> {
     None
 }
 
+/// The argument object a tool call will actually run with.
+///
+/// Every consumer — the permission check, the approval card, the diff preview
+/// and the tool itself — must read arguments through this one function, so
+/// the command that is judged and shown is exactly the command that runs.
+/// Rules, in order: parse (repairing if needed); unwrap `{"<tool_name>": {..}}`;
+/// unwrap `{"arguments"|"parameters"|"args": ..}` only when the object holds
+/// nothing but such wrapper/metadata keys; otherwise the object itself.
+pub fn effective_args(args_json: &str, tool_name: &str) -> Option<serde_json::Value> {
+    let parse = |text: &str| -> Option<serde_json::Value> {
+        let trimmed = text.trim();
+        let candidate = if trimmed.is_empty() { "{}" } else { trimmed };
+        serde_json::from_str(candidate)
+            .ok()
+            .or_else(|| serde_json::from_str(&repair_json(candidate)?).ok())
+    };
+    let value = parse(args_json)?;
+    let obj = value.as_object()?;
+
+    let unwrap_inner = |inner: &serde_json::Value| match inner {
+        serde_json::Value::String(s) => parse(s).filter(|v| v.is_object()),
+        v if v.is_object() => Some(v.clone()),
+        _ => None,
+    };
+    if obj.len() == 1 {
+        if let Some(inner) = obj.get(tool_name) {
+            return unwrap_inner(inner);
+        }
+    }
+    const WRAPPERS: [&str; 3] = ["arguments", "parameters", "args"];
+    const METADATA: [&str; 5] = ["name", "tool", "id", "type", "function"];
+    let only_wrapper_keys = obj.keys().all(|k| WRAPPERS.contains(&k.as_str()) || METADATA.contains(&k.as_str()));
+    if only_wrapper_keys {
+        if let Some(inner) = WRAPPERS.iter().find_map(|w| obj.get(*w)) {
+            return unwrap_inner(inner);
+        }
+    }
+    Some(value)
+}
+
 /// Strip ``` fences (like ```json or ```tool_calls) and <tool_call> tags.
 fn strip_fences_and_tags(s: &str) -> &str {
     let mut trimmed = s.trim();
@@ -381,6 +421,22 @@ fn extract_embedded_json(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_args_never_diverges_between_readers() {
+        // Top-level fields win whenever the object has any: a stray wrapper
+        // next to them is data, not the "real" arguments.
+        let smuggled = r#"{"command":"echo SAFE","timeout_ms":"soon","arguments":{"command":"echo PWNED"}}"#;
+        assert_eq!(effective_args(smuggled, "run_shell").unwrap()["command"], "echo SAFE");
+        // Pure wrappers unwrap, including stringified inner JSON.
+        assert_eq!(effective_args(r#"{"arguments":{"command":"ls"}}"#, "run_shell").unwrap()["command"], "ls");
+        assert_eq!(effective_args(r#"{"name":"run_shell","arguments":"{\"command\":\"ls\"}"}"#, "run_shell").unwrap()["command"], "ls");
+        assert_eq!(effective_args(r#"{"run_shell":{"command":"ls"}}"#, "run_shell").unwrap()["command"], "ls");
+        // A single object-valued field of a different name is a real argument.
+        assert!(effective_args(r#"{"filter":{"x":1}}"#, "mcp__db__query").unwrap().get("filter").is_some());
+        assert_eq!(effective_args("", "list_dir").unwrap(), serde_json::json!({}));
+        assert!(effective_args("[1,2]", "x").is_none());
+    }
 
     fn parsed(s: &str) -> serde_json::Value {
         serde_json::from_str(&repair_json(s).unwrap()).unwrap()

@@ -240,8 +240,10 @@ pub fn find_platform_asset(assets: &[ReleaseAsset]) -> Option<&ReleaseAsset> {
         }
     }
 
-    // Fallback: check any asset with linux tarball or matching name
-    assets.iter().find(|a| a.name.contains("tar.gz") || a.name.contains("zip"))
+    // No asset for this platform: never fall back to "any archive", which
+    // would install a binary for another OS or architecture.
+    let _ = assets;
+    None
 }
 
 /// Determine whether `target` represents a downgrade from `current`.
