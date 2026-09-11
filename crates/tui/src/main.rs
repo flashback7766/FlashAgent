@@ -1160,10 +1160,10 @@ async fn main() -> Result<()> {
             "--setup" => force_setup = true,
             "-y" | "--yes" => skip_trust = true,
             "-h" | "--help" => {
-                println!("FlashAgent TUI\n\nUsage: flashagent-tui [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Specify LLM model name\n  --url <endpoint>     API endpoint (default: http://localhost:1234/v1)\n  --setup              Run first-time setup wizard\n  --resume <id>        Resume a previously saved chat session\n  -y, --yes            Skip directory trust confirmation\n  -h, --help           Show this help message");
+                println!("FlashAgent TUI\n\nUsage: flashagent [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Specify LLM model name\n  --url <endpoint>     API endpoint (default: http://localhost:1234/v1)\n  --setup              Run first-time setup wizard\n  --resume <id>        Resume a previously saved chat session\n  -y, --yes            Skip directory trust confirmation\n  -h, --help           Show this help message");
                 return Ok(());
             }
-            other => anyhow::bail!("usage: flashagent-tui [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--setup] [--resume <id>] [-y|--yes] (got {other})"),
+            other => anyhow::bail!("usage: flashagent [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--setup] [--resume <id>] [-y|--yes] (got {other})"),
         }
     }
 

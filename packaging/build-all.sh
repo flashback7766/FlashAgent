@@ -15,7 +15,7 @@ echo "=== Building FlashAgent Release Packages (${VERSION}) ==="
 mkdir -p "${DIST_DIR}"
 
 # 1. Build release binary with explicit version embedded
-BINARY="${ROOT_DIR}/target/release/flashagent-tui"
+BINARY="${ROOT_DIR}/target/release/flashagent"
 echo "--> Compiling release binary with FLASHAGENT_VERSION=${VERSION}..."
 FLASHAGENT_VERSION="${VERSION}" cargo build --release --workspace -p flashagent-tui
 strip "${BINARY}" || true
@@ -41,8 +41,7 @@ else
     ARCH_DIR="/tmp/flashagent-arch-build"
     rm -rf "${ARCH_DIR}"
     mkdir -p "${ARCH_DIR}/usr/bin" "${ARCH_DIR}/usr/share/applications" "${ARCH_DIR}/usr/share/icons/hicolor/256x256/apps" "${ARCH_DIR}/usr/share/licenses/flashagent-bin"
-    cp "${BINARY}" "${ARCH_DIR}/usr/bin/flashagent-tui"
-    ln -sf flashagent-tui "${ARCH_DIR}/usr/bin/flashagent"
+    cp "${BINARY}" "${ARCH_DIR}/usr/bin/flashagent"
     cp "${ROOT_DIR}/packaging/desktop/flashagent.desktop" "${ARCH_DIR}/usr/share/applications/"
     cp "${ROOT_DIR}/packaging/desktop/flashagent.png" "${ARCH_DIR}/usr/share/icons/hicolor/256x256/apps/"
     cp "${ROOT_DIR}/LICENSE" "${ARCH_DIR}/usr/share/licenses/flashagent-bin/LICENSE"
@@ -60,7 +59,6 @@ size = ${FILE_SIZE}
 arch = x86_64
 license = MIT
 provides = flashagent
-provides = flashagent-tui
 depend = gcc-libs
 depend = glibc
 EOF
@@ -82,8 +80,7 @@ if command -v dpkg-deb >/dev/null 2>&1; then
         DEB_VER="0.1.0~${RAW_VER}"
     fi
     sed -e "s/^Version:.*/Version: ${DEB_VER}-1/" "${ROOT_DIR}/packaging/debian/control" > "${DEB_DIR}/DEBIAN/control"
-    cp "${BINARY}" "${DEB_DIR}/usr/bin/flashagent-tui"
-    ln -sf flashagent-tui "${DEB_DIR}/usr/bin/flashagent"
+    cp "${BINARY}" "${DEB_DIR}/usr/bin/flashagent"
     cp "${ROOT_DIR}/packaging/desktop/flashagent.desktop" "${DEB_DIR}/usr/share/applications/"
     cp "${ROOT_DIR}/packaging/desktop/flashagent.png" "${DEB_DIR}/usr/share/icons/hicolor/256x256/apps/"
     cp "${ROOT_DIR}/LICENSE" "${DEB_DIR}/usr/share/doc/flashagent/copyright"
@@ -98,7 +95,6 @@ VOID_DIR="/tmp/flashagent-void"
 rm -rf "${VOID_DIR}"
 mkdir -p "${VOID_DIR}/bin" "${VOID_DIR}/share/applications" "${VOID_DIR}/share/icons" "${VOID_DIR}/xbps"
 cp "${BINARY}" "${VOID_DIR}/bin/flashagent"
-ln -sf flashagent "${VOID_DIR}/bin/flashagent-tui"
 cp "${ROOT_DIR}/packaging/desktop/flashagent.desktop" "${VOID_DIR}/share/applications/"
 cp "${ROOT_DIR}/packaging/desktop/flashagent.png" "${VOID_DIR}/share/icons/"
 sed -e "s/^version=.*/version=${RAW_VER}/" "${ROOT_DIR}/packaging/void/template" > "${VOID_DIR}/xbps/template"
@@ -113,8 +109,7 @@ rm -rf "${APPDIR}"
 mkdir -p "${APPDIR}/usr/bin" "${APPDIR}/usr/share/applications" "${APPDIR}/usr/share/icons/hicolor/256x256/apps"
 cp "${ROOT_DIR}/packaging/appimage/AppRun" "${APPDIR}/AppRun"
 chmod +x "${APPDIR}/AppRun"
-cp "${BINARY}" "${APPDIR}/usr/bin/flashagent-tui"
-ln -sf flashagent-tui "${APPDIR}/usr/bin/flashagent"
+cp "${BINARY}" "${APPDIR}/usr/bin/flashagent"
 cp "${ROOT_DIR}/packaging/desktop/flashagent.desktop" "${APPDIR}/"
 cp "${ROOT_DIR}/packaging/desktop/flashagent.png" "${APPDIR}/"
 cp "${ROOT_DIR}/packaging/desktop/flashagent.png" "${APPDIR}/.DirIcon"
@@ -137,9 +132,8 @@ echo "--> Packaging Generic Linux tarballs..."
 TAR_TMP="/tmp/flashagent-tarball-build"
 rm -rf "${TAR_TMP}"
 mkdir -p "${TAR_TMP}"
-cp "${BINARY}" "${TAR_TMP}/flashagent-tui"
 cp "${BINARY}" "${TAR_TMP}/flashagent"
-tar -czf "${DIST_DIR}/flashagent-${VERSION}-linux-x86_64.tar.gz" -C "${TAR_TMP}" flashagent flashagent-tui
+tar -czf "${DIST_DIR}/flashagent-${VERSION}-linux-x86_64.tar.gz" -C "${TAR_TMP}" flashagent
 cp "${DIST_DIR}/flashagent-${VERSION}-linux-x86_64.tar.gz" "${DIST_DIR}/flashagent-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
 rm -rf "${TAR_TMP}"
 

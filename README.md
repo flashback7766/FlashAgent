@@ -75,7 +75,7 @@ Requires [Rust 1.85+](https://rustup.rs):
 git clone https://github.com/flashback7766/FlashAgent.git
 cd FlashAgent
 cargo build --release
-./target/release/flashagent-tui
+./target/release/flashagent
 ```
 </details>
 
@@ -169,8 +169,7 @@ crates/tui     crossterm terminal UI (the product today)
 crates/svc     self-updater (future home of the background service)
 crates/data    SQLite + FTS5 store (not yet used by the TUI; sessions are JSON files)
 crates/proto   IPC contract (reserved for the UI ⇄ service split)
-crates/ui      native wgpu renderer prototype (Track B)
-crates/app     placeholder for the future GUI entrypoint
+crates/ui      native wgpu renderer prototype (Track B, planned for v2)
 ```
 
 The split into a background service plus native GPU UI, IPC and the SQLite-backed session sidebar are planned work — see [ARCHITECTURE.md](ARCHITECTURE.md) and [ROADMAP.md](ROADMAP.md).

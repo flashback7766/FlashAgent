@@ -5,7 +5,6 @@ Cargo.lock.orig
 
 # Compiled binaries and symlinks
 flashagent
-flashagent-tui
 *.exe
 *.dll
 *.so

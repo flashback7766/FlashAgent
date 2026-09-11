@@ -11,7 +11,7 @@ distfiles="https://github.com/flashback7766/FlashAgent/archive/refs/tags/v${vers
 
 post_install() {
 	vlicense LICENSE
-	vbin target/${RUST_TARGET}/release/flashagent-tui flashagent
+	vbin target/${RUST_TARGET}/release/flashagent
 	vinstall packaging/desktop/flashagent.desktop 644 usr/share/applications
 	vinstall packaging/desktop/flashagent.png 644 usr/share/icons/hicolor/256x256/apps
 }

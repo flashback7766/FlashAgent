@@ -20,7 +20,7 @@ def main():
     if os.path.exists(cast_path):
         os.remove(cast_path)
 
-    cmd_str = f"asciinema rec -f asciicast-v2 --overwrite {cast_path} -c ./target/release/flashagent-tui"
+    cmd_str = f"asciinema rec -f asciicast-v2 --overwrite {cast_path} -c ./target/release/flashagent"
     print(f"Launching tmux session with asciinema ({cols}x{rows})...")
     subprocess.run(["tmux", "new-session", "-d", "-s", "demo", "-x", str(cols), "-y", str(rows), cmd_str], check=True)
 

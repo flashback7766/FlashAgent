@@ -221,9 +221,10 @@ try {
 
     # Copy binary to destination (with running process replacement support)
     $DestExe = Join-Path $InstallDir "flashagent.exe"
-    $DestTuiExe = Join-Path $InstallDir "flashagent-tui.exe"
     Safe-InstallExe $TargetExe $DestExe
-    Safe-InstallExe $TargetExe $DestTuiExe
+    # Older installs also placed a flashagent-tui.exe copy; the command is just `flashagent` now.
+    $OldTuiExe = Join-Path $InstallDir "flashagent-tui.exe"
+    if (Test-Path $OldTuiExe) { Remove-Item -Path $OldTuiExe -Force -ErrorAction SilentlyContinue }
 
     # Also mirror into ~/.local/bin if directory exists or for cross-environment convenience
     try {

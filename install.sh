@@ -261,7 +261,11 @@ else
 fi
 
 chmod +x "${INSTALL_DIR}/flashagent"
-ln -sf flashagent "${INSTALL_DIR}/flashagent-tui" 2>/dev/null || true
+# Older installs also created a `flashagent-tui` alias; the command is just
+# `flashagent` now. Only remove the alias if it is ours (a link to flashagent).
+if [ -L "${INSTALL_DIR}/flashagent-tui" ] && [ "$(readlink "${INSTALL_DIR}/flashagent-tui")" = "flashagent" ]; then
+  rm -f "${INSTALL_DIR}/flashagent-tui"
+fi
 rm -f "${INSTALL_DIR}/flashagent.old" 2>/dev/null || true
 
 # macOS Gatekeeper quarantine removal

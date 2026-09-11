@@ -6,7 +6,7 @@
 
 This document describes the target design. What exists today:
 
-- **Process model**: not split yet. `flashagent-tui` hosts loop, tools and permissions in one process; `proto` (IPC contract) and `app` (GUI entrypoint) are placeholders, `svc` contains only the updater.
+- **Process model**: not split yet. `flashagent` (crate `flashagent-tui`) hosts loop, tools and permissions in one process; `proto` (IPC contract) is a placeholder, `svc` contains only the updater. The GUI entrypoint crate was removed until Track B resumes (v2).
 - **Data**: `crates/data` (SQLite + FTS5) is implemented and tested but not used by the TUI; sessions are JSON files in `~/.flashagent/sessions/`.
 - **LLM**: OpenAI-compatible backend only (A11 adds native adapters). The text tool-call parser runs inside `core::loop_`.
 - **Memory writes**: the `memory_*` tools go through the Write category; they are disabled during `/goal`.
@@ -43,7 +43,7 @@ This document describes the target design. What exists today:
 | `svc` | Core service binary: tokio runtime, shell isolation, filesystem snapshots, updater engine, telemetry. |
 | `ui` | wgpu hardware renderer, cosmic-text/parley, Material 3 Expressive component kit, spring physics engine, AccessKit, IME. |
 | `tui` | Lightweight terminal client connected to the core engine. |
-| `app` | Main entrypoint binary: manages service lifecycle and launches the native UI. |
+| `app` (v2, not present) | Main entrypoint binary: manages service lifecycle and launches the native UI. |
 
 Dependency Rule: `core` does not depend on `llm` or `ui` — the loop consumes abstract traits. `ui` knows nothing of HTTP or SQL.
 

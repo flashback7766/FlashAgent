@@ -17,7 +17,7 @@ def main():
     if os.path.exists(cast_path):
         os.remove(cast_path)
 
-    cmd = f"asciinema rec -f asciicast-v2 {cast_path} -c ./target/release/flashagent-tui"
+    cmd = f"asciinema rec -f asciicast-v2 {cast_path} -c ./target/release/flashagent"
     print(f"Launching tmux session for menus ({cols}x{rows})...")
     subprocess.run(["tmux", "new-session", "-d", "-s", "demo-menu", "-x", str(cols), "-y", str(rows), cmd], check=True)
 
