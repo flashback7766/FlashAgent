@@ -1,2 +1,1 @@
-//! flashagent-proto: IPC contract between UI/TUI processes and the core
-//! service. Strictly typed commands (UI→core) and events (core→UI), versioned.
+//! flashagent-proto: empty, reserved for a process split that has not happened.

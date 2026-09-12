@@ -1,6 +1,6 @@
 //! Filesystem tools over a fixed working directory. Paths may be relative
 //! (resolved against the cwd) or absolute; sandboxing by permission rules is
-//! the A5 layer's job, not this module's.
+//! the permission layer's job, not this module's.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};

@@ -76,9 +76,9 @@ pub struct BuiltinToolsConfig {
     pub is_goal_mode: Option<Arc<AtomicBool>>,
     /// Toolset exposure profile.
     pub toolset_profile: Option<ToolsetProfile>,
-    /// Whether web fetch and search are enabled (PHILOSOPHY.md §3: opt-in only).
+    /// Whether web fetch and search are enabled. Off unless the user opts in.
     pub web_enabled: Option<bool>,
-    /// Discovered model context window size (PHILOSOPHY.md §9: adaptive toolset).
+    /// Discovered model context window size; small windows get fewer tools.
     pub context_window: Option<usize>,
     /// Optional MCP manager coordinating external Model Context Protocol servers.
     pub mcp_manager: Option<Arc<mcp::McpManager>>,
@@ -148,12 +148,12 @@ impl BuiltinTools {
         }
     }
 
-    /// Enable or disable web tools (PHILOSOPHY.md §3: opt-in only).
+    /// Enable or disable web tools.
     pub fn set_web_enabled(&self, enabled: bool) {
         self.web_enabled.store(enabled, Ordering::Relaxed);
     }
 
-    /// Update discovered context window size for adaptive toolset sizing (PHILOSOPHY.md §9).
+    /// Update the discovered context window size, which decides how many tools are offered.
     /// Tell the tools whether the model can see images; `view_image` is only
     /// offered, and only works, when it can.
     pub fn set_vision_supported(&self, supported: bool) {
@@ -386,7 +386,7 @@ impl ToolExec for BuiltinTools {
             },
         ];
 
-        // Extended tools (Auto and Full profiles, adapted by context window per PHILOSOPHY.md §9)
+        // Extended tools: offered unless the context window is too small to afford their schemas.
         let profile = self.toolset_profile.read().map(|p| *p).unwrap_or(ToolsetProfile::Auto);
         let ctx = self.context_window.read().ok().and_then(|c| *c);
         let effective_profile = match profile {
@@ -456,7 +456,7 @@ impl ToolExec for BuiltinTools {
             });
         }
 
-        // PHILOSOPHY.md §3: Web tools require explicit opt-in
+        // Web tools only when the user has turned them on.
             if self.web_enabled.load(Ordering::Relaxed) {
                 specs.push(ToolSpec {
                     name: "web_fetch".into(),
@@ -676,7 +676,7 @@ mod tests {
         })
         .unwrap();
         let specs_auto = tools_auto.specs();
-        assert_eq!(specs_auto.len(), 17); // 9 core + 8 extended, web disabled by default per PHILOSOPHY.md §3
+        assert_eq!(specs_auto.len(), 17); // 9 core + 8 extended; web is off by default
         let names_auto: Vec<&str> = specs_auto.iter().map(|s| s.name.as_str()).collect();
         assert!(names_auto.contains(&"ask_user"));
         assert!(names_auto.contains(&"outline_file"));

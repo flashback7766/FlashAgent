@@ -33,3 +33,9 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Maintainer workflow notes for AI agents: kept locally, not part of the project
+.audit/
+.agents/
+AGENTS.md
+CONTEXT.md

@@ -3,7 +3,7 @@
 //! rules and an approval-gate trait the UI implements.
 //!
 //! The layer wraps any [`ToolExec`] ([`PermissionedTools`]); the loop itself
-//! stays permission-agnostic. Canon: PHILOSOPHY.md §6.
+//! stays permission-agnostic.
 
 use std::sync::{Arc, Mutex};
 
@@ -12,7 +12,7 @@ use flashagent_llm::{ToolCall, ToolSpec};
 
 use crate::loop_::{ToolExec, ToolOutput};
 
-/// Permission mode. Canon order:
+/// Permission mode, from most to least restrictive:
 /// 1. Planning — read-only research, denies writes and shell execution.
 /// 2. Manual — confirms every non-read action (both writes and commands).
 /// 3. AcceptEdits (default out-of-box) — auto-approves file writes and edits; terminal commands still require confirmation.
@@ -256,7 +256,7 @@ fn smuggles_side_effects(cmd: &str) -> bool {
 /// A rule created by answering "Always" on a shell card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellRule {
-    /// `program subcommand` plus any flags: the canon's `npm test` covering
+    /// `program subcommand` plus any flags: `npm test` covering
     /// `npm test --watch` (but never `npm publish`).
     Prefix(String),
     /// Everything else, verbatim: `rm -rf build` never grows into
@@ -341,7 +341,7 @@ impl PermissionState {
     }
 
     /// "Always" on an approval card. Shell cards get narrow per-segment rules
-    /// (canon: `npm test` never covers `npm publish`); other tools are allowed
+    /// (`npm test` never covers `npm publish`); other tools are allowed
     /// by name for the session. Returns the rules added, for the UI to show.
     pub fn allow_always(&self, req: &ApprovalRequest) -> Vec<String> {
         if req.category != Category::Shell {
@@ -545,7 +545,7 @@ mod tests {
         assert!(rules.shell_allows("npm test"));
         assert!(rules.shell_allows("npm test -- --watch"));
         assert!(!rules.shell_allows("npm publish"));
-        // The killer case from the canon: allowed head + denied tail.
+        // The dangerous case: an allowed head followed by a denied tail.
         assert!(!rules.shell_allows("npm test && npm publish"));
         // Prefix is not a raw string match: "npm testcase" must not pass.
         assert!(!rules.shell_allows("npm testcase"));

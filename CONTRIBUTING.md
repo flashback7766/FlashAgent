@@ -72,4 +72,4 @@ cargo build --release
 ## Code of Conduct
 Please note that all participants in this project are expected to adhere to our **[Code of Conduct](CODE_OF_CONDUCT.md)**.
 
-Thank you for helping make FlashAgent better! ⚡
+Thank you for helping make FlashAgent better.

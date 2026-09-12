@@ -2,7 +2,7 @@
 //! role, a constrained tool subset and inherited permissions. Results flow back
 //! as tool results; children can message each other over typed per-id channels.
 //!
-//! Canon: PHILOSOPHY.md §6-7 — subagents inherit parent rights, never expand
+//! Subagents inherit the parent's rights and can never expand
 //! them. `core` stays protocol-free: the host only needs [`LlmSource`] and a
 //! tool factory, so the service/UI layer can plug any backend.
 
@@ -97,7 +97,7 @@ pub trait SubagentToolFactory: Send + Sync {
 
 /// Orchestrator for subagents. Owns the LLM source; hands out ids and channels.
 /// Children inherit the parent's permission state (via the tool factory) — they
-/// never expand it. Canon: PHILOSOPHY.md §6-7.
+/// never expand it.
 pub struct SubagentHost {
     llm: Arc<dyn LlmSource>,
     factory: Arc<dyn SubagentToolFactory>,
