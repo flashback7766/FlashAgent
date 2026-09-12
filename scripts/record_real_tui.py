@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 import os
-import shutil
 import subprocess
 import time
 import sys
 
 def main():
     cast_path = "/tmp/flashagent_real.cast"
-    gif_path = os.path.abspath("assets/demo.gif")
-    docs_gif_path = os.path.abspath("docs/screenshots/gifs/hero-chat.gif")
+    gif_path = os.path.abspath("docs/screenshots/gifs/hero-chat.gif")
 
     # 1. Clean up any previous session
     subprocess.run(["tmux", "kill-session", "-t", "demo"], stderr=subprocess.DEVNULL)
@@ -125,8 +123,6 @@ def main():
     size_kb = os.path.getsize(gif_path) / 1024
     print(f"Done! Real GIF saved to {gif_path} ({size_kb:.1f} KB)")
 
-    shutil.copyfile(gif_path, docs_gif_path)
-    print(f"Copied to {docs_gif_path}")
 
 if __name__ == "__main__":
     main()

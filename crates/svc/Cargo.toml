@@ -5,12 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-flashagent-proto = { path = "../proto" }
 flashagent-core = { path = "../core" }
-tokio = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 reqwest = { workspace = true }
 tar = "0.4"
 flate2 = "1.0"
