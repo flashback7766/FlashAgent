@@ -2462,7 +2462,7 @@ pub fn welcome_card_responsive_opts(
             format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}for autonomy{RESET}"),
             format!(" {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET} {M3_MUT}·{RESET} {M3_ICE}Esc{RESET} {M3_MUT}quit{RESET}"),
             format!(" {M3_ICE}F1{RESET} {M3_MUT}context{RESET} {M3_MUT}·{RESET} {M3_ICE}F2{RESET} {M3_MUT}verbose{RESET} {M3_MUT}·{RESET} {M3_ICE}F3{RESET} {M3_MUT}model{RESET}"),
-            format!(" {M3_ICE}F4{RESET} {M3_MUT}effort{RESET} {M3_MUT}·{RESET} {M3_ICE}F5{RESET} {M3_MUT}sampling{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+C/V{RESET} {M3_MUT}clip{RESET}"),
+            format!(" {M3_ICE}F4{RESET} {M3_MUT}effort{RESET} {M3_MUT}·{RESET} {M3_ICE}F5{RESET} {M3_MUT}sampling{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+V{RESET} {M3_MUT}paste image{RESET}"),
             format!(" {M3_ICE}Ctrl+R{RESET} {M3_MUT}regen{RESET} {M3_MUT}·{RESET} {M3_ICE}/help{RESET} {M3_MUT}or{RESET} {M3_ICE}/skills{RESET} {M3_MUT}for more{RESET}"),
         ];
 

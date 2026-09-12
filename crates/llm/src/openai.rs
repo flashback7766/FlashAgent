@@ -342,7 +342,27 @@ impl OpenAiCompat {
                     };
                     serde_json::json!({ "role": "system", "content": content })
                 }
-                Role::User => serde_json::json!({ "role": "user", "content": m.content }),
+                Role::User => {
+                    if m.images.is_empty() {
+                        serde_json::json!({ "role": "user", "content": m.content })
+                    } else {
+                        // A message with pictures is sent the way every
+                        // OpenAI-compatible server expects them: content
+                        // becomes a list of parts, text first so the question
+                        // is read before the image it is about.
+                        let mut parts = Vec::new();
+                        if !m.content.trim().is_empty() {
+                            parts.push(serde_json::json!({ "type": "text", "text": m.content }));
+                        }
+                        for url in &m.images {
+                            parts.push(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": { "url": url }
+                            }));
+                        }
+                        serde_json::json!({ "role": "user", "content": parts })
+                    }
+                }
             })
             .collect();
 
@@ -575,6 +595,30 @@ mod tests {
     use super::*;
     use crate::LlmBackend;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn a_message_with_a_picture_is_sent_as_content_parts() {
+        let llm = OpenAiCompat::new("http://localhost:1234/v1", "vlm", None);
+        let mut msg = ChatMessage::user("why does this frame look wrong?");
+        msg.images.push("data:image/png;base64,AAAA".to_string());
+        let body = llm.body(&[msg], &[], &crate::types::TurnOptions::default());
+        let user = body["messages"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap().clone();
+        let parts = user["content"].as_array().expect("content is a list of parts");
+        assert_eq!(parts[0]["type"], "text", "the question comes before the picture it is about");
+        assert_eq!(parts[0]["text"], "why does this frame look wrong?");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    #[test]
+    fn a_message_without_pictures_is_sent_exactly_as_before() {
+        // Every server accepts a plain string; only a message with images
+        // needs the list form.
+        let llm = OpenAiCompat::new("http://localhost:1234/v1", "m", None);
+        let body = llm.body(&[ChatMessage::user("hello")], &[], &crate::types::TurnOptions::default());
+        let user = body["messages"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap().clone();
+        assert_eq!(user["content"], "hello");
+    }
 
     #[test]
     fn switching_models_does_not_keep_the_old_model_s_thinking_profile() {

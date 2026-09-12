@@ -60,6 +60,9 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     /// For assistant messages: calls made by the model in this message.
     pub tool_calls: Vec<ToolCall>,
+    /// Images attached to this message, as `data:` URLs. A model that cannot
+    /// see them simply never receives them.
+    pub images: Vec<String>,
 }
 
 impl ChatMessage {
@@ -71,6 +74,7 @@ impl ChatMessage {
             reasoning: None,
             tool_call_id: None,
             tool_calls: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -82,6 +86,7 @@ impl ChatMessage {
             reasoning: None,
             tool_call_id: None,
             tool_calls: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -93,6 +98,7 @@ impl ChatMessage {
             reasoning: None,
             tool_call_id: None,
             tool_calls: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -104,6 +110,7 @@ impl ChatMessage {
             reasoning: None,
             tool_call_id: Some(tool_call_id.into()),
             tool_calls: Vec::new(),
+            images: Vec::new(),
         }
     }
 }

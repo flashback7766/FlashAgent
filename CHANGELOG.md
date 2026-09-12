@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Pictures.** `Ctrl+V` pastes a screenshot straight from the clipboard into
+  the message — the composer shows `📎 screenshot 1440×900`, `Ctrl+Z` takes it
+  back, and the model sees it. Dropping an image file on the window works too,
+  as does naming one in the text. Verified end to end: a drawn digit pasted
+  into a chat with qwen3.6-35b came back as "7".
+  A model that cannot see is named as such when you attach, rather than letting
+  you send into the dark, and pictures survive `--resume`.
 - Every tool call now explains itself, reads and searches included. The header
   was recommended but optional for them, and a capable 35B model wrote one
   exactly never — so a search read `Searched "**/*.rs"` while an edit read like
