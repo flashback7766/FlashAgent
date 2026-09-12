@@ -171,6 +171,15 @@ impl BuiltinTools {
         }
     }
 
+    /// A path as the user should see it: relative to the project when it is
+    /// inside it, which is where models usually hand back absolute paths.
+    fn shown_path(&self, path: &str) -> String {
+        std::path::Path::new(path)
+            .strip_prefix(&self.cwd)
+            .map(|rel| rel.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string())
+    }
+
     /// Unified diff of what a write/edit call would change, or `None` when the
     /// call is not a write or the file state cannot be read.
     fn preview_for(&self, call: &ToolCall) -> Option<String> {
@@ -180,7 +189,7 @@ impl BuiltinTools {
                 let path = v.get("path")?.as_str()?;
                 let new = v.get("content")?.as_str()?;
                 let old = fs_tools::read_raw(&self.cwd, path);
-                Some(flashagent_core::unified(old.as_deref(), new, path, 3))
+                Some(flashagent_core::unified(old.as_deref(), new, &self.shown_path(path), 3))
             }
             "edit_file" => {
                 let path = v.get("path")?.as_str()?;
@@ -188,7 +197,7 @@ impl BuiltinTools {
                     serde_json::from_value(v.get("edits")?.clone()).ok()?;
                 let old = fs_tools::read_raw(&self.cwd, path)?;
                 let new = fs_tools::apply_edits(old.clone(), &edits).ok()?;
-                Some(flashagent_core::unified(Some(&old), &new, path, 3))
+                Some(flashagent_core::unified(Some(&old), &new, &self.shown_path(path), 3))
             }
             "patch_file" => {
                 let path = v.get("path")?.as_str()?;
@@ -580,6 +589,34 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_write_preview_names_the_file_relative_to_the_project() {
+        // The approval card showed "--- a//tmp/.../project/main.rs": an
+        // absolute path from the model, pasted after "a/".
+        let dir = testing::tempdir();
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
+        let tools = BuiltinTools::new(BuiltinToolsConfig {
+            cwd: dir.clone(),
+            brave_api_key: None,
+            question_gate: None,
+            is_goal_mode: None,
+            toolset_profile: None,
+            web_enabled: None,
+            context_window: None,
+            mcp_manager: None,
+        })
+        .expect("tools");
+        let abs = dir.join("main.rs").to_string_lossy().to_string();
+        let call = ToolCall {
+            id: "c".into(),
+            name: "write_file".into(),
+            args_json: serde_json::json!({"path": abs, "content": "fn main() { println!(); }\n"}).to_string(),
+        };
+        let diff = tools.preview_for(&call).expect("a preview");
+        assert!(diff.contains("--- a/main.rs") && diff.contains("+++ b/main.rs"), "{diff}");
+        assert!(!diff.contains("a//"), "{diff}");
+    }
     #[test]
     fn edit_file_approval_card_gets_a_diff() {
         // The approval card promises a diff before anything is written; if the
