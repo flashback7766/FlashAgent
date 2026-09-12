@@ -42,6 +42,10 @@ impl App {
                     self.latest_suggestion = None;
                     self.custom_placeholder = None;
                     self.renderer.request_reprint();
+                } else if !worth_saving(&self.history) {
+                    // Nothing was said, so nothing is saved and there is no
+                    // session to come back to: the question protects nothing.
+                    return Flow::Quit;
                 } else {
                     self.quit_confirm = true;
                     self.renderer.request_reprint();
