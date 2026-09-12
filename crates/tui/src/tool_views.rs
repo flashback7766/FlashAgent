@@ -92,7 +92,7 @@ pub fn render_command_card(
     lines.push((LineKind::Tool, render_card_top(cmd, width)));
 
     // Prompt line inside box: `~/cwd $ cmd args`
-    let short_cwd = if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok()) {
+    let short_cwd = if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).and_then(|h| h.into_string().ok()) {
         if cwd.starts_with(&home) {
             format!("~{}", &cwd[home.len()..])
         } else {
