@@ -597,6 +597,7 @@ impl Renderer {
         sampling_view: Option<&SamplingView>,
         context_modal: Option<&ContextModal>,
         mcp_modal: Option<&McpModal>,
+        memory_modal: Option<&flashagent_tui::memory_view::MemoryModal>,
         autocomplete: Option<&AutocompletePopup>,
         context_usage: &ContextUsage,
         st: FrameState<'_>,
@@ -871,6 +872,11 @@ impl Renderer {
             tail.extend(modal.render(width));
             input_line_idx = tail.len().saturating_sub(1);
             custom_cursor_col = Some(0);
+        } else if let Some(modal) = memory_modal {
+            // Morph composer into the memory screen
+            tail.extend(modal.render(width));
+            input_line_idx = tail.len().saturating_sub(1);
+            custom_cursor_col = Some(0);
         } else {
             // Standard input box
             tail.push((
@@ -953,6 +959,8 @@ impl Renderer {
             "  \x1b[38;2;135;130;125mf1 / enter / esc — close context breakdown\x1b[0m".to_string()
         } else if mcp_modal.is_some() {
             "  \x1b[38;2;135;130;125mtab/1-3 — switch tab · ↑/↓ — navigate · enter — select · esc — close\x1b[0m".to_string()
+        } else if memory_modal.is_some() {
+            "  \x1b[38;2;135;130;125m↑/↓ — select · e — tell the model · d — forget · esc — close\x1b[0m".to_string()
         } else if autocomplete.is_some() {
             "  \x1b[38;2;135;130;125mtab — complete · ↑/↓ — select · enter — send · esc — dismiss\x1b[0m".to_string()
         } else if st.running {
@@ -1312,7 +1320,15 @@ async fn main() -> Result<()> {
     // binary has moved forward, show what arrived.
     if std::io::stdout().is_terminal() {
         let now = flashagent_svc::updater::current_version();
-        let news = flashagent_tui::whatsnew::since(config.last_seen_version.as_deref(), now);
+        let news = match config.last_seen_version.as_deref() {
+            Some(seen) => flashagent_tui::whatsnew::since(Some(seen), now),
+            // Nobody who updated INTO the first build that records a version
+            // has one recorded, and they are exactly the people with news to
+            // read. A set-up config with no version is an existing user, not
+            // a first run — the first run stamps itself before it gets here.
+            None if config.setup_completed => flashagent_tui::whatsnew::latest(1),
+            None => Vec::new(),
+        };
         if config.last_seen_version.as_deref() != Some(now) {
             config.last_seen_version = Some(now.to_string());
             let _ = config.save();
@@ -2104,6 +2120,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let mut settings_view: Option<SettingsView> = None;
     let mut sampling_view: Option<SamplingView> = None;
     let mut context_modal: Option<ContextModal> = None;
+    let mut memory_modal: Option<flashagent_tui::memory_view::MemoryModal> = None;
+    let mut last_tool_name: Option<String> = None;
     let mut mcp_modal: Option<McpModal> = None;
     let mut context_usage = ContextUsage::new(context_capacity);
     update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
@@ -2407,6 +2425,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             sampling_view.as_ref(),
             context_modal.as_ref(),
             mcp_modal.as_ref(),
+            memory_modal.as_ref(),
             autocomplete.as_ref(),
             &context_usage,
             FrameState {
@@ -2709,6 +2728,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         turn_phase = TurnPhase::Thinking;
                     }
                     LoopEvent::ToolStarted { name, args_json, .. } => {
+                        last_tool_name = Some(name.clone());
                         turn_outcome.tool_calls += 1;
                         token_tracker.on_delta(name);
                         token_tracker.on_delta(args_json);
@@ -2721,9 +2741,23 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             .unwrap_or_else(|| format!("Running {name}"));
                         turn_phase = TurnPhase::Tool(what);
                     }
-                    LoopEvent::ToolFinished { is_error, .. } => {
+                    LoopEvent::ToolFinished { is_error, result, .. } => {
                         if *is_error {
                             turn_outcome.failed_tools += 1;
+                        }
+                        // Memory is written without being asked, so it is
+                        // said out loud. It arrives on its own, which puts it
+                        // on the line under the input rather than in the chat.
+                        let wrote_memory = last_tool_name
+                            .as_deref()
+                            .is_some_and(|n| matches!(n, "memory_create" | "memory_update" | "memory_remove"));
+                        if wrote_memory && !*is_error {
+                            if let Some(said) = result.as_deref().and_then(|r| r.lines().next()) {
+                                background = Some(BackgroundNotice::fading(
+                                    format!("{said}  ·  /memory to see or change it"),
+                                    10,
+                                ));
+                            }
                         }
                         turn_phase = TurnPhase::AfterTool;
                     }
@@ -3221,6 +3255,40 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             renderer.request_reprint();
                         }
                     }
+                    continue;
+                }
+
+                // The memory screen owns every key while it is up: 'd' and
+                // 'e' are commands on the list and letters inside a note.
+                if let Some(ref mut modal) = memory_modal {
+                    use flashagent_tui::memory_view::MemoryAction;
+                    match modal.handle_key(code, mods) {
+                        MemoryAction::None => {}
+                        MemoryAction::Close => {
+                            memory_modal = None;
+                        }
+                        MemoryAction::Forget { name, scope } => {
+                            let cwd = std::env::current_dir().unwrap_or_default();
+                            let removed = flashagent_core::MemoryStore::for_scope(scope, &cwd)
+                                .map(|store| store.remove(&name).unwrap_or(false))
+                                .unwrap_or(false);
+                            notice!(&if removed {
+                                format!("[Forgot \"{name}\"]")
+                            } else {
+                                format!("[Could not forget \"{name}\"]")
+                            });
+                            memory_modal = Some(flashagent_tui::memory_view::MemoryModal::new(&cwd));
+                        }
+                        MemoryAction::Tell { message } => {
+                            // Sent through the ordinary path, so it is an
+                            // ordinary turn: the model decides what to change
+                            // and says so in the chat.
+                            memory_modal = None;
+                            input = message;
+                            let _ = tx.send(UiEvent::Key(KeyCode::Enter, KeyModifiers::NONE));
+                        }
+                    }
+                    renderer.request_reprint();
                     continue;
                 }
 
@@ -4302,6 +4370,14 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 continue;
                             }
 
+                            if trimmed == "/memory" || trimmed == "/memories" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                memory_modal = Some(flashagent_tui::memory_view::MemoryModal::new(&std::env::current_dir().unwrap_or_default()));
+                                renderer.request_reprint();
+                                continue;
+                            }
+
                             if trimmed == "/context" {
                                 input.clear();
                                 autocomplete_idx = 0;
@@ -4715,6 +4791,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     sampling_view.as_ref(),
                                     context_modal.as_ref(),
                                     mcp_modal.as_ref(),
+                                    memory_modal.as_ref(),
                                     autocomplete.as_ref(),
                                     &context_usage,
                                     FrameState {

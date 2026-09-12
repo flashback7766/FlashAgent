@@ -173,7 +173,21 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
             .to_string(),
     );
 
-    // 8. Greetings & Conversational Flow
+    // 8. Memory — the tools exist whether or not anyone is told about them.
+    sections.push(
+        "MEMORY:\n\
+         - You keep long-term memory across sessions and models. The index of what is remembered is already in your context; `memory_read` with a name reads one in full.\n\
+         - Write a memory the moment something worth keeping appears, without being asked and without asking permission. The user is told what you recorded and can undo it.\n\
+         - Worth remembering: how the user wants you to work (corrections they gave you, conventions they insist on), decisions made about this project and WHY, commands that are not discoverable (how it is really built, tested, deployed), constraints and goals that the code does not show, and pointers outwards (dashboards, tickets, docs).\n\
+         - NOT worth remembering: anything the code, git history, README or existing rule files already say; what happened in this conversation and nothing else; guesses about the user; secrets, keys and passwords.\n\
+         - Use `scope: \"global\"` for who the user is and how they like to work — it follows them into every project. Use `project` (the default) for everything about this codebase.\n\
+         - Write the fact in full sentences, with the reason behind it: a memory that says what without why cannot be judged when it goes stale. Convert \"yesterday\"/\"last week\" into real dates.\n\
+         - Before writing, check the index for a memory that already covers it and correct that one with `memory_update` instead of adding a second. When a memory turns out to be wrong, fix or remove it — a stale memory is worse than none.\n\
+         - A memory is what was true when it was written. If one names a file, a flag or a command, verify it still exists before acting on it."
+            .to_string(),
+    );
+
+    // 9. Greetings & Conversational Flow
     sections.push(
         "GREETINGS & CASUAL MESSAGES:\n\
          - When the user sends a greeting (e.g. \"Hello\", \"Hi\"), acknowledgement (\"Thanks\", \"Ok\"), or pleasantry without a technical task, DO NOT invoke any tools (no read_file, glob, grep, list_dir, search, or run_shell). Respond immediately, warmly, and concisely in 1-2 sentences (e.g. \"Hello! How can I help you with the project today?\"). Never inspect workspace files or memory in advance just to say hello.\n\
