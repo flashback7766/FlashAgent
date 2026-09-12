@@ -422,6 +422,7 @@ impl AgentLoop {
                 reasoning: if assistant_reasoning.is_empty() { None } else { Some(assistant_reasoning.clone()) },
                 tool_call_id: None,
                 tool_calls: calls.clone(),
+                images: Vec::new(),
             };
             history.push(assistant_msg);
 
@@ -586,6 +587,7 @@ fn push_partial_assistant(history: &mut Vec<ChatMessage>, text: String, reasonin
         reasoning: (!reasoning.is_empty()).then_some(reasoning),
         tool_call_id: None,
         tool_calls: Vec::new(),
+        images: Vec::new(),
     });
 }
 

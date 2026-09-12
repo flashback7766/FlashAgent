@@ -824,12 +824,16 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 .map(|n| n as usize);
 
             let mut supports_tools = false;
-            let mut supports_vision = false;
+            let mut supports_vision = m
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(|t| t.eq_ignore_ascii_case("vlm"))
+                .unwrap_or(false);
             let mut thinking = ThinkingProfile::unsupported();
 
             if let Some(caps) = m.get("capabilities") {
                 supports_tools = caps.get("trained_for_tool_use").and_then(|v| v.as_bool()).unwrap_or(false);
-                supports_vision = caps.get("vision").and_then(|v| v.as_bool()).unwrap_or(false);
+                supports_vision |= caps.get("vision").and_then(|v| v.as_bool()).unwrap_or(false);
 
                 if let Some(reasoning) = caps.get("reasoning") {
                     let mut presets = Vec::new();
@@ -936,11 +940,21 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
             .map(|n| n as usize);
 
         let mut supports_tools = false;
+        // LM Studio marks a vision model by its type ("vlm") and does not
+        // always repeat it in the capability list.
+        let mut supports_vision = m
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|t| t.eq_ignore_ascii_case("vlm"))
+            .unwrap_or(false);
         let mut thinking = ThinkingProfile::unsupported();
 
         if let Some(caps) = m.get("capabilities") {
             if let Some(arr) = caps.as_array() {
                 supports_tools = arr.iter().any(|v| v.as_str() == Some("tool_use"));
+                // Or-ed: the type already said "vlm" for some servers, and
+                // the capability list does not always repeat it.
+                supports_vision |= arr.iter().any(|v| matches!(v.as_str(), Some("vision") | Some("image_input")));
             } else if let Some(obj) = caps.as_object() {
                 supports_tools = obj.get("trained_for_tool_use").and_then(|v| v.as_bool()).unwrap_or(false);
                 if let Some(levels) = obj.get("reasoning_effort_levels").or_else(|| obj.get("reasoning_efforts")).and_then(|v| v.as_array()) {
@@ -987,7 +1001,7 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
             max_context_length,
             thinking,
             supports_tools,
-            supports_vision: false,
+            supports_vision,
         });
     }
 
@@ -997,6 +1011,19 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vision_model_is_recognised_however_the_server_says_so() {
+        // LM Studio marks it by type; other servers list a capability.
+        let by_type = serde_json::json!({"data":[{"id":"qwen3.6-35b","type":"vlm","capabilities":["tool_use"]}]});
+        assert!(parse_server_models(&by_type)[0].supports_vision);
+
+        let by_capability = serde_json::json!({"data":[{"id":"m","capabilities":["tool_use","vision"]}]});
+        assert!(parse_server_models(&by_capability)[0].supports_vision);
+
+        let text_only = serde_json::json!({"data":[{"id":"m","type":"llm","capabilities":["tool_use"]}]});
+        assert!(!parse_server_models(&text_only)[0].supports_vision);
+    }
 
     #[test]
     fn a_learned_correction_moves_one_preset_and_stops_at_the_ends() {
@@ -1297,6 +1324,7 @@ mod tests {
             reasoning: None,
             tool_call_id: Some("1".into()),
             tool_calls: vec![],
+            images: Vec::new(),
         };
         let task = ChatMessage::user("Read src/parser.rs and describe it");
         let base = analyze_turn_complexity(std::slice::from_ref(&task));
@@ -1340,6 +1368,7 @@ mod tests {
             reasoning: None,
             tool_call_id: Some("2".into()),
             tool_calls: vec![],
+            images: Vec::new(),
         });
         assert_eq!(
             analyze_turn_complexity(&deep),

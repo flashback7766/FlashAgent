@@ -163,6 +163,7 @@ struct FrameState<'a> {
     background_style: NoticeStyle,
     /// What the running turn is doing, for the composer line.
     turn_phase: Option<&'a TurnPhase>,
+    attachments: &'a [String],
     /// A release-channel switch waiting for a yes or no.
     channel_prompt: Option<&'a str>,
     quit_prompt: Option<&'a str>,
@@ -888,6 +889,15 @@ impl Renderer {
                 LineKind::System,
                 format!("{border_color}╭{}╮{reset}", "─".repeat(inner_w)),
             ));
+
+            // What is going with the message, above the line it goes with.
+            if !st.attachments.is_empty() {
+                let listed = st.attachments.join("  ");
+                let row = format!(
+                    " \x1b[38;2;145;205;140m📎\x1b[0m \x1b[38;2;160;165;180m{listed}\x1b[0m \x1b[38;2;100;95;90m· ctrl+z removes\x1b[0m"
+                );
+                tail.push((LineKind::System, pad_box_row(&row, width)));
+            }
 
             // Line 1: Input line with breathing prompt icon `❯` and placeholder if empty
             input_line_idx = tail.len();
@@ -1775,6 +1785,76 @@ impl TurnPhase {
     }
 }
 
+
+/// A picture waiting to be sent with the next message.
+#[derive(Debug, Clone, PartialEq)]
+struct Attachment {
+    /// What to call it in the composer: a file name, or "screenshot".
+    name: String,
+    /// The `data:` URL the request carries.
+    data_url: String,
+    /// Pixel size, when the header gave one.
+    size: Option<(u32, u32)>,
+}
+
+impl Attachment {
+    fn from_clipboard(image: flashagent_tui::clipboard::ClipboardImage) -> Self {
+        Self {
+            name: "screenshot".to_string(),
+            size: image.dimensions(),
+            data_url: image.to_data_url(),
+        }
+    }
+
+    /// A dropped or pasted path, when it points at an image that exists.
+    fn from_dropped_path(pasted: &str) -> Option<Self> {
+        // Terminals quote a dropped path when it contains spaces.
+        let raw = pasted.trim().trim_matches(['\'', '"']).trim();
+        if raw.is_empty() || raw.contains('\n') {
+            return None;
+        }
+        let path = std::path::Path::new(raw);
+        let media_type = flashagent_tui::clipboard::image_media_type(path)?;
+        let bytes = std::fs::read(path).ok()?;
+        if bytes.is_empty() {
+            return None;
+        }
+        Some(Self {
+            name: path.file_name()?.to_string_lossy().to_string(),
+            size: flashagent_tui::clipboard::image_dimensions(&bytes),
+            data_url: format!(
+                "data:{media_type};base64,{}",
+                flashagent_tui::clipboard::base64_encode(&bytes)
+            ),
+        })
+    }
+
+    /// How it reads in the composer.
+    fn label(&self) -> String {
+        match self.size {
+            Some((w, h)) => format!("{} {w}×{h}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
+/// Whether the model in use can see pictures at all.
+fn model_sees_images(source: &BackendSource, model: &str) -> bool {
+    sees_images(source.discovery().as_ref(), model)
+}
+
+/// As above, over what discovery found.
+///
+/// A model the server never mentioned gets the benefit of the doubt: a
+/// warning that turns out to be wrong is worse than one the server itself
+/// will give if the picture really cannot be read.
+fn sees_images(discovery: Option<&flashagent_llm::ServerDiscovery>, model: &str) -> bool {
+    discovery
+        .and_then(|d| d.models.iter().find(|m| m.id == model))
+        .map(|m| m.supports_vision)
+        .unwrap_or(true)
+}
+
 /// A message that appeared without the user doing anything. It lives on the
 /// line under the input, and most of them fade: a notice that is no longer
 /// actionable should not take that line for the rest of the session.
@@ -1858,6 +1938,11 @@ struct SavedMessage {
     reasoning: Option<String>,
     tool_call_id: Option<String>,
     tool_calls: Vec<SavedToolCall>,
+    /// Pictures sent with this message, as `data:` URLs. A resumed session
+    /// that dropped them would leave the model answering about something it
+    /// can no longer see.
+    #[serde(default)]
+    images: Vec<String>,
 }
 
 impl From<&ChatMessage> for SavedMessage {
@@ -1876,6 +1961,7 @@ impl From<&ChatMessage> for SavedMessage {
                     args_json: tc.args_json.clone(),
                 })
                 .collect(),
+            images: m.images.clone(),
         }
     }
 }
@@ -1902,6 +1988,7 @@ impl From<SavedMessage> for ChatMessage {
                     args_json: tc.args_json,
                 })
                 .collect(),
+            images: m.images,
         }
     }
 }
@@ -2148,6 +2235,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let mut context_modal: Option<ContextModal> = None;
     let mut memory_modal: Option<flashagent_tui::memory_view::MemoryModal> = None;
     let mut last_tool_name: Option<String> = None;
+    // Pictures waiting to go with the next message. A screenshot is the
+    // fastest way to say "this is what I mean", and typing it out is the
+    // slowest.
+    let mut attachments: Vec<Attachment> = Vec::new();
     let mut mcp_modal: Option<McpModal> = None;
     let mut context_usage = ContextUsage::new(context_capacity);
     update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
@@ -2437,6 +2528,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         let channel_prompt: Option<String> = channel_switch.as_ref().map(|sw| {
             channel_switch_warning(sw.to, flashagent_svc::updater::current_version(), &sw.target)
         });
+        let attachment_labels: Vec<String> = attachments.iter().map(Attachment::label).collect();
         let quit_prompt: Option<&str> = quit_confirm.then_some(
             "Quit FlashAgent? The session is saved either way and comes back with --resume.",
         );
@@ -2494,6 +2586,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 channel_prompt: channel_prompt.as_deref(),
                 quit_prompt,
                 turn_phase: running.then_some(&turn_phase),
+                attachments: &attachment_labels,
                 background_style: background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                 context_warn_threshold: app_config.context_warn_threshold,
             },
@@ -2999,6 +3092,18 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 }
             }
             UiEvent::Paste(pasted) => {
+                // Dropping a file on a terminal pastes its path. When that
+                // path is a picture, the user meant the picture.
+                if let Some(att) = Attachment::from_dropped_path(&pasted) {
+                    let label = att.label();
+                    attachments.push(att);
+                    background = Some(BackgroundNotice::fading(
+                        format!("{label} attached · Ctrl+Z removes it"),
+                        8,
+                    ));
+                    renderer.request_reprint();
+                    continue;
+                }
                 let sanitized = pasted.replace("\r\n", " ").replace(['\n', '\r'], " ");
                 if !sanitized.is_empty() {
                     if question_gate.pending().is_some() {
@@ -3835,7 +3940,25 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     KeyCode::Char('v') | KeyCode::Char('V') | KeyCode::Char('\u{043c}') | KeyCode::Char('\u{041c}')
                         if mods.contains(KeyModifiers::CONTROL) =>
                     {
-                        if let Some(text) = flashagent_tui::clipboard::get_clipboard_text() {
+                        // A screenshot on the clipboard is what the user
+                        // means by paste far more often than the file path
+                        // of one, so it is looked for first.
+                        if let Some(image) = flashagent_tui::clipboard::get_clipboard_image() {
+                            let att = Attachment::from_clipboard(image);
+                            let label = att.label();
+                            attachments.push(att);
+                            if !model_sees_images(&source, &current_model) {
+                                background = Some(BackgroundNotice::sticky(format!(
+                                    "{label} attached · {current_model} cannot see images — press F3 for one that can"
+                                )));
+                            } else {
+                                background = Some(BackgroundNotice::fading(
+                                    format!("{label} attached · Ctrl+Z removes it"),
+                                    8,
+                                ));
+                            }
+                            renderer.request_reprint();
+                        } else if let Some(text) = flashagent_tui::clipboard::get_clipboard_text() {
                             let sanitized = text.replace("\r\n", " ").replace(['\n', '\r'], " ");
                             if !sanitized.is_empty() {
                                 input.push_str(&sanitized);
@@ -3844,6 +3967,19 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 renderer.request_reprint();
                             }
                         }
+                    }
+
+                    // Ctrl+Z: take back the last picture attached.
+                    KeyCode::Char('z') | KeyCode::Char('Z') | KeyCode::Char('\u{044f}') | KeyCode::Char('\u{042f}')
+                        if mods.contains(KeyModifiers::CONTROL) && !attachments.is_empty() =>
+                    {
+                        if let Some(removed) = attachments.pop() {
+                            background = Some(BackgroundNotice::fading(
+                                format!("{} removed", removed.label()),
+                                5,
+                            ));
+                        }
+                        renderer.request_reprint();
                     }
 
                     // Ctrl+D: exit on empty input when idle
@@ -4248,6 +4384,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                      • /diff · /commit <msg>  — git diff --stat / commit staged changes\n\
                                      • /export [md|html|jsonl] — write the conversation to a file\n\
                                      • /editor (or Ctrl+E)    — compose the prompt in an external editor\n\
+                                     • Ctrl+V                 — paste a screenshot for a vision model (Ctrl+Z takes it back); dropping an image file works too\n\
                                      • /update (or Ctrl+U) · /channel <stable|beta> — check, download and install an update, with progress\n\
                                      • /skill:<name>          — invoke a skill from .agents/skills/\n\
                                      • /exit                  — save the session and quit\n\
@@ -4881,6 +5018,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         channel_prompt: None,
                                         quit_prompt: None,
                                         turn_phase: None,
+                                        attachments: &[],
                 background_style: background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                                         context_warn_threshold: app_config.context_warn_threshold,
                                     },
@@ -5136,14 +5274,41 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             if let Some("Russian") = script_language(&text) {
                                 chat.set_language("ru");
                             }
-                            chat.push_user(&text);
+                            // A path typed (or pasted without bracketed
+                            // paste) is still the user pointing at a picture.
+                            for token in text.split_whitespace() {
+                                if attachments.len() >= 8 {
+                                    break;
+                                }
+                                if let Some(att) = Attachment::from_dropped_path(token) {
+                                    if !attachments.iter().any(|a| a.data_url == att.data_url) {
+                                        attachments.push(att);
+                                    }
+                                }
+                            }
+                            let shown = if attachments.is_empty() {
+                                text.clone()
+                            } else {
+                                // The transcript has to show that a picture
+                                // went with the message; otherwise the
+                                // answer refers to something invisible.
+                                let labels: Vec<String> =
+                                    attachments.iter().map(|a| a.label()).collect();
+                                format!("{text}  [{}]", labels.join(", "))
+                            };
+                            chat.push_user(&shown);
                             let first = !history.iter().any(|m| m.role == flashagent_llm::Role::User);
                             let content = if first && !memory_block.is_empty() {
                                 format!("{memory_block}\n\n---\n\n{text}")
                             } else {
                                 text
                             };
-                            history.push(ChatMessage::user(content));
+                            let mut user_msg = ChatMessage::user(content);
+                            if !attachments.is_empty() {
+                                user_msg.images = attachments.iter().map(|a| a.data_url.clone()).collect();
+                                attachments.clear();
+                            }
+                            history.push(user_msg);
                             update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
                             cancel.store(false, Ordering::Relaxed);
                             suggested_prompt = None;
@@ -6305,6 +6470,63 @@ mod tests {
         assert_eq!(view.config.permission_mode, PermissionMode::Bypass);
         assert_eq!(view.config.thinking_effort, "high");
         assert_eq!(view.config.model, "gemma");
+    }
+
+    #[test]
+    fn a_warning_is_only_given_when_the_server_says_the_model_is_blind() {
+        use flashagent_llm::{DiscoveredModel, ServerDiscovery, ThinkingProfile};
+        let model = |id: &str, vision: bool| DiscoveredModel {
+            id: id.to_string(),
+            display_name: None,
+            is_loaded: true,
+            context_length: None,
+            max_context_length: None,
+            thinking: ThinkingProfile::unsupported(),
+            supports_tools: true,
+            supports_vision: vision,
+        };
+        let disc = ServerDiscovery {
+            base_url: "http://localhost:1234/v1".into(),
+            models: vec![model("sees", true), model("blind", false)],
+            active_model: None,
+        };
+        assert!(sees_images(Some(&disc), "sees"));
+        assert!(!sees_images(Some(&disc), "blind"));
+        assert!(sees_images(Some(&disc), "never-heard-of-it"), "an unknown model is not accused");
+        assert!(sees_images(None, "anything"), "nor is one on a server we could not ask");
+    }
+
+    #[test]
+    fn a_dropped_image_path_becomes_an_attachment() {
+        // Terminals paste the path of a dropped file; a path that points at a
+        // picture means the picture.
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("shot.png");
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&800u32.to_be_bytes());
+        bytes.extend_from_slice(&600u32.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        std::fs::write(&png, &bytes).unwrap();
+
+        let att = Attachment::from_dropped_path(png.to_str().unwrap()).expect("attached");
+        assert_eq!(att.name, "shot.png");
+        assert_eq!(att.size, Some((800, 600)));
+        assert_eq!(att.label(), "shot.png 800×600");
+        assert!(att.data_url.starts_with("data:image/png;base64,"));
+
+        // Quoted, the way a terminal writes a path with spaces in it.
+        let quoted = format!("'{}'", png.to_str().unwrap());
+        assert!(Attachment::from_dropped_path(&quoted).is_some());
+    }
+
+    #[test]
+    fn ordinary_pasted_text_is_still_text() {
+        assert_eq!(Attachment::from_dropped_path("just some words"), None);
+        assert_eq!(Attachment::from_dropped_path("/no/such/file.png"), None, "a path to nothing is not a picture");
+        assert_eq!(Attachment::from_dropped_path("notes.md"), None);
+        assert_eq!(Attachment::from_dropped_path(""), None);
     }
 
     #[test]
