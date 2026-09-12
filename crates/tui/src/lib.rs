@@ -1997,6 +1997,25 @@ fn mascot_color(px: u8, breath: u8, offline: bool) -> Option<(u8, u8, u8)> {
     Some(color)
 }
 
+/// The mascot's face for the status line, shown while the model works.
+///
+/// The welcome card (and the full sprite with it) is gone as soon as the
+/// conversation starts, so this is the only place the mascot can react to a
+/// running turn. Five columns wide in every frame — a status line that
+/// changes width jitters.
+///
+/// `phase` is 80 ms of *wall clock*, not UI ticks: the screen repaints when
+/// events arrive, which with a fast model is far more often than the tick and
+/// with a slow one far less. A single-frame blink would be missed either way,
+/// so each expression holds for a few hundred milliseconds.
+pub fn thinking_face(phase: usize) -> &'static str {
+    match phase % 24 {
+        20..=23 => "(-_-)",
+        16..=19 => "(^_-)",
+        _ => "(•_•)",
+    }
+}
+
 /// Returns the 6 lines of the 8-bit companion mascot «Swift» in Material 3 colors.
 pub fn mascot_swift_lines() -> [String; 6] {
     mascot_swift_lines_animated(0)
@@ -3545,6 +3564,26 @@ mod tests {
             let vis = visible_width(&line.1);
             assert!(vis <= top_vis, "content line {vis} must not exceed box width {top_vis}");
         }
+    }
+
+    #[test]
+    fn the_thinking_face_never_changes_width() {
+        let mut seen = std::collections::HashSet::new();
+        for tick in 0..200usize {
+            let face = thinking_face(tick);
+            assert_eq!(visible_width(face), 5, "status line would jitter: {face}");
+            seen.insert(face);
+        }
+        assert!(seen.len() > 1, "the face must actually animate");
+        // Each expression must hold long enough to be seen: repaints are
+        // event-driven, so a one-frame blink is invisible in practice.
+        let cycle: Vec<&str> = (0..24).map(thinking_face).collect();
+        let shortest = cycle
+            .chunk_by(|a, b| a == b)
+            .map(|run| run.len())
+            .min()
+            .unwrap_or(0);
+        assert!(shortest >= 4, "an expression lasting {shortest} frames would be missed");
     }
 
     #[test]
