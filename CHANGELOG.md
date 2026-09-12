@@ -5,6 +5,14 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- Changing the release channel now asks first. It replaces the binary with a
+  different line of builds, so the card says what that means — moving down to
+  stable can take features away and reset the settings they introduced — and
+  names the version you would land on. Answering no puts back only the
+  channel: everything else you changed in the same visit stays applied. If the
+  channel you picked has nothing published on it yet, it says that instead of
+  pretending there is a version waiting.
+
 - Messages that appear on their own — an update installing, the context being
   compacted — now live on the line under the input rather than in the composer.
   The composer answers what you just did; something you did not ask for must
