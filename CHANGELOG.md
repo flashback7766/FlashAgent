@@ -5,6 +5,15 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- One-line system notices moved out of the transcript and under the cursor.
+  `[No models discovered]`, `[Usage: /verbose …]`, `Update b238 · [███░░] 52%`
+  and the rest are addressed to the person at the keyboard, not to the
+  conversation, and a chat full of them is a chat you stop reading. Anything
+  with structure — a skills listing, a git diff, the `/goal` report — still
+  belongs in the transcript and stays there.
+- A finished update no longer says the same thing twice: the progress line
+  disappears and the banner states the outcome.
+
 - A single bad line in `config.json` no longer resets every setting. The
   loader used to throw the whole file away on any error, so one typo silently
   put you back on the default backend, model and permission mode. Now each
