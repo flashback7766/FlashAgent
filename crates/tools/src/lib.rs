@@ -321,37 +321,37 @@ impl ToolExec for BuiltinTools {
             ToolSpec {
                 name: "read_file".into(),
                 description: "Read a text file with 1-based line numbers".into(),
-                parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"File path, relative to working directory or absolute"},"offset":{"type":"integer","description":"0-based first line to read"},"limit":{"type":"integer","description":"Max lines to read (default 2000)"}},"required":["path"]}"#.into(),
+                parameters_json: r#"{"type":"object","properties":{"header":{"type":"string","description":"One short line saying what you are looking for — e.g. 'Find where the cache is invalidated'. Recommended: it is what the user sees while you work."},"path":{"type":"string","description":"File path, relative to working directory or absolute"},"offset":{"type":"integer","description":"0-based first line to read"},"limit":{"type":"integer","description":"Max lines to read (default 2000)"}},"required":["path"]}"#.into(),
             },
             ToolSpec {
                 name: "write_file".into(),
                 description: "Create or fully overwrite a file".into(),
-                parameters_json: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#.into(),
+                parameters_json: r#"{"type":"object","properties":{"header":{"type":"string","description":"One short line, in the user's language, saying what this call is for — e.g. 'Add the missing null check to parser.rs'. The user sees it before the call runs, and before they approve it."},"path":{"type":"string"},"content":{"type":"string"}},"required":["header","path","content"]}"#.into(),
             },
             ToolSpec {
                 name: "edit_file".into(),
                 description: "Apply surgical string replacements to a file; each edit replaces exact old_string matches".into(),
-                parameters_json: r#"{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["old_string","new_string"]}}},"required":["path","edits"]}"#.into(),
+                parameters_json: r#"{"type":"object","properties":{"header":{"type":"string","description":"One short line, in the user's language, saying what this call is for — e.g. 'Add the missing null check to parser.rs'. The user sees it before the call runs, and before they approve it."},"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["old_string","new_string"]}}},"required":["header","path","edits"]}"#.into(),
             },
             ToolSpec {
                 name: "list_dir".into(),
                 description: "List a directory; directory entries end with /".into(),
-                parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Defaults to the working directory"}}}"#.into(),
+                parameters_json: r#"{"type":"object","properties":{"header":{"type":"string","description":"One short line saying what you are looking for — e.g. 'Find where the cache is invalidated'. Recommended: it is what the user sees while you work."},"path":{"type":"string","description":"Defaults to the working directory"}}}"#.into(),
             },
             ToolSpec {
                 name: "glob".into(),
                 description: "Find files by glob pattern (e.g. src/**/*.rs), max 500 results".into(),
-                parameters_json: r#"{"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]}"#.into(),
+                parameters_json: r#"{"type":"object","properties":{"header":{"type":"string","description":"One short line saying what you are looking for — e.g. 'Find where the cache is invalidated'. Recommended: it is what the user sees while you work."},"pattern":{"type":"string"}},"required":["pattern"]}"#.into(),
             },
             ToolSpec {
                 name: "grep".into(),
                 description: "Search file contents by regex; returns path:line:text".into(),
-                parameters_json: r#"{"type":"object","properties":{"pattern":{"type":"string"},"glob":{"type":"string","description":"Restrict to files matching this glob"},"case_insensitive":{"type":"boolean"}},"required":["pattern"]}"#.into(),
+                parameters_json: r#"{"type":"object","properties":{"header":{"type":"string","description":"One short line saying what you are looking for — e.g. 'Find where the cache is invalidated'. Recommended: it is what the user sees while you work."},"pattern":{"type":"string"},"glob":{"type":"string","description":"Restrict to files matching this glob"},"case_insensitive":{"type":"boolean"}},"required":["pattern"]}"#.into(),
             },
             ToolSpec {
                 name: "run_shell".into(),
                 description: "Run a shell command. Foreground by default (timeout_ms, default 120000). With background:true returns a task id; poll with {\"task_id\":N}, terminate with {\"task_id\":N,\"kill\":true}".into(),
-                parameters_json: r#"{"type":"object","properties":{"command":{"type":"string"},"background":{"type":"boolean"},"timeout_ms":{"type":"integer"},"task_id":{"type":"integer","description":"Poll or kill a background task"},"kill":{"type":"boolean","description":"With task_id: kill the task"}},"required":[]}"#.into(),
+                parameters_json: r#"{"type":"object","properties":{"header":{"type":"string","description":"One short line, in the user's language, saying what this call is for — e.g. 'Add the missing null check to parser.rs'. The user sees it before the call runs, and before they approve it."},"command":{"type":"string"},"background":{"type":"boolean"},"timeout_ms":{"type":"integer"},"task_id":{"type":"integer","description":"Poll or kill a background task"},"kill":{"type":"boolean","description":"With task_id: kill the task"}},"required":["header"]}"#.into(),
             },
             ToolSpec {
                 name: "ask_user".into(),
@@ -388,22 +388,22 @@ impl ToolExec for BuiltinTools {
             specs.push(ToolSpec {
                 name: "patch_file".into(),
                 description: "Apply a standard unified diff patch to a target file".into(),
-                parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"File path to patch"},"patch":{"type":"string","description":"Unified diff patch text with @@ hunks"}},"required":["path","patch"]}"#.into(),
+                parameters_json: r#"{"type":"object","properties":{"header":{"type":"string","description":"One short line, in the user's language, saying what this call is for — e.g. 'Add the missing null check to parser.rs'. The user sees it before the call runs, and before they approve it."},"path":{"type":"string","description":"File path to patch"},"patch":{"type":"string","description":"Unified diff patch text with @@ hunks"}},"required":["header","path","patch"]}"#.into(),
             });
             specs.push(ToolSpec {
                 name: "outline_file".into(),
                 description: "Extract structural outline of a file (functions, structs, classes, traits, headings) with line numbers without reading the entire content".into(),
-                parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"File path to inspect"}},"required":["path"]}"#.into(),
+                parameters_json: r#"{"type":"object","properties":{"header":{"type":"string","description":"One short line saying what you are looking for — e.g. 'Find where the cache is invalidated'. Recommended: it is what the user sees while you work."},"path":{"type":"string","description":"File path to inspect"}},"required":["path"]}"#.into(),
             });
             specs.push(ToolSpec {
                 name: "git_status".into(),
                 description: "Inspect git repository status: current branch, staged, unstaged, and untracked files".into(),
-                parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Optional subpath filter"}},"required":[]}"#.into(),
+                parameters_json: r#"{"type":"object","properties":{"header":{"type":"string","description":"One short line saying what you are looking for — e.g. 'Find where the cache is invalidated'. Recommended: it is what the user sees while you work."},"path":{"type":"string","description":"Optional subpath filter"}},"required":[]}"#.into(),
             });
             specs.push(ToolSpec {
                 name: "git_diff".into(),
                 description: "View unified diff of working tree changes or staged changes".into(),
-                parameters_json: r#"{"type":"object","properties":{"staged":{"type":"boolean","description":"View staged/cached diff if true"},"path":{"type":"string","description":"Optional file path filter"}},"required":[]}"#.into(),
+                parameters_json: r#"{"type":"object","properties":{"header":{"type":"string","description":"One short line saying what you are looking for — e.g. 'Find where the cache is invalidated'. Recommended: it is what the user sees while you work."},"staged":{"type":"boolean","description":"View staged/cached diff if true"},"path":{"type":"string","description":"Optional file path filter"}},"required":[]}"#.into(),
             });
             specs.push(ToolSpec {
                 name: "env_info".into(),

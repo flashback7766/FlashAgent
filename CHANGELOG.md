@@ -5,6 +5,15 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- Tool calls now carry a one-line explanation the model writes itself, and
+  that line is what you read: `Add the missing null check to parser.rs`
+  instead of `Editing parser.rs`. It is required for anything with
+  consequences — writes, patches, shell commands — and recommended for reads
+  and searches, so the cheap calls stay cheap. When a call fails, the same
+  sentence says so: `Failed to add the missing null check to parser.rs`. The
+  expanded card underneath is unchanged: the explanation is the model's
+  stated intent, the card is what actually happened.
+
 - Changing the release channel now asks first. It replaces the binary with a
   different line of builds, so the card says what that means — moving down to
   stable can take features away and reset the settings they introduced — and
