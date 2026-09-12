@@ -146,6 +146,7 @@ pub struct PrefillTracker {
 impl PrefillTracker {
     pub fn cache_file_path() -> Option<PathBuf> {
         std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
             .ok()
             .map(|h| PathBuf::from(h).join(".flashagent").join("prefill_cache.json"))
     }
