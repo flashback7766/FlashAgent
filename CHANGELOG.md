@@ -5,6 +5,10 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- CI keeps its build artifacts for three days instead of the default ninety.
+  They only exist to hand binaries from the build jobs to the publish job in
+  the same run — the release assets are the lasting copy — and two days of
+  releases had filled the account's Actions storage with 2.3 GB of them.
 - The README recordings are redone against the current build, and two were
   added where a still picture explains nothing: `/goal` being stopped by its
   step budget and handing back a report, and Ctrl+U downloading and installing
