@@ -27,7 +27,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run workspace tests
-        run: cargo test --workspace --verbose
+        run: cargo test --workspace --verbose --no-fail-fast
 
       - name: Strict Clippy verification
         run: cargo clippy --workspace -- -D warnings
