@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use flashagent_llm::{ChatMessage, LlmError, LlmEvent, Role, ScannerEvent, TextToolScanner, ToolCall, ToolSpec};
@@ -72,6 +73,15 @@ pub struct LoopConfig {
     pub max_steps: Option<u32>,
     /// Soft token budget across the whole run; None = unlimited.
     pub max_tokens: Option<i64>,
+    /// Budget on *generated* tokens only (completion tokens summed over the
+    /// run). Separate from [`Self::max_tokens`] because with a local prefix
+    /// cache the prompt is re-counted every step, so a total-token budget
+    /// mostly measures how long the conversation is, not how much work the
+    /// model did.
+    pub max_output_tokens: Option<i64>,
+    /// Wall-clock budget for the whole run; checked between steps and after
+    /// tool execution, so a single long tool call can overshoot it.
+    pub time_budget: Option<Duration>,
     /// Base turn options for this session (configured thinking effort, etc.).
     pub base_turn_options: flashagent_llm::TurnOptions,
 }
@@ -107,6 +117,13 @@ pub enum LoopEvent {
     Usage(flashagent_llm::Usage),
     /// A user steering directive was injected into the loop mid-flight.
     SteeringInjected(String),
+    /// A loop iteration is about to request a turn. `step` is 1-based.
+    StepStarted {
+        /// 1-based iteration number.
+        step: u32,
+        /// Configured step cap, if any.
+        max_steps: Option<u32>,
+    },
     /// The loop stopped and why.
     Done(DoneReason),
 }
@@ -118,8 +135,10 @@ pub enum DoneReason {
     Completed,
     /// `max_steps` was reached.
     StepLimit,
-    /// `max_tokens` was reached.
+    /// `max_tokens` or `max_output_tokens` was reached.
     TokenBudget,
+    /// `time_budget` elapsed.
+    TimeLimit,
     /// The user pressed stop.
     Cancelled,
     /// The backend broke; the error is reported separately.
@@ -225,6 +244,8 @@ impl AgentLoop {
         let specs = tools.specs();
         let known_tools: HashSet<String> = specs.iter().map(|s| s.name.clone()).collect();
         let mut tokens_used: i64 = 0;
+        let mut output_tokens: i64 = 0;
+        let started = Instant::now();
         let mut stall_nudges: usize = 0;
         // A stalled scratchpad reply plus the nudge answering it: sent with
         // the next request only, never stored — loop plumbing, not conversation.
@@ -240,7 +261,12 @@ impl AgentLoop {
                     return Ok((history, DoneReason::StepLimit));
                 }
             }
+            if self.config.time_budget.is_some_and(|b| started.elapsed() >= b) {
+                events(LoopEvent::Done(DoneReason::TimeLimit));
+                return Ok((history, DoneReason::TimeLimit));
+            }
             step += 1;
+            events(LoopEvent::StepStarted { step, max_steps: self.config.max_steps });
 
             if self.cancel.load(Ordering::Relaxed) {
                 events(LoopEvent::Done(DoneReason::Cancelled));
@@ -349,6 +375,7 @@ impl AgentLoop {
                     }
                     LlmEvent::Usage(u) => {
                         tokens_used += u.prompt.unwrap_or(0) + u.completion.unwrap_or(0);
+                        output_tokens += u.completion.unwrap_or(0);
                         events(LoopEvent::Usage(u));
                     }
                     LlmEvent::Done(reason) => truncated |= reason == flashagent_llm::FinishReason::Length,
@@ -499,9 +526,16 @@ impl AgentLoop {
                 history.push(ChatMessage::user(steer_msg));
             }
 
-            if self.config.max_tokens.is_some_and(|b| tokens_used >= b) {
+            if self.config.max_tokens.is_some_and(|b| tokens_used >= b)
+                || self.config.max_output_tokens.is_some_and(|b| output_tokens >= b)
+            {
                 events(LoopEvent::Done(DoneReason::TokenBudget));
                 return Ok((history, DoneReason::TokenBudget));
+            }
+
+            if self.config.time_budget.is_some_and(|b| started.elapsed() >= b) {
+                events(LoopEvent::Done(DoneReason::TimeLimit));
+                return Ok((history, DoneReason::TimeLimit));
             }
         }
     }
@@ -994,6 +1028,108 @@ mod tests {
         );
         let (_history, done) = run_loop(&l, &llm, &tools, |_| {});
         assert!(matches!(done, DoneReason::TokenBudget));
+    }
+
+    fn usage_turn(prompt: i64, completion: i64, id: &str) -> MockTurn {
+        MockTurn {
+            events: vec![
+                Ok(LlmEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some(id.into()),
+                    name: Some("shell".into()),
+                    args_delta: r#"{"cmd":"ls"}"#.into(),
+                }),
+                Ok(LlmEvent::Usage(flashagent_llm::Usage {
+                    prompt: Some(prompt),
+                    completion: Some(completion),
+                    cached: None,
+                    mtp: None,
+                })),
+                Ok(LlmEvent::Done(FinishReason::ToolUse)),
+            ],
+        }
+    }
+
+    #[test]
+    fn output_budget_counts_generated_tokens_only() {
+        // A long conversation re-sends a huge prompt every step; with a prefix
+        // cache that costs almost nothing, so the prompt must not eat the
+        // budget. Three steps generate 40 tokens each: the 120-token budget
+        // trips on the third, not on the first prompt of 9000.
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![
+                usage_turn(9000, 40, "a"),
+                usage_turn(9000, 40, "b"),
+                usage_turn(9000, 40, "c"),
+                text_turn("never reached"),
+            ]),
+        };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(
+            LoopConfig { max_output_tokens: Some(120), ..Default::default() },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (_history, done) = run_loop(&l, &llm, &tools, |_| {});
+        assert!(matches!(done, DoneReason::TokenBudget), "got {done:?}");
+        assert_eq!(tools.calls.lock().unwrap().len(), 3);
+    }
+
+    struct SlowTools {
+        inner: MockTools,
+    }
+
+    #[async_trait]
+    impl ToolExec for SlowTools {
+        async fn execute(&self, call: &ToolCall) -> ToolOutput {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            self.inner.execute(call).await
+        }
+        fn specs(&self) -> Vec<ToolSpec> {
+            self.inner.specs()
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn time_budget_stops_the_run() {
+        let turns: Vec<MockTurn> = (0..20).map(|i| tool_turn("shell", &format!("c{i}"))).collect();
+        let llm = MockLlm { turns: std::sync::Mutex::new(turns) };
+        let tools = SlowTools { inner: MockTools::new() };
+        let l = AgentLoop::new(
+            LoopConfig {
+                time_budget: Some(Duration::from_millis(150)),
+                ..Default::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let started = Instant::now();
+        let (_history, done) = run_loop(&l, &llm, &tools, |_| {});
+        assert!(matches!(done, DoneReason::TimeLimit), "got {done:?}");
+        let calls = tools.inner.calls.lock().unwrap().len();
+        assert!(calls < 20, "time budget did not cut the run short: {calls} calls");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn step_progress_is_reported_with_the_cap() {
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![tool_turn("shell", "a"), text_turn("done")]),
+        };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(
+            LoopConfig { max_steps: Some(7), ..Default::default() },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let (_history, _done) = run_loop(&l, &llm, &tools, move |e| {
+            if let LoopEvent::StepStarted { step, max_steps } = e {
+                sink.lock().unwrap().push((step, max_steps));
+            }
+        });
+        assert_eq!(*seen.lock().unwrap(), vec![(1, Some(7)), (2, Some(7))]);
     }
 
     #[test]

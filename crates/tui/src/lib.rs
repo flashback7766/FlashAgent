@@ -13,6 +13,7 @@ use unicode_width::UnicodeWidthChar;
 pub mod autocomplete;
 pub mod clipboard;
 pub mod context_modal;
+pub mod goal;
 pub mod mcp_view;
 pub mod prefill;
 pub mod sampling;
@@ -981,6 +982,9 @@ impl ChatView {
                 self.lines.push(ChatLine::new(LineKind::User, directive));
                 self.needs_reprint = true;
             }
+            // Progress for the status line only: the transcript stays
+            // readable instead of gaining a line per loop iteration.
+            LoopEvent::StepStarted { .. } => {}
             LoopEvent::Done(reason) => {
                 self.streaming = None;
                 if let Some(i) = self.streaming_reasoning.take() {

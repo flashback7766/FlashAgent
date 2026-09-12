@@ -126,7 +126,7 @@ Reads are always allowed. Approval cards offer **Allow**, **Always** and **Deny*
 
 **Sessions** — conversations are saved on exit; resume with `flashagent --resume <session_id>`. `/compact` summarises older turns to free context, and it happens automatically near the limit.
 
-**Autonomous mode (`/goal <task>`)** — runs the task end to end in Accept All mode with maximum reasoning effort, no questions and a 250-step cap, then restores your previous mode. Filesystem snapshots, milestone commits and a structured final report are on the [roadmap](ROADMAP.md) (A10).
+**Autonomous mode (`/goal [--steps N] [--time 30m] [--tokens 200k] <task>`)** — runs the task end to end in Accept All mode with maximum reasoning effort and no questions, under a budget (default: 250 steps and one hour; `--tokens` counts generated tokens only). The status line shows the burn-down live, and the run ends with a factual report card — steps, generated tokens, elapsed, files created and edited, shell commands that failed, and whether a budget cut the run short — built from what the loop did, not from what the model says it did. Your previous permission mode and effort are restored afterwards. Filesystem snapshots and milestone commits are on the [roadmap](ROADMAP.md).
 
 **Updates** — `flashagent --update`, `/update`, or automatic background checks. Downloads are checked against the release checksums; `--channel stable|beta` or `/channel` switches channels.
 

@@ -18,6 +18,7 @@ use flashagent_core::{
 };
 use flashagent_llm::{ChatMessage, LlmBackend};
 use flashagent_tools::{BuiltinTools, BuiltinToolsConfig};
+use flashagent_tui::goal::{GoalBudgets, GoalLedger};
 use flashagent_tui::{
     clip_ansi, pad_box_row, render_session_saved_card, restore_line_color,
     visible_width, welcome_card_responsive_opts, AutocompletePopup, ChatView, ConfirmSelect,
@@ -124,6 +125,8 @@ struct FrameState<'a> {
     cwd: &'a str,
     mode: PermissionMode,
     is_goal_active: bool,
+    /// Live `/goal` progress against its budgets, when one is running.
+    goal_progress: Option<&'a str>,
     tip: Option<&'a str>,
     tip_animated: Option<&'a str>,
     tip_lines: Option<&'a [String]>,
@@ -522,9 +525,11 @@ impl Renderer {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn format_status_left(
     running: bool,
     is_goal_active: bool,
+    goal_progress: Option<&str>,
     mode_label: &str,
     token_tracker: Option<&TokenTracker>,
     budget: usize,
@@ -536,7 +541,13 @@ fn format_status_left(
         } else {
             format!("\x1b[38;2;145;205;140m[{mode_label}]\x1b[0m")
         };
-        format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;168;199;250mGenerating response...\x1b[0m{expand_status}")
+        // During a goal the budget burn-down is the useful thing to watch;
+        // "Generating response..." says nothing a spinner does not.
+        let activity = match goal_progress {
+            Some(p) => format!("\x1b[38;2;168;199;250m{p}\x1b[0m"),
+            None => "\x1b[38;2;168;199;250mGenerating response...\x1b[0m".to_string(),
+        };
+        format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m {activity}{expand_status}")
     } else if let Some(stats) = token_tracker.and_then(|tt| tt.format_stats_width(budget)) {
         if is_goal_active {
             format!("  \x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m \x1b[38;2;100;95;90m·\x1b[0m {stats}{expand_status}")
@@ -966,6 +977,7 @@ impl Renderer {
         let left_telemetry = format_status_left(
             st.running,
             st.is_goal_active,
+            st.goal_progress,
             st.mode.label(),
             st.token_tracker,
             budget,
@@ -1925,6 +1937,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         task: String,
     }
     let mut goal_state: Option<SavedGoalState> = None;
+    // Facts about the running /goal, accumulated from loop events for the
+    // live progress line and the final report.
+    let mut goal_ledger: Option<GoalLedger> = None;
     let mut copy_toast: Option<(String, std::time::Instant)> = None;
     let mut last_ctrl_c: Option<std::time::Instant> = None;
 
@@ -1984,6 +1999,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             }
         }
         let active_toast = copy_toast.as_ref().map(|(msg, _)| msg.as_str());
+        // Recomputed every frame: the elapsed part of it moves on its own.
+        let goal_progress: Option<String> =
+            goal_ledger.as_ref().filter(|_| running).map(|l| l.progress());
         let live_prefill = token_tracker.live_prefill_status();
         let ttft_display = token_tracker.ttft_display();
         let tg_speed = token_tracker.tg_3s();
@@ -2004,6 +2022,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 input: &input,
                 mode: perm.state().mode(),
                 is_goal_active: goal_state.is_some(),
+                goal_progress: goal_progress.as_deref(),
                 tip: if app_config.show_tips { Some(tip_animator.tip_text) } else { None },
                 tip_animated: None,
                 tip_lines: if app_config.show_tips { Some(&tip_lines) } else { None },
@@ -2092,6 +2111,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         perm.state().set_mode(saved.mode);
                         current_effort = saved.effort.clone();
                         max_steps = saved.max_steps;
+                        if let Some(ledger) = goal_ledger.take() {
+                            push_goal_report(&mut chat, &ledger, DoneReason::Cancelled);
+                        }
                     }
                     chat.on_event(&flashagent_core::LoopEvent::Done(flashagent_core::DoneReason::Cancelled));
                     custom_placeholder = Some("Turn aborted; its partial output was not kept in the model context".to_string());
@@ -2255,6 +2277,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     }
                     _ => {}
                 }
+                if let Some(ledger) = goal_ledger.as_mut() {
+                    ledger.on_event(&e);
+                    if matches!(e, LoopEvent::StepStarted { .. }) {
+                        renderer.request_reprint();
+                    }
+                }
                 chat.on_event(&e);
                 if chat.take_needs_reprint() {
                     renderer.request_reprint();
@@ -2280,6 +2308,13 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     perm.state().set_mode(saved.mode);
                     current_effort = saved.effort.clone();
                     max_steps = saved.max_steps;
+                    if let Some(ledger) = goal_ledger.take() {
+                        let reason = match &res {
+                            Ok((_, r)) => *r,
+                            Err(_) => DoneReason::Failed,
+                        };
+                        push_goal_report(&mut chat, &ledger, reason);
+                    }
                     chat.push_system(&format!(
                         "[Goal \"{}\" finished · Restored mode to {} and thinking to {}]",
                         flashagent_tui::truncate_middle(&saved.task, 40),
@@ -3171,7 +3206,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     source.clone(),
                                     perm,
                                     history.clone(),
-                                    max_steps,
+                                    GoalBudgets::steps_only(max_steps),
                                     turn_opts,
                                     tx.clone(),
                                     steer_rx,
@@ -3462,7 +3497,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 autocomplete_idx = 0;
                                 chat.push_system(
                                     "Commands & Skills (Tab to autocomplete):\n\
-                                     • /goal <task>           — launch fully autonomous execution with max reasoning\n\
+                                     • /goal [--steps N] [--time 30m] [--tokens 200k] <task> — autonomous run under a budget\n\
                                      • /settings (or Tab)     — open settings configuration tab\n\
                                      • /context               — show detailed context window breakdown\n\
                                      • /verbose [all|last|off] — toggle verbose mode (or press F2 / Alt+O / Ctrl+O)\n\
@@ -3489,17 +3524,28 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             if trimmed == "/goal" {
                                 input.clear();
                                 autocomplete_idx = 0;
-                                chat.push_system(
+                                chat.push_system(&format!(
                                     "Autonomous Goal Mode:\n\
-                                     Usage: /goal <task description>\n\
-                                     Example: /goal Refactor error handling in core crate and run test suite\n\
-                                     In goal mode, FlashAgent lifts all permission gates, maximizes reasoning, and executes autonomously without human interruption until complete."
-                                );
+                                     Usage: /goal [--steps N] [--time 30m] [--tokens 200k] <task description>\n\
+                                     Example: /goal --time 20m Refactor error handling in core crate and run test suite\n\
+                                     Budgets default to {} and stop the run when reached; --tokens counts generated tokens only.\n\
+                                     In goal mode, FlashAgent lifts all permission gates, maximizes reasoning, and executes autonomously without human interruption until a budget or the task ends it.",
+                                    GoalBudgets::default().summary()
+                                ));
                                 continue;
                             } else if let Some(task) = trimmed.strip_prefix("/goal ") {
-                                let task_desc = task.trim().to_string();
+                                let task = task.to_string();
                                 input.clear();
                                 autocomplete_idx = 0;
+                                let (goal_budgets, task_desc) =
+                                    match flashagent_tui::goal::parse_goal_command(&task) {
+                                        Ok(parsed) => parsed,
+                                        Err(msg) => {
+                                            chat.push_system(&msg);
+                                            renderer.request_reprint();
+                                            continue;
+                                        }
+                                    };
 
                                 // Save previous state to roll back upon goal completion
                                 goal_state = Some(SavedGoalState {
@@ -3508,11 +3554,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     max_steps,
                                     task: task_desc.clone(),
                                 });
+                                goal_ledger =
+                                    Some(GoalLedger::new(task_desc.clone(), goal_budgets.clone()));
 
                                 // Lift restrictions for autonomous execution
                                 perm.state().set_mode(PermissionMode::Bypass);
                                 current_effort = "high".to_string();
-                                let goal_max_steps: Option<u32> = Some(250);
                                 tools_arc.set_goal_mode(true);
 
                                 let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
@@ -3522,11 +3569,15 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 let reset = "\x1b[0m";
 
                                 let title = format!(" Goal: {} ", flashagent_tui::truncate_middle(&task_desc, inner_w.saturating_sub(10)));
-                                let dash_count = inner_w.saturating_sub(title.chars().count() + 2);
+                                let dash_count = inner_w.saturating_sub(title.chars().count() + 1);
                                 chat.push_line(LineKind::System, format!("{border_color}╭─\x1b[1;38;2;245;240;232m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)));
-                                let meta_line = "Mode: Autonomous · Permissions: Auto-Approved · Thinking: Max · Interruption: None";
-                                let pad_len = inner_w.saturating_sub(meta_line.chars().count() + 2);
+                                let meta_line = "Mode: Autonomous · Permissions: Auto-Approved · Thinking: Max · Esc to stop";
+                                let pad_len = inner_w.saturating_sub(meta_line.chars().count() + 1);
                                 chat.push_line(LineKind::System, format!("{border_color}│{reset} \x1b[38;2;160;155;145m{meta_line}\x1b[0m{border_color}{}│{reset}", " ".repeat(pad_len)));
+                                let budget_line = format!("Budget: {}", goal_budgets.summary());
+                                let budget_line = flashagent_tui::truncate_middle(&budget_line, inner_w.saturating_sub(2));
+                                let pad_len = inner_w.saturating_sub(budget_line.chars().count() + 1);
+                                chat.push_line(LineKind::System, format!("{border_color}│{reset} \x1b[38;2;160;155;145m{budget_line}\x1b[0m{border_color}{}│{reset}", " ".repeat(pad_len)));
                                 chat.push_line(LineKind::System, format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)));
 
                                 chat.push_user(&format!("/goal {task_desc}"));
@@ -3539,8 +3590,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                      1. Do NOT ask clarifying questions or seek user confirmation. All tool actions are pre-approved.\n\
                                      2. Plan, research, edit, execute, and verify completely on your own.\n\
                                      3. Thoroughly test and verify your changes before finishing.\n\
-                                     4. Conclude with a clear structured summary of what was accomplished.",
-                                    task_desc
+                                     4. Conclude with a clear structured summary of what was accomplished.\n\n\
+                                     Budget for this run: {}. When it runs out the run is stopped wherever it \
+                                     is, so do the load-bearing work first and say plainly what is left \
+                                     unfinished or unverified rather than claiming success.",
+                                    task_desc,
+                                    goal_budgets.summary()
                                 );
 
                                 let first = !history.iter().any(|m| m.role == flashagent_llm::Role::User);
@@ -3567,7 +3622,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     source.clone(),
                                     perm,
                                     history.clone(),
-                                    goal_max_steps,
+                                    goal_budgets,
                                     turn_opts,
                                     tx.clone(),
                                     steer_rx,
@@ -3648,7 +3703,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         source.clone(),
                                         perm,
                                         history.clone(),
-                                        max_steps,
+                                        GoalBudgets::steps_only(max_steps),
                                         turn_opts,
                                         tx.clone(),
                                         steer_rx,
@@ -4011,6 +4066,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         input: &input,
                                         mode: perm.state().mode(),
                                         is_goal_active: goal_state.is_some(),
+                                        goal_progress: None,
                                         tip: Some(tip_animator.tip_text),
                                         tip_animated: None,
                                         tip_lines: Some(&tip_lines),
@@ -4249,7 +4305,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     source.clone(),
                                     perm,
                                     history.clone(),
-                                    max_steps,
+                                    GoalBudgets::steps_only(max_steps),
                                     turn_opts,
                                     tx.clone(),
                                     steer_rx,
@@ -4292,7 +4348,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 source.clone(),
                                 perm,
                                 history.clone(),
-                                max_steps,
+                                GoalBudgets::steps_only(max_steps),
                                 turn_opts,
                                 tx.clone(),
                                 steer_rx,
@@ -4407,7 +4463,7 @@ fn spawn_turn(
     source: Arc<BackendSource>,
     perm: &'static PermissionedTools,
     history: Vec<ChatMessage>,
-    max_steps: Option<u32>,
+    budgets: GoalBudgets,
     turn_opts: flashagent_llm::TurnOptions,
     tx: tokio::sync::mpsc::UnboundedSender<UiEvent>,
     steer_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
@@ -4416,7 +4472,9 @@ fn spawn_turn(
     cancel.store(false, Ordering::Relaxed);
     tokio::spawn(async move {
         let config = LoopConfig {
-            max_steps,
+            max_steps: budgets.steps,
+            max_output_tokens: budgets.output_tokens,
+            time_budget: budgets.time,
             base_turn_options: turn_opts,
             ..Default::default()
         };
@@ -4896,6 +4954,75 @@ fn card_safe(text: &str) -> String {
         .collect()
 }
 
+/// Draw the `/goal` ledger as a card. Facts the loop reported, so a run that
+/// stopped at a budget cannot read as a run that finished — whatever the
+/// model's own closing summary claims.
+fn push_goal_report(chat: &mut ChatView, ledger: &GoalLedger, reason: DoneReason) {
+    let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+    let card_w = (w as usize).saturating_sub(4).clamp(44, 110);
+    let inner_w = card_w.saturating_sub(2);
+    let border = if matches!(reason, DoneReason::Completed) {
+        "\x1b[38;2;145;205;140m"
+    } else {
+        "\x1b[38;2;225;175;95m"
+    };
+    let reset = "\x1b[0m";
+
+    let title = format!(" Goal report: {} ", flashagent_tui::truncate_middle(&ledger.task, inner_w.saturating_sub(18)));
+    let dashes = inner_w.saturating_sub(flashagent_tui::visible_width(&title) + 1);
+    chat.push_line(
+        LineKind::System,
+        format!("{border}╭─\x1b[1;38;2;245;240;232m{title}{border}{}╮{reset}", "─".repeat(dashes)),
+    );
+    for line in ledger.report(reason) {
+        for row in wrap_plain(&card_safe(&line), inner_w.saturating_sub(2)) {
+            let pad = inner_w.saturating_sub(flashagent_tui::visible_width(&row) + 1);
+            chat.push_line(
+                LineKind::System,
+                format!("{border}│{reset} \x1b[38;2;200;196;188m{row}\x1b[0m{}{border}│{reset}", " ".repeat(pad)),
+            );
+        }
+    }
+    chat.push_line(LineKind::System, format!("{border}╰{}╯{reset}", "─".repeat(inner_w)));
+}
+
+/// Wrap plain text at `width` on word boundaries, keeping a leading indent.
+fn wrap_plain(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    if text.chars().count() <= width {
+        return vec![text.to_string()];
+    }
+    let indent: String = text.chars().take_while(|c| *c == ' ').collect();
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if row.is_empty() { word.chars().count() } else { row.chars().count() + 1 + word.chars().count() };
+        if !row.is_empty() && candidate > width {
+            rows.push(std::mem::take(&mut row));
+            row.push_str(&indent);
+            row.push_str("  ");
+        }
+        if !row.is_empty() && !row.ends_with(' ') {
+            row.push(' ');
+        }
+        row.push_str(word);
+        // A single word longer than the card: hard-split it.
+        while row.chars().count() > width {
+            let head: String = row.chars().take(width).collect();
+            let tail: String = row.chars().skip(width).collect();
+            rows.push(head);
+            row = tail;
+        }
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
+}
+
 /// Settings → "Run Tool Test": ask the active model to call a probe tool and
 /// report whether a well-formed call came back — natively or as text markup
 /// that FlashAgent's scanner recovers.
@@ -5184,7 +5311,7 @@ mod tests {
         tracker.last_ttft = Some(std::time::Duration::from_millis(1770));
 
         // When running is true, Line 3 must show "Generating response..." and NOT duplicate prompt tokens or TTFT
-        let status = format_status_left(true, false, "Normal", Some(&tracker), 80, "");
+        let status = format_status_left(true, false, None, "Normal", Some(&tracker), 80, "");
         assert!(status.contains("Generating response..."));
         assert!(status.contains("[Normal]"));
         assert!(!status.contains("4.9K"));
@@ -5193,7 +5320,7 @@ mod tests {
 
         // When running is false, Line 3 displays the completed turn telemetry
         tracker.on_finished();
-        let status_done = format_status_left(false, false, "Normal", Some(&tracker), 80, "");
+        let status_done = format_status_left(false, false, None, "Normal", Some(&tracker), 80, "");
         assert!(status_done.contains("4.9K prompt"));
         assert!(status_done.contains("TTFT 1.77s"));
         assert!(status_done.contains("44.4 tg"));
@@ -5203,13 +5330,58 @@ mod tests {
     #[test]
     fn test_format_status_left_goal_active_modes() {
         let tracker = TokenTracker::new("default".to_string());
-        let status_running = format_status_left(true, true, "Autonomous", Some(&tracker), 80, "");
+        let status_running = format_status_left(true, true, None, "Autonomous", Some(&tracker), 80, "");
         assert!(status_running.contains("[Goal: Autonomous]"));
         assert!(status_running.contains("Generating response..."));
 
-        let status_ready = format_status_left(false, true, "Autonomous", None, 80, "");
+        let status_ready = format_status_left(false, true, None, "Autonomous", None, 80, "");
         assert!(status_ready.contains("[Goal: Autonomous]"));
         assert!(status_ready.contains("Ready"));
+    }
+
+    #[test]
+    fn test_goal_progress_replaces_the_generic_running_text() {
+        let tracker = TokenTracker::new("default".to_string());
+        let status = format_status_left(
+            true,
+            true,
+            Some("step 12/250 · 4.2k tok · 3m05s/1h0m"),
+            "Autonomous",
+            Some(&tracker),
+            80,
+            "",
+        );
+        assert!(status.contains("step 12/250"), "{status}");
+        assert!(status.contains("3m05s/1h0m"), "{status}");
+        assert!(!status.contains("Generating response..."), "{status}");
+    }
+
+    #[test]
+    fn test_goal_report_card_states_the_budget_stop() {
+        let mut chat = ChatView::default();
+        let ledger = GoalLedger::new(
+            "refactor the parser".into(),
+            GoalBudgets { steps: Some(40), time: None, output_tokens: None },
+        );
+        push_goal_report(&mut chat, &ledger, DoneReason::StepLimit);
+        let rendered = chat.render(100);
+        let text: String = rendered
+            .iter()
+            .map(|(_, t)| flashagent_tui::strip_ansi(t))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Goal report"), "{text}");
+        assert!(text.contains("INCOMPLETE"), "{text}");
+        assert!(text.contains("step budget reached (40 steps)"), "{text}");
+
+        let widths: Vec<usize> = rendered
+            .iter()
+            .map(|(_, t)| flashagent_tui::visible_width(&flashagent_tui::strip_ansi(t)))
+            .collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "card rows must line up with the border: {widths:?}"
+        );
     }
 }
 
