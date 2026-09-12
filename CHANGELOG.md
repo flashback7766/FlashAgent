@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## b246 — memory that survives the session
 
+- The what's-new screen opens with the claims, not the whole text: one line
+  per change, with `…` where there is more and `tab` to read it. Five
+  paragraphs at once is a wall nobody reads.
 - Memory the model keeps for itself. One fact per file under `memory/`, with
   `MEMORY.md` as an index of one line each — so what is remembered no longer
   grows until it crowds out the conversation it was meant to help. Every fact
