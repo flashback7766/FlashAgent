@@ -2221,6 +2221,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let mut last_ctrl_c: Option<std::time::Instant> = None;
     let started_at = std::time::Instant::now();
     let mut last_mascot_mood = MascotMood::Checking;
+    // What the user has already been told about the server, so a mood that
+    // flickers does not re-announce itself.
+    let mut announced_mood = MascotMood::Checking;
 
     macro_rules! finish {
         () => {
@@ -2291,6 +2294,28 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         }
         let active_toast = copy_toast.as_ref().map(|(msg, _)| msg.as_str());
         // Recomputed every frame: the elapsed part of it moves on its own.
+        // The server being unreachable is not something to discover by typing
+        // a prompt and waiting. Said once when it happens, taken back when it
+        // starts answering.
+        if mascot_mood != announced_mood {
+            let previous = std::mem::replace(&mut announced_mood, mascot_mood);
+            match mascot_mood {
+                MascotMood::Offline => {
+                    background = Some(BackgroundNotice::sticky(format!(
+                        "No model server at {} \u{b7} start it, or pick another in Tab \u{2192} LLM",
+                        app_config.backend_url.trim_end_matches('/')
+                    )));
+                }
+                MascotMood::Happy if previous == MascotMood::Offline => {
+                    background = Some(BackgroundNotice::fading(
+                        format!("Model server is answering \u{b7} {current_model}"),
+                        5,
+                    ));
+                }
+                _ => {}
+            }
+        }
+
         let channel_prompt: Option<String> = channel_switch.as_ref().map(|sw| {
             channel_switch_warning(sw.to, flashagent_svc::updater::current_version(), &sw.target)
         });
@@ -2736,8 +2761,29 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         close_dangling_user(&mut history, "[no reply: the model backend failed]");
                         update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
                         chat.on_event(&LoopEvent::Done(DoneReason::Failed));
-                        chat.push_line(LineKind::ToolError, format!("Error: {e}"));
-                        notice!("The model backend failed — press Ctrl+R to retry the last prompt.");
+                        // What broke and what to do about it, with the raw
+                        // text kept underneath rather than as the headline.
+                        let explained = flashagent_tui::backend_error::explain(
+                            &e,
+                            &app_config.backend_url,
+                            &current_model,
+                        );
+                        chat.push_line(LineKind::ToolError, explained.headline.clone());
+                        if let Some(hint) = &explained.hint {
+                            // Its own line: an embedded newline is not wrapped
+                            // by the renderer, it is clipped.
+                            chat.push_line(
+                                LineKind::System,
+                                format!("  \x1b[38;2;160;155;145m{hint}\x1b[0m"),
+                            );
+                        }
+                        if explained.headline != explained.raw.trim() {
+                            chat.push_line(
+                                LineKind::System,
+                                format!("  \x1b[38;2;120;115;110m{}\x1b[0m", explained.raw.trim()),
+                            );
+                        }
+                        notice!("Ctrl+R retries the last prompt");
                     }
                 }
             }

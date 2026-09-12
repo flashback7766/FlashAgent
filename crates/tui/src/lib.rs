@@ -11,6 +11,7 @@ use parking_lot::Mutex;
 use unicode_width::UnicodeWidthChar;
 
 pub mod autocomplete;
+pub mod backend_error;
 pub mod clipboard;
 pub mod context_modal;
 pub mod goal;
