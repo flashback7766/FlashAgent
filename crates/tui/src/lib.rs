@@ -21,6 +21,7 @@ pub mod select;
 pub mod settings;
 pub mod startup;
 pub mod tips;
+pub mod whatsnew;
 pub mod wizard;
 pub use autocomplete::{AutocompleteCategory, AutocompleteItem, AutocompletePopup};
 pub use context_modal::ContextModal;

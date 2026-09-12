@@ -157,6 +157,8 @@ struct FrameState<'a> {
     ttft_display: Option<&'a str>,
     background: Option<&'a str>,
     background_style: NoticeStyle,
+    /// A release-channel switch waiting for a yes or no.
+    channel_prompt: Option<&'a str>,
     context_warn_threshold: usize,
 }
 
@@ -687,6 +689,39 @@ impl Renderer {
                 pad_box_row(&format!(" {allow_btn}   {always_btn}   {deny_btn}"), width),
             ));
 
+            input_line_idx = tail.len();
+            tail.push((
+                LineKind::System,
+                format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
+            ));
+            custom_cursor_col = Some(0);
+        } else if let Some(prompt) = st.channel_prompt {
+            // Same treatment as an approval card: this replaces the binary
+            // under the user, so it is asked in the same place and with the
+            // same weight as anything else that cannot be undone by typing.
+            let border_color = "\x1b[38;2;225;175;95m";
+            let reset = "\x1b[0m";
+            let title = " Switch release channel ";
+            let dash_w = inner_w.saturating_sub(visible_width(title) + 2);
+            tail.push((
+                LineKind::System,
+                format!("{border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
+            ));
+            // Word-aware wrapping: this is a sentence to read and decide on,
+            // not a command to inspect character by character.
+            for row in wrap_plain(prompt, inner_w.saturating_sub(3)) {
+                tail.push((
+                    LineKind::System,
+                    pad_box_row(&format!(" \x1b[38;2;240;235;225m{row}\x1b[0m"), width),
+                ));
+            }
+            tail.push((
+                LineKind::System,
+                pad_box_row(
+                    " \x1b[1;38;2;225;175;95m[► Yes (y)]\x1b[0m   \x1b[38;2;160;155;145m[ No (n / Esc) ]\x1b[0m",
+                    width,
+                ),
+            ));
             input_line_idx = tail.len();
             tail.push((
                 LineKind::System,
@@ -1537,6 +1572,63 @@ fn thinking_summary_str(source: &BackendSource, current_effort: &str) -> String 
 }
 
 #[derive(Debug, Clone)]
+/// A release-channel change waiting to be confirmed.
+///
+/// Switching channel is not a preference like a colour: it replaces the
+/// binary with a different line of builds, which can take features away and
+/// leave settings behind that the older build does not understand. It is
+/// asked about, once, in those words.
+struct ChannelSwitch {
+    from: flashagent_core::config::UpdateChannel,
+    to: flashagent_core::config::UpdateChannel,
+    /// The version that channel would put you on, once the check answers.
+    target: ChannelTarget,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ChannelTarget {
+    /// The release feed has not answered yet.
+    Checking,
+    /// The newest build on that channel.
+    Version(String),
+    /// The channel exists but has nothing published on it.
+    Empty,
+    /// The feed could not be reached; the switch is still the user's to make.
+    Unknown,
+}
+
+/// What the user is about to do, in a sentence they can decide on.
+fn channel_switch_warning(
+    to: flashagent_core::config::UpdateChannel,
+    current: &str,
+    target: &ChannelTarget,
+) -> String {
+    use flashagent_core::config::UpdateChannel;
+    let channel = to.label().to_lowercase();
+    let destination = match target {
+        ChannelTarget::Version(v) => v.clone(),
+        ChannelTarget::Empty => {
+            return format!(
+                "Nothing is published on the {channel} channel yet, so you would stay on \
+                 {current} until something is. Switch anyway?"
+            )
+        }
+        // Still checking, or the feed could not be reached: name the channel
+        // rather than invent a version.
+        ChannelTarget::Checking | ChannelTarget::Unknown => format!("the newest {channel} release"),
+    };
+    match to {
+        UpdateChannel::Stable => format!(
+            "You will be moved from {current} down to {destination}. Features added since may \
+             disappear or behave differently, and settings they introduced can be reset. Continue?"
+        ),
+        UpdateChannel::Beta => format!(
+            "You will be moved from {current} to {destination}. Beta builds land often and can \
+             regress; that is the point of them. Continue?"
+        ),
+    }
+}
+
 /// A message that appeared without the user doing anything. It lives on the
 /// line under the input, and most of them fade: a notice that is no longer
 /// actionable should not take that line for the rest of the session.
@@ -1946,6 +2038,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     // the user's own actions are answered; a message they did not ask for
     // must not take that spot.
     let mut background: Option<BackgroundNotice> = None;
+    let mut channel_switch: Option<ChannelSwitch> = None;
+    let (channel_probe_tx, mut channel_probe_rx) =
+        tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
     let mut pending_update: Option<(String, String, String, Option<String>)> = None;
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
     let (channel_watch_tx, mut channel_watch_rx) = tokio::sync::watch::channel(app_config.update_channel);
@@ -2156,6 +2251,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         }
         let active_toast = copy_toast.as_ref().map(|(msg, _)| msg.as_str());
         // Recomputed every frame: the elapsed part of it moves on its own.
+        let channel_prompt: Option<String> = channel_switch.as_ref().map(|sw| {
+            channel_switch_warning(sw.to, flashagent_svc::updater::current_version(), &sw.target)
+        });
         let goal_progress: Option<String> =
             goal_ledger.as_ref().filter(|_| running).map(|l| l.progress());
         let live_prefill = token_tracker.live_prefill_status();
@@ -2206,12 +2304,20 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 prefill_status: if app_config.show_ttft { live_prefill.as_deref() } else { None },
                 ttft_display: if app_config.show_ttft { ttft_display.as_deref() } else { None },
                 background: background.as_ref().map(|b| b.text.as_str()),
+                channel_prompt: channel_prompt.as_deref(),
                 background_style: background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                 context_warn_threshold: app_config.context_warn_threshold,
             },
         );
 
         let ev = tokio::select! {
+            Some(target) = channel_probe_rx.recv() => {
+                if let Some(sw) = channel_switch.as_mut() {
+                    sw.target = target;
+                    renderer.request_reprint();
+                }
+                continue;
+            }
             Some(notice) = update_rx.recv() => {
                 match notice {
                     UpdateNotice::Available { version, asset_name, download_url, checksums_url } => {
@@ -2649,6 +2755,42 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 }
             }
             UiEvent::Key(code, mods) => {
+                // The channel card owns the keyboard while it is up: it is a
+                // yes-or-no about replacing the binary, and typing past it
+                // would leave the answer ambiguous.
+                if let Some(sw) = channel_switch.take() {
+                    let yes = matches!(
+                        code,
+                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('\u{043d}')
+                            | KeyCode::Char('\u{041d}') | KeyCode::Enter
+                    );
+                    if yes {
+                        app_config.update_channel = sw.to;
+                        let _ = app_config.save();
+                        if channel_watch_tx.receiver_count() > 0 {
+                            let _ = channel_watch_tx.send(sw.to);
+                        }
+                        if let Some(ref mut view) = settings_view {
+                            view.config.update_channel = sw.to;
+                        }
+                        background = Some(BackgroundNotice::sticky(format!(
+                            "Release channel is now {} \u{b7} press Ctrl+U to move to it",
+                            sw.to.label()
+                        )));
+                    } else {
+                        // Everything else the user changed stayed applied; only
+                        // this one is put back.
+                        if let Some(ref mut view) = settings_view {
+                            view.config.update_channel = sw.from;
+                        }
+                        background = Some(BackgroundNotice::fading(
+                            format!("Still on the {} channel", sw.from.label()),
+                            5,
+                        ));
+                    }
+                    renderer.request_reprint();
+                    continue;
+                }
                 // If settings view is open, it captures all keyboard input
                 if let Some(ref mut settings) = settings_view {
                     // What the view was opened with (live session values).
@@ -2680,7 +2822,35 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             }
                             suggested_prompt = None;
 
-                            app_config = persisted_from_view(&settings.config, &app_config, shown_mode, &shown_effort);
+                            // Every other setting is applied now; the release
+                            // channel waits for an answer, so declining costs
+                            // the user nothing else they just changed.
+                            let wanted_channel = settings.config.update_channel;
+                            let mut applied = persisted_from_view(&settings.config, &app_config, shown_mode, &shown_effort);
+                            if wanted_channel != app_config.update_channel {
+                                applied.update_channel = app_config.update_channel;
+                                custom_placeholder = None;
+                                channel_switch = Some(ChannelSwitch {
+                                    from: app_config.update_channel,
+                                    to: wanted_channel,
+                                    target: ChannelTarget::Checking,
+                                });
+                                let tx_ch = channel_probe_tx.clone();
+                                tokio::spawn(async move {
+                                    let target = match flashagent_svc::updater::newest_on_channel(
+                                        wanted_channel,
+                                        flashagent_svc::updater::DEFAULT_RELEASES_API,
+                                    )
+                                    .await
+                                    {
+                                        Ok(Some(version)) => ChannelTarget::Version(version),
+                                        Ok(None) => ChannelTarget::Empty,
+                                        Err(_) => ChannelTarget::Unknown,
+                                    };
+                                    let _ = tx_ch.send(target);
+                                });
+                            }
+                            app_config = applied;
                             let _ = app_config.save();
                             tools_arc.set_toolset_profile(app_config.toolset_profile);
                             tools_arc.set_web_enabled(app_config.free_search);
@@ -4330,6 +4500,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         prefill_status: None,
                                         ttft_display: None,
                                         background: background.as_ref().map(|b| b.text.as_str()),
+                                        channel_prompt: None,
                 background_style: background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                                         context_warn_threshold: app_config.context_warn_threshold,
                                     },
@@ -5858,6 +6029,43 @@ mod tests {
         let mut talked = system_only.clone();
         talked.push(ChatMessage::user("привет"));
         assert!(worth_saving(&talked));
+    }
+
+    #[test]
+    fn switching_channel_says_what_it_will_do() {
+        use flashagent_core::config::UpdateChannel;
+
+        // Going back to stable is a downgrade, and the user is told so in
+        // those words before anything is replaced.
+        let down = channel_switch_warning(
+            UpdateChannel::Stable,
+            "b238",
+            &ChannelTarget::Version("v1.0.0".into()),
+        );
+        assert!(down.contains("from b238 down to v1.0.0"), "{down}");
+        assert!(down.contains("disappear"), "{down}");
+        assert!(down.ends_with("Continue?"), "{down}");
+
+        let up = channel_switch_warning(
+            UpdateChannel::Beta,
+            "v1.0.0",
+            &ChannelTarget::Version("b238".into()),
+        );
+        assert!(up.contains("from v1.0.0 to b238"), "{up}");
+        assert!(up.contains("regress"), "{up}");
+
+        // The feed has not answered yet, or could not be reached: name the
+        // channel rather than invent a version.
+        for unknown in [ChannelTarget::Checking, ChannelTarget::Unknown] {
+            let text = channel_switch_warning(UpdateChannel::Stable, "b238", &unknown);
+            assert!(text.contains("the newest stable release"), "{text}");
+        }
+
+        // Nothing published there yet — the honest answer is that you would
+        // stay where you are.
+        let empty = channel_switch_warning(UpdateChannel::Stable, "b238", &ChannelTarget::Empty);
+        assert!(empty.contains("Nothing is published"), "{empty}");
+        assert!(empty.contains("stay on b238"), "{empty}");
     }
 
     #[test]

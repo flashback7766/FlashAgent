@@ -278,6 +278,28 @@ pub fn is_downgrade(current: &str, target: &str, channel: UpdateChannel) -> bool
 }
 
 /// Checks GitHub releases API and returns update status.
+/// The newest version published on `channel`, or `None` when that channel has
+/// nothing on it yet.
+///
+/// [`check_for_updates`] cannot answer this: it reports `UpToDate` both when
+/// you already have the newest build and when the channel is empty. The
+/// difference matters when offering to move someone onto it.
+pub async fn newest_on_channel(
+    channel: UpdateChannel,
+    api_url: &str,
+) -> anyhow::Result<Option<String>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent(format!("FlashAgent-Updater/{}", current_version()))
+        .build()?;
+    let resp = client.get(api_url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("GitHub API returned HTTP {}", resp.status());
+    }
+    let releases: Vec<GitHubRelease> = resp.json().await?;
+    Ok(find_target_release(&releases, channel).map(extract_release_version))
+}
+
 pub async fn check_for_updates(channel: UpdateChannel, api_url: &str) -> anyhow::Result<UpdateStatus> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
