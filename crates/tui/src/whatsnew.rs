@@ -163,6 +163,8 @@ pub struct WhatsNew {
     shown_at: Instant,
     /// Set once the user has asked to see this page all at once.
     all_at_once: bool,
+    /// Whether entries are shown in full rather than just their opening claim.
+    expanded: bool,
     /// Version this screen is announcing.
     to: String,
 }
@@ -199,6 +201,7 @@ impl WhatsNew {
             page: 0,
             shown_at: Instant::now(),
             all_at_once: false,
+            expanded: false,
             to: to.to_string(),
         };
         view.relayout(width, height);
@@ -216,16 +219,28 @@ impl WhatsNew {
         if self.width == width && self.height == height {
             return;
         }
-        let seen_version = self.pages.get(self.page).map(|p| p.version.clone());
         self.width = width;
         self.height = height;
-        self.pages = layout(&self.releases, self.text_width(), self.body_rows());
+        self.rebuild();
+    }
+
+    /// Re-flow, keeping the reader on the release they were reading: a resize
+    /// or a change of detail must not throw away their place in the list.
+    fn rebuild(&mut self) {
+        let seen_version = self.pages.get(self.page).map(|p| p.version.clone());
+        self.pages = layout(&self.releases, self.text_width(), self.body_rows(), self.expanded);
         self.page = seen_version
             .and_then(|v| self.pages.iter().position(|p| p.version == v))
             .unwrap_or(0)
             .min(self.pages.len().saturating_sub(1));
         self.shown_at = Instant::now();
-        self.all_at_once = false;
+        // Detail the reader asked for is not something to watch arrive.
+        self.all_at_once = self.expanded;
+    }
+
+    /// Whether the full text is on screen.
+    pub fn is_expanded(&self) -> bool {
+        self.expanded
     }
 
     fn inner_width(&self) -> usize {
@@ -276,6 +291,13 @@ impl WhatsNew {
     pub fn handle_key(&mut self, code: KeyCode) -> Option<()> {
         match code {
             KeyCode::Esc | KeyCode::Char('q') => Some(()),
+            KeyCode::Tab | KeyCode::Char('m') => {
+                // Every entry at full length is a wall; the opening claim
+                // alone is sometimes not enough. Both, on one key.
+                self.expanded = !self.expanded;
+                self.rebuild();
+                None
+            }
             KeyCode::Left | KeyCode::Backspace | KeyCode::PageUp | KeyCode::Char('k') => {
                 if self.page > 0 {
                     let prev = self.page - 1;
@@ -376,14 +398,15 @@ impl WhatsNew {
         } else {
             String::new()
         };
+        let detail = if self.expanded { "tab — less" } else { "tab — more" };
         let hint = if !self.fully_revealed() {
-            "enter — show all · esc — skip"
+            format!("enter — show all · {detail} · esc — skip")
         } else if self.page + 1 < self.pages.len() {
-            "enter — next · ← — back · esc — skip"
+            format!("enter — next · ← — back · {detail} · esc — skip")
         } else if self.pages.len() > 1 {
-            "enter — start working · ← — back"
+            format!("enter — start working · ← — back · {detail}")
         } else {
-            "enter — start working"
+            format!("enter — start working · {detail}")
         };
         lines.push(pad(&format!("{counter}{DIM}{hint}{RESET}")));
         lines.push(format!("  {BORDER}└{}┘{RESET}", "─".repeat(inner_w)));
@@ -392,7 +415,36 @@ impl WhatsNew {
 }
 
 /// Break the releases into screens of at most `rows` body rows.
-fn layout(releases: &[Release], text_w: usize, rows: usize) -> Vec<Page> {
+/// The claim a changelog entry opens with, and the detail after it.
+///
+/// Entries are written to be read in full in the file; on a screen the first
+/// sentence is what someone actually wants — the rest is there for whoever
+/// asks for it.
+fn split_claim(item: &str) -> (String, String) {
+    let bytes = item.as_bytes();
+    let mut depth_code = false;
+    for (i, c) in item.char_indices() {
+        if c == '`' {
+            depth_code = !depth_code;
+        }
+        if depth_code || !matches!(c, '.' | '!' | '?') {
+            continue;
+        }
+        let next = bytes.get(i + 1).copied();
+        // A sentence ends on punctuation followed by a space, not on the dot
+        // inside `v1.0.0` or `main.rs`.
+        if matches!(next, Some(b' ') | None) {
+            let head = item[..=i].trim().to_string();
+            // A three-word opener is a fragment, not a claim.
+            if head.split_whitespace().count() >= 5 {
+                return (head, item[i + 1..].trim().to_string());
+            }
+        }
+    }
+    (item.to_string(), String::new())
+}
+
+fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> Vec<Page> {
     let mut pages = Vec::new();
     for rel in releases {
         // Each entry becomes one or more wrapped rows, indented under its
@@ -402,8 +454,14 @@ fn layout(releases: &[Release], text_w: usize, rows: usize) -> Vec<Page> {
             let rendered = if let Some(head) = item.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
                 vec![format!("  {BRIGHT}{head}{RESET}")]
             } else {
-                let styled = style_inline(item, TEXT);
-                crate::wrap_styled(&styled, text_w)
+                let (claim, detail) = split_claim(item);
+                let shown = if expanded || detail.is_empty() {
+                    style_inline(item, TEXT)
+                } else {
+                    // The claim in full, and a mark saying there is more.
+                    format!("{}{DIM} …{RESET}", style_inline(&claim, TEXT))
+                };
+                crate::wrap_styled(&shown, text_w)
                     .into_iter()
                     .enumerate()
                     .map(|(i, row)| {
@@ -588,6 +646,52 @@ mod tests {
 
     fn sample_releases() -> Vec<Release> {
         releases_between(SAMPLE, "b218", "b238")
+    }
+
+    #[test]
+    fn a_page_opens_with_the_claims_not_the_whole_text() {
+        // Five paragraphs at once is a wall nobody reads; the first sentence
+        // of each is what the screen is for.
+        let releases = releases_between(CHANGELOG, "b238", "b245");
+        let short = WhatsNew::new(releases.clone(), "b245", 100, 40);
+        let long = {
+            let mut v = WhatsNew::new(releases, "b245", 100, 40);
+            v.handle_key(KeyCode::Tab);
+            v
+        };
+        assert!(long.is_expanded());
+        let rows_short: usize = short.pages.iter().map(|p| p.rows.len()).sum();
+        let rows_long: usize = long.pages.iter().map(|p| p.rows.len()).sum();
+        assert!(rows_short * 2 < rows_long, "short {rows_short} vs full {rows_long}");
+        let dump = crate::strip_ansi(&short.render().join("\n"));
+        assert!(dump.contains('…'), "the mark saying there is more is missing:\n{dump}");
+        assert!(dump.contains("tab — more"), "{dump}");
+    }
+
+    #[test]
+    fn asking_for_detail_keeps_you_on_the_release_you_were_reading() {
+        let mut view = WhatsNew::new(releases_between(CHANGELOG, "b233", "b245"), "b245", 100, 24);
+        view.handle_key(KeyCode::Enter);
+        view.handle_key(KeyCode::Enter);
+        let version = view.pages[view.page].version.clone();
+        view.handle_key(KeyCode::Tab);
+        assert_eq!(view.pages[view.page].version, version);
+        assert!(view.fully_revealed(), "detail you asked for does not animate in");
+    }
+
+    #[test]
+    fn a_claim_is_a_whole_sentence_and_a_version_number_is_not_the_end_of_one() {
+        let (claim, rest) = split_claim("Betas now rank below v1.0.0 in the changelog. That fixes the jump.");
+        assert_eq!(claim, "Betas now rank below v1.0.0 in the changelog.");
+        assert_eq!(rest, "That fixes the jump.");
+
+        let (whole, nothing) = split_claim("Directories still end in `/`.");
+        assert_eq!(whole, "Directories still end in `/`.");
+        assert_eq!(nothing, "", "a one-sentence entry has no hidden half");
+
+        let (short, tail) = split_claim("Fixed. The recap request was capped at 512 tokens and ran out.");
+        assert!(short.starts_with("Fixed."), "{short}");
+        assert!(tail.is_empty(), "a two-word opener is a fragment, not a claim");
     }
 
     #[test]
