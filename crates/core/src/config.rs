@@ -285,6 +285,10 @@ pub struct AppConfig {
     /// Number of network retry attempts for LLM requests (default 3).
     #[serde(default = "default_retries")]
     pub network_retries: usize,
+    /// Last version whose changes were shown to the user, so an update can
+    /// tell them what arrived exactly once.
+    #[serde(default)]
+    pub last_seen_version: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -424,6 +428,7 @@ impl Default for AppConfig {
             git_diff_preview: true,
             git_smart_commit: true,
             network_retries: 3,
+            last_seen_version: None,
         }
     }
 }

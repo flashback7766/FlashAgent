@@ -5,6 +5,13 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- After an update, FlashAgent shows what arrived. One release per screen,
+  entries appearing one at a time, `enter` to move on and `esc` to skip the
+  rest — read straight out of this file, so the screen cannot claim a feature
+  that did not ship. It appears exactly once per version, never on a first
+  run, and `/whatsnew` reopens it whenever you want. A fresh install is
+  stamped silently, so nobody is greeted by a year of history.
+
 - Narrow terminals no longer cut text in half. Lines built from several facts
   now drop whole facts when the width runs out — `gemma-4-e2b · auto · 64k`
   becomes `gemma-4-e2b · auto`, not `gemma-4-e2b · auto [off` — the composer
