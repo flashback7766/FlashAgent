@@ -157,6 +157,8 @@ struct FrameState<'a> {
     ttft_display: Option<&'a str>,
     background: Option<&'a str>,
     background_style: NoticeStyle,
+    /// What the running turn is doing, for the composer line.
+    turn_phase: Option<&'a TurnPhase>,
     /// A release-channel switch waiting for a yes or no.
     channel_prompt: Option<&'a str>,
     context_warn_threshold: usize,
@@ -889,7 +891,8 @@ impl Renderer {
                         1 => ".. ",
                         _ => "...",
                     };
-                    format!(" {prompt_styled} \x1b[38;2;135;130;125mWorking on task{dots}\x1b[0m")
+                    let what = st.turn_phase.map_or_else(|| "Working on task".to_string(), TurnPhase::label);
+                    format!(" {prompt_styled} \x1b[38;2;135;130;125m{what}{dots}\x1b[0m")
                 } else if let Some(sug) = st.suggested_prompt {
                     format!(" {prompt_styled}  \x1b[38;2;155;160;175m{sug}\x1b[0m \x1b[38;2;100;105;120m(→ to use)\x1b[0m")
                 } else if let Some(custom) = st.custom_placeholder {
@@ -1629,6 +1632,42 @@ fn channel_switch_warning(
     }
 }
 
+/// What the turn is doing right now, as far as the loop has told us.
+///
+/// Every state here is something the loop actually reported — the model has
+/// not answered yet, it is reasoning, it is writing, a named tool is running.
+/// Nothing is inferred from how long it has taken: "almost done" is not a
+/// thing the program knows, and guessing it is how a progress bar starts
+/// lying.
+#[derive(Debug, Clone, PartialEq)]
+enum TurnPhase {
+    /// Request sent, nothing back yet.
+    Waiting,
+    /// Reasoning tokens are arriving.
+    Thinking,
+    /// Visible answer tokens are arriving.
+    Writing,
+    /// A tool is running; the string is what it is doing.
+    Tool(String),
+    /// A tool finished and the model has the result but has not spoken yet.
+    AfterTool,
+    /// The user asked to stop and the turn is winding down.
+    Stopping,
+}
+
+impl TurnPhase {
+    fn label(&self) -> String {
+        match self {
+            Self::Waiting => "Waiting for the model".to_string(),
+            Self::Thinking => "Thinking".to_string(),
+            Self::Writing => "Writing the answer".to_string(),
+            Self::Tool(what) => flashagent_tui::truncate_middle(what, 60),
+            Self::AfterTool => "Reading the result".to_string(),
+            Self::Stopping => "Stopping".to_string(),
+        }
+    }
+}
+
 /// A message that appeared without the user doing anything. It lives on the
 /// line under the input, and most of them fade: a notice that is no longer
 /// actionable should not take that line for the rest of the session.
@@ -2039,6 +2078,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     // must not take that spot.
     let mut background: Option<BackgroundNotice> = None;
     let mut channel_switch: Option<ChannelSwitch> = None;
+    let mut turn_phase = TurnPhase::Waiting;
     let (channel_probe_tx, mut channel_probe_rx) =
         tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
     let mut pending_update: Option<(String, String, String, Option<String>)> = None;
@@ -2305,6 +2345,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 ttft_display: if app_config.show_ttft { ttft_display.as_deref() } else { None },
                 background: background.as_ref().map(|b| b.text.as_str()),
                 channel_prompt: channel_prompt.as_deref(),
+                turn_phase: running.then_some(&turn_phase),
                 background_style: background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                 context_warn_threshold: app_config.context_warn_threshold,
             },
@@ -2561,13 +2602,29 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 match &e {
                     LoopEvent::TurnDelta(text) => {
                         token_tracker.on_delta(text);
+                        turn_phase = TurnPhase::Writing;
                     }
                     LoopEvent::ReasoningDelta(text) => {
                         token_tracker.on_delta(text);
+                        turn_phase = TurnPhase::Thinking;
                     }
                     LoopEvent::ToolStarted { name, args_json, .. } => {
                         token_tracker.on_delta(name);
                         token_tracker.on_delta(args_json);
+                        // The model's own header when it wrote one, since it
+                        // says what the call is for; the tool name otherwise.
+                        let what = flashagent_llm::effective_args(args_json, name)
+                            .and_then(|v| {
+                                v.get("header").and_then(|h| h.as_str()).map(str::trim).filter(|h| !h.is_empty()).map(str::to_string)
+                            })
+                            .unwrap_or_else(|| format!("Running {name}"));
+                        turn_phase = TurnPhase::Tool(what);
+                    }
+                    LoopEvent::ToolFinished { .. } => {
+                        turn_phase = TurnPhase::AfterTool;
+                    }
+                    LoopEvent::StepStarted { step, .. } if *step > 1 => {
+                        turn_phase = TurnPhase::AfterTool;
                     }
                     LoopEvent::Usage(u) => {
                         token_tracker.on_usage(u);
@@ -3198,6 +3255,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             if running && cancel_requested.is_none() {
                                 cancel.store(true, Ordering::Relaxed);
                                 cancel_requested = Some(std::time::Instant::now());
+                                turn_phase = TurnPhase::Stopping;
                                 active_steer_tx = None;
                                 custom_placeholder = Some("Interrupting...".to_string());
                             }
@@ -3331,6 +3389,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             if running && cancel_requested.is_none() {
                                 cancel.store(true, Ordering::Relaxed);
                                 cancel_requested = Some(std::time::Instant::now());
+                                turn_phase = TurnPhase::Stopping;
                                 active_steer_tx = None;
                                 custom_placeholder = Some("Interrupting...".to_string());
                             }
@@ -3434,6 +3493,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             if cancel_requested.is_none() {
                                 cancel.store(true, Ordering::Relaxed);
                                 cancel_requested = Some(std::time::Instant::now());
+                                turn_phase = TurnPhase::Stopping;
                                 active_steer_tx = None;
                                 suggested_prompt = None;
                                 custom_placeholder = Some("Interrupting...".to_string());
@@ -3485,6 +3545,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             if cancel_requested.is_none() {
                                 cancel.store(true, Ordering::Relaxed);
                                 cancel_requested = Some(std::time::Instant::now());
+                                turn_phase = TurnPhase::Stopping;
                                 active_steer_tx = None;
                                 suggested_prompt = None;
                                 custom_placeholder = Some("Interrupting...".to_string());
@@ -3560,6 +3621,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 custom_placeholder = None;
                                 last_expanded = false;
                                 running = true;
+                                turn_phase = TurnPhase::Waiting;
                                 turn_started = Some(std::time::Instant::now());
                                 token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                                 source.set_model(&current_model);
@@ -4014,6 +4076,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 suggested_prompt = None;
                                 custom_placeholder = None;
                                 running = true;
+                                turn_phase = TurnPhase::Waiting;
                                 turn_started = Some(std::time::Instant::now());
                                 token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                                 source.set_model(&current_model);
@@ -4095,6 +4158,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     custom_placeholder = None;
                                     last_expanded = false;
                                     running = true;
+                                turn_phase = TurnPhase::Waiting;
                                     turn_started = Some(std::time::Instant::now());
                                     token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                                     source.set_model(&current_model);
@@ -4501,6 +4565,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         ttft_display: None,
                                         background: background.as_ref().map(|b| b.text.as_str()),
                                         channel_prompt: None,
+                                        turn_phase: None,
                 background_style: background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                                         context_warn_threshold: app_config.context_warn_threshold,
                                     },
@@ -4701,6 +4766,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 suggested_prompt = None;
                                 custom_placeholder = None;
                                 running = true;
+                                turn_phase = TurnPhase::Waiting;
                                 turn_started = Some(std::time::Instant::now());
                                 token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                                 source.set_model(&current_model);
@@ -4744,6 +4810,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             suggested_prompt = None;
                             custom_placeholder = None;
                             running = true;
+                            turn_phase = TurnPhase::Waiting;
                             turn_started = Some(std::time::Instant::now());
                             token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                             source.set_model(&current_model);
@@ -6029,6 +6096,26 @@ mod tests {
         let mut talked = system_only.clone();
         talked.push(ChatMessage::user("привет"));
         assert!(worth_saving(&talked));
+    }
+
+    #[test]
+    fn the_composer_says_what_the_turn_is_actually_doing() {
+        // Every one of these comes from something the loop reported. There is
+        // deliberately no "almost done": the program does not know that.
+        assert_eq!(TurnPhase::Waiting.label(), "Waiting for the model");
+        assert_eq!(TurnPhase::Thinking.label(), "Thinking");
+        assert_eq!(TurnPhase::Writing.label(), "Writing the answer");
+        assert_eq!(TurnPhase::AfterTool.label(), "Reading the result");
+        assert_eq!(TurnPhase::Stopping.label(), "Stopping");
+
+        // A tool shows what the model said it was for.
+        assert_eq!(
+            TurnPhase::Tool("Add the null check to parser.rs".into()).label(),
+            "Add the null check to parser.rs"
+        );
+        // And a header long enough to break the line is shortened, not wrapped.
+        let long = TurnPhase::Tool("x".repeat(200)).label();
+        assert!(long.chars().count() <= 60, "{}", long.chars().count());
     }
 
     #[test]

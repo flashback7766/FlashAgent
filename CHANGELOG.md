@@ -5,6 +5,12 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- The composer says what the turn is actually doing instead of "Working on
+  task": waiting for the model, thinking, running the tool the model named,
+  reading the result, writing the answer, stopping. Every one of those comes
+  from something the loop reported — there is deliberately no "almost done",
+  because the program does not know that.
+
 - Tool calls now carry a one-line explanation the model writes itself, and
   that line is what you read: `Add the missing null check to parser.rs`
   instead of `Editing parser.rs`. It is required for anything with
