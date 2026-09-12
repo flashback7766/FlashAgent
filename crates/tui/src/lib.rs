@@ -3929,7 +3929,7 @@ mod tests {
         v.push_line(LineKind::Assistant, "Turn 2 assistant answer");
         v.update_or_push_turn_system("recap:", "recap: Turn 2 recap");
 
-        // Must have 6 lines: Turn 1 recap is PRESERVED, Turn 2 recap is added at the end!
+        // 6 lines: turn 1's recap is kept and turn 2's is appended.
         assert_eq!(v.lines.len(), 6);
         assert_eq!(v.lines[2].text, "recap: Turn 1 recap");
         assert_eq!(v.lines[5].text, "recap: Turn 2 recap");
@@ -4235,7 +4235,7 @@ mod tests {
         let rendered = render_markdown_text(md_input, 100);
         assert!(!rendered.is_empty());
 
-        // Every table border and content line must have the exact same visible width!
+        // Every border and content row has the same visible width.
         let widths: Vec<usize> = rendered.iter().map(|l| visible_width(l)).collect();
         let expected_w = widths[0];
         for (idx, &w) in widths.iter().enumerate() {
@@ -4323,7 +4323,7 @@ mod tests {
         assert_eq!(s4, "Deepening Code Search");
         prior.push(s4);
 
-        // All 4 headers in this turn are completely unique!
+        // All four headers in this turn are distinct.
         let unique_count = prior.iter().collect::<std::collections::HashSet<_>>().len();
         assert_eq!(unique_count, 4);
     }
@@ -4368,7 +4368,7 @@ mod tests {
         chat.push_system("  recap: Answered turn 2");
 
         assert!(chat.truncate_to_last_user());
-        // After truncation, last line must be the last user prompt!
+        // After truncation the last line is the last user prompt.
         assert_eq!(chat.lines.last().map(|l| (l.kind, l.text.as_str())), Some((LineKind::User, "Turn 2 Question")));
         assert_eq!(chat.lines.len(), 5); // Welcome, Turn 1 Q, Turn 1 A, Recap 1, Turn 2 Q
 

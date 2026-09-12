@@ -717,7 +717,7 @@ impl App {
             return Flow::Continue;
         }
         // Shift+Up, Ctrl+Up, Alt+Up -> scroll chat up.
-        // If already scrolled up (scroll_offset > 0), plain Up also scrolls chat up!
+        // Once scrolled back, a plain Up keeps scrolling the transcript.
         if (matches!(code, KeyCode::Up) && (mods.contains(KeyModifiers::SHIFT) || mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT)))
             || (self.renderer.scroll_offset > 0 && matches!(code, KeyCode::Up))
         {
@@ -728,7 +728,7 @@ impl App {
             return Flow::Continue;
         }
         // Shift+Down, Ctrl+Down, Alt+Down -> scroll chat down.
-        // If already scrolled up (scroll_offset > 0), plain Down also scrolls chat down!
+        // Once scrolled back, a plain Down scrolls toward the end.
         if (matches!(code, KeyCode::Down) && (mods.contains(KeyModifiers::SHIFT) || mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT)))
             || (self.renderer.scroll_offset > 0 && matches!(code, KeyCode::Down))
         {

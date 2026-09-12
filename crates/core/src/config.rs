@@ -424,7 +424,7 @@ impl Default for AppConfig {
             repeat_penalty: Some(1.00),
             presence_penalty: Some(0.00),
             min_p: Some(0.00),
-            max_steps: None, // Unlimited steps per turn!
+            max_steps: None, // no step limit per turn
             token_budget: 2000,
             free_search: false, // nothing leaves the machine unless the user turns it on
             setup_completed: false,

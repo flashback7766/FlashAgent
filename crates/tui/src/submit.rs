@@ -923,7 +923,7 @@ impl App {
                     }
                     self.history_index = None;
                     self.current_draft.clear();
-                    // Sending new prompt closes temporary last thinking block (Rule 4)
+                    // Sending a new prompt collapses the previous turn's expanded thinking.
                     self.last_expanded = false;
 
                     // What the user types decides what the labels are
