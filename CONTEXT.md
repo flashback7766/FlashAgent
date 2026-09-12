@@ -24,7 +24,7 @@ LLM: OpenAI-compatible endpoints (any local or remote endpoints: LM Studio,
 Ollama, vLLM, OpenRouter, Gemini, and any compatible models). Embedded llama.cpp is a separate phase later.
 License: MIT. Releases: GitHub Releases, Stable + Beta channels. Telemetry: strictly opt-in anonymous counters.
 
-## Current Project Status (b236; the b233 end-to-end audit is in `.audit/2026-09-11-e2e-audit-b233.md`)
+## Current Project Status (b237; the b233 end-to-end audit is in `.audit/2026-09-11-e2e-audit-b233.md`)
 - B0 UI Renderer Gate: PASS (prototype `crates/ui/src/bin/b0.rs`; builds and runs its event loop; no golden frames exist yet).
 - Track A: A0–A9 closed. A10 `/goal` is PARTIAL: Accept All + max effort + ask_user/memory writes disabled +
   mode restore + step/time/token budgets with a live burn-down + a factual end-of-run report (b235).

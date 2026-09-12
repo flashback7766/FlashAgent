@@ -281,7 +281,7 @@ pub fn file_icon(path: &str) -> &'static str {
     } else if p.ends_with(".py") {
         "🐍"
     } else if p.ends_with(".js") || p.ends_with(".ts") || p.ends_with(".tsx") || p.ends_with(".jsx") {
-        "⚡"
+        "📜"
     } else if p.ends_with(".json") || p.ends_with(".toml") || p.ends_with(".yaml") || p.ends_with(".yml") {
         "⚙"
     } else {
@@ -2151,7 +2151,7 @@ pub fn welcome_card_responsive_opts(
     } else {
         [
             "".to_string(),
-            format!("{M3_PRI_B}⚡ FlashAgent Engine ⚡{RESET}"),
+            format!("{M3_PRI_B}FlashAgent Engine{RESET}"),
             format!("{M3_MUT}Local-first AI Pair Programmer{RESET}"),
             format!("{M3_MUT}Ultra-low latency inference{RESET}"),
             "".to_string(),

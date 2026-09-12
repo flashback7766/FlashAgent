@@ -3,6 +3,12 @@
 Beta builds are numbered `bNNN` and ship on the rolling `beta` pre-release.
 Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
+## b237 — no lightning left
+
+- The last two lightning bolts are gone: the welcome card says `FlashAgent
+  Engine` plainly, and a shell script is marked `$` rather than an emoji —
+  which is also one column wide instead of two.
+
 ## b236 — updates you can watch
 
 - The status line drops the lightning emoji from its numbers: `TTFT 6.84s

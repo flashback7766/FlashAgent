@@ -40,7 +40,7 @@ pub fn tool_file_icon(path: &str) -> &'static str {
         "rs" => "🦀",
         "toml" | "yaml" | "yml" | "json" => "⚙",
         "md" | "txt" => "📄",
-        "sh" | "bash" => "⚡",
+        "sh" | "bash" => "$",
         _ => "📄",
     }
 }

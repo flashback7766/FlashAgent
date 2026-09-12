@@ -1,6 +1,6 @@
 # Maintainer: flashback7766 <https://github.com/flashback7766>
 pkgname=flashagent-bin
-pkgver=b236
+pkgver=b237
 pkgrel=1
 pkgdesc="Fast, local-first autonomous AI coding agent in pure Rust"
 arch=('x86_64')
