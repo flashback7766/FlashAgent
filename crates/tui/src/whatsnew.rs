@@ -10,6 +10,16 @@ use crossterm::event::{Event, KeyCode, KeyEventKind};
 /// Marks an entry that is a paragraph of prose rather than a listed change.
 const PROSE: &str = "\u{b6}";
 
+/// Marks the place where the changelog asks for a new screen.
+const PAGE: &str = "\u{c}";
+
+/// How the changelog asks for one. An HTML comment, so GitHub shows nothing.
+const PAGE_MARK: &str = "<!-- page -->";
+
+/// Presses it takes to get past a release's note. A note someone took the
+/// time to write is not skipped by a key held down from the last screen.
+const NOTE_PRESSES: usize = 3;
+
 /// The changelog as it stood when this binary was built.
 pub const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 
@@ -110,6 +120,14 @@ pub fn releases_between(changelog: &str, from: &str, to: &str) -> Vec<Release> {
         if current.is_none() {
             continue;
         }
+        if line.trim() == PAGE_MARK {
+            finish_item(&mut item, &mut current);
+            finish_paragraph(&mut paragraph, &mut current);
+            if let Some(rel) = current.as_mut() {
+                rel.items.push(PAGE.to_string());
+            }
+            continue;
+        }
         if let Some(sub) = line.strip_prefix("### ") {
             // Sub-headings become their own entry, so a long release still
             // reads as a list rather than one wall.
@@ -174,6 +192,8 @@ pub struct Page {
     pub part: (usize, usize),
     /// Index, within the release, of the first entry on this screen.
     pub first_item: usize,
+    /// Whether this screen is all note and no list.
+    pub note: bool,
 }
 
 /// The paged "what arrived while you were away" screen.
@@ -191,6 +211,8 @@ pub struct WhatsNew {
     expanded: bool,
     /// Version this screen is announcing.
     to: String,
+    /// Continue presses made on the current screen.
+    presses: usize,
 }
 
 const DIM: &str = "\x1b[38;2;135;130;125m";
@@ -268,6 +290,7 @@ impl WhatsNew {
             all_at_once: false,
             expanded: false,
             to: to.to_string(),
+            presses: 0,
         };
         view.relayout(width, height);
         view
@@ -358,12 +381,56 @@ impl WhatsNew {
         self.page = page;
         self.shown_at = Instant::now();
         self.all_at_once = false;
+        self.presses = 0;
+    }
+
+    /// Whether moving on from this screen leaves a note behind. A note that
+    /// runs over two screens is only held on the last of them.
+    fn leaving_note(&self) -> bool {
+        let Some(page) = self.pages.get(self.page) else {
+            return false;
+        };
+        page.note
+            && !self
+                .pages
+                .get(self.page + 1)
+                .is_some_and(|next| next.note && next.version == page.version)
+    }
+
+    /// Presses still needed before the reader is let past this screen,
+    /// counting the one that moves on.
+    fn presses_needed(&self) -> usize {
+        if self.leaving_note() {
+            NOTE_PRESSES.saturating_sub(self.presses).max(1)
+        } else {
+            1
+        }
+    }
+
+    /// Count a press that would move past the screen; true while the screen
+    /// still holds the reader.
+    fn hold(&mut self) -> bool {
+        if !self.leaving_note() {
+            return false;
+        }
+        self.presses += 1;
+        if self.presses < NOTE_PRESSES {
+            self.all_at_once = true;
+            return true;
+        }
+        false
     }
 
     /// Handle a key. `Some(())` means the screen is finished with.
     pub fn handle_key(&mut self, code: KeyCode) -> Option<()> {
         match code {
-            KeyCode::Esc | KeyCode::Char('q') => Some(()),
+            KeyCode::Esc | KeyCode::Char('q') => {
+                // Skipping counts as a press, not as a way around the note.
+                if self.hold() {
+                    return None;
+                }
+                Some(())
+            }
             KeyCode::Tab | KeyCode::Char('m') => {
                 // Every entry at full length is a wall; the opening claim
                 // alone is sometimes not enough. Both, on one key.
@@ -386,6 +453,9 @@ impl WhatsNew {
             | KeyCode::Char(' ')
             | KeyCode::PageDown
             | KeyCode::Char('j') => {
+                if self.hold() {
+                    return None;
+                }
                 if !self.fully_revealed() {
                     // Impatience is an instruction: show the rest now.
                     self.all_at_once = true;
@@ -472,7 +542,11 @@ impl WhatsNew {
             String::new()
         };
         let detail = if self.expanded { "tab — less" } else { "tab — more" };
-        let hint = if !self.fully_revealed() {
+        let back = if self.page > 0 { " · ← — back" } else { "" };
+        let needed = self.presses_needed();
+        let hint = if needed > 1 {
+            format!("press enter {needed} times to go on{back}")
+        } else if !self.fully_revealed() {
             format!("enter — show all · {detail} · esc — skip")
         } else if self.page + 1 < self.pages.len() {
             format!("enter — next · ← — back · {detail} · esc — skip")
@@ -517,13 +591,25 @@ fn split_claim(item: &str) -> (String, String) {
     (item.to_string(), String::new())
 }
 
+/// An entry's rendered rows, with whether it asks for a new screen and whether
+/// it is prose.
+type Entry = (Vec<String>, (bool, bool));
+
 fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> Vec<Page> {
     let mut pages = Vec::new();
     for rel in releases {
         // Each entry becomes one or more wrapped rows, indented under its
         // marker so a wrapped line still reads as part of the same point.
         let mut entries: Vec<Vec<String>> = Vec::new();
+        // Per entry: whether it asks for a new screen, and whether it is prose.
+        let mut kinds: Vec<(bool, bool)> = Vec::new();
         for item in &rel.items {
+            if item == PAGE {
+                entries.push(Vec::new());
+                kinds.push((true, false));
+                continue;
+            }
+            kinds.push((false, item.starts_with(PROSE)));
             let rendered = if let Some(head) = item.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
                 // A heading after a list needs air above it; after a
                 // paragraph, which already ends in a blank row, it does not.
@@ -566,17 +652,18 @@ fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> V
             entries.push(rendered);
         }
 
-        let mut chunks: Vec<Vec<Vec<String>>> = Vec::new();
-        let mut chunk: Vec<Vec<String>> = Vec::new();
+        let mut chunks: Vec<Vec<Entry>> = Vec::new();
+        let mut chunk: Vec<Entry> = Vec::new();
         let mut used = 0;
-        for entry in entries {
+        for (entry, kind) in entries.into_iter().zip(kinds) {
             let len = entry.len();
-            if !chunk.is_empty() && used + len > rows {
+            let (page_mark, _) = kind;
+            if !chunk.is_empty() && (page_mark || used + len > rows) {
                 chunks.push(std::mem::take(&mut chunk));
                 used = 0;
             }
             used += len;
-            chunk.push(entry);
+            chunk.push((entry, kind));
         }
         if !chunk.is_empty() {
             chunks.push(chunk);
@@ -586,8 +673,10 @@ fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> V
         let mut first_item = 0;
         for (i, chunk) in chunks.into_iter().enumerate() {
             let count = chunk.len();
+            let note = chunk.iter().any(|(_, (_, prose))| *prose)
+                && chunk.iter().all(|(_, (page_mark, prose))| *page_mark || *prose);
             let mut page_rows = Vec::new();
-            for (entry_idx, entry) in chunk.into_iter().enumerate() {
+            for (entry_idx, (entry, _)) in chunk.into_iter().enumerate() {
                 for row in entry {
                     // A screen does not open on the blank row meant to
                     // separate a heading from what came before it.
@@ -597,12 +686,18 @@ fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> V
                     page_rows.push((entry_idx, row));
                 }
             }
+            // Nor does it end on one: the blank after a closing paragraph is
+            // a row the next screen's content could have used.
+            while page_rows.last().is_some_and(|(_, row)| row.is_empty()) {
+                page_rows.pop();
+            }
             pages.push(Page {
                 version: rel.version.clone(),
                 title: rel.title.clone(),
                 rows: page_rows,
                 part: (i + 1, total),
                 first_item,
+                note,
             });
             first_item += count;
         }
@@ -856,6 +951,110 @@ mod tests {
         if at > 0 && !view.pages.iter().any(|p| p.rows.first().is_some_and(|(_, r)| crate::strip_ansi(r).trim() == "Later")) {
             assert!(all[at - 1].is_empty(), "no blank row before the heading: {:?}", &all[at.saturating_sub(2)..=at]);
         }
+    }
+
+    const PAGED: &str = "# Changelog\n\n\
+        ## b260 — paged\n\n\
+        A short note.\n\n\
+        — flashback\n\n\
+        <!-- page -->\n\n\
+        ### One\n\n\
+        - The first change.\n\n\
+        <!-- page -->\n\n\
+        ### Two\n\n\
+        - The second change.\n";
+
+    fn plain_rows(view: &WhatsNew) -> String {
+        view.pages.iter().flat_map(|p| p.rows.iter().map(|(_, r)| crate::strip_ansi(r))).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn a_page_mark_starts_a_new_screen_and_is_never_shown() {
+        let view = WhatsNew::new(releases_between(PAGED, "b250", "b260"), "b260", 100, 40);
+        assert_eq!(view.pages(), 3, "{:#?}", view.pages);
+        let text = plain_rows(&view);
+        assert!(!text.contains("<!--") && !text.contains('\u{c}'), "{text}");
+        assert!(view.pages[0].note, "the first screen is the note");
+        assert!(!view.pages[1].note && !view.pages[2].note);
+        assert!(crate::strip_ansi(&view.render()[2]).contains("1 of 3"));
+    }
+
+    #[test]
+    fn the_note_takes_three_presses_to_leave() {
+        let mut view = WhatsNew::new(releases_between(PAGED, "b250", "b260"), "b260", 100, 40);
+        assert!(crate::strip_ansi(&view.render().join("\n")).contains("press enter 3 times"));
+        assert_eq!(view.handle_key(KeyCode::Enter), None);
+        assert_eq!(view.handle_key(KeyCode::Char(' ')), None);
+        assert_eq!(view.page, 0, "two presses are not enough");
+        assert!(view.fully_revealed(), "the note is on screen in full while it waits");
+        view.handle_key(KeyCode::Right);
+        assert_eq!(view.page, 1, "any continue key counts, and the third one moves on");
+        // The list after it pages as it always did.
+        view.handle_key(KeyCode::Enter);
+        view.handle_key(KeyCode::Enter);
+        assert_eq!(view.page, 2);
+    }
+
+    #[test]
+    fn esc_on_the_note_counts_as_a_press_rather_than_a_way_around_it() {
+        let mut view = WhatsNew::new(releases_between(PAGED, "b250", "b260"), "b260", 100, 40);
+        assert_eq!(view.handle_key(KeyCode::Esc), None);
+        assert_eq!(view.handle_key(KeyCode::Esc), None);
+        assert_eq!(view.handle_key(KeyCode::Esc), Some(()));
+    }
+
+    #[test]
+    fn coming_back_to_the_note_asks_again_and_leaving_the_list_does_not() {
+        let mut view = WhatsNew::new(releases_between(PAGED, "b250", "b260"), "b260", 100, 40);
+        for _ in 0..3 {
+            view.handle_key(KeyCode::Enter);
+        }
+        assert_eq!(view.page, 1);
+        assert_eq!(view.handle_key(KeyCode::Esc), Some(()), "only the note holds");
+        view.handle_key(KeyCode::Left);
+        assert_eq!(view.page, 0);
+        view.handle_key(KeyCode::Enter);
+        assert_eq!(view.page, 0, "the count starts over");
+    }
+
+    #[test]
+    fn a_note_taller_than_the_window_is_held_only_on_its_last_screen() {
+        let para = "word ".repeat(120);
+        let log = format!("# Changelog\n\n## b260 — long\n\n{para}\n\n{para}\n\n{para}\n\n<!-- page -->\n\n- one change\n");
+        let mut view = WhatsNew::new(releases_between(&log, "b250", "b260"), "b260", 80, 20);
+        let notes = view.pages.iter().take_while(|p| p.note).count();
+        assert!(notes >= 2, "the note spans screens: {}", view.pages());
+        // Every screen shown whole first, so each press below is a page turn.
+        while view.page + 1 < notes {
+            let before = view.page;
+            view.all_at_once = true;
+            view.handle_key(KeyCode::Enter);
+            assert_eq!(view.page, before + 1, "the early part of a note pages with one press");
+        }
+        let last = view.page;
+        view.all_at_once = true;
+        view.handle_key(KeyCode::Enter);
+        view.handle_key(KeyCode::Enter);
+        assert_eq!(view.page, last, "its last screen holds");
+        view.handle_key(KeyCode::Enter);
+        assert_eq!(view.page, last + 1);
+    }
+
+    #[test]
+    fn a_screen_does_not_end_on_a_blank_row() {
+        let view = WhatsNew::new(releases_between(PAGED, "b250", "b260"), "b260", 100, 40);
+        for page in &view.pages {
+            assert!(!page.rows.last().is_some_and(|(_, r)| r.is_empty()), "{:?}", page.part);
+        }
+    }
+
+    #[test]
+    fn the_b260_notes_are_a_letter_and_four_screens() {
+        let view = WhatsNew::new(releases_between(CHANGELOG, "b250", "b260"), "b260", 120, 40);
+        let sizes: Vec<usize> = view.pages.iter().map(|p| p.rows.len()).collect();
+        assert_eq!(view.pages(), 5, "rows per screen: {sizes:?}\n{}", plain_rows(&view));
+        assert!(view.pages[0].note);
+        assert!(view.pages[1..].iter().all(|p| !p.note));
     }
 
     #[test]
