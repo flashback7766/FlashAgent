@@ -3,6 +3,14 @@
 Beta builds are numbered `bNNN` and ship on the rolling `beta` pre-release.
 Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
+## Unreleased
+
+- The README recordings are redone against the current build, and two were
+  added where a still picture explains nothing: `/goal` being stopped by its
+  step budget and handing back a report, and Ctrl+U downloading and installing
+  an update. Each one is a real session against a local model, so the timings
+  and token counts on screen are the ones it produced.
+
 ## b238 — no emoji in the tool cards
 
 - Tool cards drop their emoji icons. `Edited notes.md +1 -0`, `Read
