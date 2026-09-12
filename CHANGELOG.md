@@ -5,6 +5,14 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- While the model works, the mascot's face sits in the status line —
+  `(•_•) [Manual] · Generating response...` — blinking and winking on the
+  turn's own clock. The welcome card is gone by then, so this is the only
+  place it can keep you company.
+- Fixed: `--resume` drew only the top border of the welcome card. The card is
+  animated in row by row on start-up, and a resumed session prints its
+  messages over it immediately, which stopped the animation halfway. A resumed
+  session now gets the whole card at once.
 - The follow-up suggestion above the input box no longer offers prompts the
   assistant meant for you ("Расскажи о своём проекте и опиши, в чём нужна
   помощь"). Pressing → sends the suggestion to the model, so a question aimed

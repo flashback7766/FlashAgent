@@ -139,6 +139,9 @@ struct FrameState<'a> {
     running: bool,
     /// Seconds since turn start (for the working status line).
     elapsed_secs: u64,
+    /// 80 ms steps of wall clock since the turn began — the mascot's face
+    /// animates on this rather than on repaints, which are event-driven.
+    face_phase: usize,
     /// Number of tokens generated strictly by the model in this turn.
     model_tokens: usize,
     /// Speed of token generation over a rolling 3-second window (tg_3s).
@@ -535,8 +538,15 @@ fn format_status_left(
     token_tracker: Option<&TokenTracker>,
     budget: usize,
     expand_status: &str,
+    face_phase: usize,
 ) -> String {
     if running {
+        // The welcome card is long gone by now, so this is where the mascot
+        // keeps the user company while the model works.
+        let face = format!(
+            "\x1b[38;2;138;180;248m{}\x1b[0m ",
+            flashagent_tui::thinking_face(face_phase)
+        );
         let mode_str = if is_goal_active {
             "\x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m".to_string()
         } else {
@@ -548,7 +558,7 @@ fn format_status_left(
             Some(p) => format!("\x1b[38;2;168;199;250m{p}\x1b[0m"),
             None => "\x1b[38;2;168;199;250mGenerating response...\x1b[0m".to_string(),
         };
-        format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m {activity}{expand_status}")
+        format!("  {face}{mode_str} \x1b[38;2;100;95;90m·\x1b[0m {activity}{expand_status}")
     } else if let Some(stats) = token_tracker.and_then(|tt| tt.format_stats_width(budget)) {
         if is_goal_active {
             format!("  \x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m \x1b[38;2;100;95;90m·\x1b[0m {stats}{expand_status}")
@@ -983,6 +993,7 @@ impl Renderer {
             st.token_tracker,
             budget,
             expand_status,
+            st.face_phase,
         );
 
         let left_vis = visible_width(&left_telemetry);
@@ -1892,10 +1903,11 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         app_config.show_mascot,
         MascotMood::Checking,
     );
-    // Only the first row goes up now: the tick loop reveals the rest over the
-    // next half second, so the card appears to draw itself.
-    let first_row: Vec<_> = initial_card.into_iter().take(1).collect();
-    chat.update_welcome_card(first_row);
+    // The reveal is driven by the tick loop, which stops touching the card as
+    // soon as the transcript has a user message in it. A resumed session puts
+    // messages up immediately, so its card would stay stuck at whatever row
+    // the reveal had reached — draw it whole instead.
+    chat.update_welcome_card(opening_card(initial_card, resume_session_id.is_none()));
 
     if let Some(ref resume_id) = resume_session_id {
         if let Some(home) = flashagent_home_dir() {
@@ -2065,6 +2077,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 tick_n,
                 running,
                 elapsed_secs: turn_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                face_phase: turn_started.map(|t| (t.elapsed().as_millis() / 80) as usize).unwrap_or(0),
                 model_tokens: if app_config.show_tokens { token_tracker.total_model_tokens } else { 0 },
                 tokens_per_sec: if app_config.show_tokens { tg_speed } else { 0.0 },
                 f_keep: if app_config.show_tokens { token_tracker.last_f_keep } else { None },
@@ -4134,6 +4147,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         tick_n,
                                         running,
                                         elapsed_secs: turn_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                                        face_phase: turn_started.map(|t| (t.elapsed().as_millis() / 80) as usize).unwrap_or(0),
                                         model_tokens: token_tracker.total_model_tokens,
                                         tokens_per_sec: tg_speed,
                                         f_keep: token_tracker.last_f_keep,
@@ -4542,6 +4556,17 @@ fn spawn_turn(
         let result = res.map_err(|e| (e.to_string(), e.into_history()));
         let _ = tx.send(UiEvent::Finished { turn_id, result });
     })
+}
+
+/// The welcome card as first shown. Animated, it starts as its top border and
+/// the tick loop draws in the rest; otherwise it goes up whole, because
+/// nothing will come back to finish it.
+fn opening_card(card: Vec<RenderLine>, animate: bool) -> Vec<RenderLine> {
+    if animate {
+        card.into_iter().take(1).collect()
+    } else {
+        card
+    }
 }
 
 /// How many rows of the welcome card to draw, so it appears to draw itself
@@ -5440,7 +5465,7 @@ mod tests {
         tracker.last_ttft = Some(std::time::Duration::from_millis(1770));
 
         // When running is true, Line 3 must show "Generating response..." and NOT duplicate prompt tokens or TTFT
-        let status = format_status_left(true, false, None, "Normal", Some(&tracker), 80, "");
+        let status = format_status_left(true, false, None, "Normal", Some(&tracker), 80, "", 0);
         assert!(status.contains("Generating response..."));
         assert!(status.contains("[Normal]"));
         assert!(!status.contains("4.9K"));
@@ -5449,7 +5474,7 @@ mod tests {
 
         // When running is false, Line 3 displays the completed turn telemetry
         tracker.on_finished();
-        let status_done = format_status_left(false, false, None, "Normal", Some(&tracker), 80, "");
+        let status_done = format_status_left(false, false, None, "Normal", Some(&tracker), 80, "", 0);
         assert!(status_done.contains("4.9K prompt"));
         assert!(status_done.contains("TTFT 1.77s"));
         assert!(status_done.contains("44.4 tg"));
@@ -5459,11 +5484,11 @@ mod tests {
     #[test]
     fn test_format_status_left_goal_active_modes() {
         let tracker = TokenTracker::new("default".to_string());
-        let status_running = format_status_left(true, true, None, "Autonomous", Some(&tracker), 80, "");
+        let status_running = format_status_left(true, true, None, "Autonomous", Some(&tracker), 80, "", 0);
         assert!(status_running.contains("[Goal: Autonomous]"));
         assert!(status_running.contains("Generating response..."));
 
-        let status_ready = format_status_left(false, true, None, "Autonomous", None, 80, "");
+        let status_ready = format_status_left(false, true, None, "Autonomous", None, 80, "", 0);
         assert!(status_ready.contains("[Goal: Autonomous]"));
         assert!(status_ready.contains("Ready"));
     }
@@ -5479,10 +5504,37 @@ mod tests {
             Some(&tracker),
             80,
             "",
+            0,
         );
         assert!(status.contains("step 12/250"), "{status}");
         assert!(status.contains("3m05s/1h0m"), "{status}");
         assert!(!status.contains("Generating response..."), "{status}");
+    }
+
+    #[test]
+    fn the_face_keeps_the_user_company_only_while_working() {
+        let tracker = TokenTracker::new("default".to_string());
+        let working = format_status_left(true, false, None, "Normal", Some(&tracker), 80, "", 0);
+        assert!(working.contains("(•_•)"), "{working}");
+        let blinking = format_status_left(true, false, None, "Normal", Some(&tracker), 80, "", 46);
+        assert!(blinking.contains("(-_-)"), "{blinking}");
+        // Idle the mascot lives on the welcome card; two of them would be one
+        // too many.
+        let idle = format_status_left(false, false, None, "Normal", None, 80, "", 0);
+        assert!(!idle.contains("(•_•)"), "{idle}");
+    }
+
+    #[test]
+    fn a_resumed_session_gets_the_whole_card_not_a_stuck_reveal() {
+        // The tick loop stops refreshing the card once the transcript has a
+        // user message, so a resumed session must never start truncated.
+        let card = flashagent_tui::welcome_card_responsive_opts(
+            "m", "/tmp", "Manual", 0, None, None, 100, 30, 0, true,
+            flashagent_tui::MascotMood::Checking,
+        );
+        assert!(card.len() > 1);
+        assert_eq!(opening_card(card.clone(), false).len(), card.len(), "resume draws it whole");
+        assert_eq!(opening_card(card, true).len(), 1, "a fresh start animates it in");
     }
 
     #[test]
