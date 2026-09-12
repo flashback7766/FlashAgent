@@ -155,7 +155,8 @@ struct FrameState<'a> {
     copy_toast: Option<&'a str>,
     prefill_status: Option<&'a str>,
     ttft_display: Option<&'a str>,
-    update_banner: Option<&'a str>,
+    background: Option<&'a str>,
+    background_style: NoticeStyle,
     context_warn_threshold: usize,
 }
 
@@ -915,15 +916,32 @@ impl Renderer {
             } else {
                 String::new()
             };
-            format!(
-                "  {} \x1b[38;2;168;199;250mTokens - \x1b[1;38;2;235;240;250m{}\x1b[0m \x1b[38;2;194;231;255m({:.1}/s)\x1b[0m{cache_str}{ttft_str} \x1b[38;2;75;99;130m·\x1b[0m \x1b[38;2;155;165;180m{}s\x1b[0m \x1b[38;2;135;130;125m· tab/f1-f5 menus · enter to steer · esc to interrupt\x1b[0m",
+            let live = format!(
+                "  {} \x1b[38;2;168;199;250mTokens - \x1b[1;38;2;235;240;250m{}\x1b[0m \x1b[38;2;194;231;255m({:.1}/s)\x1b[0m{cache_str}{ttft_str} \x1b[38;2;75;99;130m·\x1b[0m \x1b[38;2;155;165;180m{}s\x1b[0m",
                 SPINNER[st.tick_n % SPINNER.len()],
                 st.model_tokens,
                 st.tokens_per_sec,
                 st.elapsed_secs,
-            )
-        } else if let Some(banner) = st.update_banner {
-            format!("  \x1b[1;38;2;120;220;140m{banner}\x1b[0m")
+            );
+            // A turn is running, and something turned up on its own. Both
+            // belong on this line: the counters prove the model is alive, the
+            // notice is the thing the user did not ask for and must not miss.
+            // The keybinding tail is what gives way when they do not both fit.
+            let tail_hint = "\x1b[38;2;135;130;125m· tab/f1-f5 menus · enter to steer · esc to interrupt\x1b[0m";
+            match st.background {
+                Some(text) => {
+                    let notice = format!(" \x1b[38;2;75;99;130m·\x1b[0m {}", st.background_style.paint(text));
+                    let with_hint = format!("{live}{notice} \x1b[38;2;135;130;125m· esc to interrupt\x1b[0m");
+                    if visible_width(&with_hint) <= width {
+                        with_hint
+                    } else {
+                        format!("{live}{notice}")
+                    }
+                }
+                None => format!("{live} {tail_hint}"),
+            }
+        } else if let Some(text) = st.background {
+            format!("  {}", st.background_style.paint(text))
         } else {
             // Responsive footer shortcuts adapting cleanly to any terminal width:
             if width >= 140 {
@@ -1519,6 +1537,65 @@ fn thinking_summary_str(source: &BackendSource, current_effort: &str) -> String 
 }
 
 #[derive(Debug, Clone)]
+/// A message that appeared without the user doing anything. It lives on the
+/// line under the input, and most of them fade: a notice that is no longer
+/// actionable should not take that line for the rest of the session.
+struct BackgroundNotice {
+    text: String,
+    expires: Option<std::time::Instant>,
+}
+
+/// How brightly a background notice is drawn. A notice that is about to
+/// expire dims over its last second, so it leaves the line instead of
+/// blinking out of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct NoticeStyle {
+    fade: f32,
+}
+
+impl NoticeStyle {
+    const FULL: Self = Self { fade: 1.0 };
+
+    fn paint(self, text: &str) -> String {
+        let lerp = |from: f32, to: f32| (to + (from - to) * self.fade).round() as u8;
+        // From the healthy green towards the muted grey the hints use.
+        let (r, g, b) = (lerp(120.0, 100.0), lerp(220.0, 95.0), lerp(140.0, 90.0));
+        let bold = if self.fade > 0.6 { "1;" } else { "" };
+        format!("\x1b[{bold}38;2;{r};{g};{b}m{text}\x1b[0m")
+    }
+}
+
+impl BackgroundNotice {
+    /// Full brightness until the last second of its life, then a ramp down.
+    fn style(&self) -> NoticeStyle {
+        match self.expires {
+            None => NoticeStyle::FULL,
+            Some(at) => {
+                let left = at.saturating_duration_since(std::time::Instant::now()).as_secs_f32();
+                NoticeStyle { fade: left.clamp(0.0, 1.0) }
+            }
+        }
+    }
+
+    /// Stays until something replaces it — use for anything the user still
+    /// has to act on ("restart to run the new build").
+    fn sticky(text: impl Into<String>) -> Self {
+        Self { text: text.into(), expires: None }
+    }
+
+    /// Disappears after `secs`.
+    fn fading(text: impl Into<String>, secs: u64) -> Self {
+        Self {
+            text: text.into(),
+            expires: Some(std::time::Instant::now() + std::time::Duration::from_secs(secs)),
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.expires.is_some_and(|t| std::time::Instant::now() >= t)
+    }
+}
+
 enum UpdateNotice {
     Available { version: String, asset_name: String, download_url: String, checksums_url: Option<String> },
     /// Only the manual update (Ctrl+U) sends these; a background update stays
@@ -1864,7 +1941,11 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         format!("session_{ts}")
     });
 
-    let mut update_banner: Option<String> = None;
+    // Things that turn up on their own — an update installing, the context
+    // being compacted — go on the line under the input. The composer is where
+    // the user's own actions are answered; a message they did not ask for
+    // must not take that spot.
+    let mut background: Option<BackgroundNotice> = None;
     let mut pending_update: Option<(String, String, String, Option<String>)> = None;
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
     let (channel_watch_tx, mut channel_watch_rx) = tokio::sync::watch::channel(app_config.update_channel);
@@ -2124,7 +2205,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 copy_toast: if app_config.show_toasts { active_toast } else { None },
                 prefill_status: if app_config.show_ttft { live_prefill.as_deref() } else { None },
                 ttft_display: if app_config.show_ttft { ttft_display.as_deref() } else { None },
-                update_banner: update_banner.as_deref(),
+                background: background.as_ref().map(|b| b.text.as_str()),
+                background_style: background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                 context_warn_threshold: app_config.context_warn_threshold,
             },
         );
@@ -2134,21 +2216,22 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 match notice {
                     UpdateNotice::Available { version, asset_name, download_url, checksums_url } => {
                         pending_update = Some((version.clone(), asset_name, download_url, checksums_url));
-                        update_banner = Some(format!("Update Available: {version} · Press Ctrl+U to install"));
+                        background = Some(BackgroundNotice::sticky(format!(
+                            "Update available: {version} · press Ctrl+U to install"
+                        )));
                         if let Some(ref mut s) = settings_view {
                             s.update_check_status = Some(format!("Available: {version} (Press Ctrl+U)"));
                         }
                     }
                     UpdateNotice::Progress { version, stage } => {
-                        notice!(&update_progress_line(&version, stage));
+                        background = Some(BackgroundNotice::sticky(update_progress_line(&version, stage)));
+                        renderer.request_reprint();
                     }
                     UpdateNotice::Ready { version } => {
                         pending_update = None;
-                        // The banner says "Update Ready: <version> · Restart
-                        // FlashAgent" and stays put; the progress line has
-                        // done its job by now.
-                        custom_placeholder = None;
-                        update_banner = Some(format!("Update Ready: {version} · Restart FlashAgent"));
+                        background = Some(BackgroundNotice::sticky(format!(
+                            "Update ready: {version} · restart FlashAgent to run it"
+                        )));
                         if let Some(ref mut s) = settings_view {
                             s.update_check_status = Some(format!("Ready: {version} (restart to apply)"));
                         }
@@ -2157,13 +2240,19 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         if let Some(ref mut s) = settings_view {
                             s.update_check_status = Some(format!("Up to date ({version})"));
                         }
-                        notice!(&format!("FlashAgent {version} is up to date"));
+                        background = Some(BackgroundNotice::fading(
+                            format!("FlashAgent {version} is up to date"),
+                            6,
+                        ));
                     }
                     UpdateNotice::Failed { error } => {
                         if let Some(ref mut s) = settings_view {
                             s.update_check_status = Some(format!("Error: {error}"));
                         }
-                        chat.push_line(LineKind::ToolError, format!("Update failed: {error}"));
+                        background = Some(BackgroundNotice::fading(
+                            format!("Update failed: {}", flashagent_tui::truncate_middle(&error, 90)),
+                            10,
+                        ));
                     }
                 }
                 renderer.request_reprint();
@@ -2176,6 +2265,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             _ = tick.tick() => {
                 tick_n += 1;
                 tip_animator.tick();
+                if background.as_ref().is_some_and(BackgroundNotice::expired) {
+                    background = None;
+                    renderer.request_reprint();
+                }
                 // The loop did not wind down in time (a tool ignoring
                 // cancellation): abort it. History keeps the prompt but not
                 // the partial turn, and the user is told so.
@@ -2441,7 +2534,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 let source_compact = source.clone();
                                 if let Some(freed) = compact_context(&source_compact, &mut history, None).await {
                                     update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
-                                    custom_placeholder = Some(format!("Context auto-compacted (~{} freed)", ContextUsage::format_tokens(freed)));
+                                    background = Some(BackgroundNotice::fading(
+                                        format!("Context auto-compacted (~{} freed)", ContextUsage::format_tokens(freed)),
+                                        8,
+                                    ));
                                 }
                             }
 
@@ -3378,7 +3474,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         if mods.contains(KeyModifiers::CONTROL) =>
                     {
                         if let Some((target_ver, asset_name, download_url, checksums_url)) = pending_update.clone() {
-                            notice!(&format!("{UPDATE_LINE_PREFIX}{target_ver} \u{b7} starting download..."));
+                            background = Some(BackgroundNotice::sticky(format!(
+                                "{UPDATE_LINE_PREFIX}{target_ver} \u{b7} starting download..."
+                            )));
+                            renderer.request_reprint();
                             let update_tx_clone = update_tx.clone();
                             tokio::spawn(async move {
                                 let progress_tx = update_tx_clone.clone();
@@ -3402,10 +3501,14 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 let _ = update_tx_clone.send(notice);
                             });
                         } else if !flashagent_svc::updater::is_dev_mode() {
-                            notice!(&format!(
-                                "{UPDATE_LINE_PREFIX}\u{b7} checking the {} channel...",
-                                app_config.update_channel.label()
+                            background = Some(BackgroundNotice::fading(
+                                format!(
+                                    "{UPDATE_LINE_PREFIX}\u{b7} checking the {} channel...",
+                                    app_config.update_channel.label()
+                                ),
+                                30,
                             ));
+                            renderer.request_reprint();
                             let update_tx_clone = update_tx.clone();
                             let ch = app_config.update_channel;
                             tokio::spawn(async move {
@@ -3444,7 +3547,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 }
                             });
                         } else {
-                            notice!("[Auto-updater is disabled in dev mode]");
+                            background = Some(BackgroundNotice::fading("Auto-updater is disabled in dev mode", 6));
                             renderer.request_reprint();
                         }
                     }
@@ -4226,7 +4329,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         copy_toast: None,
                                         prefill_status: None,
                                         ttft_display: None,
-                                        update_banner: update_banner.as_deref(),
+                                        background: background.as_ref().map(|b| b.text.as_str()),
+                background_style: background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                                         context_warn_threshold: app_config.context_warn_threshold,
                                     },
                                 );
@@ -4692,6 +4796,38 @@ fn extract_user_prompt(content: &str) -> &str {
 
 
 
+/// The language a turn is written in, by script, when it is clearly not
+/// English. Script is a crude signal but a reliable one for the case that
+/// matters: a model answering a Russian conversation in English.
+fn script_language(text: &str) -> Option<&'static str> {
+    let mut cyrillic = 0usize;
+    let mut latin = 0usize;
+    let mut cjk = 0usize;
+    let mut other = 0usize;
+    for c in text.chars().filter(|c| c.is_alphabetic()) {
+        match c as u32 {
+            0x0400..=0x04FF => cyrillic += 1,
+            0x0041..=0x005A | 0x0061..=0x007A => latin += 1,
+            0x3040..=0x30FF | 0x4E00..=0x9FFF => cjk += 1,
+            _ => other += 1,
+        }
+    }
+    let total = cyrillic + latin + cjk + other;
+    if total < 12 {
+        return None;
+    }
+    let share = |n: usize| n as f32 / total as f32;
+    // Code and identifiers are Latin even in a Russian conversation, so a
+    // minority of Cyrillic is still a Russian conversation.
+    if share(cyrillic) > 0.25 {
+        Some("Russian")
+    } else if share(cjk) > 0.25 {
+        Some("Chinese or Japanese, matching the user")
+    } else {
+        None
+    }
+}
+
 async fn generate_llm_recap_and_suggestion(
     source: &BackendSource,
     history: &[ChatMessage],
@@ -4718,7 +4854,16 @@ async fn generate_llm_recap_and_suggestion(
         }\n\
         Do NOT generate any internal thinking or explanations. Start immediately with { and return only valid JSON.";
 
-    let user_turn_info = format!("User prompt: {user_snip}\nAssistant response: {asst_snip}");
+    // "the language of the conversation" is not an instruction a small model
+    // reliably follows; naming the language is.
+    let language_rule = match script_language(&format!("{user_snip} {asst_snip}")) {
+        Some(lang) => format!(
+            "\nThe conversation is in {lang}. Write BOTH fields in {lang}, not in English."
+        ),
+        None => String::new(),
+    };
+    let user_turn_info =
+        format!("User prompt: {user_snip}\nAssistant response: {asst_snip}{language_rule}");
     let query_messages = vec![
         ChatMessage::system(system_prompt),
         ChatMessage::user(user_turn_info),
@@ -5713,6 +5858,20 @@ mod tests {
         let mut talked = system_only.clone();
         talked.push(ChatMessage::user("привет"));
         assert!(worth_saving(&talked));
+    }
+
+    #[test]
+    fn the_conversation_language_is_named_not_guessed() {
+        // A Russian conversation that quotes Python still reads as Russian:
+        // the code is Latin either way.
+        let ru = "Покажи пример кода для функции сортировки. Вот пример функции \
+                  сортировки пузырьком: def bubble_sort(arr): return sorted(arr)";
+        assert_eq!(script_language(ru), Some("Russian"));
+
+        assert_eq!(script_language("Show me a bubble sort in Python, with comments"), None);
+        // Too little to judge: better to say nothing than to guess.
+        assert_eq!(script_language("ок"), None);
+        assert_eq!(script_language(""), None);
     }
 
     #[test]

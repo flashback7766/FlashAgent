@@ -5,6 +5,19 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- Messages that appear on their own — an update installing, the context being
+  compacted — now live on the line under the input rather than in the composer.
+  The composer answers what you just did; something you did not ask for must
+  not take that spot. They also share the line with the live token counters
+  while a turn is running, instead of waiting for it to finish, and the ones
+  that stop being actionable dim out over their last second rather than
+  blinking away.
+- The recap and the follow-up suggestion now come back in the language of the
+  conversation. "Write it in the language of the conversation" is not an
+  instruction a small model follows; the language is now named outright,
+  detected by script — and a Russian conversation that quotes Python still
+  reads as Russian.
+
 - `flashagent --tool-test` scores your model on eight scenarios the agent loop
   performs on real work, and `--all-models` does it for every chat model your
   server lists and prints a markdown table. The check also runs once after
