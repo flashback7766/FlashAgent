@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- The auto-compaction threshold follows the window: 97% at a million tokens,
+  95% at 512k, 90% at 256k, 85% at 128k, 80% at 64k, 75% at 32k and below. One
+  percentage cannot suit both ends — ten percent of a million tokens is a
+  hundred thousand left empty, while ten percent of 32k is not one answer.
+  Settings says which one is in force: *Enabled (auto: 85% for this window)*.
+  A threshold you set by hand is still yours; the old shipped default of 90 was
+  never a choice, so it becomes automatic.
+
 ## b250 — compaction you can watch, and what a picture costs
 
 - Compaction says what it is doing, in the chat, where it belongs: *Compacting

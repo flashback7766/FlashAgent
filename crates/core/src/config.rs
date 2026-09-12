@@ -267,7 +267,7 @@ pub struct AppConfig {
     /// Warning threshold percent for context window usage (default 70).
     #[serde(default = "default_warn_threshold")]
     pub context_warn_threshold: usize,
-    /// Auto-compaction threshold percent for context window usage (default 90).
+    /// Auto-compaction threshold percent, or 0 to choose by window size.
     #[serde(default = "default_compact_threshold")]
     pub context_compact_threshold: usize,
     /// Whether sessions are automatically saved on exit.
@@ -308,7 +308,9 @@ fn default_warn_threshold() -> usize {
 }
 
 fn default_compact_threshold() -> usize {
-    90
+    // Zero means "choose by the window": 85% of a 128k window, 97% of a
+    // million, 75% of 32k. A single percentage cannot suit both ends.
+    0
 }
 
 fn default_editor() -> String {
@@ -422,7 +424,7 @@ impl Default for AppConfig {
             approval_mode: "destructive".to_string(),
             auto_compact_context: true,
             context_warn_threshold: 70,
-            context_compact_threshold: 90,
+            context_compact_threshold: 0,
             auto_save_sessions: true,
             external_editor: "$EDITOR".to_string(),
             git_diff_preview: true,
@@ -527,6 +529,13 @@ impl AppConfig {
         if self.thinking_effort == "default" || self.thinking_effort.is_empty() {
             self.thinking_effort = "auto".to_string();
         }
+        // 90 was what every config shipped with rather than anything anyone
+        // chose, and it is wrong at both ends of the range; it becomes
+        // "choose by the window". A threshold that really was picked by hand
+        // is any other number, and is kept.
+        if self.context_compact_threshold == 90 {
+            self.context_compact_threshold = 0;
+        }
         self
     }
 
@@ -594,6 +603,20 @@ mod tests {
         assert_eq!(cfg.permission_mode, crate::PermissionMode::AcceptEdits);
         assert_eq!(cfg.sampling_preset, SamplingPreset::MtpCoding);
         assert_eq!(cfg.toolset_profile, ToolsetProfile::Full);
+    }
+
+    #[test]
+    fn the_old_shipped_threshold_becomes_the_automatic_one() {
+        // 90 was the number every config was born with, not a decision, and
+        // it is wrong at both ends: too early for a million-token window, too
+        // late for 32k.
+        let (cfg, _) = AppConfig::from_json_str(r#"{"context_compact_threshold":90}"#);
+        assert_eq!(cfg.context_compact_threshold, 0, "0 means choose by the window");
+
+        // A number someone actually typed is theirs.
+        let (chosen, _) = AppConfig::from_json_str(r#"{"context_compact_threshold":60}"#);
+        assert_eq!(chosen.context_compact_threshold, 60);
+        assert_eq!(AppConfig::default().context_compact_threshold, 0);
     }
 
     #[test]

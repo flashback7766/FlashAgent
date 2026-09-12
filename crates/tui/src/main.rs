@@ -3050,7 +3050,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         + context_usage.memory_tokens
                                         + context_usage.tools_tokens,
                                     last_turn_growth,
-                                    threshold_pct: app_config.context_compact_threshold,
+                                    threshold_pct: flashagent_core::resolved_compact_threshold(
+                                        app_config.context_compact_threshold,
+                                        context_usage.total_capacity,
+                                    ),
                                 })
                             } else {
                                 flashagent_core::CompactionVerdict::No
@@ -4421,7 +4424,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             mcp_modal = None;
                             let runtime_mode = goal_state.as_ref().map_or(perm.state().mode(), |g| g.mode);
                             let effort = goal_state.as_ref().map_or(current_effort.as_str(), |g| g.effort.as_str());
-                            settings_view = Some(settings_for_runtime(&app_config, runtime_mode, effort, &current_model, &available_models));
+                            settings_view = Some(settings_for_runtime(&app_config, runtime_mode, effort, &current_model, &available_models, context_usage.total_capacity));
                         }
                         renderer.request_reprint();
                     }
@@ -4695,7 +4698,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 autocomplete_idx = 0;
                                 let runtime_mode = goal_state.as_ref().map_or(perm.state().mode(), |g| g.mode);
                                 let effort = goal_state.as_ref().map_or(current_effort.as_str(), |g| g.effort.as_str());
-                                settings_view = Some(settings_for_runtime(&app_config, runtime_mode, effort, &current_model, &available_models));
+                                settings_view = Some(settings_for_runtime(&app_config, runtime_mode, effort, &current_model, &available_models, context_usage.total_capacity));
                                 continue;
                             }
 
@@ -6269,12 +6272,15 @@ fn settings_for_runtime(
     effort: &str,
     model: &str,
     models: &[String],
+    context_capacity: usize,
 ) -> SettingsView {
     let mut cfg = config.clone();
     cfg.permission_mode = mode;
     cfg.thinking_effort = effort.to_string();
     cfg.model = model.to_string();
-    SettingsView::new(cfg, models.to_vec())
+    let mut view = SettingsView::new(cfg, models.to_vec());
+    view.context_capacity = context_capacity;
+    view
 }
 
 /// The config to persist from a settings view. The view shows the live mode
@@ -6652,7 +6658,7 @@ mod tests {
     #[test]
     fn opening_settings_never_persists_the_live_mode_as_default() {
         let persisted = AppConfig { permission_mode: PermissionMode::AcceptEdits, thinking_effort: "auto".into(), ..AppConfig::default() };
-        let view = settings_for_runtime(&persisted, PermissionMode::Bypass, "high", "m", &[]);
+        let view = settings_for_runtime(&persisted, PermissionMode::Bypass, "high", "m", &[], 131_072);
         // Untouched: defaults stay as they were on disk.
         let saved = persisted_from_view(&view.config, &persisted, PermissionMode::Bypass, "high");
         assert_eq!(saved.permission_mode, PermissionMode::AcceptEdits);
@@ -6667,7 +6673,7 @@ mod tests {
     #[test]
     fn settings_open_on_live_session_state() {
         let cfg = AppConfig { permission_mode: PermissionMode::AcceptEdits, thinking_effort: "auto".into(), ..AppConfig::default() };
-        let view = settings_for_runtime(&cfg, PermissionMode::Bypass, "high", "gemma", &[]);
+        let view = settings_for_runtime(&cfg, PermissionMode::Bypass, "high", "gemma", &[], 131_072);
         assert_eq!(view.config.permission_mode, PermissionMode::Bypass);
         assert_eq!(view.config.thinking_effort, "high");
         assert_eq!(view.config.model, "gemma");
