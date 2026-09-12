@@ -19,7 +19,7 @@ impl ContextModal {
         let inner_w = width.saturating_sub(6).clamp(20, 76);
 
         let title = " Context Window Breakdown (/context) ";
-        let dash_count = inner_w.saturating_sub(title.chars().count() + 2);
+        let dash_count = inner_w.saturating_sub(title.chars().count() + 1);
         lines.push((
             LineKind::System,
             format!("  {border_color}┌─\x1b[1;38;2;225;175;95m{title}{border_color}{}┐{reset}", "─".repeat(dash_count)),
@@ -107,5 +107,17 @@ mod tests {
         assert!(joined.contains("Context Window Breakdown"));
         assert!(joined.contains("Total Window:"));
         assert!(joined.contains("System Prompt"));
+    }
+
+    #[test]
+    fn every_row_of_the_box_is_as_wide_as_its_top() {
+        // The top border was one column short, so its corner sat left of the
+        // side of every row under it.
+        let modal = ContextModal::new(ContextUsage::new(128_000));
+        for width in [60usize, 80, 110, 140] {
+            let widths: std::collections::BTreeSet<usize> =
+                modal.render(width).iter().map(|l| crate::visible_width(&l.1)).filter(|w| *w > 0).collect();
+            assert_eq!(widths.len(), 1, "{width} columns: rows of widths {widths:?}");
+        }
     }
 }

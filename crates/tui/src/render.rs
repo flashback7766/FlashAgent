@@ -231,7 +231,7 @@ impl Renderer {
             let tool_styled = format!("\x1b[1;38;2;225;175;95m{}\x1b[0m", req.tool);
             let title = format!(" Confirm: {tool_styled} ");
             let vis_title_len = visible_width(&title);
-            let dash_w = inner_w.saturating_sub(vis_title_len + 2);
+            let dash_w = inner_w.saturating_sub(vis_title_len + 1);
 
             tail.push((
                 LineKind::System,
@@ -312,7 +312,7 @@ impl Renderer {
             // same weight as anything else that cannot be undone by typing.
             let border_color = "\x1b[38;2;225;175;95m";
             let reset = "\x1b[0m";
-            let dash_w = inner_w.saturating_sub(visible_width(title) + 2);
+            let dash_w = inner_w.saturating_sub(visible_width(title) + 1);
             tail.push((
                 LineKind::System,
                 format!("{border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
@@ -342,7 +342,7 @@ impl Renderer {
             // The composer becomes the question card.
             let title = " Question from FlashAgent ";
             let vis_title_len = visible_width(title);
-            let dash_w = inner_w.saturating_sub(vis_title_len + 2);
+            let dash_w = inner_w.saturating_sub(vis_title_len + 1);
 
             tail.push((
                 LineKind::System,
