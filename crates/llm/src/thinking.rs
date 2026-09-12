@@ -155,6 +155,20 @@ pub enum TaskComplexity {
     High,
 }
 
+impl TaskComplexity {
+    /// This level moved `steps` presets up or down, stopping at the ends.
+    ///
+    /// Used by the learned correction, which is why it saturates rather than
+    /// wrapping: a model that keeps overthinking greetings cannot be pushed
+    /// below "no thinking at all".
+    pub fn shifted(self, steps: i8) -> Self {
+        let ladder = [Self::Minimal, Self::Low, Self::Medium, Self::High];
+        let at = ladder.iter().position(|c| *c == self).unwrap_or(0) as i32;
+        let moved = (at + steps as i32).clamp(0, ladder.len() as i32 - 1) as usize;
+        ladder[moved]
+    }
+}
+
 impl ThinkingProfile {
     /// Create a profile for an endpoint that does not support thinking parameters.
     pub fn unsupported() -> Self {
@@ -233,10 +247,20 @@ impl ThinkingProfile {
 
     /// Dynamically resolve the optimal thinking preset for the current turn messages.
     pub fn resolve_dynamic(&self, messages: &[crate::types::ChatMessage]) -> Option<&str> {
+        self.resolve_dynamic_biased(messages, 0)
+    }
+
+    /// As `resolve_dynamic`, with a correction learned from how this model's
+    /// turns have actually gone: `-1` thinks one preset less, `+1` one more.
+    pub fn resolve_dynamic_biased(
+        &self,
+        messages: &[crate::types::ChatMessage],
+        bias: i8,
+    ) -> Option<&str> {
         if !self.supported || self.presets.is_empty() {
             return None;
         }
-        let complexity = Self::analyze_turn_complexity(messages);
+        let complexity = Self::analyze_turn_complexity(messages).shifted(bias);
         self.resolve_for_complexity(complexity)
     }
 
@@ -973,6 +997,34 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_learned_correction_moves_one_preset_and_stops_at_the_ends() {
+        use TaskComplexity::*;
+        assert_eq!(Medium.shifted(-1), Low);
+        assert_eq!(Medium.shifted(1), High);
+        assert_eq!(Minimal.shifted(-1), Minimal, "there is nothing below not thinking");
+        assert_eq!(High.shifted(1), High);
+        assert_eq!(Medium.shifted(0), Medium);
+    }
+
+    #[test]
+    fn the_correction_changes_the_preset_auto_picks() {
+        let profile = ThinkingProfile {
+            presets: vec!["off".into(), "low".into(), "medium".into(), "high".into()],
+            protocol: ThinkingProtocol::ReasoningEffort,
+            supported: true,
+            default_preset: Some("medium".into()),
+        };
+        let ask = [crate::types::ChatMessage::user(
+            "Refactor the whole project: split the loop into steps, then fix the failing tests in crates/core/src/loop_.rs",
+        )];
+        let neutral = profile.resolve_dynamic_biased(&ask, 0).map(str::to_string);
+        let turned_down = profile.resolve_dynamic_biased(&ask, -1).map(str::to_string);
+        assert_eq!(neutral.as_deref(), Some("high"), "a big task asks for the most thinking");
+        assert_eq!(turned_down.as_deref(), Some("medium"), "the learned step is actually applied");
+        assert_eq!(profile.resolve_dynamic(&ask).map(str::to_string), neutral, "no bias, no change");
+    }
 
     #[test]
     fn test_min_and_max_effort_selection() {

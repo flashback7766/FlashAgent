@@ -5,6 +5,31 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- Auto effort learns from how the turns actually go. The guess about a task is
+  made before the model has said a word, so it cannot know that *this* model
+  thinks for two minutes about a one-line answer, or that it fumbles tool calls
+  unless given room. Now the turns are watched — a failed tool call or a
+  Ctrl+R asks for more thinking, a mountain of reasoning with a sentence of
+  answer and nothing done asks for less, stopping it mid-thought counts as too
+  slow — and the level is nudged by at most one preset step, only after three
+  consistent turns, fading back to neutral as soon as the turns stop
+  complaining. Learned per model, kept in `~/.flashagent/effort.json`, and
+  `/effort` says what it settled on: *Auto (per turn; learned one step down,
+  after 7 turns)*. A preset you picked by hand is never second-guessed.
+- Fixed: the recap under a turn often never appeared. The request was capped at
+  512 tokens, and a model told not to think thinks anyway — one run spent 361
+  of them reasoning and was cut off before it closed its JSON, so nothing was
+  shown. The budget now covers that, the recap is asked for first so it
+  survives a cut-off, and a sentence that did finish is kept even when the
+  brace after it never arrived.
+- Fixed: a Russian chat was labelled in English — `Thought: Analyzing Request`,
+  `Planning Implementation`. Those names are FlashAgent's own, and they now
+  follow the conversation: `Разбираю запрос`, `Планирую реализацию`. A stage
+  lifted out of the model's own reasoning is still shown exactly as it wrote
+  it — translating a quote would put words in its mouth.
+- Fixed: listing the working directory read `Searched search`. It now reads
+  `Searched the project`.
+
 - After an update, FlashAgent shows what arrived. One release per screen,
   entries appearing one at a time, `enter` to move on and `esc` to skip the
   rest — read straight out of this file, so the screen cannot claim a feature

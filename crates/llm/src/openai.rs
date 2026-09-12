@@ -24,6 +24,10 @@ pub struct OpenAiCompat {
     /// before any response arrived. HTTP errors and mid-stream drops are not
     /// retried: the request may already have had effects on the server.
     max_retries: std::sync::atomic::AtomicUsize,
+    /// Preset steps to shift auto effort by, learned from how this model's
+    /// turns have gone. Shared, because the app sets it from outside the
+    /// request path.
+    effort_bias: std::sync::Arc<std::sync::atomic::AtomicI8>,
 }
 
 /// How many times a 400 may teach us a new request shape before we give up.
@@ -68,6 +72,7 @@ impl OpenAiCompat {
             discovery: std::sync::Arc::new(std::sync::RwLock::new(None)),
             working_models_url: std::sync::Arc::new(std::sync::RwLock::new(None)),
             max_retries: std::sync::atomic::AtomicUsize::new(0),
+            effort_bias: std::sync::Arc::new(std::sync::atomic::AtomicI8::new(0)),
         }
     }
 
@@ -79,6 +84,18 @@ impl OpenAiCompat {
     /// Retry budget for transport failures (the `network_retries` setting).
     pub fn set_max_retries(&self, retries: usize) {
         self.max_retries.store(retries, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Shift auto effort by `steps` presets for this model, as learned from
+    /// its past turns. Only auto is affected: a preset the user picked by
+    /// hand is theirs, and second-guessing it would be a bug.
+    pub fn set_effort_bias(&self, steps: i8) {
+        self.effort_bias.store(steps.clamp(-1, 1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The correction in force right now.
+    pub fn effort_bias(&self) -> i8 {
+        self.effort_bias.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Return the currently active model ID.
@@ -214,7 +231,9 @@ impl OpenAiCompat {
         } else if options.thinking == crate::types::ThinkingEffort::Off {
             current_profile.resolve_effort(options.thinking).map(String::from).or(Some("off".to_string()))
         } else if options.thinking == crate::types::ThinkingEffort::Auto {
-            current_profile.resolve_dynamic(messages).map(String::from)
+            current_profile
+                .resolve_dynamic_biased(messages, self.effort_bias())
+                .map(String::from)
         } else if options.thinking != crate::types::ThinkingEffort::Default {
             current_profile.resolve_effort(options.thinking).map(String::from)
         } else {
@@ -527,6 +546,20 @@ mod tests {
     use super::*;
     use crate::LlmBackend;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn the_learned_effort_correction_is_never_more_than_one_step() {
+        // The correction is a nudge, not a second opinion: a runaway value
+        // would let one bad week silently pin the model at "off".
+        let llm = OpenAiCompat::new("http://localhost:1234/v1", "m", None);
+        assert_eq!(llm.effort_bias(), 0, "nothing learned yet");
+        llm.set_effort_bias(-7);
+        assert_eq!(llm.effort_bias(), -1);
+        llm.set_effort_bias(7);
+        assert_eq!(llm.effort_bias(), 1);
+        llm.set_effort_bias(0);
+        assert_eq!(llm.effort_bias(), 0);
+    }
 
     /// One-shot HTTP server answering every request with `status` + `body`;
     /// returns its base URL and a request counter.
