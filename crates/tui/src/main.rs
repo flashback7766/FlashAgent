@@ -1119,6 +1119,7 @@ async fn main() -> Result<()> {
     let mut force_setup = false;
     let mut skip_trust = false;
     let mut resume_session_id = None;
+    let mut tool_test: Option<bool> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -1181,11 +1182,8 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
             }
-            "--tool-test" => {
-                let all = args.next().as_deref() == Some("--all-models");
-                let code = run_tool_check_cli(&config, all).await;
-                std::process::exit(code);
-            }
+            "--tool-test" => tool_test = Some(false),
+            "--all-models" => tool_test = Some(true),
             "--setup" => force_setup = true,
             "-y" | "--yes" => skip_trust = true,
             "-h" | "--help" => {
@@ -1194,6 +1192,11 @@ async fn main() -> Result<()> {
             }
             other => anyhow::bail!("usage: flashagent [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--tool-test [--all-models]] [--setup] [--resume <id>] [-y|--yes] (got {other})"),
         }
+    }
+
+    if let Some(all_models) = tool_test {
+        let code = run_tool_check_cli(&config, all_models).await;
+        std::process::exit(code);
     }
 
     use std::io::IsTerminal;
@@ -1800,6 +1803,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let mut input = String::new();
     let mut custom_placeholder: Option<String> = None;
     let mut suggested_prompt: Option<String> = None;
+
+
     let mut latest_suggestion: Option<String> = None;
     let mut tip_animator = flashagent_tui::tips::TipAnimator::new();
     let mut input_history: Vec<String> = Vec::new();
@@ -1831,6 +1836,22 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let mut autocomplete_idx = 0usize;
     let mut tick_n = 0usize;
     let mut renderer = Renderer::new();
+
+    /// A one-line system notice. These go under the cursor rather than into
+    /// the transcript: they are addressed to the person at the keyboard, not
+    /// to the conversation, and a chat full of "[No models discovered]" is a
+    /// chat you stop reading. Anything with structure — a listing, a diff, a
+    /// report — still belongs in the transcript.
+    macro_rules! notice {
+        ($text:expr) => {{
+            custom_placeholder = Some(($text).to_string());
+            // A pending suggestion is drawn in the same spot and would hide
+            // the notice; take() rather than assign, so a site that sets it
+            // again right after is not flagged as a dead store.
+            suggested_prompt.take();
+            renderer.request_reprint();
+        }};
+    }
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(80));
     let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(3));
     check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1956,7 +1977,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             flashagent_llm::Role::Tool => history.push(msg),
                         }
                     }
-                    chat.push_system(&format!("Resumed session '{resume_id}' ({} messages loaded).", history.len()));
+                    notice!(&format!("Resumed session '{resume_id}' ({} messages loaded).", history.len()));
                 } else {
                     chat.push_line(LineKind::ToolError, format!("Session file {} is unreadable; starting fresh.", session_path.display()));
                 }
@@ -2119,39 +2140,26 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         }
                     }
                     UpdateNotice::Progress { version, stage } => {
-                        chat.update_or_push_system(
-                            UPDATE_LINE_PREFIX,
-                            &update_progress_line(&version, stage),
-                        );
+                        notice!(&update_progress_line(&version, stage));
                     }
                     UpdateNotice::Ready { version } => {
                         pending_update = None;
-                        // Land the progress line on its outcome instead of
-                        // leaving it frozen at "installing...".
-                        chat.update_or_push_system(
-                            UPDATE_LINE_PREFIX,
-                            &format!("{UPDATE_LINE_PREFIX}{version} \u{b7} installed \u{b7} restart FlashAgent to run it"),
-                        );
+                        // The banner says "Update Ready: <version> · Restart
+                        // FlashAgent" and stays put; the progress line has
+                        // done its job by now.
+                        custom_placeholder = None;
                         update_banner = Some(format!("Update Ready: {version} · Restart FlashAgent"));
                         if let Some(ref mut s) = settings_view {
                             s.update_check_status = Some(format!("Ready: {version} (restart to apply)"));
                         }
                     }
                     UpdateNotice::UpToDate { version } => {
-                        chat.update_or_push_system(
-                            UPDATE_LINE_PREFIX,
-                            &format!("{UPDATE_LINE_PREFIX}\u{b7} already on {version}"),
-                        );
                         if let Some(ref mut s) = settings_view {
                             s.update_check_status = Some(format!("Up to date ({version})"));
                         }
-                        custom_placeholder = Some(format!("FlashAgent {version} is up to date"));
+                        notice!(&format!("FlashAgent {version} is up to date"));
                     }
                     UpdateNotice::Failed { error } => {
-                        chat.update_or_push_system(
-                            UPDATE_LINE_PREFIX,
-                            &format!("{UPDATE_LINE_PREFIX}\u{b7} failed"),
-                        );
                         if let Some(ref mut s) = settings_view {
                             s.update_check_status = Some(format!("Error: {error}"));
                         }
@@ -2273,7 +2281,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             UiEvent::ToolTestResult(verdict) => {
                 match settings_view.as_mut() {
                     Some(s) => s.tool_test_status = Some(verdict),
-                    None => chat.push_system(&format!("Tool test: {verdict}")),
+                    None => notice!(&format!("Tool test: {verdict}")),
                 }
                 renderer.request_reprint();
             }
@@ -2405,13 +2413,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         };
                         push_goal_report(&mut chat, &ledger, reason);
                     }
-                    chat.push_system(&format!(
+                    notice!(&format!(
                         "[Goal \"{}\" finished · Restored mode to {} and thinking to {}]",
                         flashagent_tui::truncate_middle(&saved.task, 40),
                         saved.mode.label(),
                         saved.effort
                     ));
-                    renderer.request_reprint();
                 }
 
                 match res {
@@ -2471,10 +2478,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
                         chat.on_event(&LoopEvent::Done(DoneReason::Failed));
                         chat.push_line(LineKind::ToolError, format!("Error: {e}"));
-                        chat.push_system("Press Ctrl+R to retry the last prompt.");
-                        suggested_prompt = None;
-                        custom_placeholder = None;
-                        renderer.request_reprint();
+                        notice!("The model backend failed — press Ctrl+R to retry the last prompt.");
                     }
                 }
             }
@@ -2651,7 +2655,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 menu.select_by_value(&current_model);
                                 model_menu = Some(menu);
                             } else {
-                                chat.push_system("[No models discovered from server]");
+                                notice!("[No models discovered from server]");
                             }
                             renderer.request_reprint();
                         }
@@ -3076,9 +3080,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 // covers `npm publish`); tool-wide otherwise.
                                 let rules = perm.state().allow_always(&req);
                                 if rules.is_empty() {
-                                    chat.push_system("[Allowed once: this command cannot be saved as a narrow rule]");
+                                    notice!("[Allowed once: this command cannot be saved as a narrow rule]");
                                 } else {
-                                    chat.push_system(&format!("[Always allowed this session: {}]", rules.join(", ")));
+                                    notice!(&format!("[Always allowed this session: {}]", rules.join(", ")));
                                 }
                             }
                             gate.respond(Decision::Allow);
@@ -3363,7 +3367,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 autocomplete_idx = 0;
                             }
                             Err(err) => {
-                                chat.push_system(&format!("Failed to launch external editor: {err}"));
+                                notice!(&format!("Failed to launch external editor: {err}"));
                             }
                         }
                         renderer.request_reprint();
@@ -3374,11 +3378,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         if mods.contains(KeyModifiers::CONTROL) =>
                     {
                         if let Some((target_ver, asset_name, download_url, checksums_url)) = pending_update.clone() {
-                            chat.update_or_push_system(
-                                UPDATE_LINE_PREFIX,
-                                &format!("{UPDATE_LINE_PREFIX}{target_ver} \u{b7} starting download..."),
-                            );
-                            renderer.request_reprint();
+                            notice!(&format!("{UPDATE_LINE_PREFIX}{target_ver} \u{b7} starting download..."));
                             let update_tx_clone = update_tx.clone();
                             tokio::spawn(async move {
                                 let progress_tx = update_tx_clone.clone();
@@ -3402,14 +3402,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 let _ = update_tx_clone.send(notice);
                             });
                         } else if !flashagent_svc::updater::is_dev_mode() {
-                            chat.update_or_push_system(
-                                UPDATE_LINE_PREFIX,
-                                &format!(
-                                    "{UPDATE_LINE_PREFIX}\u{b7} checking the {} channel...",
-                                    app_config.update_channel.label()
-                                ),
-                            );
-                            renderer.request_reprint();
+                            notice!(&format!(
+                                "{UPDATE_LINE_PREFIX}\u{b7} checking the {} channel...",
+                                app_config.update_channel.label()
+                            ));
                             let update_tx_clone = update_tx.clone();
                             let ch = app_config.update_channel;
                             tokio::spawn(async move {
@@ -3448,7 +3444,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 }
                             });
                         } else {
-                            chat.push_system("[Auto-updater is disabled in dev mode]");
+                            notice!("[Auto-updater is disabled in dev mode]");
                             renderer.request_reprint();
                         }
                     }
@@ -3472,7 +3468,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             menu.select_by_value(&current_model);
                             model_menu = Some(menu);
                         } else {
-                            chat.push_system("[No models discovered from server]");
+                            notice!("[No models discovered from server]");
                         }
                     }
 
@@ -3676,7 +3672,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     match flashagent_tui::goal::parse_goal_command(&task) {
                                         Ok(parsed) => parsed,
                                         Err(msg) => {
-                                            chat.push_system(&msg);
+                                            notice!(&msg);
                                             renderer.request_reprint();
                                             continue;
                                         }
@@ -3776,7 +3772,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     .map(|s| format!("  • {} — {}", s.trigger, s.description))
                                     .collect();
                                 if listed.is_empty() {
-                                    chat.push_system("[No skills found. Add .agents/skills/<name>.md (project) or ~/.flashagent/skills/<name>.md (global).]");
+                                    notice!("[No skills found. Add .agents/skills/<name>.md (project) or ~/.flashagent/skills/<name>.md (global).]");
                                 } else {
                                     chat.push_system(&format!("Skills:\n{}", listed.join("\n")));
                                 }
@@ -3845,7 +3841,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         turn_counter,
                                     ));
                                 } else {
-                                    chat.push_system("[No previous turn to regenerate]");
+                                    notice!("[No previous turn to regenerate]");
                                     renderer.request_reprint();
                                 }
                                 continue;
@@ -3868,7 +3864,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 }
                                 if !known.contains(&arg_val) {
                                     known.dedup();
-                                    chat.push_system(&format!("[Unknown effort '{arg_val}'. Available: {}]", known.join(", ")));
+                                    notice!(&format!("[Unknown effort '{arg_val}'. Available: {}]", known.join(", ")));
                                     renderer.request_reprint();
                                     continue;
                                 }
@@ -3899,7 +3895,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     menu.select_by_value(&current_model);
                                     model_menu = Some(menu);
                                 } else {
-                                    chat.push_system("[No models discovered from server]");
+                                    notice!("[No models discovered from server]");
                                 }
                                 continue;
                             }
@@ -3943,11 +3939,11 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     "acceptedits" | "accept_edits" | "edits" | "auto" | "default" => Some(PermissionMode::AcceptEdits),
                                     "bypass" | "accept_all" | "all" => Some(PermissionMode::Bypass),
                                     "autonomic" => {
-                                        chat.push_system("[Autonomic mode is temporary and activated exclusively during `/goal <task>` execution]");
+                                        notice!("[Autonomic mode is temporary and activated exclusively during `/goal <task>` execution]");
                                         None
                                     }
                                     _ => {
-                                        chat.push_system("[Usage: /mode planning | /mode manual | /mode edits | /mode all]");
+                                        notice!("[Usage: /mode planning | /mode manual | /mode edits | /mode all]");
                                         None
                                     }
                                 };
@@ -3981,7 +3977,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     continue;
                                 }
                                 let channel = app_config.update_channel;
-                                chat.push_system(&format!("Checking for updates on {} channel...", channel.label()));
+                                notice!(&format!("Checking for updates on {} channel...", channel.label()));
                                 let update_tx_clone = update_tx.clone();
                                 tokio::spawn(async move {
                                     match flashagent_svc::updater::check_for_updates(channel, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
@@ -4026,7 +4022,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 if let Some(ch) = target_ch {
                                     app_config.update_channel = ch;
                                     let _ = app_config.save();
-                                    chat.push_system(&format!(
+                                    notice!(&format!(
                                         "Switched to \x1b[1m{}\x1b[0m channel. Checking for releases in background...",
                                         ch.label()
                                     ));
@@ -4043,7 +4039,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         }
                                     }
                                 } else {
-                                    chat.push_system("Invalid channel. Choose either: /channel stable or /channel beta");
+                                    notice!("Invalid channel. Choose either: /channel stable or /channel beta");
                                 }
                                 continue;
                             }
@@ -4100,7 +4096,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 let server_name = target.trim().to_string();
                                 input.clear();
                                 autocomplete_idx = 0;
-                                chat.push_system(&format!("Testing MCP server '{}'...", server_name));
+                                notice!(&format!("Testing MCP server '{}'...", server_name));
                                 let mgr = tools_arc.mcp_manager();
                                 match mgr.test_server(&server_name).await {
                                     Ok(report) => {
@@ -4143,11 +4139,11 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                             });
                                         }
                                         Err(e) => {
-                                            chat.push_system(&format!("\x1b[38;2;245;120;120mFailed to save MCP configuration:\x1b[0m {e}"));
+                                            notice!(&format!("\x1b[38;2;245;120;120mFailed to save MCP configuration:\x1b[0m {e}"));
                                         }
                                     }
                                 } else {
-                                    chat.push_system(&format!("Unknown marketplace extension: '{id}'. Type /mcp market to see available items."));
+                                    notice!(&format!("Unknown marketplace extension: '{id}'. Type /mcp market to see available items."));
                                 }
                                 renderer.request_reprint();
                                 continue;
@@ -4161,20 +4157,19 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             if trimmed == "/mcp reload" {
                                 input.clear();
                                 autocomplete_idx = 0;
-                                chat.push_system("Reloading MCP configurations and restarting servers...");
                                 let mgr = tools_arc.mcp_manager();
                                 match mgr.reload().await {
                                     Ok(()) => {
                                         let statuses = mgr.server_status_list().await;
                                         let active = statuses.iter().filter(|s| s.state == flashagent_tools::mcp::ServerConnectionState::Active).count();
                                         let tools: usize = statuses.iter().map(|s| s.tool_count).sum();
-                                        chat.push_system(&format!(
+                                        notice!(&format!(
                                             "\x1b[38;2;135;220;145m✔ MCP reload complete:\x1b[0m {} active server(s), {} discovered tool(s).",
                                             active, tools
                                         ));
                                     }
                                     Err(e) => {
-                                        chat.push_system(&format!("\x1b[38;2;245;120;120mMCP reload failed:\x1b[0m {e}"));
+                                        notice!(&format!("\x1b[38;2;245;120;120mMCP reload failed:\x1b[0m {e}"));
                                     }
                                 }
                                 renderer.request_reprint();
@@ -4283,7 +4278,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         last_expanded = false;
                                     }
                                     _ => {
-                                        chat.push_system("[Usage: /verbose all | /verbose last | /verbose off]");
+                                        notice!("[Usage: /verbose all | /verbose last | /verbose off]");
                                     }
                                 };
                                 renderer.request_reprint();
@@ -4302,7 +4297,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         input = edited;
                                     }
                                     Err(err) => {
-                                        chat.push_system(&format!("Failed to launch external editor: {err}"));
+                                        notice!(&format!("Failed to launch external editor: {err}"));
                                     }
                                 }
                                 renderer.request_reprint();
@@ -4316,13 +4311,13 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     Ok(out) => {
                                         let s = String::from_utf8_lossy(&out.stdout);
                                         if s.trim().is_empty() {
-                                            chat.push_system("[Git working tree clean — no unstaged changes]");
+                                            notice!("[Git working tree clean — no unstaged changes]");
                                         } else {
                                             chat.push_system(&format!("Git diff summary:\n{}", s.trim_end()));
                                         }
                                     }
                                     Err(e) => {
-                                        chat.push_system(&format!("Failed to run git diff: {e}"));
+                                        notice!(&format!("Failed to run git diff: {e}"));
                                     }
                                 }
                                 renderer.request_reprint();
@@ -4353,7 +4348,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         chat.push_system(&format!("Git commit status:\n{}{}", s, err));
                                     }
                                     Err(e) => {
-                                        chat.push_system(&format!("Failed to run git commit: {e}"));
+                                        notice!(&format!("Failed to run git commit: {e}"));
                                     }
                                 }
                                 renderer.request_reprint();
@@ -4400,8 +4395,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     }
                                 };
                                 match std::fs::write(&filename, content) {
-                                    Ok(_) => chat.push_system(&format!("Exported conversation to: \x1b[1m{filename}\x1b[0m")),
-                                    Err(e) => chat.push_system(&format!("Failed to export conversation: {e}")),
+                                    Ok(_) => notice!(&format!("Exported conversation to: \x1b[1m{filename}\x1b[0m")),
+                                    Err(e) => notice!(&format!("Failed to export conversation: {e}")),
                                 }
                                 renderer.request_reprint();
                                 continue;
@@ -4417,13 +4412,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             if let Some(sname) = skill_name {
                                 let Some(skill_content) = find_skill_file(&sname).and_then(|p| std::fs::read_to_string(p).ok()) else {
                                     input.clear();
-                                    chat.push_system(&format!("[Unknown skill '{sname}'. Type /skills to list available skills.]"));
+                                    notice!(&format!("[Unknown skill '{sname}'. Type /skills to list available skills.]"));
                                     renderer.request_reprint();
                                     continue;
                                 };
                                 input.clear();
                                 autocomplete_idx = 0;
-                                chat.push_system(&format!("[Invoking skill: {sname}]"));
                                 chat.push_user(&format!("/skill:{sname}"));
                                 let prompt = format!("Execute skill: {sname}\n\nSkill Instructions:\n{skill_content}");
                                 history.push(ChatMessage::user(prompt));

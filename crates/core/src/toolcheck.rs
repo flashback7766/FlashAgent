@@ -394,7 +394,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
             ChatMessage::system("You are a coding agent. Use the tools to do what is asked."),
             ChatMessage::user("What version is in version.txt?"),
             asked,
-            ChatMessage::tool_result("call_1", "1   v4.2.1"),
+            ChatMessage::tool_result("call_1", "version = v4.2.1"),
         ],
         timeout,
     )
@@ -432,7 +432,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
                 "Read status.txt, then report the number it contains with report_status.",
             ),
             first,
-            ChatMessage::tool_result("call_2", "1   7"),
+            ChatMessage::tool_result("call_2", "status = 7"),
         ],
         timeout,
     )
