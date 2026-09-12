@@ -109,7 +109,9 @@ impl Category {
     pub fn from_tool(tool: &str) -> Self {
         match tool {
             "read_file" | "list_dir" | "glob" | "grep" | "outline_file" | "git_status" | "git_diff"
-            | "env_info" | "memory_read" | "ask_user" => Category::Read,
+            // Looking at a picture in the project is a read like any other,
+            // and the tool refuses to leave the working directory.
+            | "view_image" | "env_info" | "memory_read" | "ask_user" => Category::Read,
             // Spawning grants nothing by itself: every call the child makes
             // goes through this same permission state.
             "spawn_agent" => Category::Read,
@@ -485,6 +487,7 @@ impl ToolExec for PermissionedTools {
             Verdict::Deny(reason) => ToolOutput {
                 content: format!("denied by permissions: {reason}"),
                 is_error: true,
+                images: Vec::new(),
             },
             Verdict::NeedApproval { diff } => {
                 let req = ApprovalRequest {
@@ -504,6 +507,7 @@ impl ToolExec for PermissionedTools {
                                   carry on with what you can do without it."
                             .into(),
                         is_error: true,
+                        images: Vec::new(),
                     },
                 }
             }
@@ -652,6 +656,11 @@ mod tests {
         for mode in [PermissionMode::Planning, PermissionMode::Manual, PermissionMode::AcceptEdits, PermissionMode::Bypass] {
             let state = PermissionState::new(mode, Arc::new(DenyAllGate));
             assert_eq!(state.decide(&call("read_file", r#"{"path":"a"}"#), None), Verdict::Allow);
+        assert_eq!(
+            state.decide(&call("view_image", r#"{"path":"d.png"}"#), None),
+            Verdict::Allow,
+            "opening a picture in the project is a read, not a change"
+        );
             assert_eq!(state.decide(&call("grep", r#"{"pattern":"x"}"#), None), Verdict::Allow);
             assert_eq!(state.decide(&call("web_fetch", r#"{"url":"https://x"}"#), None), Verdict::Allow);
         }
@@ -734,7 +743,7 @@ mod tests {
         impl ToolExec for Counting {
             async fn execute(&self, _call: &ToolCall) -> ToolOutput {
                 *self.runs.lock().expect("runs lock") += 1;
-                ToolOutput { content: "ran".into(), is_error: false }
+                ToolOutput { content: "ran".into(), is_error: false, images: Vec::new() }
             }
             fn specs(&self) -> Vec<ToolSpec> {
                 vec![]

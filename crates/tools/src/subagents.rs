@@ -44,6 +44,7 @@ impl ToolExec for CompositeTools {
             None => ToolOutput {
                 content: format!("unknown tool: {}", call.name),
                 is_error: true,
+                images: Vec::new(),
             },
         }
     }
@@ -101,6 +102,7 @@ impl ToolExec for ToolSubset {
             return ToolOutput {
                 content: format!("tool '{}' is not available to this subagent", call.name),
                 is_error: true,
+                images: Vec::new(),
             };
         }
         self.inner.execute(call).await
@@ -159,7 +161,7 @@ mod tests {
     #[async_trait]
     impl ToolExec for Recorder {
         async fn execute(&self, call: &ToolCall) -> ToolOutput {
-            ToolOutput { content: format!("ran {}", call.name), is_error: false }
+            ToolOutput { content: format!("ran {}", call.name), is_error: false, images: Vec::new() }
         }
         fn specs(&self) -> Vec<ToolSpec> {
             vec![

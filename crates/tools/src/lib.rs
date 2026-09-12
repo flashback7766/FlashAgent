@@ -10,6 +10,7 @@ pub mod env_tools;
 pub mod fs_tools;
 pub mod git;
 pub mod mcp;
+pub mod image_tool;
 pub mod memory_tools;
 pub mod outline;
 pub mod patch;
@@ -94,6 +95,9 @@ pub struct BuiltinTools {
     toolset_profile: std::sync::RwLock<ToolsetProfile>,
     web_enabled: Arc<AtomicBool>,
     context_window: Arc<std::sync::RwLock<Option<usize>>>,
+    /// Whether the model in use can see images. Set by the app from what the
+    /// server said about the model.
+    vision_supported: Arc<std::sync::atomic::AtomicBool>,
     mcp_manager: Arc<mcp::McpManager>,
 }
 
@@ -117,6 +121,7 @@ impl BuiltinTools {
             toolset_profile: std::sync::RwLock::new(config.toolset_profile.unwrap_or(ToolsetProfile::Auto)),
             web_enabled: Arc::new(AtomicBool::new(config.web_enabled.unwrap_or(false))),
             context_window: Arc::new(std::sync::RwLock::new(config.context_window)),
+            vision_supported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_manager,
         })
     }
@@ -149,6 +154,17 @@ impl BuiltinTools {
     }
 
     /// Update discovered context window size for adaptive toolset sizing (PHILOSOPHY.md §9).
+    /// Tell the tools whether the model can see images; `view_image` is only
+    /// offered, and only works, when it can.
+    pub fn set_vision_supported(&self, supported: bool) {
+        self.vision_supported.store(supported, Ordering::Relaxed);
+    }
+
+    /// Whether the model in use can see images.
+    pub fn vision_supported(&self) -> bool {
+        self.vision_supported.load(Ordering::Relaxed)
+    }
+
     pub fn set_context_window(&self, window: Option<usize>) {
         if let Ok(mut lock) = self.context_window.write() {
             *lock = window;
@@ -309,9 +325,14 @@ impl WritePreview for BuiltinTools {
 #[async_trait]
 impl ToolExec for BuiltinTools {
     async fn execute(&self, call: &ToolCall) -> ToolOutput {
+        // The only tool whose result is not text: it hands back the picture
+        // itself, so it does not go through the string dispatcher.
+        if call.name == "view_image" {
+            return image_tool::view_image(&self.cwd, &call.args_json, self.vision_supported());
+        }
         match self.dispatch(call).await {
-            Ok(text) => ToolOutput { content: truncate_output(text), is_error: false },
-            Err(e) => ToolOutput { content: format!("error: {e}"), is_error: true },
+            Ok(text) => ToolOutput { content: truncate_output(text), is_error: false, images: Vec::new() },
+            Err(e) => ToolOutput { content: format!("error: {e}"), is_error: true, images: Vec::new() },
         }
     }
 
@@ -425,7 +446,17 @@ impl ToolExec for BuiltinTools {
                 description: "Forget a memory that turned out to be wrong or no longer applies. Disabled in autonomous /goal mode".into(),
                 parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "One short line, in the user's language, saying what this call is for — e.g. 'Read the loop that applies the patch'. The user sees it instead of the raw call, so write one for every call, including reads and searches."}, "title": {"type": "string", "description": "Name of the memory to forget."}, "scope": {"type": "string", "enum": ["project", "global"], "description": "Use 'global' for anything about the USER — how they work, what they prefer, corrections they gave you — so it follows them into every project. Use 'project' only for facts about this codebase. A sentence that starts with 'I' or 'the user' is global."}}, "required": ["header", "title"]}"#.into(),
             });
-            // PHILOSOPHY.md §3: Web tools require explicit opt-in
+            // Only offered when the model can actually see: a tool it cannot use
+        // is a tool it will call and then apologise for.
+        if self.vision_supported() {
+            specs.push(ToolSpec {
+                name: "view_image".into(),
+                description: "Look at an image in the project — a diagram, a screenshot, a mockup. The picture itself comes back, so describe what you see rather than guessing from the file name.".into(),
+                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "One short line, in the user's language, saying what this call is for — e.g. 'Look at the architecture diagram'. The user sees it instead of the raw call."}, "path": {"type": "string", "description": "Path to the image inside the project (png, jpg, gif, webp, bmp)."}}, "required": ["header", "path"]}"#.into(),
+            });
+        }
+
+        // PHILOSOPHY.md §3: Web tools require explicit opt-in
             if self.web_enabled.load(Ordering::Relaxed) {
                 specs.push(ToolSpec {
                     name: "web_fetch".into(),
