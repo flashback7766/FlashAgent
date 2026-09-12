@@ -172,6 +172,8 @@ pub struct Page {
     pub rows: Vec<(usize, String)>,
     /// `(part, of)` when one release needed more than one screen.
     pub part: (usize, usize),
+    /// Index, within the release, of the first entry on this screen.
+    pub first_item: usize,
 }
 
 /// The paged "what arrived while you were away" screen.
@@ -213,14 +215,43 @@ fn style_inline(text: &str, base: &str) -> String {
             // the emphasis.
             let mut bold = false;
             for chunk in part.split("**") {
-                out.push_str(if bold { BRIGHT } else { base });
-                out.push_str(chunk);
+                let style = if bold { BRIGHT } else { base };
+                out.push_str(style);
+                out.push_str(&italicise(chunk, style));
                 bold = !bold;
             }
         }
         in_code = !in_code;
     }
     out.push_str(RESET);
+    out
+}
+
+/// Render `*emphasis*` as italic and drop the asterisks. An asterisk only
+/// opens emphasis when text follows it directly and only closes it when text
+/// precedes it, so a lone `*` in prose is left alone.
+fn italicise(text: &str, style: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '*' && i + 1 < chars.len() && !chars[i + 1].is_whitespace() && chars[i + 1] != '*'
+            && (i == 0 || !chars[i - 1].is_alphanumeric())
+        {
+            if let Some(close) = (i + 2..chars.len()).find(|&j| {
+                chars[j] == '*' && !chars[j - 1].is_whitespace() && (j + 1 == chars.len() || !chars[j + 1].is_alphanumeric())
+            }) {
+                out.push_str("\x1b[3m");
+                out.extend(&chars[i + 1..close]);
+                out.push_str("\x1b[23m");
+                out.push_str(style);
+                i = close + 1;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
     out
 }
 
@@ -261,10 +292,18 @@ impl WhatsNew {
     /// Re-flow, keeping the reader on the release they were reading: a resize
     /// or a change of detail must not throw away their place in the list.
     fn rebuild(&mut self) {
-        let seen_version = self.pages.get(self.page).map(|p| p.version.clone());
+        // Where the reader is: the release, and the first entry on screen.
+        // Keeping only the release sent someone who asked for more detail on
+        // the third screen of a long release back to its first.
+        let seen = self.pages.get(self.page).map(|p| (p.version.clone(), p.first_item));
         self.pages = layout(&self.releases, self.text_width(), self.body_rows(), self.expanded);
-        self.page = seen_version
-            .and_then(|v| self.pages.iter().position(|p| p.version == v))
+        self.page = seen
+            .and_then(|(version, item)| {
+                self.pages
+                    .iter()
+                    .rposition(|p| p.version == version && p.first_item <= item)
+                    .or_else(|| self.pages.iter().position(|p| p.version == version))
+            })
             .unwrap_or(0)
             .min(self.pages.len().saturating_sub(1));
         self.shown_at = Instant::now();
@@ -486,7 +525,14 @@ fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> V
         let mut entries: Vec<Vec<String>> = Vec::new();
         for item in &rel.items {
             let rendered = if let Some(head) = item.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-                vec![format!("  {BRIGHT}{head}{RESET}")]
+                // A heading after a list needs air above it; after a
+                // paragraph, which already ends in a blank row, it does not.
+                let after_blank = entries.last().is_none_or(|e: &Vec<String>| e.last().is_some_and(|r| r.is_empty()));
+                if after_blank {
+                    vec![format!("  {BRIGHT}{head}{RESET}")]
+                } else {
+                    vec![String::new(), format!("  {BRIGHT}{head}{RESET}")]
+                }
             } else if let Some(text) = item.strip_prefix(PROSE) {
                 // A letter is not a list: no marker, no folding to the first
                 // sentence, and a blank row after each paragraph.
@@ -511,7 +557,8 @@ fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> V
                         if i == 0 {
                             format!("  {ACCENT}›{RESET} {row}")
                         } else {
-                            format!("   {row}")
+                            // Under the text after "› ", not under the marker.
+                            format!("    {row}")
                         }
                     })
                     .collect()
@@ -536,10 +583,17 @@ fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> V
         }
 
         let total = chunks.len();
+        let mut first_item = 0;
         for (i, chunk) in chunks.into_iter().enumerate() {
+            let count = chunk.len();
             let mut page_rows = Vec::new();
             for (entry_idx, entry) in chunk.into_iter().enumerate() {
                 for row in entry {
+                    // A screen does not open on the blank row meant to
+                    // separate a heading from what came before it.
+                    if page_rows.is_empty() && row.is_empty() {
+                        continue;
+                    }
                     page_rows.push((entry_idx, row));
                 }
             }
@@ -548,7 +602,9 @@ fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> V
                 title: rel.title.clone(),
                 rows: page_rows,
                 part: (i + 1, total),
+                first_item,
             });
+            first_item += count;
         }
     }
     pages
@@ -762,6 +818,72 @@ mod tests {
         let log = format!("# Changelog\n\n## b260 — long\n\n{long_para}\n\n{long_para}\n\n{long_para}\n\n- one change\n");
         let view = WhatsNew::new(releases_between(&log, "b250", "b260"), "b260", 80, 20);
         assert!(view.pages() >= 2, "a letter taller than the window spans screens, got {}", view.pages());
+    }
+
+    fn long_release() -> Vec<Release> {
+        let mut items = vec![format!("{PROSE}{}", "opening words ".repeat(30))];
+        for i in 0..14 {
+            items.push(format!("Change number {i} does one thing. And then it explains the thing at some length, enough to fold."));
+        }
+        items.push("[Later]".to_string());
+        items.push("A change under the later heading.".to_string());
+        vec![Release { version: "b260".into(), title: "long".into(), items }]
+    }
+
+    #[test]
+    fn asking_for_detail_keeps_the_reader_on_the_screen_they_were_reading() {
+        let mut view = WhatsNew::new(long_release(), "b260", 80, 20);
+        assert!(view.pages() >= 3, "needs several screens, got {}", view.pages());
+        view.handle_key(KeyCode::Enter);
+        view.handle_key(KeyCode::Enter);
+        let reading = view.pages[view.page].first_item;
+        assert!(reading > 0, "moved off the first screen");
+        view.handle_key(KeyCode::Tab);
+        let now = &view.pages[view.page];
+        let next_first = view.pages.get(view.page + 1).map_or(usize::MAX, |p| p.first_item);
+        assert!(now.first_item <= reading && reading < next_first, "entry {reading} is not on screen {} ({}..{next_first})", view.page, now.first_item);
+        assert!(view.page > 0, "expanding did not send the reader back to the start");
+    }
+
+    #[test]
+    fn a_heading_gets_air_above_it_but_a_screen_never_opens_on_a_blank_row() {
+        let view = WhatsNew::new(long_release(), "b260", 80, 40);
+        for page in &view.pages {
+            assert!(!page.rows.first().is_some_and(|(_, r)| r.is_empty()), "screen {:?} opens on a blank row", page.part);
+        }
+        let all: Vec<String> = view.pages.iter().flat_map(|p| p.rows.iter().map(|(_, r)| crate::strip_ansi(r))).collect();
+        let at = all.iter().position(|r| r.trim() == "Later").expect("heading rendered");
+        if at > 0 && !view.pages.iter().any(|p| p.rows.first().is_some_and(|(_, r)| crate::strip_ansi(r).trim() == "Later")) {
+            assert!(all[at - 1].is_empty(), "no blank row before the heading: {:?}", &all[at.saturating_sub(2)..=at]);
+        }
+    }
+
+    #[test]
+    fn single_asterisk_emphasis_is_italic_and_the_marks_are_gone() {
+        let styled = style_inline("it reads *Thought: … (4s)* now, and 2 * 3 stays", TEXT);
+        assert_eq!(crate::strip_ansi(&styled), "it reads Thought: … (4s) now, and 2 * 3 stays");
+        assert!(styled.contains("\x1b[3m"), "the emphasis is kept, as italic");
+        let code = style_inline("tools like `get_*` stay literal", TEXT);
+        assert_eq!(crate::strip_ansi(&code), "tools like get_* stay literal");
+    }
+
+    #[test]
+    fn wrapped_rows_line_up_under_their_text() {
+        let long = "Approval cards name files relative to the project and the preview rows go to the change itself instead of repeating the file name".to_string();
+        let rel = vec![Release { version: "b260".into(), title: String::new(), items: vec![long, format!("{PROSE}{}", "word ".repeat(40))] }];
+        let mut view = WhatsNew::new(rel, "b260", 60, 40);
+        view.handle_key(KeyCode::Tab);
+        let rows: Vec<String> = view.pages[0].rows.iter().map(|(_, r)| crate::strip_ansi(r)).collect();
+        let bullet: Vec<&String> = rows.iter().take_while(|r| !r.trim().starts_with("word")).filter(|r| !r.is_empty()).collect();
+        assert!(bullet.len() > 1, "{rows:?}");
+        // Columns, not bytes: the marker is one column but three bytes.
+        let text_col = bullet[0][..bullet[0].find("Approval").unwrap()].chars().count();
+        for r in &bullet[1..] {
+            assert_eq!(r.len() - r.trim_start().len(), text_col, "continuation not under the text: {r:?}");
+        }
+        let prose: Vec<&String> = rows.iter().filter(|r| r.trim().starts_with("word")).collect();
+        assert!(prose.len() > 1);
+        assert!(prose.iter().all(|r| r.len() - r.trim_start().len() == 2), "prose rows share one indent: {prose:?}");
     }
 
     #[test]
