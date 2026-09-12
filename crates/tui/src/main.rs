@@ -4584,7 +4584,7 @@ async fn generate_llm_recap_and_suggestion(
     let system_prompt =
         "You are a conversation analyzer. Return strictly JSON with the following fields:\n\
         {\n  \
-          \"suggestion\": \"the next follow-up prompt FROM THE USER to the assistant in imperative mood (e.g. 'Show Swift code examples', 'Explain Swift features in detail', 'Explain how safety works'). Strictly from the user's perspective! Never write from the assistant's perspective! Do not repeat the existing query!\",\n  \
+          \"suggestion\": \"the next message the USER will send to the assistant, in imperative mood, about the work just done (e.g. 'Show Swift code examples', 'Explain how safety works', 'Run the tests and fix what fails'). It must be something the assistant can answer on its own. NEVER ask the user for information about themselves, their project or what they need: 'Tell me about your project', 'Tell me what help you need' are WRONG - those are the assistant talking to the user. Write it in the language of the conversation. Do not repeat the existing query!\",\n  \
           \"recap\": \"one concise past-tense sentence of what was explained or done\"\n\
         }\n\
         Do NOT generate any internal thinking or explanations. Start immediately with { and return only valid JSON.";
@@ -4702,7 +4702,7 @@ fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Option<String>)
 
 fn sanitize_user_suggestion(s: &str) -> Option<String> {
     let mut trimmed = s.trim().trim_matches('"').trim_matches('\'').trim();
-    if trimmed.is_empty() || is_generic_suggestion(trimmed) {
+    if trimmed.is_empty() || is_generic_suggestion(trimmed) || is_addressed_to_the_user(trimmed) {
         return None;
     }
 
@@ -4765,6 +4765,34 @@ fn sanitize_user_suggestion(s: &str) -> Option<String> {
     } else {
         Some(clean)
     }
+}
+
+/// A suggestion is a message the user is about to send TO the model. Models
+/// often return the opposite: the assistant asking the *user* for information
+/// ("Расскажи о своём проекте", "Tell me about your setup"). Pressing → on one
+/// of those sends the user their own question back, so they are dropped.
+///
+/// The giveaway is the object, not the verb: "расскажи о архитектуре" is a
+/// fine prompt, "расскажи о своём проекте" is the assistant talking to you.
+fn is_addressed_to_the_user(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    // Russian: reflexive/second-person possessives always point at whoever is
+    // being addressed, and here that is the user.
+    const RU_POSSESSIVE: &[&str] = &[
+        "свой", "своё", "свое", "своего", "своей", "своем", "своём", "своих", "свою", "своими",
+        "твой", "твоё", "твое", "твоей", "твоем", "твоём", "твои", "твоих",
+        "ваш ", "ваша", "ваше", "вашей", "вашем", "ваши", "вашу",
+    ];
+    // Phrases that only make sense coming from the assistant.
+    const HANDOFF: &[&str] = &[
+        "нужна помощь", "нужна ли помощь", "чем помочь", "чем могу помочь", "чем я могу помочь",
+        "что тебя интересует", "что вас интересует", "дай знать", "дайте знать", "если хочешь",
+        "если хотите", "уточни, что", "уточните, что",
+        "your project", "your code", "your task", "your goal", "your setup", "your repo",
+        "your codebase", "your use case", "your requirements", "what help", "how can i help",
+        "let me know", "feel free to", "if you'd like", "if you would like",
+    ];
+    RU_POSSESSIVE.iter().chain(HANDOFF).any(|needle| lower.contains(needle))
 }
 
 fn is_assistant_phrased(text: &str) -> bool {
@@ -5301,6 +5329,43 @@ mod tests {
         assert_eq!(sanitize_user_suggestion("What's next?"), None);
         assert_eq!(sanitize_user_suggestion("Next"), None);
         assert_eq!(sanitize_user_suggestion("Continue"), None);
+    }
+
+    #[test]
+    fn suggestions_the_assistant_aimed_at_the_user_are_dropped() {
+        // Pressing → sends the suggestion to the model, so a question the
+        // assistant is asking *the user* is worse than no suggestion at all.
+        for bad in [
+            "Расскажи о своём проекте и опиши, в чём нужна помощь",
+            "Опиши свою задачу подробнее",
+            "Напиши, чем могу помочь",
+            "Дай знать, если хочешь примеры",
+            "Tell me about your project",
+            "Let me know what you need",
+            "Describe your setup and your goal",
+            "Feel free to ask about anything else",
+        ] {
+            assert_eq!(sanitize_user_suggestion(bad), None, "should have been dropped: {bad}");
+        }
+    }
+
+    #[test]
+    fn real_follow_up_prompts_still_pass() {
+        // The verb is not the giveaway — the object is. These are things a
+        // user genuinely sends next, and they must survive the filter.
+        for (input, expected) in [
+            ("Расскажи об архитектуре агентного цикла", "Расскажи об архитектуре агентного цикла"),
+            ("Объясни, почему тест падает", "Объясни, почему тест падает"),
+            ("Запусти тесты и почини то, что упало", "Запусти тесты и почини то, что упало"),
+            ("Explain how the permission modes differ", "Explain how the permission modes differ"),
+            ("Show the diff before applying it", "Show the diff before applying it"),
+        ] {
+            assert_eq!(
+                sanitize_user_suggestion(input).as_deref(),
+                Some(expected),
+                "should have been kept: {input}"
+            );
+        }
     }
 
 
