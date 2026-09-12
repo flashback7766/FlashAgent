@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+Found by running every surface of the app against a real model and reading
+what the server actually received.
+
+- Fixed: switching models kept the previous model's thinking profile, so
+  FlashAgent asked a model that cannot reason for a reasoning effort. LM Studio
+  logged *"'minimal' reasoning effort is not directly supported"* on every
+  turn. A profile belongs to a model, and is now re-derived when the model
+  changes; a model discovery knows nothing about gets no thinking fields at all.
+- Fixed: a model switch also overwrote your effort setting — `auto` became
+  `off` the moment the server loaded a model without reasoning, and stayed off
+  for every model afterwards. The setting is yours; `/effort` now says "this
+  model does not reason; kept for the next one" instead of silently changing it.
+- A turn parked on an approval card said "Generating response...". It is not
+  generating anything; it says **Waiting for your answer**.
+- Esc on an empty prompt quit immediately. It now asks, and the session is
+  saved either way.
+- Tool cards keep the facts next to the model's header: `Create note.txt with
+  text hello · note.txt +1`. The header said what it meant to do; only the card
+  says what happened to the tree. A header that already names the file gets
+  only the part it left out.
+- A declined tool call told the model "denied by user", which one model read as
+  a privilege error and started asking for sudo. It now says the user declined,
+  and not to retry or work around it.
+- `/diff` said "working tree clean" with six untracked files in the directory.
+  It now says what it actually checked: tracked files, and how many untracked
+  ones it did not.
+- `/export` wrote `session_session_1789.md`.
+- Skills are listed by their own `description:`, not "Skill defined in greet.md".
+- A resumed `/goal` showed its whole internal directive as if you had typed it.
+
 ## b246 — memory that survives the session
 
 - The what's-new screen opens with the claims, not the whole text: one line

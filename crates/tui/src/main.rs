@@ -165,6 +165,7 @@ struct FrameState<'a> {
     turn_phase: Option<&'a TurnPhase>,
     /// A release-channel switch waiting for a yes or no.
     channel_prompt: Option<&'a str>,
+    quit_prompt: Option<&'a str>,
     context_warn_threshold: usize,
 }
 
@@ -542,6 +543,7 @@ impl Renderer {
 fn format_status_left(
     running: bool,
     is_goal_active: bool,
+    awaiting_user: bool,
     goal_progress: Option<&str>,
     mode_label: &str,
     token_tracker: Option<&TokenTracker>,
@@ -563,9 +565,12 @@ fn format_status_left(
         };
         // During a goal the budget burn-down is the useful thing to watch;
         // "Generating response..." says nothing a spinner does not.
-        let activity = match goal_progress {
-            Some(p) => format!("\x1b[38;2;168;199;250m{p}\x1b[0m"),
-            None => "\x1b[38;2;168;199;250mGenerating response...\x1b[0m".to_string(),
+        let activity = match (awaiting_user, goal_progress) {
+            // A turn stopped at an approval card is not generating anything;
+            // it is waiting for the person who has to answer it.
+            (true, _) => "\x1b[38;2;225;175;95mWaiting for your answer\x1b[0m".to_string(),
+            (false, Some(p)) => format!("\x1b[38;2;168;199;250m{p}\x1b[0m"),
+            (false, None) => "\x1b[38;2;168;199;250mGenerating response...\x1b[0m".to_string(),
         };
         format!("  {face}{mode_str} \x1b[38;2;100;95;90m·\x1b[0m {activity}{expand_status}")
     } else if let Some(stats) = token_tracker.and_then(|tt| tt.format_stats_width(budget)) {
@@ -702,13 +707,13 @@ impl Renderer {
                 format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
             ));
             custom_cursor_col = Some(0);
-        } else if let Some(prompt) = st.channel_prompt {
+        } else if let Some(prompt) = st.channel_prompt.or(st.quit_prompt) {
+            let title = if st.quit_prompt.is_some() { " Quit FlashAgent " } else { " Switch release channel " };
             // Same treatment as an approval card: this replaces the binary
             // under the user, so it is asked in the same place and with the
             // same weight as anything else that cannot be undone by typing.
             let border_color = "\x1b[38;2;225;175;95m";
             let reset = "\x1b[0m";
-            let title = " Switch release channel ";
             let dash_w = inner_w.saturating_sub(visible_width(title) + 2);
             tail.push((
                 LineKind::System,
@@ -947,6 +952,12 @@ impl Renderer {
             } else {
                 "  \x1b[38;2;135;130;125m↑/↓ / 1-N — select · enter — confirm · esc — cancel\x1b[0m".to_string()
             }
+        } else if st.quit_prompt.is_some() {
+            // The question under the cursor owns the keys; the usual hints
+            // would be answering a different question.
+            "  \x1b[38;2;135;130;125my / enter — quit · n / esc — stay\x1b[0m".to_string()
+        } else if st.channel_prompt.is_some() {
+            "  \x1b[38;2;135;130;125my / enter — switch · n / esc — keep the current channel\x1b[0m".to_string()
         } else if sampling_view.is_some() {
             "  \x1b[38;2;135;130;125mtype digits/./- · ←/→ adjust · ↑/↓ navigate · enter apply · esc back\x1b[0m".to_string()
         } else if settings_view.is_some() {
@@ -1088,6 +1099,7 @@ impl Renderer {
         let left_telemetry = format_status_left(
             st.running,
             st.is_goal_active,
+            gate.pending().is_some() || question_gate.pending().is_some(),
             st.goal_progress,
             st.mode.label(),
             st.token_tracker,
@@ -1605,9 +1617,23 @@ fn build_effort_menu(
     let mut items = Vec::new();
     // Auto is the one setting that changes behind the user's back, so it is
     // the one that has to say what it has decided and why.
-    let auto_desc = match memory.explain(model) {
-        Some(learned) => format!("Auto (per turn; learned {learned})"),
-        None => "Auto (dynamically adjusts thinking per turn)".to_string(),
+    // The profile is empty both for "cannot reason" and for "not discovered
+    // yet"; discovery is the one that can tell them apart.
+    let can_think = match source.profile() {
+        Some(p) => p.supported,
+        None => source
+            .discovery()
+            .and_then(|d| d.models.iter().find(|m| m.id == model).map(|m| m.thinking.supported))
+            .unwrap_or(true),
+    };
+    let auto_desc = if !can_think {
+        // The setting is kept, but saying it is in force would be a lie.
+        "Auto (this model does not reason; kept for the next one)".to_string()
+    } else {
+        match memory.explain(model) {
+            Some(learned) => format!("Auto (per turn; learned {learned})"),
+            None => "Auto (dynamically adjusts thinking per turn)".to_string(),
+        }
     };
     items.push(SelectItem::with_description(
         "auto",
@@ -2162,6 +2188,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     // must not take that spot.
     let mut background: Option<BackgroundNotice> = None;
     let mut channel_switch: Option<ChannelSwitch> = None;
+    // Esc used to quit outright, which loses a session to one stray keypress.
+    let mut quit_confirm = false;
     let mut turn_phase = TurnPhase::Waiting;
     // Auto effort guesses the task before the model has said a word. How its
     // turns actually go is the only evidence of whether the guess fits this
@@ -2409,6 +2437,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         let channel_prompt: Option<String> = channel_switch.as_ref().map(|sw| {
             channel_switch_warning(sw.to, flashagent_svc::updater::current_version(), &sw.target)
         });
+        let quit_prompt: Option<&str> = quit_confirm.then_some(
+            "Quit FlashAgent? The session is saved either way and comes back with --resume.",
+        );
         let goal_progress: Option<String> =
             goal_ledger.as_ref().filter(|_| running).map(|l| l.progress());
         let live_prefill = token_tracker.live_prefill_status();
@@ -2461,6 +2492,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 ttft_display: if app_config.show_ttft { ttft_display.as_deref() } else { None },
                 background: background.as_ref().map(|b| b.text.as_str()),
                 channel_prompt: channel_prompt.as_deref(),
+                quit_prompt,
                 turn_phase: running.then_some(&turn_phase),
                 background_style: background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                 context_warn_threshold: app_config.context_warn_threshold,
@@ -2670,9 +2702,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         if model_changed {
                             app_config.model = current_model.clone();
                             let _ = app_config.save();
-                            if !active.thinking.supported {
-                                current_effort = "off".to_string();
-                            } else if current_effort == "off" || current_effort.is_empty() {
+                            // The effort is the user's choice, not the
+                            // server's. A model that cannot reason simply
+                            // receives no thinking fields — silently turning
+                            // "auto" into "off" here lost the setting for
+                            // every model afterwards.
+                            if current_effort.is_empty() {
                                 current_effort = "auto".to_string();
                             }
                         }
@@ -2984,6 +3019,20 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 // The channel card owns the keyboard while it is up: it is a
                 // yes-or-no about replacing the binary, and typing past it
                 // would leave the answer ambiguous.
+                if quit_confirm {
+                    quit_confirm = false;
+                    let yes = matches!(
+                        code,
+                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('\u{043d}')
+                            | KeyCode::Char('\u{041d}') | KeyCode::Enter
+                    );
+                    if yes {
+                        break 'main_loop;
+                    }
+                    renderer.request_reprint();
+                    continue;
+                }
+
                 if let Some(sw) = channel_switch.take() {
                     let yes = matches!(
                         code,
@@ -3381,9 +3430,11 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 if let Some(disc) = source.discovery() {
                                     if let Some(m) = disc.models.iter().find(|m| m.id == current_model) {
                                         current_context = m.context_display();
-                                        if !m.thinking.supported {
-                                            current_effort = "off".to_string();
-                                        } else if current_effort == "off" || current_effort.is_empty() {
+                                        // The effort the user picked survives
+                                        // the switch; a model that cannot
+                                        // reason just receives no thinking
+                                        // fields.
+                                        if current_effort.is_empty() {
                                             current_effort = "auto".to_string();
                                         }
                                     }
@@ -3722,7 +3773,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             custom_placeholder = None;
                             renderer.request_reprint();
                         } else {
-                            break 'main_loop;
+                            quit_confirm = true;
+                            renderer.request_reprint();
                         }
                     }
                     // F1: toggle context modal
@@ -4827,6 +4879,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         ttft_display: None,
                                         background: background.as_ref().map(|b| b.text.as_str()),
                                         channel_prompt: None,
+                                        quit_prompt: None,
                                         turn_phase: None,
                 background_style: background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                                         context_warn_threshold: app_config.context_warn_threshold,
@@ -4913,7 +4966,20 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     Ok(out) => {
                                         let s = String::from_utf8_lossy(&out.stdout);
                                         if s.trim().is_empty() {
-                                            notice!("[Git working tree clean — no unstaged changes]");
+                                            // `git diff` says nothing about files
+                                            // git has never seen, and "clean" next
+                                            // to three untracked files is a lie.
+                                            let untracked = std::process::Command::new("git")
+                                                .args(["ls-files", "--others", "--exclude-standard"])
+                                                .output()
+                                                .ok()
+                                                .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+                                                .unwrap_or(0);
+                                            match untracked {
+                                                0 => notice!("[No changes to tracked files]"),
+                                                1 => notice!("[No changes to tracked files · 1 untracked file]"),
+                                                n => notice!(&format!("[No changes to tracked files · {n} untracked files]")),
+                                            }
                                         } else {
                                             chat.push_system(&format!("Git diff summary:\n{}", s.trim_end()));
                                         }
@@ -4961,10 +5027,13 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 let format_arg = trimmed.strip_prefix("/export ").map(|s| s.trim().to_lowercase()).unwrap_or_else(|| "md".to_string());
                                 input.clear();
                                 autocomplete_idx = 0;
+                                // The id already starts with "session_"; the
+                                // old line produced session_session_1789.md.
+                                let stem = session_id.strip_prefix("session_").unwrap_or(&session_id);
                                 let filename = match format_arg.as_str() {
-                                    "html" => format!("session_{session_id}.html"),
-                                    "jsonl" | "json" => format!("session_{session_id}.jsonl"),
-                                    _ => format!("session_{session_id}.md"),
+                                    "html" => format!("session_{stem}.html"),
+                                    "jsonl" | "json" => format!("session_{stem}.jsonl"),
+                                    _ => format!("session_{stem}.md"),
                                 };
                                 let content = match format_arg.as_str() {
                                     "html" => {
@@ -5297,6 +5366,17 @@ fn welcome_reveal_rows(started_at: std::time::Instant) -> Option<usize> {
 }
 
 fn extract_user_prompt(content: &str) -> &str {
+    // A resumed goal used to show its whole scaffolding as if the user had
+    // typed it: "[AUTONOMOUS GOAL DIRECTIVE] You are operating in fully...".
+    // What they typed was the goal.
+    if content.starts_with("[AUTONOMOUS GOAL DIRECTIVE]") {
+        if let Some(rest) = content.split_once("Target goal:") {
+            let goal = rest.1.lines().next().unwrap_or("").trim();
+            if !goal.is_empty() {
+                return goal;
+            }
+        }
+    }
     if let Some((_mem, user_part)) = content.rsplit_once("\n\n---\n\n") {
         user_part.trim()
     } else {
@@ -6228,6 +6308,14 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_goal_shows_the_goal_not_its_scaffolding() {
+        let directive = "[AUTONOMOUS GOAL DIRECTIVE]\nYou are operating in fully autonomous /goal mode.\nTarget goal: Создай файл hello.txt\n\nAutonomous Rules:\n1. Do NOT ask...";
+        assert_eq!(extract_user_prompt(directive), "Создай файл hello.txt");
+        assert_eq!(extract_user_prompt("plain question"), "plain question");
+        assert_eq!(extract_user_prompt("memory block\n\n---\n\nthe question"), "the question");
+    }
+
+    #[test]
     fn a_recap_cut_off_by_the_token_limit_is_still_shown() {
         // Observed for real: the model spent its whole budget thinking and
         // the JSON never closed, so no recap ever appeared. The recap is the
@@ -6398,7 +6486,7 @@ mod tests {
         tracker.last_ttft = Some(std::time::Duration::from_millis(1770));
 
         // When running is true, Line 3 must show "Generating response..." and NOT duplicate prompt tokens or TTFT
-        let status = format_status_left(true, false, None, "Normal", Some(&tracker), 80, "", 0);
+        let status = format_status_left(true, false, false, None, "Normal", Some(&tracker), 80, "", 0);
         assert!(status.contains("Generating response..."));
         assert!(status.contains("[Normal]"));
         assert!(!status.contains("4.9K"));
@@ -6407,7 +6495,7 @@ mod tests {
 
         // When running is false, Line 3 displays the completed turn telemetry
         tracker.on_finished();
-        let status_done = format_status_left(false, false, None, "Normal", Some(&tracker), 80, "", 0);
+        let status_done = format_status_left(false, false, false, None, "Normal", Some(&tracker), 80, "", 0);
         assert!(status_done.contains("4.9K prompt"));
         assert!(status_done.contains("TTFT 1.77s"));
         assert!(status_done.contains("44.4 tg"));
@@ -6417,11 +6505,11 @@ mod tests {
     #[test]
     fn test_format_status_left_goal_active_modes() {
         let tracker = TokenTracker::new("default".to_string());
-        let status_running = format_status_left(true, true, None, "Autonomous", Some(&tracker), 80, "", 0);
+        let status_running = format_status_left(true, true, false, None, "Autonomous", Some(&tracker), 80, "", 0);
         assert!(status_running.contains("[Goal: Autonomous]"));
         assert!(status_running.contains("Generating response..."));
 
-        let status_ready = format_status_left(false, true, None, "Autonomous", None, 80, "", 0);
+        let status_ready = format_status_left(false, true, false, None, "Autonomous", None, 80, "", 0);
         assert!(status_ready.contains("[Goal: Autonomous]"));
         assert!(status_ready.contains("Ready"));
     }
@@ -6432,6 +6520,7 @@ mod tests {
         let status = format_status_left(
             true,
             true,
+            false,
             Some("step 12/250 · 4.2k tok · 3m05s/1h0m"),
             "Autonomous",
             Some(&tracker),
@@ -6442,6 +6531,11 @@ mod tests {
         assert!(status.contains("step 12/250"), "{status}");
         assert!(status.contains("3m05s/1h0m"), "{status}");
         assert!(!status.contains("Generating response..."), "{status}");
+
+        // A turn parked on an approval card is not generating anything.
+        let waiting = format_status_left(true, false, true, None, "Manual", Some(&tracker), 80, "", 0);
+        assert!(waiting.contains("Waiting for your answer"), "{waiting}");
+        assert!(!waiting.contains("Generating response..."), "{waiting}");
     }
 
     #[test]
@@ -6568,13 +6662,13 @@ mod tests {
     #[test]
     fn the_face_keeps_the_user_company_only_while_working() {
         let tracker = TokenTracker::new("default".to_string());
-        let working = format_status_left(true, false, None, "Normal", Some(&tracker), 80, "", 0);
+        let working = format_status_left(true, false, false, None, "Normal", Some(&tracker), 80, "", 0);
         assert!(working.contains("(•_•)"), "{working}");
-        let blinking = format_status_left(true, false, None, "Normal", Some(&tracker), 80, "", 46);
+        let blinking = format_status_left(true, false, false, None, "Normal", Some(&tracker), 80, "", 46);
         assert!(blinking.contains("(-_-)"), "{blinking}");
         // Idle the mascot lives on the welcome card; two of them would be one
         // too many.
-        let idle = format_status_left(false, false, None, "Normal", None, 80, "", 0);
+        let idle = format_status_left(false, false, false, None, "Normal", None, 80, "", 0);
         assert!(!idle.contains("(•_•)"), "{idle}");
     }
 

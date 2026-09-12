@@ -105,8 +105,34 @@ impl OpenAiCompat {
 
     /// Switch or set the active model ID.
     pub fn set_model(&self, model: impl Into<String>) {
-        if let Ok(mut lock) = self.model.write() {
-            *lock = model.into();
+        let model = model.into();
+        let changed = match self.model.write() {
+            Ok(mut lock) => {
+                let changed = *lock != model;
+                *lock = model.clone();
+                changed
+            }
+            Err(_) => return,
+        };
+        if !changed {
+            return;
+        }
+
+        // A thinking profile belongs to a model, not to a connection. Keeping
+        // the old one means asking a model that cannot reason for a reasoning
+        // effort — the server warns, and the request carries fields the model
+        // has no use for. What discovery already knows about the new model is
+        // the answer; when it knows nothing, so do we.
+        let derived = self.discovery.read().ok().and_then(|d| {
+            d.as_ref().and_then(|disc| {
+                disc.models
+                    .iter()
+                    .find(|m| m.id == model)
+                    .map(|m| m.thinking.clone())
+            })
+        });
+        if let Ok(mut lock) = self.profile.write() {
+            *lock = derived;
         }
     }
 
@@ -225,6 +251,9 @@ impl OpenAiCompat {
     fn body_at(&self, messages: &[ChatMessage], tools: &[ToolSpec], options: &crate::types::TurnOptions, fields: Fields) -> serde_json::Value {
         let current_model = self.model();
 
+        // No discovered profile means the model's abilities are unknown, not
+        // that it has every preset: the default is a guess, and a wrong guess
+        // here puts fields in the request that the server logs warnings about.
         let current_profile = self.profile.read().ok().and_then(|p| p.clone()).unwrap_or_default();
         let resolved_effort: Option<String> = if let Some(effort_str) = &options.custom_effort {
             Some(effort_str.clone())
@@ -546,6 +575,29 @@ mod tests {
     use super::*;
     use crate::LlmBackend;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn switching_models_does_not_keep_the_old_model_s_thinking_profile() {
+        // LM Studio warned: "'minimal' reasoning effort is not directly
+        // supported" — we were still asking with the previous model's
+        // profile after the server switched models under us.
+        let llm = OpenAiCompat::new("http://127.0.0.1:1234/v1", "thinker", None).with_profile(
+            crate::thinking::ThinkingProfile {
+                presets: vec!["off".into(), "on".into()],
+                protocol: crate::thinking::ThinkingProtocol::LmStudio,
+                supported: true,
+                default_preset: Some("on".into()),
+            },
+        );
+        assert!(llm.profile().is_some_and(|p| p.supported));
+        llm.set_model("a-model-that-cannot-reason");
+        assert!(
+            llm.profile().is_none(),
+            "an unknown model inherits nothing from the one before it"
+        );
+        llm.set_model("a-model-that-cannot-reason");
+        assert!(llm.profile().is_none(), "setting the same model again changes nothing");
+    }
 
     #[test]
     fn the_learned_effort_correction_is_never_more_than_one_step() {
