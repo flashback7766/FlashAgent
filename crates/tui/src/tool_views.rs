@@ -7,7 +7,7 @@
 //!   (`\x1b[48;2;22;38;60m` / `\x1b[38;2;145;195;255m`) and folding dividers.
 //! - Shell Commands: Boxed card with `~/FlashAgent $ <cmd>`, yellow command,
 //!   white flags, output lines with `- And N More lines...` folding.
-//! - Directory Analysis: `Analyzed 📁 <path> ⌵`, indented `📄 <file>` / `📁 <dir>`,
+//! - Directory Analysis: `Analyzed <path> ⌵`, indented entries (`<dir>/` keeps its slash),
 //!   capped with `- And 56 More...`.
 //! - Grep / Search: Grouped by file, cyan line numbers, bold yellow query match,
 //!   `- And N More matches...`.
@@ -15,7 +15,6 @@
 //! - Memory, Git, Web, MCP tools.
 
 use crate::{clip_ansi, visible_width, LineKind, RenderLine};
-use std::path::Path;
 
 // ANSI Colors matching FlashAgent Material 3 Expressive palette
 const RESET: &str = "\x1b[0m";
@@ -32,18 +31,6 @@ const BG_DEL: &str = "\x1b[48;2;65;20;25m";
 const BG_ADD: &str = "\x1b[48;2;20;55;30m";
 const BG_READ: &str = "\x1b[48;2;22;38;60m";
 const TEXT_READ: &str = "\x1b[38;2;145;195;255m";
-
-/// File icon helper based on extension.
-pub fn tool_file_icon(path: &str) -> &'static str {
-    let ext = Path::new(path).extension().and_then(|s| s.to_str()).unwrap_or("");
-    match ext {
-        "rs" => "🦀",
-        "toml" | "yaml" | "yml" | "json" => "⚙",
-        "md" | "txt" => "📄",
-        "sh" | "bash" => "$",
-        _ => "📄",
-    }
-}
 
 /// Helper to render centered fold line: `──────── +N more lines ────────`
 pub fn render_fold_line(text: &str, width: usize) -> String {
@@ -186,8 +173,8 @@ pub fn render_command_card(
 /// Render directory exploration card (Screenshot 3).
 ///
 /// Features:
-/// - Header: `Analyzed 📁 .audit ⌵`
-/// - Indented entries: `  📄 filename` / `  📁 dirname/`
+/// - Header: `Analyzed .audit ⌵`
+/// - Indented entries: `  filename` / `  dirname/`
 /// - Capped with: `  - And 56 More...`
 pub fn render_directory_card(
     path: &str,
@@ -197,12 +184,11 @@ pub fn render_directory_card(
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
     let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
-    let icon = "📁";
 
     let header = if is_running {
-        format!("  {TEXT_MUTED}Analyzing{RESET} {icon} {TEXT_BRIGHT}{path}{RESET} ⠋")
+        format!("  {TEXT_MUTED}Analyzing{RESET} {TEXT_BRIGHT}{path}{RESET} ⠋")
     } else {
-        format!("  {TEXT_MUTED}Analyzed{RESET} {icon} {TEXT_BRIGHT}{path}{RESET} {chevron}")
+        format!("  {TEXT_MUTED}Analyzed{RESET} {TEXT_BRIGHT}{path}{RESET} {chevron}")
     };
     lines.push((LineKind::Tool, header));
 
@@ -212,12 +198,7 @@ pub fn render_directory_card(
         let display_count = raw_entries.len().min(MAX_ENTRIES);
 
         for &entry in &raw_entries[..display_count] {
-            let is_dir = entry.ends_with('/');
-            let entry_icon = if is_dir { "📁" } else { tool_file_icon(entry) };
-            lines.push((
-                LineKind::Tool,
-                format!("    {entry_icon} {TEXT_BRIGHT}{entry}{RESET}"),
-            ));
+            lines.push((LineKind::Tool, format!("    {TEXT_BRIGHT}{entry}{RESET}")));
         }
 
         if raw_entries.len() > MAX_ENTRIES {
@@ -235,7 +216,7 @@ pub fn render_directory_card(
 /// Render file reading / code inspection card (Screenshot 1 styling in soft blue).
 ///
 /// Features:
-/// - Header: `Read 📄 src/main.rs (120 lines) ⌵`
+/// - Header: `Read src/main.rs (120 lines) ⌵`
 /// - Two-column line numbers with soft blue background (`\x1b[48;2;22;38;60m`)
 ///   and ice-cyan text (`\x1b[38;2;145;195;255m`).
 /// - Folded unread blocks with `──────── +N more lines ────────`.
@@ -247,14 +228,13 @@ pub fn render_read_card(
     width: usize,
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
-    let icon = tool_file_icon(path);
     let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
 
     let raw_text = content.unwrap_or("");
     let file_lines: Vec<&str> = raw_text.lines().collect();
     let count = file_lines.len();
 
-    let header = format!("  {TEXT_MUTED}Read{RESET} {icon} {TEXT_BRIGHT}{path}{RESET} {TEXT_MUTED}({count} lines){RESET} {chevron}");
+    let header = format!("  {TEXT_MUTED}Read{RESET} {TEXT_BRIGHT}{path}{RESET} {TEXT_MUTED}({count} lines){RESET} {chevron}");
     lines.push((LineKind::Tool, header));
 
     if offset > 0 {
@@ -354,7 +334,7 @@ pub fn parse_diff_to_rows(diff_text: &str) -> Vec<DiffRow> {
 /// Render file edits & creation card (Screenshot 1).
 ///
 /// Features:
-/// - Header: `Edited 📄 src/lib.rs (+12 -4) ⌵`
+/// - Header: `Edited src/lib.rs (+12 -4) ⌵`
 /// - Two-column line numbers: `old_num new_num │ line`
 /// - Deletions: dark red background (`\x1b[48;2;65;20;25m`) + red text (`\x1b[38;2;245;120;120m`).
 /// - Additions: dark green background (`\x1b[48;2;20;55;30m`) + green text (`\x1b[38;2;135;220;145m`).
@@ -368,12 +348,11 @@ pub fn render_edit_card(
     width: usize,
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
-    let icon = tool_file_icon(path);
     let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
 
     let action_verb = if is_write { "Wrote" } else { "Edited" };
     let header = format!(
-        "  {TEXT_MUTED}{action_verb}{RESET} {icon} {TEXT_BRIGHT}{path}{RESET} {TEXT_GREEN}+{added}{RESET} {TEXT_RED}-{deleted}{RESET} {chevron}"
+        "  {TEXT_MUTED}{action_verb}{RESET} {TEXT_BRIGHT}{path}{RESET} {TEXT_GREEN}+{added}{RESET} {TEXT_RED}-{deleted}{RESET} {chevron}"
     );
     lines.push((LineKind::Tool, header));
 
@@ -651,6 +630,29 @@ pub fn render_generic_card(
 mod tests {
     use super::*;
 
+    /// Emoji in a tool card are decoration on a line that already says what
+    /// happened, and they are two columns wide next to one-column glyphs, so
+    /// the columns in a listing never line up. Keep them out.
+    #[test]
+    fn tool_cards_carry_no_emoji() {
+        let cards = [
+            render_directory_card("src", Some("main.rs\nmod/\nnotes.md"), false, 100),
+            render_read_card("src/main.rs", Some("fn main() {}"), 0, 50, 100),
+            render_edit_card("src/lib.rs", 3, 1, None, false, 100),
+        ];
+        for card in cards {
+            for (_, line) in &card {
+                for ch in line.chars() {
+                    let c = ch as u32;
+                    assert!(
+                        !(0x1F000..=0x1FAFF).contains(&c) && c != 0x2699 && c != 0x26A1,
+                        "emoji {ch:?} crept back into a tool card: {line}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_render_command_card_prompt_and_folding() {
         let output = (1..=25).map(|i| format!("Compiling package_{i} v0.1.0")).collect::<Vec<_>>().join("\n");
@@ -668,8 +670,8 @@ mod tests {
         let lines = render_directory_card(".audit", Some(&entries), false, 80);
         let text_dump = lines.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
         let plain = crate::strip_ansi(&text_dump);
-        assert!(plain.contains("Analyzed 📁 .audit"));
-        assert!(plain.contains("📄 2026-09-01-audit-step.md"));
+        assert!(plain.contains("Analyzed .audit"));
+        assert!(plain.contains("2026-09-01-audit-step.md"));
         assert!(plain.contains("- And 5 More..."));
     }
 

@@ -274,21 +274,6 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     wrap_styled(text, width)
 }
 
-pub fn file_icon(path: &str) -> &'static str {
-    let p = path.to_lowercase();
-    if p.ends_with(".rs") {
-        "🦀"
-    } else if p.ends_with(".py") {
-        "🐍"
-    } else if p.ends_with(".js") || p.ends_with(".ts") || p.ends_with(".tsx") || p.ends_with(".jsx") {
-        "📜"
-    } else if p.ends_with(".json") || p.ends_with(".toml") || p.ends_with(".yaml") || p.ends_with(".yml") {
-        "⚙"
-    } else {
-        "📄"
-    }
-}
-
 pub fn format_cmd(cmd: &str) -> String {
     let clean = cmd.trim();
     let first_line = clean.lines().next().unwrap_or(clean).trim();
@@ -665,7 +650,6 @@ impl ChatView {
                 } else if name == "edit_file" || name == "write_file" || name == "patch_file" {
                     let path = parsed.get("path").and_then(|s| s.as_str()).unwrap_or("file").to_string();
                     let basename = std::path::Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or(&path);
-                    let icon = file_icon(&path);
 
                     let (added, deleted) = if name == "edit_file" {
                         let mut a = 0;
@@ -693,7 +677,7 @@ impl ChatView {
                         (a, d)
                     };
 
-                    let text = format!("  \x1b[38;2;160;165;180mEditing\x1b[0m {icon} \x1b[1;38;2;225;230;240m{basename}\x1b[0m {chevron}");
+                    let text = format!("  \x1b[38;2;160;165;180mEditing\x1b[0m \x1b[1;38;2;225;230;240m{basename}\x1b[0m {chevron}");
                     let mut line = ChatLine::with_details(LineKind::Tool, text, args_json.clone());
                     line.tool_name = Some(name.clone());
                     line.tool_group = Some(ToolGroupKind::Edit { path, added, deleted, is_running: true });
@@ -925,10 +909,9 @@ impl ChatView {
                             ToolGroupKind::Edit { path, added, deleted, is_running } => {
                                 *is_running = false;
                                 let k = if *is_error { LineKind::ToolError } else { LineKind::Tool };
-                                let icon = file_icon(path);
                                 let basename = std::path::Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path);
                                 let t = format!(
-                                    "  \x1b[38;2;160;165;180mEdited\x1b[0m {icon} \x1b[1;38;2;225;230;240m{basename}\x1b[0m \x1b[38;2;145;205;140m+{added}\x1b[0m \x1b[38;2;230;120;120m-{deleted}\x1b[0m"
+                                    "  \x1b[38;2;160;165;180mEdited\x1b[0m \x1b[1;38;2;225;230;240m{basename}\x1b[0m \x1b[38;2;145;205;140m+{added}\x1b[0m \x1b[38;2;230;120;120m-{deleted}\x1b[0m"
                                 );
                                 (k, t)
                             }
@@ -3091,7 +3074,7 @@ mod tests {
         v3.on_event(&LoopEvent::ToolFinished { id: "e1".into(), is_error: false, result_len: 50, result: None });
         let (settled3, live3) = v3.render_split(100, false);
         let all3: Vec<_> = settled3.into_iter().chain(live3).collect();
-        assert!(all3.iter().any(|(_, t)| t.contains("Edited") && t.contains("🦀") && t.contains("lib.rs") && t.contains("+2") && t.contains("-0")));
+        assert!(all3.iter().any(|(_, t)| t.contains("Edited") && t.contains("lib.rs") && t.contains("+2") && t.contains("-0")));
 
         // 4. Consecutive exploration consolidation: 4 files, 1 search
         let mut v4 = ChatView::default();
@@ -3890,8 +3873,8 @@ mod tests {
         assert!(expanded_text.contains("\x1b[48;2;22;38;60m"), "Read view must have soft blue background");
 
         // Check directory card
-        assert!(plain_expanded.contains("Analyzed 📁 .audit"));
-        assert!(plain_expanded.contains("📄 2026-09-07-a0-skeleton.md"));
+        assert!(plain_expanded.contains("Analyzed .audit"));
+        assert!(plain_expanded.contains("2026-09-07-a0-skeleton.md"));
     }
 
     #[test]
