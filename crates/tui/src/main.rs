@@ -5467,11 +5467,13 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             // Sending new prompt closes temporary last thinking block (Rule 4)
                             last_expanded = false;
 
-                            // A user writing in Russian gets Russian labels
-                            // whatever the config says the language is: what
-                            // they actually type is the better evidence.
-                            if let Some("Russian") = script_language(&text) {
-                                chat.set_language("ru");
+                            // What the user types decides what the labels are
+                            // written in — in both directions. Detecting only
+                            // Russian left an English conversation labelled
+                            // "Разбираю запрос" for anyone whose config said
+                            // ru, and nothing they typed could change it back.
+                            if let Some(lang) = conversation_language(&text) {
+                                chat.set_language(lang);
                             }
                             // A path typed out is still the user pointing at
                             // a picture — but only a path. Naming a file in a
@@ -5757,6 +5759,40 @@ fn extract_user_prompt(content: &str) -> &str {
 }
 
 
+
+
+/// The language to write our own labels in, from what the user just typed.
+///
+/// `None` when the message is too short to tell — a bare "ok" is not evidence
+/// of anything, and switching on it would make the labels flicker.
+fn conversation_language(text: &str) -> Option<&'static str> {
+    // A slash command is our vocabulary, not theirs.
+    if text.trim_start().starts_with('/') {
+        return None;
+    }
+    let mut cyrillic = 0usize;
+    let mut latin = 0usize;
+    for c in text.chars().filter(|c| c.is_alphabetic()) {
+        match c as u32 {
+            0x0400..=0x04FF => cyrillic += 1,
+            0x0041..=0x005A | 0x0061..=0x007A => latin += 1,
+            _ => {}
+        }
+    }
+    let total = cyrillic + latin;
+    if total < 2 {
+        return None;
+    }
+    // Code and identifiers are Latin even in a Russian conversation, so a
+    // minority of Cyrillic still means Russian.
+    if cyrillic * 4 >= total {
+        Some("ru")
+    } else if latin == total {
+        Some("en")
+    } else {
+        None
+    }
+}
 
 /// The language a turn is written in, by script, when it is clearly not
 /// English. Script is a crude signal but a reliable one for the case that
@@ -6753,6 +6789,22 @@ mod tests {
         // Quoted, the way a terminal writes a path with spaces in it.
         let quoted = format!("'{}'", png.to_str().unwrap());
         assert!(Attachment::from_dropped_path(&quoted).is_some());
+    }
+
+    #[test]
+    fn the_labels_follow_the_language_in_both_directions() {
+        // An English chat was labelled in Russian because the config said ru
+        // and detection only ever switched one way.
+        assert_eq!(conversation_language("Hi!"), Some("en"));
+        assert_eq!(conversation_language("Привет!"), Some("ru"));
+        assert_eq!(conversation_language("посмотри main.rs и скажи что там"), Some("ru"));
+        assert_eq!(
+            conversation_language("read main.rs and tell me what it does"),
+            Some("en")
+        );
+        assert_eq!(conversation_language("ok"), Some("en"));
+        assert_eq!(conversation_language("/help"), None, "a command says nothing about language");
+        assert_eq!(conversation_language("42"), None);
     }
 
     #[test]

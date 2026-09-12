@@ -1379,15 +1379,27 @@ impl ChatView {
                 } else if let Some(s) = secs {
                     format!("  \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m \x1b[38;2;140;145;160m({s}s)\x1b[0m {chevron}")
                 } else {
-                    format!("  \x1b[1;38;2;194;231;255mThinking:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m {chevron}")
+                    // Thinking lifted out of the answer text: no duration was
+                    // ever measured, but it is plainly over — the answer is
+                    // underneath it.
+                    format!("  \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m {chevron}")
                 };
                 let budget = width.saturating_sub(4);
                 let clipped_styled = clip_ansi(&text_styled, budget);
                 target.push((LineKind::Reasoning, clipped_styled));
             } else {
                 let trimmed_text = text.trim();
-                let title_vis = format!("Thinking: {stage}");
-                let title_styled = format!("\x1b[1;38;2;194;231;255mThinking:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m");
+                // The expanded box carried "Thinking:" for the whole session,
+                // including under a finished answer.
+                let verb = if is_streaming { "Thinking" } else { "Thought" };
+                let elapsed = match (is_streaming, secs) {
+                    (false, Some(s)) => format!(" ({s}s)"),
+                    _ => String::new(),
+                };
+                let title_vis = format!("{verb}: {stage}{elapsed}");
+                let title_styled = format!(
+                    "\x1b[1;38;2;194;231;255m{verb}:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m\x1b[38;2;140;145;160m{elapsed}\x1b[0m"
+                );
                 let box_w = width.saturating_sub(4).clamp(30, 84);
                 let border_color = "\x1b[38;2;75;99;130m";
                 let reset = "\x1b[0m";
@@ -3468,6 +3480,42 @@ mod tests {
 
         let deny_card = approval_card_with_selection(&req, Decision::Deny);
         assert!(deny_card.iter().any(|(_, t)| t.contains("❯ [Deny]")));
+    }
+
+    #[test]
+    fn a_finished_thought_is_not_still_called_thinking() {
+        // Seen in a screenshot: the answer and its recap were on the screen
+        // and the block above them still read "Thinking: Разбираю запрос".
+        let mut v = ChatView::default();
+        v.push_user("Hi!");
+        v.on_event(&LoopEvent::ReasoningDelta("The user sent a greeting.".into()));
+        v.on_event(&LoopEvent::TurnDelta("Hello!".into()));
+        v.on_event(&LoopEvent::Done(DoneReason::Completed));
+        let dump: String = v.render(100).iter().map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("Thought:"), "{dump}");
+        assert!(!dump.contains("Thinking:"), "{dump}");
+    }
+
+    #[test]
+    fn thinking_that_came_out_of_the_answer_is_also_finished() {
+        // A model that writes <think> into its content leaves no duration
+        // behind, which is not a reason to claim it is still going.
+        let mut v = ChatView::default();
+        v.push_user("hi");
+        v.on_event(&LoopEvent::TurnDelta("<think>weighing it up</think>Hello!".into()));
+        v.on_event(&LoopEvent::Done(DoneReason::Completed));
+        let dump: String = v.render(100).iter().map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("Thought:"), "{dump}");
+        assert!(!dump.contains("Thinking:"), "{dump}");
+    }
+
+    #[test]
+    fn while_it_is_still_thinking_it_says_so() {
+        let mut v = ChatView::default();
+        v.push_user("hi");
+        v.on_event(&LoopEvent::ReasoningDelta("still going".into()));
+        let dump: String = v.render(100).iter().map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("Thinking:"), "{dump}");
     }
 
     #[test]
