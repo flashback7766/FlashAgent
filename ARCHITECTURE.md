@@ -1,95 +1,78 @@
-# FlashAgent — Architecture
+# Architecture
 
-> HOW we build. Source of WHAT and WHY is `PHILOSOPHY.md`. Sequence of execution is `ROADMAP.md`.
+What exists today. Plans live in [ROADMAP.md](ROADMAP.md).
 
-## 0. Implementation Status (b238)
+## Process
 
-This document describes the target design. What exists today:
+One process. `flashagent` (crate `flashagent-tui`) runs the terminal UI, the
+agent loop, the tools and the permission layer together. There is no
+background service and no IPC.
 
-- **Process model**: not split yet. `flashagent` (crate `flashagent-tui`) hosts loop, tools and permissions in one process; `proto` (IPC contract) is a placeholder, `svc` contains only the updater. The GUI entrypoint crate was removed until Track B resumes (v2).
-- **Data**: `crates/data` (SQLite + FTS5) is implemented and tested but not used by the TUI; sessions are JSON files in `~/.flashagent/sessions/`.
-- **LLM**: OpenAI-compatible backend only (A11 adds native adapters). The text tool-call parser runs inside `core::loop_`.
-- **Memory writes**: the `memory_*` tools go through the Write category; they are disabled during `/goal`.
-- **Renderer**: B0 prototype only (`crates/ui/src/bin/b0.rs`); no component kit, no golden frames yet.
+## Crates
 
-## 1. Process Model
-
-```
-┌─────────────┐   Local IPC         ┌──────────────────┐
-│  UI Process  │ ◄────────────────► │  Core Service    │
-│  flashagent- │   events/commands  │  flashagent-svc  │
-│  ui (wgpu)   │                    │  loop, tools, DB │──► LLM Backends (HTTP)
-└─────────────┘                    └──────────────────┘──► MCP Servers
-       ▲                                   ▲
-       │ same protocol                     │ shell processes (sandboxed)
-┌──────┴──────┐                            ▼
-│ TUI Client  │                    SQLite + FTS5
-└─────────────┘
-```
-
-- A UI crash never kills the task: the background service continues the agent loop, and the UI reconnects, restoring full state from SQLite plus event replay.
-- IPC Transport: Named pipes (Windows) / Unix domain sockets (Linux/macOS), length-prefix framing, serialization via serde JSON initially (with room for postcard binary serialization later).
-- TUI uses the exact same protocol and core service: the core engine is validated without a GUI from day one.
-
-## 2. Workspace (Cargo Crates)
-
-| Crate | Responsibility |
+| Crate | What it holds |
 |---|---|
-| `core` | Agent loop, modes, permissions, subagents, memory, autonomy layers. Zero dependencies on HTTP, SQL, or UI. |
-| `llm` | `LlmBackend` trait, adapters (OpenAI-compatible, Ollama, Anthropic, Mistral, DeepSeek, OpenRouter…), unified `ToolCall`, parsers, reasoning stream, token usage. |
-| `tools` | `Tool` trait, built-in toolsets (adaptive by context window size), MCP client, registry/marketplace. |
-| `data` | SQLite + FTS5, schema migrations, sessions, memory, export, legacy data migrator from ~/.flashgent. |
-| `proto` | IPC protocol contract: UI→Core commands, Core→UI events, strongly typed and versioned serde schemas. |
-| `svc` | Core service binary: tokio runtime, shell isolation, filesystem snapshots, updater engine, telemetry. |
-| `ui` | wgpu hardware renderer, cosmic-text/parley, Material 3 Expressive component kit, spring physics engine, AccessKit, IME. |
-| `tui` | Lightweight terminal client connected to the core engine. |
-| `app` (v2, not present) | Main entrypoint binary: manages service lifecycle and launches the native UI. |
+| `core` | Agent loop and its events, permission modes and approval gating, subagents, memory (rule files and the per-fact store), system prompt, config, auto-effort learning, tool-calling check. |
+| `llm` | One backend: an OpenAI-compatible streaming client. Thinking-preset discovery, text tool-call parsing, JSON repair, token estimates. |
+| `tools` | Built-in tools (files, patching, shell, search, git, memory, web), the MCP client and marketplace, subagent spawning. |
+| `tui` | The terminal UI: chat view, composer, menus, settings, setup wizard, `/goal`, image attachments, what's-new screen. |
+| `svc` | The self-updater. |
+| `proto` | Empty. Reserved for a process split that has not happened. |
 
-Dependency Rule: `core` does not depend on `llm` or `ui` — the loop consumes abstract traits. `ui` knows nothing of HTTP or SQL.
+`core` does not depend on `tools` or `tui`; the loop talks to tools and to
+the model through traits (`ToolExec`, `LlmSource`), which is also how the
+tests drive it with mocks.
 
-## 3. LLM Layer
+## Agent loop
 
-- Trait: `stream(request) -> Stream<Event>`; event stream variants: `TextDelta`, `ReasoningDelta`, `ToolCallChunk`, `Usage`, `Error`, `Done`.
-- Unified `ToolCall { id, name, args_json }`; protocol adapters: native JSON tool calls, XML tags, NDJSON blocks. A shared multi-parser with self-healing JSON repair handles normalization prior to adapters.
-- Reasoning: `reasoning_content` / `<think>` tags — first-class support, stored in history, rendered muted grey in stream and complete in Transcript.
-- Tokens: reported usage from API with local fallback estimation (tiktoken lookup tables).
-- Universal compatibility with any OpenAI-compatible endpoint. Backend presets are configuration, not hardcoded logic.
+`core::loop_` streams a turn from the model, collects tool calls (native, or
+parsed out of text for models that write them inline), runs each call
+through the permission layer, feeds results back, and repeats until the
+model answers without a call or a budget runs out. Budgets: steps, total
+tokens, generated tokens, wall-clock time. Every event (text, reasoning,
+tool start and finish, usage) is emitted for the UI.
 
-## 4. Tools and MCP
+Every tool call the model makes gets a result, including when the user
+cancels, because strict servers reject a history with an unanswered call.
 
-- Adaptive toolsets: `ultra (~32k)` / `core (~64k)` / `full` — dynamically chosen based on model context limits, overrideable by user.
-- MCP: client powered by `rmcp`, settings manager, marketplace curated from a verifiable JSON registry in repo. Non-read-only calls require confirmation with argument preview.
+## Permissions
 
-## 5. Permissions and Safety
+Four modes: Planning (read-only), Manual (ask before anything that is not a
+read), Accept Edits (file changes allowed, shell asks), Accept All. Shell
+approvals can be remembered per command prefix, and a prefix never covers a
+different subcommand: approving `npm test` does not approve `npm publish`.
+A declined call is returned to the model as an error it must not retry.
 
-- Four primary modes: Manual / Autonomic / Planning / Bypass + optional category matrix (`read` / `write` / `shell` / `net` / `mcp`).
-- Allow rules: narrow execution rules (command prefix matching with full parsing of `&&`, `;`, `|` chains; e.g. `npm test` never covers `npm publish`).
-- File writes: mandatory diff preview before writing (unified / split view, per-line selection, live diff).
-- Subagents: inherit parent permissions strictly; privilege escalation is architecturally prevented (permissions reside in execution context, not model prompts).
-- Autonomous mode: filesystem snapshot per task + git commit per milestone; bounded by step limits, token budgets, execution timeouts, and action blacklists.
-- Prompt injection protection: tool content is unconditionally treated as untrusted (`Untrusted<T>`); system directives embedded inside data payloads are ignored by design.
+## Model backend
 
-## 6. Memory
+Anything that speaks the OpenAI chat-completions API: LM Studio, Ollama,
+llama.cpp, vLLM, OpenRouter. What a model supports (context window, tool
+use, vision, thinking presets) is read from the server; the thinking
+profile is re-read when the model changes.
 
-- Dual-tier architecture: project-level `MEMORY.md` + global `~/.flashagent/MEMORY.md`; automatic discovery of external rule files (`CLAUDE.md`, `AGENTS.md`).
-- Context injection: full inclusion when within budget; otherwise table of contents with targeted tool-based lookup.
-- Modification: requires explicit confirmation in Manual mode, automated in Autonomic mode; memory diffs clearly rendered in UI.
+## Memory
 
-## 7. Renderer (Highest-Risk Layer)
+- Rule files: `MEMORY.md`, `CLAUDE.md`, `AGENTS.md` and `.agents/rules/` in
+  the project, and `~/.flashagent/` globally, injected into the prompt.
+- Remembered facts: one file per fact under `memory/`, indexed by
+  `MEMORY.md`. Facts about the user are global, facts about the code stay
+  with the project. Writes are refused during `/goal`.
 
-- wgpu + cosmic-text / parley. Bespoke Material 3 Expressive widget system: morphing buttons, mini-panels, dynamic color schemes.
-- Animations: global spring physics engine; timeline scheduler; non-distracting ambient background loops; parallel transitions; master toggle to reduce/disable motion.
-- Frame scheduling: present on change (sleep frames), vsync / VRR, render rate matching monitor native Hz, dynamic display switching, crisp fractional DPI scaling.
-- Text input: IME via winit from day one; AccessKit accessibility from day one; Material Symbols; Noto Emoji; bundled typography with custom TTF/OTF support.
-- Validation gate: 1-week isolated prototype (window + cosmic-text + composer with Cyrillic/IME + single spring morph) prior to committing to main codebase.
+## Storage
 
-## 8. Updates and Telemetry
+Plain files under `~/.flashagent/`: `config.json`, `sessions/*.json`,
+`memory/` and `MEMORY.md`, `rules/`, `skills/`, `mcp.json`, `effort.json`,
+`image-costs.json`, `prefill_cache.json`. A project can add its own
+`.mcp.json`, `.agents/rules/` and `.agents/skills/`.
 
-- GitHub Releases: check → download → verify checksum/signature → "Restart to Update" banner → atomic replacement on next launch. Stable and Beta channels.
-- Telemetry: opt-in operational counters (launch count, version, OS, backend/tools), opt-in crash stack traces. Zero session logs or user data sent.
+## Updates
 
-## 9. Testing and Quality Assurance
+GitHub Releases, `beta` and `stable` channels. The updater downloads the
+release asset, checks it against `SHA256SUMS`, and replaces the binary; the
+new version runs on the next start.
 
-- Loop contract tests: deterministic mock LLM server exercising edge cases (stream drops, corrupted JSON, prompt injections, unclosed blocks, multi-tool executions).
-- Golden traces: recorded conversation sessions serving as regression benchmarks for parsers.
-- UI: golden render frames and layout constraint tests. `cargo test` + CI on GitHub Actions across Linux and Windows.
+## Tests
+
+Unit tests next to the code, loop tests against a mock model, and render
+tests that assert no row overflows the terminal width. CI runs
+`cargo test` and `cargo clippy -D warnings`.

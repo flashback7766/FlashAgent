@@ -202,7 +202,7 @@ pub enum LlmError {
     /// Stream broke mid-flight (network drop, malformed SSE).
     #[error("stream interrupted: {0}")]
     Stream(String),
-    /// Philosophical or configuration policy restriction (e.g. PHILOSOPHY.md §4).
+    /// Refused by a policy or configuration setting.
     #[error("forbidden: {0}")]
     Forbidden(String),
 }

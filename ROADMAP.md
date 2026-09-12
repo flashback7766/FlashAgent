@@ -1,6 +1,6 @@
 # FlashAgent — Roadmap (Dateless Milestones)
 
-> Sequence: two parallel tracks. Core engine is verified via the TUI client; UI is verified via the renderer prototype.
+> v1 is the terminal app. The native UI (Track B) is postponed to v2.
 > Milestone status: `[ ]` / `[~]` / `[x]`. Updated upon completion, without arbitrary calendar deadlines.
 
 ## Road to v1.0 (current focus)
@@ -15,12 +15,12 @@ when unit tests pass.
 - [x] **V3. `/goal` budgets and report** — `--steps`, `--time` and `--tokens` on the command, burn-down in the status line, and a factual end-of-run card built from loop events (files touched, failed commands, why it stopped). Snapshots and milestone commits move to v1.x.
 - [ ] **V4. TUI structure** — split `crates/tui/src/main.rs` (event loop, commands, rendering, updater, sessions) into modules without behaviour changes.
 - [ ] **V5. Scenario tests** — scripted mock-LLM server + headless TUI driver covering the core paths (tool turn, approval, cancel, compact, resume, MCP, goal) in CI.
-- [ ] **V6. Tool-calling benchmark** — reproducible probe across popular local models; results table in README; first-run tool test.
+- [x] **V6. Tool-calling benchmark** — `flashagent --tool-test [--all-models]`, eight scenarios, results in [docs/tool-calling.md](docs/tool-calling.md) and the README; the first run checks the chosen model.
 - [ ] **V7. Fewer heuristics** — prefer capabilities the server reports (reasoning presets, context, tool support) over name-based guessing.
 
 ## Track A — Core Engine
 - [x] **A0. Workspace Skeleton** — 9 crates, CI (Linux + Windows), clippy strict with 0 warnings, MIT license, README.
-- [x] **A1. Data Layer** — SQLite + FTS5 (bundled), sessions/messages, versioned migrations, FTS triggers, Cyrillic/multilingual search. 5/5 tests. *Not yet consumed by the TUI (sessions are JSON files); wiring lands with B2.*
+- [x] **A1. Data Layer** — SQLite + FTS5 (bundled), sessions/messages, versioned migrations, FTS triggers, Cyrillic/multilingual search. 5/5 tests. *Never used by the TUI (sessions are JSON files); removed from the repo, last present in commit 28ee7ea.*
 - [x] **A2. LLM Adapter** — OpenAI-compatible streaming, unified `ToolCall`, multi-parser (Hermes / Mistral / bare JSON) with self-healing JSON repair, reasoning, token usage with local fallback. 20/20 llm tests. *b233: the text multi-parser is now wired into the loop (it was unit-tested only); bounded 400 adaptation.*
 - [x] **A3. Agent Loop** — `AgentLoop` built over abstract `LlmSource` / `ToolExec` traits, UI event streams, cancellation token, 9/9 contract tests (multi-tool calls, stream truncation, step/token budget limits, prompt injection safety).
 - [x] **A4. Tools** — 9 built-in tools (read / write / edit-chunks / list_dir / glob / grep / run_shell / web_fetch / web_search), process sandboxing (background execution, timeouts, live stream output, task id tracking). 13/13 tools tests, 57 workspace tests. Adaptive sets in Track C.
@@ -36,7 +36,7 @@ when unit tests pass.
 
 ## Track B — Native UI (postponed to v2)
 
-> Decided 2026-09-11: v1 ships the terminal app only. The B0 prototype stays in `crates/ui`; B1–B10 resume after v1.0.
+> Decided 2026-09-11: v1 ships the terminal app only; B1–B10 resume after v1.0. The B0 prototype was removed from the repo and is in commit 28ee7ea.
 - [x] **B0. Renderer Prototype (Gate)** — Owner GO approved: wgpu + cosmic-text + IME + spring morphing verified, sRGB/color fix and spacebar handling resolved, clippy strict 0 warnings.
 - [ ] **B1. Material 3 Expressive Kit** — Themes (light/dark/system, dynamic palette), Material Symbols, typography scale, spring engine, ambient background loops, motion reduction toggle.
 - [ ] **B2. App Shell** — IPC client, auto-reconnect, session sidebar with FTS search, status ticker ribbon, command palette.
@@ -58,13 +58,13 @@ when unit tests pass.
 - [ ] **C5. Legacy Gems** — Porting battle-tested capabilities from legacy ~/flashgent:
   - **Argument Aliasing**: Tolerant tool parameter naming (`filePath`/`path`, `oldString`/`TargetContent`, `cmd`/`command`) in `flashagent-tools`.
   - **AST Project Outline**: Background symbol indexing (classes, functions, structs, traits) in native Rust (`ignore` + regex) with compact project outline injection into system prompt.
-  - **Context Steering**: Mid-flight user directive injection channel into `AgentLoop` during streaming/execution without resetting context.
+  - **Context Steering**: Mid-flight user directive injection channel into `AgentLoop` during streaming/execution without resetting context. *Done: Enter while a turn runs.*
   - **FileSnapshots & Workspace Rewind**: Persistent `file_snapshots` table in SQLite (`content_before`) for step-by-step filesystem rewinds and history truncation.
   - **In-place Continuation (`continueResponse`)**: Seamless completion of truncated responses within the same assistant message card without message duplication.
   - **Deep Prompt Injection Hardening (`untrusted`)**: Per-session cryptographic nonce + template control token neutralisation + signature-based prompt hijacking detection.
   - **Batch Multi-File Editing**: Extending `edit_file` with batch file array support (`files: [{ path, edits }]`).
   - **Automatic Session Titling**: Asynchronous background micro-query to LLM after turn 1 to title the conversation.
-  - **UI Telemetry Markers**: Rolling generation speedometer `tg_3s` (3-second window) and command palette `Cmd/Ctrl+K`.
+  - **UI Telemetry Markers**: Rolling generation speedometer `tg_3s` (3-second window) and command palette `Cmd/Ctrl+K`. *Done: `tg_3s`. Open: the command palette.*
 
 ## Execution Rules
 - One milestone = one branch = verifiable outcome. Sequence within tracks follows milestone numbering.

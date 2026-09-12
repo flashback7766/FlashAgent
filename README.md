@@ -29,7 +29,7 @@
 - **Tool calling that does not depend on luck.** Native tool calls, plus a recovery parser for models that write calls as text (`<tool_call>`, `[TOOL_CALLS]`, bare JSON) — common with small local models. Arguments are JSON-repaired before they reach a tool. And you do not have to guess whether your model is up to it: `flashagent --tool-test` [scores it in seconds](docs/tool-calling.md).
 - **You stay in control.** Four permission modes, an approval card that shows the exact command, diff or MCP arguments, and "Always" rules that stay narrow: allowing `cargo test` never allows `cargo publish`.
 - **Steer while it works.** Type while the model is streaming and press <kbd>Enter</kbd>: your guidance lands at the next safe point without breaking the tool-call protocol. <kbd>Esc</kbd> interrupts cleanly — pending tool calls are closed out and partial output is kept, so the next prompt just continues.
-- **Tiny and instant.** One self-contained binary (only libc underneath), ~12 MB resident when idle, prints its version in ~2 ms. Nothing to install alongside it.
+- **Tiny and instant.** One binary that links only the system C libraries (libc, libm, libgcc_s), ~12 MB resident when idle, prints its version in ~2 ms. Nothing to install alongside it.
 
 <table>
 <tr>
@@ -201,13 +201,11 @@ crates/core    agent loop, steering, permissions, subagents, memory, system prom
 crates/llm     OpenAI-compatible streaming, reasoning-preset discovery, text tool-call parser, JSON repair
 crates/tools   built-in tools, sandboxed shell, patching, MCP client/manager/marketplace
 crates/tui     crossterm terminal UI (the product today)
-crates/svc     self-updater (future home of the background service)
-crates/data    SQLite + FTS5 store (not yet used by the TUI; sessions are JSON files)
-crates/proto   IPC contract (reserved for the UI ⇄ service split)
-crates/ui      native wgpu renderer prototype (Track B, planned for v2)
+crates/svc     self-updater
+crates/proto   placeholder for a future process split
 ```
 
-The split into a background service plus native GPU UI, IPC and the SQLite-backed session sidebar are planned work — see [ARCHITECTURE.md](ARCHITECTURE.md) and [ROADMAP.md](ROADMAP.md).
+Everything runs in one process. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit.
 
 ```bash
 cargo test --workspace

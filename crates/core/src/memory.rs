@@ -1,7 +1,7 @@
 //! Memory: project + global MEMORY.md, pickup of foreign rule files
 //! (CLAUDE.md, AGENTS.md), threshold-based context injection.
 //!
-//! Injection policy (canon: PHILOSOPHY §8): a document goes in whole when the
+//! Injection policy: a document goes in whole when the
 //! token budget allows; otherwise only its outline (heading lines) goes in,
 //! with a note that the model can read the file point-wise with `read_file`.
 //! Writing memory is a plain `write_file` call and travels through the

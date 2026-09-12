@@ -3,7 +3,7 @@
 //! The parent agent loop is wrapped in [`PermissionedTools`]; subagents get the
 //! same underlying `BuiltinTools` but a restricted tool subset and the same
 //! permission state — so they inherit parent rights, never expand them
-//! (PHILOSOPHY.md §6-7). The factory lives here because it needs the concrete
+//! The factory lives here because it needs the concrete
 //! `BuiltinTools` to construct executors.
 
 use std::sync::Arc;

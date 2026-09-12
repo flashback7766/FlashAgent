@@ -426,7 +426,7 @@ impl Default for AppConfig {
             min_p: Some(0.00),
             max_steps: None, // Unlimited steps per turn!
             token_budget: 2000,
-            free_search: false, // PHILOSOPHY.md §3: local-first by default; web tools require opt-in
+            free_search: false, // nothing leaves the machine unless the user turns it on
             setup_completed: false,
             toolset_profile: ToolsetProfile::Auto,
             trusted_directories: Vec::new(),

@@ -55,7 +55,7 @@ fn pending_images_from(images: Vec<String>) -> Vec<String> {
     images
 }
 
-/// Executor of tool calls. Implemented by `flashagent-tools` in A4;
+/// Executor of tool calls. Implemented by `flashagent-tools`;
 /// tests stub it.
 #[async_trait]
 pub trait ToolExec: Send + Sync {
