@@ -11,7 +11,7 @@ Please take a moment to review this document before submitting contributions.
 Before writing code or proposing features, please read **[PHILOSOPHY.md](PHILOSOPHY.md)**.
 FlashAgent adheres strictly to a few inviolable principles:
 1. **Local-first by default**: No telemetry, no cloud lock-in, no session leakage.
-2. **0% Electron / Chromium**: Blazing fast, pure native Rust (<15ms cold start, minimal memory footprint).
+2. **0% Electron / Chromium**: pure native Rust, one binary, about 12 MB of memory when idle.
 3. **Rock-solid tool calling**: Tool execution cannot be a lottery. Protocol invariants and self-healing parsing are sacred.
 4. **M3 Expressive craft**: High UX fidelity, rich terminal ergonomics, smooth visual feedback.
 
