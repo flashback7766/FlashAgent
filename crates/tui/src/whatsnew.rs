@@ -7,6 +7,9 @@
 
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 
+/// Marks an entry that is a paragraph of prose rather than a listed change.
+const PROSE: &str = "\u{b6}";
+
 /// The changelog as it stood when this binary was built.
 pub const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 
@@ -62,6 +65,9 @@ pub fn releases_between(changelog: &str, from: &str, to: &str) -> Vec<Release> {
     let mut out: Vec<Release> = Vec::new();
     let mut current: Option<Release> = None;
     let mut item: Vec<String> = Vec::new();
+    // A release can open with prose — a note from the maintainer — before
+    // its list of changes. It is kept whole, as paragraphs.
+    let mut paragraph: Vec<String> = Vec::new();
 
     let finish_item = |item: &mut Vec<String>, current: &mut Option<Release>| {
         if !item.is_empty() {
@@ -71,10 +77,19 @@ pub fn releases_between(changelog: &str, from: &str, to: &str) -> Vec<Release> {
             item.clear();
         }
     };
+    let finish_paragraph = |paragraph: &mut Vec<String>, current: &mut Option<Release>| {
+        if !paragraph.is_empty() {
+            if let Some(rel) = current.as_mut() {
+                rel.items.push(format!("{PROSE}{}", flatten(paragraph)));
+            }
+            paragraph.clear();
+        }
+    };
 
     for line in changelog.lines() {
         if let Some(heading) = line.strip_prefix("## ") {
             finish_item(&mut item, &mut current);
+            finish_paragraph(&mut paragraph, &mut current);
             if let Some(rel) = current.take() {
                 out.push(rel);
             }
@@ -99,19 +114,26 @@ pub fn releases_between(changelog: &str, from: &str, to: &str) -> Vec<Release> {
             // Sub-headings become their own entry, so a long release still
             // reads as a list rather than one wall.
             finish_item(&mut item, &mut current);
+            finish_paragraph(&mut paragraph, &mut current);
             if let Some(rel) = current.as_mut() {
                 rel.items.push(format!("[{}]", sub.trim()));
             }
         } else if let Some(bullet) = line.strip_prefix("- ") {
             finish_item(&mut item, &mut current);
+            finish_paragraph(&mut paragraph, &mut current);
             item.push(bullet.to_string());
         } else if line.starts_with("  ") && !item.is_empty() {
             item.push(line.to_string());
         } else if line.trim().is_empty() {
             finish_item(&mut item, &mut current);
+            finish_paragraph(&mut paragraph, &mut current);
+        } else {
+            finish_item(&mut item, &mut current);
+            paragraph.push(line.to_string());
         }
     }
     finish_item(&mut item, &mut current);
+    finish_paragraph(&mut paragraph, &mut current);
     if let Some(rel) = current.take() {
         out.push(rel);
     }
@@ -465,6 +487,15 @@ fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> V
         for item in &rel.items {
             let rendered = if let Some(head) = item.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
                 vec![format!("  {BRIGHT}{head}{RESET}")]
+            } else if let Some(text) = item.strip_prefix(PROSE) {
+                // A letter is not a list: no marker, no folding to the first
+                // sentence, and a blank row after each paragraph.
+                let mut rows: Vec<String> = crate::wrap_styled(&style_inline(text, TEXT), text_w + 2)
+                    .into_iter()
+                    .map(|row| format!("  {row}"))
+                    .collect();
+                rows.push(String::new());
+                rows
             } else {
                 let (claim, detail) = split_claim(item);
                 let shown = if expanded || detail.is_empty() {
@@ -689,6 +720,48 @@ mod tests {
         view.handle_key(KeyCode::Tab);
         assert_eq!(view.pages[view.page].version, version);
         assert!(view.fully_revealed(), "detail you asked for does not animate in");
+    }
+
+    const LETTER: &str = "# Changelog\n\n\
+        ## b260 — a note first\n\n\
+        A lot of people think vibecoded means slop. This release is an answer to\n\
+        that, on this exact project.\n\n\
+        Second paragraph, with `code` in it.\n\n\
+        — flashback\n\n\
+        ### What changed\n\n\
+        - Removed the banner.\n\
+        - Measured the numbers.\n";
+
+    #[test]
+    fn a_release_can_open_with_prose_before_its_list() {
+        let rels = releases_between(LETTER, "b250", "b260");
+        let items = &rels[0].items;
+        assert_eq!(items.len(), 6, "{items:?}");
+        assert!(items[0].starts_with(PROSE));
+        assert!(items[0].contains("This release is an answer to that, on this exact project."), "wrapped lines rejoin: {items:?}");
+        assert!(items[2].ends_with("flashback"), "the sign-off is its own paragraph");
+        assert_eq!(items[3], "[What changed]");
+        assert_eq!(items[4], "Removed the banner.", "bullets after the letter are unchanged");
+    }
+
+    #[test]
+    fn prose_is_shown_whole_without_a_bullet_marker() {
+        let view = WhatsNew::new(releases_between(LETTER, "b250", "b260"), "b260", 100, 40);
+        let rows: Vec<String> = view.pages[0].rows.iter().map(|(_, r)| crate::strip_ansi(r)).collect();
+        let first = rows.iter().position(|r| r.contains("A lot of people")).expect("prose on the page");
+        assert!(!rows[first].contains('›'), "prose has no marker: {:?}", rows[first]);
+        let joined = rows.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(joined.contains("on this exact project."), "not folded to its first sentence: {joined}");
+        assert!(!joined.contains('\u{b6}'), "the internal marker never reaches the screen");
+        assert!(joined.contains("› Removed the banner."), "listed changes keep their marker");
+    }
+
+    #[test]
+    fn a_long_letter_spans_pages() {
+        let long_para = "word ".repeat(120);
+        let log = format!("# Changelog\n\n## b260 — long\n\n{long_para}\n\n{long_para}\n\n{long_para}\n\n- one change\n");
+        let view = WhatsNew::new(releases_between(&log, "b250", "b260"), "b260", 80, 20);
+        assert!(view.pages() >= 2, "a letter taller than the window spans screens, got {}", view.pages());
     }
 
     #[test]
