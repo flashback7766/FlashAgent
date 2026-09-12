@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The suggestion list no longer hangs on the screen while the context is being
+  compacted. The command that opened it is long gone from the composer.
 - The auto-compaction threshold follows the window: 97% at a million tokens,
   95% at 512k, 90% at 256k, 85% at 128k, 80% at 64k, 75% at 32k and below. One
   percentage cannot suit both ends — ten percent of a million tokens is a
