@@ -61,6 +61,10 @@ impl BackendSource {
         self.0.set_effort_bias(steps);
     }
 
+    async fn measure_image_cost(&self, probe: &[u8], w: u32, h: u32) -> Option<(f32, f32)> {
+        self.0.measure_image_cost(probe, w, h).await
+    }
+
     async fn discover_server(&self) -> Option<flashagent_llm::ServerDiscovery> {
         self.0.discover_server().await
     }
@@ -894,7 +898,7 @@ impl Renderer {
             if !st.attachments.is_empty() {
                 let listed = st.attachments.join("  ");
                 let row = format!(
-                    " \x1b[38;2;145;205;140m📎\x1b[0m \x1b[38;2;160;165;180m{listed}\x1b[0m \x1b[38;2;100;95;90m· ctrl+z removes\x1b[0m"
+                    " \x1b[38;2;145;205;140mattached\x1b[0m \x1b[38;2;160;165;180m{listed}\x1b[0m \x1b[38;2;100;95;90m· ctrl+z removes\x1b[0m"
                 );
                 tail.push((LineKind::System, pad_box_row(&row, width)));
             }
@@ -1831,11 +1835,57 @@ impl Attachment {
 
     /// How it reads in the composer.
     fn label(&self) -> String {
-        match self.size {
+        self.labelled(None)
+    }
+
+    /// As above, with what the picture will cost when that has been measured
+    /// for this model. The cost is the number that decides whether to resize,
+    /// and it is model-specific: a Qwen charges by area, a Gemma a flat rate.
+    fn labelled(&self, cost: Option<flashagent_tui::image_cost::ImageCost>) -> String {
+        let size = match self.size {
             Some((w, h)) => format!("{} {w}×{h}", self.name),
-            None => self.name.clone(),
+            None => return self.name.clone(),
+        };
+        match (cost, self.size) {
+            (Some(cost), Some((w, h))) => format!("{size} · {}", cost.label(w, h)),
+            _ => size,
         }
     }
+}
+
+
+/// Measure what a picture costs this model, once, in the background.
+///
+/// Three throwaway requests that generate a single token each; the answer is
+/// kept for the life of the install. Without it the composer can only say how
+/// many pixels a screenshot has, which is not the number anyone needs.
+fn maybe_measure_image_cost(
+    costs: &flashagent_tui::image_cost::ImageCosts,
+    in_flight: &mut Option<String>,
+    model: &str,
+    source: &Arc<BackendSource>,
+    tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>,
+) {
+    if costs.get(model).is_some() || in_flight.as_deref() == Some(model) {
+        return;
+    }
+    *in_flight = Some(model.to_string());
+    let source = source.clone();
+    let tx = tx.clone();
+    let model = model.to_string();
+    tokio::spawn(async move {
+        let probe = flashagent_tui::image_cost::probe_png();
+        if let Some((per_pixel, fixed)) = source
+            .measure_image_cost(
+                &probe,
+                flashagent_tui::image_cost::PROBE_WIDTH,
+                flashagent_tui::image_cost::PROBE_HEIGHT,
+            )
+            .await
+        {
+            let _ = tx.send(UiEvent::ImageCost { model, per_pixel, fixed });
+        }
+    });
 }
 
 /// Whether the model in use can see pictures at all.
@@ -2239,6 +2289,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     // fastest way to say "this is what I mean", and typing it out is the
     // slowest.
     let mut attachments: Vec<Attachment> = Vec::new();
+    // What a picture costs is measured once per model and remembered.
+    let mut image_costs = flashagent_tui::image_cost::ImageCosts::load();
+    let mut image_cost_probe: Option<String> = None;
     let mut mcp_modal: Option<McpModal> = None;
     let mut context_usage = ContextUsage::new(context_capacity);
     update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
@@ -2287,6 +2340,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     // model, so the turns are watched and the guess is nudged by one step.
     let mut effort_memory = flashagent_core::EffortMemory::load();
     let mut turn_outcome = flashagent_core::TurnOutcome::default();
+    // How much the last turn added to the context, so the next one can be
+    // sized before it is started rather than after it overflows.
+    let mut last_turn_growth: usize = 0;
+    let mut context_before_turn: usize = 0;
     source.set_effort_bias(effort_memory.steps(&current_model));
     tools_arc.set_vision_supported(model_sees_images(&source, &current_model));
     let (channel_probe_tx, mut channel_probe_rx) =
@@ -2529,7 +2586,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         let channel_prompt: Option<String> = channel_switch.as_ref().map(|sw| {
             channel_switch_warning(sw.to, flashagent_svc::updater::current_version(), &sw.target)
         });
-        let attachment_labels: Vec<String> = attachments.iter().map(Attachment::label).collect();
+        let cost_now = image_costs.get(&current_model);
+        let attachment_labels: Vec<String> =
+            attachments.iter().map(|a| a.labelled(cost_now)).collect();
         let quit_prompt: Option<&str> = quit_confirm.then_some(
             "Quit FlashAgent? The session is saved either way and comes back with --resume.",
         );
@@ -2760,6 +2819,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     renderer.request_reprint();
                 }
             }
+            UiEvent::ImageCost { model, per_pixel, fixed } => {
+                image_costs.set(&model, flashagent_tui::image_cost::ImageCost { per_pixel, fixed });
+                image_costs.save();
+                image_cost_probe = None;
+                renderer.request_reprint();
+            }
             UiEvent::ToolTestResult(verdict) => {
                 match settings_view.as_mut() {
                     Some(s) => s.tool_test_status = Some(verdict),
@@ -2927,6 +2992,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 // What the turn cost against what it produced is the only
                 // honest evidence about whether auto guessed right for this
                 // model. A goal run is excluded: its effort is the user's.
+                // What this turn cost the window is the best guess at what
+                // the next one will cost.
+                let grown = context_usage.total_used().saturating_sub(context_before_turn);
+                if grown > 0 {
+                    last_turn_growth = grown.max(last_turn_growth / 2);
+                }
                 if goal_state.is_none() {
                     let steps = effort_memory.observe(&current_model, &turn_outcome);
                     effort_memory.save();
@@ -2967,19 +3038,99 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             custom_placeholder = Some(interrupt_msg.to_string());
                             renderer.request_reprint();
                         } else {
-                            // Auto-compact context when reaching threshold capacity
-                            if app_config.auto_compact_context
-                                && context_usage.percentage() >= app_config.context_compact_threshold as f32
-                                && history.len() > 3
-                            {
+                            // Summarise the older part of the conversation
+                            // when the next turn would not fit, or the user's
+                            // threshold is passed — and only when there is
+                            // something worth summarising.
+                            let verdict = if app_config.auto_compact_context && history.len() > 3 {
+                                flashagent_core::should_compact(flashagent_core::CompactionInput {
+                                    used: context_usage.total_used(),
+                                    capacity: context_usage.total_capacity,
+                                    fixed: context_usage.system_tokens
+                                        + context_usage.memory_tokens
+                                        + context_usage.tools_tokens,
+                                    last_turn_growth,
+                                    threshold_pct: app_config.context_compact_threshold,
+                                })
+                            } else {
+                                flashagent_core::CompactionVerdict::No
+                            };
+                            if verdict.should() {
+                                // This one belongs in the transcript: it
+                                // changes what the model remembers, which is
+                                // the conversation itself.
+                                chat.push_system("Compacting context...");
+                                renderer.request_reprint();
+                                let tg_speed = token_tracker.tg_3s();
+                                renderer.frame(
+                                    &chat,
+                                    &gate,
+                                    &question_gate,
+                                    effort_menu.as_ref(),
+                                    model_menu.as_ref(),
+                                    settings_view.as_ref(),
+                                    sampling_view.as_ref(),
+                                    context_modal.as_ref(),
+                                    mcp_modal.as_ref(),
+                                    memory_modal.as_ref(),
+                                    autocomplete.as_ref(),
+                                    &context_usage,
+                                    FrameState {
+                                        input: &input,
+                                        mode: perm.state().mode(),
+                                        is_goal_active: goal_state.is_some(),
+                                        goal_progress: None,
+                                        tip: Some(tip_animator.tip_text),
+                                        tip_animated: None,
+                                        tip_lines: Some(&tip_lines),
+                                        token_tracker: Some(&token_tracker),
+                                        thinking_effort: &current_effort,
+                                        reasoning_expand: ReasoningExpansion {
+                                            all: all_expanded,
+                                            last: last_expanded,
+                                        },
+                                        tick_n,
+                                        running,
+                                        elapsed_secs: turn_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                                        face_phase: turn_started.map(|t| (t.elapsed().as_millis() / 80) as usize).unwrap_or(0),
+                                        model_tokens: token_tracker.total_model_tokens,
+                                        tokens_per_sec: tg_speed,
+                                        f_keep: token_tracker.last_f_keep,
+                                        model: &current_model,
+                                        context_window: current_context.as_deref(),
+                                        cwd: &cwd_display,
+                                        confirm_selection: confirm_select.decision(),
+                                        question_state: Some(&question_ui_state),
+                                        custom_placeholder: custom_placeholder.as_deref(),
+                                        suggested_prompt: suggested_prompt.as_deref(),
+                                        copy_toast: None,
+                                        prefill_status: None,
+                                        ttft_display: None,
+                                        background: background.as_ref().map(|b| b.text.as_str()),
+                                        channel_prompt: None,
+                                        quit_prompt: None,
+                                        turn_phase: None,
+                                        attachments: &[],
+                background_style: background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
+                                        context_warn_threshold: app_config.context_warn_threshold,
+                                    },
+                                );
                                 let source_compact = source.clone();
-                                if let Some(freed) = compact_context(&source_compact, &mut history, None).await {
-                                    update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
-                                    background = Some(BackgroundNotice::fading(
-                                        format!("Context auto-compacted (~{} freed)", ContextUsage::format_tokens(freed)),
-                                        8,
-                                    ));
+                                let before = context_usage.total_used();
+                                match compact_context(&source_compact, &mut history, None).await {
+                                    Some(_) => {
+                                        update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
+                                        let saved = before.saturating_sub(context_usage.total_used());
+                                        chat.replace_last_system(&format!(
+                                            "Context compacted · {} saved · the conversation so far is now a summary",
+                                            ContextUsage::format_tokens(saved)
+                                        ));
+                                    }
+                                    None => chat.replace_last_system(
+                                        "Compacting context failed — the conversation is unchanged",
+                                    ),
                                 }
+                                renderer.request_reprint();
                             }
 
                             if app_config.auto_save_sessions {
@@ -3949,6 +4100,13 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         // means by paste far more often than the file path
                         // of one, so it is looked for first.
                         if let Some(image) = flashagent_tui::clipboard::get_clipboard_image() {
+                            maybe_measure_image_cost(
+                                &image_costs,
+                                &mut image_cost_probe,
+                                &current_model,
+                                &source,
+                                &tx,
+                            );
                             let att = Attachment::from_clipboard(image);
                             let label = att.label();
                             attachments.push(att);
@@ -4975,7 +5133,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 let focus = trimmed.strip_prefix("/compact").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
                                 input.clear();
                                 autocomplete_idx = 0;
-                                custom_placeholder = Some("Compacting conversation context...".to_string());
+                                chat.push_system("Compacting context...");
+                                custom_placeholder = None;
                                 suggested_prompt = None;
                                 let tg_speed = token_tracker.tg_3s();
                                 renderer.frame(
@@ -5031,11 +5190,20 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         context_warn_threshold: app_config.context_warn_threshold,
                                     },
                                 );
-                                if let Some(freed) = compact_context(&source, &mut history, focus.as_deref()).await {
+                                let before = context_usage.total_used();
+                                if compact_context(&source, &mut history, focus.as_deref()).await.is_some() {
                                     update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
-                                    custom_placeholder = Some(format!("Context compacted (~{} freed)", ContextUsage::format_tokens(freed)));
+                                    let saved = before.saturating_sub(context_usage.total_used());
+                                    // Said in the transcript, like the
+                                    // automatic one: it is the conversation
+                                    // that changed.
+                                    chat.replace_last_system(&format!(
+                                        "Context compacted · {} saved · the conversation so far is now a summary",
+                                        ContextUsage::format_tokens(saved)
+                                    ));
+                                    custom_placeholder = None;
                                 } else {
-                                    custom_placeholder = Some("Context is already compact".to_string());
+                                    chat.replace_last_system("Nothing to compact yet");
                                 }
                                 suggested_prompt = None;
                                 renderer.request_reprint();
@@ -5318,6 +5486,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             } else {
                                 text
                             };
+                            context_before_turn = context_usage.total_used();
                             let mut user_msg = ChatMessage::user(content);
                             if !attachments.is_empty() {
                                 user_msg.images = attachments.iter().map(|a| a.data_url.clone()).collect();
@@ -5979,15 +6148,26 @@ async fn compact_context(
         String::new()
     };
 
+    // The summary replaces the conversation, so it is asked for by section:
+    // a free-form précis loses exactly the things the next turn needs — what
+    // the user actually asked for, which files are in play, and what was
+    // about to happen next.
     let summary_prompt = format!(
-        "You are an expert technical context compaction engine.\n\
-         Summarize the following conversation history concisely into clean structured notes.\n\
-         Preserve key technical decisions, architectural context, modified files, errors encountered, and user intents.\n\
-         Discard pleasantries, repetitive steps, and verbose tool dumps.\n\
+        "Summarize this conversation so that work can continue from the summary alone.\n\
+         Write these sections, in this order, and leave out any that has nothing in it:\n\
+         1. GOAL — what the user is trying to achieve, in their own words where possible.\n\
+         2. DECISIONS — choices made and the reason for each.\n\
+         3. FILES — every file read or changed, with what changed in it.\n\
+         4. FACTS — commands, versions, paths, numbers and errors that were established. Keep them exact.\n\
+         5. STATE — what is done, what is verified, what is still broken.\n\
+         6. NEXT — what was about to be done.\n\
+         Keep every instruction and preference the user stated. Drop pleasantries, \
+         repeated steps and tool output that led nowhere. Write in the language of the \
+         conversation.\n\
          {focus_text}\n\
-         Conversation to compact:\n\n\
+         Conversation:\n\n\
          {to_compact}\n\n\
-         Provide ONLY the structured technical summary."
+         Output only the summary."
     );
 
     let msgs = vec![
@@ -6000,12 +6180,17 @@ async fn compact_context(
         ..Default::default()
     };
 
+    // The old budget was twelve seconds for the whole summary and five
+    // between chunks. A 35B model on a laptop writes at ten tokens a second,
+    // so every summary it was asked for timed out and the conversation was
+    // replaced by a list of truncated snippets instead. Prefill of a long
+    // history alone can take a minute.
     let summary = if let Ok(Ok(mut stream)) = tokio::time::timeout(
-        std::time::Duration::from_secs(12),
+        std::time::Duration::from_secs(300),
         source.turn_with_options(&msgs, &[], &opts),
     ).await {
         let mut text = String::new();
-        while let Ok(Some(Ok(ev))) = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await {
+        while let Ok(Some(Ok(ev))) = tokio::time::timeout(std::time::Duration::from_secs(120), stream.next()).await {
             if let flashagent_llm::LlmEvent::TextDelta(d) = ev {
                 text.push_str(&d);
             }

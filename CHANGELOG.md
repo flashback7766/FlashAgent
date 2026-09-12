@@ -1,6 +1,31 @@
 # Changelog
 
-## Unreleased
+## b250 — compaction you can watch, and what a picture costs
+
+- Compaction says what it is doing, in the chat, where it belongs: *Compacting
+  context...* becomes *Context compacted · 12K saved · the conversation so far
+  is now a summary*. It changes what the model remembers, so it is part of the
+  conversation and not a notice that fades.
+- **Compaction was quietly failing on any model worth using.** The summary had
+  twelve seconds to arrive and five between chunks; a 35B writing at ten tokens
+  a second never finished, so every compaction fell back to a list of truncated
+  snippets. The budget now fits a real model, and the summary is asked for by
+  section — goal, decisions, files, facts, state, next — so what the next turn
+  needs cannot be summarised away. Checked end to end: after compaction the
+  model still answered with a port number and a branch name that existed only
+  in the part that was summarised.
+- The auto-compaction threshold looks at more than a percentage. It compacts
+  when the next turn would not fit — sized from what the last turn cost —
+  rather than waiting for a line to be crossed and discovering the overflow
+  mid-turn; and it does not compact a conversation whose bulk is the system
+  prompt and tool schemas, where summarising frees nothing and costs the recent
+  context.
+- The attachment row says what a picture will cost: `attached screenshot
+  1440×900 · ~1.2k tokens`. The number is measured against the server once per
+  model, because it cannot be guessed — a Qwen charges by area (about a token
+  per thousand pixels, measured), a Gemma a flat rate per image.
+- No emoji in the attachment row.
+- The what's-new screen shows the changelog's emphasis as emphasis.
 
 - The what's-new screen shows the changelog's emphasis as emphasis. It printed
   `**Pictures.**` with the asterisks.

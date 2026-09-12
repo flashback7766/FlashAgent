@@ -553,7 +553,72 @@ impl crate::LlmBackend for OpenAiCompat {
     }
 }
 
+/// A 1×1 PNG and a 64×64 PNG, used to ask the server what a picture costs.
+/// Both are valid files; the small one is the control.
+const PROBE_TINY: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R', 0, 0, 0, 1,
+    0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xDE, 0, 0, 0, 12, b'I', b'D', b'A', b'T', 0x08,
+    0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D, 0xB0, 0, 0,
+    0, 0, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
+];
+
 impl OpenAiCompat {
+    /// Ask the server what an image of a known size costs in prompt tokens.
+    ///
+    /// Guessing is not possible: a Qwen-VL charges by area, a Gemma charges a
+    /// flat rate per image whatever its size. Two throwaway requests — one
+    /// with a picture, one without — and the difference is the answer, for
+    /// this model, from the server that will actually be billed for it.
+    ///
+    /// Returns tokens per pixel and the flat cost, as `(per_pixel, fixed)`.
+    pub async fn measure_image_cost(&self, probe_png: &[u8], width: u32, height: u32) -> Option<(f32, f32)> {
+        let ask = |images: Vec<String>| {
+            let mut msg = ChatMessage::user("x");
+            msg.images = images;
+            serde_json::json!({
+                "model": self.model(),
+                "messages": [ {
+                    "role": "user",
+                    "content": if msg.images.is_empty() {
+                        serde_json::json!("x")
+                    } else {
+                        serde_json::json!([
+                            { "type": "text", "text": "x" },
+                            { "type": "image_url", "image_url": { "url": msg.images[0] } }
+                        ])
+                    }
+                } ],
+                "max_tokens": 1,
+                "stream": false,
+            })
+        };
+
+        let prompt_tokens = |v: &serde_json::Value| -> Option<f32> {
+            v.get("usage")?.get("prompt_tokens")?.as_f64().map(|n| n as f32)
+        };
+
+        let data_url = |bytes: &[u8]| format!("data:image/png;base64,{}", crate::base64_encode(bytes));
+
+        let plain: serde_json::Value = self.send_with_retries(&ask(Vec::new())).await.ok()?.json().await.ok()?;
+        let with_image: serde_json::Value =
+            self.send_with_retries(&ask(vec![data_url(probe_png)])).await.ok()?.json().await.ok()?;
+        let with_tiny: serde_json::Value =
+            self.send_with_retries(&ask(vec![data_url(PROBE_TINY)])).await.ok()?.json().await.ok()?;
+
+        let base = prompt_tokens(&plain)?;
+        let big = prompt_tokens(&with_image)? - base;
+        let tiny = prompt_tokens(&with_tiny)? - base;
+        if big <= 0.0 {
+            return None;
+        }
+        // The 1×1 costs whatever a picture costs before its pixels are
+        // counted; the rest scales with area. A model that charges a flat
+        // rate lands on per_pixel ≈ 0 by itself.
+        let pixels = (width as f32) * (height as f32);
+        let per_pixel = ((big - tiny) / pixels).max(0.0);
+        Some((per_pixel, tiny.max(0.0)))
+    }
+
     async fn send_with_retries(&self, body: &serde_json::Value) -> Result<reqwest::Response, LlmError> {
         let retries = self.max_retries.load(std::sync::atomic::Ordering::Relaxed);
         let mut attempt = 0usize;
