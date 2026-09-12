@@ -7,6 +7,7 @@
 pub mod config;
 pub mod context_usage;
 pub mod diff;
+pub mod encoding;
 pub mod effort_memory;
 pub mod loop_;
 pub mod memory;
@@ -19,6 +20,7 @@ pub mod toolcheck;
 pub use config::{AppConfig, BackendPreset, SamplingPreset, ToolsetProfile, UpdateChannel};
 pub use context_usage::ContextUsage;
 pub use diff::unified;
+pub use encoding::base64_encode;
 pub use effort_memory::{EffortMemory, ModelBias, TurnOutcome};
 pub use loop_::{AgentLoop, DoneReason, LoopConfig, LoopError, LoopEvent, LlmSource, ToolExec, ToolOutput, WritePreview};
 pub use memory_store::{Entry as MemoryEntry, Kind as MemoryEntryKind, Scope as MemoryScope, Store as MemoryStore};

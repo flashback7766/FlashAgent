@@ -1,7 +1,16 @@
 # Changelog
 
-## Unreleased
+## b249 — pictures
 
+- `view_image` — the model can open a picture in the project itself: a diagram
+  in `docs/`, a screenshot in a bug report, a mockup to build from. The picture
+  comes back as a picture, in a message of its own, because a tool result is
+  text on every server worth supporting. Offered only to models that can see,
+  refuses anything outside the working directory, and refuses a file too large
+  to send with its size rather than failing the turn. Verified: qwen3.6-35b
+  opened a diagram and described the two boxes and the arrow between them.
+- A file named in a sentence stays a mention; only a written-out path attaches
+  itself. Otherwise asking "what is in diagram.png?" quietly sent a megabyte.
 - **Pictures.** `Ctrl+V` pastes a screenshot straight from the clipboard into
   the message — the composer shows `📎 screenshot 1440×900`, `Ctrl+Z` takes it
   back, and the model sees it. Dropping an image file on the window works too,

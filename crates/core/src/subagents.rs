@@ -236,7 +236,7 @@ impl ToolExec for SubagentTool {
         let v: serde_json::Value = serde_json::from_str(call.args_json.trim()).unwrap_or(serde_json::json!({}));
         let task = v.get("task").and_then(|x| x.as_str()).unwrap_or("").to_string();
         if task.is_empty() {
-            return ToolOutput { content: "spawn_agent: `task` is required".into(), is_error: true };
+            return ToolOutput { content: "spawn_agent: `task` is required".into(), is_error: true, images: Vec::new() };
         }
         let role_name = v.get("role").and_then(|x| x.as_str()).unwrap_or("researcher").to_string();
         let max_steps = v.get("max_steps").and_then(|x| x.as_u64()).unwrap_or(20) as u32;
@@ -260,10 +260,10 @@ impl ToolExec for SubagentTool {
         while let Some(msg) = rx.recv().await {
             if let SubagentMsg::Finished { body, done, .. } = msg {
                 let is_error = !matches!(done, DoneReason::Completed);
-                return ToolOutput { content: body, is_error };
+                return ToolOutput { content: body, is_error, images: Vec::new() };
             }
         }
-        ToolOutput { content: "[subagent exited without an answer]".into(), is_error: true }
+        ToolOutput { content: "[subagent exited without an answer]".into(), is_error: true, images: Vec::new() }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -324,7 +324,7 @@ mod tests {
     #[async_trait]
     impl ToolExec for NoopTools {
         async fn execute(&self, call: &ToolCall) -> ToolOutput {
-            ToolOutput { content: format!("ran {}", call.name), is_error: false }
+            ToolOutput { content: format!("ran {}", call.name), is_error: false, images: Vec::new() }
         }
         fn specs(&self) -> Vec<ToolSpec> {
             vec![]

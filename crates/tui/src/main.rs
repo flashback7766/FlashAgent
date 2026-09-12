@@ -2288,6 +2288,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let mut effort_memory = flashagent_core::EffortMemory::load();
     let mut turn_outcome = flashagent_core::TurnOutcome::default();
     source.set_effort_bias(effort_memory.steps(&current_model));
+    tools_arc.set_vision_supported(model_sees_images(&source, &current_model));
     let (channel_probe_tx, mut channel_probe_rx) =
         tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
     let mut pending_update: Option<(String, String, String, Option<String>)> = None;
@@ -2790,6 +2791,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         tools_arc.set_context_window(Some(new_ctx_len));
                         source.set_model(&current_model);
                         source.set_effort_bias(effort_memory.steps(&current_model));
+                        tools_arc.set_vision_supported(model_sees_images(&source, &current_model));
                         update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
 
                         if model_changed {
@@ -3239,6 +3241,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 current_model = app_config.model.clone();
                                 source.set_model(&current_model);
                                 source.set_effort_bias(effort_memory.steps(&current_model));
+                                tools_arc.set_vision_supported(model_sees_images(&source, &current_model));
                             }
                             // During /goal the live mode/effort are the goal's;
                             // edits apply to what the goal restores afterwards.
@@ -3324,6 +3327,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 current_model = app_config.model.clone();
                                 source.set_model(&current_model);
                                 source.set_effort_bias(effort_memory.steps(&current_model));
+                                tools_arc.set_vision_supported(model_sees_images(&source, &current_model));
                                 current_effort = app_config.thinking_effort.clone();
                                 perm.state().set_mode(app_config.permission_mode);
                                 refresh_welcome_card_if_before_user_msg(
@@ -3532,6 +3536,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 let _ = app_config.save();
                                 source.set_model(&current_model);
                                 source.set_effort_bias(effort_memory.steps(&current_model));
+                                tools_arc.set_vision_supported(model_sees_images(&source, &current_model));
                                 if let Some(disc) = source.discovery() {
                                     if let Some(m) = disc.models.iter().find(|m| m.id == current_model) {
                                         current_context = m.context_display();
@@ -4030,6 +4035,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                                 source.set_model(&current_model);
                                 source.set_effort_bias(effort_memory.steps(&current_model));
+                                tools_arc.set_vision_supported(model_sees_images(&source, &current_model));
                                 let turn_opts = build_turn_options(&app_config, &current_effort);
                                 turn_counter += 1;
                                 turn_outcome = flashagent_core::TurnOutcome::default();
@@ -4488,6 +4494,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                                 source.set_model(&current_model);
                                 source.set_effort_bias(effort_memory.steps(&current_model));
+                                tools_arc.set_vision_supported(model_sees_images(&source, &current_model));
                                 let turn_opts = build_turn_options(&app_config, &current_effort);
                                 turn_counter += 1;
                                 turn_outcome = flashagent_core::TurnOutcome::default();
@@ -4611,6 +4618,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                                     source.set_model(&current_model);
                                     source.set_effort_bias(effort_memory.steps(&current_model));
+                                    tools_arc.set_vision_supported(model_sees_images(&source, &current_model));
                                     let turn_opts = build_turn_options(&app_config, &current_effort);
                                     turn_counter += 1;
                                 turn_outcome = flashagent_core::TurnOutcome::default();
@@ -5240,6 +5248,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                                 source.set_model(&current_model);
                                 source.set_effort_bias(effort_memory.steps(&current_model));
+                                tools_arc.set_vision_supported(model_sees_images(&source, &current_model));
                                 let turn_opts = build_turn_options(&app_config, &current_effort);
                                 turn_counter += 1;
                                 turn_outcome = flashagent_core::TurnOutcome::default();
@@ -5274,9 +5283,15 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             if let Some("Russian") = script_language(&text) {
                                 chat.set_language("ru");
                             }
-                            // A path typed (or pasted without bracketed
-                            // paste) is still the user pointing at a picture.
-                            for token in text.split_whitespace() {
+                            // A path typed out is still the user pointing at
+                            // a picture — but only a path. Naming a file in a
+                            // sentence ("open diagram.png and tell me...") is
+                            // a mention, and the model has view_image for
+                            // that; silently attaching a megabyte because a
+                            // word ended in .png would be a surprise.
+                            for token in text.split_whitespace().filter(|t| {
+                                t.contains('/') || t.contains('\\')
+                            }) {
                                 if attachments.len() >= 8 {
                                     break;
                                 }
@@ -5319,6 +5334,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                             source.set_model(&current_model);
                             source.set_effort_bias(effort_memory.steps(&current_model));
+                            tools_arc.set_vision_supported(model_sees_images(&source, &current_model));
                             let turn_opts = build_turn_options(&app_config, &current_effort);
                             turn_counter += 1;
                                 turn_outcome = flashagent_core::TurnOutcome::default();
@@ -6519,6 +6535,18 @@ mod tests {
         // Quoted, the way a terminal writes a path with spaces in it.
         let quoted = format!("'{}'", png.to_str().unwrap());
         assert!(Attachment::from_dropped_path(&quoted).is_some());
+    }
+
+    #[test]
+    fn a_bare_file_name_in_a_sentence_is_a_mention_not_an_attachment() {
+        // Attaching on any word ending in .png would send a megabyte because
+        // the user said "look at diagram.png"; that is what view_image is
+        // for. A written-out path is a different matter.
+        let looks_like_a_path = |t: &str| t.contains('/') || t.contains('\\');
+        assert!(!looks_like_a_path("diagram.png"));
+        assert!(looks_like_a_path("./diagram.png"));
+        assert!(looks_like_a_path("docs/diagram.png"));
+        assert!(looks_like_a_path("/home/me/shot.png"));
     }
 
     #[test]

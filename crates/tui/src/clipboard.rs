@@ -4,32 +4,7 @@
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-/// RFC 4648 Base64 encoding without external dependencies.
-pub fn base64_encode(data: &[u8]) -> String {
-    const CHARSET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-
-        out.push(CHARSET[(b0 >> 2) as usize] as char);
-        out.push(CHARSET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-
-        if chunk.len() > 1 {
-            out.push(CHARSET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
-        } else {
-            out.push('=');
-        }
-
-        if chunk.len() > 2 {
-            out.push(CHARSET[(b2 & 0x3f) as usize] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
+pub use flashagent_core::base64_encode;
 
 /// Set system clipboard text using OSC 52, arboard, and platform CLI tools.
 pub fn set_clipboard_text(text: &str) -> bool {
