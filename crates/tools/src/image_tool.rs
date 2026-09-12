@@ -177,7 +177,10 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.png"), png(1, 1)).unwrap();
         let path = outside.path().join("secret.png");
-        let out = view_image(dir.path(), &format!(r#"{{"path":"{}"}}"#, path.display()), true);
+        // Built with serde, not format!: a Windows path is full of backslashes,
+        // which are escapes inside a JSON string.
+        let args = serde_json::json!({ "path": path.to_string_lossy() }).to_string();
+        let out = view_image(dir.path(), &args, true);
         assert!(out.is_error);
         assert!(out.content.contains("outside the working directory"), "{}", out.content);
     }
