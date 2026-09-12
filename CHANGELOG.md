@@ -5,6 +5,16 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- Narrow terminals no longer cut text in half. Lines built from several facts
+  now drop whole facts when the width runs out — `gemma-4-e2b · auto · 64k`
+  becomes `gemma-4-e2b · auto`, not `gemma-4-e2b · auto [off` — the composer
+  shortens its prompt, and a tip too long for two lines ends on a word. A
+  test renders the welcome card at six widths down to 30 columns and fails if
+  any row overflows.
+- Short windows show the real mascot again. They had their own hand-drawn
+  "mini" version that still had the old round eyes, so the creature changed
+  species when the window got short.
+
 - Backend failures are explained instead of dumped. `llm: http: error sending
   request for url (http://localhost:1234/v1/chat/completions)` now reads *No
   model server answered at http://localhost:1234/v1*, with a line saying what

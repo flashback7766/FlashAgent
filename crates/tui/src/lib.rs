@@ -2165,6 +2165,34 @@ pub fn welcome_card_responsive(
 
 /// Responsive welcome banner with customizable feature options.
 #[allow(clippy::too_many_arguments)]
+/// Join as many of `parts` as fit in `width`, in order, and drop the rest.
+///
+/// A status line built from four facts and then clipped loses the last one
+/// mid-word and looks broken; dropping whole facts keeps it readable at any
+/// terminal size. Each part is `(plain, styled)`: the plain form is what gets
+/// measured, so colour codes do not count towards the width.
+pub fn fit_parts(parts: &[(String, String)], separator: &str, width: usize) -> String {
+    let sep_w = visible_width(separator);
+    let mut out = String::new();
+    let mut used = 0usize;
+    for (plain, styled) in parts {
+        let cost = plain.chars().count() + if out.is_empty() { 0 } else { sep_w };
+        // Stop at the first one that does not fit rather than skipping it:
+        // the parts are in priority order, and "64k" on its own, without the
+        // model it belongs to, says nothing.
+        if used + cost > width {
+            break;
+        }
+        if !out.is_empty() {
+            out.push_str(separator);
+        }
+        out.push_str(styled);
+        used += cost;
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn welcome_card_responsive_opts(
     model: &str,
     cwd: &str,
@@ -2317,8 +2345,18 @@ pub fn welcome_card_responsive_opts(
         let top = format!("{M3_BRD}╭─{RESET} {t_left_colored} {M3_BRD}{}╮{RESET}", "─".repeat(d1));
         let bot = format!("{M3_BRD}╰{}╯{RESET}", "─".repeat(inner_w));
 
-        let model_meta = truncate_middle(model, 16);
-        let left_meta = format!("{M3_PRI}{model_meta}{RESET} {M3_MUT}·{RESET} {M3_LGT}{th_str}{RESET} {M3_MUT}·{RESET} {M3_ICE}{ctx_short}{RESET}");
+        // Model first, then effort, then context: whichever no longer fits is
+        // dropped whole instead of being cut in half.
+        let model_meta = truncate_middle(model, inner_w.saturating_sub(4).min(28));
+        let left_meta = fit_parts(
+            &[
+                (model_meta.clone(), format!("{M3_PRI}{model_meta}{RESET}")),
+                (th_str.to_string(), format!("{M3_LGT}{th_str}{RESET}")),
+                (ctx_short.to_string(), format!("{M3_ICE}{ctx_short}{RESET}")),
+            ],
+            &format!(" {M3_MUT}\u{b7}{RESET} "),
+            inner_w.saturating_sub(2),
+        );
         let cwd_meta = format!("{M3_MUT}{}{RESET}", truncate_middle(&cwd_clean, inner_w.saturating_sub(4)));
 
         lines.push((LineKind::System, top));
@@ -2330,17 +2368,11 @@ pub fn welcome_card_responsive_opts(
                     lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(m, inner_w))));
                 }
             } else {
-                let is_blink = (tick_n % 50 == 46) || (tick_n % 50 == 47);
-                let eyes = if is_blink { "\x1b[38;2;194;231;255m▄\x1b[0m" } else { "\x1b[1;38;2;255;255;255m●\x1b[0m" };
-                let c_ice = "\x1b[38;2;194;231;255m";
-                let c_pri = "\x1b[38;2;138;180;248m";
-                let reset = "\x1b[0m";
-                let mini = [
-                    format!("{c_ice}▄███▄{reset}"),
-                    format!("{c_pri}▄█{eyes}{c_pri}█{eyes}█▄{reset}"),
-                    format!("{c_ice}█ █{reset}"),
-                ];
-                for m in &mini {
+                // A short screen shows the top half of the same sprite rather
+                // than a different creature: there used to be a hand-drawn
+                // "mini" version here that still had the old round eyes, so
+                // the mascot changed species when the window got short.
+                for m in mascot.iter().take(3) {
                     lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(m, inner_w))));
                 }
             }
@@ -2353,7 +2385,16 @@ pub fn welcome_card_responsive_opts(
             let div_cmd = format!("{M3_BRD}├─{RESET} {M3_LGT_B}Quick Commands{RESET} {M3_BRD}{}┤{RESET}", "─".repeat(inner_w.saturating_sub(17)));
             lines.push((LineKind::System, div_cmd));
             lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}for autonomy{RESET}"), inner_w))));
-            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET} {M3_MUT}·{RESET} {M3_ICE}Esc{RESET} {M3_MUT}quit{RESET} {M3_MUT}·{RESET} {M3_ICE}F1..F5{RESET} {M3_MUT}hotkeys{RESET}"), inner_w))));
+            let hints = fit_parts(
+                &[
+                    ("Tab settings".into(), format!("{M3_ICE}Tab{RESET} {M3_MUT}settings{RESET}")),
+                    ("Esc quit".into(), format!("{M3_ICE}Esc{RESET} {M3_MUT}quit{RESET}")),
+                    ("F1..F5 hotkeys".into(), format!("{M3_ICE}F1..F5{RESET} {M3_MUT}hotkeys{RESET}")),
+                ],
+                &format!(" {M3_MUT}\u{b7}{RESET} "),
+                inner_w.saturating_sub(2),
+            );
+            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {hints}"), inner_w))));
         } else {
             lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal{RESET} {M3_MUT}·{RESET} {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET} {M3_MUT}·{RESET} {M3_ICE}Esc{RESET} {M3_MUT}quit{RESET}"), inner_w))));
         }
@@ -3686,6 +3727,57 @@ mod tests {
         assert_eq!(lower_first("Add a null check"), "add a null check");
         assert_eq!(lower_first("MEMORY.md needs a line"), "MEMORY.md needs a line");
         assert_eq!(lower_first(""), "");
+    }
+
+    #[test]
+    fn a_line_built_from_facts_drops_whole_facts_when_narrow() {
+        let parts = vec![
+            ("gemma-4-e2b".to_string(), "\x1b[31mgemma-4-e2b\x1b[0m".to_string()),
+            ("auto".to_string(), "\x1b[32mauto\x1b[0m".to_string()),
+            ("64k".to_string(), "\x1b[33m64k\x1b[0m".to_string()),
+        ];
+        let sep = " · ";
+
+        // Everything fits.
+        let wide = strip_ansi(&fit_parts(&parts, sep, 40));
+        assert_eq!(wide, "gemma-4-e2b · auto · 64k");
+
+        // Only the first two: the third is dropped whole, not cut in half.
+        let narrow = strip_ansi(&fit_parts(&parts, sep, 20));
+        assert_eq!(narrow, "gemma-4-e2b · auto");
+
+        // And the colour codes are not counted as width.
+        assert!(visible_width(&fit_parts(&parts, sep, 20)) <= 20);
+
+        // Nothing fits: an empty line rather than a broken one.
+        assert_eq!(fit_parts(&parts, sep, 3), "");
+    }
+
+    #[test]
+    fn the_welcome_card_never_overflows_a_narrow_terminal() {
+        for width in [30usize, 36, 46, 56, 80, 120] {
+            let card = welcome_card_responsive_opts(
+                "gemma-4-e2b-it-qat@q4_k_xl",
+                "/home/someone/projects/flashagent",
+                "Accept Edits",
+                0,
+                Some("auto [off, on]"),
+                Some("64k ctx"),
+                width,
+                24,
+                0,
+                true,
+                MascotMood::Happy,
+            );
+            for (_, line) in &card {
+                assert!(
+                    visible_width(line) <= width,
+                    "{width} cols: row is {} wide: {:?}",
+                    visible_width(line),
+                    strip_ansi(line)
+                );
+            }
+        }
     }
 
     #[test]
