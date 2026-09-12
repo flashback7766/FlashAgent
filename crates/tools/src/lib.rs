@@ -360,8 +360,8 @@ impl ToolExec for BuiltinTools {
             },
             ToolSpec {
                 name: "memory_read".into(),
-                description: "Read project (./MEMORY.md) or global (~/.flashagent/MEMORY.md) long-term memory".into(),
-                parameters_json: r#"{"type":"object","properties":{"scope":{"type":"string","enum":["project","global","all"],"description":"Scope to read ('project', 'global', or 'all')"}},"required":[]}"#.into(),
+                description: "List what is remembered, or read one memory in full by name. The index of every memory is already in your context; use this to read a body.".into(),
+                parameters_json: r#"{"type": "object", "properties": {"scope": {"type": "string", "enum": ["project", "global", "all"], "description": "Which memory to look at; 'all' by default."}, "name": {"type": "string", "description": "Name of one memory to read in full. Omit to list what is remembered."}}, "required": []}"#.into(),
             },
         ];
 
@@ -412,18 +412,18 @@ impl ToolExec for BuiltinTools {
             });
             specs.push(ToolSpec {
                 name: "memory_create".into(),
-                description: "Create a new named section in long-term memory (MEMORY.md). Disabled in autonomous /goal mode".into(),
-                parameters_json: r#"{"type":"object","properties":{"title":{"type":"string","description":"Section title"},"content":{"type":"string","description":"Content to record"},"scope":{"type":"string","enum":["project","global"],"description":"Defaults to project"}},"required":["title","content"]}"#.into(),
+                description: "Remember one fact across sessions: something the user told you about how they work, or a decision about this project and its reason. Not things the code, git history or docs already say. Disabled in autonomous /goal mode".into(),
+                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "One short line, in the user's language, saying what this call is for — e.g. 'Remember that the suite runs with nextest'. The user sees it before the call runs."}, "title": {"type": "string", "description": "Short title; it becomes the memory's name."}, "content": {"type": "string", "description": "The fact itself, in full sentences, with the reason behind it when there is one."}, "description": {"type": "string", "description": "One line saying what this memory is about. It goes in the index that is loaded every turn, so make it specific."}, "type": {"type": "string", "enum": ["preference", "decision", "reference", "work"], "description": "preference = how the user likes to work; decision = a choice made about this project and why; reference = a pointer outwards (URL, ticket); work = ongoing goals or constraints."}, "scope": {"type": "string", "enum": ["project", "global"], "description": "Use 'global' for anything about the USER — how they work, what they prefer, corrections they gave you — so it follows them into every project. Use 'project' only for facts about this codebase. A sentence that starts with 'I' or 'the user' is global."}}, "required": ["header", "title", "content"]}"#.into(),
             });
             specs.push(ToolSpec {
                 name: "memory_update".into(),
-                description: "Update an existing section in long-term memory (MEMORY.md). Disabled in autonomous /goal mode".into(),
-                parameters_json: r#"{"type":"object","properties":{"title":{"type":"string","description":"Section title to update"},"content":{"type":"string","description":"New content for the section"},"scope":{"type":"string","enum":["project","global"],"description":"Defaults to project"}},"required":["title","content"]}"#.into(),
+                description: "Correct something already remembered, when it turns out to be wrong or has changed. Disabled in autonomous /goal mode".into(),
+                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "One short line, in the user's language, saying what this call is for — e.g. 'Remember that the suite runs with nextest'. The user sees it before the call runs."}, "title": {"type": "string", "description": "Name of the memory to correct."}, "content": {"type": "string", "description": "The corrected fact."}, "description": {"type": "string", "description": "One line saying what this memory is about. It goes in the index that is loaded every turn, so make it specific."}, "type": {"type": "string", "enum": ["preference", "decision", "reference", "work"], "description": "preference = how the user likes to work; decision = a choice made about this project and why; reference = a pointer outwards (URL, ticket); work = ongoing goals or constraints."}, "scope": {"type": "string", "enum": ["project", "global"], "description": "Use 'global' for anything about the USER — how they work, what they prefer, corrections they gave you — so it follows them into every project. Use 'project' only for facts about this codebase. A sentence that starts with 'I' or 'the user' is global."}}, "required": ["header", "title", "content"]}"#.into(),
             });
             specs.push(ToolSpec {
                 name: "memory_remove".into(),
-                description: "Remove a section from long-term memory (MEMORY.md). Disabled in autonomous /goal mode".into(),
-                parameters_json: r#"{"type":"object","properties":{"title":{"type":"string","description":"Section title to delete"},"scope":{"type":"string","enum":["project","global"],"description":"Defaults to project"}},"required":["title"]}"#.into(),
+                description: "Forget a memory that turned out to be wrong or no longer applies. Disabled in autonomous /goal mode".into(),
+                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "One short line, in the user's language, saying what this call is for — e.g. 'Remember that the suite runs with nextest'. The user sees it before the call runs."}, "title": {"type": "string", "description": "Name of the memory to forget."}, "scope": {"type": "string", "enum": ["project", "global"], "description": "Use 'global' for anything about the USER — how they work, what they prefer, corrections they gave you — so it follows them into every project. Use 'project' only for facts about this codebase. A sentence that starts with 'I' or 'the user' is global."}}, "required": ["header", "title"]}"#.into(),
             });
             // PHILOSOPHY.md §3: Web tools require explicit opt-in
             if self.web_enabled.load(Ordering::Relaxed) {

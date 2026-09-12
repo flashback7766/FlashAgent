@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+- Memory the model keeps for itself. One fact per file under `memory/`, with
+  `MEMORY.md` as an index of one line each — so what is remembered no longer
+  grows until it crowds out the conversation it was meant to help. Every fact
+  carries its type (preference, decision, reference, work) and the date it was
+  written, because a note that does not say when it was true quietly outlives
+  the decision it recorded. Facts about you go global and follow you into every
+  project and every model; facts about the codebase stay with the project.
+- The model now writes memories without being asked. The tools existed before
+  this, but nothing in the prompt said what was worth remembering, so it never
+  used them. It is told now — corrections you gave it, decisions and their
+  reasons, commands that are not discoverable — and told what is NOT worth it:
+  anything the code, git history or README already says.
+- `/memory` shows everything remembered, in both scopes: `d` forgets one, and
+  `e` sends the model a note about the one under the cursor — "this is out of
+  date, I use just test now" — and it corrects the memory itself. Memory
+  written without being asked has to be visible and reversible.
+- Writing a memory is announced on the line under the input, with a pointer to
+  `/memory`.
+- Fixed: the what's-new screen did not appear for anyone updating into b245.
+  Nobody had a recorded version yet — that field ships in b245 — and an absent
+  version was read as a first run. An existing config with no version is now
+  read as what it is: someone who updated, and has news to read.
+
 Beta builds are numbered `bNNN` and ship on the rolling `beta` pre-release.
 Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 

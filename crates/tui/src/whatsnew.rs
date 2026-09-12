@@ -711,6 +711,18 @@ mod tests {
     }
 
     #[test]
+    fn the_newest_release_stands_in_when_no_version_was_ever_recorded() {
+        // Everyone updating INTO the first build that records a version has
+        // nothing recorded, and they are precisely the people with news to
+        // read. `latest` is what they get instead of silence.
+        let newest = latest(1);
+        assert_eq!(newest.len(), 1);
+        assert!(!newest[0].items.is_empty());
+        assert!(!newest[0].version.contains("Unreleased"));
+        assert_eq!(latest(3).len(), 3);
+    }
+
+    #[test]
     fn nothing_is_shown_when_the_build_did_not_move_forward() {
         assert!(releases_between(SAMPLE, "b238", "b238").is_empty());
         assert!(releases_between(SAMPLE, "b238", "b236").is_empty(), "a downgrade is not news");
