@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Every tool call now explains itself, reads and searches included. The header
+  was recommended but optional for them, and a capable 35B model wrote one
+  exactly never — so a search read `Searched "**/*.rs"` while an edit read like
+  a sentence. It is asked for on every call now: `Find all .rs files in the
+  project · "**/*.rs"`, `Read main.rs contents`.
+- Paths inside the project are shown relative to it. A line reading `Read
+  /tmp/claude-1000/-home-flashback/.../audit_proj/main.rs` was all prefix and
+  no information.
 Found by running every surface of the app against a real model and reading
 what the server actually received.
 
