@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **The first five minutes.** Walked from an empty home directory with the
+  published build, as a new user gets it, and fixed what that turned up:
+  - *"Welcome back"* greeted people who had never been here. It now says
+    *Welcome* until there is a saved session to come back to.
+  - The interface language was Russian for everybody, because that was the
+    shipped default and the wizard never asks. It follows the locale now, and
+    what you type still overrides it.
+  - The tool-calling check printed its verdict to a screen the app then
+    cleared, so the one thing a new user needed to read was gone before they
+    could read it. It is now the first line of the conversation: *Tool-calling
+    check: 6/8 — unreliable — expect to babysit it.*
+  - That check ran before the "do you trust this directory?" question, so the
+    first thing a new user did was wait a minute and only then get asked where
+    they were. The instant question comes first.
 - The suggestion list no longer hangs on the screen while the context is being
   compacted. The command that opened it is long gone from the composer.
 - The auto-compaction threshold follows the window: 97% at a million tokens,

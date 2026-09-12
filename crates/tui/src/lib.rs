@@ -2066,6 +2066,21 @@ pub fn truncate_middle(s: &str, max_len: usize) -> String {
     format!("{prefix}...{suffix}")
 }
 
+/// Whether this person has used FlashAgent before.
+///
+/// A saved session is the evidence: the config file exists from the moment
+/// the setup wizard finishes, so it cannot answer this, but a session is only
+/// written once a conversation has happened.
+pub fn been_here_before() -> bool {
+    let Some(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok() else {
+        return false;
+    };
+    let sessions = std::path::PathBuf::from(home).join(".flashagent").join("sessions");
+    std::fs::read_dir(sessions)
+        .map(|mut d| d.any(|e| e.is_ok()))
+        .unwrap_or(false)
+}
+
 /// Formats the startup welcome banner with runtime context:
 /// model & context window, current directory, permission mode,
 /// thinking effort/presets, loaded memory documents, and usage tips.
@@ -2381,6 +2396,9 @@ pub fn welcome_card_responsive_opts(
     } else {
         username
     };
+    // "Welcome back" to someone who has never been here is the kind of
+    // detail that tells a person the whole thing was assembled carelessly.
+    let greeting = if been_here_before() { "Welcome back" } else { "Welcome" };
 
     let th_str = thinking.unwrap_or("High");
     let ctx_short = context_window.unwrap_or("128k");
@@ -2452,7 +2470,7 @@ pub fn welcome_card_responsive_opts(
         let cwd_meta = format!("{M3_MUT}{}{RESET}", truncate_middle(&cwd_clean, w1.saturating_sub(4)));
 
         let left_lines = [
-            center_cell(&format!("{M3_TXT_B}Welcome back {M3_ICE}{username_clean}{M3_TXT_B}!{RESET}"), w1),
+            center_cell(&format!("{M3_TXT_B}{greeting} {M3_ICE}{username_clean}{M3_TXT_B}!{RESET}"), w1),
             "".to_string(),
             center_cell(&mascot[0], w1),
             center_cell(&mascot[1], w1),
@@ -2526,7 +2544,7 @@ pub fn welcome_card_responsive_opts(
         let cwd_meta = format!("{M3_MUT}{}{RESET}", truncate_middle(&cwd_clean, inner_w.saturating_sub(4)));
 
         lines.push((LineKind::System, top));
-        lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(&format!("{M3_TXT_B}Welcome back {M3_ICE}{username_clean}{M3_TXT_B}!{RESET}"), inner_w))));
+        lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(&format!("{M3_TXT_B}{greeting} {M3_ICE}{username_clean}{M3_TXT_B}!{RESET}"), inner_w))));
 
         if show_mascot {
             if height >= 20 {
