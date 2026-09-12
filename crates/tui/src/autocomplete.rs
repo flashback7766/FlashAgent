@@ -42,6 +42,7 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/help", "Show command reference and keybindings", AutocompleteCategory::Command),
         AutocompleteItem::new("/settings", "Open interactive settings tab (or press Tab on empty prompt)", AutocompleteCategory::Command),
         AutocompleteItem::new("/sampling", "Open sampling parameters menu (or press F5)", AutocompleteCategory::Command),
+        AutocompleteItem::new("/whatsnew", "Show what changed in the latest releases", AutocompleteCategory::Command),
         AutocompleteItem::new("/context", "Show detailed context window token breakdown", AutocompleteCategory::Command),
         AutocompleteItem::new("/clear", "Clear terminal screen and conversation scrollback", AutocompleteCategory::Command),
         AutocompleteItem::new("/effort", "Select thinking effort preset (off, low, medium, high)", AutocompleteCategory::Command),

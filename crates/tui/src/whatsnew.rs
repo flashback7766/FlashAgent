@@ -5,6 +5,8 @@
 //! forward by more than a hair, this shows what arrived — read straight out
 //! of `CHANGELOG.md`, so the screen cannot drift from what actually shipped.
 
+use crossterm::event::{Event, KeyCode, KeyEventKind};
+
 /// The changelog as it stood when this binary was built.
 pub const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 
@@ -19,10 +21,14 @@ pub struct Release {
     pub items: Vec<String>,
 }
 
-/// Sortable rank of a version: `b238` → (238, 0, 0), `v1.2.3` → (1, 2, 3).
+/// Sortable rank of a version: `b238` → (0, 238, 0), `v1.2.3` → (1, 2, 3).
+///
+/// Betas live below 1.0 on purpose: the move from `b238` to `v1.0.0` is the
+/// one release where a user most wants to read what changed, and a plain
+/// numeric comparison would call it a downgrade and say nothing.
 fn rank(version: &str) -> Option<(u64, u64, u64)> {
     if let Some(n) = version.strip_prefix('b') {
-        return n.parse().ok().map(|b| (b, 0, 0));
+        return n.parse().ok().map(|b| (0, b, 0));
     }
     let mut parts = version.strip_prefix('v')?.split(['.', '-']).map(|p| p.parse::<u64>().ok());
     Some((parts.next()??, parts.next().flatten().unwrap_or(0), parts.next().flatten().unwrap_or(0)))
@@ -122,6 +128,437 @@ pub fn since(from: Option<&str>, to: &str) -> Vec<Release> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The screen
+// ---------------------------------------------------------------------------
+
+use std::time::{Duration, Instant};
+
+/// How long each entry waits before it appears. Slow enough that the eye
+/// follows one line at a time, fast enough that nobody sits through it.
+const REVEAL_STEP: Duration = Duration::from_millis(110);
+
+/// One screenful: a release, or part of one when it does not fit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Page {
+    /// Version heading for this screen.
+    pub version: String,
+    /// Title after the em dash, when there is one.
+    pub title: String,
+    /// Rendered rows, each tagged with the entry it belongs to so entries
+    /// appear whole rather than line by line.
+    pub rows: Vec<(usize, String)>,
+    /// `(part, of)` when one release needed more than one screen.
+    pub part: (usize, usize),
+}
+
+/// The paged "what arrived while you were away" screen.
+pub struct WhatsNew {
+    releases: Vec<Release>,
+    pages: Vec<Page>,
+    width: usize,
+    height: usize,
+    /// Current screen.
+    pub page: usize,
+    shown_at: Instant,
+    /// Set once the user has asked to see this page all at once.
+    all_at_once: bool,
+    /// Version this screen is announcing.
+    to: String,
+}
+
+const DIM: &str = "\x1b[38;2;135;130;125m";
+const TEXT: &str = "\x1b[38;2;200;195;185m";
+const BRIGHT: &str = "\x1b[1;38;2;240;235;225m";
+const ACCENT: &str = "\x1b[1;38;2;225;175;95m";
+const CODE: &str = "\x1b[38;2;175;170;225m";
+const BORDER: &str = "\x1b[38;2;100;95;90m";
+const RESET: &str = "\x1b[0m";
+
+/// Colour `code` spans inside a changelog entry.
+fn style_inline(text: &str, base: &str) -> String {
+    let mut out = String::from(base);
+    let mut in_code = false;
+    for part in text.split('`') {
+        out.push_str(if in_code { CODE } else { base });
+        out.push_str(part);
+        in_code = !in_code;
+    }
+    out.push_str(RESET);
+    out
+}
+
+impl WhatsNew {
+    /// Build the screen for `releases`, laid out for a terminal of this size.
+    pub fn new(releases: Vec<Release>, to: &str, width: usize, height: usize) -> Self {
+        let mut view = Self {
+            releases,
+            pages: Vec::new(),
+            width: 0,
+            height: 0,
+            page: 0,
+            shown_at: Instant::now(),
+            all_at_once: false,
+            to: to.to_string(),
+        };
+        view.relayout(width, height);
+        view
+    }
+
+    /// Number of screens the user will page through.
+    pub fn pages(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Re-flow for a new terminal size, keeping the reader roughly where they
+    /// were: a resize must not throw away the place in the list.
+    pub fn relayout(&mut self, width: usize, height: usize) {
+        if self.width == width && self.height == height {
+            return;
+        }
+        let seen_version = self.pages.get(self.page).map(|p| p.version.clone());
+        self.width = width;
+        self.height = height;
+        self.pages = layout(&self.releases, self.text_width(), self.body_rows());
+        self.page = seen_version
+            .and_then(|v| self.pages.iter().position(|p| p.version == v))
+            .unwrap_or(0)
+            .min(self.pages.len().saturating_sub(1));
+        self.shown_at = Instant::now();
+        self.all_at_once = false;
+    }
+
+    fn inner_width(&self) -> usize {
+        self.width.saturating_sub(6).clamp(14, 110)
+    }
+
+    fn text_width(&self) -> usize {
+        self.inner_width().saturating_sub(6).max(16)
+    }
+
+    /// Rows available for the entries themselves, after the frame, the
+    /// heading and the footer.
+    fn body_rows(&self) -> usize {
+        self.height.saturating_sub(9).clamp(3, 24)
+    }
+
+    /// Entries revealed so far on this page.
+    fn revealed(&self) -> usize {
+        if self.all_at_once {
+            return usize::MAX;
+        }
+        1 + (self.shown_at.elapsed().as_millis() / REVEAL_STEP.as_millis()) as usize
+    }
+
+    /// Whether the whole page is on screen already.
+    pub fn fully_revealed(&self) -> bool {
+        let entries = self
+            .pages
+            .get(self.page)
+            .and_then(|p| p.rows.last().map(|(e, _)| e + 1))
+            .unwrap_or(0);
+        self.revealed() >= entries
+    }
+
+    /// Whether the screen still has something to draw on its own — the caller
+    /// keeps redrawing while this is true.
+    pub fn animating(&self) -> bool {
+        !self.fully_revealed()
+    }
+
+    fn go(&mut self, page: usize) {
+        self.page = page;
+        self.shown_at = Instant::now();
+        self.all_at_once = false;
+    }
+
+    /// Handle a key. `Some(())` means the screen is finished with.
+    pub fn handle_key(&mut self, code: KeyCode) -> Option<()> {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => Some(()),
+            KeyCode::Left | KeyCode::Backspace | KeyCode::PageUp | KeyCode::Char('k') => {
+                if self.page > 0 {
+                    let prev = self.page - 1;
+                    self.go(prev);
+                    // Going back is going back to read, not to watch it
+                    // appear again.
+                    self.all_at_once = true;
+                }
+                None
+            }
+            KeyCode::Enter
+            | KeyCode::Right
+            | KeyCode::Char(' ')
+            | KeyCode::PageDown
+            | KeyCode::Char('j') => {
+                if !self.fully_revealed() {
+                    // Impatience is an instruction: show the rest now.
+                    self.all_at_once = true;
+                    return None;
+                }
+                if self.page + 1 < self.pages.len() {
+                    let next = self.page + 1;
+                    self.go(next);
+                    None
+                } else {
+                    Some(())
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Draw the screen.
+    pub fn render(&self) -> Vec<String> {
+        let inner_w = self.inner_width();
+        let mut lines = Vec::new();
+
+        // The heading is the first thing that stops fitting in a narrow
+        // window, and a sheared-open box is worse than a shorter name.
+        let title = [
+            format!(" What's new in FlashAgent {} ", self.to),
+            format!(" What's new · {} ", self.to),
+            format!(" {} ", self.to),
+        ]
+        .into_iter()
+        // One dash of frame always stays to the right of the heading.
+        .find(|t| crate::visible_width(t) < inner_w)
+        .unwrap_or_else(|| " new ".to_string());
+        let dashes = inner_w.saturating_sub(crate::visible_width(&title) + 1);
+        lines.push(format!(
+            "  {BORDER}┌─{ACCENT}{title}{BORDER}{}┐{RESET}",
+            "─".repeat(dashes)
+        ));
+
+        let pad = |content: &str| -> String {
+            let max_w = inner_w.saturating_sub(2);
+            let vis = crate::visible_width(content);
+            let clipped = if vis > max_w { crate::clip_ansi(content, max_w) } else { content.to_string() };
+            let pad = " ".repeat(max_w.saturating_sub(crate::visible_width(&clipped)));
+            format!("  {BORDER}│{RESET} {clipped}{pad} {BORDER}│{RESET}")
+        };
+
+        let Some(page) = self.pages.get(self.page) else {
+            lines.push(pad(""));
+            lines.push(format!("  {BORDER}└{}┘{RESET}", "─".repeat(inner_w)));
+            return lines;
+        };
+
+        lines.push(pad(""));
+        let mut heading = format!("{ACCENT}{}{RESET}", page.version);
+        if !page.title.is_empty() {
+            heading.push_str(&format!("{DIM} — {BRIGHT}{}{RESET}", page.title));
+        }
+        if page.part.1 > 1 {
+            heading.push_str(&format!(" {DIM}({} of {}){RESET}", page.part.0, page.part.1));
+        }
+        lines.push(pad(&heading));
+        lines.push(pad(""));
+
+        let revealed = self.revealed();
+        let mut body = 0;
+        for (entry, row) in &page.rows {
+            if *entry >= revealed {
+                break;
+            }
+            lines.push(pad(row));
+            body += 1;
+        }
+        // Hold the box still while the entries arrive, so the footer does not
+        // crawl down the screen.
+        for _ in body..page.rows.len() {
+            lines.push(pad(""));
+        }
+
+        lines.push(pad(""));
+        let counter = if self.pages.len() > 1 {
+            format!("{DIM}{}/{}{RESET}   ", self.page + 1, self.pages.len())
+        } else {
+            String::new()
+        };
+        let hint = if !self.fully_revealed() {
+            "enter — show all · esc — skip"
+        } else if self.page + 1 < self.pages.len() {
+            "enter — next · ← — back · esc — skip"
+        } else if self.pages.len() > 1 {
+            "enter — start working · ← — back"
+        } else {
+            "enter — start working"
+        };
+        lines.push(pad(&format!("{counter}{DIM}{hint}{RESET}")));
+        lines.push(format!("  {BORDER}└{}┘{RESET}", "─".repeat(inner_w)));
+        lines
+    }
+}
+
+/// Break the releases into screens of at most `rows` body rows.
+fn layout(releases: &[Release], text_w: usize, rows: usize) -> Vec<Page> {
+    let mut pages = Vec::new();
+    for rel in releases {
+        // Each entry becomes one or more wrapped rows, indented under its
+        // marker so a wrapped line still reads as part of the same point.
+        let mut entries: Vec<Vec<String>> = Vec::new();
+        for item in &rel.items {
+            let rendered = if let Some(head) = item.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                vec![format!("  {BRIGHT}{head}{RESET}")]
+            } else {
+                let styled = style_inline(item, TEXT);
+                crate::wrap_styled(&styled, text_w)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, row)| {
+                        if i == 0 {
+                            format!("  {ACCENT}›{RESET} {row}")
+                        } else {
+                            format!("   {row}")
+                        }
+                    })
+                    .collect()
+            };
+            entries.push(rendered);
+        }
+
+        let mut chunks: Vec<Vec<Vec<String>>> = Vec::new();
+        let mut chunk: Vec<Vec<String>> = Vec::new();
+        let mut used = 0;
+        for entry in entries {
+            let len = entry.len();
+            if !chunk.is_empty() && used + len > rows {
+                chunks.push(std::mem::take(&mut chunk));
+                used = 0;
+            }
+            used += len;
+            chunk.push(entry);
+        }
+        if !chunk.is_empty() {
+            chunks.push(chunk);
+        }
+
+        let total = chunks.len();
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            let mut page_rows = Vec::new();
+            for (entry_idx, entry) in chunk.into_iter().enumerate() {
+                for row in entry {
+                    page_rows.push((entry_idx, row));
+                }
+            }
+            pages.push(Page {
+                version: rel.version.clone(),
+                title: rel.title.clone(),
+                rows: page_rows,
+                part: (i + 1, total),
+            });
+        }
+    }
+    pages
+}
+
+/// Show the screen from inside the running app, where the event reader
+/// already owns stdin and raw mode must stay on.
+pub async fn run_channel(
+    releases: Vec<Release>,
+    to: &str,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::UiEvent>,
+) -> std::io::Result<()> {
+    use crossterm::{cursor, execute, terminal::{EnterAlternateScreen, LeaveAlternateScreen}};
+    use std::io::Write;
+
+    if releases.is_empty() {
+        return Ok(());
+    }
+
+    let mut stdout = std::io::stdout();
+    let _ = execute!(stdout, EnterAlternateScreen, cursor::Hide);
+
+    let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+    let mut view = WhatsNew::new(releases, to, w as usize, h as usize);
+
+    loop {
+        let mut buf = String::from("\x1b[H\x1b[2J\r\n");
+        for line in view.render() {
+            buf.push_str(&line);
+            buf.push_str("\r\n");
+        }
+        let _ = stdout.write_all(buf.as_bytes());
+        let _ = stdout.flush();
+
+        // While entries are still arriving the screen has to redraw on its
+        // own; once it is whole, waiting on a key costs nothing.
+        let next = tokio::time::timeout(Duration::from_millis(40), rx.recv()).await;
+        match next {
+            Ok(Some(crate::UiEvent::Key(code, _))) => {
+                if view.handle_key(code).is_some() {
+                    break;
+                }
+            }
+            Ok(Some(crate::UiEvent::Resize(w, h))) => view.relayout(w as usize, h as usize),
+            Ok(None) => break,
+            _ => {}
+        }
+    }
+
+    let _ = execute!(stdout, cursor::Show, LeaveAlternateScreen);
+    Ok(())
+}
+
+/// Show the screen, then return. Takes over the terminal for as long as it is
+/// up and hands it back exactly as it was found.
+pub async fn run(releases: Vec<Release>, to: &str) -> std::io::Result<()> {
+    use crossterm::{
+        cursor, execute,
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    };
+    use std::io::Write;
+
+    if releases.is_empty() {
+        return Ok(());
+    }
+
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    let _ = execute!(stdout, EnterAlternateScreen, cursor::Hide);
+
+    let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+    let mut view = WhatsNew::new(releases, to, w as usize, h as usize);
+
+    loop {
+        let buffer = {
+            let mut buf = String::from("\x1b[H\x1b[2J\r\n");
+            for line in view.render() {
+                buf.push_str(&line);
+                buf.push_str("\r\n");
+            }
+            buf
+        };
+        let _ = stdout.write_all(buffer.as_bytes());
+        let _ = stdout.flush();
+
+        if crossterm::event::poll(Duration::from_millis(40)).unwrap_or(false) {
+            match crossterm::event::read()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    if view.handle_key(key.code).is_some() {
+                        break;
+                    }
+                }
+                Event::Resize(w, h) => view.relayout(w as usize, h as usize),
+                _ => {}
+            }
+        }
+    }
+
+    let _ = execute!(stdout, cursor::Show, LeaveAlternateScreen);
+    let _ = disable_raw_mode();
+    Ok(())
+}
+
+/// The newest `n` releases in the bundled changelog, for when the screen is
+/// asked for rather than triggered.
+pub fn latest(n: usize) -> Vec<Release> {
+    let mut all = releases_between(CHANGELOG, "b0", "v9999.0.0");
+    all.truncate(n);
+    all
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +585,101 @@ mod tests {
         \n\
         ### Tool calling\n\
         - Text tool calls are executed.\n";
+
+    fn sample_releases() -> Vec<Release> {
+        releases_between(SAMPLE, "b218", "b238")
+    }
+
+    #[test]
+    fn every_row_fits_the_terminal_it_was_drawn_for() {
+        // The screen takes over the whole terminal; a row wider than the
+        // window wraps and shears the box open.
+        for width in [30usize, 44, 60, 80, 120] {
+            let view = WhatsNew::new(sample_releases(), "b238", width, 24);
+            for row in view.render() {
+                assert!(
+                    crate::visible_width(&row) <= width,
+                    "{width} columns: {:?} is {} wide",
+                    crate::strip_ansi(&row),
+                    crate::visible_width(&row)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn entries_arrive_one_at_a_time_and_the_box_does_not_move() {
+        let view = WhatsNew::new(sample_releases(), "b238", 80, 24);
+        assert!(!view.fully_revealed(), "the first frame shows one entry, not all of them");
+        let early = view.render();
+
+        let mut done = WhatsNew::new(sample_releases(), "b238", 80, 24);
+        done.handle_key(KeyCode::Enter);
+        assert!(done.fully_revealed(), "enter shows the rest at once");
+        assert_eq!(
+            early.len(),
+            done.render().len(),
+            "the frame is the same height throughout, so the footer stays put"
+        );
+        assert!(
+            crate::strip_ansi(&done.render().join("\n")).contains("Tool cards drop their emoji"),
+            "the entries are actually on the screen"
+        );
+    }
+
+    #[test]
+    fn enter_walks_the_releases_and_then_finishes() {
+        let mut view = WhatsNew::new(sample_releases(), "b238", 80, 24);
+        let pages = view.pages();
+        assert!(pages >= 2, "the sample has more than one release");
+        for page in 0..pages {
+            assert_eq!(view.page, page);
+            view.handle_key(KeyCode::Enter); // reveal
+            assert_eq!(view.handle_key(KeyCode::Enter), if page + 1 == pages { Some(()) } else { None });
+        }
+        assert_eq!(view.page, pages - 1);
+    }
+
+    #[test]
+    fn going_back_shows_the_page_whole_rather_than_replaying_it() {
+        let mut view = WhatsNew::new(sample_releases(), "b238", 80, 24);
+        view.handle_key(KeyCode::Enter);
+        view.handle_key(KeyCode::Enter);
+        assert_eq!(view.page, 1);
+        view.handle_key(KeyCode::Left);
+        assert_eq!(view.page, 0);
+        assert!(view.fully_revealed(), "a page you have already read does not animate again");
+    }
+
+    #[test]
+    fn esc_leaves_from_anywhere() {
+        let mut view = WhatsNew::new(sample_releases(), "b238", 80, 24);
+        assert_eq!(view.handle_key(KeyCode::Esc), Some(()));
+    }
+
+    #[test]
+    fn a_short_window_splits_one_release_across_screens() {
+        let long = vec![Release {
+            version: "b240".into(),
+            title: "many things".into(),
+            items: (0..12).map(|i| format!("entry number {i}")).collect(),
+        }];
+        let tall = WhatsNew::new(long.clone(), "b240", 80, 40);
+        let short = WhatsNew::new(long, "b240", 80, 14);
+        assert!(short.pages() > tall.pages(), "{} vs {}", short.pages(), tall.pages());
+        let head = crate::strip_ansi(&short.render()[2]);
+        assert!(head.contains("1 of"), "a split release says which part you are on: {head:?}");
+    }
+
+    #[test]
+    fn a_resize_keeps_the_reader_on_the_release_they_were_reading() {
+        let mut view = WhatsNew::new(sample_releases(), "b238", 80, 40);
+        view.handle_key(KeyCode::Enter);
+        view.handle_key(KeyCode::Enter);
+        let version = view.pages[view.page].version.clone();
+        view.relayout(50, 20);
+        assert_eq!(view.pages[view.page].version, version);
+    }
 
     #[test]
     fn only_releases_between_the_two_builds_are_shown() {

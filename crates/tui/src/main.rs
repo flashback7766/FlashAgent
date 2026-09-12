@@ -1297,6 +1297,25 @@ async fn main() -> Result<()> {
         // anything here works, and finding out by watching it narrate its
         // intentions for ten minutes is a bad first hour. Ask it now.
         first_run_tool_check(&config).await;
+        // Nothing arrived while they were away: they have been here for a
+        // minute. Stamp the version so the next update has something to
+        // measure against.
+        config.last_seen_version = Some(flashagent_svc::updater::current_version().to_string());
+        let _ = config.save();
+    }
+
+    // An update that lands silently is an update nobody uses. Once, after the
+    // binary has moved forward, show what arrived.
+    if std::io::stdout().is_terminal() {
+        let now = flashagent_svc::updater::current_version();
+        let news = flashagent_tui::whatsnew::since(config.last_seen_version.as_deref(), now);
+        if config.last_seen_version.as_deref() != Some(now) {
+            config.last_seen_version = Some(now.to_string());
+            let _ = config.save();
+        }
+        if !news.is_empty() {
+            let _ = flashagent_tui::whatsnew::run(news, now).await;
+        }
     }
 
     let api_key = config.api_key.clone().or_else(|| std::env::var("FLASHAGENT_API_KEY").ok());
@@ -4200,6 +4219,31 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 let runtime_mode = goal_state.as_ref().map_or(perm.state().mode(), |g| g.mode);
                                 let effort = goal_state.as_ref().map_or(current_effort.as_str(), |g| g.effort.as_str());
                                 settings_view = Some(settings_for_runtime(&app_config, runtime_mode, effort, &current_model, &available_models));
+                                continue;
+                            }
+
+                            if trimmed == "/whatsnew" || trimmed == "/changelog" {
+                                input.clear();
+                                autocomplete_idx = 0;
+                                let now = flashagent_svc::updater::current_version();
+                                // Asked for on purpose, so there is no
+                                // "nothing changed" case worth a blank
+                                // screen: fall back to the last few releases.
+                                let mut news = flashagent_tui::whatsnew::since(
+                                    app_config.last_seen_version.as_deref(),
+                                    now,
+                                );
+                                if news.is_empty() {
+                                    news = flashagent_tui::whatsnew::latest(3);
+                                }
+                                if news.is_empty() {
+                                    notice!("[No changelog is bundled with this build.]");
+                                } else {
+                                    flashagent_tui::whatsnew::run_channel(news, now, &mut rx)
+                                        .await
+                                        .ok();
+                                    renderer.request_reprint();
+                                }
                                 continue;
                             }
 
