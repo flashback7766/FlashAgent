@@ -5,6 +5,13 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- The follow-up suggestion above the input box no longer offers prompts the
+  assistant meant for you ("Расскажи о своём проекте и опиши, в чём нужна
+  помощь"). Pressing → sends the suggestion to the model, so a question aimed
+  at you was worse than no suggestion at all; those are now dropped, and the
+  analyzer is told plainly to write a message the assistant can answer on its
+  own, in the language of the conversation. The giveaway is the object, not
+  the verb — "расскажи об архитектуре" still passes.
 - The mascot is drawn properly. A terminal cell is twice as tall as it is
   wide, so the old sprite — one pixel per cell — came out as a stretched,
   spiky kite. It now draws two pixels per cell, which makes the pixels square
