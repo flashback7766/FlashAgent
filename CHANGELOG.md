@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+A lot of people think "vibecoded" means "AI slop". I'm tired of hearing it,
+and honestly I was tired of catching myself thinking it too. So this release is
+me proving it wrong, on this exact project, with Anthropic's Claude.
+
+Let's get the obvious part out of the way. Yes, FlashAgent is written with
+Claude. Most of the code in this repo came out of Claude Code, and the commit
+history says so. I'm not going to pretend otherwise, and I'm not going to
+apologise for it.
+
+I don't understand every line of it yet. I'm learning it one piece at a time.
+What I do is everything around the code: I decide what gets built and what
+doesn't, I run it every day on my own laptop against local models, I break it,
+and I send back screenshots of what's wrong until it isn't. Most of the fixes
+in this changelog started exactly like that.
+
+Here's what I figured out: "vibecoded" and "slop" are not the same word. Slop
+is what you get when nobody is looking. Code nobody checked, numbers nobody
+measured, docs describing a product that doesn't exist. And to be fair, some of
+that was in here.
+
+So it's gone. The README banner promised a cold start nobody had measured, and
+its memory figure disagreed with the README right under it; every number left
+was measured on a published build. Two crates nobody used are deleted. Two
+thousand "tips" of random programming trivia are down to forty real ones. The
+architecture doc describes what exists instead of a GPU renderer that was never
+built. And the terminal client, whose main file was 7,236 lines with a single
+3,349-line function inside it, is split into modules you can actually read: that
+function is 982 lines now, and the file is 2,293.
+
+None of that changed what the app does. Every step was checked the same way:
+455 tests, clippy with warnings as errors, a line-by-line audit that nothing got
+lost in the move, and a live run against a real model after each step.
+
+If you still think this is slop after reading the code, open an issue and point
+at the line. That's a better use of both our time than "lol vibecoder".
+
+— flashback
+
+### What changed
+
+- Approval cards name files relative to the project. An edit showed
+  `target: /tmp/.../project/main.rs` and a diff starting `--- a//tmp/...`; it
+  now shows `target: main.rs`, and the six preview rows go to the change itself
+  instead of repeating the file name.
+- Forty tips about FlashAgent instead of two thousand about everything, and a
+  test fails if a tip names a command that does not exist.
+- The what's-new screen can open a release with a note before its list. This
+  one, for example.
 - A finished thought no longer says it is still thinking. The block above a
   written answer read *Thinking: …* for the rest of the session; it reads
   *Thought: … (4s)* now, expanded or collapsed, and only says Thinking while
@@ -10,20 +58,6 @@
   Detection only ever switched to Russian, so an English chat on a config that
   said `ru` was labelled *Разбираю запрос* and nothing typed could change it
   back.
-- **The first five minutes.** Walked from an empty home directory with the
-  published build, as a new user gets it, and fixed what that turned up:
-  - *"Welcome back"* greeted people who had never been here. It now says
-    *Welcome* until there is a saved session to come back to.
-  - The interface language was Russian for everybody, because that was the
-    shipped default and the wizard never asks. It follows the locale now, and
-    what you type still overrides it.
-  - The tool-calling check printed its verdict to a screen the app then
-    cleared, so the one thing a new user needed to read was gone before they
-    could read it. It is now the first line of the conversation: *Tool-calling
-    check: 6/8 — unreliable — expect to babysit it.*
-  - That check ran before the "do you trust this directory?" question, so the
-    first thing a new user did was wait a minute and only then get asked where
-    they were. The instant question comes first.
 - The suggestion list no longer hangs on the screen while the context is being
   compacted. The command that opened it is long gone from the composer.
 - The auto-compaction threshold follows the window: 97% at a million tokens,
@@ -33,6 +67,24 @@
   Settings says which one is in force: *Enabled (auto: 85% for this window)*.
   A threshold you set by hand is still yours; the old shipped default of 90 was
   never a choice, so it becomes automatic.
+
+### The first five minutes
+
+Walked from an empty home directory with the published build, as a new user
+gets it, and fixed what that turned up.
+
+- *"Welcome back"* greeted people who had never been here. It now says
+  *Welcome* until there is a saved session to come back to.
+- The interface language was Russian for everybody, because that was the
+  shipped default and the wizard never asks. It follows the locale now, and
+  what you type still overrides it.
+- The tool-calling check printed its verdict to a screen the app then
+  cleared, so the one thing a new user needed to read was gone before they
+  could read it. It is now the first line of the conversation: *Tool-calling
+  check: 6/8 — unreliable — expect to babysit it.*
+- That check ran before the "do you trust this directory?" question, so the
+  first thing a new user did was wait a minute and only then get asked where
+  they were. The instant question comes first.
 
 ## b250 — compaction you can watch, and what a picture costs
 
