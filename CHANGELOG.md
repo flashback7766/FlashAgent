@@ -5,6 +5,20 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- Backend failures are explained instead of dumped. `llm: http: error sending
+  request for url (http://localhost:1234/v1/chat/completions)` now reads *No
+  model server answered at http://localhost:1234/v1*, with a line saying what
+  to do and the original text kept underneath. A missing model points at F3, a
+  full context at `/compact`, a rejected key at the settings, a dropped stream
+  at the server's own log. Anything unrecognised keeps its own words rather
+  than being smoothed into a confident guess.
+- An unreachable model server says so when you start, not when you send your
+  first prompt — and takes it back by itself once the server answers.
+- Auto reasoning effort judges the task instead of the vocabulary: it used to
+  match forty English keywords, so Russian prompts matched none of them, and
+  it measured length in bytes, which made every Cyrillic sentence "long" and
+  sent it to maximum reasoning.
+
 - The composer says what the turn is actually doing instead of "Working on
   task": waiting for the model, thinking, running the tool the model named,
   reading the result, writing the answer, stopping. Every one of those comes
