@@ -791,6 +791,36 @@ pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskCo
     ThinkingProfile::analyze_turn_complexity(messages)
 }
 
+/// An embedding model turns text into vectors and cannot hold a conversation,
+/// so it is never offered as the model to talk to.
+fn is_embedding(m: &serde_json::Value) -> bool {
+    m.get("type")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| t.to_ascii_lowercase().starts_with("embedding"))
+}
+
+/// Fill in what one model listing left out from another.
+///
+/// LM Studio's `/api/v1/models` has the richest capabilities but can leave
+/// models out entirely — on a real server, the one that was loaded — while
+/// `/api/v0/models` lists every model with its load state. What the first
+/// listing says about a model it does have is kept.
+pub fn merge_server_models(mut primary: Vec<DiscoveredModel>, other: Vec<DiscoveredModel>) -> Vec<DiscoveredModel> {
+    for m in other {
+        match primary.iter_mut().find(|p| p.id == m.id) {
+            Some(p) => {
+                if m.is_loaded && !p.is_loaded {
+                    p.is_loaded = true;
+                    p.context_length = m.context_length.or(p.context_length);
+                }
+                p.supports_vision |= m.supports_vision;
+            }
+            None => primary.push(m),
+        }
+    }
+    primary
+}
+
 /// Parse models and capabilities from server JSON (LM Studio `/api/v1/models`,
 /// `/api/v0/models`, or OpenAI-compatible `/v1/models`).
 pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
@@ -804,7 +834,7 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .trim();
-            if id.is_empty() {
+            if id.is_empty() || is_embedding(m) {
                 continue;
             }
 
@@ -926,7 +956,7 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim();
-        if id.is_empty() {
+        if id.is_empty() || is_embedding(m) {
             continue;
         }
 
@@ -1128,6 +1158,55 @@ mod tests {
         let p5 = ThinkingProfile::parse_api_error(err5).expect("parsed p5");
         assert_eq!(p5.presets, vec!["on", "off"]);
         assert_eq!(p5.protocol, ThinkingProtocol::LmStudio);
+    }
+
+    #[test]
+    fn a_model_the_v1_listing_leaves_out_is_taken_from_v0() {
+        // Shapes as a real LM Studio returned them: v1 without the loaded
+        // qwen, v0 with it and its state.
+        let v1 = serde_json::json!({"models": [
+            {"type": "llm", "key": "gemma-4-e2b-it-qat@q4_k_xl", "loaded_instances": [], "max_context_length": 131072,
+             "capabilities": {"vision": false, "trained_for_tool_use": true,
+                              "reasoning": {"allowed_options": ["off", "on"], "default": "on"}}},
+            {"type": "embedding", "key": "text-embedding-nomic-embed-text-v1.5", "loaded_instances": [], "max_context_length": 2048}
+        ]});
+        let v0 = serde_json::json!({"data": [
+            {"id": "qwen3.6-35b-a3b-mtp", "type": "vlm", "state": "loaded", "max_context_length": 262144},
+            {"id": "gemma-4-e2b-it-qat@q4_k_xl", "type": "llm", "state": "not-loaded", "max_context_length": 131072},
+            {"id": "text-embedding-nomic-embed-text-v1.5", "type": "embeddings", "state": "not-loaded", "max_context_length": 2048}
+        ]});
+        let merged = merge_server_models(parse_server_models(&v1), parse_server_models(&v0));
+        let ids: Vec<&str> = merged.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gemma-4-e2b-it-qat@q4_k_xl", "qwen3.6-35b-a3b-mtp"]);
+        assert!(merged[1].is_loaded, "the loaded model is found and known to be loaded");
+        assert!(merged[1].supports_vision);
+        assert!(merged[0].supports_tools && merged[0].thinking.supported, "what v1 knew about a model it listed is kept");
+    }
+
+    #[test]
+    fn a_model_loaded_according_to_v0_is_loaded_even_if_v1_listed_it_idle() {
+        let v1 = serde_json::json!({"models": [{"type": "llm", "key": "m", "loaded_instances": [], "max_context_length": 131072}]});
+        let v0 = serde_json::json!({"data": [{"id": "m", "type": "llm", "state": "loaded", "loaded_context_length": 32768}]});
+        let merged = merge_server_models(parse_server_models(&v1), parse_server_models(&v0));
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].is_loaded);
+        assert_eq!(merged[0].context_length, Some(32768));
+    }
+
+    #[test]
+    fn an_embedding_model_is_never_offered_as_a_chat_model() {
+        let v1 = serde_json::json!({"models": [
+            {"type": "llm", "key": "chat", "loaded_instances": []},
+            {"type": "embedding", "key": "text-embedding-nomic-embed-text-v1.5", "loaded_instances": []}
+        ]});
+        let v0 = serde_json::json!({"data": [
+            {"id": "chat", "type": "llm", "state": "not-loaded"},
+            {"id": "text-embedding-nomic-embed-text-v1.5", "type": "embeddings", "state": "not-loaded"}
+        ]});
+        for listing in [v1, v0] {
+            let ids: Vec<String> = parse_server_models(&listing).into_iter().map(|m| m.id).collect();
+            assert_eq!(ids, vec!["chat".to_string()], "{listing}");
+        }
     }
 
     #[test]

@@ -190,7 +190,22 @@ impl OpenAiCompat {
             if let Ok(resp) = req.send().await {
                 if resp.status().is_success() {
                     if let Ok(val) = resp.json::<serde_json::Value>().await {
-                        let models = crate::thinking::parse_server_models(&val);
+                        let mut models = crate::thinking::parse_server_models(&val);
+                        if !models.is_empty() && url.ends_with("/api/v1/models") {
+                            // LM Studio's v1 listing can leave models out,
+                            // the loaded one included; v0 lists them all.
+                            let mut req = self.client.get(format!("{root}/api/v0/models")).timeout(std::time::Duration::from_secs(2));
+                            if let Some(key) = &self.api_key {
+                                req = req.bearer_auth(key);
+                            }
+                            if let Ok(resp) = req.send().await {
+                                if resp.status().is_success() {
+                                    if let Ok(extra) = resp.json::<serde_json::Value>().await {
+                                        models = crate::thinking::merge_server_models(models, crate::thinking::parse_server_models(&extra));
+                                    }
+                                }
+                            }
+                        }
                         if !models.is_empty() {
                             if let Ok(mut lock) = self.working_models_url.write() {
                                 *lock = Some(url);

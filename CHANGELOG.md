@@ -1,5 +1,18 @@
 # Changelog
 
+## b261 — the model you loaded
+
+- The setup wizard and the model list find the model LM Studio has loaded.
+  LM Studio's `/api/v1/models` can leave models out — on a real server it left
+  out the loaded `qwen3.6-35b-a3b-mtp` — and FlashAgent stopped at that list, so
+  step 3 offered three idle models and called them *3 models loaded*. It now
+  fills the gaps from `/api/v0/models`, which lists every model with its state.
+  Checked against LM Studio: step 3 shows *qwen3.6-35b-a3b-mtp · ● loaded ·
+  vision*.
+- An embedding model is no longer offered as the model to talk to.
+- The model count says what it counts: *3 on the server*, not *3 models
+  loaded*.
+
 ## b260 — The slop is human
 
 Humans can make far more slop than AI ever will. All it takes is not watching
