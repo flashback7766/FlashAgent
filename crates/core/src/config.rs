@@ -57,8 +57,33 @@ fn default_repeat_penalty() -> Option<f32> { Some(1.0) }
 fn default_presence_penalty() -> Option<f32> { Some(0.0) }
 fn default_min_p() -> Option<f32> { Some(0.0) }
 
+/// Accept a stored enum value whatever its case or separators — `"Beta"`,
+/// `"beta"`, `"accept_edits"` and `"AcceptEdits"` all mean what they look
+/// like, and a config is written by hand often enough that insisting on one
+/// spelling only costs the user their settings.
+macro_rules! lenient_enum {
+    ($ty:ty, $name:expr, { $($text:literal => $variant:expr),+ $(,)? }) => {
+        impl<'de> serde::Deserialize<'de> for $ty {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let raw = String::deserialize(d)?;
+                let key: String = raw
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .flat_map(char::to_lowercase)
+                    .collect();
+                match key.as_str() {
+                    $($text => Ok($variant),)+
+                    _ => Err(serde::de::Error::custom(format!(
+                        "unknown {} {raw:?}", $name
+                    ))),
+                }
+            }
+        }
+    };
+}
+
 /// Predefined sampling presets for model generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub enum SamplingPreset {
     #[default]
     Coding,
@@ -300,7 +325,7 @@ fn default_update_channel() -> UpdateChannel {
 }
 
 /// Release channel for application updates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateChannel {
     #[default]
@@ -332,7 +357,7 @@ impl UpdateChannel {
 }
 
 /// Toolset exposure profile for adjusting advertised tools and schemas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub enum ToolsetProfile {
     #[default]
     Auto,
@@ -430,27 +455,74 @@ impl AppConfig {
         if let Some(path) = Self::default_path() {
             if path.exists() {
                 if let Ok(content) = std::fs::read_to_string(&path) {
-                    match serde_json::from_str::<Self>(&content) {
-                        Ok(mut cfg) => {
-                            if cfg.toolset_profile == ToolsetProfile::Compact {
-                                cfg.toolset_profile = ToolsetProfile::Auto;
-                            }
-                            if cfg.thinking_effort == "default" || cfg.thinking_effort.is_empty() {
-                                cfg.thinking_effort = "auto".to_string();
-                            }
-                            return cfg;
-                        }
-                        Err(err) => {
-                            eprintln!(
-                                "Warning: Failed to parse user config at {}: {err}. Falling back to defaults.",
-                                path.display()
-                            );
-                        }
+                    let (cfg, rejected) = Self::from_json_str(&content);
+                    for field in &rejected {
+                        eprintln!(
+                            "Warning: {} in {} is not valid; using the default for it. \
+                             Every other setting was kept.",
+                            field,
+                            path.display()
+                        );
                     }
+                    return cfg;
                 }
             }
         }
         Self::default()
+    }
+
+    /// Parse a config file, keeping every field that is valid.
+    ///
+    /// A config is a long list of independent settings, so one bad entry must
+    /// not cost the user the other thirty: fields that fail are replaced by
+    /// their default and named in the returned list, and the rest are applied.
+    /// A file that is not a JSON object at all is the only total loss.
+    pub fn from_json_str(content: &str) -> (Self, Vec<String>) {
+        if let Ok(cfg) = serde_json::from_str::<Self>(content) {
+            return (cfg.normalised(), Vec::new());
+        }
+
+        let Ok(serde_json::Value::Object(user)) = serde_json::from_str::<serde_json::Value>(content)
+        else {
+            return (Self::default(), vec!["the file (it is not valid JSON)".to_string()]);
+        };
+
+        // Start from the defaults and put back one field at a time; whatever
+        // does not survive a round-trip is the field that is broken.
+        let mut base = match serde_json::to_value(Self::default()) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => return (Self::default(), vec!["the file".to_string()]),
+        };
+        let mut rejected = Vec::new();
+        for (key, value) in user {
+            // Unknown keys are ignored by serde anyway; only known ones can
+            // break, and only they are worth reporting.
+            if !base.contains_key(&key) {
+                continue;
+            }
+            let previous = base.insert(key.clone(), value);
+            if serde_json::from_value::<Self>(serde_json::Value::Object(base.clone())).is_err() {
+                if let Some(old) = previous {
+                    base.insert(key.clone(), old);
+                }
+                rejected.push(key);
+            }
+        }
+
+        let cfg = serde_json::from_value::<Self>(serde_json::Value::Object(base))
+            .unwrap_or_default();
+        (cfg.normalised(), rejected)
+    }
+
+    /// Settings that are stored but no longer meaningful on their own.
+    fn normalised(mut self) -> Self {
+        if self.toolset_profile == ToolsetProfile::Compact {
+            self.toolset_profile = ToolsetProfile::Auto;
+        }
+        if self.thinking_effort == "default" || self.thinking_effort.is_empty() {
+            self.thinking_effort = "auto".to_string();
+        }
+        self
     }
 
     /// Check if a directory is already in the trusted directories list.
@@ -505,6 +577,67 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stored_values_are_read_whatever_their_case() {
+        // A config is edited by hand; "Beta" must not mean something else
+        // than "beta", and the mode may be copied from the label in the app.
+        let (cfg, rejected) = AppConfig::from_json_str(
+            r#"{"update_channel":"Beta","permission_mode":"Accept Edits","sampling_preset":"MTP_Coding","toolset_profile":"FULL"}"#,
+        );
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert_eq!(cfg.update_channel, UpdateChannel::Beta);
+        assert_eq!(cfg.permission_mode, crate::PermissionMode::AcceptEdits);
+        assert_eq!(cfg.sampling_preset, SamplingPreset::MtpCoding);
+        assert_eq!(cfg.toolset_profile, ToolsetProfile::Full);
+    }
+
+    #[test]
+    fn one_bad_field_does_not_cost_the_user_the_others() {
+        // The old loader threw the whole file away on any error, so a single
+        // typo silently reset every setting.
+        let (cfg, rejected) = AppConfig::from_json_str(
+            r#"{"backend_url":"http://localhost:9999/v1","model":"my-model","temperature":0.2,
+                "update_channel":"purple","context_warn_threshold":55}"#,
+        );
+        assert_eq!(rejected, vec!["update_channel".to_string()]);
+        assert_eq!(cfg.backend_url, "http://localhost:9999/v1");
+        assert_eq!(cfg.model, "my-model");
+        assert_eq!(cfg.context_warn_threshold, 55);
+        assert_eq!(
+            cfg.update_channel,
+            AppConfig::default().update_channel,
+            "the broken field falls back to what a fresh config would have"
+        );
+    }
+
+    #[test]
+    fn a_wrongly_typed_field_is_reported_by_name() {
+        let (cfg, rejected) = AppConfig::from_json_str(
+            r#"{"model":"kept","auto_save_sessions":"yes please","token_budget":"lots"}"#,
+        );
+        assert_eq!(cfg.model, "kept");
+        assert!(rejected.contains(&"auto_save_sessions".to_string()), "{rejected:?}");
+        assert!(rejected.contains(&"token_budget".to_string()), "{rejected:?}");
+    }
+
+    #[test]
+    fn a_file_that_is_not_json_falls_back_whole() {
+        let (cfg, rejected) = AppConfig::from_json_str("this is not json at all");
+        assert_eq!(cfg, AppConfig::default().normalised());
+        assert_eq!(rejected.len(), 1);
+    }
+
+    #[test]
+    fn unknown_settings_are_ignored_rather_than_reported() {
+        // A key from an older build, or a typo in a key name, is not
+        // something the user can act on — and serde drops it either way.
+        let (cfg, rejected) = AppConfig::from_json_str(
+            r#"{"model":"kept","colour_theme":"dark","update_channel":"nope"}"#,
+        );
+        assert_eq!(cfg.model, "kept");
+        assert_eq!(rejected, vec!["update_channel".to_string()]);
+    }
+
     use super::*;
 
     #[test]
@@ -565,3 +698,27 @@ mod tests {
         assert!(presets.iter().any(|p| p.name == "vLLM"));
     }
 }
+
+lenient_enum!(SamplingPreset, "sampling preset", {
+    "coding" => SamplingPreset::Coding,
+    "mtpcoding" => SamplingPreset::MtpCoding,
+    "mtp" => SamplingPreset::Mtp,
+    "chatting" => SamplingPreset::Chatting,
+    "mtpchatting" => SamplingPreset::MtpChatting,
+    "precise" => SamplingPreset::Precise,
+    "gemma" => SamplingPreset::Gemma,
+    "custom" => SamplingPreset::Custom,
+});
+
+lenient_enum!(UpdateChannel, "update channel", {
+    "beta" => UpdateChannel::Beta,
+    "stable" => UpdateChannel::Stable,
+    "release" => UpdateChannel::Stable,
+});
+
+lenient_enum!(ToolsetProfile, "toolset profile", {
+    "auto" => ToolsetProfile::Auto,
+    "full" => ToolsetProfile::Full,
+    "compact" => ToolsetProfile::Compact,
+});
+

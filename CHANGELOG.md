@@ -5,6 +5,15 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- A single bad line in `config.json` no longer resets every setting. The
+  loader used to throw the whole file away on any error, so one typo silently
+  put you back on the default backend, model and permission mode. Now each
+  field stands on its own: the broken ones fall back and are named on stderr,
+  everything else is kept.
+- Stored values are read whatever their case. `"Beta"`, `"beta"`,
+  `"Accept Edits"` (the label the app itself shows) and `"accept_edits"` all
+  mean what they look like — a config is edited by hand, and a capital letter
+  was costing people their settings.
 - CI keeps its build artifacts for three days instead of the default ninety.
   They only exist to hand binaries from the build jobs to the publish job in
   the same run — the release assets are the lasting copy — and two days of
