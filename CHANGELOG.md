@@ -5,6 +5,9 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- The status line drops the lightning emoji from its numbers: `TTFT 6.84s
+  (495 t/s prefill)`, `Prefill ~1.2s`, `cache 62%`. A telemetry row is meant
+  to be read, not decorated.
 - Ctrl+U (and `/update`) now checks, downloads and installs in one go, with
   the download visible: `Update b235 · [████████░░░░░░░░] 52% · 3.4/6.6 MB`,
   then `verifying checksum...`, `installing...`, and the line lands on
