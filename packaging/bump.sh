@@ -60,12 +60,12 @@ if [ "${TOTAL_INC}" -gt 15 ]; then
 fi
 
 # Find current build tag
-CURRENT_TAG="$(git -C "${ROOT_DIR}" describe --tags --match 'b[0-9]*' --exact-match 2>/dev/null || git -C "${ROOT_DIR}" describe --tags --match 'b[0-9]*' 2>/dev/null || echo "b238")"
+CURRENT_TAG="$(git -C "${ROOT_DIR}" describe --tags --match 'b[0-9]*' --exact-match 2>/dev/null || git -C "${ROOT_DIR}" describe --tags --match 'b[0-9]*' 2>/dev/null || echo "b245")"
 CURRENT_NUM="${CURRENT_TAG#b}"
 CURRENT_NUM="${CURRENT_NUM%%-*}"
 
 if ! [[ "${CURRENT_NUM}" =~ ^[0-9]+$ ]]; then
-    CURRENT_NUM=238
+    CURRENT_NUM=245
 fi
 
 NEW_NUM=$(( CURRENT_NUM + TOTAL_INC ))
