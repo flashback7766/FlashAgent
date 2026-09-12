@@ -3,7 +3,7 @@
 Beta builds are numbered `bNNN` and ship on the rolling `beta` pre-release.
 Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
-## Unreleased
+## b245 — auto effort that learns, and a screen that speaks your language
 
 - Auto effort learns from how the turns actually go. The guess about a task is
   made before the model has said a word, so it cannot know that *this* model
