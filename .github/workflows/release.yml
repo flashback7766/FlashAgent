@@ -46,7 +46,7 @@ jobs:
           # Only needed until the publish job in this same run picks them up;
           # the release assets are the copy that lasts. The default 90 days
           # filled the account's Actions storage in two days of releases.
-          retention-days: 1
+          retention-days: 3
 
   build-windows:
     name: Build Windows (MSVC x86_64)
@@ -85,7 +85,7 @@ jobs:
           path: |
             dist/flashagent-windows-*.zip
             dist/flashagent-windows-*.exe
-          retention-days: 1
+          retention-days: 3
 
   build-macos:
     name: Build macOS (Apple Silicon ARM64 & Intel x86_64)
@@ -126,7 +126,7 @@ jobs:
         with:
           name: macos-artifacts
           path: dist/*
-          retention-days: 1
+          retention-days: 3
 
   publish-release:
     name: Publish GitHub Release
