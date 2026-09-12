@@ -278,7 +278,7 @@ impl ThinkingProfile {
                     .map(String::as_str)
                     .or_else(|| {
                         // For models with binary on/off presets (e.g. Qwen/DeepSeek in LM Studio), keep "on"
-                        // rather than flipping enable_thinking to false and evicting KV prefix cache!
+                        // rather than flipping enable_thinking to false, which would evict the KV prefix cache.
                         self.presets.iter().find(|p| p.eq_ignore_ascii_case("on")).map(String::as_str)
                     })
                     .or_else(|| self.min_effort())

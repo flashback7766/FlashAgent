@@ -1766,8 +1766,8 @@ mod tests {
         // Verify history structure:
         // [0] User: initial prompt
         // [1] Assistant: tool call (call_1)
-        // [2] Tool: tool result (call_1) -- MUST immediately follow assistant tool call!
-        // [3] User: [STEERING DIRECTIVE] -- MUST follow tool response, NEVER between assistant and tool!
+        // [2] Tool: tool result (call_1) -- directly after the assistant's tool call
+        // [3] User: [STEERING DIRECTIVE] -- after the tool result, never between a call and its result
         // [4] Assistant: final turn
         assert_eq!(history.len(), 5);
         assert_eq!(history[1].role, Role::Assistant);

@@ -227,7 +227,7 @@ impl Renderer {
         let mut custom_cursor_col: Option<u16> = None;
 
         if let Some(req) = gate.pending() {
-            // Morph the composer into the approval card!
+            // The composer becomes the approval card.
             let tool_styled = format!("\x1b[1;38;2;225;175;95m{}\x1b[0m", req.tool);
             let title = format!(" Confirm: {tool_styled} ");
             let vis_title_len = visible_width(&title);
@@ -339,7 +339,7 @@ impl Renderer {
             ));
             custom_cursor_col = Some(0);
         } else if let Some(req) = question_gate.pending() {
-            // Morph the composer into the question card!
+            // The composer becomes the question card.
             let title = " Question from FlashAgent ";
             let vis_title_len = visible_width(title);
             let dash_w = inner_w.saturating_sub(vis_title_len + 2);

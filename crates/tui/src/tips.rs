@@ -447,6 +447,6 @@ mod tests {
         anim.phase = TipPhase::Erasing;
         anim.char_count = 20; // erased down into line 1
         let lines_erasing = anim.render_lines(0, 70);
-        assert_eq!(lines_erasing.len(), 1); // line 2 is gone!
+        assert_eq!(lines_erasing.len(), 1); // the second line has been erased
     }
 }

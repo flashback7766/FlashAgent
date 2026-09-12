@@ -332,7 +332,7 @@ impl SetupWizard {
             }
         }
 
-        // When in Step 0 and on Custom (preset_idx == 5), direct keyboard typing is active!
+        // On step 0 with Custom selected (preset_idx == 5), typing edits the URL directly.
         if self.step == 0 && self.preset_idx == 5 {
             match code {
                 KeyCode::Enter => {
