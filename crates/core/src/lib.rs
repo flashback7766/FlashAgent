@@ -7,6 +7,7 @@
 pub mod config;
 pub mod context_usage;
 pub mod diff;
+pub mod effort_memory;
 pub mod loop_;
 pub mod memory;
 pub mod permissions;
@@ -17,6 +18,7 @@ pub mod toolcheck;
 pub use config::{AppConfig, BackendPreset, SamplingPreset, ToolsetProfile, UpdateChannel};
 pub use context_usage::ContextUsage;
 pub use diff::unified;
+pub use effort_memory::{EffortMemory, ModelBias, TurnOutcome};
 pub use loop_::{AgentLoop, DoneReason, LoopConfig, LoopError, LoopEvent, LlmSource, ToolExec, ToolOutput, WritePreview};
 pub use memory::{collect, injection_block, outline, MemoryDoc, MemoryKind, GLOBAL_FILENAME, PROJECT_FILENAMES};
 pub use permissions::{

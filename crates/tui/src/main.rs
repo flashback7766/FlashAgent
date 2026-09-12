@@ -57,6 +57,10 @@ impl BackendSource {
         self.0.set_model(model);
     }
 
+    fn set_effort_bias(&self, steps: i8) {
+        self.0.set_effort_bias(steps);
+    }
+
     async fn discover_server(&self) -> Option<flashagent_llm::ServerDiscovery> {
         self.0.discover_server().await
     }
@@ -1577,11 +1581,21 @@ fn build_model_menu(source: &BackendSource) -> Option<SelectMenu<String>> {
     Some(SelectMenu::new("Select Model", items).with_noun("models"))
 }
 
-fn build_effort_menu(source: &BackendSource) -> SelectMenu<String> {
+fn build_effort_menu(
+    source: &BackendSource,
+    memory: &flashagent_core::EffortMemory,
+    model: &str,
+) -> SelectMenu<String> {
     let mut items = Vec::new();
+    // Auto is the one setting that changes behind the user's back, so it is
+    // the one that has to say what it has decided and why.
+    let auto_desc = match memory.explain(model) {
+        Some(learned) => format!("Auto (per turn; learned {learned})"),
+        None => "Auto (dynamically adjusts thinking per turn)".to_string(),
+    };
     items.push(SelectItem::with_description(
         "auto",
-        "Auto (dynamically adjusts thinking per turn)",
+        &auto_desc,
         "auto".to_string(),
     ));
     if let Some(prof) = source.profile() {
@@ -2071,6 +2085,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let mut current_draft = String::new();
     let mut confirm_select = ConfirmSelect::new();
     let mut chat = ChatView::default();
+    chat.set_language(&app_config.language);
     let mut running = false;
     let mut active_turn_handle: Option<tokio::task::JoinHandle<()>> = None;
     let mut active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
@@ -2130,6 +2145,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let mut background: Option<BackgroundNotice> = None;
     let mut channel_switch: Option<ChannelSwitch> = None;
     let mut turn_phase = TurnPhase::Waiting;
+    // Auto effort guesses the task before the model has said a word. How its
+    // turns actually go is the only evidence of whether the guess fits this
+    // model, so the turns are watched and the guess is nudged by one step.
+    let mut effort_memory = flashagent_core::EffortMemory::load();
+    let mut turn_outcome = flashagent_core::TurnOutcome::default();
+    source.set_effort_bias(effort_memory.steps(&current_model));
     let (channel_probe_tx, mut channel_probe_rx) =
         tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
     let mut pending_update: Option<(String, String, String, Option<String>)> = None;
@@ -2624,6 +2645,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         context_usage.total_capacity = new_ctx_len.max(1024);
                         tools_arc.set_context_window(Some(new_ctx_len));
                         source.set_model(&current_model);
+                        source.set_effort_bias(effort_memory.steps(&current_model));
                         update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
 
                         if model_changed {
@@ -2678,13 +2700,16 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 match &e {
                     LoopEvent::TurnDelta(text) => {
                         token_tracker.on_delta(text);
+                        turn_outcome.answer_chars += text.chars().count();
                         turn_phase = TurnPhase::Writing;
                     }
                     LoopEvent::ReasoningDelta(text) => {
                         token_tracker.on_delta(text);
+                        turn_outcome.reasoning_chars += text.chars().count();
                         turn_phase = TurnPhase::Thinking;
                     }
                     LoopEvent::ToolStarted { name, args_json, .. } => {
+                        turn_outcome.tool_calls += 1;
                         token_tracker.on_delta(name);
                         token_tracker.on_delta(args_json);
                         // The model's own header when it wrote one, since it
@@ -2696,7 +2721,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             .unwrap_or_else(|| format!("Running {name}"));
                         turn_phase = TurnPhase::Tool(what);
                     }
-                    LoopEvent::ToolFinished { .. } => {
+                    LoopEvent::ToolFinished { is_error, .. } => {
+                        if *is_error {
+                            turn_outcome.failed_tools += 1;
+                        }
                         turn_phase = TurnPhase::AfterTool;
                     }
                     LoopEvent::StepStarted { step, .. } if *step > 1 => {
@@ -2731,6 +2759,16 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 cancel_requested = None;
                 cancel.store(false, Ordering::Relaxed);
                 token_tracker.on_finished();
+
+                // What the turn cost against what it produced is the only
+                // honest evidence about whether auto guessed right for this
+                // model. A goal run is excluded: its effort is the user's.
+                if goal_state.is_none() {
+                    let steps = effort_memory.observe(&current_model, &turn_outcome);
+                    effort_memory.save();
+                    source.set_effort_bias(steps);
+                }
+                turn_outcome = flashagent_core::TurnOutcome::default();
 
                 // Roll back any temporary goal state
                 if let Some(saved) = goal_state.take() {
@@ -3012,6 +3050,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             if app_config.model != current_model {
                                 current_model = app_config.model.clone();
                                 source.set_model(&current_model);
+                                source.set_effort_bias(effort_memory.steps(&current_model));
                             }
                             // During /goal the live mode/effort are the goal's;
                             // edits apply to what the goal restores afterwards.
@@ -3083,7 +3122,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             app_config = persisted_from_view(&settings.config, &app_config, shown_mode, &shown_effort);
                             let _ = app_config.save();
                             settings_view = None;
-                            let mut menu = build_effort_menu(&source);
+                            let mut menu = build_effort_menu(&source, &effort_memory, &current_model);
                             menu.select_by_value(&current_effort);
                             effort_menu = Some(menu);
                             renderer.request_reprint();
@@ -3096,6 +3135,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             if completed {
                                 current_model = app_config.model.clone();
                                 source.set_model(&current_model);
+                                source.set_effort_bias(effort_memory.steps(&current_model));
                                 current_effort = app_config.thinking_effort.clone();
                                 perm.state().set_mode(app_config.permission_mode);
                                 refresh_welcome_card_if_before_user_msg(
@@ -3269,6 +3309,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 app_config.model = current_model.clone();
                                 let _ = app_config.save();
                                 source.set_model(&current_model);
+                                source.set_effort_bias(effort_memory.steps(&current_model));
                                 if let Some(disc) = source.discovery() {
                                     if let Some(m) = disc.models.iter().find(|m| m.id == current_model) {
                                         current_context = m.context_display();
@@ -3706,6 +3747,16 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             && context_modal.is_none()
                         {
                             if let Some(user_idx) = history.iter().rposition(|m| m.role == flashagent_llm::Role::User) {
+                                // Asking for the same answer again is the
+                                // user saying the last one was not good
+                                // enough — the one signal that the model was
+                                // given too little room to think.
+                                let steps = effort_memory.observe(
+                                    &current_model,
+                                    &flashagent_core::TurnOutcome { regenerated: true, ..Default::default() },
+                                );
+                                effort_memory.save();
+                                source.set_effort_bias(steps);
                                 history.truncate(user_idx + 1);
                                 chat.truncate_to_last_user();
                                 renderer.scroll_to_bottom();
@@ -3722,8 +3773,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 turn_started = Some(std::time::Instant::now());
                                 token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                                 source.set_model(&current_model);
+                                source.set_effort_bias(effort_memory.steps(&current_model));
                                 let turn_opts = build_turn_options(&app_config, &current_effort);
                                 turn_counter += 1;
+                                turn_outcome = flashagent_core::TurnOutcome::default();
                                 let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                                 active_steer_tx = Some(steer_tx);
                                 active_turn_handle = Some(spawn_turn(
@@ -3886,7 +3939,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     | KeyCode::Char('t') | KeyCode::Char('T') | KeyCode::Char('\u{0435}') | KeyCode::Char('\u{0415}')
                         if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) || matches!(code, KeyCode::F(4)) =>
                     {
-                        let mut menu = build_effort_menu(&source);
+                        let mut menu = build_effort_menu(&source, &effort_memory, &current_model);
                         menu.select_by_value(&current_effort);
                         effort_menu = Some(menu);
                     }
@@ -4177,8 +4230,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 turn_started = Some(std::time::Instant::now());
                                 token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                                 source.set_model(&current_model);
+                                source.set_effort_bias(effort_memory.steps(&current_model));
                                 let turn_opts = build_turn_options(&app_config, &current_effort);
                                 turn_counter += 1;
+                                turn_outcome = flashagent_core::TurnOutcome::default();
                                 let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                                 active_steer_tx = Some(steer_tx);
                                 active_turn_handle = Some(spawn_turn(
@@ -4268,6 +4323,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 input.clear();
                                 autocomplete_idx = 0;
                                 if let Some(user_idx) = history.iter().rposition(|m| m.role == flashagent_llm::Role::User) {
+                                    let steps = effort_memory.observe(
+                                        &current_model,
+                                        &flashagent_core::TurnOutcome { regenerated: true, ..Default::default() },
+                                    );
+                                    effort_memory.save();
+                                    source.set_effort_bias(steps);
                                     history.truncate(user_idx + 1);
                                     chat.truncate_to_last_user();
                                     renderer.scroll_to_bottom();
@@ -4284,8 +4345,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     turn_started = Some(std::time::Instant::now());
                                     token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                                     source.set_model(&current_model);
+                                    source.set_effort_bias(effort_memory.steps(&current_model));
                                     let turn_opts = build_turn_options(&app_config, &current_effort);
                                     turn_counter += 1;
+                                turn_outcome = flashagent_core::TurnOutcome::default();
                                     let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                                     active_steer_tx = Some(steer_tx);
                                     active_turn_handle = Some(spawn_turn(
@@ -4309,7 +4372,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             if trimmed == "/effort" || trimmed == "/thinking" || trimmed == "/t" {
                                 input.clear();
                                 autocomplete_idx = 0;
-                                let mut menu = build_effort_menu(&source);
+                                let mut menu = build_effort_menu(&source, &effort_memory, &current_model);
                                 menu.select_by_value(&current_effort);
                                 effort_menu = Some(menu);
                                 continue;
@@ -4892,8 +4955,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 turn_started = Some(std::time::Instant::now());
                                 token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                                 source.set_model(&current_model);
+                                source.set_effort_bias(effort_memory.steps(&current_model));
                                 let turn_opts = build_turn_options(&app_config, &current_effort);
                                 turn_counter += 1;
+                                turn_outcome = flashagent_core::TurnOutcome::default();
                                 let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                                 active_steer_tx = Some(steer_tx);
                                 active_turn_handle = Some(spawn_turn(
@@ -4919,6 +4984,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             // Sending new prompt closes temporary last thinking block (Rule 4)
                             last_expanded = false;
 
+                            // A user writing in Russian gets Russian labels
+                            // whatever the config says the language is: what
+                            // they actually type is the better evidence.
+                            if let Some("Russian") = script_language(&text) {
+                                chat.set_language("ru");
+                            }
                             chat.push_user(&text);
                             let first = !history.iter().any(|m| m.role == flashagent_llm::Role::User);
                             let content = if first && !memory_block.is_empty() {
@@ -4936,8 +5007,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             turn_started = Some(std::time::Instant::now());
                             token_tracker.on_turn_start(current_model.clone(), context_usage.total_used());
                             source.set_model(&current_model);
+                            source.set_effort_bias(effort_memory.steps(&current_model));
                             let turn_opts = build_turn_options(&app_config, &current_effort);
                             turn_counter += 1;
+                                turn_outcome = flashagent_core::TurnOutcome::default();
                             let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                             active_steer_tx = Some(steer_tx);
                             active_turn_handle = Some(spawn_turn(
@@ -5209,8 +5282,8 @@ async fn generate_llm_recap_and_suggestion(
     let system_prompt =
         "You are a conversation analyzer. Return strictly JSON with the following fields:\n\
         {\n  \
-          \"suggestion\": \"the next message the USER will send to the assistant, in imperative mood, about the work just done (e.g. 'Show Swift code examples', 'Explain how safety works', 'Run the tests and fix what fails'). It must be something the assistant can answer on its own. NEVER ask the user for information about themselves, their project or what they need: 'Tell me about your project', 'Tell me what help you need' are WRONG - those are the assistant talking to the user. Write it in the language of the conversation. Do not repeat the existing query!\",\n  \
-          \"recap\": \"one concise past-tense sentence of what was explained or done\"\n\
+          \"recap\": \"one concise past-tense sentence of what was explained or done\",\n  \
+          \"suggestion\": \"the next message the USER will send to the assistant, in imperative mood, about the work just done (e.g. 'Show Swift code examples', 'Explain how safety works', 'Run the tests and fix what fails'). It must be something the assistant can answer on its own. NEVER ask the user for information about themselves, their project or what they need: 'Tell me about your project', 'Tell me what help you need' are WRONG - those are the assistant talking to the user. Write it in the language of the conversation. Do not repeat the existing query!\"\n\
         }\n\
         Do NOT generate any internal thinking or explanations. Start immediately with { and return only valid JSON.";
 
@@ -5233,7 +5306,11 @@ async fn generate_llm_recap_and_suggestion(
         thinking: flashagent_llm::ThinkingEffort::Off,
         custom_effort: Some("none".to_string()),
         temperature: Some(0.2),
-        max_tokens: Some(512),
+        // Models asked not to think often think anyway: one observed run
+        // spent 361 of its 512 tokens reasoning and was cut off before it
+        // closed the JSON, so no recap ever appeared. The budget has to
+        // cover the thinking the model does regardless.
+        max_tokens: Some(1500),
         ..Default::default()
     };
 
@@ -5317,21 +5394,77 @@ fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Option<String>)
         candidate.trim()
     };
 
-    let parsed: serde_json::Value = serde_json::from_str(json_str)
-        .ok()
-        .or_else(|| flashagent_llm::repair_json(json_str).and_then(|r| serde_json::from_str(&r).ok()))?;
+    // A run that hit its token limit leaves the object unclosed. Repairing
+    // such JSON invents the closing quote, and with it the end of a sentence
+    // the model never wrote — so when the text does not parse as it stands,
+    // each field is read literally instead, and a value that never closed is
+    // dropped rather than completed for it.
+    let parsed: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(_) => flashagent_llm::repair_json(json_str)
+            .and_then(|r| serde_json::from_str(&r).ok())
+            .filter(|_: &serde_json::Value| !json_str.trim_end().ends_with(|c: char| c != '}'))
+            .unwrap_or(serde_json::Value::Null),
+    };
 
-    let recap_raw = parsed.get("recap").and_then(|s| s.as_str())?;
-    let recap = recap_raw.trim().trim_matches('"').to_string();
+    // The recap is the first field asked for, so it is usually complete even
+    // in a cut-off answer: a finished sentence is worth more than a
+    // well-formed brace.
+    let recap_raw = match parsed.get("recap").and_then(|s| s.as_str()) {
+        Some(found) => found.to_string(),
+        None => salvage_json_string_field(json_str, "recap")?,
+    };
+    let recap = recap_raw.trim().trim_matches('\"').to_string();
     if recap.is_empty() || is_generic_recap(&recap) {
         return None;
     }
 
-    let suggestion = parsed.get("suggestion")
+    let suggestion = parsed
+        .get("suggestion")
         .and_then(|s| s.as_str())
-        .and_then(sanitize_user_suggestion);
+        .map(str::to_string)
+        .or_else(|| salvage_json_string_field(json_str, "suggestion"))
+        .and_then(|s| sanitize_user_suggestion(&s));
 
     Some((recap, suggestion))
+}
+
+/// Read one string field out of JSON that may have been cut off mid-object.
+///
+/// Deliberately literal: it takes the text between the quotes after
+/// `"field":` and stops at the first unescaped quote, or at the end of what
+/// arrived. A value that never closed is dropped rather than guessed at.
+fn salvage_json_string_field(raw: &str, field: &str) -> Option<String> {
+    let key = format!("\"{field}\"");
+    let after_key = &raw[raw.find(&key)? + key.len()..];
+    let after_colon = after_key.trim_start().strip_prefix(':')?.trim_start();
+    let body = after_colon.strip_prefix('"')?;
+
+    let mut value = String::new();
+    let mut chars = body.chars();
+    let mut closed = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some('n') => value.push('\n'),
+                Some('t') => value.push('\t'),
+                Some(esc) => value.push(esc),
+                None => break,
+            },
+            '"' => {
+                closed = true;
+                break;
+            }
+            other => value.push(other),
+        }
+    }
+    let value = value.trim().to_string();
+    // An unclosed value is a sentence chopped mid-word; only keep it if it
+    // got far enough to say something and ended on a whole word.
+    if !closed && (value.len() < 20 || !value.ends_with(['.', '!', '?'])) {
+        return None;
+    }
+    (!value.is_empty()).then_some(value)
 }
 
 fn sanitize_user_suggestion(s: &str) -> Option<String> {
@@ -6015,6 +6148,30 @@ mod tests {
         assert_eq!(view.config.permission_mode, PermissionMode::Bypass);
         assert_eq!(view.config.thinking_effort, "high");
         assert_eq!(view.config.model, "gemma");
+    }
+
+    #[test]
+    fn a_recap_cut_off_by_the_token_limit_is_still_shown() {
+        // Observed for real: the model spent its whole budget thinking and
+        // the JSON never closed, so no recap ever appeared. The recap is the
+        // first field asked for precisely so it survives this.
+        let truncated = "{\"recap\": \"Ассистент осмотрел проект и описал его структуру.\", \"suggestion\": \"Покажи код игро";
+        let (recap, suggestion) = parse_recap_and_suggestion_json(truncated).expect("recap salvaged");
+        assert_eq!(recap, "Ассистент осмотрел проект и описал его структуру.");
+        assert_eq!(suggestion, None, "half a suggestion is not a suggestion");
+    }
+
+    #[test]
+    fn half_a_recap_is_not_shown() {
+        let cut_early = "{\"recap\": \"Ассистент осмотр";
+        assert_eq!(parse_recap_and_suggestion_json(cut_early), None);
+    }
+
+    #[test]
+    fn escapes_survive_the_salvage() {
+        let truncated = "{\"recap\": \"Read \\\"main.rs\\\" and fixed the loop.\", \"sugg";
+        let (recap, _) = parse_recap_and_suggestion_json(truncated).expect("recap salvaged");
+        assert_eq!(recap, "Read \"main.rs\" and fixed the loop.");
     }
 
     #[test]

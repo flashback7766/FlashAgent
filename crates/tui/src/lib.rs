@@ -191,6 +191,8 @@ pub struct ChatView {
     needs_reprint: bool,
     /// Cached render of settled lines to avoid expensive markdown & wrap re-parsing every frame.
     settled_cache: Mutex<SettledRenderCache>,
+    /// Language of the conversation, for the labels this view writes itself.
+    language: String,
 }
 
 /// Wrap styled text to `width` visible characters, preserving active ANSI escape sequences
@@ -406,6 +408,16 @@ impl ChatView {
     }
 
     /// Number of user lines (prompts and steering directives) so far.
+    /// Tell the view which language the conversation is in, so the labels it
+    /// writes itself do not arrive in English in a Russian chat.
+    pub fn set_language(&mut self, language: &str) {
+        if self.language != language {
+            self.language = language.to_string();
+            *self.settled_cache.lock() = SettledRenderCache::default();
+            self.needs_reprint = true;
+        }
+    }
+
     pub fn user_turn_count(&self) -> usize {
         self.lines.iter().filter(|l| l.kind == LineKind::User).count()
     }
@@ -660,8 +672,13 @@ impl ChatView {
                             .or_else(|| parsed.get("query"))
                             .or_else(|| parsed.get("path"))
                             .and_then(|s| s.as_str())
-                            .unwrap_or("search")
+                            // A listing of the working directory carries no
+                            // path and no pattern, and "Searched search" is
+                            // not a sentence.
+                            .unwrap_or("the project")
                     };
+                    // Nor is "Searched .".
+                    let target = if matches!(target, "." | "./" | "") { "the project" } else { target };
 
                     let mut consolidated = false;
                     if let Some(last_line) = self.lines.last_mut() {
@@ -1322,13 +1339,12 @@ impl ChatView {
                         last_tool_group = Some(tg.clone());
                     }
                 } else if line.kind == LineKind::Reasoning {
-                    let stage = resolve_reasoning_stage(
+                    turn_reasoning_stages.push(resolve_reasoning_stage(
                         &line.text,
                         &turn_reasoning_stages,
                         last_tool_group.as_ref(),
                         turn_tools_executed,
-                    );
-                    turn_reasoning_stages.push(stage);
+                    ));
                 } else if line.kind == LineKind::Assistant {
                     let (think_opt, _) = extract_thinking_from_text(&line.text);
                     if let Some(think_text) = think_opt {
@@ -1336,13 +1352,16 @@ impl ChatView {
                             .iter()
                             .any(|l| l.kind == LineKind::Reasoning);
                         if !has_native_reasoning {
-                            let stage = resolve_reasoning_stage(
+                            // The ledger keeps the English name: it is what
+                            // the "do not repeat a stage" check compares
+                            // against, and translating it would make every
+                            // stage look new.
+                            turn_reasoning_stages.push(resolve_reasoning_stage(
                                 &think_text,
                                 &turn_reasoning_stages,
                                 last_tool_group.as_ref(),
                                 turn_tools_executed,
-                            );
-                            turn_reasoning_stages.push(stage);
+                            ));
                         }
                     }
                 }
@@ -1372,6 +1391,7 @@ impl ChatView {
                     turn_tools_executed,
                 );
                 turn_reasoning_stages.push(stage.clone());
+                let stage = localize_stage(&stage, &self.language);
                 let is_streaming = self.streaming_reasoning == Some(i);
                 push_reasoning(target, &line.text, line.reasoning_secs, is_streaming, is_expanded, &stage);
                 continue;
@@ -1391,6 +1411,7 @@ impl ChatView {
                             turn_tools_executed,
                         );
                         turn_reasoning_stages.push(stage.clone());
+                        let stage = localize_stage(&stage, &self.language);
                         let is_streaming = self.streaming == Some(i);
                         push_reasoning(target, &think_text, line.reasoning_secs, is_streaming, is_expanded, &stage);
                     }
@@ -1647,6 +1668,50 @@ pub fn derive_stage_from_tool(last_tool_group: Option<&ToolGroupKind>) -> String
         Some(ToolGroupKind::Subagent { .. }) => "Evaluating Subagent Output".to_string(),
         Some(ToolGroupKind::Memory { .. }) => "Reviewing Project Memory".to_string(),
         _ => "Evaluating Tool Results".to_string(),
+    }
+}
+
+/// Say one of the stage labels this app writes itself in the language of the
+/// conversation.
+///
+/// Only labels FlashAgent invents are translated. A stage lifted out of the
+/// model's own reasoning is the model's wording and is left exactly as it
+/// wrote it — putting Russian words in its mouth would be a lie about what it
+/// said.
+pub fn localize_stage(stage: &str, language: &str) -> String {
+    if !language.eq_ignore_ascii_case("ru") {
+        return stage.to_string();
+    }
+    const RU: &[(&str, &str)] = &[
+        ("Analyzing Request", "Разбираю запрос"),
+        ("Evaluating Search Results", "Оцениваю результаты поиска"),
+        ("Deepening Code Search", "Углубляю поиск по коду"),
+        ("Analyzing File Contents", "Разбираю содержимое файлов"),
+        ("Evaluating Explored Context", "Оцениваю найденное"),
+        ("Evaluating Command Output", "Оцениваю вывод команды"),
+        ("Verifying Code Changes", "Проверяю правки"),
+        ("Evaluating Subagent Output", "Оцениваю ответ субагента"),
+        ("Reviewing Project Memory", "Просматриваю память проекта"),
+        ("Evaluating Tool Results", "Оцениваю результаты инструментов"),
+        ("Synthesizing Findings", "Свожу выводы"),
+        ("Planning Implementation", "Планирую реализацию"),
+        ("Refining Solution", "Уточняю решение"),
+        ("Verifying Solution", "Проверяю решение"),
+        ("Formulating Response", "Формулирую ответ"),
+    ];
+    // A repeated stage comes back as "Name (part 2)"; the suffix is ours too.
+    let (base, part) = match stage.split_once(" (part ") {
+        Some((base, rest)) => (base, rest.trim_end_matches(')').parse::<u32>().ok()),
+        None => (stage, None),
+    };
+    let translated = RU
+        .iter()
+        .find(|(en, _)| en.eq_ignore_ascii_case(base))
+        .map(|(_, ru)| (*ru).to_string());
+    match (translated, part) {
+        (Some(ru), Some(n)) => format!("{ru} (часть {n})"),
+        (Some(ru), None) => ru,
+        (None, _) => stage.to_string(),
     }
 }
 
@@ -3324,6 +3389,59 @@ mod tests {
         // The assistant line is still live (appends continue after reasoning).
         assert_eq!(v.streaming, Some(0));
         assert_eq!(v.settled_boundary(), 0);
+    }
+
+    #[test]
+    fn listing_the_working_directory_reads_as_a_sentence() {
+        // It showed "Searched search": the fallback was the word "search",
+        // and a listing of the working directory has neither path nor
+        // pattern to name.
+        let mut chat = ChatView::default();
+        chat.push_user("look around");
+        chat.on_event(&LoopEvent::ToolStarted { id: "a".into(), name: "list_dir".into(), args_json: "{}".into() });
+        chat.on_event(&LoopEvent::ToolFinished { id: "a".into(), is_error: false, result_len: 1, result: Some("x".into()) });
+        let (settled, live) = chat.render_split(100, ReasoningExpansion::default());
+        let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("Searched the project"), "{dump}");
+        assert!(!dump.contains("Searched search"), "{dump}");
+    }
+
+    #[test]
+    fn the_labels_we_write_ourselves_follow_the_conversation() {
+        // A Russian chat showed "Thought: Analyzing Request": the fallback
+        // stage names were English constants with no way out.
+        assert_eq!(localize_stage("Analyzing Request", "ru"), "Разбираю запрос");
+        assert_eq!(localize_stage("Planning Implementation", "ru"), "Планирую реализацию");
+        assert_eq!(localize_stage("Analyzing Request", "en"), "Analyzing Request");
+        assert_eq!(
+            localize_stage("Formulating Response (part 2)", "ru"),
+            "Формулирую ответ (часть 2)",
+            "the repeat suffix is ours too"
+        );
+    }
+
+    #[test]
+    fn the_models_own_words_are_left_alone() {
+        // A stage lifted out of the model's reasoning is a quote. Translating
+        // it would put words in its mouth.
+        assert_eq!(
+            localize_stage("Checking the apply lines in Close", "ru"),
+            "Checking the apply lines in Close"
+        );
+    }
+
+    #[test]
+    fn a_russian_chat_shows_russian_stages() {
+        let mut chat = ChatView::default();
+        chat.set_language("ru");
+        chat.push_user("Осмотри проект и расскажи что он делает");
+        chat.on_event(&LoopEvent::ReasoningDelta("Сначала посмотрю структуру проекта.".into()));
+        chat.on_event(&LoopEvent::TurnDelta("Готово.".into()));
+        chat.on_event(&LoopEvent::Done(DoneReason::Completed));
+        let (settled, live) = chat.render_split(100, ReasoningExpansion::default());
+        let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("Разбираю запрос"), "{dump}");
+        assert!(!dump.contains("Analyzing Request"), "{dump}");
     }
 
     #[test]
