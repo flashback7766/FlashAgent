@@ -30,7 +30,7 @@
 ## Why FlashAgent
 
 - **Built for local models.** Point it at LM Studio, Ollama, llama.cpp or vLLM and it discovers the loaded model, its context window and its reasoning presets on its own. Cloud endpoints (OpenRouter, anything OpenAI-compatible) work too.
-- **Tool calling that does not depend on luck.** Native tool calls, plus a recovery parser for models that write calls as text (`<tool_call>`, `[TOOL_CALLS]`, bare JSON) — common with small local models. Arguments are JSON-repaired before they reach a tool. Settings → *Run Tool Test* tells you in seconds whether your model can drive tools.
+- **Tool calling that does not depend on luck.** Native tool calls, plus a recovery parser for models that write calls as text (`<tool_call>`, `[TOOL_CALLS]`, bare JSON) — common with small local models. Arguments are JSON-repaired before they reach a tool. And you do not have to guess whether your model is up to it: `flashagent --tool-test` [scores it in seconds](docs/tool-calling.md).
 - **You stay in control.** Four permission modes, an approval card that shows the exact command, diff or MCP arguments, and "Always" rules that stay narrow: allowing `cargo test` never allows `cargo publish`.
 - **Steer while it works.** Type while the model is streaming and press <kbd>Enter</kbd>: your guidance lands at the next safe point without breaking the tool-call protocol. <kbd>Esc</kbd> interrupts cleanly — pending tool calls are closed out and partial output is kept, so the next prompt just continues.
 - **Tiny and instant.** One self-contained binary (only libc underneath), ~11 MB resident when idle, prints its version in ~5 ms. Nothing to install alongside it.
@@ -49,6 +49,37 @@
 </table>
 
 <sub>Every recording on this page is a real session against a local model — Gemma 4 E2B in LM Studio, 64k context — so the timings and token counts in the status line are the ones it produced. Playback is sped up; nothing else is edited.</sub>
+
+---
+
+## Will your model actually drive tools?
+
+An agent is only as good as the model's willingness to call a tool instead of
+describing one — and that failure is quiet, so FlashAgent ships the check:
+
+```bash
+flashagent --tool-test               # the model you have configured
+flashagent --tool-test --all-models  # every chat model your server lists
+```
+
+Eight scenarios, each one something the loop does on real work. Measured here
+on one machine, LM Studio, one model resident at a time:
+
+| Model | Score | Time | Where it fell down |
+| :--- | :--- | :--- | :--- |
+| `qwen3.6-35b-a3b-mtp@iq3_xxs` | **8/8** | 48s | — |
+| `gemma-4-e4b-it@iq4_xs` | 7/8 | 21s | recovering from a failed call |
+| `gemma4-overlooked.thinker.uncensored-e2b` | 7/8 | 8s | recovering from a failed call |
+| `gemma-4-e2b-it-qat@q4_k_xl` | 6/8 | 9s | recovering from a failed call; two files in one turn |
+
+The interesting number is not the score, it is *which* scenario fails. Three of
+these four, handed a tool result that says `error: no such file: src/confg.rs
+(did you mean src/config.rs?)`, explain the problem in prose instead of calling
+the tool again with the corrected path. Tools fail constantly in real work — a
+wrong path, a build error, a missing dependency — and a model that turns each
+one into a paragraph makes you the one driving.
+
+[Method, raw results, and how to run it on your own models →](docs/tool-calling.md)
 
 ---
 

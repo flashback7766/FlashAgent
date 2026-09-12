@@ -5,6 +5,13 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- `flashagent --tool-test` scores your model on eight scenarios the agent loop
+  performs on real work, and `--all-models` does it for every chat model your
+  server lists and prints a markdown table. The check also runs once after
+  setup, so a model that cannot drive tools is something you learn in the first
+  minute rather than the first hour. Results for four local models, the method
+  and the raw output are in [docs/tool-calling.md](docs/tool-calling.md).
+
 - One-line system notices moved out of the transcript and under the cursor.
   `[No models discovered]`, `[Usage: /verbose …]`, `Update b238 · [███░░] 52%`
   and the rest are addressed to the person at the keyboard, not to the
