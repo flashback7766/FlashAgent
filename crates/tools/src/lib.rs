@@ -549,6 +549,36 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn edit_file_approval_card_gets_a_diff() {
+        // The approval card promises a diff before anything is written; if the
+        // preview returns None the user approves blind.
+        let dir = std::env::temp_dir().join(format!("fa-preview-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/parser.rs"), "fn a() {}\npub fn parse_duration() {}\n").unwrap();
+
+        let tools = BuiltinTools::new(BuiltinToolsConfig {
+            cwd: dir.clone(),
+            brave_api_key: None,
+            question_gate: None,
+            is_goal_mode: None,
+            toolset_profile: None,
+            web_enabled: None,
+            context_window: None,
+            mcp_manager: None,
+        })
+        .unwrap();
+        let call = ToolCall {
+            id: "1".into(),
+            name: "edit_file".into(),
+            args_json: r#"{"path":"src/parser.rs","edits":[{"old_string":"pub fn parse_duration() {}","new_string":"/// A bare number means minutes.\npub fn parse_duration() {}"}]}"#.into(),
+        };
+        let diff = tools.write_preview(&call);
+        let _ = std::fs::remove_dir_all(&dir);
+        let diff = diff.expect("edit_file must preview as a diff");
+        assert!(diff.contains("+/// A bare number means minutes."), "{diff}");
+    }
+
     use super::*;
 
     #[tokio::test]

@@ -40,13 +40,15 @@
 <td width="50%"><img src="docs/screenshots/gifs/steering.gif" alt="Mid-flight steering"><br>
 <sub><b>Mid-flight steering</b> — redirect a running turn without losing it.</sub></td>
 <td width="50%"><img src="docs/screenshots/gifs/tools-diff.gif" alt="Tool execution and diff approval"><br>
-<sub><b>Tools & diffs</b> — shell, file edits and patches behind an approval card with a live diff.</sub></td>
+<sub><b>Tools & approvals</b> — every write, patch and shell command stops at a card naming the exact target: Allow, Always or Deny.</sub></td>
 </tr>
 <tr>
 <td colspan="2"><img src="docs/screenshots/gifs/menus.gif" alt="Non-blocking menus"><br>
 <sub><b>Non-blocking menus</b> — switch model (<kbd>F3</kbd>), thinking effort (<kbd>F4</kbd>) or sampling (<kbd>F5</kbd>) while tokens keep streaming.</sub></td>
 </tr>
 </table>
+
+<sub>Every recording on this page is a real session against a local model — Gemma 4 E2B in LM Studio, 64k context — so the timings and token counts in the status line are the ones it produced. Playback is sped up; nothing else is edited.</sub>
 
 ---
 
@@ -128,7 +130,13 @@ Reads are always allowed. Approval cards offer **Allow**, **Always** and **Deny*
 
 **Autonomous mode (`/goal [--steps N] [--time 30m] [--tokens 200k] <task>`)** — runs the task end to end in Accept All mode with maximum reasoning effort and no questions, under a budget (default: 250 steps and one hour; `--tokens` counts generated tokens only). The status line shows the burn-down live, and the run ends with a factual report card — steps, generated tokens, elapsed, files created and edited, shell commands that failed, and whether a budget cut the run short — built from what the loop did, not from what the model says it did. Your previous permission mode and effort are restored afterwards. Filesystem snapshots and milestone commits are on the [roadmap](ROADMAP.md).
 
-**Updates** — `flashagent --update`, `/update`, or automatic background checks. Downloads are checked against the release checksums; `--channel stable|beta` or `/channel` switches channels.
+<img src="docs/screenshots/gifs/goal-budget.gif" width="100%" alt="A goal stopped by its step budget, with the report card">
+
+<sub>Here a four-step budget cuts the run short and the card says so — <b>INCOMPLETE</b>, one file created, no shell commands — while the model's own closing summary sits above it.</sub>
+
+**Updates** — <kbd>Ctrl</kbd>+<kbd>U</kbd> in the app, `flashagent --update`, or automatic background checks. A manual update checks, downloads and installs in one press and shows each stage; a background one stays silent. Downloads are verified against the release checksums; `--channel stable|beta` or `/channel` switches channels.
+
+<img src="docs/screenshots/gifs/update-progress.gif" width="100%" alt="Ctrl+U checking, downloading and installing an update">
 
 ---
 
