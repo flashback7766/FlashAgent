@@ -3,7 +3,7 @@
 Beta builds are numbered `bNNN` and ship on the rolling `beta` pre-release.
 Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
-## Unreleased
+## b235 — budgets, a mascot that means something
 
 - While the model works, the mascot's face sits in the status line —
   `(•_•) [Manual] · Generating response...` — blinking and winking on the
