@@ -1509,6 +1509,9 @@ fn thinking_summary_str(source: &BackendSource, current_effort: &str) -> String 
 #[derive(Debug, Clone)]
 enum UpdateNotice {
     Available { version: String, asset_name: String, download_url: String, checksums_url: Option<String> },
+    /// Only the manual update (Ctrl+U) sends these; a background update stays
+    /// silent so it never takes over a screen the user is reading.
+    Progress { version: String, stage: flashagent_svc::updater::UpdateProgress },
     Ready { version: String },
     UpToDate { version: String },
     Failed { error: String },
@@ -1975,7 +1978,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
 
     macro_rules! finish {
         () => {
-            if app_config.auto_save_sessions && !history.is_empty() {
+            if app_config.auto_save_sessions && worth_saving(&history) {
                 save_session_file(&session_id, &current_model, &cwd_display, &history)
                     .map(|_| session_id.clone())
             } else {
@@ -2106,20 +2109,40 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             s.update_check_status = Some(format!("Available: {version} (Press Ctrl+U)"));
                         }
                     }
+                    UpdateNotice::Progress { version, stage } => {
+                        chat.update_or_push_system(
+                            UPDATE_LINE_PREFIX,
+                            &update_progress_line(&version, stage),
+                        );
+                    }
                     UpdateNotice::Ready { version } => {
                         pending_update = None;
+                        // Land the progress line on its outcome instead of
+                        // leaving it frozen at "installing...".
+                        chat.update_or_push_system(
+                            UPDATE_LINE_PREFIX,
+                            &format!("{UPDATE_LINE_PREFIX}{version} \u{b7} installed \u{b7} restart FlashAgent to run it"),
+                        );
                         update_banner = Some(format!("Update Ready: {version} · Restart FlashAgent"));
                         if let Some(ref mut s) = settings_view {
                             s.update_check_status = Some(format!("Ready: {version} (restart to apply)"));
                         }
                     }
                     UpdateNotice::UpToDate { version } => {
+                        chat.update_or_push_system(
+                            UPDATE_LINE_PREFIX,
+                            &format!("{UPDATE_LINE_PREFIX}\u{b7} already on {version}"),
+                        );
                         if let Some(ref mut s) = settings_view {
                             s.update_check_status = Some(format!("Up to date ({version})"));
                         }
                         custom_placeholder = Some(format!("FlashAgent {version} is up to date"));
                     }
                     UpdateNotice::Failed { error } => {
+                        chat.update_or_push_system(
+                            UPDATE_LINE_PREFIX,
+                            &format!("{UPDATE_LINE_PREFIX}\u{b7} failed"),
+                        );
                         if let Some(ref mut s) = settings_view {
                             s.update_check_status = Some(format!("Error: {error}"));
                         }
@@ -3342,29 +3365,67 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         if mods.contains(KeyModifiers::CONTROL) =>
                     {
                         if let Some((target_ver, asset_name, download_url, checksums_url)) = pending_update.clone() {
-                            chat.push_system(&format!("Downloading update {target_ver}..."));
+                            chat.update_or_push_system(
+                                UPDATE_LINE_PREFIX,
+                                &format!("{UPDATE_LINE_PREFIX}{target_ver} \u{b7} starting download..."),
+                            );
                             renderer.request_reprint();
                             let update_tx_clone = update_tx.clone();
                             tokio::spawn(async move {
-                                let notice = match flashagent_svc::updater::download_and_apply(&download_url, &asset_name, checksums_url.as_deref()).await {
+                                let progress_tx = update_tx_clone.clone();
+                                let ver_for_progress = target_ver.clone();
+                                let result = flashagent_svc::updater::download_and_apply_with_progress(
+                                    &download_url,
+                                    &asset_name,
+                                    checksums_url.as_deref(),
+                                    move |stage| {
+                                        let _ = progress_tx.send(UpdateNotice::Progress {
+                                            version: ver_for_progress.clone(),
+                                            stage,
+                                        });
+                                    },
+                                )
+                                .await;
+                                let notice = match result {
                                     Ok(_) => UpdateNotice::Ready { version: target_ver },
                                     Err(e) => UpdateNotice::Failed { error: e.to_string() },
                                 };
                                 let _ = update_tx_clone.send(notice);
                             });
                         } else if !flashagent_svc::updater::is_dev_mode() {
-                            chat.push_system(&format!("Checking for updates on {} channel...", app_config.update_channel.label()));
+                            chat.update_or_push_system(
+                                UPDATE_LINE_PREFIX,
+                                &format!(
+                                    "{UPDATE_LINE_PREFIX}\u{b7} checking the {} channel...",
+                                    app_config.update_channel.label()
+                                ),
+                            );
                             renderer.request_reprint();
                             let update_tx_clone = update_tx.clone();
                             let ch = app_config.update_channel;
                             tokio::spawn(async move {
                                 match flashagent_svc::updater::check_for_updates(ch, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
+                                    // Asked for by hand: go straight on to the
+                                    // download instead of making the user press
+                                    // Ctrl+U a second time.
                                     Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, checksums_url, .. }) => {
-                                        let _ = update_tx_clone.send(UpdateNotice::Available {
-                                            version: target,
-                                            asset_name,
-                                            download_url,
-                                            checksums_url,
+                                        let progress_tx = update_tx_clone.clone();
+                                        let ver_for_progress = target.clone();
+                                        let result = flashagent_svc::updater::download_and_apply_with_progress(
+                                            &download_url,
+                                            &asset_name,
+                                            checksums_url.as_deref(),
+                                            move |stage| {
+                                                let _ = progress_tx.send(UpdateNotice::Progress {
+                                                    version: ver_for_progress.clone(),
+                                                    stage,
+                                                });
+                                            },
+                                        )
+                                        .await;
+                                        let _ = update_tx_clone.send(match result {
+                                            Ok(_) => UpdateNotice::Ready { version: target },
+                                            Err(e) => UpdateNotice::Failed { error: e.to_string() },
                                         });
                                     }
                                     Ok(flashagent_svc::updater::UpdateStatus::UpToDate { current, .. }) => {
@@ -3577,7 +3638,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                      • /diff · /commit <msg>  — git diff --stat / commit staged changes\n\
                                      • /export [md|html|jsonl] — write the conversation to a file\n\
                                      • /editor (or Ctrl+E)    — compose the prompt in an external editor\n\
-                                     • /update · /channel <stable|beta> — updater and release channel\n\
+                                     • /update (or Ctrl+U) · /channel <stable|beta> — check, download and install an update, with progress\n\
                                      • /skill:<name>          — invoke a skill from .agents/skills/\n\
                                      • /exit                  — save the session and quit\n\
                                      • Tab                    — autocomplete popup or settings tab\n\
@@ -4558,6 +4619,46 @@ fn spawn_turn(
     })
 }
 
+/// Whether this run produced a conversation worth writing to disk.
+///
+/// `history` is never empty — it opens with the system prompt — so anything
+/// that only checks emptiness saves a session for a start-and-quit, and hands
+/// the user a `--resume` id that restores nothing.
+fn worth_saving(history: &[ChatMessage]) -> bool {
+    history.iter().any(|m| m.role == flashagent_llm::Role::User)
+}
+
+/// One line of manual-update progress, e.g.
+/// `Update b235 · [████████░░░░░░░░] 52% · 3.5/6.7 MB`.
+fn update_progress_line(version: &str, stage: flashagent_svc::updater::UpdateProgress) -> String {
+    use flashagent_svc::updater::UpdateProgress;
+    const MB: f64 = 1024.0 * 1024.0;
+    let detail = match stage {
+        UpdateProgress::Downloading { received, total: Some(total) } if total > 0 => {
+            let done = (received.min(total) as f64 / total as f64).clamp(0.0, 1.0);
+            let filled = (done * 16.0).round() as usize;
+            format!(
+                "[{}{}] {:>3}% · {:.1}/{:.1} MB",
+                "\u{2588}".repeat(filled),
+                "\u{2591}".repeat(16 - filled),
+                (done * 100.0).round() as u32,
+                received as f64 / MB,
+                total as f64 / MB
+            )
+        }
+        // Some mirrors send no content-length; show the bytes, not a fake bar.
+        UpdateProgress::Downloading { received, .. } => {
+            format!("{:.1} MB downloaded", received as f64 / MB)
+        }
+        UpdateProgress::Verifying => "verifying checksum...".to_string(),
+        UpdateProgress::Installing => "installing...".to_string(),
+    };
+    format!("{UPDATE_LINE_PREFIX}{version} \u{b7} {detail}")
+}
+
+/// Marks the single line that manual-update progress rewrites in place.
+const UPDATE_LINE_PREFIX: &str = "Update ";
+
 /// The welcome card as first shown. Animated, it starts as its top border and
 /// the tick loop draws in the rest; otherwise it goes up whole, because
 /// nothing will come back to finish it.
@@ -5509,6 +5610,56 @@ mod tests {
         assert!(status.contains("step 12/250"), "{status}");
         assert!(status.contains("3m05s/1h0m"), "{status}");
         assert!(!status.contains("Generating response..."), "{status}");
+    }
+
+    #[test]
+    fn opening_and_closing_saves_nothing() {
+        let system_only = vec![ChatMessage::system("you are a helpful agent")];
+        assert!(!worth_saving(&system_only), "a start-and-quit must not leave a session file");
+
+        let mut talked = system_only.clone();
+        talked.push(ChatMessage::user("привет"));
+        assert!(worth_saving(&talked));
+    }
+
+    #[test]
+    fn manual_update_progress_shows_what_it_is_doing() {
+        use flashagent_svc::updater::UpdateProgress;
+        let half = update_progress_line(
+            "b235",
+            UpdateProgress::Downloading { received: 3_500_000, total: Some(7_000_000) },
+        );
+        assert!(half.starts_with(UPDATE_LINE_PREFIX), "{half}");
+        assert!(half.contains("50%"), "{half}");
+        assert!(half.contains("3.3/6.7 MB"), "{half}");
+        assert!(half.contains('█') && half.contains('░'), "{half}");
+
+        // A mirror that sends no content-length must not get a fabricated bar.
+        let unknown =
+            update_progress_line("b235", UpdateProgress::Downloading { received: 1_048_576, total: None });
+        assert!(unknown.contains("1.0 MB downloaded"), "{unknown}");
+        assert!(!unknown.contains('%'), "{unknown}");
+
+        // The stages after the download are named, not silent.
+        assert!(update_progress_line("b235", UpdateProgress::Verifying).contains("verifying"));
+        assert!(update_progress_line("b235", UpdateProgress::Installing).contains("installing"));
+
+        // Every stage rewrites one line rather than stacking up.
+        let mut chat = ChatView::default();
+        for stage in [
+            UpdateProgress::Downloading { received: 1, total: Some(10) },
+            UpdateProgress::Downloading { received: 9, total: Some(10) },
+            UpdateProgress::Verifying,
+            UpdateProgress::Installing,
+        ] {
+            chat.update_or_push_system(UPDATE_LINE_PREFIX, &update_progress_line("b235", stage));
+        }
+        let lines = chat.render(120);
+        let update_lines = lines
+            .iter()
+            .filter(|(_, t)| flashagent_tui::strip_ansi(t).trim_start().starts_with(UPDATE_LINE_PREFIX))
+            .count();
+        assert_eq!(update_lines, 1, "progress must rewrite its line, not stack: {lines:?}");
     }
 
     #[test]

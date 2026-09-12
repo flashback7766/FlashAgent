@@ -63,6 +63,26 @@ pub fn current_version() -> &'static str {
 ///
 /// In development mode, auto-updating is disabled to prevent overwriting binaries or dropping
 /// unexpected files into ~/.local/bin/flashagent.
+/// Whether `path` sits inside a checkout of this project — identified by
+/// `crates/tui/Cargo.toml` naming the crate, so that any other Rust project
+/// the user keeps a binary in is not mistaken for one.
+fn in_source_tree(path: &Path) -> bool {
+    let mut dir = path.to_path_buf();
+    // Start at the containing directory when given a file.
+    if dir.is_file() {
+        dir.pop();
+    }
+    loop {
+        let tui_manifest = dir.join("crates").join("tui").join("Cargo.toml");
+        if std::fs::read_to_string(&tui_manifest).is_ok_and(|m| m.contains("name = \"flashagent-tui\"")) {
+            return true;
+        }
+        if !dir.pop() {
+            return false;
+        }
+    }
+}
+
 pub fn is_dev_mode() -> bool {
     // 1. Explicit dev environment override
     if std::env::var("FLASHAGENT_DEV")
@@ -91,18 +111,14 @@ pub fn is_dev_mode() -> bool {
         }
     }
 
-    // 4. Working inside the FlashAgent source tree itself. Only this repo:
-    // any git-tracked Rust project also has a Cargo.toml, and an installed
-    // binary must keep updating when the user works in one.
-    if let Ok(mut dir) = std::env::current_dir() {
-        loop {
-            let tui_manifest = dir.join("crates").join("tui").join("Cargo.toml");
-            if std::fs::read_to_string(&tui_manifest).is_ok_and(|m| m.contains("name = \"flashagent-tui\"")) {
-                return true;
-            }
-            if !dir.pop() {
-                break;
-            }
+    // 4. The binary itself lives inside the FlashAgent source tree. What
+    // decides this is where the executable is, not where the user happens to
+    // stand: an installed `flashagent` must keep updating while you work in
+    // the repository, which is exactly where you are when you notice there is
+    // a new build.
+    if let Ok(exe) = std::env::current_exe() {
+        if in_source_tree(&exe) {
+            return true;
         }
     }
 
@@ -483,7 +499,34 @@ pub fn atomic_replace_executable(target: &Path, new_binary_bytes: &[u8]) -> anyh
 
 /// Download asset payload, verify it against the release checksums, and
 /// apply the in-place update.
+/// What an update is doing right now. Only the manual path (Ctrl+U) reports
+/// these; a background update stays silent by passing a callback that drops
+/// them, because an update nobody asked for must not take over the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateProgress {
+    /// Bytes pulled so far, and the total when the server declared one.
+    Downloading { received: u64, total: Option<u64> },
+    /// Checking the download against `SHA256SUMS`.
+    Verifying,
+    /// Unpacking and swapping the executable.
+    Installing,
+}
+
+/// Emit progress no more than this often: a 7 MB download arrives in hundreds
+/// of chunks, and a repaint per chunk would cost more than the download.
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+
 pub async fn download_and_apply(download_url: &str, asset_name: &str, checksums_url: Option<&str>) -> anyhow::Result<PathBuf> {
+    download_and_apply_with_progress(download_url, asset_name, checksums_url, |_| {}).await
+}
+
+/// As [`download_and_apply`], reporting each stage to `on_progress`.
+pub async fn download_and_apply_with_progress(
+    download_url: &str,
+    asset_name: &str,
+    checksums_url: Option<&str>,
+    mut on_progress: impl FnMut(UpdateProgress),
+) -> anyhow::Result<PathBuf> {
     if is_dev_mode() {
         anyhow::bail!("In-app updater is disabled in development mode (running from source repository or cargo target build).");
     }
@@ -496,13 +539,30 @@ pub async fn download_and_apply(download_url: &str, asset_name: &str, checksums_
         .user_agent(format!("FlashAgent-Updater/{}", current_version()))
         .build()?;
 
-    let resp = client.get(download_url).send().await?;
+    let mut resp = client.get(download_url).send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("Failed downloading asset {}: HTTP {}", asset_name, resp.status());
     }
 
-    let payload = resp.bytes().await?;
+    // Streamed rather than `resp.bytes()`, so the caller can show the download
+    // moving instead of a line that sits there for half a minute.
+    let total = resp.content_length();
+    let mut payload: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
+    let mut last_report = std::time::Instant::now();
+    on_progress(UpdateProgress::Downloading { received: 0, total });
+    while let Some(chunk) = resp.chunk().await? {
+        payload.extend_from_slice(&chunk);
+        if last_report.elapsed() >= PROGRESS_INTERVAL {
+            last_report = std::time::Instant::now();
+            on_progress(UpdateProgress::Downloading { received: payload.len() as u64, total });
+        }
+    }
+    on_progress(UpdateProgress::Downloading { received: payload.len() as u64, total });
+
+    on_progress(UpdateProgress::Verifying);
     verify_checksum(&client, checksums_url, asset_name, &payload).await?;
+
+    on_progress(UpdateProgress::Installing);
     let binary_bytes = extract_binary_bytes(asset_name, &payload)?;
 
     let target_path = resolve_install_target()?;
@@ -535,6 +595,47 @@ pub async fn check_and_apply_background(channel: UpdateChannel) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_checkout(root: &Path) {
+        std::fs::create_dir_all(root.join("crates").join("tui")).unwrap();
+        std::fs::write(
+            root.join("crates").join("tui").join("Cargo.toml"),
+            "[package]\nname = \"flashagent-tui\"\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn dev_mode_follows_the_binary_not_the_working_directory() {
+        let tmp = std::env::temp_dir().join(format!("fa-devmode-{}", std::process::id()));
+        let repo = tmp.join("FlashAgent");
+        let elsewhere = tmp.join("opt").join("bin");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        fake_checkout(&repo);
+
+        // A binary built inside the checkout is a dev build...
+        assert!(in_source_tree(&repo.join("target").join("release").join("flashagent")));
+        assert!(in_source_tree(&repo.join("crates").join("tui")));
+        // ...while an installed one is not, no matter that the user is
+        // standing in the repository when they press Ctrl+U.
+        assert!(!in_source_tree(&elsewhere.join("flashagent")));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn an_unrelated_rust_project_is_not_this_source_tree() {
+        let tmp = std::env::temp_dir().join(format!("fa-otherproj-{}", std::process::id()));
+        let other = tmp.join("someones-project");
+        std::fs::create_dir_all(other.join("crates").join("tui")).unwrap();
+        std::fs::write(
+            other.join("crates").join("tui").join("Cargo.toml"),
+            "[package]\nname = \"their-tui\"\n",
+        )
+        .unwrap();
+        assert!(!in_source_tree(&other.join("flashagent")));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn test_find_target_release_beta_and_stable() {
