@@ -202,7 +202,6 @@ crates/llm     OpenAI-compatible streaming, reasoning-preset discovery, text too
 crates/tools   built-in tools, sandboxed shell, patching, MCP client/manager/marketplace
 crates/tui     crossterm terminal UI (the product today)
 crates/svc     self-updater
-crates/proto   placeholder for a future process split
 ```
 
 Everything runs in one process. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit.

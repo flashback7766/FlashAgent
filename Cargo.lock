@@ -364,28 +364,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "flashagent-proto"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "flashagent-svc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "flashagent-core",
- "flashagent-proto",
  "flate2",
  "reqwest",
  "ring",
  "serde",
- "serde_json",
  "tar",
- "tokio",
 ]
 
 [[package]]
@@ -395,7 +383,6 @@ dependencies = [
  "async-trait",
  "flashagent-core",
  "flashagent-llm",
- "futures",
  "glob",
  "libc",
  "parking_lot",

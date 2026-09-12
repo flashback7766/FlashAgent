@@ -17,7 +17,6 @@ background service and no IPC.
 | `tools` | Built-in tools (files, patching, shell, search, git, memory, web), the MCP client and marketplace, subagent spawning. |
 | `tui` | The terminal UI: chat view, composer, menus, settings, setup wizard, `/goal`, image attachments, what's-new screen. |
 | `svc` | The self-updater. |
-| `proto` | Empty. Reserved for a process split that has not happened. |
 
 `core` does not depend on `tools` or `tui`; the loop talks to tools and to
 the model through traits (`ToolExec`, `LlmSource`), which is also how the
