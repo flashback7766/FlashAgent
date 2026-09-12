@@ -3,6 +3,14 @@
 Beta builds are numbered `bNNN` and ship on the rolling `beta` pre-release.
 Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
+## b238 — no emoji in the tool cards
+
+- Tool cards drop their emoji icons. `Edited notes.md +1 -0`, `Read
+  src/main.rs (120 lines)`, `Analyzed src/` — the extension already says what
+  a file is, so the icon carried nothing, and being two columns wide next to
+  one-column glyphs it made listings fail to line up. Directories still end in
+  `/`, the way `ls -F` marks them. A test keeps them out.
+
 ## b237 — no lightning left
 
 - The last two lightning bolts are gone: the welcome card says `FlashAgent
