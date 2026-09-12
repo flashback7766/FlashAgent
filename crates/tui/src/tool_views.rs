@@ -59,7 +59,7 @@ pub fn render_card_bottom(width: usize) -> String {
     format!("{BORDER_DIM}╰{}╯{RESET}", "─".repeat(bot_dashes))
 }
 
-/// Render an interactive shell command execution card (Screenshot 2).
+/// Render a shell command card.
 ///
 /// Features:
 /// - Header: `Ran cargo build --release ⌵`
@@ -170,7 +170,7 @@ pub fn render_command_card(
     lines
 }
 
-/// Render directory exploration card (Screenshot 3).
+/// Render a directory listing card.
 ///
 /// Features:
 /// - Header: `Analyzed .audit ⌵`
@@ -213,7 +213,7 @@ pub fn render_directory_card(
     lines
 }
 
-/// Render file reading / code inspection card (Screenshot 1 styling in soft blue).
+/// Render a file read card.
 ///
 /// Features:
 /// - Header: `Read src/main.rs (120 lines) ⌵`
@@ -331,7 +331,7 @@ pub fn parse_diff_to_rows(diff_text: &str) -> Vec<DiffRow> {
     rows
 }
 
-/// Render file edits & creation card (Screenshot 1).
+/// Render a file edit or creation card.
 ///
 /// Features:
 /// - Header: `Edited src/lib.rs (+12 -4) ⌵`
@@ -665,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_directory_card_screenshot3() {
+    fn test_render_directory_card() {
         let entries = (1..=20).map(|i| format!("2026-09-0{i}-audit-step.md")).collect::<Vec<_>>().join("\n");
         let lines = render_directory_card(".audit", Some(&entries), false, 80);
         let text_dump = lines.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");

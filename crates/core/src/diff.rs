@@ -26,6 +26,8 @@ pub fn unified(old: Option<&str>, new: &str, path: &str, context: usize) -> Stri
 
     // Cap: beyond this the DP is not worth it.
     const CAP: usize = 1500;
+    // git's form for an absolute path is a/etc/hosts, not a//etc/hosts.
+    let path = path.trim_start_matches('/');
     let header_old = if old.is_none() { "/dev/null".to_string() } else { format!("a/{path}") };
     let mut out = format!("--- {header_old}\n+++ b/{path}\n");
     if mid_old.len() > CAP || mid_new.len() > CAP {
@@ -166,6 +168,9 @@ mod tests {
     fn modification_produces_minus_and_plus() {
         let d = unified(Some("a\nb\nc\n"), "a\nB\nc\n", "f.txt", 2);
         assert!(d.contains("--- a/f.txt"));
+        let abs = unified(Some("x\n"), "y\n", "/etc/hosts", 3);
+        assert!(abs.contains("--- a/etc/hosts") && abs.contains("+++ b/etc/hosts"), "{abs}");
+        assert!(!abs.contains("a//"), "{abs}");
         assert!(d.contains("+++ b/f.txt"));
         assert!(d.contains("-b"));
         assert!(d.contains("+B"));

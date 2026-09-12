@@ -253,7 +253,7 @@ impl Renderer {
             let (label, value) = if let Some(cmd) = field("command") {
                 ("command:", cmd)
             } else if let Some(path) = field("path") {
-                ("target:", path)
+                ("target:", flashagent_tui::relative_to_cwd(&path))
             } else if args.as_object().is_some_and(|o| !o.is_empty()) {
                 ("args:", card_safe(&args.to_string()))
             } else {
@@ -264,7 +264,9 @@ impl Renderer {
             }
 
             if let Some(ref diff) = req.diff {
-                for line in diff.lines().take(6) {
+                // The file is already named on the target row; the six rows
+                // of preview are for the change itself.
+                for line in diff.lines().filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ")).take(6) {
                     let (color, prefix) = if line.starts_with('+') {
                         ("\x1b[38;2;145;205;140m", "+")
                     } else if line.starts_with('-') {

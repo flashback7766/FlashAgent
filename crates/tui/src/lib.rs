@@ -298,26 +298,26 @@ pub fn lower_first(text: &str) -> String {
     first.to_lowercase().collect::<String>() + &rest
 }
 
-pub fn format_cmd(cmd: &str) -> String {
-    let clean = cmd.trim();
-    let first_line = clean.lines().next().unwrap_or(clean).trim();
-    // Models hand back absolute paths, and a line reading "Read
-    // /tmp/claude-1000/-home-flashback/.../audit_proj/main.rs" is all
-    // prefix and no information: everything up to the working directory
-    // is where the user already is.
-    let storage;
-    let first_line = match std::env::current_dir() {
+/// `text` with the working directory taken out of any path in it. Models hand
+/// back absolute paths, and everything up to the project is where the user
+/// already is.
+pub fn relative_to_cwd(text: &str) -> String {
+    match std::env::current_dir() {
         Ok(cwd) => {
             let cwd = cwd.to_string_lossy().to_string();
-            if !cwd.is_empty() && first_line.contains(&cwd) {
-                storage = first_line.replace(&format!("{cwd}/"), "").replace(&cwd, ".");
-                storage.as_str()
-            } else {
-                first_line
+            if cwd.is_empty() || !text.contains(&cwd) {
+                return text.to_string();
             }
+            text.replace(&format!("{cwd}/"), "").replace(&cwd, ".")
         }
-        Err(_) => first_line,
-    };
+        Err(_) => text.to_string(),
+    }
+}
+
+pub fn format_cmd(cmd: &str) -> String {
+    let clean = cmd.trim();
+    let first_line = relative_to_cwd(clean.lines().next().unwrap_or(clean).trim());
+    let first_line = first_line.as_str();
     let max_len = 70;
     if first_line.chars().count() > max_len {
         let truncated: String = first_line.chars().take(max_len - 3).collect();
