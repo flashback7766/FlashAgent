@@ -17,7 +17,7 @@ use crate::loop_::{ToolExec, ToolOutput};
 /// 2. Manual — confirms every non-read action (both writes and commands).
 /// 3. AcceptEdits (default out-of-box) — auto-approves file writes and edits; terminal commands still require confirmation.
 /// 4. Bypass (Accept All) — all actions allowed without confirmation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum PermissionMode {
     /// Read-only research: writes and shell execution are denied.
     Planning,
@@ -27,6 +27,31 @@ pub enum PermissionMode {
     AcceptEdits,
     /// Everything allowed, nothing asked. User's explicit choice (Accept All).
     Bypass,
+}
+
+
+/// Read a stored mode whatever its spelling: the stored form
+/// (`"AcceptEdits"`), the label shown in the app (`"Accept Edits"`), and
+/// snake_case all mean the same thing. A config edited by hand must not cost
+/// the user their settings over a capital letter.
+impl<'de> serde::Deserialize<'de> for PermissionMode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = <String as serde::Deserialize>::deserialize(d)?;
+        let key: String = raw
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect();
+        match key.as_str() {
+            "planning" | "plan" => Ok(Self::Planning),
+            "manual" | "ask" => Ok(Self::Manual),
+            "acceptedits" | "edits" => Ok(Self::AcceptEdits),
+            "bypass" | "acceptall" | "all" => Ok(Self::Bypass),
+            _ => Err(serde::de::Error::custom(format!(
+                "unknown permission mode {raw:?} (expected Planning, Manual, AcceptEdits or Bypass)"
+            ))),
+        }
+    }
 }
 
 impl PermissionMode {
