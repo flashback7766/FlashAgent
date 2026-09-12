@@ -140,7 +140,10 @@ impl Default for ThinkingProfile {
 }
 
 /// Estimated complexity of the current turn to dynamically modulate thinking effort.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Ordered: `Minimal < Low < Medium < High`, so callers can compare levels
+/// rather than enumerate them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TaskComplexity {
     /// Trivial greetings, pleasantries, simple confirmations, or minimal queries.
     Minimal,
@@ -357,238 +360,244 @@ impl ThinkingProfile {
         }
     }
 
-/// Analyze the turn messages to classify task complexity for dynamic reasoning.
+/// How hard this turn looks, and why.
+///
+/// The rule that matters: the level is decided by **the user's own message**
+/// and then held for every step of that task. A turn that reads three files
+/// and runs a test is one task, not four decisions — flipping the reasoning
+/// preset between steps costs the backend its prefix cache and tells the
+/// model nothing new. A failed tool result is the one thing that raises it.
+///
+/// Signals are structural rather than lexical. The old version matched a list
+/// of English words, so a Russian prompt matched nothing, and it measured
+/// length in bytes, so any Cyrillic sentence over fifty characters counted as
+/// "long" and went to maximum reasoning. Both of those are how a model ends
+/// up thinking for forty seconds about "прочитай файл".
 pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskComplexity {
-    let last_msg = match messages.last() {
-        Some(m) => m,
-        None => return TaskComplexity::Medium,
+    use crate::types::Role;
+
+    let Some(last) = messages.last() else {
+        return TaskComplexity::Medium;
     };
 
-    match last_msg.role {
-        crate::types::Role::Tool => {
-            let content = last_msg.content.trim();
-            // Checking if tool output indicates an error or failure
-            let is_err = content.starts_with("Error:")
-                || content.starts_with("error:")
-                || content.contains("Traceback (most recent call last)")
-                || content.contains("panicked at")
-                || content.contains("BUILD FAILED")
-                || content.contains("FAILED");
-            if is_err {
-                return TaskComplexity::High;
-            }
-            // Code or substantial file inspection requires reasoning
-            if content.len() > 350
-                || content.contains("fn ")
-                || content.contains("struct ")
-                || content.contains("impl ")
-                || content.contains("def ")
-                || content.contains("class ")
-            {
-                return TaskComplexity::High;
-            }
-            // Short status or acknowledgement from tool execution (e.g. "Applied edits to...")
-            if content.len() <= 120 {
-                return TaskComplexity::Low;
-            }
-            TaskComplexity::Medium
+    // Something the model tried has failed: that is worth thinking about,
+    // whatever the task looked like when it started.
+    let last_failed = last.role == Role::Tool && Self::looks_like_failure(&last.content);
+
+    // The task's own message, not whatever the last tool printed — and not
+    // the "yes" that approved a step either: answering a question mid-task
+    // does not make the task trivial.
+    let mut base = messages
+        .iter()
+        .rev()
+        .filter(|m| m.role == Role::User)
+        .find(|m| !Self::is_bare_acknowledgement(Self::user_text(&m.content)))
+        .map(|m| Self::user_message_complexity(&m.content))
+        .unwrap_or(TaskComplexity::Minimal);
+
+    // "делай" / "yes, go ahead" approves whatever was just proposed, and the
+    // proposal is the task. Without this, agreeing to a full refactor scores
+    // like the word "делай".
+    let last_user_is_ack = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User)
+        .is_some_and(|m| Self::is_bare_acknowledgement(Self::user_text(&m.content)));
+    if last_user_is_ack {
+        if let Some(plan) = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant && !m.content.trim().is_empty())
+        {
+            base = base.max(Self::user_message_complexity(&plan.content));
         }
-        crate::types::Role::User => {
-            let raw_content = &last_msg.content;
-            // Strip injected memory block preamble if present
-            let prompt = if let Some((_mem, user_part)) = raw_content.rsplit_once("\n\n---\n\n") {
-                user_part.trim()
-            } else {
-                raw_content.trim()
-            };
+    }
 
-            let p_lower = prompt.to_lowercase();
-            let clean_lower = prompt
-                .trim_matches(|c: char| !c.is_alphanumeric() && !c.is_whitespace())
-                .to_lowercase();
+    if last_failed {
+        return Self::raise(base);
+    }
+    base
+}
 
-            // 1. Direct user brevity overrides: explicitly instructed not to think or answer in one line
-            let is_explicit_brevity = p_lower.contains("no thinking")
-                || p_lower.contains("don't think")
-                || p_lower.contains("no reasoning")
-                || p_lower.contains("concise")
-                || p_lower.contains("one line")
-                || p_lower.contains("briefly")
-                || p_lower.contains("short answer")
-                || p_lower.contains("without thinking")
-                || p_lower.contains("without reasoning");
-            if is_explicit_brevity {
-                return TaskComplexity::Minimal;
-            }
-
-            // 2. Direct user deep reasoning overrides: explicitly instructed to reason or think deeply
-            let is_explicit_deep = p_lower.contains("think step by step")
-                || p_lower.contains("deep reasoning")
-                || p_lower.contains("think deeply")
-                || p_lower.contains("reason carefully")
-                || p_lower.contains("full analysis")
-                || p_lower.contains("analyze thoroughly")
-                || p_lower.contains("detailed analysis");
-            if is_explicit_deep {
-                return TaskComplexity::High;
-            }
-
-            // 3. Pure greetings and casual pleasantries (never task execution)
-            let is_greeting = is_greeting_text(prompt);
-
-            // 4. Check follow-up confirmation or response to an ongoing task / question
-            let is_confirmation_or_choice = matches!(
-                clean_lower.as_str(),
-                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
-                | "yes" | "no" | "y" | "n" | "ok" | "okay" | "sure" | "proceed" | "continue" | "go" | "do it" | "agree"
-            );
-
-            // If there is prior conversation history and user is answering a question or continuing a task
-            if messages.len() > 1 && !is_greeting && (is_confirmation_or_choice || clean_lower.len() <= 40) {
-                let prev_msgs = &messages[..messages.len() - 1];
-                let has_active_task = prev_msgs.iter().rev().take(4).any(|m| {
-                    m.role == crate::types::Role::Tool
-                        || !m.tool_calls.is_empty()
-                        || m.content.contains('?')
-                        || m.content.contains("```")
-                        || m.content.contains("error")
-                        || m.content.contains("test")
-                        || m.content.contains("fn ")
-                        || m.content.contains("struct ")
-                        || m.content.contains("diff")
-                });
-
-                if has_active_task {
-                    // Continuing an active task -> preserve High complexity to keep thinking on and prevent KV cache eviction
-                    return TaskComplexity::High;
-                }
-            }
-
-            // 5. Technical task keywords & actions
-            let has_tech_keywords = p_lower.contains("explain")
-                || p_lower.contains("describe")
-                || p_lower.contains("overview")
-                || p_lower.contains("implement")
-                || p_lower.contains("refactor")
-                || p_lower.contains("fix")
-                || p_lower.contains("debug")
-                || p_lower.contains("error")
-                || p_lower.contains("panic")
-                || p_lower.contains("bug")
-                || p_lower.contains("compile")
-                || p_lower.contains("build")
-                || p_lower.contains("test")
-                || p_lower.contains("write")
-                || p_lower.contains("create")
-                || p_lower.contains("modify")
-                || p_lower.contains("update")
-                || p_lower.contains("delete")
-                || p_lower.contains("remove")
-                || p_lower.contains("run")
-                || p_lower.contains("check")
-                || p_lower.contains("verify")
-                || p_lower.contains("server")
-                || p_lower.contains("client")
-                || p_lower.contains("request")
-                || p_lower.contains("memory")
-                || p_lower.contains("thread")
-                || p_lower.contains("database")
-                || p_lower.contains("borrow")
-                || p_lower.contains("architecture")
-                || p_lower.contains("algorithm")
-                || p_lower.contains("optimize");
-
-            // 6. Substantive / analytical question indicators
-            let is_substantive_question = (prompt.contains('?')
-                || p_lower.starts_with("how ")
-                || p_lower.starts_with("why ")
-                || p_lower.starts_with("what is ")
-                || p_lower.starts_with("what ")
-                || p_lower.starts_with("which ")
-                || p_lower.starts_with("where ")
-                || p_lower.starts_with("when ")
-                || p_lower.starts_with("compare ")
-                || p_lower.contains("difference")
-                || p_lower.contains(" vs ")
-                || p_lower.contains("versus"))
-                && !is_greeting;
-
-            // 7. Code syntax indicators & technical identifiers
-            let has_code_syntax = prompt.contains("```")
-                || prompt.contains("fn ")
-                || prompt.contains("struct ")
-                || prompt.contains("enum ")
-                || prompt.contains("trait ")
-                || prompt.contains("class ")
-                || prompt.contains("impl ")
-                || prompt.contains("def ")
-                || prompt.contains("let ")
-                || prompt.contains("const ")
-                || prompt.contains("pub ")
-                || prompt.contains("import ")
-                || prompt.contains("::")
-                || prompt.contains("->")
-                || prompt.contains("=>")
-                || prompt.contains("&&")
-                || prompt.contains("||")
-                || prompt.contains("!=")
-                || prompt.contains("==")
-                || prompt.contains("&str")
-                || prompt.contains("String")
-                || prompt.contains("Option<")
-                || prompt.contains("Result<")
-                || prompt.contains("Vec<")
-                || prompt.contains("HashMap<")
-                || prompt.contains("Arc<")
-                || prompt.contains("Mutex<")
-                || prompt.contains(".rs")
-                || prompt.contains(".py")
-                || prompt.contains(".js")
-                || prompt.contains(".ts")
-                || prompt.contains(".toml")
-                || prompt.contains(".json")
-                || prompt.contains(".yaml")
-                || prompt.contains(".yml")
-                || prompt.contains(".sql")
-                || prompt.contains(".sh")
-                || p_lower.contains("cargo ")
-                || p_lower.contains("git ")
-                || p_lower.contains("npm ")
-                || p_lower.contains("docker ")
-                || p_lower.contains("rustc ")
-                || p_lower.contains("bash ")
-                || p_lower.contains("grep ")
-                || p_lower.contains("curl ");
-
-            if is_greeting && !has_code_syntax && !has_tech_keywords && !is_substantive_question {
-                return TaskComplexity::Minimal;
-            }
-
-            // Short standalone acknowledgement or pleasantry without question or technical context
-            if prompt.len() <= 50
-                && !has_code_syntax
-                && !has_tech_keywords
-                && !is_substantive_question
-                && !prompt.contains('{')
-                && !prompt.contains('}')
-                && !prompt.contains(';')
-            {
-                return TaskComplexity::Minimal;
-            }
-
-            if has_code_syntax || has_tech_keywords || prompt.len() > 100 {
-                return TaskComplexity::High;
-            }
-
-            if is_substantive_question {
-                return TaskComplexity::Medium;
-            }
-
-            TaskComplexity::Medium
-        }
-        _ => TaskComplexity::Medium,
+/// One step up, never past the top.
+fn raise(level: TaskComplexity) -> TaskComplexity {
+    match level {
+        TaskComplexity::Minimal => TaskComplexity::Low,
+        TaskComplexity::Low => TaskComplexity::Medium,
+        TaskComplexity::Medium | TaskComplexity::High => TaskComplexity::High,
     }
 }
+
+/// Whether a tool result reads as a failure, in any language: the markers are
+/// program output, not prose.
+fn looks_like_failure(content: &str) -> bool {
+    let c = content.trim();
+    let lower = c.to_lowercase();
+    lower.starts_with("error")
+        || lower.starts_with("failed")
+        || c.contains("Traceback (most recent call last)")
+        || c.contains("panicked at")
+        || lower.contains("build failed")
+        || lower.contains("test failed")
+        || lower.contains("compilation failed")
+        || lower.contains("permission denied")
+        || lower.contains("no such file")
+        // "exit code: 0" is a success; anything else is not.
+        || (lower.contains("exit code:") && !lower.contains("exit code: 0"))
+}
+
+/// Explicit instructions about reasoning, in the two languages the app is
+/// used in. These are the user overriding the guess, so they win outright.
+fn explicit_override(lower: &str) -> Option<TaskComplexity> {
+    const BRIEF: &[&str] = &[
+        "no thinking", "don't think", "do not think", "without thinking", "no reasoning",
+        "in one line", "one word", "short answer", "briefly", "be brief", "concise",
+        "без размышлен", "не думай", "коротко", "кратко", "в одну строку", "одним словом",
+    ];
+    const DEEP: &[&str] = &[
+        "think step by step", "think deeply", "reason carefully", "deep reasoning",
+        "thoroughly", "in detail", "full analysis",
+        "подумай", "тщательно", "подробно", "детально", "разберись",
+    ];
+    if BRIEF.iter().any(|k| lower.contains(k)) {
+        return Some(TaskComplexity::Minimal);
+    }
+    if DEEP.iter().any(|k| lower.contains(k)) {
+        return Some(TaskComplexity::High);
+    }
+    None
+}
+
+/// The user's own words, without the memory block we inject ahead of them.
+fn user_text(raw: &str) -> &str {
+    match raw.rsplit_once("\n\n---\n\n") {
+        Some((_memory, user_part)) => user_part.trim(),
+        None => raw.trim(),
+    }
+}
+
+/// "yes", "1", "ок", "давай" — an answer to the agent, not a task.
+fn is_bare_acknowledgement(prompt: &str) -> bool {
+    prompt.chars().count() <= 12
+        && prompt.split_whitespace().count() <= 2
+        && !prompt.contains('?')
+}
+
+/// Score one user message by what it is shaped like.
+fn user_message_complexity(raw: &str) -> TaskComplexity {
+    let prompt = Self::user_text(raw);
+    let lower = prompt.to_lowercase();
+
+    if let Some(explicit) = Self::explicit_override(&lower) {
+        return explicit;
+    }
+    if crate::thinking::is_greeting_text(prompt) {
+        return TaskComplexity::Minimal;
+    }
+
+    // Characters, not bytes: a Cyrillic sentence is not twice as hard as the
+    // same sentence in English.
+    let chars = prompt.chars().count();
+
+    if Self::is_bare_acknowledgement(prompt) {
+        return TaskComplexity::Minimal;
+    }
+
+    let mut score = 0i32;
+
+    // Several things asked for at once, or a sequence to carry out.
+    let multi_step = prompt.lines().filter(|l| {
+        let t = l.trim_start();
+        t.starts_with("- ") || t.starts_with("* ") || t.starts_with(|c: char| c.is_ascii_digit())
+    }).count() >= 2
+        || lower.contains(" then ")
+        || lower.contains(", then")
+        || lower.contains("потом")
+        || lower.contains("затем")
+        || lower.contains("после чего")
+        || lower.contains(" and then ");
+    if multi_step {
+        score += 2;
+    }
+
+    // Code the user pasted, or symbols they are pointing at.
+    if prompt.contains("```") {
+        score += 2;
+    }
+    let code_marks = ["::", "->", "=>", "fn ", "def ", "class ", "impl ", "struct ", "()", "{}", "<T>"];
+    if code_marks.iter().filter(|m| prompt.contains(**m)).count() >= 2 {
+        score += 2;
+    }
+
+    // A path or a file: concrete work on something that exists.
+    let has_path = prompt.split_whitespace().any(|w| {
+        let w = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '_');
+        (w.contains('/') && !w.contains("://")) || w.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.is_empty() && (2..=4).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphabetic())
+        })
+    });
+    if has_path {
+        score += 1;
+    }
+
+    // Something is broken, in either language.
+    const TROUBLE: &[&str] = &[
+        "error", "panic", "crash", "fails", "failing", "broken", "bug", "regress", "why does",
+        "ошибк", "падает", "ломает", "не работает", "баг", "почему",
+    ];
+    if TROUBLE.iter().any(|k| lower.contains(k)) {
+        score += 2;
+    }
+
+    // Asking for something to be produced or changed is work; asking a
+    // question about it is not. This is the one lexical signal kept, it is
+    // short, and it is written in both languages the app is used in — the
+    // list it replaced had forty English words including "run" and "check",
+    // which fire on nearly every sentence a programmer types.
+    const MAKE: &[&str] = &[
+        "write ", "create ", "implement ", "add ", "fix ", "refactor", "rename", "delete ",
+        "remove ", "update ", "migrate", "port ", "optimis", "optimiz",
+        "напиш", "создай", "добавь", "исправь", "почини", "переимен", "удали", "обнови",
+        "рефактор", "реализуй", "перепиш",
+    ];
+    if MAKE.iter().any(|k| lower.contains(k)) {
+        score += 1;
+    }
+
+    // Scope. "Refactor the parser" and "refactor the whole project" are the
+    // same length and the same verb; only one of them is a week of work.
+    const WHOLE: &[&str] = &[
+        "whole project", "entire project", "whole codebase", "entire codebase", "all files",
+        "everywhere", "across the codebase", "the whole thing", "from scratch", "rewrite everything",
+        "весь проект", "всего проекта", "всему проекту", "полный", "полностью", "везде",
+        "во всех файлах", "с нуля", "всё приложение", "все файлы",
+    ];
+    if WHOLE.iter().any(|k| lower.contains(k)) {
+        score += 2;
+    }
+
+    // Length, in characters.
+    if chars > 240 {
+        score += 2;
+    } else if chars > 80 {
+        score += 1;
+    }
+
+    // A question at all.
+    if prompt.contains('?') {
+        score += 1;
+    }
+
+    match score {
+        // Nothing in it suggests work at all. Short and empty-handed is small
+        // talk; long and empty-handed is still a question worth answering.
+        0 if chars <= 40 => TaskComplexity::Minimal,
+        0 => TaskComplexity::Low,
+        1..=2 => TaskComplexity::Medium,
+        _ => TaskComplexity::High,
+    }
+}
+
 
     /// Parse model metadata from `/v1/models` or `/v1/models/{model}` response JSON.
     pub fn parse_model_metadata(data: &serde_json::Value, model_name: &str) -> Option<Self> {
@@ -1105,87 +1114,186 @@ mod tests {
     }
 
     #[test]
-    fn test_analyze_turn_complexity() {
+    fn greetings_and_acknowledgements_need_no_reasoning() {
+        use crate::types::ChatMessage;
+        for text in ["Hello!", "thanks, ok", "What's up bro!", "Good morning", "ок", "да"] {
+            assert_eq!(
+                analyze_turn_complexity(&[ChatMessage::user(text)]),
+                TaskComplexity::Minimal,
+                "{text}"
+            );
+        }
+        // The memory block we inject is ours, not the user's message.
+        assert_eq!(
+            analyze_turn_complexity(&[ChatMessage::user(
+                "# Memory (automatically loaded)\n\n---\n\nHello"
+            )]),
+            TaskComplexity::Minimal
+        );
+    }
+
+    #[test]
+    fn a_russian_prompt_is_judged_like_the_same_prompt_in_english() {
+        use crate::types::ChatMessage;
+        // The old version measured length in bytes, so this sentence — 57
+        // characters, 94 bytes — counted as "long" and went to maximum
+        // reasoning purely for being Cyrillic.
+        let ru = analyze_turn_complexity(&[ChatMessage::user(
+            "Прочитай src/parser.rs и коротко опиши что делает функция",
+        )]);
+        let en = analyze_turn_complexity(&[ChatMessage::user(
+            "Read src/parser.rs and briefly describe what the function does",
+        )]);
+        assert_eq!(ru, en, "same request, same effort");
+        assert!(ru <= TaskComplexity::Medium, "a file read is not maximum-reasoning work: {ru:?}");
+    }
+
+    #[test]
+    fn ordinary_work_does_not_get_maximum_reasoning() {
+        use crate::types::ChatMessage;
+        for text in [
+            "Write a JSON parsing function in Rust",
+            "Добавь док-комментарий над parse_duration",
+            "What is DNS?",
+            "Rename the cache field to store",
+        ] {
+            let level = analyze_turn_complexity(&[ChatMessage::user(text)]);
+            assert!(
+                level <= TaskComplexity::Medium,
+                "{text} came out as {level:?}; High is for work that is failing or multi-step"
+            );
+        }
+    }
+
+    #[test]
+    fn hard_work_is_recognised_as_hard() {
+        use crate::types::ChatMessage;
+        for text in [
+            "Fix the panic in parser.rs, then add a test for it and run the suite",
+            "Почини ошибку в src/loop.rs, потом прогони тесты",
+            "Think step by step and compare B-trees and LSM-trees",
+            "Why does the build fail with a borrow error in src/main.rs?",
+        ] {
+            assert_eq!(
+                analyze_turn_complexity(&[ChatMessage::user(text)]),
+                TaskComplexity::High,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_user_can_say_how_much_thinking_they_want() {
+        use crate::types::ChatMessage;
+        for brief in [
+            "Name the capital of France, answer in one line without reasoning",
+            "Кратко: что делает эта функция?",
+        ] {
+            assert_eq!(
+                analyze_turn_complexity(&[ChatMessage::user(brief)]),
+                TaskComplexity::Minimal,
+                "{brief}"
+            );
+        }
+        assert_eq!(
+            analyze_turn_complexity(&[ChatMessage::user("Подробно разбери архитектуру цикла")]),
+            TaskComplexity::High
+        );
+    }
+
+    #[test]
+    fn agreeing_to_a_big_job_inherits_the_job() {
+        use crate::types::ChatMessage;
+
+        // The user states the job, then approves it a message later. "делай"
+        // is two syllables; the task behind it is a week.
+        let stated = vec![
+            ChatMessage::user("Делаем полный рефактор проекта"),
+            ChatMessage::assistant("Хорошо, начну с разбора зависимостей. Приступать?"),
+            ChatMessage::user("делай"),
+        ];
+        assert_eq!(analyze_turn_complexity(&stated), TaskComplexity::High);
+
+        // And the other way round: the assistant proposes the big job, the
+        // user only says yes, so the proposal is the task.
+        let proposed = vec![
+            ChatMessage::user("Что тут можно улучшить?"),
+            ChatMessage::assistant(
+                "Предлагаю полный рефактор проекта: вынести цикл в отдельный модуль, \
+                 переписать разбор аргументов и прогнать тесты. Делаем?",
+            ),
+            ChatMessage::user("да"),
+        ];
+        assert_eq!(analyze_turn_complexity(&proposed), TaskComplexity::High);
+    }
+
+    #[test]
+    fn scope_counts_even_when_the_sentence_is_short() {
+        use crate::types::ChatMessage;
+        let one_file = analyze_turn_complexity(&[ChatMessage::user("Refactor the parser")]);
+        let whole = analyze_turn_complexity(&[ChatMessage::user("Refactor the whole project")]);
+        assert!(whole > one_file, "{whole:?} vs {one_file:?}");
+        assert_eq!(whole, TaskComplexity::High);
+    }
+
+    #[test]
+    fn a_failed_tool_raises_the_level_but_a_successful_one_does_not() {
         use crate::types::{ChatMessage, Role};
-
-        // 1. Simple greeting
-        let msg_hello = vec![ChatMessage::user("Hello!")];
-        assert_eq!(analyze_turn_complexity(&msg_hello), TaskComplexity::Minimal);
-
-        // 2. Casual acknowledgement
-        let msg_ok = vec![ChatMessage::user("thanks, ok")];
-        assert_eq!(analyze_turn_complexity(&msg_ok), TaskComplexity::Minimal);
-
-        // 3. Simple greeting with memory block
-        let msg_mem = vec![ChatMessage::user("# Memory (automatically loaded)\n\n---\n\nHello")];
-        assert_eq!(analyze_turn_complexity(&msg_mem), TaskComplexity::Minimal);
-
-        // 4. Code editing request
-        let msg_code = vec![ChatMessage::user("Write a JSON parsing function in Rust")];
-        assert_eq!(analyze_turn_complexity(&msg_code), TaskComplexity::High);
-
-        // 5. Tool execution error
-        let msg_err = vec![ChatMessage {
+        let tool = |content: &str| ChatMessage {
             role: Role::Tool,
-            content: "error: compilation failed with code 1\npanicked at main.rs:42".to_string(),
+            content: content.to_string(),
             reasoning: None,
             tool_call_id: Some("1".into()),
             tool_calls: vec![],
-        }];
-        assert_eq!(analyze_turn_complexity(&msg_err), TaskComplexity::High);
+        };
+        let task = ChatMessage::user("Read src/parser.rs and describe it");
+        let base = analyze_turn_complexity(std::slice::from_ref(&task));
 
-        // 6. Tool short success
-        let msg_tool_ok = vec![ChatMessage {
+        // A step that worked keeps the task at its own level: flipping the
+        // preset between steps costs the backend its prefix cache.
+        assert_eq!(
+            analyze_turn_complexity(&[task.clone(), tool("exit code: 0\noutput:\ndone")]),
+            base
+        );
+
+        // A step that failed is worth more thought than the task asked for.
+        for failure in [
+            "error: no such file: src/confg.rs",
+            "exit code: 101\noutput:\ntest failures",
+            "panicked at src/main.rs:42",
+        ] {
+            assert!(
+                analyze_turn_complexity(&[task.clone(), tool(failure)]) > base,
+                "{failure}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_level_holds_across_the_steps_of_one_task() {
+        use crate::types::{ChatMessage, Role};
+        // Answering "yes" mid-task is not a new, trivial turn: the task is
+        // what is being worked on, and its level is what applies.
+        let history = vec![
+            ChatMessage::user("Fix the compilation error in src/main.rs, then run the tests"),
+            ChatMessage::assistant("Found a type error. Fix it now?"),
+            ChatMessage::user("Yes"),
+        ];
+        assert_eq!(analyze_turn_complexity(&history), TaskComplexity::High);
+
+        let mut deep = history.clone();
+        deep.push(ChatMessage {
             role: Role::Tool,
-            content: "Applied edits to src/lib.rs successfully".to_string(),
+            content: "exit code: 0".into(),
             reasoning: None,
             tool_call_id: Some("2".into()),
             tool_calls: vec![],
-        }];
-        assert_eq!(analyze_turn_complexity(&msg_tool_ok), TaskComplexity::Low);
-
-        // 7. Substantive technical question with '?'
-        let msg_q_tech = vec![ChatMessage::user("How does the borrow checker work in Rust?")];
-        assert_eq!(analyze_turn_complexity(&msg_q_tech), TaskComplexity::High);
-
-        // 8. General question without tech keywords
-        let msg_q_gen = vec![ChatMessage::user("What is DNS?")];
-        assert_eq!(analyze_turn_complexity(&msg_q_gen), TaskComplexity::Medium);
-
-        // 9. User answering agent's question ("Yes") in ongoing task
-        let msg_continuation = vec![
-            ChatMessage::user("Fix compilation error"),
-            ChatMessage::assistant("Found type error. Fix it now?"),
-            ChatMessage::user("Yes"),
-        ];
-        assert_eq!(analyze_turn_complexity(&msg_continuation), TaskComplexity::High);
-
-        // 10. User picking option "1" in ongoing task
-        let msg_choice = vec![
-            ChatMessage::user("Setup database"),
-            ChatMessage::assistant("1) SQLite\n2) PostgreSQL\nWhich option to choose?"),
-            ChatMessage::user("1"),
-        ];
-        assert_eq!(analyze_turn_complexity(&msg_choice), TaskComplexity::High);
-
-        // 11. User explicit brevity override
-        let msg_brevity = vec![ChatMessage::user("Name the capital of France, answer in one line without reasoning")];
-        assert_eq!(analyze_turn_complexity(&msg_brevity), TaskComplexity::Minimal);
-
-        // 12. User explicit deep reasoning override
-        let msg_deep = vec![ChatMessage::user("Think step by step and compare B-trees and LSM-trees")];
-        assert_eq!(analyze_turn_complexity(&msg_deep), TaskComplexity::High);
-
-        // 13. Casual greeting
-        let msg_slang = vec![ChatMessage::user("What's up bro!")];
-        assert_eq!(analyze_turn_complexity(&msg_slang), TaskComplexity::Minimal);
-
-        // 14. Casual / conversational greeting variants
-        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Hello!")]), TaskComplexity::Minimal);
-        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Hi there")]), TaskComplexity::Minimal);
-        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Hey!")]), TaskComplexity::Minimal);
-        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Good morning")]), TaskComplexity::Minimal);
-        assert_eq!(analyze_turn_complexity(&[ChatMessage::user("Hello! What are you doing?")]), TaskComplexity::Minimal);
+        });
+        assert_eq!(
+            analyze_turn_complexity(&deep),
+            TaskComplexity::High,
+            "the level must not drop halfway through a task"
+        );
     }
 
     #[test]
