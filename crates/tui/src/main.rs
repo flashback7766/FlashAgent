@@ -1181,13 +1181,18 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
             }
+            "--tool-test" => {
+                let all = args.next().as_deref() == Some("--all-models");
+                let code = run_tool_check_cli(&config, all).await;
+                std::process::exit(code);
+            }
             "--setup" => force_setup = true,
             "-y" | "--yes" => skip_trust = true,
             "-h" | "--help" => {
-                println!("FlashAgent TUI\n\nUsage: flashagent [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Specify LLM model name\n  --url <endpoint>     API endpoint (default: http://localhost:1234/v1)\n  --setup              Run first-time setup wizard\n  --resume <id>        Resume a previously saved chat session\n  -y, --yes            Skip directory trust confirmation\n  -h, --help           Show this help message");
+                println!("FlashAgent TUI\n\nUsage: flashagent [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Specify LLM model name\n  --url <endpoint>     API endpoint (default: http://localhost:1234/v1)\n  --setup              Run first-time setup wizard\n  --tool-test [--all-models]  Check whether the model can drive tools\n  --resume <id>        Resume a previously saved chat session\n  -y, --yes            Skip directory trust confirmation\n  -h, --help           Show this help message");
                 return Ok(());
             }
-            other => anyhow::bail!("usage: flashagent [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--setup] [--resume <id>] [-y|--yes] (got {other})"),
+            other => anyhow::bail!("usage: flashagent [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--tool-test [--all-models]] [--setup] [--resume <id>] [-y|--yes] (got {other})"),
         }
     }
 
@@ -1197,6 +1202,10 @@ async fn main() -> Result<()> {
         if !completed {
             return Ok(());
         }
+        // Whether the chosen model can actually drive tools decides whether
+        // anything here works, and finding out by watching it narrate its
+        // intentions for ten minutes is a bad first hour. Ask it now.
+        first_run_tool_check(&config).await;
     }
 
     let api_key = config.api_key.clone().or_else(|| std::env::var("FLASHAGENT_API_KEY").ok());
@@ -5239,6 +5248,96 @@ fn wrap_plain(text: &str, width: usize) -> Vec<String> {
         rows.push(String::new());
     }
     rows
+}
+
+/// Run the tool-calling check once, right after setup, and say what it means.
+async fn first_run_tool_check(config: &AppConfig) {
+    println!("\nChecking whether {} can drive tools...", config.model);
+    let source = BackendSource(flashagent_llm::OpenAiCompat::new(
+        &config.backend_url,
+        &config.model,
+        config.api_key.clone(),
+    ));
+    let report = flashagent_core::toolcheck::check_model(
+        &source,
+        &config.model,
+        std::time::Duration::from_secs(60),
+    )
+    .await;
+    for line in report.lines() {
+        println!("{line}");
+    }
+    let (passed, total) = report.score();
+    if passed < total {
+        println!(
+            "\nA model that fails these will talk about doing the work instead of doing it.\n\
+             You can re-run this any time with `flashagent --tool-test`, or compare models\n\
+             with `flashagent --tool-test --all-models`."
+        );
+    }
+    println!();
+}
+
+/// `--tool-test`: run the tool-calling scenarios against the configured model,
+/// or against every model the server lists. Exits non-zero when a model cannot
+/// drive tools, so it can be used as a check rather than only read.
+async fn run_tool_check_cli(config: &AppConfig, all_models: bool) -> i32 {
+    let timeout = std::time::Duration::from_secs(120);
+    let mut models = vec![config.model.clone()];
+    if all_models {
+        let probe = BackendSource(flashagent_llm::OpenAiCompat::new(
+            &config.backend_url,
+            &config.model,
+            config.api_key.clone(),
+        ));
+        match probe.discover_server().await {
+            Some(disc) if !disc.models.is_empty() => {
+                models = disc
+                    .models
+                    .iter()
+                    .map(|m| m.id.clone())
+                    .filter(|id| flashagent_core::toolcheck::is_chat_model(id))
+                    .collect();
+            }
+            _ => {
+                eprintln!("Could not list models at {}; checking the configured one only.", config.backend_url);
+            }
+        }
+    }
+
+    println!("Tool-calling check against {}", config.backend_url);
+    let mut reports = Vec::new();
+    for model in &models {
+        println!("\n{model}");
+        let source = BackendSource(flashagent_llm::OpenAiCompat::new(
+            &config.backend_url,
+            model,
+            config.api_key.clone(),
+        ));
+        let report = flashagent_core::toolcheck::check_model(&source, model, timeout).await;
+        for line in report.lines() {
+            println!("{line}");
+        }
+        reports.push(report);
+    }
+
+    if reports.len() > 1 {
+        println!("\n{}", flashagent_core::toolcheck::MARKDOWN_HEADER);
+        for r in &reports {
+            println!("{}", r.markdown_row());
+        }
+    }
+    let json: Vec<_> = reports.iter().map(|r| r.to_json()).collect();
+    if let Ok(path) = std::env::var("FLASHAGENT_TOOL_TEST_JSON") {
+        // Raw results, so a published table can be checked rather than believed.
+        if let Ok(text) = serde_json::to_string_pretty(&json) {
+            let _ = std::fs::write(&path, text);
+            println!("\nRaw results written to {path}");
+        }
+    }
+
+    // A model that fails everything is a failure of the check, not of the run.
+    i32::from(reports.iter().any(|r| r.score().0 == 0))
 }
 
 /// Settings → "Run Tool Test": ask the active model to call a probe tool and
