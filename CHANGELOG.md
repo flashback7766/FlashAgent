@@ -5,6 +5,14 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- `/goal` takes budgets: `/goal [--steps N] [--time 30m] [--tokens 200k]
+  <task>`, defaulting to 250 steps and one hour. `--tokens` counts generated
+  tokens only — with a prefix cache, a total-token budget mostly measures how
+  long the conversation is. The status line shows the burn-down live
+  (`step 12/250 · 4.2k tok · 3m05s/1h0m`), and the run ends with a report card
+  built from loop events, not from the model's own account: steps, generated
+  tokens, elapsed, files created and edited, shell commands that failed, and
+  an explicit INCOMPLETE when a budget (or Esc) ended the run.
 - The command is just `flashagent`. Packages, tarballs, the AppImage and the
   installers no longer add a `flashagent-tui` alias (reinstalling removes the
   old one); in-app hints use the new name. The empty `crates/app` is gone.

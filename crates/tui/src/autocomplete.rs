@@ -49,7 +49,7 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/verbose", "Toggle verbose mode for thoughts and tool calls (all, last, off)", AutocompleteCategory::Command),
         AutocompleteItem::new("/expand", "Toggle verbose mode for thoughts and tool calls (all, last, off)", AutocompleteCategory::Command),
         AutocompleteItem::new("/mode", "Cycle permission mode (Planning, Manual, Accept Edits, Accept All)", AutocompleteCategory::Command),
-        AutocompleteItem::new("/goal", "Run autonomous task until goal is fully completed", AutocompleteCategory::Command),
+        AutocompleteItem::new("/goal", "Autonomous run under a budget: /goal [--steps N] [--time 30m] [--tokens 200k] <task>", AutocompleteCategory::Command),
         AutocompleteItem::new("/mcp", "List and manage Model Context Protocol servers", AutocompleteCategory::Command),
         AutocompleteItem::new("/compact", "Compact conversation context (optional: /compact <focus instructions>)", AutocompleteCategory::Command),
         AutocompleteItem::new("/regenerate", "Regenerate the last assistant response from scratch (or press Ctrl+R)", AutocompleteCategory::Command),

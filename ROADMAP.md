@@ -12,7 +12,7 @@ when unit tests pass.
 
 - [x] **V1. One command** — binary is `flashagent` everywhere; `flashagent-tui` alias and the empty `app` crate removed.
 - [x] **V2. MCP trust from config only** — only `read_only` / `read_only_tools` in `.mcp.json` skip approval; tool names and server `readOnlyHint` no longer do.
-- [ ] **V3. `/goal` budgets and report** — step / token / time limits set on the command and shown live; structured final report (done / skipped / verify by hand). Snapshots and milestone commits move to v1.x.
+- [x] **V3. `/goal` budgets and report** — `--steps`, `--time` and `--tokens` on the command, burn-down in the status line, and a factual end-of-run card built from loop events (files touched, failed commands, why it stopped). Snapshots and milestone commits move to v1.x.
 - [ ] **V4. TUI structure** — split `crates/tui/src/main.rs` (event loop, commands, rendering, updater, sessions) into modules without behaviour changes.
 - [ ] **V5. Scenario tests** — scripted mock-LLM server + headless TUI driver covering the core paths (tool turn, approval, cancel, compact, resume, MCP, goal) in CI.
 - [ ] **V6. Tool-calling benchmark** — reproducible probe across popular local models; results table in README; first-run tool test.
