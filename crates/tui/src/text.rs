@@ -22,10 +22,14 @@ pub fn wrap_styled(text: &str, width: usize) -> Vec<String> {
 
         for word in line.split(' ') {
             let w_vis = visible_width(word);
-            let need_space = !cur.is_empty();
+            // Decided by what is visible, not by what is in the buffer: a
+            // continuation row starts with the style it carries over, and
+            // treating that escape code as text put a space before the first
+            // word of every wrapped styled line.
+            let need_space = cur_vis > 0;
             let space_vis = if need_space { 1 } else { 0 };
 
-            if !cur.is_empty() && cur_vis + space_vis + w_vis > width {
+            if cur_vis > 0 && cur_vis + space_vis + w_vis > width {
                 if active_style.is_some() {
                     cur.push_str("\x1b[0m");
                 }
@@ -36,7 +40,7 @@ pub fn wrap_styled(text: &str, width: usize) -> Vec<String> {
                 }
             }
 
-            if !cur.is_empty() {
+            if cur_vis > 0 {
                 cur.push(' ');
                 cur_vis += 1;
             }
@@ -246,4 +250,23 @@ pub fn truncate_middle(s: &str, max_len: usize) -> String {
     let prefix: String = s.chars().take(left).collect();
     let suffix: String = s.chars().skip(char_count - right).collect();
     format!("{prefix}...{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wrapped_styled_line_does_not_start_its_continuation_with_a_space() {
+        // The carried-over style code made the row look non-empty, so every
+        // continuation of a coloured line began one column too far right.
+        let styled = format!("\x1b[38;2;200;195;185m{}\x1b[0m", "alpha beta gamma delta epsilon zeta eta theta");
+        let rows = wrap_styled(&styled, 12);
+        assert!(rows.len() > 1, "{rows:?}");
+        for row in &rows[1..] {
+            assert!(!strip_ansi(row).starts_with(' '), "continuation starts with a space: {:?}", strip_ansi(row));
+        }
+        let plain: Vec<String> = rows.iter().map(|r| strip_ansi(r)).collect();
+        assert_eq!(plain.join(" "), "alpha beta gamma delta epsilon zeta eta theta", "no word lost or doubled");
+    }
 }
