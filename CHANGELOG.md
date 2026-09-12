@@ -1,55 +1,62 @@
 # Changelog
 
-## Unreleased
+## b260 — The slop is human
 
-A lot of people think "vibecoded" means "AI slop". I'm tired of hearing it,
-and honestly I was tired of catching myself thinking it too. So this release is
-me proving it wrong, on this exact project, with Anthropic's Claude.
+Humans can make far more slop than AI ever will. All it takes is not watching
+the AI.
 
-Let's get the obvious part out of the way. Yes, FlashAgent is written with
-Claude. Most of the code in this repo came out of Claude Code, and the commit
-history says so. I'm not going to pretend otherwise, and I'm not going to
-apologise for it.
+A lot of people think "vibecoded" means "AI slop". I was tired of hearing it,
+and more tired of catching myself thinking it. So, plainly: FlashAgent is
+written with Anthropic's Claude, and every commit says so. I don't understand
+every line yet. What I do is watch. I decide what gets built, run it every day
+against local models, break it, and send back screenshots until it works.
 
-I don't understand every line of it yet. I'm learning it one piece at a time.
-What I do is everything around the code: I decide what gets built and what
-doesn't, I run it every day on my own laptop against local models, I break it,
-and I send back screenshots of what's wrong until it isn't. Most of the fixes
-in this changelog started exactly like that.
+The slop that was in this repo wasn't the AI's. It was the part nobody checked:
+a README banner with numbers nobody measured, docs describing a GPU renderer
+that never existed, two thousand tips of random trivia, crates nothing used,
+and a 7,236-line main file with a 3,349-line function inside it. That one is on
+me, not on Claude.
 
-Here's what I figured out: "vibecoded" and "slop" are not the same word. Slop
-is what you get when nobody is looking. Code nobody checked, numbers nobody
-measured, docs describing a product that doesn't exist. And to be fair, some of
-that was in here.
+So this release is me watching. That function is 982 lines now and the file is
+2,293; forty real tips are left; every number in the README was measured. What
+the app does didn't change: 462 tests, clippy with warnings as errors, and a
+live run against a real model after every step.
 
-So it's gone. The README banner promised a cold start nobody had measured, and
-its memory figure disagreed with the README right under it; every number left
-was measured on a published build. Two crates nobody used are deleted. Two
-thousand "tips" of random programming trivia are down to forty real ones. The
-architecture doc describes what exists instead of a GPU renderer that was never
-built. And the terminal client, whose main file was 7,236 lines with a single
-3,349-line function inside it, is split into modules you can actually read: that
-function is 982 lines now, and the file is 2,293.
-
-None of that changed what the app does. Every step was checked the same way:
-455 tests, clippy with warnings as errors, a line-by-line audit that nothing got
-lost in the move, and a live run against a real model after each step.
-
-If you still think this is slop after reading the code, open an issue and point
-at the line. That's a better use of both our time than "lol vibecoder".
+Still see slop? Open an issue and point at the line. That is worth more than
+"lol vibecoder".
 
 — flashback
 
-### What changed
+<!-- page -->
 
-- Approval cards name files relative to the project. An edit showed
-  `target: /tmp/.../project/main.rs` and a diff starting `--- a//tmp/...`; it
-  now shows `target: main.rs`, and the six preview rows go to the change itself
-  instead of repeating the file name.
+### Less slop
+
+- `main.rs` is 2,293 lines instead of 7,236, and its event loop 982 instead of
+  3,349. Keys, prompt submission, turn completion, rendering, sessions and menus
+  are modules of their own, and the chat library is split the same way. Nothing
+  it does changed; a live run against a real model after each step checked it.
 - Forty tips about FlashAgent instead of two thousand about everything, and a
   test fails if a tip names a command that does not exist.
-- The what's-new screen can open a release with a note before its list. This
-  one, for example.
+- The crates nothing used are gone, the empty protocol crate last, along with
+  dependencies nobody imported.
+- The docs describe what exists. The architecture page named a GPU renderer, an
+  IPC service and telemetry that were never built, and the README banner
+  promised a cold start nobody had measured.
+- The tests run on Windows again. One test wrote a Windows path into JSON by
+  hand, the backslashes broke it, and since b249 that failure stopped every
+  test after it. CI now runs every suite even when one fails.
+
+<!-- page -->
+
+### Talking to the model
+
+- The auto-compaction threshold follows the window: 97% at a million tokens,
+  95% at 512k, 90% at 256k, 85% at 128k, 80% at 64k, 75% at 32k and below. One
+  percentage cannot suit both ends — ten percent of a million tokens is a
+  hundred thousand left empty, while ten percent of 32k is not one answer.
+  Settings says which one is in force: *Enabled (auto: 85% for this window)*.
+  A threshold you set by hand is still yours; the old shipped default of 90 was
+  never a choice, so it becomes automatic.
 - A finished thought no longer says it is still thinking. The block above a
   written answer read *Thinking: …* for the rest of the session; it reads
   *Thought: … (4s)* now, expanded or collapsed, and only says Thinking while
@@ -60,13 +67,8 @@ at the line. That's a better use of both our time than "lol vibecoder".
   back.
 - The suggestion list no longer hangs on the screen while the context is being
   compacted. The command that opened it is long gone from the composer.
-- The auto-compaction threshold follows the window: 97% at a million tokens,
-  95% at 512k, 90% at 256k, 85% at 128k, 80% at 64k, 75% at 32k and below. One
-  percentage cannot suit both ends — ten percent of a million tokens is a
-  hundred thousand left empty, while ten percent of 32k is not one answer.
-  Settings says which one is in force: *Enabled (auto: 85% for this window)*.
-  A threshold you set by hand is still yours; the old shipped default of 90 was
-  never a choice, so it becomes automatic.
+
+<!-- page -->
 
 ### The first five minutes
 
@@ -85,6 +87,23 @@ gets it, and fixed what that turned up.
 - That check ran before the "do you trust this directory?" question, so the
   first thing a new user did was wait a minute and only then get asked where
   they were. The instant question comes first.
+
+<!-- page -->
+
+### Smaller things
+
+- Approval cards name files relative to the project. An edit showed
+  `target: /tmp/.../project/main.rs` and a diff starting `--- a//tmp/...`; it
+  now shows `target: main.rs`, and the six preview rows go to the change itself
+  instead of repeating the file name.
+- The what's-new screen can open a release with a note, and a note is not
+  skipped by accident: it takes three presses to move past it. This one, for
+  example.
+- On Windows the prefill-time cache is saved. It looked for the home directory
+  only in `HOME`, which Windows does not set.
+- Long notes read properly here: wrapped lines no longer start with a space,
+  *emphasis* is italic, a heading gets a blank row above it, and Tab keeps you
+  on the entry you were reading.
 
 ## b250 — compaction you can watch, and what a picture costs
 
@@ -111,8 +130,6 @@ gets it, and fixed what that turned up.
   model, because it cannot be guessed — a Qwen charges by area (about a token
   per thousand pixels, measured), a Gemma a flat rate per image.
 - No emoji in the attachment row.
-- The what's-new screen shows the changelog's emphasis as emphasis.
-
 - The what's-new screen shows the changelog's emphasis as emphasis. It printed
   `**Pictures.**` with the asterisks.
 
