@@ -187,7 +187,8 @@ pub struct AppConfig {
     pub api_key: Option<String>,
     /// Selected default model ID.
     pub model: String,
-    /// System prompt & agent language ("ru" or "en").
+    /// Interface language ("ru" or "en"); taken from the locale when unset.
+    #[serde(default = "default_language")]
     pub language: String,
     /// Default permission mode on startup.
     pub permission_mode: PermissionMode,
@@ -307,6 +308,24 @@ fn default_warn_threshold() -> usize {
     70
 }
 
+/// The language the interface writes in when nothing has been chosen.
+///
+/// Read from the locale rather than assumed: the shipped default was Russian,
+/// which meant everyone else met a Russian-labelled app until they typed
+/// enough of their own language for it to be detected.
+fn default_language() -> String {
+    let locale = std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LC_MESSAGES"))
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default()
+        .to_lowercase();
+    if locale.starts_with("ru") {
+        "ru".to_string()
+    } else {
+        "en".to_string()
+    }
+}
+
 fn default_compact_threshold() -> usize {
     // Zero means "choose by the window": 85% of a 128k window, 97% of a
     // million, 75% of 32k. A single percentage cannot suit both ends.
@@ -395,7 +414,7 @@ impl Default for AppConfig {
             backend_url: "http://localhost:1234/v1".to_string(),
             api_key: None,
             model: String::new(),
-            language: "ru".to_string(),
+            language: default_language(),
             permission_mode: PermissionMode::AcceptEdits,
             thinking_effort: "auto".to_string(),
             sampling_preset: SamplingPreset::Coding,
@@ -603,6 +622,25 @@ mod tests {
         assert_eq!(cfg.permission_mode, crate::PermissionMode::AcceptEdits);
         assert_eq!(cfg.sampling_preset, SamplingPreset::MtpCoding);
         assert_eq!(cfg.toolset_profile, ToolsetProfile::Full);
+    }
+
+    #[test]
+    fn the_interface_language_follows_the_locale() {
+        // The shipped default was Russian for everyone, so an English speaker
+        // met "Разбираю запрос" on their first run.
+        let restore = std::env::var("LANG").ok();
+        std::env::set_var("LANG", "ru_RU.UTF-8");
+        std::env::remove_var("LC_ALL");
+        std::env::remove_var("LC_MESSAGES");
+        assert_eq!(AppConfig::default().language, "ru");
+        std::env::set_var("LANG", "en_GB.UTF-8");
+        assert_eq!(AppConfig::default().language, "en");
+        std::env::set_var("LANG", "de_DE.UTF-8");
+        assert_eq!(AppConfig::default().language, "en", "anything we do not speak is English");
+        match restore {
+            Some(v) => std::env::set_var("LANG", v),
+            None => std::env::remove_var("LANG"),
+        }
     }
 
     #[test]

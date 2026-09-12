@@ -1326,20 +1326,21 @@ async fn main() -> Result<()> {
     }
 
     use std::io::IsTerminal;
+    // Carried into the first conversation, because the screen it was printed
+    // on is about to be cleared.
+    let mut first_run_verdict: Option<String> = None;
+    let mut ran_setup = false;
     if (!config.setup_completed || force_setup) && std::io::stdout().is_terminal() {
         let completed = flashagent_tui::run_wizard(&mut config).await.unwrap_or(false);
         if !completed {
             return Ok(());
         }
-        // Whether the chosen model can actually drive tools decides whether
-        // anything here works, and finding out by watching it narrate its
-        // intentions for ten minutes is a bad first hour. Ask it now.
-        first_run_tool_check(&config).await;
         // Nothing arrived while they were away: they have been here for a
         // minute. Stamp the version so the next update has something to
         // measure against.
         config.last_seen_version = Some(flashagent_svc::updater::current_version().to_string());
         let _ = config.save();
+        ran_setup = true;
     }
 
     // An update that lands silently is an update nobody uses. Once, after the
@@ -1394,6 +1395,15 @@ async fn main() -> Result<()> {
         }
         config.trust_directory(&cwd);
         let _ = config.save();
+    }
+
+    if ran_setup {
+        // Whether the chosen model can actually drive tools decides whether
+        // anything here works, and finding out by watching it narrate its
+        // intentions for ten minutes is a bad first hour. Asked after the
+        // trust question, which is instant: nobody should wait a minute for
+        // a check and only then be asked where they are.
+        first_run_verdict = first_run_tool_check(&config).await;
     }
 
     // Process-lifetime objects: leaked once, so the spawned loop task can hold
@@ -1559,6 +1569,7 @@ async fn main() -> Result<()> {
         initial_effort,
         available_models,
         resume_session_id,
+        first_run_verdict,
     })
     .await;
     let _ = crossterm::execute!(
@@ -1597,6 +1608,8 @@ struct AppContext {
     initial_effort: String,
     available_models: Vec<String>,
     resume_session_id: Option<String>,
+    /// Verdict of the first-run tool check, to be said in the conversation.
+    first_run_verdict: Option<String>,
 }
 
 fn build_model_menu(source: &BackendSource) -> Option<SelectMenu<String>> {
@@ -2207,6 +2220,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         initial_effort,
         mut available_models,
         resume_session_id,
+        first_run_verdict,
     } = ctx;
     let cancel = Arc::new(AtomicBool::new(false));
     let mut question_ui_state = QuestionUiState::default();
@@ -2424,6 +2438,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     // messages up immediately, so its card would stay stuck at whatever row
     // the reveal had reached — draw it whole instead.
     chat.update_welcome_card(opening_card(initial_card, resume_session_id.is_none()));
+    if let Some(verdict) = first_run_verdict {
+        chat.push_system(&verdict);
+    }
 
     if let Some(ref resume_id) = resume_session_id {
         if let Some(home) = flashagent_home_dir() {
@@ -6414,7 +6431,7 @@ fn wrap_plain(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Run the tool-calling check once, right after setup, and say what it means.
-async fn first_run_tool_check(config: &AppConfig) {
+async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
     println!("\nChecking whether {} can drive tools...", config.model);
     let source = BackendSource(flashagent_llm::OpenAiCompat::new(
         &config.backend_url,
@@ -6439,6 +6456,14 @@ async fn first_run_tool_check(config: &AppConfig) {
         );
     }
     println!();
+
+    // Printing it was not enough: the app starts, clears the screen, and the
+    // one thing the user needed to read is gone. The verdict goes into the
+    // conversation instead, where it stays until they scroll past it.
+    Some(format!(
+        "Tool-calling check: {passed}/{total} — {}. Re-run with `flashagent --tool-test`.",
+        report.verdict()
+    ))
 }
 
 /// `--tool-test`: run the tool-calling scenarios against the configured model,
