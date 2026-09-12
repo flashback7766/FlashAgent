@@ -1,10 +1,6 @@
 <div align="center">
 
-<a href="https://github.com/flashback7766/FlashAgent">
-  <img src="assets/banner.svg" alt="FlashAgent — The Local-First AI Coding Agent" width="880" />
-</a>
-
-<br/>
+# FlashAgent
 
 ### A fast, local-first AI coding agent for your terminal — one native Rust binary, your models, your machine.
 
@@ -15,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-89b4fa.svg)](https://github.com/flashback7766/FlashAgent/releases)
 [![Discussions](https://img.shields.io/badge/discussions-join-a6e3a1.svg)](https://github.com/flashback7766/FlashAgent/discussions)
 
-**~11 MB of RAM idle · single ~19 MB binary · no Node, no Python, no Electron · zero telemetry**
+**~12 MB of RAM idle · single ~16 MB binary · no Node, no Python, no Electron · zero telemetry**
 
 <br/>
 
@@ -33,7 +29,7 @@
 - **Tool calling that does not depend on luck.** Native tool calls, plus a recovery parser for models that write calls as text (`<tool_call>`, `[TOOL_CALLS]`, bare JSON) — common with small local models. Arguments are JSON-repaired before they reach a tool. And you do not have to guess whether your model is up to it: `flashagent --tool-test` [scores it in seconds](docs/tool-calling.md).
 - **You stay in control.** Four permission modes, an approval card that shows the exact command, diff or MCP arguments, and "Always" rules that stay narrow: allowing `cargo test` never allows `cargo publish`.
 - **Steer while it works.** Type while the model is streaming and press <kbd>Enter</kbd>: your guidance lands at the next safe point without breaking the tool-call protocol. <kbd>Esc</kbd> interrupts cleanly — pending tool calls are closed out and partial output is kept, so the next prompt just continues.
-- **Tiny and instant.** One self-contained binary (only libc underneath), ~11 MB resident when idle, prints its version in ~5 ms. Nothing to install alongside it.
+- **Tiny and instant.** One self-contained binary (only libc underneath), ~12 MB resident when idle, prints its version in ~2 ms. Nothing to install alongside it.
 
 <table>
 <tr>
