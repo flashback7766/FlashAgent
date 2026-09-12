@@ -12,6 +12,7 @@ pub mod memory;
 pub mod permissions;
 pub mod prompt;
 pub mod subagents;
+pub mod toolcheck;
 
 pub use config::{AppConfig, BackendPreset, SamplingPreset, ToolsetProfile, UpdateChannel};
 pub use context_usage::ContextUsage;
