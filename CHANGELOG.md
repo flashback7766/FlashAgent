@@ -3,6 +3,22 @@
 Beta builds are numbered `bNNN` and ship on the rolling `beta` pre-release.
 Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
+## Unreleased
+
+- Ctrl+U (and `/update`) now checks, downloads and installs in one go, with
+  the download visible: `Update b235 · [████████░░░░░░░░] 52% · 3.4/6.6 MB`,
+  then `verifying checksum...`, `installing...`, and the line lands on
+  `installed · restart FlashAgent to run it`. It rewrites one line rather than
+  stacking up, and a background update stays silent as before.
+- Fixed: an installed `flashagent` refused to update while you stood in the
+  FlashAgent repository, claiming to be a dev build. What decides that is
+  where the binary lives, not where you are — and the repository is exactly
+  where you are when you notice there is a new build.
+- Fixed: opening FlashAgent and closing it without saying anything saved a
+  session and offered a `--resume` id that restored nothing. The history is
+  never really empty — it opens with the system prompt — so the check now
+  looks for an actual user message.
+
 ## b235 — budgets, a mascot that means something
 
 - While the model works, the mascot's face sits in the status line —
