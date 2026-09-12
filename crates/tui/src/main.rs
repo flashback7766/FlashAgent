@@ -898,7 +898,15 @@ impl Renderer {
                 } else if let Some(custom) = st.custom_placeholder {
                     format!(" {prompt_styled}  \x1b[38;2;135;140;155m{custom}\x1b[0m")
                 } else {
-                    format!(" {prompt_styled}  \x1b[38;2;135;130;125mAsk FlashAgent to do anything...\x1b[0m")
+                    // The long form is friendlier; the short one is what fits.
+                    let prompt_text = if width >= 60 {
+                        "Ask FlashAgent to do anything..."
+                    } else if width >= 40 {
+                        "Ask FlashAgent..."
+                    } else {
+                        "Ask..."
+                    };
+                    format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
                 }
             } else {
                 format!(" {prompt_styled} {}", st.input)
@@ -991,7 +999,18 @@ impl Renderer {
             } else if width >= 68 {
                 "  \x1b[38;2;135;130;125menter — send · tab — settings · f3 — model · esc — quit\x1b[0m".to_string()
             } else {
-                "  \x1b[38;2;135;130;125menter — send · tab — menu · esc — quit\x1b[0m".to_string()
+                // Below ~68 columns the list is assembled from what fits,
+                // so it ends on a word rather than on half a separator.
+                let hints = flashagent_tui::fit_parts(
+                    &[
+                        ("enter — send".into(), "enter — send".into()),
+                        ("tab — menu".into(), "tab — menu".into()),
+                        ("esc — quit".into(), "esc — quit".into()),
+                    ],
+                    " · ",
+                    width.saturating_sub(2),
+                );
+                format!("  \x1b[38;2;135;130;125m{hints}\x1b[0m")
             }
         };
         tail.push((LineKind::System, left_hint));
@@ -1013,6 +1032,19 @@ impl Renderer {
             if width >= 30 && tip_content.chars().count() > avail1 {
                 let (l1, l2) = flashagent_tui::tips::split_tip_at_word_boundary(tip_content, avail1);
                 let row1 = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{l1}\x1b[0m");
+                // The split gives two lines; a tip that needs three loses the
+                // rest, so end the second one on a word rather than inside it.
+                let room = width.saturating_sub(9);
+                let l2 = if l2.chars().count() > room {
+                    let head: String = l2.chars().take(room.saturating_sub(1)).collect();
+                    let cut = match head.rfind(' ') {
+                        Some(i) if i >= room / 3 => head[..i].to_string(),
+                        _ => head,
+                    };
+                    format!("{cut}\u{2026}")
+                } else {
+                    l2.to_string()
+                };
                 let row2 = format!("       \x1b[38;2;175;170;160m{l2}\x1b[0m");
                 tail.push((LineKind::System, clip_ansi(&row1, width.saturating_sub(2))));
                 tail.push((LineKind::System, clip_ansi(&row2, width.saturating_sub(2))));

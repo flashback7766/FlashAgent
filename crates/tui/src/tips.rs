@@ -2204,8 +2204,16 @@ impl TipAnimator {
             let l2_start_char = self.tip_text.chars().count().saturating_sub(line2_full.chars().count());
             let l2_typed_chars = self.char_count.saturating_sub(l2_start_char);
             let typed2: String = line2_full.chars().take(l2_typed_chars).collect();
+            // A tip longer than two lines used to lose the rest mid-word
+            // ("...to configur"). Cut at a word instead, and say so.
             let clipped2 = if typed2.chars().count() > avail2 {
-                typed2.chars().take(avail2).collect::<String>()
+                let room = avail2.saturating_sub(1);
+                let head: String = typed2.chars().take(room).collect();
+                let cut = match head.rfind(' ') {
+                    Some(i) if i >= room / 2 => head[..i].to_string(),
+                    _ => head,
+                };
+                format!("{cut}\u{2026}")
             } else {
                 typed2
             };
