@@ -3,7 +3,7 @@
 Beta builds are numbered `bNNN` and ship on the rolling `beta` pre-release.
 Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
-## Unreleased
+## b236 — updates you can watch
 
 - The status line drops the lightning emoji from its numbers: `TTFT 6.84s
   (495 t/s prefill)`, `Prefill ~1.2s`, `cache 62%`. A telemetry row is meant
