@@ -390,11 +390,11 @@ impl TokenTracker {
                 } else {
                     "prefill".to_string()
                 };
-                parts.push(format!("\x1b[38;2;120;220;140m⚡ TTFT {:.2}s ({spd_str})\x1b[0m", ttft.as_secs_f64()));
+                parts.push(format!("\x1b[38;2;120;220;140mTTFT {:.2}s ({spd_str})\x1b[0m", ttft.as_secs_f64()));
             } else if budget >= 30 {
-                parts.push(format!("\x1b[38;2;120;220;140m⚡ TTFT {:.2}s\x1b[0m", ttft.as_secs_f64()));
+                parts.push(format!("\x1b[38;2;120;220;140mTTFT {:.2}s\x1b[0m", ttft.as_secs_f64()));
             } else {
-                parts.push(format!("\x1b[38;2;120;220;140m⚡ {:.2}s\x1b[0m", ttft.as_secs_f64()));
+                parts.push(format!("\x1b[38;2;120;220;140m{:.2}s\x1b[0m", ttft.as_secs_f64()));
             }
         }
 
@@ -430,7 +430,7 @@ impl TokenTracker {
             } else {
                 let mut fallback_parts = Vec::new();
                 if let Some(ttft) = self.last_ttft {
-                    fallback_parts.push(format!("\x1b[38;2;120;220;140m⚡ {:.2}s\x1b[0m", ttft.as_secs_f64()));
+                    fallback_parts.push(format!("\x1b[38;2;120;220;140m{:.2}s\x1b[0m", ttft.as_secs_f64()));
                 }
                 if let Some(s) = speed {
                     if s > 0.0 {
@@ -467,7 +467,7 @@ impl TokenTracker {
         } else {
             format!("{:.0} t/s", spd)
         };
-        Some(format!("\x1b[38;2;120;220;140m⚡ TTFT {:.2}s ({speed_str})\x1b[0m", ttft.as_secs_f64()))
+        Some(format!("\x1b[38;2;120;220;140mTTFT {:.2}s ({speed_str})\x1b[0m", ttft.as_secs_f64()))
     }
 }
 
@@ -906,7 +906,7 @@ impl Renderer {
             "  \x1b[38;2;135;130;125mtab — complete · ↑/↓ — select · enter — send · esc — dismiss\x1b[0m".to_string()
         } else if st.running {
             let cache_str = if let Some(fk) = st.f_keep {
-                format!(" \x1b[38;2;75;99;130m·\x1b[0m \x1b[38;2;120;220;140m⚡ cache {:.0}%\x1b[0m", fk * 100.0)
+                format!(" \x1b[38;2;75;99;130m·\x1b[0m \x1b[38;2;120;220;140mcache {:.0}%\x1b[0m", fk * 100.0)
             } else {
                 String::new()
             };
