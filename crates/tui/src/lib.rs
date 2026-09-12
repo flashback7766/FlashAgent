@@ -329,6 +329,52 @@ pub fn format_explore(is_running: bool, files: usize, searches: usize, last_targ
     }
 }
 
+
+/// What a call names, in a few words: the file and the size of the change for
+/// a write, the target for a read, the command for a shell call.
+///
+/// Shown next to the model's own header, because the header says what it
+/// meant to do and this says what it asked for.
+pub fn call_facts(name: &str, parsed: &serde_json::Value) -> Option<String> {
+    let path_of = |key: &str| -> Option<String> {
+        let raw = parsed.get(key)?.as_str()?;
+        let base = std::path::Path::new(raw)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(raw);
+        Some(base.to_string())
+    };
+    match name {
+        "edit_file" => {
+            let (mut added, mut deleted) = (0usize, 0usize);
+            for ed in parsed.get("edits")?.as_array()? {
+                deleted += ed.get("old_string").and_then(|s| s.as_str()).unwrap_or("").lines().count();
+                added += ed.get("new_string").and_then(|s| s.as_str()).unwrap_or("").lines().count();
+            }
+            Some(format!("{} +{added} -{deleted}", path_of("path")?))
+        }
+        "write_file" => {
+            let lines = parsed.get("content").and_then(|s| s.as_str()).unwrap_or("").lines().count().max(1);
+            Some(format!("{} +{lines}", path_of("path")?))
+        }
+        "patch_file" => {
+            let patch = parsed.get("patch").and_then(|s| s.as_str()).unwrap_or("");
+            let added = patch.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count();
+            let deleted = patch.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count();
+            Some(format!("{} +{added} -{deleted}", path_of("path")?))
+        }
+        "read_file" | "outline_file" => path_of("path"),
+        "run_shell" => parsed.get("command").and_then(|c| c.as_str()).map(format_cmd),
+        "grep" | "glob" => parsed
+            .get("pattern")
+            .or_else(|| parsed.get("query"))
+            .and_then(|p| p.as_str())
+            .map(|p| format!("\"{}\"", format_cmd(p))),
+        "list_dir" => Some(path_of("path").unwrap_or_else(|| "the project".to_string())),
+        _ => None,
+    }
+}
+
 impl ChatView {
     /// Index of the first live (still-changing) line; `lines.len()` when
     /// everything is settled. Everything before it can be printed to the
@@ -627,7 +673,25 @@ impl ChatView {
                     .map(format_cmd);
 
                 if let Some(header) = header {
-                    let run_text = format!("  \x1b[38;2;160;165;180m{header}\x1b[0m {chevron}");
+                    // The header is the model's intent; the suffix is what the
+                    // call actually names. "Add the missing null check" reads
+                    // well, but only "parser.rs +3 -1" says what happened to
+                    // the tree.
+                    let facts = call_facts(name, &parsed)
+                        // "Read main.rs · main.rs" says it twice. When the
+                        // header already names the file, only what it cannot
+                        // say is worth adding — the size of the change.
+                        .and_then(|f| {
+                            let said = |part: &str| header.to_lowercase().contains(&part.to_lowercase());
+                            match f.split_once(" +") {
+                                Some((file, size)) if said(file) => Some(format!("+{size}")),
+                                None if said(&f) => None,
+                                _ => Some(f),
+                            }
+                        })
+                        .map(|f| format!(" \x1b[38;2;120;125;140m·\x1b[0m \x1b[38;2;160;165;180m{f}\x1b[0m"))
+                        .unwrap_or_default();
+                    let run_text = format!("  \x1b[38;2;160;165;180m{header}\x1b[0m{facts} {chevron}");
                     let done_text = run_text.clone();
                     let fail_text = format!(
                         "  \x1b[38;2;230;120;120mFailed to {}\x1b[0m {chevron}",
@@ -3390,6 +3454,68 @@ mod tests {
         // The assistant line is still live (appends continue after reasoning).
         assert_eq!(v.streaming, Some(0));
         assert_eq!(v.settled_boundary(), 0);
+    }
+
+    #[test]
+    fn a_headed_edit_card_still_says_what_it_did_to_the_tree() {
+        // The header replaced the card, so "Edited main.rs +1 -1" was lost:
+        // the model's intention survived and the fact did not.
+        let mut chat = ChatView::default();
+        chat.push_user("add a line");
+        chat.on_event(&LoopEvent::ToolStarted {
+            id: "e".into(),
+            name: "edit_file".into(),
+            args_json: r#"{"header":"Add a second println to main","path":"src/main.rs","edits":[{"old_string":"one","new_string":"one\ntwo"}]}"#.into(),
+        });
+        chat.on_event(&LoopEvent::ToolFinished { id: "e".into(), is_error: false, result_len: 1, result: Some("ok".into()) });
+        let (settled, live) = chat.render_split(110, ReasoningExpansion::default());
+        let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("Add a second println to main"), "{dump}");
+        assert!(dump.contains("main.rs +2 -1"), "the facts are gone:\n{dump}");
+
+        // A header that names the file gets only what it did not say.
+        let mut chat = ChatView::default();
+        chat.push_user("edit it");
+        chat.on_event(&LoopEvent::ToolStarted {
+            id: "e".into(),
+            name: "edit_file".into(),
+            args_json: r#"{"header":"Fix the loop in main.rs","path":"main.rs","edits":[{"old_string":"one","new_string":"two"}]}"#.into(),
+        });
+        let (settled, live) = chat.render_split(110, ReasoningExpansion::default());
+        let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("Fix the loop in main.rs"), "{dump}");
+        assert!(dump.contains("+1 -1"), "{dump}");
+        assert!(!dump.contains("main.rs · main.rs"), "said twice:\n{dump}");
+    }
+
+    #[test]
+    fn a_header_that_already_names_the_file_is_not_made_to_repeat_it() {
+        let mut chat = ChatView::default();
+        chat.push_user("read it");
+        chat.on_event(&LoopEvent::ToolStarted {
+            id: "r".into(),
+            name: "read_file".into(),
+            args_json: r#"{"header":"Read main.rs","path":"main.rs"}"#.into(),
+        });
+        let (settled, live) = chat.render_split(110, ReasoningExpansion::default());
+        let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("Read main.rs"), "{dump}");
+        assert!(!dump.contains("main.rs · main.rs"), "said twice:\n{dump}");
+    }
+
+    #[test]
+    fn a_headed_shell_card_names_the_command() {
+        let mut chat = ChatView::default();
+        chat.push_user("list files");
+        chat.on_event(&LoopEvent::ToolStarted {
+            id: "s".into(),
+            name: "run_shell".into(),
+            args_json: r#"{"header":"List the files in the project","command":"ls -1"}"#.into(),
+        });
+        let (settled, live) = chat.render_split(110, ReasoningExpansion::default());
+        let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("List the files in the project"), "{dump}");
+        assert!(dump.contains("ls -1"), "{dump}");
     }
 
     #[test]

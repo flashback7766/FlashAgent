@@ -173,13 +173,15 @@ impl EffortMemory {
             return None;
         }
         let turns = if bias.samples == 1 { "turn" } else { "turns" };
+        // "1 of 3 turn" was the old reading; the count in that sentence is
+        // the threshold, not the sample.
         // Said in a menu that is already about this model, so the name would
         // only push the useful half off the edge of the box.
         Some(match bias.steps() {
             1 => format!("one step up, after {} {turns}", bias.samples),
             -1 => format!("one step down, after {} {turns}", bias.samples),
             _ if bias.samples < MIN_SAMPLES => {
-                format!("still watching ({} of {MIN_SAMPLES} {turns})", bias.samples)
+                format!("still watching ({} of {MIN_SAMPLES} turns)", bias.samples)
             }
             _ => format!("nothing to correct, after {} {turns}", bias.samples),
         })

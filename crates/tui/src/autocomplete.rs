@@ -141,11 +141,22 @@ pub fn load_skills(cwd: &Path) -> Vec<AutocompleteItem> {
             // Extract trigger/description from content
             let desc = if let Ok(content) = std::fs::read_to_string(&path) {
                 let mut found_desc = None;
+                // `description:` is what every skill file in the wild carries
+                // — the frontmatter key Claude and Anthropic skills use. Only
+                // reading `Trigger:` meant a perfectly good description was
+                // ignored in favour of "Skill defined in greet.md".
                 for line in content.lines() {
                     let trimmed = line.trim();
-                    if let Some(rest) = trimmed.strip_prefix("Trigger:") {
-                        found_desc = Some(rest.trim().to_string());
-                        break;
+                    if let Some(rest) = trimmed
+                        .strip_prefix("Trigger:")
+                        .or_else(|| trimmed.strip_prefix("description:"))
+                        .or_else(|| trimmed.strip_prefix("Description:"))
+                    {
+                        let text = rest.trim().trim_matches('"').trim();
+                        if !text.is_empty() {
+                            found_desc = Some(text.to_string());
+                            break;
+                        }
                     }
                 }
                 found_desc.unwrap_or_else(|| format!("Skill defined in {}", path.file_name().unwrap_or_default().to_string_lossy()))
@@ -355,6 +366,24 @@ impl AutocompletePopup {
         ));
 
         lines
+    }
+}
+
+#[cfg(test)]
+mod skill_tests {
+    #[test]
+    fn a_skill_is_listed_by_its_own_description() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = dir.path().join(".agents/skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::write(
+            skills.join("greet.md"),
+            "---\nname: greet\ndescription: Say hello politely\n---\n\nBody.\n",
+        )
+        .unwrap();
+        let items = super::load_skills(dir.path());
+        let greet = items.iter().find(|i| i.trigger.contains("greet")).expect("skill found");
+        assert_eq!(greet.description, "Say hello politely");
     }
 }
 

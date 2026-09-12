@@ -496,7 +496,13 @@ impl ToolExec for PermissionedTools {
                 match self.state.gate.approve(&req).await {
                     Decision::Allow => self.inner.execute(call).await,
                     Decision::Deny => ToolOutput {
-                        content: "denied by user".into(),
+                        // A small model read the old "denied by user" as a
+                        // privilege error and started asking for sudo. Say
+                        // what happened and what to do about it.
+                        content: "The user declined this call. Do not retry it and do not look \
+                                  for a way around it — ask them what they would prefer, or \
+                                  carry on with what you can do without it."
+                            .into(),
                         is_error: true,
                     },
                 }
@@ -746,7 +752,7 @@ mod tests {
 
         // Write denied by gate → inner never runs.
         let out = wrapped.execute(&call("write_file", r#"{"path":"a"}"#)).await;
-        assert!(out.is_error && out.content.contains("denied by user"));
+        assert!(out.is_error && out.content.contains("declined this call"));
         assert_eq!(*inner.runs.lock().unwrap(), 0);
 
         // Read passes without the gate.
