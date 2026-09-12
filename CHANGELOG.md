@@ -1,5 +1,15 @@
 # Changelog
 
+## b262 — square boxes, and a quit that does not ask for nothing
+
+- Esc on a session where nothing was said quits straight away. It asked
+  *Quit FlashAgent? The session is saved either way*, but an empty session is
+  not saved and there is no `--resume` to come back to. A session with a
+  conversation still asks.
+- The approval card, the quit and channel dialogs, the question card and
+  `/context` drew their top border one column short, so the right corner sat
+  left of the side under it. Checked at 80, 110 and 140 columns.
+
 ## b261 — the model you loaded
 
 - The setup wizard and the model list find the model LM Studio has loaded.
