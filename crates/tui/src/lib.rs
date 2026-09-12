@@ -298,6 +298,23 @@ pub fn lower_first(text: &str) -> String {
 pub fn format_cmd(cmd: &str) -> String {
     let clean = cmd.trim();
     let first_line = clean.lines().next().unwrap_or(clean).trim();
+    // Models hand back absolute paths, and a line reading "Read
+    // /tmp/claude-1000/-home-flashback/.../audit_proj/main.rs" is all
+    // prefix and no information: everything up to the working directory
+    // is where the user already is.
+    let storage;
+    let first_line = match std::env::current_dir() {
+        Ok(cwd) => {
+            let cwd = cwd.to_string_lossy().to_string();
+            if !cwd.is_empty() && first_line.contains(&cwd) {
+                storage = first_line.replace(&format!("{cwd}/"), "").replace(&cwd, ".");
+                storage.as_str()
+            } else {
+                first_line
+            }
+        }
+        Err(_) => first_line,
+    };
     let max_len = 70;
     if first_line.chars().count() > max_len {
         let truncated: String = first_line.chars().take(max_len - 3).collect();
@@ -3454,6 +3471,15 @@ mod tests {
         // The assistant line is still live (appends continue after reasoning).
         assert_eq!(v.streaming, Some(0));
         assert_eq!(v.settled_boundary(), 0);
+    }
+
+    #[test]
+    fn a_path_inside_the_project_is_shown_relative_to_it() {
+        // "Read /tmp/claude-1000/-home.../audit_proj/main.rs" was all prefix.
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        assert_eq!(format_cmd(&format!("Read {cwd}/src/main.rs")), "Read src/main.rs");
+        assert_eq!(format_cmd(&format!("cat {cwd}")), "cat .");
+        assert_eq!(format_cmd("Read /etc/hosts"), "Read /etc/hosts", "paths elsewhere are left alone");
     }
 
     #[test]
