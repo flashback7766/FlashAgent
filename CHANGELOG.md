@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A finished thought no longer says it is still thinking. The block above a
+  written answer read *Thinking: …* for the rest of the session; it reads
+  *Thought: … (4s)* now, expanded or collapsed, and only says Thinking while
+  the tokens are still arriving.
+- The labels FlashAgent writes follow the conversation in **both** directions.
+  Detection only ever switched to Russian, so an English chat on a config that
+  said `ru` was labelled *Разбираю запрос* and nothing typed could change it
+  back.
 - **The first five minutes.** Walked from an empty home directory with the
   published build, as a new user gets it, and fixed what that turned up:
   - *"Welcome back"* greeted people who had never been here. It now says
