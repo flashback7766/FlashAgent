@@ -275,6 +275,22 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     wrap_styled(text, width)
 }
 
+/// "Add the null check" → "add the null check", so it can follow "Failed to".
+/// Only the first character, and only when it is not part of an identifier
+/// like `MEMORY.md` that would look wrong in lower case.
+pub fn lower_first(text: &str) -> String {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let rest: String = chars.collect();
+    let second_is_upper = rest.chars().next().is_some_and(|c| c.is_uppercase());
+    if second_is_upper {
+        return text.to_string();
+    }
+    first.to_lowercase().collect::<String>() + &rest
+}
+
 pub fn format_cmd(cmd: &str) -> String {
     let clean = cmd.trim();
     let first_line = clean.lines().next().unwrap_or(clean).trim();
@@ -584,7 +600,31 @@ impl ChatView {
                 let parsed: serde_json::Value = serde_json::from_str(args_json.trim()).unwrap_or_default();
                 let chevron = "\x1b[38;2;120;125;140m›\x1b[0m";
 
-                if name == "run_shell" {
+                // The model is asked to say what a call is for. When it did,
+                // that sentence is the line — "Add the missing null check to
+                // parser.rs" tells you more than "Editing parser.rs" ever
+                // could. The expanded card underneath is unchanged, so the
+                // facts are still one keypress away.
+                let header = parsed
+                    .get("header")
+                    .and_then(|h| h.as_str())
+                    .map(str::trim)
+                    .filter(|h| !h.is_empty())
+                    .map(format_cmd);
+
+                if let Some(header) = header {
+                    let run_text = format!("  \x1b[38;2;160;165;180m{header}\x1b[0m {chevron}");
+                    let done_text = run_text.clone();
+                    let fail_text = format!(
+                        "  \x1b[38;2;230;120;120mFailed to {}\x1b[0m {chevron}",
+                        lower_first(&header)
+                    );
+                    let mut line = ChatLine::with_details(LineKind::Tool, run_text.clone(), args_json.clone());
+                    line.tool_name = Some(name.clone());
+                    line.tool_group = Some(ToolGroupKind::Custom { run_text, done_text, fail_text, is_running: true });
+                    self.lines.push(line);
+                    self.open_tool = Some(self.lines.len() - 1);
+                } else if name == "run_shell" {
                     let cmd = parsed.get("command").and_then(|s| s.as_str()).unwrap_or("command").to_string();
                     let mut consolidated = false;
                     if let Some(last_line) = self.lines.last_mut() {
@@ -1029,6 +1069,25 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
     let details_str = call.args_json.as_str();
     let parsed: serde_json::Value = serde_json::from_str(details_str.trim()).unwrap_or_default();
 
+    // The model's stated intent sits above the facts, never instead of them:
+    // the card underneath still shows the command, the diff, the output.
+    let card = |rows: Vec<RenderLine>| -> Vec<RenderLine> {
+        let Some(header) = parsed
+            .get("header")
+            .and_then(|h| h.as_str())
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+        else {
+            return rows;
+        };
+        let mut out = vec![(
+            LineKind::Tool,
+            format!("  \x1b[38;2;160;165;180m{}\x1b[0m", format_cmd(header)),
+        )];
+        out.extend(rows);
+        out
+    };
+
     if tool_name == "run_shell" {
         let cmd = parsed.get("command").and_then(|s| s.as_str()).unwrap_or("command");
         let cwd = parsed.get("cwd").and_then(|s| s.as_str()).map(|s| s.to_string()).unwrap_or_else(|| {
@@ -1036,27 +1095,27 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "~".to_string())
         });
-        return tool_views::render_command_card(
+        return card(tool_views::render_command_card(
             &cwd,
             cmd,
             call.result.as_deref(),
             call.is_error,
             call.is_running,
             width,
-        );
+        ));
     }
 
     if tool_name == "read_file" || tool_name == "outline_file" {
         let path = parsed.get("path").and_then(|s| s.as_str()).unwrap_or("file");
         let offset = parsed.get("offset").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
         let limit = parsed.get("limit").and_then(|s| s.as_u64()).unwrap_or(2000) as usize;
-        return tool_views::render_read_card(
+        return card(tool_views::render_read_card(
             path,
             call.result.as_deref(),
             offset,
             limit,
             width,
-        );
+        ));
     }
 
     if tool_name == "list_dir" || tool_name == "glob" {
@@ -1064,12 +1123,12 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
             .or_else(|| parsed.get("pattern"))
             .and_then(|s| s.as_str())
             .unwrap_or(".");
-        return tool_views::render_directory_card(
+        return card(tool_views::render_directory_card(
             path,
             call.result.as_deref(),
             call.is_running,
             width,
-        );
+        ));
     }
 
     if tool_name == "grep" {
@@ -1077,11 +1136,11 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
             .or_else(|| parsed.get("query"))
             .and_then(|s| s.as_str())
             .unwrap_or("pattern");
-        return tool_views::render_grep_card(
+        return card(tool_views::render_grep_card(
             pattern,
             call.result.as_deref(),
             width,
-        );
+        ));
     }
 
     if tool_name == "edit_file" || tool_name == "write_file" || tool_name == "patch_file" {
@@ -1124,43 +1183,43 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
             (a, d, Some(simulated))
         };
 
-        return tool_views::render_edit_card(
+        return card(tool_views::render_edit_card(
             path,
             added,
             deleted,
             diff_text.as_deref(),
             is_write,
             width,
-        );
+        ));
     }
 
     if tool_name == "spawn_agent" {
         let task = parsed.get("task").and_then(|s| s.as_str()).unwrap_or("task");
-        return tool_views::render_subagent_card(
+        return card(tool_views::render_subagent_card(
             task,
             call.result.as_deref(),
             call.is_running,
             width,
-        );
+        ));
     }
 
     if tool_name.starts_with("memory_") {
         let scope = parsed.get("scope").and_then(|s| s.as_str()).unwrap_or("project");
-        return tool_views::render_memory_card(
+        return card(tool_views::render_memory_card(
             tool_name,
             &[scope.to_string()],
             call.result.as_deref().or(Some(&call.args_json)),
             width,
-        );
+        ));
     }
 
     if tool_name == "git_status" || tool_name == "git_diff" {
         let is_diff = tool_name == "git_diff";
-        return tool_views::render_git_card(
+        return card(tool_views::render_git_card(
             is_diff,
             call.result.as_deref(),
             width,
-        );
+        ));
     }
 
     tool_views::render_generic_card(
@@ -3568,6 +3627,64 @@ mod tests {
             .min()
             .unwrap_or(0);
         assert!(shortest >= 4, "an expression lasting {shortest} frames would be missed");
+    }
+
+    #[test]
+    fn a_tool_line_reads_as_the_model_explained_it() {
+        let mut v = ChatView::default();
+        let args = r#"{"header":"Add the missing null check to parser.rs","path":"src/parser.rs","edits":[]}"#;
+        v.on_event(&LoopEvent::ToolStarted {
+            id: "1".into(),
+            name: "edit_file".into(),
+            args_json: args.into(),
+        });
+        let collapsed = |v: &ChatView| -> String {
+            v.render_split(120, ReasoningExpansion::default())
+                .0
+                .iter()
+                .chain(v.render_split(120, ReasoningExpansion::default()).1.iter())
+                .map(|(_, t)| strip_ansi(t))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let running = collapsed(&v);
+        assert!(running.contains("Add the missing null check to parser.rs"), "{running}");
+        assert!(!running.contains("Editing"), "the header replaces the generated line: {running}");
+
+        // And when the call fails, the same sentence says so.
+        v.on_event(&LoopEvent::ToolFinished {
+            id: "1".into(),
+            is_error: true,
+            result_len: 5,
+            result: Some("error: no such file".into()),
+        });
+        // The expanded diff card renders under the line, so look at the whole
+        // frame rather than assuming a row index.
+        let failed = collapsed(&v);
+        assert!(
+            failed.contains("Failed to add the missing null check to parser.rs"),
+            "{failed}"
+        );
+    }
+
+    #[test]
+    fn a_call_without_a_header_keeps_the_built_in_line() {
+        let mut v = ChatView::default();
+        v.on_event(&LoopEvent::ToolStarted {
+            id: "1".into(),
+            name: "run_shell".into(),
+            args_json: r#"{"command":"cargo test"}"#.into(),
+        });
+        let line = strip_ansi(&v.render(120)[0].1);
+        assert!(line.contains("Running"), "{line}");
+        assert!(line.contains("cargo test"), "{line}");
+    }
+
+    #[test]
+    fn an_identifier_is_not_lower_cased_into_nonsense() {
+        assert_eq!(lower_first("Add a null check"), "add a null check");
+        assert_eq!(lower_first("MEMORY.md needs a line"), "MEMORY.md needs a line");
+        assert_eq!(lower_first(""), "");
     }
 
     #[test]
