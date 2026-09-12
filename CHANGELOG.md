@@ -5,6 +5,17 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 ## Unreleased
 
+- The mascot is drawn properly. A terminal cell is twice as tall as it is
+  wide, so the old sprite — one pixel per cell — came out as a stretched,
+  spiky kite. It now draws two pixels per cell, which makes the pixels square
+  and the shape round. It also breathes (the highlight rises and falls over
+  about three seconds), and the welcome card draws itself in from the top over
+  half a second on start-up.
+- The mascot's face reports whether the model server answered: eyes open and a
+  smile when it did, eyes shut and drained colour when it did not, neutral
+  while the first check is still running. Discovery reruns every few seconds,
+  so starting your server turns the face around by itself — on a first run
+  that is the difference between "nothing happens" and knowing why.
 - `/goal` takes budgets: `/goal [--steps N] [--time 30m] [--tokens 200k]
   <task>`, defaulting to 250 steps and one hour. `--tokens` counts generated
   tokens only — with a prefix cache, a total-token budget mostly measures how

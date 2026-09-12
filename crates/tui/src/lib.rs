@@ -1903,33 +1903,143 @@ const M3_TXT: &str = "\x1b[38;2;235;240;250m";
 const M3_TXT_B: &str = "\x1b[1;38;2;235;240;250m";
 const RESET: &str = "\x1b[0m";
 
+/// What the mascot's face is reacting to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MascotMood {
+    /// Still waiting for the first answer from the model server.
+    Checking,
+    /// The server answered: it is reachable and listing models.
+    Happy,
+    /// The server did not answer — nothing will work until it does.
+    Offline,
+}
+
+/// The mascot as a pixel grid: 16 wide, 12 tall, two pixels per terminal row.
+///
+/// A terminal cell is about twice as tall as it is wide, so a sprite drawn one
+/// pixel per cell comes out stretched — that is what made the old mascot a
+/// spiky kite. Drawing two pixels per cell with `▀` (foreground = upper pixel,
+/// background = lower) gives square pixels and a shape that reads as intended.
+///
+/// `.` transparent · `#` body · `o` highlight · `w` eye · `k` mouth
+fn mascot_grid(blink: bool, mood: MascotMood) -> [&'static str; 12] {
+    // Blinking closes the upper half of each eye and leaves a lash line.
+    // Offline keeps the eyes shut: nothing to look at until the server answers.
+    let (eyes_top, eyes_bottom) = if blink || mood == MascotMood::Offline {
+        (".##############.", ".###kk####kk###.")
+    } else {
+        (".###ww####ww###.", ".###ww####ww###.")
+    };
+    // The mouth carries the mood: corners up when the server answered, a flat
+    // line when it did not, a small neutral dot while we are still asking.
+    let (mouth_top, mouth_bottom) = match mood {
+        MascotMood::Happy => ("..###k####k###..", "..####kkkk####.."),
+        MascotMood::Checking => ("..############..", "..#####kk#####.."),
+        MascotMood::Offline => ("..############..", "..####kkkk####.."),
+    };
+    [
+        "......oooo......",
+        "....oooooooo....",
+        "..############..",
+        ".##############.",
+        eyes_top,
+        eyes_bottom,
+        mouth_top,
+        mouth_bottom,
+        "..############..",
+        "...##########...",
+        "....##....##....",
+        "....##....##....",
+    ]
+}
+
+/// Breathing: a slow triangle wave, 0 (dimmest) to 5 (brightest), one full
+/// cycle per ~3 seconds at the 80 ms UI tick.
+fn breath_level(tick_n: usize) -> u8 {
+    const PERIOD: usize = 38;
+    let half = PERIOD / 2;
+    let phase = tick_n % PERIOD;
+    let up = if phase < half { phase } else { PERIOD - phase - 1 };
+    (up.min(half - 1) * 6 / half) as u8
+}
+
+/// Whether the mascot looks different at `tick_n` than it did one tick ago.
+///
+/// The welcome card is rebuilt only when this says so: breathing must not cost
+/// a full card repaint 12 times a second.
+pub fn mascot_needs_repaint(tick_n: usize) -> bool {
+    let blink = |t: usize| (t % 50 == 46) || (t % 50 == 47);
+    let prev = tick_n.wrapping_sub(1);
+    blink(tick_n) != blink(prev) || breath_level(tick_n) != breath_level(prev)
+}
+
+/// Colour of one pixel, or `None` when it is transparent. `breath` (0..=5)
+/// lifts the highlight; `offline` drains the body towards grey.
+fn mascot_color(px: u8, breath: u8, offline: bool) -> Option<(u8, u8, u8)> {
+    let lift = |lo: u8, hi: u8| -> u8 {
+        let span = hi as i32 - lo as i32;
+        (lo as i32 + span * breath as i32 / 5) as u8
+    };
+    let color = match px {
+        b'#' => (138, 180, 248),
+        b'o' => (lift(150, 194), lift(196, 231), lift(224, 255)),
+        b'w' => (255, 255, 255),
+        b'k' => (32, 42, 62),
+        _ => return None,
+    };
+    if offline {
+        // Halfway to grey: visibly not the healthy colour, still readable.
+        let (r, g, b) = color;
+        let grey = ((r as u16 + g as u16 + b as u16) / 3) as u8;
+        let mix = |c: u8| ((c as u16 + grey as u16) / 2) as u8;
+        return Some((mix(r), mix(g), mix(b)));
+    }
+    Some(color)
+}
+
 /// Returns the 6 lines of the 8-bit companion mascot «Swift» in Material 3 colors.
 pub fn mascot_swift_lines() -> [String; 6] {
     mascot_swift_lines_animated(0)
 }
 
-/// Returns the 6 lines of the 8-bit companion mascot «Swift» with animation frames based on `tick_n`.
-/// Every ~4 seconds, the mascot blinks its eyes.
+/// Returns the 6 lines of the mascot for `tick_n`, with a neutral mood.
 pub fn mascot_swift_lines_animated(tick_n: usize) -> [String; 6] {
-    let is_blink = (tick_n % 50 == 46) || (tick_n % 50 == 47);
-    let eyes = if is_blink {
-        "\x1b[38;2;194;231;255m▄\x1b[0m"
-    } else {
-        "\x1b[1;38;2;255;255;255m●\x1b[0m"
-    };
-    let c_ice = "\x1b[38;2;194;231;255m";
-    let c_pri = "\x1b[38;2;138;180;248m";
-    let bg_dark = "\x1b[48;2;28;27;20m";
-    let reset = "\x1b[0m";
+    mascot_swift_lines_mood(tick_n, MascotMood::Checking)
+}
 
-    [
-        format!("         {c_ice}▄█▄{reset}         "),
-        format!("       {c_pri}▄█████▄{reset}       "),
-        format!("     {c_pri}▄██{reset}{bg_dark}{eyes}{reset}{c_pri}███{reset}{bg_dark}{eyes}{reset}{c_pri}██▄{reset}     "),
-        format!("     {c_pri}▀████{reset}{bg_dark}{c_ice}▼{reset}{c_pri}████▀{reset}     "),
-        format!("       {c_pri}▀█████▀{reset}       "),
-        format!("        {c_ice}█   █{reset}        "),
-    ]
+/// Returns the 6 lines of the mascot: blinking every ~4 seconds, breathing
+/// continuously, and wearing `mood` on its face.
+///
+/// Every line is exactly 16 columns wide, transparent pixels included, so the
+/// rows stay aligned with each other when the card centres them.
+pub fn mascot_swift_lines_mood(tick_n: usize, mood: MascotMood) -> [String; 6] {
+    let blink = (tick_n % 50 == 46) || (tick_n % 50 == 47);
+    let grid = mascot_grid(blink, mood);
+    let breath = breath_level(tick_n);
+    let offline = mood == MascotMood::Offline;
+    let mut out: Vec<String> = Vec::with_capacity(6);
+    for pair in grid.chunks(2) {
+        let (top, bottom) = (pair[0].as_bytes(), pair[1].as_bytes());
+        let mut line = String::new();
+        for x in 0..16 {
+            match (mascot_color(top[x], breath, offline), mascot_color(bottom[x], breath, offline)) {
+                (None, None) => line.push(' '),
+                (Some((r, g, b)), None) => {
+                    line.push_str(&format!("\x1b[38;2;{r};{g};{b}m▀\x1b[0m"));
+                }
+                (None, Some((r, g, b))) => {
+                    line.push_str(&format!("\x1b[38;2;{r};{g};{b}m▄\x1b[0m"));
+                }
+                (Some((tr, tg, tb)), Some((br, bg, bb))) => {
+                    line.push_str(&format!(
+                        "\x1b[38;2;{tr};{tg};{tb}m\x1b[48;2;{br};{bg};{bb}m▀\x1b[0m"
+                    ));
+                }
+            }
+        }
+        out.push(line);
+    }
+    out.try_into().expect("12 pixel rows make exactly 6 terminal rows")
 }
 
 /// Formats the startup welcome banner with clean version header and quick instructions.
@@ -1986,6 +2096,7 @@ pub fn welcome_card_responsive(
         height,
         tick_n,
         true,
+        MascotMood::Checking,
     )
 }
 
@@ -2002,6 +2113,7 @@ pub fn welcome_card_responsive_opts(
     height: usize,
     tick_n: usize,
     show_mascot: bool,
+    mood: MascotMood,
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
     let username = std::env::var("USER")
@@ -2016,7 +2128,7 @@ pub fn welcome_card_responsive_opts(
     let th_str = thinking.unwrap_or("High");
     let ctx_short = context_window.unwrap_or("128k");
     let mascot = if show_mascot {
-        mascot_swift_lines_animated(tick_n)
+        mascot_swift_lines_mood(tick_n, mood)
     } else {
         [
             "".to_string(),
@@ -3436,19 +3548,57 @@ mod tests {
     }
 
     #[test]
-    fn mascot_swift_lines_dimensions_and_animation() {
-        let open = mascot_swift_lines_animated(0);
-        let blink = mascot_swift_lines_animated(46);
-        for l in &open {
-            assert_eq!(visible_width(l), 21, "mascot line must be exactly 21 visible chars: {l}");
+    fn mascot_lines_are_a_fixed_width_grid() {
+        for mood in [MascotMood::Checking, MascotMood::Happy, MascotMood::Offline] {
+            for tick in [0usize, 19, 46, 47, 60] {
+                for line in &mascot_swift_lines_mood(tick, mood) {
+                    assert_eq!(
+                        visible_width(line),
+                        16,
+                        "every mascot row is 16 columns so the rows stay aligned: {line}"
+                    );
+                }
+            }
         }
-        for l in &blink {
-            assert_eq!(visible_width(l), 21, "mascot blinking line must be exactly 21 visible chars: {l}");
-        }
-        assert!(open[2].contains('●'), "open eyes line must contain ●");
-        assert!(blink[2].contains('▄'), "blinking eyes line must contain ▄");
     }
 
+    #[test]
+    fn mascot_blinks_and_breathes() {
+        let open = mascot_swift_lines_mood(0, MascotMood::Happy);
+        let blink = mascot_swift_lines_mood(46, MascotMood::Happy);
+        // Row 2 carries the eyes (pixel rows 4-5).
+        assert!(open[2].contains("255;255;255"), "open eyes are white: {}", open[2]);
+        assert!(!blink[2].contains("255;255;255"), "shut eyes show no white: {}", blink[2]);
+
+        // Breathing moves the highlight colour on the top row without
+        // touching the shape.
+        let dim = mascot_swift_lines_mood(0, MascotMood::Happy);
+        let bright = mascot_swift_lines_mood(18, MascotMood::Happy);
+        assert_ne!(dim[0], bright[0], "the highlight must change over the breath cycle");
+        assert_eq!(visible_width(&dim[0]), visible_width(&bright[0]));
+    }
+
+    #[test]
+    fn mascot_face_reports_the_server_state() {
+        let happy = mascot_swift_lines_mood(0, MascotMood::Happy);
+        let offline = mascot_swift_lines_mood(0, MascotMood::Offline);
+        let checking = mascot_swift_lines_mood(0, MascotMood::Checking);
+        assert!(happy != offline && happy != checking && checking != offline);
+        // Offline shuts the eyes and drains the colour; the body colour of a
+        // reachable server must not appear.
+        assert!(!offline.concat().contains("138;180;248"), "offline must not use the healthy blue");
+        assert!(happy.concat().contains("138;180;248"));
+    }
+
+    #[test]
+    fn mascot_repaints_only_when_it_changed() {
+        // The card is rebuilt on these ticks; at 12.5 ticks a second, doing it
+        // every tick would repaint the screen for nothing.
+        let repaints = (0..100).filter(|t| mascot_needs_repaint(*t)).count();
+        assert!(repaints > 4, "the mascot must actually animate: {repaints}");
+        assert!(repaints < 40, "too many card rebuilds: {repaints}");
+        assert!(mascot_needs_repaint(46), "the blink must trigger a repaint");
+    }
     #[test]
     fn test_render_markdown_tables_headings_and_lists() {
         let md_input = "## Stack\n\n\
