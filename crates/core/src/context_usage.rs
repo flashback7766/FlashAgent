@@ -196,3 +196,143 @@ mod tests {
         assert_eq!(ContextUsage::format_used_tokens(500), "500");
     }
 }
+
+/// What is known when deciding whether to compact before the next turn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompactionInput {
+    /// Tokens in use right now.
+    pub used: usize,
+    /// Window capacity.
+    pub capacity: usize,
+    /// Tokens that cannot be compacted away: the system prompt, the injected
+    /// memory index and the tool schemas. Summarising never touches them.
+    pub fixed: usize,
+    /// How much the last turn added. The next one is assumed to want about
+    /// as much again.
+    pub last_turn_growth: usize,
+    /// The user's threshold, as a percentage of the window.
+    pub threshold_pct: usize,
+}
+
+/// Whether to compact now, and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionVerdict {
+    /// Leave it alone.
+    No,
+    /// The next turn would not fit.
+    NextTurnWouldNotFit,
+    /// Past the threshold the user set.
+    PastThreshold,
+}
+
+impl CompactionVerdict {
+    pub fn should(self) -> bool {
+        self != CompactionVerdict::No
+    }
+}
+
+/// Decide whether the conversation should be summarised before the next turn.
+///
+/// A flat percentage is a poor rule on its own. It fires on a conversation
+/// whose bulk is the system prompt and tool schemas — which summarising cannot
+/// shrink, so the cost is the recent context and the gain is nothing — and it
+/// waits for the line to be crossed even when the next turn is plainly going
+/// to run past the end of the window.
+pub fn should_compact(input: CompactionInput) -> CompactionVerdict {
+    let CompactionInput { used, capacity, fixed, last_turn_growth, threshold_pct } = input;
+    if capacity == 0 {
+        return CompactionVerdict::No;
+    }
+
+    // What summarising could actually reclaim. Below this there is nothing to
+    // win and a recent turn to lose.
+    let compactable = used.saturating_sub(fixed);
+    const MIN_WORTH_COMPACTING: usize = 2_000;
+    if compactable < MIN_WORTH_COMPACTING {
+        return CompactionVerdict::No;
+    }
+
+    // A turn needs room for the prompt and for the answer. Assume the next one
+    // is the size of the last, with a floor for the first few turns.
+    let expected = last_turn_growth.max(1_500);
+    let headroom = capacity.saturating_sub(used);
+    if headroom < expected {
+        return CompactionVerdict::NextTurnWouldNotFit;
+    }
+
+    let pct = (used as f32 / capacity as f32) * 100.0;
+    if pct >= threshold_pct as f32 {
+        return CompactionVerdict::PastThreshold;
+    }
+    CompactionVerdict::No
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+
+    fn input() -> CompactionInput {
+        CompactionInput {
+            used: 10_000,
+            capacity: 100_000,
+            fixed: 6_000,
+            last_turn_growth: 2_000,
+            threshold_pct: 90,
+        }
+    }
+
+    #[test]
+    fn an_early_conversation_is_left_alone() {
+        assert_eq!(should_compact(input()), CompactionVerdict::No);
+    }
+
+    #[test]
+    fn the_threshold_still_applies() {
+        let late = CompactionInput { used: 92_000, ..input() };
+        assert_eq!(should_compact(late), CompactionVerdict::PastThreshold);
+    }
+
+    #[test]
+    fn a_turn_that_would_not_fit_is_not_made_to_wait_for_the_threshold() {
+        // 80% used, but the last turn took 25k and there are 20k left: the
+        // next one runs off the end, and finding that out mid-turn costs the
+        // turn.
+        let tight = CompactionInput { used: 80_000, last_turn_growth: 25_000, ..input() };
+        assert_eq!(should_compact(tight), CompactionVerdict::NextTurnWouldNotFit);
+    }
+
+    #[test]
+    fn nothing_is_compacted_when_the_bulk_cannot_be_compacted() {
+        // A small window filled by the system prompt, memory and tool
+        // schemas: summarising the three remaining messages frees nothing and
+        // throws away what the model was just told.
+        let mostly_fixed = CompactionInput {
+            used: 15_000,
+            capacity: 16_000,
+            fixed: 14_000,
+            last_turn_growth: 3_000,
+            threshold_pct: 90,
+        };
+        assert_eq!(should_compact(mostly_fixed), CompactionVerdict::No);
+    }
+
+    #[test]
+    fn a_conversation_with_real_history_in_a_tight_window_is_compacted() {
+        let worth_it = CompactionInput {
+            used: 15_000,
+            capacity: 16_000,
+            fixed: 6_000,
+            last_turn_growth: 3_000,
+            threshold_pct: 90,
+        };
+        assert_eq!(should_compact(worth_it), CompactionVerdict::NextTurnWouldNotFit);
+    }
+
+    #[test]
+    fn a_missing_capacity_never_triggers_anything() {
+        let zero = CompactionInput { capacity: 0, ..input() };
+        assert_eq!(should_compact(zero), CompactionVerdict::No);
+        assert!(!CompactionVerdict::No.should());
+        assert!(CompactionVerdict::PastThreshold.should());
+    }
+}

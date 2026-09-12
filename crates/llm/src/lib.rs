@@ -5,6 +5,7 @@
 //! JSON repair runs before parsing so slightly-broken model output still lands.
 //! Reasoning streams are first-class citizens.
 
+pub mod encoding;
 pub mod repair;
 pub mod types;
 pub mod thinking;
@@ -13,6 +14,7 @@ pub mod tokenizer;
 mod parse;
 mod openai;
 
+pub use encoding::base64_encode;
 pub use openai::OpenAiCompat;
 pub use parse::{ChunkParser, SseDecoder, TextToolScanner, ScannerEvent};
 pub use repair::{effective_args, repair_json};

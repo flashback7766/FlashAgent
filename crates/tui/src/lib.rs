@@ -22,6 +22,7 @@ pub mod select;
 pub mod settings;
 pub mod startup;
 pub mod tips;
+pub mod image_cost;
 pub mod memory_view;
 pub mod whatsnew;
 pub mod wizard;
@@ -59,6 +60,8 @@ pub enum UiEvent {
     ServerDiscovered(ServerDiscovery),
     /// Outcome of the Settings → "Run Tool Test" probe.
     ToolTestResult(String),
+    /// What a picture costs this model, measured against the server.
+    ImageCost { model: String, per_pixel: f32, fixed: f32 },
     BackgroundRecap {
         turn_id: u64,
         recap: String,
@@ -619,6 +622,22 @@ impl ChatView {
         self.streaming = None;
         self.streaming_reasoning = None;
         self.lines.push(ChatLine::new(LineKind::System, text.to_string()));
+    }
+
+    /// Replace the last system line with its outcome.
+    ///
+    /// Used for the work that announces itself before it starts —
+    /// "Compacting context..." becomes "Context compacted · 12k saved" in
+    /// place, rather than leaving both on the screen.
+    pub fn replace_last_system(&mut self, text: &str) {
+        match self.lines.iter().rposition(|l| l.kind == LineKind::System) {
+            Some(i) => {
+                self.lines[i].text = text.to_string();
+                *self.settled_cache.lock() = SettledRenderCache::default();
+                self.needs_reprint = true;
+            }
+            None => self.push_system(text),
+        }
     }
 
 
