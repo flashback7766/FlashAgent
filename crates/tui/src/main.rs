@@ -19,6 +19,7 @@ use flashagent_core::{
 use flashagent_llm::{ChatMessage, LlmBackend};
 use flashagent_tools::{BuiltinTools, BuiltinToolsConfig};
 use flashagent_tui::goal::{GoalBudgets, GoalLedger};
+use flashagent_tui::MascotMood;
 use flashagent_tui::{
     clip_ansi, pad_box_row, render_session_saved_card, restore_line_color,
     visible_width, welcome_card_responsive_opts, AutocompletePopup, ChatView, ConfirmSelect,
@@ -1656,9 +1657,11 @@ fn refresh_welcome_card_if_before_user_msg(
     current_effort: &str,
     context_display: Option<&str>,
     show_mascot: bool,
+    mood: MascotMood,
 ) {
     refresh_welcome_card_animated(
-        chat, renderer, model, cwd_display, mode_str, memory_docs, source, current_effort, context_display, 0, None, show_mascot,
+        chat, renderer, model, cwd_display, mode_str, memory_docs, source, current_effort,
+        context_display, 0, None, show_mascot, mood, None,
     );
 }
 
@@ -1676,6 +1679,10 @@ fn refresh_welcome_card_animated(
     tick_n: usize,
     width_override: Option<usize>,
     show_mascot: bool,
+    mood: MascotMood,
+    // `reveal_rows`: draw only this many rows — the start-up reveal, where the
+    // card appears to draw itself from the top down. `None` draws all of it.
+    reveal_rows: Option<usize>,
 ) {
     if !chat.has_user_message() {
         let (term_w, term_h) = {
@@ -1694,7 +1701,12 @@ fn refresh_welcome_card_animated(
             term_h,
             tick_n,
             show_mascot,
+            mood,
         );
+        let card = match reveal_rows {
+            Some(rows) => card.into_iter().take(rows.max(1)).collect(),
+            None => card,
+        };
         chat.update_welcome_card(card);
         renderer.request_reprint();
     }
@@ -1878,8 +1890,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         term_h as usize,
         0,
         app_config.show_mascot,
+        MascotMood::Checking,
     );
-    chat.update_welcome_card(initial_card);
+    // Only the first row goes up now: the tick loop reveals the rest over the
+    // next half second, so the card appears to draw itself.
+    let first_row: Vec<_> = initial_card.into_iter().take(1).collect();
+    chat.update_welcome_card(first_row);
 
     if let Some(ref resume_id) = resume_session_id {
         if let Some(home) = flashagent_home_dir() {
@@ -1942,6 +1958,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let mut goal_ledger: Option<GoalLedger> = None;
     let mut copy_toast: Option<(String, std::time::Instant)> = None;
     let mut last_ctrl_c: Option<std::time::Instant> = None;
+    let started_at = std::time::Instant::now();
+    let mut last_mascot_mood = MascotMood::Checking;
 
     macro_rules! finish {
         () => {
@@ -1955,6 +1973,16 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     }
 
     'main_loop: loop {
+        // The face reports the one thing that decides whether anything works:
+        // did the model server answer. Discovery reruns every few seconds, so
+        // starting the server later turns the face around on its own.
+        let mascot_mood = if source.discovery().is_some() {
+            MascotMood::Happy
+        } else if started_at.elapsed() < std::time::Duration::from_secs(5) {
+            MascotMood::Checking
+        } else {
+            MascotMood::Offline
+        };
         let autocomplete = if !running
             && input.starts_with('/')
             && effort_menu.is_none()
@@ -1988,6 +2016,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     tick_n,
                     Some(term_w as usize),
                     app_config.show_mascot,
+                    mascot_mood,
+                    None,
                 );
             }
         }
@@ -2124,7 +2154,19 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 if term_resized {
                     last_term_size = current_term_size;
                 }
-                if !running && !chat.has_user_message() && (term_resized || tick_n % 50 == 46 || tick_n % 50 == 48) {
+                // The mascot breathes and blinks, and the card draws itself
+                // in on start-up; rebuild it only on the ticks where it
+                // actually looks different.
+                let reveal_rows = welcome_reveal_rows(started_at);
+                let mood_changed = mascot_mood != last_mascot_mood;
+                last_mascot_mood = mascot_mood;
+                if !running
+                    && !chat.has_user_message()
+                    && (term_resized
+                        || mood_changed
+                        || reveal_rows.is_some()
+                        || flashagent_tui::mascot_needs_repaint(tick_n))
+                {
                     refresh_welcome_card_animated(
                         &mut chat,
                         &mut renderer,
@@ -2138,6 +2180,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         tick_n,
                         Some(current_term_size.0 as usize),
                         app_config.show_mascot,
+                        mascot_mood,
+                        reveal_rows,
                     );
                 }
                 if term_resized {
@@ -2235,6 +2279,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             &current_effort,
                             current_context.as_deref(),
                             app_config.show_mascot,
+                            mascot_mood,
                         );
 
                         if model_changed {
@@ -2405,6 +2450,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         tick_n,
                         Some(cols as usize),
                         app_config.show_mascot,
+                        mascot_mood,
+                        None,
                     );
                 }
                 renderer.request_reprint();
@@ -2521,6 +2568,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                 &current_effort,
                                 current_context.as_deref(),
                                 app_config.show_mascot,
+                                mascot_mood,
                             );
                             renderer.request_reprint();
                         }
@@ -2592,6 +2640,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     &current_effort,
                                     current_context.as_deref(),
                                     app_config.show_mascot,
+                                    mascot_mood,
                                 );
                             }
                             renderer.request_reprint();
@@ -2772,6 +2821,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     &current_effort,
                                     current_context.as_deref(),
                                     app_config.show_mascot,
+                                    mascot_mood,
                                 );
                                 custom_placeholder = Some(format!("Switched active model to: {current_model}"));
                                 suggested_prompt = None;
@@ -2806,6 +2856,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     &current_effort,
                                     current_context.as_deref(),
                                     app_config.show_mascot,
+                                    mascot_mood,
                                 );
                                 custom_placeholder = Some(format!("Thinking effort set to: {current_effort}"));
                                 suggested_prompt = None;
@@ -3372,6 +3423,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             &current_effort,
                             current_context.as_deref(),
                             app_config.show_mascot,
+                            mascot_mood,
                         );
                         custom_placeholder = Some(format!("Permission mode set to: {}", next_mode.label()));
                         suggested_prompt = None;
@@ -3749,6 +3801,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     &current_effort,
                                     current_context.as_deref(),
                                     app_config.show_mascot,
+                                    mascot_mood,
                                 );
                                 custom_placeholder = Some(format!("Thinking effort set to: {arg_val}"));
                                 suggested_prompt = None;
@@ -3791,6 +3844,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                     &current_effort,
                                     current_context.as_deref(),
                                     app_config.show_mascot,
+                                    mascot_mood,
                                 );
                                 custom_placeholder = Some(format!("Permission mode set to: {}", next_mode.label()));
                                 suggested_prompt = None;
@@ -3827,6 +3881,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                                         &current_effort,
                                         current_context.as_deref(),
                                         app_config.show_mascot,
+                                        mascot_mood,
                                     );
                                     custom_placeholder = Some(format!("Permission mode set to: {}", mode.label()));
                                     suggested_prompt = None;
@@ -4487,6 +4542,15 @@ fn spawn_turn(
         let result = res.map_err(|e| (e.to_string(), e.into_history()));
         let _ = tx.send(UiEvent::Finished { turn_id, result });
     })
+}
+
+/// How many rows of the welcome card to draw, so it appears to draw itself
+/// from the top down over the first half second. `None` once it is whole.
+fn welcome_reveal_rows(started_at: std::time::Instant) -> Option<usize> {
+    const ROW_MS: u128 = 35;
+    const ROWS: u128 = 15;
+    let elapsed = started_at.elapsed().as_millis();
+    (elapsed < ROW_MS * ROWS).then(|| (elapsed / ROW_MS) as usize + 1)
 }
 
 fn extract_user_prompt(content: &str) -> &str {
