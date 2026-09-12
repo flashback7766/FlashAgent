@@ -182,8 +182,20 @@ fn style_inline(text: &str, base: &str) -> String {
     let mut out = String::from(base);
     let mut in_code = false;
     for part in text.split('`') {
-        out.push_str(if in_code { CODE } else { base });
-        out.push_str(part);
+        if in_code {
+            out.push_str(CODE);
+            out.push_str(part);
+        } else {
+            // Outside code spans the file's own emphasis is markup, and
+            // printing "**Pictures.**" on screen shows the marks rather than
+            // the emphasis.
+            let mut bold = false;
+            for chunk in part.split("**") {
+                out.push_str(if bold { BRIGHT } else { base });
+                out.push_str(chunk);
+                bold = !bold;
+            }
+        }
         in_code = !in_code;
     }
     out.push_str(RESET);
@@ -677,6 +689,15 @@ mod tests {
         view.handle_key(KeyCode::Tab);
         assert_eq!(view.pages[view.page].version, version);
         assert!(view.fully_revealed(), "detail you asked for does not animate in");
+    }
+
+    #[test]
+    fn the_changelogs_own_markup_is_shown_as_emphasis_not_as_asterisks() {
+        let styled = style_inline("**Pictures.** `Ctrl+V` pastes one", TEXT);
+        let plain = crate::strip_ansi(&styled);
+        assert_eq!(plain, "Pictures. Ctrl+V pastes one");
+        assert!(styled.contains(BRIGHT), "the emphasis is kept, as colour");
+        assert!(styled.contains(CODE));
     }
 
     #[test]
