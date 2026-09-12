@@ -790,7 +790,7 @@ impl SetupWizard {
                 let count_info = if self.is_lm_studio() && self.discovered_models.iter().any(|m| m.is_loaded) {
                     format!("({total_models} loaded in LM Studio)")
                 } else if self.model_search.is_empty() {
-                    format!("({total_models} models loaded)")
+                    format!("({total_models} on the server)")
                 } else {
                     format!("({total_matches}/{total_models} · filter: \"{}\")", self.model_search)
                 };
@@ -1197,7 +1197,7 @@ mod tests {
 
         // 10 items shown in window
         let rendered = wizard.render(80).join("\n");
-        assert!(rendered.contains("430 models loaded"));
+        assert!(rendered.contains("430 on the server"));
         assert!(rendered.contains("▼ ... (420 more below)"));
 
         // Type live search "variant-04"
