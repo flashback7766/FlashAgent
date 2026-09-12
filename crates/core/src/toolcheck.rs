@@ -103,6 +103,21 @@ pub fn scenarios() -> Vec<Scenario> {
             title: "moves on to the next tool",
             matters: "multi-step work is the whole point of an agent",
         },
+        Scenario {
+            key: "exact_content",
+            title: "keeps content exact through JSON",
+            matters: "quotes and newlines mangled in transit corrupt the file being written",
+        },
+        Scenario {
+            key: "after_error",
+            title: "recovers from a failed tool call",
+            matters: "tools fail constantly; a model that cannot adapt stalls on the first one",
+        },
+        Scenario {
+            key: "two_calls",
+            title: "asks for two files in one turn",
+            matters: "one call per turn turns a ten-file job into ten round trips",
+        },
     ]
 }
 
@@ -112,6 +127,11 @@ fn probe_tools() -> Vec<ToolSpec> {
             name: "read_lines".into(),
             description: "Read the first N lines of a file.".into(),
             parameters_json: r#"{"type":"object","properties":{"path":{"type":"string"},"count":{"type":"integer"}},"required":["path","count"]}"#.into(),
+        },
+        ToolSpec {
+            name: "write_file".into(),
+            description: "Write content to a file, replacing it.".into(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#.into(),
         },
         ToolSpec {
             name: "report_status".into(),
@@ -130,12 +150,19 @@ fn opts() -> TurnOptions {
     }
 }
 
-/// What one turn produced.
+/// What one turn produced. Calls are kept in full: a turn may legitimately
+/// carry several, and whether it does is itself one of the things measured.
 struct Turn {
-    call: Option<(String, String, CallStyle)>,
+    calls: Vec<(String, String, CallStyle)>,
     text: String,
     secs: f32,
     error: Option<String>,
+}
+
+impl Turn {
+    fn first_call(&self) -> Option<&(String, String, CallStyle)> {
+        self.calls.first()
+    }
 }
 
 async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Duration) -> Turn {
@@ -146,54 +173,68 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
             .turn_with_options(messages, &tools, &opts())
             .await
             .map_err(|e| e.to_string())?;
-        let (mut name, mut args, mut text) = (String::new(), String::new(), String::new());
+        // Deltas arrive interleaved by index, the same way the agent loop
+        // assembles them.
+        let mut parts: Vec<(String, String)> = Vec::new();
+        let mut text = String::new();
         while let Some(ev) = stream.next().await {
             match ev.map_err(|e| e.to_string())? {
-                LlmEvent::ToolCallDelta { name: Some(n), args_delta, .. } => {
-                    if name.is_empty() {
-                        name = n;
+                LlmEvent::ToolCallDelta { index, name, args_delta, .. } => {
+                    if parts.len() <= index {
+                        parts.resize(index + 1, (String::new(), String::new()));
                     }
-                    args.push_str(&args_delta);
+                    let slot = &mut parts[index];
+                    if let Some(n) = name {
+                        if slot.0.is_empty() {
+                            slot.0 = n;
+                        }
+                    }
+                    slot.1.push_str(&args_delta);
                 }
-                LlmEvent::ToolCallDelta { args_delta, .. } => args.push_str(&args_delta),
                 LlmEvent::TextDelta(t) => text.push_str(&t),
                 _ => {}
             }
         }
-        Ok::<_, String>((name, args, text))
+        Ok::<_, String>((parts, text))
     };
 
     match tokio::time::timeout(timeout, collect).await {
         Err(_) => Turn {
-            call: None,
+            calls: Vec::new(),
             text: String::new(),
             secs: started.elapsed().as_secs_f32(),
             error: Some(format!("no answer within {}s", timeout.as_secs())),
         },
         Ok(Err(e)) => Turn {
-            call: None,
+            calls: Vec::new(),
             text: String::new(),
             secs: started.elapsed().as_secs_f32(),
             error: Some(e),
         },
-        Ok(Ok((name, args, text))) => {
+        Ok(Ok((parts, text))) => {
             let secs = started.elapsed().as_secs_f32();
-            let call = if !name.is_empty() {
-                Some((name, args, CallStyle::Native))
-            } else {
+            let mut calls: Vec<(String, String, CallStyle)> = parts
+                .into_iter()
+                .filter(|(name, _)| !name.is_empty())
+                .map(|(name, args)| (name, args, CallStyle::Native))
+                .collect();
+            if calls.is_empty() {
                 // The same recovery the agent loop uses, so the score reflects
                 // what a real run would do, not what the backend reported.
                 let mut scanner = TextToolScanner::default();
                 let mut events = scanner.feed(&text);
                 events.extend(scanner.finish());
-                events.into_iter().find_map(|e| match e {
-                    ScannerEvent::ToolCall { name, args_json, .. } => {
-                        Some((name, args_json, CallStyle::Recovered))
-                    }
-                    ScannerEvent::Text(_) => None,
-                })
-            };
-            Turn { call, text, secs, error: None }
+                calls = events
+                    .into_iter()
+                    .filter_map(|e| match e {
+                        ScannerEvent::ToolCall { name, args_json, .. } => {
+                            Some((name, args_json, CallStyle::Recovered))
+                        }
+                        ScannerEvent::Text(_) => None,
+                    })
+                    .collect();
+            }
+            Turn { calls, text, secs, error: None }
         }
     }
 }
@@ -368,7 +409,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     .await;
     results.push((
         "no_spurious_call".to_string(),
-        match (&turn.error, &turn.call) {
+        match (&turn.error, turn.first_call()) {
             (Some(e), _) => Outcome::Fail { detail: e.clone(), secs: turn.secs },
             (None, Some((name, _, _))) => Outcome::Fail {
                 detail: format!("called {name} on a question that needed no tool"),
@@ -401,7 +442,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     .await;
     results.push((
         "uses_result".to_string(),
-        match (&turn.error, &turn.call) {
+        match (&turn.error, turn.first_call()) {
             (Some(e), _) => Outcome::Fail { detail: e.clone(), secs: turn.secs },
             (None, Some((name, _, _))) => Outcome::Fail {
                 detail: format!("called {name} again instead of answering from the result"),
@@ -444,6 +485,90 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         }
     })));
 
+    // 6. Content with the characters that break naive JSON encoding.
+    const EXACT: &str = "line one\n\"quoted\"\nend";
+    let turn = run_turn(
+        llm,
+        &[
+            ChatMessage::system("You are a coding agent. Use the tools to do what is asked."),
+            ChatMessage::user(
+                "Write exactly these three lines to notes.txt, nothing else:\nline one\n\"quoted\"\nend",
+            ),
+        ],
+        timeout,
+    )
+    .await;
+    results.push(("exact_content".to_string(), judge_call(&turn, "write_file", |args| {
+        let content = args.get("content").and_then(|c| c.as_str()).unwrap_or_default();
+        let normalised = content.replace("\r\n", "\n");
+        let trimmed = normalised.trim_end_matches('\n');
+        if trimmed == EXACT {
+            Ok(())
+        } else {
+            Err(format!("content came through as {trimmed:?}"))
+        }
+    })));
+
+    // 7. The first attempt failed. Adapt, do not repeat and do not give up.
+    let mut failed = ChatMessage::assistant("");
+    failed.tool_calls = vec![flashagent_llm::ToolCall {
+        id: "call_3".into(),
+        name: "read_lines".into(),
+        args_json: r#"{"path":"src/confg.rs","count":5}"#.into(),
+    }];
+    let turn = run_turn(
+        llm,
+        &[
+            ChatMessage::system("You are a coding agent. Use the tools to do what is asked."),
+            ChatMessage::user("Read the first 5 lines of src/config.rs."),
+            failed,
+            ChatMessage::tool_result(
+                "call_3",
+                "error: no such file: src/confg.rs (did you mean src/config.rs?)",
+            ),
+        ],
+        timeout,
+    )
+    .await;
+    results.push(("after_error".to_string(), judge_call(&turn, "read_lines", |args| {
+        match args.get("path").and_then(|p| p.as_str()) {
+            Some(path) if path.ends_with("src/config.rs") => Ok(()),
+            Some(path) => Err(format!("retried with {path:?} instead of the corrected path")),
+            None => Err("no path in the retry".to_string()),
+        }
+    })));
+
+    // 8. Two files asked for at once: does the turn carry both calls?
+    let turn = run_turn(
+        llm,
+        &[
+            ChatMessage::system(
+                "You are a coding agent. Use the tools to do what is asked, in as few turns as possible.",
+            ),
+            ChatMessage::user("Read the first 10 lines of both Cargo.toml and README.md."),
+        ],
+        timeout,
+    )
+    .await;
+    results.push((
+        "two_calls".to_string(),
+        match (&turn.error, turn.calls.len()) {
+            (Some(e), _) => Outcome::Fail { detail: e.clone(), secs: turn.secs },
+            (None, 0) => Outcome::Fail {
+                detail: format!("replied with text, no tool call: {}", snippet(&turn.text)),
+                secs: turn.secs,
+            },
+            (None, 1) => Outcome::Partial {
+                detail: "one call for two files — the loop will need a second turn".to_string(),
+                secs: turn.secs,
+            },
+            (None, _) => Outcome::Pass {
+                style: turn.calls.first().map(|c| c.2).unwrap_or(CallStyle::Native),
+                secs: turn.secs,
+            },
+        },
+    ));
+
     CheckReport { model: model.to_string(), results }
 }
 
@@ -456,7 +581,7 @@ fn judge_call(
     if let Some(e) = &turn.error {
         return Outcome::Fail { detail: e.clone(), secs: turn.secs };
     }
-    let Some((name, args, style)) = &turn.call else {
+    let Some((name, args, style)) = turn.first_call() else {
         return Outcome::Fail {
             detail: format!("replied with text, no tool call: {}", snippet(&turn.text)),
             secs: turn.secs,
@@ -513,15 +638,23 @@ mod tests {
     }
 
     fn call(name: &str, args: &str) -> Vec<LlmEvent> {
-        vec![
-            LlmEvent::ToolCallDelta {
-                index: 0,
-                id: Some("c".into()),
-                name: Some(name.into()),
-                args_delta: args.into(),
-            },
-            LlmEvent::Done(FinishReason::ToolUse),
-        ]
+        calls(&[(name, args)])
+    }
+
+    /// One turn carrying several calls, the way a model that batches answers.
+    fn calls(specs: &[(&str, &str)]) -> Vec<LlmEvent> {
+        let mut events: Vec<LlmEvent> = specs
+            .iter()
+            .enumerate()
+            .map(|(index, (name, args))| LlmEvent::ToolCallDelta {
+                index,
+                id: Some(format!("c{index}")),
+                name: Some((*name).into()),
+                args_delta: (*args).into(),
+            })
+            .collect();
+        events.push(LlmEvent::Done(FinishReason::ToolUse));
+        events
     }
 
     fn text(body: &str) -> Vec<LlmEvent> {
@@ -541,13 +674,19 @@ mod tests {
             text("It turns source code into machine code."),
             text("version.txt says v4.2.1."),
             call("report_status", r#"{"code":7}"#),
+            call("write_file", r#"{"path":"notes.txt","content":"line one\n\"quoted\"\nend"}"#),
+            call("read_lines", r#"{"path":"src/config.rs","count":5}"#),
+            calls(&[
+                ("read_lines", r#"{"path":"Cargo.toml","count":10}"#),
+                ("read_lines", r#"{"path":"README.md","count":10}"#),
+            ]),
         ]
     }
 
     #[test]
     fn a_model_that_does_everything_right_scores_full_marks() {
         let report = run(perfect());
-        assert_eq!(report.score(), (5, 5), "{:?}", report.results);
+        assert_eq!(report.score(), (8, 8), "{:?}", report.results);
         assert_eq!(report.verdict(), "drives tools reliably");
         assert!(!report.needed_recovery());
     }
@@ -563,7 +702,7 @@ mod tests {
         ]);
         // Only the two scenarios that ask for prose can pass.
         // Two of the five ask for prose, and prose is all it produced.
-        assert_eq!(report.score(), (2, 5), "{:?}", report.results);
+        assert_eq!(report.score(), (2, 8), "{:?}", report.results);
         assert_eq!(report.verdict(), "mostly fails to drive tools");
     }
 
@@ -575,7 +714,7 @@ mod tests {
         let mut turns = perfect();
         turns[0] = text("<tool_call>{\"name\": \"report_status\", \"arguments\": {\"code\": 42}}</tool_call>");
         let report = run(turns);
-        assert_eq!(report.score(), (5, 5), "{:?}", report.results);
+        assert_eq!(report.score(), (8, 8), "{:?}", report.results);
         assert!(report.needed_recovery(), "recovery must be visible in the report");
         assert!(report.markdown_row().contains("text, recovered"));
     }
@@ -585,7 +724,7 @@ mod tests {
         let mut turns = perfect();
         turns[1] = call("read_lines", r#"{"path":"src/lib.rs","count":20}"#);
         let report = run(turns);
-        assert_eq!(report.score(), (4, 5));
+        assert_eq!(report.score(), (7, 8));
         let (_, outcome) = &report.results[1];
         assert!(matches!(outcome, Outcome::Partial { .. }), "{outcome:?}");
         assert!(outcome.detail().contains("src/main.rs"), "{}", outcome.detail());
@@ -596,7 +735,7 @@ mod tests {
         let mut turns = perfect();
         turns[2] = call("read_lines", r#"{"path":"compiler.md","count":5}"#);
         let report = run(turns);
-        assert_eq!(report.score(), (4, 5));
+        assert_eq!(report.score(), (7, 8));
         assert!(report.results[2].1.detail().contains("needed no tool"));
     }
 
@@ -605,15 +744,44 @@ mod tests {
         let mut turns = perfect();
         turns[3] = call("read_lines", r#"{"path":"version.txt","count":1}"#);
         let report = run(turns);
-        assert_eq!(report.score(), (4, 5));
+        assert_eq!(report.score(), (7, 8));
         assert!(report.results[3].1.detail().contains("instead of answering"));
     }
 
     #[test]
     fn a_backend_that_says_nothing_fails_rather_than_passes() {
-        let report = run(vec![vec![], vec![], vec![], vec![], vec![]]);
-        assert_eq!(report.score(), (0, 5), "{:?}", report.results);
+        let report = run(vec![Vec::new(); scenarios().len()]);
+        assert_eq!(report.score(), (0, 8), "{:?}", report.results);
         assert_eq!(report.verdict(), "cannot drive tools");
+    }
+
+    #[test]
+    fn content_mangled_in_transit_is_not_a_pass() {
+        // Quotes and newlines are where naive JSON encoding breaks, and a
+        // model that loses them corrupts the file it is writing.
+        let mut turns = perfect();
+        turns[5] = call("write_file", r#"{"path":"notes.txt","content":"line one quoted end"}"#);
+        let report = run(turns);
+        assert_eq!(report.score(), (7, 8));
+        assert!(report.results[5].1.detail().contains("came through as"));
+    }
+
+    #[test]
+    fn repeating_a_failed_call_unchanged_is_not_a_pass() {
+        let mut turns = perfect();
+        turns[6] = call("read_lines", r#"{"path":"src/confg.rs","count":5}"#);
+        let report = run(turns);
+        assert_eq!(report.score(), (7, 8));
+        assert!(report.results[6].1.detail().contains("instead of the corrected path"));
+    }
+
+    #[test]
+    fn one_call_for_two_files_is_only_half_the_work() {
+        let mut turns = perfect();
+        turns[7] = call("read_lines", r#"{"path":"Cargo.toml","count":10}"#);
+        let report = run(turns);
+        assert_eq!(report.score(), (7, 8));
+        assert!(report.results[7].1.detail().contains("second turn"));
     }
 
     #[test]
@@ -621,9 +789,9 @@ mod tests {
         let report = run(perfect());
         let lines = report.lines();
         assert_eq!(lines.len(), scenarios().len() + 1);
-        assert!(lines.last().unwrap().contains("5/5"));
-        assert!(report.markdown_row().starts_with("| `scripted` | 5/5 |"));
-        assert_eq!(report.to_json()["passed"], 5);
-        assert_eq!(report.to_json()["scenarios"].as_array().unwrap().len(), 5);
+        assert!(lines.last().unwrap().contains("8/8"));
+        assert!(report.markdown_row().starts_with("| `scripted` | 8/8 |"));
+        assert_eq!(report.to_json()["passed"], 8);
+        assert_eq!(report.to_json()["scenarios"].as_array().unwrap().len(), 8);
     }
 }
