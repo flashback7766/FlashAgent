@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- The what's-new screen shows the changelog's emphasis as emphasis. It printed
+  `**Pictures.**` with the asterisks.
+
 ## b249 — pictures
 
 - `view_image` — the model can open a picture in the project itself: a diagram
