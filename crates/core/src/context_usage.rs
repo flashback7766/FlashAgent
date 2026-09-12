@@ -336,3 +336,66 @@ mod compaction_tests {
         assert!(CompactionVerdict::PastThreshold.should());
     }
 }
+
+/// The share of the window to fill before summarising, for a window of this
+/// size.
+///
+/// A percentage that suits one window is wrong for another: five percent of a
+/// million-token window is fifty thousand tokens of room, while five percent
+/// of 32k is sixteen hundred — not enough for one answer. So the bigger the
+/// window, the later it compacts.
+pub fn default_compact_threshold(capacity: usize) -> usize {
+    match capacity {
+        c if c >= 1_000_000 => 97,
+        c if c >= 512_000 => 95,
+        c if c >= 256_000 => 90,
+        c if c >= 128_000 => 85,
+        c if c >= 64_000 => 80,
+        _ => 75,
+    }
+}
+
+/// The threshold in force: the user's, when they set one, otherwise the one
+/// this window deserves. Zero means "decide for me".
+pub fn resolved_compact_threshold(configured: usize, capacity: usize) -> usize {
+    if configured == 0 {
+        default_compact_threshold(capacity)
+    } else {
+        configured.clamp(10, 99)
+    }
+}
+
+#[cfg(test)]
+mod threshold_tests {
+    use super::*;
+
+    #[test]
+    fn a_bigger_window_is_filled_further_before_it_is_summarised() {
+        // Ten percent of a million tokens is a hundred thousand: leaving that
+        // empty wastes the window a user paid RAM for. Ten percent of 32k is
+        // barely one answer.
+        assert_eq!(default_compact_threshold(1_048_576), 97);
+        assert_eq!(default_compact_threshold(524_288), 95);
+        assert_eq!(default_compact_threshold(262_144), 90);
+        assert_eq!(default_compact_threshold(131_072), 85);
+        assert_eq!(default_compact_threshold(65_536), 80);
+        assert_eq!(default_compact_threshold(32_768), 75);
+        assert_eq!(default_compact_threshold(8_192), 75, "smaller still gets the tightest rule");
+    }
+
+    #[test]
+    fn the_bands_are_read_from_the_window_actually_loaded() {
+        // LM Studio reports 200k for a 256k-class model; the band is chosen by
+        // what is loaded, not by what the model could do.
+        assert_eq!(default_compact_threshold(204_800), 85);
+        assert_eq!(default_compact_threshold(200_000), 85);
+    }
+
+    #[test]
+    fn a_threshold_the_user_set_is_kept() {
+        assert_eq!(resolved_compact_threshold(60, 131_072), 60);
+        assert_eq!(resolved_compact_threshold(0, 131_072), 85, "zero means decide for me");
+        assert_eq!(resolved_compact_threshold(150, 131_072), 99, "and nothing silly is obeyed");
+        assert_eq!(resolved_compact_threshold(1, 131_072), 10);
+    }
+}

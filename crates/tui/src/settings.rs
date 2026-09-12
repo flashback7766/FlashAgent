@@ -93,6 +93,9 @@ pub struct SettingsView {
     pub url_input: String,
     pub available_models: Vec<String>,
     pub is_dirty: bool,
+    /// Window of the model in use, so an automatic threshold can say what it
+    /// works out to here.
+    pub context_capacity: usize,
 }
 
 impl SettingsView {
@@ -108,6 +111,7 @@ impl SettingsView {
             url_input,
             available_models,
             is_dirty: false,
+            context_capacity: 0,
         }
     }
 
@@ -519,7 +523,14 @@ impl SettingsView {
                 ("Sampling Preset", self.config.sampling_preset.label().into()),
                 ("Temperature", format!("{:.2}", self.config.temperature)),
                 ("Context Alert", if self.config.context_warn_threshold > 0 { format!("Warn at {}%", self.config.context_warn_threshold) } else { "Disabled".into() }),
-                ("Auto-Compact History", if self.config.auto_compact_context { format!("Enabled (at {}%)", self.config.context_compact_threshold) } else { "Disabled".into() }),
+                ("Auto-Compact History", if self.config.auto_compact_context {
+                    // Zero means the threshold follows the window; saying
+                    // "0%" would read as "always".
+                    match self.config.context_compact_threshold {
+                        0 => format!("Enabled (auto: {}% for this window)", flashagent_core::default_compact_threshold(self.context_capacity)),
+                        pct => format!("Enabled (at {pct}%)"),
+                    }
+                } else { "Disabled".into() }),
                 ("Web Tools", if self.config.free_search { "Enabled (web_fetch, web_search)".into() } else { "Disabled (local-first)".into() }),
                 ("Network Retries", format!("{} retries on connection failure", self.config.network_retries)),
             ],

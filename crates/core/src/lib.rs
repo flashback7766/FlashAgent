@@ -17,7 +17,10 @@ pub mod subagents;
 pub mod toolcheck;
 
 pub use config::{AppConfig, BackendPreset, SamplingPreset, ToolsetProfile, UpdateChannel};
-pub use context_usage::{should_compact, CompactionInput, CompactionVerdict, ContextUsage};
+pub use context_usage::{
+    default_compact_threshold, resolved_compact_threshold, should_compact, CompactionInput,
+    CompactionVerdict, ContextUsage,
+};
 pub use diff::unified;
 pub use flashagent_llm::base64_encode;
 pub use effort_memory::{EffortMemory, ModelBias, TurnOutcome};
