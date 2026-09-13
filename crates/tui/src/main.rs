@@ -1986,6 +1986,8 @@ mod tests {
             "Let me know what you need",
             "Describe your setup and your goal",
             "Feel free to ask about anything else",
+            "Укажи тему для анализа или задай конкретный вопрос по проекту",
+            "Specify a topic for analysis or ask a specific question about the project",
         ] {
             assert_eq!(sanitize_user_suggestion(bad), None, "should have been dropped: {bad}");
         }
