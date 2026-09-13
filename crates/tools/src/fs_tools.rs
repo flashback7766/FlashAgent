@@ -178,6 +178,94 @@ pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<S
     Ok(format!("applied {applied} edit(s) to {path}"))
 }
 
+/// Most files one call may read or edit: a batch is for a handful of related
+/// files, not for the whole project at once.
+pub(crate) const MAX_BATCH_FILES: usize = 20;
+
+/// Read several files in one call, each under its own header. A file that
+/// cannot be read says so in its place and does not stop the others; only a
+/// call where none could be read is an error.
+pub(crate) fn read_files(cwd: &Path, files: &[(String, usize, usize)]) -> Result<String, ToolError> {
+    if files.is_empty() {
+        return Err(ToolError::Other("read_file: files is empty".into()));
+    }
+    if files.len() > MAX_BATCH_FILES {
+        return Err(ToolError::Other(format!("read_file: at most {MAX_BATCH_FILES} files per call, got {}", files.len())));
+    }
+    let mut out = String::new();
+    let mut failed = 0usize;
+    for (path, offset, limit) in files {
+        let _ = writeln!(out, "=== {path} ===");
+        match read_file(cwd, path, *offset, *limit) {
+            Ok(text) => out.push_str(&text),
+            Err(e) => {
+                failed += 1;
+                let _ = write!(out, "error: {e}");
+            }
+        }
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    let out = out.trim_end().to_string();
+    if failed == files.len() {
+        return Err(ToolError::Other(out));
+    }
+    Ok(out)
+}
+
+/// Apply edits to several files as one change. Every edit is applied in
+/// memory first; if any of them does not fit, no file is written, because a
+/// change half made across files is worse than one not made at all.
+pub(crate) fn edit_files(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Result<String, ToolError> {
+    if files.is_empty() {
+        return Err(ToolError::Other("edit_file: files is empty".into()));
+    }
+    if files.len() > MAX_BATCH_FILES {
+        return Err(ToolError::Other(format!("edit_file: at most {MAX_BATCH_FILES} files per call, got {}", files.len())));
+    }
+    // (as named, resolved, new text, edits applied)
+    let mut changed: Vec<(String, PathBuf, String, usize)> = Vec::new();
+    for (path, edits) in files {
+        if edits.is_empty() {
+            return Err(ToolError::Other(format!("nothing was changed: {path} has no edits")));
+        }
+        let file = resolve(cwd, path);
+        // The same file twice in one batch: the second set of edits applies to
+        // the text the first produced.
+        let at = changed.iter().position(|(_, f, _, _)| *f == file);
+        let text = match at {
+            Some(i) => changed[i].2.clone(),
+            None => std::fs::read_to_string(&file)
+                .map_err(|e| ToolError::Other(format!("nothing was changed: read {path}: {e}")))?,
+        };
+        let new = apply_edits(text, edits).map_err(|e| ToolError::Other(format!("nothing was changed: {path}: {e}")))?;
+        match at {
+            Some(i) => {
+                changed[i].2 = new;
+                changed[i].3 += edits.len();
+            }
+            None => changed.push((path.clone(), file, new, edits.len())),
+        }
+    }
+    let mut written: Vec<String> = Vec::new();
+    for (path, file, text, _) in &changed {
+        if let Err(e) = std::fs::write(file, text) {
+            let done = if written.is_empty() {
+                "no file was written".to_string()
+            } else {
+                format!("already written: {}", written.join(", "))
+            };
+            return Err(ToolError::Other(format!("write {path}: {e}; {done}")));
+        }
+        written.push(path.clone());
+    }
+    let total: usize = changed.iter().map(|c| c.3).sum();
+    let list = changed.iter().map(|(p, _, _, n)| format!("{p} ({n})")).collect::<Vec<_>>().join(", ");
+    Ok(format!("applied {total} edit(s) to {} file(s): {list}", changed.len()))
+}
+
 /// List a directory; directories are suffixed with `/`.
 pub(crate) fn list_dir(cwd: &Path, path: &str) -> Result<String, ToolError> {
     let dir = resolve(cwd, path);

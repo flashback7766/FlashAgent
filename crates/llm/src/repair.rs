@@ -116,31 +116,55 @@ fn canonical_names(tool: &str, mut value: serde_json::Value) -> serde_json::Valu
         rename_first(obj, canonical, aliases);
     }
     if tool == "edit_file" {
-        // One edit given flat, the way a single-replace tool takes it.
-        if !obj.contains_key("edits") {
-            let mut single = serde_json::Map::new();
-            for (canonical, aliases) in [("old_string", OLD_ALIASES), ("new_string", NEW_ALIASES), ("replace_all", ALL_ALIASES)] {
-                rename_first(obj, canonical, aliases);
-                if let Some(v) = obj.remove(canonical) {
-                    single.insert(canonical.to_string(), v);
-                }
-            }
-            if single.contains_key("old_string") || single.contains_key("new_string") {
-                obj.insert("edits".to_string(), serde_json::Value::Array(vec![serde_json::Value::Object(single)]));
-            } else {
-                // Nothing that looks like an edit: put back what was taken.
-                obj.extend(single);
+        normalize_edit_target(obj);
+        if let Some(files) = obj.get_mut("files").and_then(|f| f.as_array_mut()) {
+            for item in files.iter_mut().filter_map(|f| f.as_object_mut()) {
+                rename_first(item, "path", PATH_ALIASES);
+                normalize_edit_target(item);
             }
         }
-        if let Some(edits) = obj.get_mut("edits").and_then(|e| e.as_array_mut()) {
-            for edit in edits.iter_mut().filter_map(|e| e.as_object_mut()) {
-                rename_first(edit, "old_string", OLD_ALIASES);
-                rename_first(edit, "new_string", NEW_ALIASES);
-                rename_first(edit, "replace_all", ALL_ALIASES);
+    }
+    if tool == "read_file" {
+        // A list of paths is several files, each read whole.
+        rename_first(obj, "files", &["paths", "file_paths", "filePaths"]);
+        if let Some(files) = obj.get_mut("files").and_then(|f| f.as_array_mut()) {
+            for item in files.iter_mut() {
+                if let Some(path) = item.as_str().map(str::to_string) {
+                    *item = serde_json::json!({ "path": path });
+                } else if let Some(entry) = item.as_object_mut() {
+                    rename_first(entry, "path", PATH_ALIASES);
+                }
             }
         }
     }
     value
+}
+
+/// One file's edits in the tool's own words: a single edit given flat becomes
+/// an edit list, and other agents' names inside the list are renamed.
+fn normalize_edit_target(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    if !obj.contains_key("edits") {
+        let mut single = serde_json::Map::new();
+        for (canonical, aliases) in [("old_string", OLD_ALIASES), ("new_string", NEW_ALIASES), ("replace_all", ALL_ALIASES)] {
+            rename_first(obj, canonical, aliases);
+            if let Some(v) = obj.remove(canonical) {
+                single.insert(canonical.to_string(), v);
+            }
+        }
+        if single.contains_key("old_string") || single.contains_key("new_string") {
+            obj.insert("edits".to_string(), serde_json::Value::Array(vec![serde_json::Value::Object(single)]));
+        } else {
+            // Nothing that looks like an edit: put back what was taken.
+            obj.extend(single);
+        }
+    }
+    if let Some(edits) = obj.get_mut("edits").and_then(|e| e.as_array_mut()) {
+        for edit in edits.iter_mut().filter_map(|e| e.as_object_mut()) {
+            rename_first(edit, "old_string", OLD_ALIASES);
+            rename_first(edit, "new_string", NEW_ALIASES);
+            rename_first(edit, "replace_all", ALL_ALIASES);
+        }
+    }
 }
 
 fn unwrapped_args(args_json: &str, tool_name: &str) -> Option<serde_json::Value> {
@@ -654,6 +678,29 @@ mod tests {
             serde_json::json!({ "cmd": "select 1", "filePath": "x" })
         );
         assert_eq!(args("edit_file", r#"{"path":"a.rs","note":"no edit here"}"#), serde_json::json!({ "path": "a.rs", "note": "no edit here" }));
+    }
+
+    #[test]
+    fn several_files_to_read_are_given_as_files_however_they_were_named() {
+        assert_eq!(
+            args("read_file", r#"{"paths":["a.rs","b.rs"]}"#),
+            serde_json::json!({ "files": [ { "path": "a.rs" }, { "path": "b.rs" } ] })
+        );
+        assert_eq!(
+            args("read_file", r#"{"files":[{"file_path":"a.rs","limit":5},"b.rs"]}"#),
+            serde_json::json!({ "files": [ { "path": "a.rs", "limit": 5 }, { "path": "b.rs" } ] })
+        );
+    }
+
+    #[test]
+    fn each_file_of_a_batch_edit_takes_other_agents_names_too() {
+        assert_eq!(
+            args("edit_file", r#"{"files":[{"filePath":"a.rs","oldString":"x","newString":"y"},{"path":"b.rs","edits":[{"TargetContent":"p","ReplacementContent":"q"}]}]}"#),
+            serde_json::json!({ "files": [
+                { "path": "a.rs", "edits": [ { "old_string": "x", "new_string": "y" } ] },
+                { "path": "b.rs", "edits": [ { "old_string": "p", "new_string": "q" } ] }
+            ] })
+        );
     }
 
     #[test]

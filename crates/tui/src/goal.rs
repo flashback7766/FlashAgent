@@ -215,7 +215,7 @@ pub struct GoalLedger {
     shell_ok: usize,
     shell_failed: Vec<String>,
     tool_failures: Vec<String>,
-    open_calls: Vec<(String, String, String)>, // id, tool name, subject
+    open_calls: Vec<(String, String, String, Vec<String>)>, // id, tool name, subject, files it names
 }
 
 impl GoalLedger {
@@ -258,16 +258,23 @@ impl GoalLedger {
             LoopEvent::Usage(u) => self.output_tokens += u.completion.unwrap_or(0),
             LoopEvent::ToolStarted { id, name, args_json } => {
                 let subject = subject_of(name, args_json);
-                self.open_calls.push((id.clone(), name.clone(), subject));
+                let files = files_of(name, args_json);
+                self.open_calls.push((id.clone(), name.clone(), subject, files));
             }
             LoopEvent::ToolFinished { id, is_error, result, .. } => {
-                let Some(pos) = self.open_calls.iter().position(|(cid, _, _)| cid == id) else {
+                let Some(pos) = self.open_calls.iter().position(|(cid, _, _, _)| cid == id) else {
                     return;
                 };
-                let (_, name, subject) = self.open_calls.remove(pos);
+                let (_, name, subject, files) = self.open_calls.remove(pos);
                 match (name.as_str(), *is_error) {
                     ("write_file", false) => push_unique(&mut self.written, subject),
-                    ("edit_file" | "patch_file", false) => push_unique(&mut self.edited, subject),
+                    ("edit_file" | "patch_file", false) => {
+                        // A batch edit changed every file it names.
+                        let changed = if files.is_empty() { vec![subject] } else { files };
+                        for file in changed {
+                            push_unique(&mut self.edited, file);
+                        }
+                    }
                     ("run_shell", false) => self.shell_ok += 1,
                     ("run_shell", true) => {
                         let why = first_line(result.as_deref().unwrap_or(""));
@@ -404,6 +411,19 @@ fn first_line(text: &str) -> String {
 }
 
 /// The thing a call acted on: a path, a command, otherwise the tool's own name.
+/// The files a read or an edit names: its `path`, then each of its `files`.
+fn files_of(name: &str, args_json: &str) -> Vec<String> {
+    if !matches!(name, "edit_file" | "read_file") {
+        return Vec::new();
+    }
+    let Some(args) = flashagent_llm::repair::effective_args(args_json, name) else {
+        return Vec::new();
+    };
+    let single = args.get("path").and_then(|p| p.as_str());
+    let batch = args.get("files").and_then(|f| f.as_array()).into_iter().flatten().filter_map(|f| f.get("path").and_then(|p| p.as_str()));
+    single.into_iter().chain(batch).filter(|p| !p.is_empty()).map(str::to_string).collect()
+}
+
 fn subject_of(name: &str, args_json: &str) -> String {
     let args = flashagent_llm::repair::effective_args(args_json, name);
     let pick = |key: &str| -> Option<String> {
@@ -412,6 +432,10 @@ fn subject_of(name: &str, args_json: &str) -> String {
     let raw = match name {
         "run_shell" => pick("command").unwrap_or_else(|| "(poll/kill)".to_string()),
         _ => pick("path")
+            .or_else(|| {
+                let files = files_of(name, args_json);
+                (!files.is_empty()).then(|| files.join(", "))
+            })
             .or_else(|| pick("pattern"))
             .or_else(|| pick("command"))
             .unwrap_or_default(),
@@ -560,5 +584,15 @@ mod tests {
         // Some models wrap arguments; the shared resolver must be used here too.
         let s = subject_of("write_file", r#"{"write_file":{"path":"src/x.rs"}}"#);
         assert_eq!(s, "src/x.rs");
+    }
+
+    #[test]
+    fn a_batch_edit_reports_every_file_it_changed() {
+        let mut l = GoalLedger::new("t".into(), GoalBudgets::default());
+        l.on_event(&ev_started("1", "edit_file", r#"{"files":[{"path":"src/a.rs","edits":[]},{"filePath":"src/b.rs","edits":[]}]}"#));
+        l.on_event(&ev_finished("1", false, "applied 2 edit(s) to 2 file(s)"));
+        let report = l.report(DoneReason::Completed).join("\n");
+        assert!(report.contains("~ src/a.rs") && report.contains("~ src/b.rs"), "{report}");
+        assert!(report.contains("Files changed: 2"), "{report}");
     }
 }

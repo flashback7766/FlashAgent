@@ -532,6 +532,50 @@ fn an_answer_cut_off_by_the_output_limit_is_finished_in_the_same_message() {
 }
 
 #[test]
+fn several_files_are_read_and_changed_in_one_call_each() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "read_file".into(),
+            arguments: serde_json::json!({ "header": "Read both notes", "paths": ["one.txt", "two.txt"] }),
+        },
+        Reply::ToolCall {
+            name: "edit_file".into(),
+            arguments: serde_json::json!({ "header": "Finish both notes", "files": [
+                { "path": "one.txt", "edits": [ { "old_string": "draft", "new_string": "final" } ] },
+                { "path": "two.txt", "edits": [ { "old_string": "draft", "new_string": "final" } ] }
+            ] }),
+        },
+        Reply::Text("Both notes are final.".into()),
+    ]);
+    let home = Home::new();
+    std::fs::write(home.work().join("one.txt"), "first draft\n").unwrap();
+    std::fs::write(home.work().join("two.txt"), "second draft\n").unwrap();
+    let term = ready(&home, &server);
+
+    ask(&term, "finish both notes", "Both notes are final.");
+
+    assert_eq!(std::fs::read_to_string(home.work().join("one.txt")).unwrap(), "first final\n");
+    assert_eq!(std::fs::read_to_string(home.work().join("two.txt")).unwrap(), "second final\n");
+    let turns = server.turns();
+    assert_eq!(turns.len(), 3, "one call to read both, one to change both, one to answer");
+    let tool_result = |turn: &support::mock_server::Request| -> String {
+        turn.body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|m| m["role"] == "tool")
+            .map(|m| m["content"].as_str().unwrap_or_default().to_string())
+            .unwrap_or_default()
+    };
+    let read = tool_result(&turns[1]);
+    for part in ["=== one.txt ===", "first draft", "=== two.txt ===", "second draft"] {
+        assert!(read.contains(part), "the read did not hand back {part:?}: {read}");
+    }
+    assert!(tool_result(&turns[2]).contains("2 file(s)"), "{}", tool_result(&turns[2]));
+}
+
+#[test]
 fn an_edit_written_in_another_agents_argument_names_still_edits_the_file() {
     // OpenCode's names, one edit given flat: a model trained on another agent
     // should not fail the call over what it calls the arguments.
