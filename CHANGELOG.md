@@ -1,5 +1,19 @@
 # Changelog
 
+## b271 — a suggestion that only told you to make one
+
+This release changes nothing for you to use — it only fixes a bug.
+
+- The follow-up suggestion above the input box sometimes named a *category*
+  instead of an actual prompt — "Укажи тему для анализа или задай конкретный
+  вопрос по проекту" ("Specify a topic for analysis or ask a specific
+  question about the project"). Pressing → sent that sentence itself to the
+  assistant, which made no sense. It is the same failure already fixed once
+  before for direct questions aimed at you ("Расскажи о своём проекте"); this
+  time the model phrased it without the tell (no "своём/твоём") the filter
+  was watching for. The filter now also catches this phrasing, in Russian
+  and English.
+
 ## b270 — several files in one go
 
 One thing you might notice: fewer steps when the work touches several files.
