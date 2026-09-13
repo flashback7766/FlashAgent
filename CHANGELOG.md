@@ -1,5 +1,23 @@
 # Changelog
 
+## b264 — nothing new to see, and that is the point
+
+Nothing changes for you in this release. It is about stability: the parts
+of FlashAgent you rely on most are now checked with every change, so a
+beta that breaks them does not get released.
+
+- Five more scenario tests — the real app in a terminal, against a stand-in
+  model server. They cover allowing a command (it runs, and its output goes
+  back to the model), denying one (it never runs, and the model is told),
+  Esc during an answer (it stops, and what was already written is kept),
+  `/compact` (the conversation so far becomes a summary the model is sent
+  instead), and `--resume` (a saved conversation comes back, on screen and
+  for the model).
+- Each was checked by breaking what it guards — commands no longer asking,
+  Esc no longer stopping, the summary dropped, a resumed conversation shown
+  but not sent — and watching it fail. Ten scenarios now run on Linux,
+  Windows and macOS.
+
 ## b263 — a quieter server, and the app tested the way you use it
 
 Two things in this release. Only the first is something you might notice.
