@@ -1,5 +1,24 @@
 # Changelog
 
+## b270 — several files in one go
+
+One thing you might notice: fewer steps when the work touches several files.
+
+- The model can read several files in one call instead of one call per
+  file, and change several files in one call. Each file of a read comes back
+  under its own header, and a file that cannot be read says so without
+  stopping the others.
+- A change across several files is made whole or not at all: every edit is
+  checked against its file first, and if one does not fit, no file is
+  written and the model is told which edit failed. The approval card shows
+  the diff of every file, and `/rewind` and the `/goal` report cover each of
+  them.
+- The line for such a call says what it covers: *Explored 2 files*, *Edited 2
+  files +2 -2*, or the model's own header followed by the files, like *Read
+  both notes · 2 files: one.txt, two.txt*.
+- Unit tests and a scenario test cover it, each checked by breaking what it
+  guards.
+
 ## b269 — answers that hit the length limit get finished
 
 One thing you might notice: long answers no longer stop mid-sentence.
