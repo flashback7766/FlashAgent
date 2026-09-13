@@ -168,6 +168,36 @@ impl OpenAiCompat {
         self.discovery.read().ok().and_then(|d| d.clone())
     }
 
+    /// Take what another backend's look at this server found, so this one
+    /// knows the model's reasoning settings and the kind of server from its
+    /// first request instead of from its own first look.
+    ///
+    /// Checks `active_model` as well as `models`: a server's listing does not
+    /// always repeat the loaded model's entry there, and without this fallback
+    /// adopting discovery for exactly that model silently kept no profile.
+    pub fn adopt_discovery(&self, disc: &crate::thinking::ServerDiscovery) {
+        let model = self.model();
+        let thinking = disc
+            .models
+            .iter()
+            .find(|m| m.id == model)
+            .or_else(|| disc.active_model.as_ref().filter(|m| m.id == model))
+            .map(|m| m.thinking.clone());
+        if let Ok(mut lock) = self.discovery.write() {
+            *lock = Some(disc.clone());
+        }
+        if let Some(thinking) = thinking {
+            if let Ok(mut lock) = self.profile.write() {
+                *lock = Some(thinking);
+            }
+        }
+    }
+
+    /// What kind of server this is, as far as discovery knows.
+    fn server_kind(&self) -> crate::thinking::ServerKind {
+        self.discovery.read().ok().and_then(|d| d.as_ref().map(|d| d.kind)).unwrap_or_default()
+    }
+
     /// Pre-seed or explicitly set the thinking profile.
     pub fn with_profile(mut self, profile: crate::thinking::ThinkingProfile) -> Self {
         self.profile = std::sync::Arc::new(std::sync::RwLock::new(Some(profile)));
@@ -217,6 +247,16 @@ impl OpenAiCompat {
             if let Ok(resp) = req.send().await {
                 if resp.status().is_success() {
                     if let Ok(val) = resp.json::<serde_json::Value>().await {
+                        let kind = if url.ends_with("/api/v1/models") || url.ends_with("/api/v0/models") {
+                            crate::thinking::ServerKind::LmStudio
+                        } else if val["data"]
+                            .as_array()
+                            .is_some_and(|d| d.iter().any(|m| m["owned_by"] == "llamacpp"))
+                        {
+                            crate::thinking::ServerKind::LlamaCpp
+                        } else {
+                            crate::thinking::ServerKind::Other
+                        };
                         let mut models = crate::thinking::parse_server_models(&val);
                         if !models.is_empty() && url.ends_with("/api/v1/models") {
                             // LM Studio's v1 listing can leave models out,
@@ -253,8 +293,14 @@ impl OpenAiCompat {
 
                             if let Some(ref active) = active_opt {
                                 self.set_model(&active.id);
-                                if active.thinking.supported {
-                                    if let Ok(mut lock) = self.profile.write() {
+                                // Presets the server lists always win. Anything
+                                // less — "no", or saying nothing — only fills an
+                                // empty slot: without a profile the request falls
+                                // back to a guess, but a profile the server's own
+                                // errors taught must survive the next look, which
+                                // comes every 15 seconds.
+                                if let Ok(mut lock) = self.profile.write() {
+                                    if active.thinking.supported || lock.is_none() {
                                         *lock = Some(active.thinking.clone());
                                     }
                                 }
@@ -264,6 +310,7 @@ impl OpenAiCompat {
                                 base_url: self.base_url.clone(),
                                 models,
                                 active_model: active_opt,
+                                kind,
                             };
 
                             if let Ok(mut lock) = self.discovery.write() {
@@ -311,9 +358,10 @@ impl OpenAiCompat {
             current_profile.default_preset.clone()
         };
 
-        let is_local_or_lmstudio = self.base_url.contains("localhost")
-            || self.base_url.contains("127.0.0.1")
-            || self.base_url.contains("0.0.0.0")
+        // What the server is, not where it is: a llama-server on another
+        // machine keeps a prompt cache, and a hosted API on localhost through
+        // a tunnel does not.
+        let is_local_or_lmstudio = self.server_kind().runs_local_models()
             || current_profile.protocol == crate::thinking::ThinkingProtocol::LmStudio
             || current_profile.protocol == crate::thinking::ThinkingProtocol::BooleanFlag;
 
@@ -461,7 +509,7 @@ impl OpenAiCompat {
             let is_off = effort_str == "off" || effort_str == "disabled" || effort_str == "none" || effort_str == "false" || effort_str == "0";
             if current_profile.supported {
                 current_profile.apply_to_request(&mut body, effort_str);
-            } else if is_local_or_lmstudio && is_off {
+            } else if (is_local_or_lmstudio || current_profile.is_unreported()) && is_off {
                 // For local / LM Studio endpoints without an explicit thinking profile,
                 // proactively suppress thinking so models like Gemma 4 / Qwen don't spend limited token budgets on thinking.
                 body["reasoning"] = serde_json::json!("off");
@@ -824,6 +872,29 @@ mod tests {
         let b = OpenAiCompat::new(url, "m", None);
         assert!(b.stream(&[ChatMessage::user("hi")], &[]).await.is_err());
         assert_eq!(b.requests_in_flight(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_look_at_the_server_that_says_nothing_keeps_what_its_errors_taught() {
+        // The server's own 400 is an answer about reasoning; a model listing
+        // that does not mention reasoning is not, and the look repeats every
+        // 15 seconds. Forgetting the lesson would bring the 400 back.
+        let (url, _) = canned_server("200 OK", r#"{"data":[{"id":"m","state":"loaded"}]}"#).await;
+        let learned = crate::thinking::ThinkingProfile {
+            presets: vec!["low".into(), "high".into()],
+            protocol: crate::thinking::ThinkingProtocol::ReasoningEffort,
+            supported: true,
+            default_preset: None,
+        };
+        let b = OpenAiCompat::new(url, "m", None).with_profile(learned.clone());
+        let disc = b.discover_server().await.expect("the listing was read");
+        assert!(disc.models[0].thinking.is_unreported(), "the listing says nothing about reasoning");
+        assert_eq!(b.profile(), Some(learned), "a look that said nothing replaced what the server's error taught");
+
+        // An empty slot is filled, so the request does not fall back to a guess.
+        let fresh = OpenAiCompat::new(b.base_url().to_string(), "m", None);
+        fresh.discover_server().await.expect("the listing was read");
+        assert!(fresh.profile().is_some_and(|p| p.is_unreported()));
     }
 
     #[tokio::test]

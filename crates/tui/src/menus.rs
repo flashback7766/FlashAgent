@@ -5,8 +5,7 @@ pub(crate) fn build_model_menu(source: &BackendSource) -> Option<SelectMenu<Stri
     if disc.models.is_empty() {
         return None;
     }
-    let url = disc.base_url.to_lowercase();
-    let is_lm_studio = url.contains("1234") || url.contains("lmstudio");
+    let is_lm_studio = disc.kind == flashagent_llm::thinking::ServerKind::LmStudio;
     let has_loaded = disc.models.iter().any(|m| m.is_loaded);
     let models: Vec<_> = if is_lm_studio && has_loaded {
         disc.models.iter().filter(|m| m.is_loaded).collect()
@@ -34,11 +33,13 @@ pub(crate) fn build_effort_menu(
     // the one that has to say what it has decided and why.
     // The profile is empty both for "cannot reason" and for "not discovered
     // yet"; discovery is the one that can tell them apart.
+    // A model the server said nothing about may well reason; only the
+    // server saying it cannot counts as "cannot".
     let can_think = match source.profile() {
-        Some(p) => p.supported,
+        Some(p) => p.supported || p.is_unreported(),
         None => source
             .discovery()
-            .and_then(|d| d.models.iter().find(|m| m.id == model).map(|m| m.thinking.supported))
+            .and_then(|d| d.models.iter().find(|m| m.id == model).map(|m| m.thinking.supported || m.thinking.is_unreported()))
             .unwrap_or(true),
     };
     let auto_desc = if !can_think {
@@ -69,6 +70,10 @@ pub(crate) fn build_effort_menu(
                 };
                 items.push(SelectItem::with_description(p.clone(), desc, p.clone()));
             }
+        } else if prof.is_unreported() {
+            // The server lists no settings for this model: the one thing that
+            // can honestly be offered besides its own default is off.
+            items.push(SelectItem::with_description("off", "Disable reasoning (the server lists no other settings)", "off".to_string()));
         } else if !prof.supported {
             items.push(SelectItem::with_description("off", "Reasoning unsupported by this endpoint", "off".to_string()));
         }
@@ -86,7 +91,7 @@ pub(crate) fn thinking_summary_str(source: &BackendSource, current_effort: &str)
     if let Some(ref p) = source.profile() {
         if p.supported && !p.presets.is_empty() {
             format!("{} [{}]", current_effort, p.presets.join(", "))
-        } else if !p.supported {
+        } else if !p.supported && !p.is_unreported() {
             "disabled (unsupported)".to_string()
         } else {
             current_effort.to_string()

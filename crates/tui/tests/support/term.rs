@@ -47,14 +47,27 @@ impl Home {
     /// A config for someone who has set up already, pointed at `url`, who
     /// has read the notes of this version and is not checking for updates.
     pub fn set_up(&self, url: &str) {
-        self.write_config(serde_json::json!({
+        self.set_up_with(url, serde_json::json!({}));
+    }
+
+    /// As `set_up`, with `extra`'s fields merged in on top — overriding
+    /// `model`, say, or adding `thinking_effort` — for a scenario that needs
+    /// more than the baseline config.
+    pub fn set_up_with(&self, url: &str, extra: serde_json::Value) {
+        let mut config = serde_json::json!({
             "setup_completed": true,
             "backend_url": url,
             "model": super::mock_server::MODEL,
             "last_seen_version": version(),
             "auto_check_updates": false,
             "silent_update_check": false,
-        }));
+        });
+        if let (Some(base), Some(extra)) = (config.as_object_mut(), extra.as_object()) {
+            for (k, v) in extra {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+        self.write_config(config);
     }
 
     pub fn sessions(&self) -> Vec<PathBuf> {

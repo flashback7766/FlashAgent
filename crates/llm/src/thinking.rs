@@ -22,6 +22,31 @@ pub enum ThinkingProtocol {
     BooleanFlag,
     /// LM Studio native protocol (`reasoning: "<preset>"` and `enable_thinking: bool`)
     LmStudio,
+    /// The server said nothing about reasoning for this model. Nothing is
+    /// sent unless reasoning is turned off, and the model reasons (or not) the
+    /// way it does by default.
+    Unreported,
+}
+
+/// What kind of server answered, as told by the API that answered rather
+/// than by the address it lives at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ServerKind {
+    /// Answered LM Studio's own `/api/v1/models` or `/api/v0/models`.
+    LmStudio,
+    /// llama.cpp's `llama-server`: its model list says `owned_by: llamacpp`.
+    LlamaCpp,
+    /// Any other OpenAI-compatible server, or none reached yet.
+    #[default]
+    Other,
+}
+
+impl ServerKind {
+    /// A server running models on this machine's own terms: it keeps a
+    /// prompt cache and reads the thinking switches in the chat template.
+    pub fn runs_local_models(self) -> bool {
+        matches!(self, ServerKind::LmStudio | ServerKind::LlamaCpp)
+    }
 }
 
 /// Discovered model info from the API server (LM Studio, Ollama, OpenAI, OpenRouter...).
@@ -77,7 +102,9 @@ impl DiscoveredModel {
             parts.push("vision".to_string());
         }
 
-        if self.thinking.supported {
+        if self.thinking.is_unreported() {
+            // Nothing to say: "no reasoning" would claim what the server did not.
+        } else if self.thinking.supported {
             if let Some(ref def) = self.thinking.default_preset {
                 if !self.thinking.presets.is_empty() {
                     parts.push(format!("thinking: {} [{}]", def, self.thinking.presets.join(",")));
@@ -90,6 +117,7 @@ impl DiscoveredModel {
                 parts.push("thinking".to_string());
             }
         } else {
+            // Only said when the server said it: silence is not a "no".
             parts.push("no reasoning".to_string());
         }
 
@@ -106,6 +134,9 @@ pub struct ServerDiscovery {
     pub models: Vec<DiscoveredModel>,
     /// Model currently active or loaded on the server.
     pub active_model: Option<DiscoveredModel>,
+    /// What kind of server this is, from the API that answered.
+    #[serde(default)]
+    pub kind: ServerKind,
 }
 
 /// Adaptive thinking profile discovered from the API for a model.
@@ -178,6 +209,23 @@ impl ThinkingProfile {
             supported: false,
             default_preset: None,
         }
+    }
+
+    /// A profile for a model the server said nothing about. Unlike
+    /// [`Self::unsupported`], which the server told us, this claims nothing:
+    /// no presets are offered, and turning reasoning off is still honoured.
+    pub fn unreported() -> Self {
+        Self {
+            presets: Vec::new(),
+            protocol: ThinkingProtocol::Unreported,
+            supported: false,
+            default_preset: None,
+        }
+    }
+
+    /// Whether the server said nothing about reasoning for this model.
+    pub fn is_unreported(&self) -> bool {
+        self.protocol == ThinkingProtocol::Unreported
     }
 
     /// Select the minimum effort level to reduce or disable reasoning (e.g. for Auto-Nudge).
@@ -307,6 +355,8 @@ impl ThinkingProfile {
     pub fn apply_to_request(&self, body: &mut serde_json::Value, effort: &str) {
         let is_off = effort == "off" || effort == "disabled" || effort == "none" || effort == "false" || effort == "0";
         match self.protocol {
+            // Nothing is known to send; never reached for a supported profile.
+            ThinkingProtocol::Unreported => {}
             ThinkingProtocol::ReasoningEffort => {
                 if is_off {
                     let off_val = if self.presets.iter().any(|p| p.eq_ignore_ascii_case("off")) {
@@ -814,6 +864,10 @@ pub fn merge_server_models(mut primary: Vec<DiscoveredModel>, other: Vec<Discove
                     p.context_length = m.context_length.or(p.context_length);
                 }
                 p.supports_vision |= m.supports_vision;
+                if p.thinking.is_unreported() && !m.thinking.is_unreported() {
+                    p.thinking = m.thinking.clone();
+                }
+                p.max_context_length = p.max_context_length.or(m.max_context_length);
             }
             None => primary.push(m),
         }
@@ -859,7 +913,14 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 .and_then(|v| v.as_str())
                 .map(|t| t.eq_ignore_ascii_case("vlm"))
                 .unwrap_or(false);
-            let mut thinking = ThinkingProfile::unsupported();
+            // LM Studio's v1 listing names the reasoning settings of every
+            // model that has them: a model it describes without any cannot
+            // reason. A model it does not describe at all is unknown.
+            let mut thinking = if m.get("capabilities").is_some() {
+                ThinkingProfile::unsupported()
+            } else {
+                ThinkingProfile::unreported()
+            };
 
             if let Some(caps) = m.get("capabilities") {
                 supports_tools = caps.get("trained_for_tool_use").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -897,28 +958,6 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                             default_preset: Some("on".to_string()),
                         };
                     }
-                }
-            }
-
-            if !thinking.supported {
-                let id_lower = id.to_lowercase();
-                let arch_lower = m.get("architecture").or_else(|| m.get("arch")).and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-                if id_lower.contains("qwen")
-                    || id_lower.contains("deepseek")
-                    || id_lower.contains("think")
-                    || id_lower.contains("reason")
-                    || id_lower.contains("gemma4")
-                    || id_lower.contains("gemma-4")
-                    || arch_lower.contains("qwen")
-                    || arch_lower.contains("deepseek")
-                    || arch_lower.contains("gemma4")
-                {
-                    thinking = ThinkingProfile {
-                        presets: vec!["off".to_string(), "on".to_string()],
-                        protocol: ThinkingProtocol::LmStudio,
-                        supported: true,
-                        default_preset: Some("on".to_string()),
-                    };
                 }
             }
 
@@ -961,11 +1000,16 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
         }
 
         let is_loaded = m.get("state").and_then(|v| v.as_str()).map(|s| s == "loaded").unwrap_or(false);
+        // llama-server puts both in `meta`: the context it runs with, and the
+        // one the model was trained for.
+        let meta = m.get("meta");
         let context_length = m.get("loaded_context_length")
             .or_else(|| m.get("context_length"))
+            .or_else(|| meta.and_then(|x| x.get("n_ctx")))
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
         let max_context_length = m.get("max_context_length")
+            .or_else(|| meta.and_then(|x| x.get("n_ctx_train")))
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
 
@@ -977,7 +1021,9 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
             .and_then(|v| v.as_str())
             .map(|t| t.eq_ignore_ascii_case("vlm"))
             .unwrap_or(false);
-        let mut thinking = ThinkingProfile::unsupported();
+        // Neither LM Studio's v0 listing nor a plain OpenAI one says anything
+        // about reasoning, unless a capability object lists effort levels.
+        let mut thinking = ThinkingProfile::unreported();
 
         if let Some(caps) = m.get("capabilities") {
             if let Some(arr) = caps.as_array() {
@@ -1001,28 +1047,6 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
             }
         }
 
-        if !thinking.supported {
-            let id_lower = id.to_lowercase();
-            let arch_lower = m.get("architecture").or_else(|| m.get("arch")).and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-            if id_lower.contains("qwen")
-                || id_lower.contains("deepseek")
-                || id_lower.contains("think")
-                || id_lower.contains("reason")
-                || id_lower.contains("gemma4")
-                || id_lower.contains("gemma-4")
-                || arch_lower.contains("qwen")
-                || arch_lower.contains("deepseek")
-                || arch_lower.contains("gemma4")
-            {
-                thinking = ThinkingProfile {
-                    presets: vec!["off".to_string(), "on".to_string()],
-                    protocol: ThinkingProtocol::LmStudio,
-                    supported: true,
-                    default_preset: Some("on".to_string()),
-                };
-            }
-        }
-
         discovered.push(DiscoveredModel {
             id: id.to_string(),
             display_name: None,
@@ -1041,6 +1065,55 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_is_not_given_reasoning_settings_because_of_its_name() {
+        // "qwen" or "think" in an id used to be enough to send reasoning
+        // fields the server had never mentioned. What a listing says nothing
+        // about is unknown, not guessed.
+        let v0 = serde_json::json!({"data":[{"id":"qwen3.6-35b-a3b-mtp","type":"vlm","arch":"qwen35moe","state":"loaded","capabilities":["tool_use"]}]});
+        let m = &parse_server_models(&v0)[0];
+        assert!(!m.thinking.supported);
+        assert!(m.thinking.is_unreported(), "the server said nothing, so nothing is known");
+
+        let named_to_tempt = serde_json::json!({"data":[{"id":"deepseek-r1-thinking-reasoner-gemma-4"}]});
+        assert!(parse_server_models(&named_to_tempt)[0].thinking.is_unreported());
+    }
+
+    #[test]
+    fn a_model_lm_studio_describes_without_reasoning_cannot_reason() {
+        let v1 = serde_json::json!({"models":[{"key":"qwen2.5-coder-7b","type":"llm","capabilities":{"vision":false,"trained_for_tool_use":true}}]});
+        let m = &parse_server_models(&v1)[0];
+        assert!(!m.thinking.supported);
+        assert!(!m.thinking.is_unreported(), "v1 lists reasoning for every model that has it");
+    }
+
+    #[test]
+    fn what_one_listing_said_about_reasoning_fills_a_listing_that_said_nothing() {
+        let silent = parse_server_models(&serde_json::json!({"data":[{"id":"m","state":"loaded"}]}));
+        let told = parse_server_models(&serde_json::json!({"models":[{"key":"m","capabilities":{"reasoning":{"allowed_options":["off","on"],"default":"on"}}}]}));
+        let merged = merge_server_models(silent, told);
+        assert!(merged[0].thinking.supported);
+        assert_eq!(merged[0].thinking.presets, vec!["off", "on"]);
+        assert!(merged[0].is_loaded, "what the first listing knew is kept");
+    }
+
+    #[test]
+    fn llama_server_reports_the_context_it_runs_with_and_the_one_it_was_trained_for() {
+        // A real llama-server b10630 listing, trimmed: it has both "models"
+        // (without ids) and "data".
+        let listing = serde_json::json!({
+            "models": [{"name": "/models/gemma.gguf", "model": "/models/gemma.gguf", "capabilities": ["completion"]}],
+            "object": "list",
+            "data": [{"id": "/models/gemma.gguf", "object": "model", "owned_by": "llamacpp",
+                      "meta": {"n_ctx": 2048, "n_ctx_train": 131072}}]
+        });
+        let models = parse_server_models(&listing);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "/models/gemma.gguf");
+        assert_eq!(models[0].context_length, Some(2048));
+        assert_eq!(models[0].max_context_length, Some(131072));
+    }
 
     #[test]
     fn a_vision_model_is_recognised_however_the_server_says_so() {

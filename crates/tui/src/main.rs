@@ -252,6 +252,11 @@ async fn main() -> Result<()> {
         }
     }
     backend.set_model(&model);
+    // Startup asked the server through another backend; this one sends the
+    // turns, and must not wait for its first look to know what was found.
+    if let Some(ref disc) = discovery {
+        backend.adopt_discovery(disc);
+    }
     config.model = model.clone();
 
     if model.is_empty() {
@@ -281,7 +286,9 @@ async fn main() -> Result<()> {
     let initial_effort = if !config.thinking_effort.is_empty() && config.thinking_effort != "default" {
         config.thinking_effort.clone()
     } else if let Some(ref p) = profile {
-        if !p.supported {
+        // Only the server saying the model cannot reason means off; saying
+        // nothing leaves the model to its own default.
+        if !p.supported && !p.is_unreported() {
             "off".to_string()
         } else {
             "auto".to_string()
@@ -794,7 +801,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let thinking_summary = if let Some(ref p) = source.profile() {
         if p.supported && !p.presets.is_empty() {
             format!("{} [{}]", current_effort, p.presets.join(", "))
-        } else if !p.supported {
+        } else if !p.supported && !p.is_unreported() {
             "disabled (unsupported)".to_string()
         } else {
             current_effort.clone()
@@ -1316,8 +1323,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 app.renderer.request_reprint();
             }
             UiEvent::ServerDiscovered(disc) => {
-                let url = disc.base_url.to_lowercase();
-                let is_lm_studio = url.contains("1234") || url.contains("lmstudio");
+                let is_lm_studio = disc.kind == flashagent_llm::thinking::ServerKind::LmStudio;
                 let has_loaded = disc.models.iter().any(|m| m.is_loaded);
                 app.available_models = if is_lm_studio && has_loaded {
                     disc.models.iter().filter(|m| m.is_loaded).map(|m| m.id.clone()).collect()
@@ -1818,6 +1824,7 @@ mod tests {
             base_url: "http://localhost:1234/v1".into(),
             models: vec![model("sees", true), model("blind", false)],
             active_model: None,
+            kind: Default::default(),
         };
         assert!(sees_images(Some(&disc), "sees"));
         assert!(!sees_images(Some(&disc), "blind"));

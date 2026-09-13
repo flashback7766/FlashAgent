@@ -44,6 +44,13 @@ pub struct SetupWizard {
     pub discovered_models: Vec<flashagent_llm::DiscoveredModel>,
     pub connection_status: Option<String>,
     pub sampling: crate::sampling::SamplingView,
+    /// What the server said it was, once discovery has actually run.
+    ///
+    /// `None` before that — not "not LM Studio". The URL heuristic in
+    /// `is_lm_studio` is a guess for before we've asked the server anything;
+    /// once discovery answers, its word is ground truth even when it says
+    /// "Other", which a URL guess must not then override.
+    discovered_kind: Option<flashagent_llm::thinking::ServerKind>,
 }
 
 impl SetupWizard {
@@ -80,6 +87,7 @@ impl SetupWizard {
             discovered_models: Vec::new(),
             connection_status: None,
             sampling,
+            discovered_kind: None,
         }
     }
 
@@ -103,13 +111,24 @@ impl SetupWizard {
     }
 
     /// Check if the selected backend is LM Studio.
+    ///
+    /// Once discovery has run, this is what the server actually said it is —
+    /// the URL is only a guess for the window before that, when there is
+    /// nothing else to go on (e.g. to choose sane defaults while the user is
+    /// still picking a backend).
     pub fn is_lm_studio(&self) -> bool {
+        if let Some(kind) = self.discovered_kind {
+            return kind == flashagent_llm::thinking::ServerKind::LmStudio;
+        }
         let url = self.config.backend_url.to_lowercase();
         self.preset_idx == 0 || url.contains("1234") || url.contains("lmstudio")
     }
 
-    /// Store discovered models and filter to loaded models if LM Studio is selected.
-    pub fn apply_discovered_models(&mut self, models: Vec<flashagent_llm::DiscoveredModel>) {
+    /// Store what discovery found — models, and which kind of server this is
+    /// — and filter to loaded models if LM Studio is selected.
+    pub fn apply_discovered_models(&mut self, disc: flashagent_llm::ServerDiscovery) {
+        self.discovered_kind = Some(disc.kind);
+        let models = disc.models;
         let is_lm = self.is_lm_studio();
         let has_loaded = models.iter().any(|m| m.is_loaded);
 
@@ -981,7 +1000,7 @@ pub async fn run_wizard_channel(
     // Try probing default backend for models
     let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
     if let Some(disc) = backend.discover_server().await {
-        wizard.apply_discovered_models(disc.models);
+        wizard.apply_discovered_models(disc);
     }
 
     let completed = loop {
@@ -1008,7 +1027,7 @@ pub async fn run_wizard_channel(
                         if prev_step == 1 && wizard.step == 2 {
                             let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
                             if let Some(disc) = backend.discover_server().await {
-                                wizard.apply_discovered_models(disc.models);
+                                wizard.apply_discovered_models(disc);
                             } else {
                                 wizard.available_models.clear();
                                 wizard.discovered_models.clear();
@@ -1052,7 +1071,7 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
     // Try probing default backend for models
     let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
     if let Some(disc) = backend.discover_server().await {
-        wizard.apply_discovered_models(disc.models);
+        wizard.apply_discovered_models(disc);
     }
 
     let completed = loop {
@@ -1078,7 +1097,7 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
                     if prev_step == 1 && wizard.step == 2 {
                         let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
                         if let Some(disc) = backend.discover_server().await {
-                            wizard.apply_discovered_models(disc.models);
+                            wizard.apply_discovered_models(disc);
                         } else {
                             wizard.available_models.clear();
                             wizard.discovered_models.clear();
@@ -1367,7 +1386,12 @@ mod tests {
             },
         ];
 
-        wizard.apply_discovered_models(models);
+        wizard.apply_discovered_models(flashagent_llm::ServerDiscovery {
+            base_url: wizard.config.backend_url.clone(),
+            models,
+            active_model: None,
+            kind: flashagent_llm::thinking::ServerKind::LmStudio,
+        });
 
         // Only 1 loaded model should be kept
         assert_eq!(wizard.available_models.len(), 1);
