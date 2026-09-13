@@ -70,6 +70,6 @@ fn main() {
         }
     }
 
-    // 4. Default fallback: b264
-    println!("cargo:rustc-env=FLASHAGENT_VERSION=b264");
+    // 4. Default fallback: b265
+    println!("cargo:rustc-env=FLASHAGENT_VERSION=b265");
 }

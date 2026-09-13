@@ -1,5 +1,21 @@
 # Changelog
 
+## b265 — the last of the scenario tests
+
+Nothing changes for you in this release either. It is about stability, and
+it finishes what b263 and b264 started: every path on the list for v1 is
+now tested the way you use it.
+
+- MCP: a tool marked read-only in `.mcp.json` runs without asking, and its
+  result reaches the model; a tool that changes things asks first, and a
+  refusal never reaches the MCP server.
+- `/goal`: a run writes a file and runs a command without asking, the report
+  lists both, and afterwards commands ask again as before. A run with
+  `--steps 2` stops there, and the report says it is not finished.
+- Each was checked by breaking what it guards. Fourteen scenarios now run on
+  Linux, Windows and macOS with every change, and the scenario-test
+  milestone on the road to v1 is done.
+
 ## b264 — nothing new to see, and that is the point
 
 Nothing changes for you in this release. It is about stability: the parts
