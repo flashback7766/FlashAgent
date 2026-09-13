@@ -1,6 +1,7 @@
 # FlashAgent — Roadmap (Dateless Milestones)
 
 > v1 is the terminal app. The native UI (Track B) is postponed to v2.
+> Local models come first. Cloud APIs must still work properly, for anyone whose machine cannot run a model.
 > **v1.0 ships when Track A and Track C are complete.** Track V was the groundwork that had to land first.
 > Milestone status: `[ ]` / `[~]` / `[x]`. Updated upon completion, without arbitrary calendar deadlines.
 
@@ -32,8 +33,8 @@ live run), not when unit tests pass — the same rule now applies to A and C.
 - [x] **A8. Subagents** — Dynamic roles, concurrency limits, parent review gate, inter-subagent messaging channels, strict permission inheritance.
 - [x] **A9. MCP** — Client, manager, marketplace registry. Native stdio JSON-RPC 2.0 transport, project & global configuration manager, curated verifiable marketplace, ApprovalGate enforcement for non-read-only calls, TUI slash commands (/mcp, /mcp list, /mcp market, /mcp test, /mcp add, /mcp reload). 46 tools tests, 131 workspace tests.
 - [~] **A10. Autonomous Goal Mode** — `/goal`, adaptive execution layers, task boundaries (steps/tokens/time/blacklist), filesystem snapshots + commits, live plan + final report. *Done: `/goal` entry, Accept All + max effort, ask_user and memory writes disabled, mode/effort restore, step/time/token budgets with a live burn-down, factual end-of-run report (V3). Done (b267): file snapshots before every write, `/rewind` to take turns back. Open: blacklist, milestone commits, live plan document.*
-- [ ] **A11. Extended Backends** — Ollama, Anthropic, Mistral, DeepSeek, OpenRouter, configuration presets.
-- [ ] **A12. Migrator** — Import data and settings from legacy ~/.flashgent (sessions, config).
+- [ ] **A11. Extended Backends** — Ollama, Anthropic, Mistral, DeepSeek, OpenRouter, configuration presets. *Local models come first; cloud APIs get working support for machines that cannot run a model. Already there: presets for LM Studio, Ollama, vLLM, llama.cpp and OpenRouter over the OpenAI-compatible protocol. Open: DeepSeek and Mistral presets, the native Anthropic protocol, and cloud checked end to end — streaming, tool calls, reasoning settings, and context from the provider's model list.*
+- [x] **A12. Migrator** — ~~Import data and settings from legacy ~/.flashgent (sessions, config).~~ *Closed 2026-09-14 without work: there is no `~/.flashgent` data to import; the legacy project survives only as source in `~/flashgent`.*
 
 ## Track B — Native UI (postponed to v2)
 
@@ -57,7 +58,7 @@ live run), not when unit tests pass — the same rule now applies to A and C.
 - [ ] **C3. Release Packaging** — Native installers (MSIX / NSIS for Windows, AppImage / deb / pacman for Linux, dmg for macOS), application icons, code signatures.
 - [ ] **C4. Public Launch** — Repository presentation: demo screenshots and GIFs, feature comparison matrix, quickstart < 5 minutes, good-first-issues, GitHub discussions.
 - [ ] **C5. Legacy Gems** — Porting battle-tested capabilities from legacy ~/flashgent:
-  - **Argument Aliasing**: Tolerant tool parameter naming (`filePath`/`path`, `oldString`/`TargetContent`, `cmd`/`command`) in `flashagent-tools`.
+  - **Argument Aliasing**: Tolerant tool parameter naming (`filePath`/`path`, `oldString`/`TargetContent`, `cmd`/`command`) in `flashagent-tools`. *Done (b268): in `effective_args`, so the approval card, the permission rules and the tool read the same renamed call; a call that already uses the right name keeps it; one flat edit becomes an edit list; MCP tools keep their own names.*
   - **AST Project Outline**: Background symbol indexing (classes, functions, structs, traits) in native Rust (`ignore` + regex) with compact project outline injection into system prompt.
   - **Context Steering**: Mid-flight user directive injection channel into `AgentLoop` during streaming/execution without resetting context. *Done: Enter while a turn runs.*
   - **FileSnapshots & Workspace Rewind**: Persistent `file_snapshots` table in SQLite (`content_before`) for step-by-step filesystem rewinds and history truncation. *Done (b267): `/rewind` — copies in `~/.flashagent/snapshots/<session>/` instead of an SQLite table; files and conversation go back to before a chosen turn; shell-made changes and files over 8 MB are reported, not undone.*

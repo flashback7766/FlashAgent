@@ -823,4 +823,18 @@ mod tests {
         let read3: ReadArgs = parse_args(single_key, "read_file").unwrap();
         assert_eq!(read3.path, "README.md");
     }
+
+    #[test]
+    fn a_call_in_another_agents_argument_names_is_read_as_this_tools_own() {
+        let edit: EditArgs = parse_args(r#"{"filePath":"a.rs","oldString":"x","newString":"y"}"#, "edit_file").unwrap();
+        assert_eq!(edit.path, "a.rs");
+        assert_eq!(edit.edits.len(), 1);
+        assert_eq!((edit.edits[0].old_string.as_str(), edit.edits[0].new_string.as_str()), ("x", "y"));
+
+        let shell: ShellArgs = parse_args(r#"{"cmd":"ls"}"#, "run_shell").unwrap();
+        assert_eq!(shell.command.as_deref(), Some("ls"));
+
+        let write: WriteArgs = parse_args(r#"{"file_path":"b.txt","contents":"hi"}"#, "write_file").unwrap();
+        assert_eq!((write.path.as_str(), write.content.as_str()), ("b.txt", "hi"));
+    }
 }

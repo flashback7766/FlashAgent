@@ -665,6 +665,23 @@ mod tests {
     }
 
     #[test]
+    fn a_command_under_another_name_is_judged_as_the_command_that_runs() {
+        // The tool accepts `cmd` for `command`; the rules must see it too, or
+        // an allowed prefix would ask and a denied one would slip past.
+        let state = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
+        state.allow_shell_prefix("echo SAFE");
+        assert_eq!(shell_command(r#"{"cmd":"echo SAFE"}"#).as_deref(), Some("echo SAFE"));
+        assert_eq!(state.decide(&call("run_shell", r#"{"cmd":"echo SAFE now"}"#), None), Verdict::Allow);
+        assert!(matches!(state.decide(&call("run_shell", r#"{"cmd":"rm -rf ~"}"#), None), Verdict::NeedApproval { .. }));
+        // Both names: the rule sees the one that runs.
+        assert_eq!(shell_command(r#"{"command":"rm -rf ~","cmd":"echo SAFE"}"#).as_deref(), Some("rm -rf ~"));
+        assert!(matches!(
+            state.decide(&call("run_shell", r#"{"command":"rm -rf ~","cmd":"echo SAFE"}"#), None),
+            Verdict::NeedApproval { .. }
+        ));
+    }
+
+    #[test]
     fn read_only_hint_reclassifies_external_tools_only() {
         let state = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
         let mutating = call("mcp__db__execute_mutation", "{}");
