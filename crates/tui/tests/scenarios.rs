@@ -163,3 +163,162 @@ fn a_tool_turn_runs_the_tool_and_hands_its_result_back_to_the_model() {
     );
     assert_eq!(server.replies_left(), 0);
 }
+
+/// Shown under the composer only while a turn runs.
+const RUNNING_HINT: &str = "esc to interrupt";
+
+/// Send a prompt and wait for the turn to finish: `answer` on screen and the
+/// turn over, so the next Enter starts a new turn instead of steering this one.
+fn ask(term: &Term, prompt: &str, answer: &str) {
+    term.type_text(prompt);
+    term.send(ENTER);
+    term.wait_for(answer, WAIT);
+    term.wait_gone(RUNNING_HINT, WAIT);
+}
+
+/// Everything the model was sent in one request, as text to search.
+fn sent(request: &support::mock_server::Request) -> String {
+    request.body["messages"].to_string()
+}
+
+fn shell_call(command: &str) -> Reply {
+    Reply::ToolCall {
+        name: "run_shell".into(),
+        arguments: serde_json::json!({ "header": "Leave a marker file", "command": command }),
+    }
+}
+
+#[test]
+fn a_command_runs_once_it_is_allowed() {
+    let server = MockServer::start(vec![shell_call("echo marker> marker.txt"), Reply::Text("The marker is there.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("leave a marker");
+    term.send(ENTER);
+    term.wait_for("Confirm:", WAIT);
+    assert!(!home.work().join("marker.txt").exists(), "the command ran before it was allowed");
+    // Allow is the button selected when the card opens.
+    term.send(ENTER);
+    term.wait_for("The marker is there.", WAIT);
+
+    let marker = std::fs::read_to_string(home.work().join("marker.txt")).expect("the allowed command ran");
+    assert!(marker.contains("marker"));
+    assert_eq!(server.turns().len(), 2);
+}
+
+#[test]
+fn a_command_that_is_denied_never_runs_and_the_model_is_told() {
+    let server = MockServer::start(vec![
+        shell_call("echo marker> marker.txt"),
+        Reply::Text("Understood, I will not run it.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("leave a marker");
+    term.send(ENTER);
+    term.wait_for("Confirm:", WAIT);
+    term.send("d");
+    term.wait_for("Understood, I will not run it.", WAIT);
+
+    assert!(!home.work().join("marker.txt").exists(), "a denied command ran");
+    let turns = server.turns();
+    assert_eq!(turns.len(), 2, "the model heard back about its call");
+    let messages = turns[1].body["messages"].as_array().unwrap();
+    let result = messages.iter().find(|m| m["role"] == "tool").expect("a tool result for the denied call");
+    assert!(
+        !result["content"].as_str().unwrap_or_default().trim().is_empty(),
+        "the model was told nothing about why the call did not run: {result}"
+    );
+}
+
+#[test]
+fn esc_during_a_turn_stops_it_and_keeps_what_was_already_said() {
+    let words: Vec<String> = (1..=60).map(|i| format!("word{i}")).collect();
+    let server = MockServer::start(vec![
+        Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(300) },
+        Reply::Text("Picked up after the interruption.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("count slowly");
+    term.send(ENTER);
+    term.wait_for("word3", WAIT);
+    term.send(ESC);
+    term.wait_for("Request interrupted by user", Duration::from_secs(10));
+    term.wait_gone(RUNNING_HINT, WAIT);
+    assert!(!term.screen().contains("word60"), "the turn ran to the end after Esc");
+
+    ask(&term, "go on", "Picked up after the interruption.");
+    let turns = server.turns();
+    assert_eq!(turns.len(), 2);
+    let history = sent(&turns[1]);
+    assert!(history.contains("word1 "), "the words written before Esc were not kept: {history}");
+    assert!(!history.contains("word60"));
+}
+
+#[test]
+fn compact_replaces_the_conversation_so_far_with_a_summary() {
+    let server = MockServer::start(vec![
+        Reply::Text("First answer.".into()),
+        Reply::Text("Second answer.".into()),
+        Reply::Text("Third answer, after the summary.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    ask(&term, "the first question", "First answer.");
+    ask(&term, "the second question", "Second answer.");
+    term.type_text("/compact");
+    term.send(ENTER);
+    term.wait_for("Context compacted", WAIT);
+    ask(&term, "the third question", "Third answer, after the summary.");
+
+    assert!(
+        server.requests().iter().any(|r| sent(r).contains("technical context compaction engine")),
+        "the model was never asked for a summary"
+    );
+    let turns = server.turns();
+    assert_eq!(turns.len(), 3);
+    let after = &turns[2].body["messages"];
+    assert!(
+        after[0]["content"].as_str().unwrap_or_default().contains("[Compacted Conversation History]"),
+        "the summary is not in the system prompt: {}",
+        after[0]
+    );
+    assert!(!sent(&turns[2]).contains("the first question"), "the summarised turns were still sent in full");
+}
+
+#[test]
+fn a_saved_session_comes_back_with_resume() {
+    let server = MockServer::start(vec![
+        Reply::Text("The magic number is 7.".into()),
+        Reply::Text("Yes, still 7.".into()),
+    ]);
+    let home = Home::new();
+    {
+        let mut term = ready(&home, &server);
+        ask(&term, "what is the magic number?", "The magic number is 7.");
+        term.send(ESC);
+        term.wait_for("Quit FlashAgent", WAIT);
+        term.send("y");
+        assert!(term.wait_exit(WAIT).is_some());
+    }
+    let session = home.sessions().pop().expect("the conversation was saved");
+    let id = session.file_stem().unwrap().to_string_lossy().to_string();
+
+    let term = Term::start(&home, &["-y", "--resume", &id], COLS, ROWS);
+    term.wait_for(&format!("Resumed session '{id}'"), WAIT);
+    term.wait_for("The magic number is 7.", WAIT);
+    ask(&term, "is it still the same?", "Yes, still 7.");
+
+    let turns = server.turns();
+    assert_eq!(turns.len(), 2);
+    let history = sent(&turns[1]);
+    assert!(
+        history.contains("what is the magic number?") && history.contains("The magic number is 7."),
+        "the resumed conversation did not reach the model: {history}"
+    );
+}
