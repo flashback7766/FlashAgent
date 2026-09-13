@@ -1,5 +1,24 @@
 # Changelog
 
+## b263 — a quieter server, and the app tested the way you use it
+
+Two things in this release. Only the first is something you might notice.
+
+- FlashAgent asks your server which model is loaded far less often: every
+  15 seconds instead of every 3, and never while the model is working — not
+  during a turn, and not while the recap after it is still being written. On
+  a laptop that runs its own model, that is one thing fewer competing with the
+  answer. Against a test server, 50 idle seconds went from 36 of these
+  requests to 10, and a turn with its recap from 14 to none. A model you
+  switch in LM Studio still shows up, within 15 seconds.
+- Apart from that, nothing changes for you: the rest is about stability, so
+  that bugs like the last few do not reach a beta. FlashAgent now has
+  scenario tests — the real app, started in a terminal, talking to a stand-in
+  model server, checked by what is on the screen. The first five cover the
+  setup wizard, quitting an empty session and one with a conversation, a turn
+  that calls a tool, and the model list staying quiet while the model
+  answers. Each was checked by breaking what it guards and watching it fail.
+
 ## b262 — square boxes, and a quit that does not ask for nothing
 
 - Esc on a session where nothing was said quits straight away. It asked
