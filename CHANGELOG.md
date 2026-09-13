@@ -1,5 +1,22 @@
 # Changelog
 
+## b269 — answers that hit the length limit get finished
+
+One thing you might notice: long answers no longer stop mid-sentence.
+
+- When the server stops an answer at its output limit — cloud APIs often cap
+  a reply at a few thousand tokens, and a local server does when its context
+  fills up — FlashAgent asks the model to go on from where it stopped and
+  writes the rest into the same message, up to three times. If the model
+  starts by repeating its last words, the repeat is dropped before it reaches
+  the screen.
+- The request to go on is sent once and never kept: the next turn sees one
+  whole answer.
+- A tool call cut off by the limit is still never run, as before; the model
+  is told to send it again.
+- Four unit tests and a scenario test cover it, each checked by breaking what
+  it guards.
+
 ## b268 — the argument names other agents taught your model
 
 One thing you might notice: fewer failed tool calls from models that learned
