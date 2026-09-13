@@ -56,8 +56,94 @@ pub fn repair_json(input: &str) -> Option<String> {
 /// the command that is judged and shown is exactly the command that runs.
 /// Rules, in order: parse (repairing if needed); unwrap `{"<tool_name>": {..}}`;
 /// unwrap `{"arguments"|"parameters"|"args": ..}` only when the object holds
-/// nothing but such wrapper/metadata keys; otherwise the object itself.
+/// nothing but such wrapper/metadata keys; otherwise the object itself. Last,
+/// argument names other agents use are renamed to this tool's own (see
+/// [`canonical_names`]) — here, so the renamed call is what gets judged too.
 pub fn effective_args(args_json: &str, tool_name: &str) -> Option<serde_json::Value> {
+    unwrapped_args(args_json, tool_name).map(|v| canonical_names(tool_name, v))
+}
+
+/// Other names for a built-in tool's arguments, as other agents taught models
+/// to write them: Claude Code's `file_path`, OpenCode's `filePath` and
+/// `oldString`, Gemini's `TargetFile` and `ReplacementContent`, `cmd` for
+/// `command`. A model trained on one of those should not fail a call over a
+/// name.
+const PATH_ALIASES: &[&str] =
+    &["file_path", "filePath", "filepath", "file", "filename", "TargetFile", "target_file", "AbsolutePath", "absolute_path"];
+const DIR_ALIASES: &[&str] = &["directory", "dir", "dirPath", "dir_path", "DirectoryPath", "directory_path", "file_path", "filePath"];
+
+fn aliases_for(tool: &str) -> &'static [(&'static str, &'static [&'static str])] {
+    match tool {
+        "read_file" | "outline_file" | "view_image" | "patch_file" | "edit_file" => &[("path", PATH_ALIASES)],
+        "write_file" => &[
+            ("path", PATH_ALIASES),
+            ("content", &["contents", "text", "file_text", "fileContent", "file_content", "CodeContent", "code", "data"]),
+        ],
+        "list_dir" | "git_status" | "git_diff" => &[("path", DIR_ALIASES)],
+        "run_shell" => &[("command", &["cmd", "CommandLine", "command_line", "shell_command", "script"])],
+        "grep" => &[("pattern", &["query", "regex", "search", "SearchPattern"]), ("glob", &["include", "file_pattern", "Includes"])],
+        "glob" => &[("pattern", &["glob", "file_pattern", "Pattern"])],
+        "web_fetch" => &[("url", &["uri", "link", "href", "Url"])],
+        "web_search" => &[("query", &["q", "search", "search_query", "Query"])],
+        _ => &[],
+    }
+}
+
+const OLD_ALIASES: &[&str] = &["oldString", "old_str", "old_text", "oldText", "TargetContent", "search", "find", "old"];
+const NEW_ALIASES: &[&str] = &["newString", "new_str", "new_text", "newText", "ReplacementContent", "replace", "replacement", "new"];
+const ALL_ALIASES: &[&str] = &["replaceAll", "AllowMultiple", "allow_multiple", "all"];
+
+/// Rename `aliases` to `canonical` in `obj`, unless `canonical` is already
+/// there: a call that names both is taken at its own word, never merged.
+fn rename_first(obj: &mut serde_json::Map<String, serde_json::Value>, canonical: &str, aliases: &[&str]) {
+    if obj.contains_key(canonical) {
+        return;
+    }
+    if let Some(alias) = aliases.iter().find(|a| obj.contains_key(**a)) {
+        if let Some(value) = obj.remove(*alias) {
+            obj.insert(canonical.to_string(), value);
+        }
+    }
+}
+
+/// A built-in tool's arguments with other agents' names for them renamed to
+/// its own. External tools keep theirs: their names are the server's.
+fn canonical_names(tool: &str, mut value: serde_json::Value) -> serde_json::Value {
+    let Some(obj) = value.as_object_mut() else {
+        return value;
+    };
+    for (canonical, aliases) in aliases_for(tool) {
+        rename_first(obj, canonical, aliases);
+    }
+    if tool == "edit_file" {
+        // One edit given flat, the way a single-replace tool takes it.
+        if !obj.contains_key("edits") {
+            let mut single = serde_json::Map::new();
+            for (canonical, aliases) in [("old_string", OLD_ALIASES), ("new_string", NEW_ALIASES), ("replace_all", ALL_ALIASES)] {
+                rename_first(obj, canonical, aliases);
+                if let Some(v) = obj.remove(canonical) {
+                    single.insert(canonical.to_string(), v);
+                }
+            }
+            if single.contains_key("old_string") || single.contains_key("new_string") {
+                obj.insert("edits".to_string(), serde_json::Value::Array(vec![serde_json::Value::Object(single)]));
+            } else {
+                // Nothing that looks like an edit: put back what was taken.
+                obj.extend(single);
+            }
+        }
+        if let Some(edits) = obj.get_mut("edits").and_then(|e| e.as_array_mut()) {
+            for edit in edits.iter_mut().filter_map(|e| e.as_object_mut()) {
+                rename_first(edit, "old_string", OLD_ALIASES);
+                rename_first(edit, "new_string", NEW_ALIASES);
+                rename_first(edit, "replace_all", ALL_ALIASES);
+            }
+        }
+    }
+    value
+}
+
+fn unwrapped_args(args_json: &str, tool_name: &str) -> Option<serde_json::Value> {
     let parse = |text: &str| -> Option<serde_json::Value> {
         let trimmed = text.trim();
         let candidate = if trimmed.is_empty() { "{}" } else { trimmed };
@@ -512,5 +598,67 @@ mod tests {
     #[test]
     fn garbage_returns_none() {
         assert!(repair_json("not json at all without any structures").is_none());
+    }
+
+    fn args(tool: &str, json: &str) -> serde_json::Value {
+        effective_args(json, tool).expect("arguments parsed")
+    }
+
+    #[test]
+    fn other_agents_names_for_arguments_become_the_tools_own() {
+        assert_eq!(args("read_file", r#"{"filePath":"src/a.rs"}"#)["path"], "src/a.rs");
+        assert_eq!(
+            args("write_file", r#"{"file_path":"a.txt","contents":"x"}"#),
+            serde_json::json!({ "path": "a.txt", "content": "x" })
+        );
+        assert_eq!(args("run_shell", r#"{"cmd":"cargo test"}"#)["command"], "cargo test");
+        assert_eq!(
+            args("grep", r#"{"query":"TODO","include":"*.rs"}"#),
+            serde_json::json!({ "pattern": "TODO", "glob": "*.rs" })
+        );
+        assert_eq!(args("list_dir", r#"{"directory":"src"}"#)["path"], "src");
+        assert_eq!(args("web_fetch", r#"{"uri":"https://example.com"}"#)["url"], "https://example.com");
+    }
+
+    #[test]
+    fn an_edit_in_other_agents_words_becomes_an_edit_list() {
+        // Gemini's single-replace shape.
+        assert_eq!(
+            args("edit_file", r#"{"TargetFile":"a.rs","TargetContent":"old","ReplacementContent":"new"}"#),
+            serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "old", "new_string": "new" } ] })
+        );
+        // OpenCode's names inside a list.
+        assert_eq!(
+            args("edit_file", r#"{"filePath":"a.rs","edits":[{"oldString":"a","newString":"b","replaceAll":true}]}"#),
+            serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "a", "new_string": "b", "replace_all": true } ] })
+        );
+        // The tool's own names, flat.
+        assert_eq!(
+            args("edit_file", r#"{"path":"a.rs","old_string":"a","new_string":"b"}"#),
+            serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "a", "new_string": "b" } ] })
+        );
+    }
+
+    #[test]
+    fn a_name_the_call_already_uses_correctly_is_never_overwritten() {
+        // Which command runs must never depend on which of two names wins.
+        let both = args("run_shell", r#"{"command":"ls","cmd":"rm -rf /"}"#);
+        assert_eq!(both["command"], "ls");
+        assert_eq!(both["cmd"], "rm -rf /", "the other name is left alone, not merged in");
+    }
+
+    #[test]
+    fn external_tools_keep_their_own_argument_names() {
+        assert_eq!(
+            args("mcp__db__query", r#"{"cmd":"select 1","filePath":"x"}"#),
+            serde_json::json!({ "cmd": "select 1", "filePath": "x" })
+        );
+        assert_eq!(args("edit_file", r#"{"path":"a.rs","note":"no edit here"}"#), serde_json::json!({ "path": "a.rs", "note": "no edit here" }));
+    }
+
+    #[test]
+    fn wrapped_arguments_in_other_names_are_unwrapped_and_renamed() {
+        assert_eq!(args("run_shell", r#"{"arguments":{"cmd":"ls"}}"#)["command"], "ls");
+        assert_eq!(args("read_file", r#"{"read_file":{"file_path":"README.md"}}"#)["path"], "README.md");
     }
 }

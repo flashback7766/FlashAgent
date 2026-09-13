@@ -498,6 +498,36 @@ fn a_goal_stops_at_its_step_budget_and_says_it_is_not_finished() {
 }
 
 #[test]
+fn an_edit_written_in_another_agents_argument_names_still_edits_the_file() {
+    // OpenCode's names, one edit given flat: a model trained on another agent
+    // should not fail the call over what it calls the arguments.
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "edit_file".into(),
+            arguments: serde_json::json!({ "filePath": "notes.txt", "oldString": "draft", "newString": "final" }),
+        },
+        Reply::Text("Edited.".into()),
+    ]);
+    let home = Home::new();
+    let notes = home.work().join("notes.txt");
+    std::fs::write(&notes, "a draft\n").unwrap();
+    let term = ready(&home, &server);
+
+    ask(&term, "finish the notes", "Edited.");
+
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "a final\n", "the edit did not run");
+    let turns = server.turns();
+    let result = turns[1].body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .expect("the call's result went back to the model")
+        .clone();
+    assert!(!result["content"].as_str().unwrap_or_default().contains("bad arguments"), "the call was rejected: {result}");
+}
+
+#[test]
 fn rewind_takes_the_files_and_the_conversation_back_to_before_a_turn() {
     let edit = |old: &str, new: &str| Reply::ToolCall {
         name: "edit_file".into(),
