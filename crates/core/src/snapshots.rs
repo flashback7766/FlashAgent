@@ -141,12 +141,20 @@ impl SnapshotStore {
         if !WRITING_TOOLS.contains(&tool) {
             return;
         }
-        let Some(raw) = flashagent_llm::effective_args(args_json, tool)
-            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
-        else {
+        let Some(args) = flashagent_llm::effective_args(args_json, tool) else {
             return;
         };
-        let path = self.resolve(&raw);
+        // One file, or each file of a batch.
+        let single = args.get("path").and_then(|p| p.as_str());
+        let batch = args.get("files").and_then(|f| f.as_array()).into_iter().flatten().filter_map(|f| f.get("path").and_then(|p| p.as_str()));
+        let raws: Vec<String> = single.into_iter().chain(batch).filter(|p| !p.trim().is_empty()).map(str::to_string).collect();
+        for raw in raws {
+            self.keep_before(self.resolve(&raw));
+        }
+    }
+
+    /// Keep how `path` is now, unless the current turn already has it.
+    fn keep_before(&self, path: PathBuf) {
         let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let Some(current) = st.current else {
             return;
@@ -426,6 +434,21 @@ mod tests {
         let report = s.rewind(0);
         assert_eq!(report.failed.len(), 1);
         assert!(report.failed[0].1.contains("no copy was kept"), "{:?}", report.failed);
+    }
+
+    #[test]
+    fn every_file_of_a_batch_edit_is_kept() {
+        let (project, _snaps, s) = store();
+        std::fs::write(project.path().join("a.txt"), "a").unwrap();
+        std::fs::write(project.path().join("b.txt"), "b").unwrap();
+        s.begin_turn("p");
+        s.before_write("edit_file", r#"{"files":[{"path":"a.txt","edits":[]},{"file_path":"b.txt","edits":[]}]}"#);
+        std::fs::write(project.path().join("a.txt"), "A").unwrap();
+        std::fs::write(project.path().join("b.txt"), "B").unwrap();
+        let report = s.rewind(0);
+        assert_eq!(std::fs::read_to_string(project.path().join("a.txt")).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(project.path().join("b.txt")).unwrap(), "b");
+        assert_eq!(report.restored.len(), 2);
     }
 
     #[test]

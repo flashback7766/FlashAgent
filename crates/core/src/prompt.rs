@@ -143,6 +143,7 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
         "TOOL DISCIPLINE & PARALLELISM:\n\
          - Direct Tool Invocation: Never narrate, announce, or describe tool calls in conversational text (e.g. NEVER write \"*Wait, I'll call list_dir.*\", \"I'll check the directory\", or \"Let me read the file\"). When you decide to use a tool, invoke the tool call directly.\n\
          - Prefer dedicated tools over run_shell: use read_file instead of cat/head/tail/sed, write_file/edit_file instead of echo redirection/sed/awk, glob/list_dir instead of find/ls, and grep instead of grep/rg. Reserve run_shell exclusively for builds, tests, git, and genuine terminal operations that require shell execution.\n\
+         - Several files at once: read them with one read_file call (files: [{path}, ...]) and change them with one edit_file call (files: [{path, edits}, ...]). A batch edit applies every edit or none, so a change that spans files is never left half made.\n\
          - Parallelism: Request independent lookups in the same turn so they run together in parallel. If an operation depends on a previous result, run it sequentially."
             .to_string(),
     );

@@ -192,12 +192,23 @@ impl BuiltinTools {
                 Some(flashagent_core::unified(old.as_deref(), new, &self.shown_path(path), 3))
             }
             "edit_file" => {
-                let path = v.get("path")?.as_str()?;
-                let edits: Vec<fs_tools::EditChunk> =
-                    serde_json::from_value(v.get("edits")?.clone()).ok()?;
-                let old = fs_tools::read_raw(&self.cwd, path)?;
-                let new = fs_tools::apply_edits(old.clone(), &edits).ok()?;
-                Some(flashagent_core::unified(Some(&old), &new, &self.shown_path(path), 3))
+                let args: EditArgs = serde_json::from_value(v.clone()).ok()?;
+                // A batch is shown whole: every file it would change, one diff
+                // after another.
+                let diffs: Vec<String> = args
+                    .targets()
+                    .iter()
+                    .filter_map(|(path, edits)| {
+                        let old = fs_tools::read_raw(&self.cwd, path)?;
+                        let new = fs_tools::apply_edits(old.clone(), edits).ok()?;
+                        Some(flashagent_core::unified(Some(&old), &new, &self.shown_path(path), 3))
+                    })
+                    .collect();
+                if diffs.is_empty() {
+                    None
+                } else {
+                    Some(diffs.join("\n"))
+                }
             }
             "patch_file" => {
                 let path = v.get("path")?.as_str()?;
@@ -212,7 +223,23 @@ impl BuiltinTools {
         match call.name.as_str() {
             "read_file" => {
                 let a: ReadArgs = parse_args(&call.args_json, &call.name)?;
-                fs_tools::read_file(&self.cwd, &a.path, a.offset.unwrap_or(0), a.limit.unwrap_or(2000))
+                if a.files.is_empty() {
+                    if a.path.trim().is_empty() {
+                        return Err(ToolError::Other("read_file needs a path, or files to read several".into()));
+                    }
+                    return fs_tools::read_file(&self.cwd, &a.path, a.offset.unwrap_or(0), a.limit.unwrap_or(2000));
+                }
+                let mut items: Vec<(String, Option<usize>, Option<usize>)> = Vec::new();
+                if !a.path.trim().is_empty() {
+                    items.push((a.path, a.offset, a.limit));
+                }
+                items.extend(a.files.into_iter().map(|f| (f.path, f.offset, f.limit)));
+                // The usual 2000 lines are shared out, so the last file is not
+                // the one the output limit cuts away.
+                let share = (2000 / items.len().max(1)).max(200);
+                let items: Vec<(String, usize, usize)> =
+                    items.into_iter().map(|(p, o, l)| (p, o.unwrap_or(0), l.unwrap_or(share))).collect();
+                fs_tools::read_files(&self.cwd, &items)
             }
             "write_file" => {
                 let a: WriteArgs = parse_args(&call.args_json, &call.name)?;
@@ -220,7 +247,13 @@ impl BuiltinTools {
             }
             "edit_file" => {
                 let a: EditArgs = parse_args(&call.args_json, &call.name)?;
-                fs_tools::edit_file(&self.cwd, &a.path, &a.edits)
+                if a.files.is_empty() {
+                    if a.path.trim().is_empty() || a.edits.is_empty() {
+                        return Err(ToolError::Other("edit_file needs a path and edits, or files to edit several".into()));
+                    }
+                    return fs_tools::edit_file(&self.cwd, &a.path, &a.edits);
+                }
+                fs_tools::edit_files(&self.cwd, &a.targets())
             }
             "patch_file" => {
                 let a: PatchArgs = parse_args(&call.args_json, &call.name)?;
@@ -350,8 +383,8 @@ impl ToolExec for BuiltinTools {
         let mut specs = vec![
             ToolSpec {
                 name: "read_file".into(),
-                description: "Read a text file with 1-based line numbers".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "One short line, in the user's language, saying what this call is for — e.g. 'Read the loop that applies the patch'. The user sees it instead of the raw call, so write one for every call, including reads and searches."}, "path": {"type": "string", "description": "File path, relative to working directory or absolute"}, "offset": {"type": "integer", "description": "0-based first line to read"}, "limit": {"type": "integer", "description": "Max lines to read (default 2000)"}}, "required": ["header", "path"]}"#.into(),
+                description: "Read a text file with 1-based line numbers. To read several files, pass files instead of path: one call, up to 20 files, each under its own header".into(),
+                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "One short line, in the user's language, saying what this call is for — e.g. 'Read the loop that applies the patch'. The user sees it instead of the raw call, so write one for every call, including reads and searches."}, "path": {"type": "string", "description": "File path, relative to working directory or absolute"}, "offset": {"type": "integer", "description": "0-based first line to read"}, "limit": {"type": "integer", "description": "Max lines to read (default 2000)"}, "files": {"type": "array", "description": "Several files in one call, each read like path/offset/limit", "items": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}}, "required": ["path"]}}}, "required": ["header"]}"#.into(),
             },
             ToolSpec {
                 name: "write_file".into(),
@@ -360,8 +393,8 @@ impl ToolExec for BuiltinTools {
             },
             ToolSpec {
                 name: "edit_file".into(),
-                description: "Apply surgical string replacements to a file; each edit replaces exact old_string matches".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "One short line, in the user's language, saying what this call is for — e.g. 'Read the loop that applies the patch'. The user sees it instead of the raw call, so write one for every call, including reads and searches."}, "path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"old_string": {"type": "string"}, "new_string": {"type": "string"}, "replace_all": {"type": "boolean"}}, "required": ["old_string", "new_string"]}}}, "required": ["header", "path", "edits"]}"#.into(),
+                description: "Apply surgical string replacements to a file; each edit replaces exact old_string matches. To change several files as one change, pass files instead of path and edits: up to 20 files, and either every edit applies or none does".into(),
+                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "One short line, in the user's language, saying what this call is for — e.g. 'Read the loop that applies the patch'. The user sees it instead of the raw call, so write one for every call, including reads and searches."}, "path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"old_string": {"type": "string"}, "new_string": {"type": "string"}, "replace_all": {"type": "boolean"}}, "required": ["old_string", "new_string"]}}, "files": {"type": "array", "description": "Several files changed as one change", "items": {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"old_string": {"type": "string"}, "new_string": {"type": "string"}, "replace_all": {"type": "boolean"}}, "required": ["old_string", "new_string"]}}}, "required": ["path", "edits"]}}}, "required": ["header"]}"#.into(),
             },
             ToolSpec {
                 name: "list_dir".into(),
@@ -493,6 +526,17 @@ impl ToolExec for BuiltinTools {
 
 #[derive(Deserialize)]
 struct ReadArgs {
+    #[serde(default)]
+    path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    /// Several files in one call.
+    #[serde(default)]
+    files: Vec<ReadItem>,
+}
+
+#[derive(Deserialize)]
+struct ReadItem {
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
@@ -506,8 +550,32 @@ struct WriteArgs {
 
 #[derive(Deserialize)]
 struct EditArgs {
+    #[serde(default)]
     path: String,
+    #[serde(default)]
     edits: Vec<fs_tools::EditChunk>,
+    /// Several files changed as one change.
+    #[serde(default)]
+    files: Vec<EditItem>,
+}
+
+#[derive(Deserialize)]
+struct EditItem {
+    path: String,
+    #[serde(default)]
+    edits: Vec<fs_tools::EditChunk>,
+}
+
+impl EditArgs {
+    /// Every file this call edits with its edits: `path` first, then `files`.
+    fn targets(self) -> Vec<(String, Vec<fs_tools::EditChunk>)> {
+        let mut targets = Vec::new();
+        if !self.path.trim().is_empty() && !self.edits.is_empty() {
+            targets.push((self.path, self.edits));
+        }
+        targets.extend(self.files.into_iter().map(|f| (f.path, f.edits)));
+        targets
+    }
 }
 
 #[derive(Deserialize)]
@@ -645,6 +713,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let diff = diff.expect("edit_file must preview as a diff");
         assert!(diff.contains("+/// A bare number means minutes."), "{diff}");
+    }
+
+    /// A toolset in a fresh directory holding `files`, named after `tag`.
+    fn batch_tools(tag: &str, files: &[(&str, &str)]) -> (PathBuf, BuiltinTools) {
+        let dir = std::env::temp_dir().join(format!("fa-batch-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, text) in files {
+            std::fs::write(dir.join(name), text).unwrap();
+        }
+        let tools = BuiltinTools::new(BuiltinToolsConfig {
+            cwd: dir.clone(),
+            brave_api_key: None,
+            question_gate: None,
+            is_goal_mode: None,
+            toolset_profile: None,
+            web_enabled: None,
+            context_window: None,
+            mcp_manager: None,
+        })
+        .unwrap();
+        (dir, tools)
+    }
+
+    fn batch_call(name: &str, args: serde_json::Value) -> ToolCall {
+        ToolCall { id: "t".into(), name: name.into(), args_json: args.to_string() }
+    }
+
+    #[tokio::test]
+    async fn a_batch_edit_changes_every_file_it_names() {
+        let (dir, tools) = batch_tools("ok", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
+        let out = tools
+            .execute(&batch_call("edit_file", serde_json::json!({ "files": [
+                { "path": "a.txt", "edits": [ { "old_string": "one", "new_string": "ONE" } ] },
+                { "path": "b.txt", "edits": [ { "old_string": "two", "new_string": "TWO" } ] }
+            ] })))
+            .await;
+        let (a, b) = (std::fs::read_to_string(dir.join("a.txt")).unwrap(), std::fs::read_to_string(dir.join("b.txt")).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!((a.as_str(), b.as_str()), ("ONE\n", "TWO\n"));
+        assert!(out.content.contains("2 file(s)"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn a_batch_edit_with_one_edit_that_does_not_fit_changes_no_file() {
+        let (dir, tools) = batch_tools("atomic", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
+        let out = tools
+            .execute(&batch_call("edit_file", serde_json::json!({ "files": [
+                { "path": "a.txt", "edits": [ { "old_string": "one", "new_string": "ONE" } ] },
+                { "path": "b.txt", "edits": [ { "old_string": "not in the file", "new_string": "x" } ] }
+            ] })))
+            .await;
+        let (a, b) = (std::fs::read_to_string(dir.join("a.txt")).unwrap(), std::fs::read_to_string(dir.join("b.txt")).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("nothing was changed") && out.content.contains("b.txt"), "{}", out.content);
+        assert_eq!((a.as_str(), b.as_str()), ("one\n", "two\n"), "a half-applied batch was written");
+    }
+
+    #[tokio::test]
+    async fn a_batch_edit_is_previewed_whole() {
+        let (dir, tools) = batch_tools("preview", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
+        let diff = tools.write_preview(&batch_call("edit_file", serde_json::json!({ "files": [
+            { "path": "a.txt", "edits": [ { "old_string": "one", "new_string": "ONE" } ] },
+            { "path": "b.txt", "edits": [ { "old_string": "two", "new_string": "TWO" } ] }
+        ] })));
+        let _ = std::fs::remove_dir_all(&dir);
+        let diff = diff.expect("a batch edit previews as a diff");
+        assert!(diff.contains("+ONE") && diff.contains("+TWO"), "{diff}");
+    }
+
+    #[tokio::test]
+    async fn several_files_are_read_in_one_call_and_a_missing_one_does_not_stop_the_rest() {
+        let (dir, tools) = batch_tools("read", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
+        let out = tools
+            .execute(&batch_call("read_file", serde_json::json!({ "files": [ { "path": "a.txt" }, { "path": "nope.txt" }, { "path": "b.txt" } ] })))
+            .await;
+        let none = tools
+            .execute(&batch_call("read_file", serde_json::json!({ "paths": [ "nope.txt", "gone.txt" ] })))
+            .await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!out.is_error, "{}", out.content);
+        for part in ["=== a.txt ===", "one", "=== nope.txt ===", "error:", "=== b.txt ===", "two"] {
+            assert!(out.content.contains(part), "missing {part:?} in:\n{}", out.content);
+        }
+        assert!(none.is_error, "a read where no file could be read is an error: {}", none.content);
     }
 
     use super::*;

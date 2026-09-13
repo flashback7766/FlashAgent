@@ -237,6 +237,41 @@ pub fn format_explore(is_running: bool, files: usize, searches: usize, last_targ
 ///
 /// Shown next to the model's own header, because the header says what it
 /// meant to do and this says what it asked for.
+/// The files one read or edit call names: its `path`, then each of its `files`.
+fn call_paths(parsed: &serde_json::Value) -> Vec<String> {
+    let single = parsed.get("path").and_then(|p| p.as_str());
+    let batch = parsed
+        .get("files")
+        .and_then(|f| f.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.get("path").and_then(|p| p.as_str()));
+    single.into_iter().chain(batch).filter(|p| !p.is_empty()).map(str::to_string).collect()
+}
+
+/// Every edit of an edit call, across all of its files.
+fn call_edits(parsed: &serde_json::Value) -> Vec<&serde_json::Value> {
+    let single = parsed.get("edits").and_then(|e| e.as_array()).into_iter().flatten();
+    let batch = parsed
+        .get("files")
+        .and_then(|f| f.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.get("edits").and_then(|e| e.as_array()))
+        .flatten();
+    single.chain(batch).collect()
+}
+
+/// One path, or how many a batch names.
+fn paths_label(paths: &[String], list_them: bool) -> String {
+    match paths.len() {
+        0 => "file".to_string(),
+        1 => paths[0].clone(),
+        n if list_them => format!("{n} files: {}", paths.join(", ")),
+        n => format!("{n} files"),
+    }
+}
+
 pub fn call_facts(name: &str, parsed: &serde_json::Value) -> Option<String> {
     let path_of = |key: &str| -> Option<String> {
         let raw = parsed.get(key)?.as_str()?;
@@ -249,11 +284,17 @@ pub fn call_facts(name: &str, parsed: &serde_json::Value) -> Option<String> {
     match name {
         "edit_file" => {
             let (mut added, mut deleted) = (0usize, 0usize);
-            for ed in parsed.get("edits")?.as_array()? {
+            for ed in call_edits(parsed) {
                 deleted += ed.get("old_string").and_then(|s| s.as_str()).unwrap_or("").lines().count();
                 added += ed.get("new_string").and_then(|s| s.as_str()).unwrap_or("").lines().count();
             }
-            Some(format!("{} +{added} -{deleted}", path_of("path")?))
+            let paths = call_paths(parsed);
+            let target = match paths.len() {
+                0 => return None,
+                1 => path_of("path").unwrap_or_else(|| paths[0].clone()),
+                n => format!("{n} files"),
+            };
+            Some(format!("{target} +{added} -{deleted}"))
         }
         "write_file" => {
             let lines = parsed.get("content").and_then(|s| s.as_str()).unwrap_or("").lines().count().max(1);
@@ -265,7 +306,13 @@ pub fn call_facts(name: &str, parsed: &serde_json::Value) -> Option<String> {
             let deleted = patch.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count();
             Some(format!("{} +{added} -{deleted}", path_of("path")?))
         }
-        "read_file" | "outline_file" => path_of("path"),
+        "read_file" | "outline_file" => {
+            let names: Vec<String> = call_paths(parsed)
+                .iter()
+                .map(|p| std::path::Path::new(p).file_name().and_then(|s| s.to_str()).unwrap_or(p).to_string())
+                .collect();
+            (!names.is_empty()).then(|| paths_label(&names, true))
+        }
         "run_shell" => parsed.get("command").and_then(|c| c.as_str()).map(format_cmd),
         "grep" | "glob" => parsed
             .get("pattern")
@@ -603,7 +650,9 @@ impl ChatView {
                     self.lines[i].reasoning_secs = Some(secs);
                 }
 
-                let parsed: serde_json::Value = serde_json::from_str(args_json.trim()).unwrap_or_default();
+                // Read the way the tool reads it, so other agents' argument
+                // names and batches show what will actually happen.
+                let parsed: serde_json::Value = flashagent_llm::effective_args(args_json, name).unwrap_or_default();
                 let chevron = "\x1b[38;2;120;125;140m›\x1b[0m";
 
                 // The model is asked to say what a call is for. When it did,
@@ -676,8 +725,19 @@ impl ChatView {
                     }
                 } else if name == "read_file" || name == "list_dir" || name == "glob" || name == "grep" {
                     let is_file = name == "read_file";
+                    let read_paths = if is_file { call_paths(&parsed) } else { Vec::new() };
+                    // A batch read counts every file it reads.
+                    let file_count = if is_file { read_paths.len().max(1) } else { 0 };
+                    let batch_label: String;
                     let target = if is_file {
-                        parsed.get("path").and_then(|s| s.as_str()).unwrap_or("file")
+                        match read_paths.len() {
+                            0 => "file",
+                            1 => read_paths[0].as_str(),
+                            _ => {
+                                batch_label = paths_label(&read_paths, false);
+                                batch_label.as_str()
+                            }
+                        }
                     } else {
                         parsed.get("pattern")
                             .or_else(|| parsed.get("query"))
@@ -694,7 +754,7 @@ impl ChatView {
                     let mut consolidated = false;
                     if let Some(last_line) = self.lines.last_mut() {
                         if let Some(ToolGroupKind::Explore { files, searches, last_target, is_running }) = &mut last_line.tool_group {
-                            if is_file { *files += 1; } else { *searches += 1; }
+                            if is_file { *files += file_count; } else { *searches += 1; }
                             *last_target = target.to_string();
                             *is_running = true;
                             last_line.text = format_explore(true, *files, *searches, target);
@@ -708,7 +768,7 @@ impl ChatView {
                         }
                     }
                     if !consolidated {
-                        let files = if is_file { 1 } else { 0 };
+                        let files = file_count;
                         let searches = if is_file { 0 } else { 1 };
                         let text = format_explore(true, files, searches, target);
                         let mut line = ChatLine::with_details(LineKind::Tool, text, args_json.clone());
@@ -718,19 +778,17 @@ impl ChatView {
                         self.open_tool = Some(self.lines.len() - 1);
                     }
                 } else if name == "edit_file" || name == "write_file" || name == "patch_file" {
-                    let path = parsed.get("path").and_then(|s| s.as_str()).unwrap_or("file").to_string();
+                    let path = paths_label(&call_paths(&parsed), false);
                     let basename = std::path::Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or(&path);
 
                     let (added, deleted) = if name == "edit_file" {
                         let mut a = 0;
                         let mut d = 0;
-                        if let Some(edits) = parsed.get("edits").and_then(|e| e.as_array()) {
-                            for ed in edits {
-                                let old_s = ed.get("old_string").and_then(|s| s.as_str()).unwrap_or("");
-                                let new_s = ed.get("new_string").and_then(|s| s.as_str()).unwrap_or("");
-                                d += old_s.lines().count();
-                                a += new_s.lines().count();
-                            }
+                        for ed in call_edits(&parsed) {
+                            let old_s = ed.get("old_string").and_then(|s| s.as_str()).unwrap_or("");
+                            let new_s = ed.get("new_string").and_then(|s| s.as_str()).unwrap_or("");
+                            d += old_s.lines().count();
+                            a += new_s.lines().count();
                         }
                         (a, d)
                     } else if name == "write_file" {
@@ -1135,7 +1193,8 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
     }
 
     if tool_name == "read_file" || tool_name == "outline_file" {
-        let path = parsed.get("path").and_then(|s| s.as_str()).unwrap_or("file");
+        let label = paths_label(&call_paths(&parsed), true);
+        let path = label.as_str();
         let offset = parsed.get("offset").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
         let limit = parsed.get("limit").and_then(|s| s.as_u64()).unwrap_or(2000) as usize;
         return card(tool_views::render_read_card(
@@ -1173,7 +1232,8 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
     }
 
     if tool_name == "edit_file" || tool_name == "write_file" || tool_name == "patch_file" {
-        let path = parsed.get("path").and_then(|s| s.as_str()).unwrap_or("file");
+        let label = paths_label(&call_paths(&parsed), true);
+        let path = label.as_str();
         let is_write = tool_name == "write_file";
         let (added, deleted, diff_text) = if tool_name == "write_file" {
             let content = parsed.get("content").and_then(|s| s.as_str()).unwrap_or("");
@@ -1191,22 +1251,20 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
             let mut a = 0;
             let mut d = 0;
             let mut simulated = String::new();
-            if let Some(edits) = parsed.get("edits").and_then(|e| e.as_array()) {
-                for ed in edits {
-                    let old_s = ed.get("old_string").and_then(|s| s.as_str()).unwrap_or("");
-                    let new_s = ed.get("new_string").and_then(|s| s.as_str()).unwrap_or("");
-                    for l in old_s.lines() {
-                        simulated.push('-');
-                        simulated.push_str(l);
-                        simulated.push('\n');
-                        d += 1;
-                    }
-                    for l in new_s.lines() {
-                        simulated.push('+');
-                        simulated.push_str(l);
-                        simulated.push('\n');
-                        a += 1;
-                    }
+            for ed in call_edits(&parsed) {
+                let old_s = ed.get("old_string").and_then(|s| s.as_str()).unwrap_or("");
+                let new_s = ed.get("new_string").and_then(|s| s.as_str()).unwrap_or("");
+                for l in old_s.lines() {
+                    simulated.push('-');
+                    simulated.push_str(l);
+                    simulated.push('\n');
+                    d += 1;
+                }
+                for l in new_s.lines() {
+                    simulated.push('+');
+                    simulated.push_str(l);
+                    simulated.push('\n');
+                    a += 1;
                 }
             }
             (a, d, Some(simulated))
