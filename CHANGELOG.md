@@ -1,5 +1,39 @@
 # Changelog
 
+## b266 — what the server says, not what the name suggests
+
+Two things you might notice, one fix, and the rest is internal.
+
+- FlashAgent no longer decides a model can reason because its name contains
+  "qwen", "deepseek", "gemma-4" or "think". It goes by what the server says:
+  LM Studio lists the reasoning settings of every model that has them, and a
+  model the server says nothing about is left to its own default — thinking
+  is not switched off for it, and no settings are invented for it. The
+  thinking menu for such a model offers Auto and Off, the only two things
+  that can honestly be offered.
+- With llama.cpp's `llama-server`, the context window shown and used is the
+  one the server runs with, read from its model list, instead of an assumed
+  128k.
+- The first turns after startup could go out carrying none of what the server
+  had already reported about a model's reasoning. A b263 regression: sending
+  turns and discovering the server were split into two backends so a turn
+  never had to wait on its own first look, but the turn-sending one did not
+  take over what the other had found until its own next look, up to 15
+  seconds later. It now takes over immediately, so a "thinking off" you set,
+  or a preset the server named, is already in force from the first message.
+- The setup wizard tells LM Studio apart from other servers by what the
+  server's own listing says, once it has answered, instead of guessing from
+  the URL (`1234`, `lmstudio`) — the guess is still there for the moment
+  before that. Mostly invisible; it matters for an LM Studio reachable
+  through a hostname the guess would have missed, or a server that merely
+  happened to sit on port 1234.
+- Two more scenario tests, checked by breaking what they guard: one drives a
+  turn right after startup and confirms the regression above cannot come
+  back, the other confirms that a model the server lists without saying
+  anything about its reasoning gets no reasoning fields on its turns at all —
+  silence is not "off". Sixteen scenarios now run on Linux, Windows and
+  macOS.
+
 ## b265 — the last of the scenario tests
 
 Nothing changes for you in this release either. It is about stability, and
