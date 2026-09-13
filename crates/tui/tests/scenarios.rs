@@ -27,6 +27,14 @@ fn ready(home: &Home, server: &MockServer) -> Term {
     term
 }
 
+/// As `ready`, with extra config fields merged in on top of the baseline.
+fn ready_with(home: &Home, server: &MockServer, extra: serde_json::Value) -> Term {
+    home.set_up_with(&server.url, extra);
+    let term = Term::start(home, &["-y"], COLS, ROWS);
+    term.wait_for(PROMPT, WAIT);
+    term
+}
+
 #[test]
 fn the_wizard_sets_up_a_custom_server_and_opens_the_app() {
     let server = MockServer::start(Vec::new());
@@ -106,6 +114,56 @@ fn a_session_with_a_conversation_asks_before_quitting() {
     assert!(term.wait_exit(WAIT).is_some(), "\"y\" did not quit");
     term.wait_for("Session Saved", WAIT);
     assert_eq!(home.sessions().len(), 1, "the conversation was not saved");
+}
+
+#[test]
+fn the_first_turn_after_startup_already_knows_the_server_said_reasoning_is_off() {
+    // Startup discovers the server through one backend and sends turns
+    // through another (so the turn does not wait on its own first look); a
+    // b263 regression let the very first turn go out before that discovery
+    // had been handed over, so it carried no reasoning setting at all even
+    // when the server had reported one and the user had turned it off.
+    let server = MockServer::start(vec![Reply::Text("Reasoning is off.".into())]);
+    server.report_reasoning(&["off", "on"], "on");
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "thinking_effort": "off" }));
+
+    term.type_text("are you thinking?");
+    term.send(ENTER);
+    term.wait_for("Reasoning is off.", WAIT);
+
+    let turns = server.turns();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(
+        turns[0].body["reasoning"], "off",
+        "the first turn did not carry what discovery had already found: {}",
+        turns[0].body
+    );
+}
+
+#[test]
+fn a_model_the_server_says_nothing_about_gets_no_reasoning_fields() {
+    // The server can list a model without saying anything about whether it
+    // reasons — unlike a model it explicitly reports cannot. Silence must
+    // not be read as "off": nothing about reasoning belongs on this model's
+    // turns, or a model that never asked for a specific effort would end up
+    // with one invented for it.
+    const LOOKALIKE: &str = "qwen3-reasoning-lookalike";
+    let server = MockServer::start(vec![Reply::Text("Just answering.".into())]);
+    server.add_model_the_server_says_nothing_about(LOOKALIKE);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "model": LOOKALIKE }));
+
+    term.type_text("do you reason?");
+    term.send(ENTER);
+    term.wait_for("Just answering.", WAIT);
+
+    let turns = server.turns();
+    assert_eq!(turns.len(), 1);
+    let body = &turns[0].body;
+    for field in ["reasoning", "reasoning_effort", "enable_thinking", "thinking", "chat_template_kwargs", "chat_template_config"] {
+        assert!(body.get(field).is_none(), "a model the server said nothing about got a {field:?} field: {body}");
+    }
 }
 
 #[test]

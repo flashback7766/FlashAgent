@@ -46,6 +46,12 @@ pub struct MockServer {
     pub url: String,
     requests: Arc<Mutex<Vec<Request>>>,
     replies: Arc<Mutex<VecDeque<Reply>>>,
+    /// Extra entries appended to `/api/v0/models`'s listing, beyond `MODEL`.
+    v0_extra_models: Arc<Mutex<Vec<serde_json::Value>>>,
+    /// Body for `/api/v1/models`, or `None` to answer it 404 (the default —
+    /// most scenarios have no reason to care about LM Studio's v1 listing,
+    /// only its v0 one).
+    v1_models: Arc<Mutex<Option<serde_json::Value>>>,
 }
 
 impl MockServer {
@@ -54,16 +60,18 @@ impl MockServer {
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let replies = Arc::new(Mutex::new(VecDeque::from(script)));
-        let (req2, rep2) = (requests.clone(), replies.clone());
+        let v0_extra_models = Arc::new(Mutex::new(Vec::new()));
+        let v1_models = Arc::new(Mutex::new(None));
+        let (req2, rep2, v0e2, v12) = (requests.clone(), replies.clone(), v0_extra_models.clone(), v1_models.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let (req3, rep3) = (req2.clone(), rep2.clone());
+                let (req3, rep3, v0e3, v13) = (req2.clone(), rep2.clone(), v0e2.clone(), v12.clone());
                 std::thread::spawn(move || {
-                    let _ = serve(stream, &req3, &rep3);
+                    let _ = serve(stream, &req3, &rep3, &v0e3, &v13);
                 });
             }
         });
-        MockServer { url, requests, replies }
+        MockServer { url, requests, replies, v0_extra_models, v1_models }
     }
 
     pub fn requests(&self) -> Vec<Request> {
@@ -78,9 +86,42 @@ impl MockServer {
     pub fn replies_left(&self) -> usize {
         self.replies.lock().unwrap().len()
     }
+
+    /// Make `/api/v1/models` answer with `MODEL` reporting these reasoning
+    /// presets, in LM Studio's native `capabilities.reasoning` shape — for
+    /// scenarios about a model whose reasoning settings the server actually
+    /// lists (as opposed to the plain `/api/v0/models` entry `start` already
+    /// serves for it, which names none).
+    pub fn report_reasoning(&self, presets: &[&str], default: &str) {
+        *self.v1_models.lock().unwrap() = Some(serde_json::json!({ "models": [ {
+            "key": MODEL,
+            "capabilities": {
+                "trained_for_tool_use": true,
+                "reasoning": { "allowed_options": presets, "default": default }
+            },
+            "loaded_instances": [ { "config": { "context_length": 32768 } } ]
+        } ] }));
+    }
+
+    /// Add a model to `/api/v0/models`'s listing that carries no capability
+    /// information at all — the server saying nothing about whether it can
+    /// reason, as opposed to saying it cannot. Turns run against it are still
+    /// answered from the same script as `MODEL`'s.
+    pub fn add_model_the_server_says_nothing_about(&self, id: &str) {
+        self.v0_extra_models.lock().unwrap().push(serde_json::json!({
+            "id": id, "object": "model", "type": "llm", "state": "loaded",
+            "max_context_length": 32768, "loaded_context_length": 32768
+        }));
+    }
 }
 
-fn serve(stream: TcpStream, requests: &Mutex<Vec<Request>>, replies: &Mutex<VecDeque<Reply>>) -> std::io::Result<()> {
+fn serve(
+    stream: TcpStream,
+    requests: &Mutex<Vec<Request>>,
+    replies: &Mutex<VecDeque<Reply>>,
+    v0_extra_models: &Mutex<Vec<serde_json::Value>>,
+    v1_models: &Mutex<Option<serde_json::Value>>,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
@@ -107,11 +148,18 @@ fn serve(stream: TcpStream, requests: &Mutex<Vec<Request>>, replies: &Mutex<VecD
 
     let mut out = stream;
     if method == "GET" {
-        return if path.ends_with("/api/v0/models") {
-            json(&mut out, &serde_json::json!({ "data": [ {
+        return if path.ends_with("/api/v1/models") {
+            match v1_models.lock().unwrap().clone() {
+                Some(body) => json(&mut out, &body),
+                None => out.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"),
+            }
+        } else if path.ends_with("/api/v0/models") {
+            let mut data = vec![serde_json::json!({
                 "id": MODEL, "object": "model", "type": "llm", "state": "loaded",
                 "max_context_length": 32768, "loaded_context_length": 32768
-            } ] }))
+            })];
+            data.extend(v0_extra_models.lock().unwrap().iter().cloned());
+            json(&mut out, &serde_json::json!({ "data": data }))
         } else if path.ends_with("/v1/models") && !path.contains("/api/") {
             json(&mut out, &serde_json::json!({ "object": "list", "data": [ { "id": MODEL, "object": "model" } ] }))
         } else {
