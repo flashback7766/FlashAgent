@@ -14,7 +14,7 @@ when unit tests pass.
 - [x] **V2. MCP trust from config only** — only `read_only` / `read_only_tools` in `.mcp.json` skip approval; tool names and server `readOnlyHint` no longer do.
 - [x] **V3. `/goal` budgets and report** — `--steps`, `--time` and `--tokens` on the command, burn-down in the status line, and a factual end-of-run card built from loop events (files touched, failed commands, why it stopped). Snapshots and milestone commits move to v1.x.
 - [x] **V4. TUI structure** — `main.rs` went from 7,236 lines to 2,293 and its event loop from 3,349 to 982; keys, submission, turn completion, rendering, sessions and menus are their own modules. No behaviour changes; checked with the full test suite and a live run.
-- [ ] **V5. Scenario tests** — scripted mock-LLM server + headless TUI driver covering the core paths (tool turn, approval, cancel, compact, resume, MCP, goal) in CI.
+- [~] **V5. Scenario tests** — scripted mock-LLM server + headless TUI driver covering the core paths (tool turn, approval, cancel, compact, resume, MCP, goal) in CI. *Done (b263): the real binary in a pseudo-terminal (`portable-pty` + `vt100`) against a scripted server, in `crates/tui/tests/scenarios.rs` — setup wizard, quitting an empty and a non-empty session, a tool turn, no model-list polling while the model answers; each checked by breaking what it guards. Open: approval, cancel, compact, resume, MCP, goal.*
 - [x] **V6. Tool-calling benchmark** — `flashagent --tool-test [--all-models]`, eight scenarios, results in [docs/tool-calling.md](docs/tool-calling.md) and the README; the first run checks the chosen model.
 - [ ] **V7. Fewer heuristics** — prefer capabilities the server reports (reasoning presets, context, tool support) over name-based guessing.
 

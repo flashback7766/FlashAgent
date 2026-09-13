@@ -27,3 +27,5 @@ arboard = "3.6.1"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
+portable-pty = "0.9"
+vt100 = "0.16"
