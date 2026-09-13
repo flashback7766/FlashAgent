@@ -30,6 +30,7 @@ impl App {
                              • /compact [focus]       — summarize older turns to free context\n\
                              • /clear                 — clear chat scrollback\n\
                              • /regenerate (or Ctrl+R) — regenerate last model response from scratch\n\
+                             • /rewind [n]            — take turns back: the files FlashAgent changed and the conversation return to before turn n\n\
                              • /diff · /commit <msg>  — git diff --stat / commit staged changes\n\
                              • /export [md|html|jsonl] — write the conversation to a file\n\
                              • /editor (or Ctrl+E)    — compose the prompt in an external editor\n\
@@ -127,6 +128,9 @@ impl App {
                             autonomous_directive
                         };
                         self.history.push(ChatMessage::user(content));
+                        if let (Some(store), Some(msg)) = (cx.perm.state().snapshots(), self.history.last()) {
+                            store.begin_turn(&msg.content);
+                        }
                         update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                         cx.cancel.store(false, Ordering::Relaxed);
                         self.suggested_prompt = None;
@@ -245,6 +249,11 @@ impl App {
                             self.effort_memory.save();
                             cx.source.set_effort_bias(steps);
                             self.history.truncate(user_idx + 1);
+                            // Same message, same turn: taking it back must reach
+                            // before the first attempt, even after --resume.
+                            if let Some(store) = cx.perm.state().snapshots() {
+                                store.continue_turn(&self.history[user_idx].content);
+                            }
                             self.chat.truncate_to_last_user();
                             self.renderer.scroll_to_bottom();
                             self.renderer.printed_settled = 0;
@@ -787,6 +796,103 @@ impl App {
                         return Flow::Continue;
                     }
 
+                    if trimmed == "/rewind" || trimmed.starts_with("/rewind ") {
+                        let arg = trimmed.strip_prefix("/rewind").map(|s| s.trim().to_string()).unwrap_or_default();
+                        self.input.clear();
+                        self.autocomplete_idx = 0;
+                        let Some(store) = cx.perm.state().snapshots() else {
+                            notice!("[Rewind is not available in this session]");
+                            return Flow::Continue;
+                        };
+                        let prompts: Vec<String> = self
+                            .history
+                            .iter()
+                            .filter(|m| m.role == flashagent_llm::Role::User)
+                            .map(|m| m.content.clone())
+                            .collect();
+                        let prompt_refs: Vec<&str> = prompts.iter().map(String::as_str).collect();
+                        let turns = store.rewindable(&prompt_refs);
+                        if turns.is_empty() {
+                            notice!("[Nothing to rewind to yet]");
+                            return Flow::Continue;
+                        }
+                        let chosen = arg.parse::<usize>().ok().filter(|n| (1..=turns.len()).contains(n));
+                        let Some(n) = chosen else {
+                            if !arg.is_empty() {
+                                notice!(&format!("[No turn {arg} to rewind to: pick 1 to {}]", turns.len()));
+                            }
+                            let mut text = String::from(
+                                "Turns you can go back to. The files FlashAgent changed and the conversation return to how they were before the turn:\n",
+                            );
+                            for (i, turn) in turns.iter().enumerate() {
+                                let first_line = extract_user_prompt(&prompts[turn.user_index]).lines().next().unwrap_or("").to_string();
+                                let files = match turn.files {
+                                    0 => "no file changes".to_string(),
+                                    1 => "1 file".to_string(),
+                                    k => format!("{k} files"),
+                                };
+                                text.push_str(&format!("  {}. {} · {files}\n", i + 1, flashagent_tui::truncate_middle(&first_line, 60)));
+                            }
+                            text.push_str("Type /rewind <number>. Changes made by shell commands are not undone.");
+                            self.chat.push_system(&text);
+                            self.renderer.request_reprint();
+                            return Flow::Continue;
+                        };
+                        if self.running {
+                            notice!("[Wait for the turn to finish before rewinding]");
+                            return Flow::Continue;
+                        }
+
+                        let target = turns[n - 1].clone();
+                        let report = store.rewind(target.turn);
+                        let taken_back = prompts.len() - target.user_index;
+                        let cut = self
+                            .history
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, m)| m.role == flashagent_llm::Role::User)
+                            .nth(target.user_index)
+                            .map(|(i, _)| i);
+                        if let Some(cut) = cut {
+                            self.history.truncate(cut);
+                        }
+                        self.chat.truncate_before_nth_last_user(taken_back);
+                        self.renderer.scroll_to_bottom();
+                        self.renderer.printed_settled = 0;
+                        self.renderer.prev_expansion = None;
+                        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                        self.suggested_prompt = None;
+                        self.latest_suggestion = None;
+                        self.custom_placeholder = None;
+
+                        let names = |paths: &[std::path::PathBuf]| {
+                            paths.iter().map(|p| store.display_path(p)).collect::<Vec<_>>().join(", ")
+                        };
+                        let mut summary = format!("Rewound to before turn {n}");
+                        if !report.restored.is_empty() {
+                            summary.push_str(&format!(" · put back {}", names(&report.restored)));
+                        }
+                        if !report.removed.is_empty() {
+                            summary.push_str(&format!(" · removed {}", names(&report.removed)));
+                        }
+                        if report.restored.is_empty() && report.removed.is_empty() && report.failed.is_empty() {
+                            summary.push_str(" · no files to put back");
+                        }
+                        summary.push_str(" · its prompt is back in the input · changes made by shell commands are not undone");
+                        self.chat.push_system(&summary);
+                        for (path, why) in &report.failed {
+                            self.chat.push_line(LineKind::ToolError, format!("Not put back: {} — {why}", store.display_path(path)));
+                        }
+                        // The words, not the scaffolding a goal or the first
+                        // message's memory block wrapped them in.
+                        self.input = extract_user_prompt(&prompts[target.user_index]).to_string();
+                        if self.config.auto_save_sessions {
+                            save_session_file(cx.session_id, &self.current_model, cx.cwd_display, &self.history);
+                        }
+                        self.renderer.request_reprint();
+                        return Flow::Continue;
+                    }
+
                     if trimmed == "/commit" || trimmed.starts_with("/commit ") {
                         let msg_arg = trimmed.strip_prefix("/commit ").map(|s| s.trim().to_string()).unwrap_or_default();
                         self.input.clear();
@@ -887,6 +993,9 @@ impl App {
                         self.chat.push_user(&format!("/skill:{sname}"));
                         let prompt = format!("Execute skill: {sname}\n\nSkill Instructions:\n{skill_content}");
                         self.history.push(ChatMessage::user(prompt));
+                        if let (Some(store), Some(msg)) = (cx.perm.state().snapshots(), self.history.last()) {
+                            store.begin_turn(&msg.content);
+                        }
                         update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                         cx.cancel.store(false, Ordering::Relaxed);
                         self.suggested_prompt = None;
@@ -976,6 +1085,9 @@ impl App {
                         self.attachments.clear();
                     }
                     self.history.push(user_msg);
+                    if let (Some(store), Some(msg)) = (cx.perm.state().snapshots(), self.history.last()) {
+                        store.begin_turn(&msg.content);
+                    }
                     update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                     cx.cancel.store(false, Ordering::Relaxed);
                     self.suggested_prompt = None;

@@ -1,14 +1,15 @@
 # FlashAgent — Roadmap (Dateless Milestones)
 
 > v1 is the terminal app. The native UI (Track B) is postponed to v2.
+> **v1.0 ships when Track A and Track C are complete.** Track V was the groundwork that had to land first.
 > Milestone status: `[ ]` / `[~]` / `[x]`. Updated upon completion, without arbitrary calendar deadlines.
 
-## Road to v1.0 (current focus)
+## Track V — Ready for v1 (done in b266)
 
-The product for v1 is the terminal app (`flashagent`). Work lands in this
-order; nothing else starts until these are done. A milestone is closed only
-when its user path has been run end to end (scenario test or live run), not
-when unit tests pass.
+The groundwork the terminal app (`flashagent`) needed before the rest of
+Tracks A and C: it landed in this order, before any other work. A milestone
+is closed only when its user path has been run end to end (scenario test or
+live run), not when unit tests pass — the same rule now applies to A and C.
 
 - [x] **V1. One command** — binary is `flashagent` everywhere; `flashagent-tui` alias and the empty `app` crate removed.
 - [x] **V2. MCP trust from config only** — only `read_only` / `read_only_tools` in `.mcp.json` skip approval; tool names and server `readOnlyHint` no longer do.
@@ -30,7 +31,7 @@ when unit tests pass.
 - [x] **A7.1. TUI Polish** — Print-and-forget renderer (settled lines flushed to scrollback once), ctrl+o thinking toggle, spinner/status bar, Esc interrupt, interleaved reasoning/content delta fix (parallel streaming), settled_boundary = min(). 8 tui tests, 81 workspace tests.
 - [x] **A8. Subagents** — Dynamic roles, concurrency limits, parent review gate, inter-subagent messaging channels, strict permission inheritance.
 - [x] **A9. MCP** — Client, manager, marketplace registry. Native stdio JSON-RPC 2.0 transport, project & global configuration manager, curated verifiable marketplace, ApprovalGate enforcement for non-read-only calls, TUI slash commands (/mcp, /mcp list, /mcp market, /mcp test, /mcp add, /mcp reload). 46 tools tests, 131 workspace tests.
-- [~] **A10. Autonomous Goal Mode** — `/goal`, adaptive execution layers, task boundaries (steps/tokens/time/blacklist), filesystem snapshots + commits, live plan + final report. *Done: `/goal` entry, Accept All + max effort, ask_user and memory writes disabled, mode/effort restore, step/time/token budgets with a live burn-down, factual end-of-run report (V3). Open: blacklist, filesystem snapshots, milestone commits, live plan document.*
+- [~] **A10. Autonomous Goal Mode** — `/goal`, adaptive execution layers, task boundaries (steps/tokens/time/blacklist), filesystem snapshots + commits, live plan + final report. *Done: `/goal` entry, Accept All + max effort, ask_user and memory writes disabled, mode/effort restore, step/time/token budgets with a live burn-down, factual end-of-run report (V3). Done (b267): file snapshots before every write, `/rewind` to take turns back. Open: blacklist, milestone commits, live plan document.*
 - [ ] **A11. Extended Backends** — Ollama, Anthropic, Mistral, DeepSeek, OpenRouter, configuration presets.
 - [ ] **A12. Migrator** — Import data and settings from legacy ~/.flashgent (sessions, config).
 
@@ -59,7 +60,7 @@ when unit tests pass.
   - **Argument Aliasing**: Tolerant tool parameter naming (`filePath`/`path`, `oldString`/`TargetContent`, `cmd`/`command`) in `flashagent-tools`.
   - **AST Project Outline**: Background symbol indexing (classes, functions, structs, traits) in native Rust (`ignore` + regex) with compact project outline injection into system prompt.
   - **Context Steering**: Mid-flight user directive injection channel into `AgentLoop` during streaming/execution without resetting context. *Done: Enter while a turn runs.*
-  - **FileSnapshots & Workspace Rewind**: Persistent `file_snapshots` table in SQLite (`content_before`) for step-by-step filesystem rewinds and history truncation.
+  - **FileSnapshots & Workspace Rewind**: Persistent `file_snapshots` table in SQLite (`content_before`) for step-by-step filesystem rewinds and history truncation. *Done (b267): `/rewind` — copies in `~/.flashagent/snapshots/<session>/` instead of an SQLite table; files and conversation go back to before a chosen turn; shell-made changes and files over 8 MB are reported, not undone.*
   - **In-place Continuation (`continueResponse`)**: Seamless completion of truncated responses within the same assistant message card without message duplication.
   - **Deep Prompt Injection Hardening (`untrusted`)**: Per-session cryptographic nonce + template control token neutralisation + signature-based prompt hijacking detection.
   - **Batch Multi-File Editing**: Extending `edit_file` with batch file array support (`files: [{ path, edits }]`).

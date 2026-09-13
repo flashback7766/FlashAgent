@@ -315,12 +315,32 @@ pub struct PermissionState {
     rules: Mutex<RuleSet>,
     gate: Arc<dyn ApprovalGate>,
     read_only_hint: Mutex<Option<ReadOnlyHint>>,
+    /// Where files are kept before a write, so a turn can be taken back.
+    /// Here rather than on one executor: subagents share this state, and
+    /// their writes must be taken back too.
+    snapshots: Mutex<Option<Arc<crate::snapshots::SnapshotStore>>>,
 }
 
 impl PermissionState {
     /// New state in `mode` with `gate` as the approval card sink.
     pub fn new(mode: PermissionMode, gate: Arc<dyn ApprovalGate>) -> Self {
-        Self { mode: Mutex::new(mode), rules: Mutex::new(RuleSet::default()), gate, read_only_hint: Mutex::new(None) }
+        Self {
+            mode: Mutex::new(mode),
+            rules: Mutex::new(RuleSet::default()),
+            gate,
+            read_only_hint: Mutex::new(None),
+            snapshots: Mutex::new(None),
+        }
+    }
+
+    /// Keep files in `store` before every write that is allowed from now on.
+    pub fn set_snapshots(&self, store: Arc<crate::snapshots::SnapshotStore>) {
+        *self.snapshots.lock().expect("snapshots lock") = Some(store);
+    }
+
+    /// The snapshot store, if the session has one.
+    pub fn snapshots(&self) -> Option<Arc<crate::snapshots::SnapshotStore>> {
+        self.snapshots.lock().expect("snapshots lock").clone()
     }
 
     /// Install the read-only classifier for external tools.
@@ -472,6 +492,16 @@ impl PermissionedTools {
     pub fn state(&self) -> &Arc<PermissionState> {
         &self.state
     }
+
+    /// Run a call that has been allowed, keeping first what it may overwrite.
+    /// Only here, after the verdict: a refused call changes nothing, so it
+    /// has nothing to take back.
+    async fn run_allowed(&self, call: &ToolCall) -> ToolOutput {
+        if let Some(store) = self.state.snapshots() {
+            store.before_write(&call.name, &call.args_json);
+        }
+        self.inner.execute(call).await
+    }
 }
 
 #[async_trait]
@@ -483,7 +513,7 @@ impl ToolExec for PermissionedTools {
     async fn execute(&self, call: &ToolCall) -> ToolOutput {
         let diff = self.preview.as_deref().and_then(|p| p.write_preview(call));
         match self.state.decide(call, diff) {
-            Verdict::Allow => self.inner.execute(call).await,
+            Verdict::Allow => self.run_allowed(call).await,
             Verdict::Deny(reason) => ToolOutput {
                 content: format!("denied by permissions: {reason}"),
                 is_error: true,
@@ -497,7 +527,7 @@ impl ToolExec for PermissionedTools {
                     diff,
                 };
                 match self.state.gate.approve(&req).await {
-                    Decision::Allow => self.inner.execute(call).await,
+                    Decision::Allow => self.run_allowed(call).await,
                     Decision::Deny => ToolOutput {
                         // A small model read the old "denied by user" as a
                         // privilege error and started asking for sudo. Say
