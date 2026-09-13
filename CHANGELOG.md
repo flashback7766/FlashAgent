@@ -1,5 +1,23 @@
 # Changelog
 
+## b268 — the argument names other agents taught your model
+
+One thing you might notice: fewer failed tool calls from models that learned
+another agent's way of calling tools.
+
+- A model that writes a call the way another agent wants it — `filePath` or
+  `file_path` for `path`, `oldString` or `TargetContent` for `old_string`,
+  `cmd` for `command`, one edit given on its own instead of in a list — no
+  longer gets "bad arguments" back and gives up or retries. The names are
+  converted before anything reads the call, so the command on the approval
+  card, the one the permission rules judge and the one that runs are still
+  the same command.
+- A call that already uses FlashAgent's own name for something keeps it, even
+  if it also carries the other name. Tools from MCP servers keep the names
+  their servers gave them.
+- Seven unit tests and a scenario test cover it, each checked by breaking what
+  it guards: no renaming at all, and a wrong name overwriting the right one.
+
 ## b267 — take a turn back
 
 One new thing you can use: `/rewind`.
