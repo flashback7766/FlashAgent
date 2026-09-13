@@ -498,6 +498,59 @@ fn a_goal_stops_at_its_step_budget_and_says_it_is_not_finished() {
 }
 
 #[test]
+fn rewind_takes_the_files_and_the_conversation_back_to_before_a_turn() {
+    let edit = |old: &str, new: &str| Reply::ToolCall {
+        name: "edit_file".into(),
+        arguments: serde_json::json!({
+            "header": "Change the notes",
+            "path": "notes.txt",
+            "edits": [ { "old_string": old, "new_string": new } ]
+        }),
+    };
+    let server = MockServer::start(vec![
+        edit("original", "first"),
+        Reply::Text("Changed it once.".into()),
+        edit("first", "second"),
+        Reply::ToolCall {
+            name: "write_file".into(),
+            arguments: serde_json::json!({ "header": "Add a file", "path": "added.txt", "content": "new\n" }),
+        },
+        Reply::Text("Changed it twice.".into()),
+        Reply::Text("Asked again.".into()),
+    ]);
+    let home = Home::new();
+    let notes = home.work().join("notes.txt");
+    let added = home.work().join("added.txt");
+    std::fs::write(&notes, "original\n").unwrap();
+    let term = ready(&home, &server);
+
+    ask(&term, "change the notes once", "Changed it once.");
+    ask(&term, "change them again", "Changed it twice.");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "second\n");
+    assert!(added.exists());
+
+    term.type_text("/rewind");
+    term.send(ENTER);
+    term.wait_for("Type /rewind <number>", WAIT);
+
+    term.type_text("/rewind 2");
+    term.send(ENTER);
+    term.wait_for("Rewound to before turn 2", WAIT);
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "first\n", "the edit of the taken-back turn was not undone");
+    assert!(!added.exists(), "a file the taken-back turn created is still there");
+
+    // Its prompt is back in the input: sending it asks again, and the model
+    // is not sent the turn that was taken back.
+    term.send(ENTER);
+    term.wait_for("Asked again.", WAIT);
+    let turns = server.turns();
+    let last = sent(turns.last().unwrap());
+    assert!(last.contains("change them again"), "the prompt put back in the input is not what was sent: {last}");
+    assert!(last.contains("Changed it once."), "the turn before the rewind point was lost: {last}");
+    assert!(!last.contains("Changed it twice."), "the taken-back answer was still sent to the model: {last}");
+}
+
+#[test]
 fn a_saved_session_comes_back_with_resume() {
     let server = MockServer::start(vec![
         Reply::Text("The magic number is 7.".into()),

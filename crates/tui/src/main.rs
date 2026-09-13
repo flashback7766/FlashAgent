@@ -400,6 +400,7 @@ async fn main() -> Result<()> {
         initial_effort,
         available_models,
         resume_session_id,
+        cwd: cwd.clone(),
         first_run_verdict,
     })
     .await;
@@ -541,6 +542,8 @@ struct AppContext {
     context_display: Option<String>,
     context_capacity: usize,
     cwd_display: String,
+    /// The project directory, where the file tools write.
+    cwd: std::path::PathBuf,
     initial_effort: String,
     available_models: Vec<String>,
     resume_session_id: Option<String>,
@@ -607,6 +610,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         initial_effort,
         available_models,
         resume_session_id,
+        cwd,
         first_run_verdict,
     } = ctx;
     let cancel = Arc::new(AtomicBool::new(false));
@@ -728,6 +732,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             .unwrap_or(0);
         format!("session_{ts}")
     });
+    // How files were before each turn changed them, kept beside the sessions
+    // so /rewind still works after --resume.
+    let snapshot_dir = flashagent_home_dir()
+        .map(|home| home.join("snapshots").join(&session_id))
+        .unwrap_or_else(|| std::env::temp_dir().join("flashagent-snapshots").join(&session_id));
+    perm.state().set_snapshots(Arc::new(flashagent_core::SnapshotStore::open(snapshot_dir, cwd)));
 
     // Things that turn up on their own — an update installing, the context
     // being compacted — go on the line under the input. The composer is where

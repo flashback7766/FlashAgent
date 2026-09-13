@@ -190,6 +190,11 @@ impl App {
                         self.effort_memory.save();
                         cx.source.set_effort_bias(steps);
                         self.history.truncate(user_idx + 1);
+                        // Same message, same turn: taking it back must reach
+                        // before the first attempt, even after --resume.
+                        if let Some(store) = cx.perm.state().snapshots() {
+                            store.continue_turn(&self.history[user_idx].content);
+                        }
                         self.chat.truncate_to_last_user();
                         self.renderer.scroll_to_bottom();
                         self.renderer.printed_settled = 0;

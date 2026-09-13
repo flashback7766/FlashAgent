@@ -394,6 +394,34 @@ impl ChatView {
         }
     }
 
+    /// Remove the `n`th user message from the end and everything after it,
+    /// which is what taking those turns back leaves of the transcript.
+    /// Changes nothing and returns false when there are fewer than `n`.
+    pub fn truncate_before_nth_last_user(&mut self, n: usize) -> bool {
+        if n == 0 {
+            return false;
+        }
+        let Some(pos) = self
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.kind == LineKind::User)
+            .rev()
+            .nth(n - 1)
+            .map(|(i, _)| i)
+        else {
+            return false;
+        };
+        self.lines.truncate(pos);
+        self.streaming = None;
+        self.streaming_reasoning = None;
+        self.reasoning_start = None;
+        self.open_tool = None;
+        *self.settled_cache.lock() = SettledRenderCache::default();
+        self.needs_reprint = true;
+        true
+    }
+
     /// Update an existing system message matching `prefix`, or push a new one if not found.
     pub fn update_or_push_system(&mut self, prefix: &str, text: &str) {
         self.settled_cache.lock().boundary = 0;

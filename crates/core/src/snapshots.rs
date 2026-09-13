@@ -1,0 +1,436 @@
+//! What files looked like before the agent changed them, turn by turn, so a
+//! turn can be taken back: the files it wrote return to how they were, and
+//! the conversation returns to before it.
+//!
+//! Only the file tools pass through here. A shell command that changes files
+//! does not, and taking a turn back says so rather than pretend otherwise.
+
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
+
+use serde::{Deserialize, Serialize};
+
+/// Files bigger than this are not copied; taking the turn back reports them.
+pub const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The tools that write project files. Memory tools write under
+/// `~/.flashagent`, which is not the project, and are left alone.
+const WRITING_TOOLS: &[&str] = &["write_file", "edit_file", "patch_file"];
+
+/// How a file was before a turn first touched it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Before {
+    /// It did not exist: taking the turn back removes it.
+    Missing,
+    /// Its bytes, in this blob file under the store's directory.
+    Blob(String),
+    /// Too big to keep a copy of.
+    TooLarge,
+}
+
+/// One file a turn changed, and how it was before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileBefore {
+    pub path: PathBuf,
+    pub before: Before,
+}
+
+/// Everything one turn changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnSnapshot {
+    pub seq: u64,
+    /// Fingerprint of the user message that started the turn. It is how the
+    /// turn is found again in a history that compaction shortens and
+    /// steering adds messages to.
+    pub prompt_hash: u64,
+    pub files: Vec<FileBefore>,
+}
+
+/// A turn that can still be taken back: its user message is in the history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rewindable {
+    /// Position of its user message among the history's user messages.
+    pub user_index: usize,
+    /// Position of its snapshot in the store.
+    pub turn: usize,
+    /// How many files it changed.
+    pub files: usize,
+}
+
+/// What taking turns back did to the files.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RewindReport {
+    pub restored: Vec<PathBuf>,
+    pub removed: Vec<PathBuf>,
+    /// Files that could not be put back, and why.
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Manifest {
+    turns: Vec<TurnSnapshot>,
+    next_blob: u64,
+}
+
+struct State {
+    manifest: Manifest,
+    /// The turn writes are recorded against; none until one begins.
+    current: Option<usize>,
+}
+
+/// Snapshots for one session, kept in `dir` so they survive `--resume`.
+pub struct SnapshotStore {
+    dir: PathBuf,
+    cwd: PathBuf,
+    state: Mutex<State>,
+}
+
+/// A fingerprint that stays the same across runs and builds (FNV-1a), so a
+/// resumed session finds its turns again.
+pub fn prompt_hash(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+impl SnapshotStore {
+    /// The store in `dir` for a project in `cwd`, with whatever an earlier run
+    /// of this session left there.
+    pub fn open(dir: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        let manifest = std::fs::read_to_string(dir.join("manifest.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        Self { dir, cwd: cwd.into(), state: Mutex::new(State { manifest, current: None }) }
+    }
+
+    /// A new turn, started by the user message `prompt`.
+    pub fn begin_turn(&self, prompt: &str) {
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let seq = st.manifest.turns.last().map_or(1, |t| t.seq + 1);
+        st.manifest.turns.push(TurnSnapshot { seq, prompt_hash: prompt_hash(prompt), files: Vec::new() });
+        st.current = Some(st.manifest.turns.len() - 1);
+        self.save(&st.manifest);
+    }
+
+    /// The same user message answered again (regenerate): keep recording
+    /// against its turn, so taking it back reaches before the first attempt.
+    pub fn continue_turn(&self, prompt: &str) {
+        let hash = prompt_hash(prompt);
+        let found = {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let found = st.manifest.turns.iter().rposition(|t| t.prompt_hash == hash);
+            if found.is_some() {
+                st.current = found;
+            }
+            found
+        };
+        if found.is_none() {
+            self.begin_turn(prompt);
+        }
+    }
+
+    /// Called before a tool runs: if it writes a file this turn has not
+    /// touched yet, keep how that file is now.
+    pub fn before_write(&self, tool: &str, args_json: &str) {
+        if !WRITING_TOOLS.contains(&tool) {
+            return;
+        }
+        let Some(raw) = flashagent_llm::effective_args(args_json, tool)
+            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
+        else {
+            return;
+        };
+        let path = self.resolve(&raw);
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(current) = st.current else {
+            return;
+        };
+        if st.manifest.turns[current].files.iter().any(|f| f.path == path) {
+            return;
+        }
+        let before = match std::fs::metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Before::Missing,
+            // A file that cannot even be looked at is not recorded: marking it
+            // missing would delete it on the way back.
+            Err(_) => return,
+            Ok(meta) if !meta.is_file() => return,
+            Ok(meta) if meta.len() > MAX_SNAPSHOT_BYTES => Before::TooLarge,
+            Ok(_) => {
+                let Ok(bytes) = std::fs::read(&path) else {
+                    return;
+                };
+                let name = format!("{}.bin", st.manifest.next_blob);
+                let blobs = self.dir.join("blobs");
+                if std::fs::create_dir_all(&blobs).is_err() || std::fs::write(blobs.join(&name), bytes).is_err() {
+                    return;
+                }
+                st.manifest.next_blob += 1;
+                Before::Blob(name)
+            }
+        };
+        st.manifest.turns[current].files.push(FileBefore { path, before });
+        self.save(&st.manifest);
+    }
+
+    /// The turns that can be taken back, oldest first, given the user
+    /// messages of the history as it is now. A message with no turn (steering
+    /// typed while a turn ran) is skipped, and so is a turn whose message the
+    /// history no longer has (compacted into a summary).
+    pub fn rewindable(&self, user_messages: &[&str]) -> Vec<Rewindable> {
+        let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let turns = &st.manifest.turns;
+        let mut found = Vec::new();
+        let mut limit = turns.len();
+        for (index, message) in user_messages.iter().enumerate().rev() {
+            let hash = prompt_hash(message);
+            if let Some(turn) = turns[..limit].iter().rposition(|t| t.prompt_hash == hash) {
+                found.push(Rewindable { user_index: index, turn, files: turns[turn].files.len() });
+                limit = turn;
+            }
+        }
+        found.reverse();
+        found
+    }
+
+    /// Take back turn `turn` and every turn after it: each file they changed
+    /// returns to how it was before the first of them touched it.
+    pub fn rewind(&self, turn: usize) -> RewindReport {
+        let mut report = RewindReport::default();
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if turn >= st.manifest.turns.len() {
+            return report;
+        }
+        let taken_back: Vec<TurnSnapshot> = st.manifest.turns.drain(turn..).collect();
+        let mut seen = HashSet::new();
+        // Oldest first, so the first record of a path is how it was before
+        // any of these turns.
+        for file in taken_back.iter().flat_map(|t| &t.files) {
+            if !seen.insert(file.path.clone()) {
+                continue;
+            }
+            match &file.before {
+                Before::Missing => match std::fs::remove_file(&file.path) {
+                    Ok(()) => report.removed.push(file.path.clone()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => report.failed.push((file.path.clone(), e.to_string())),
+                },
+                Before::Blob(name) => match std::fs::read(self.dir.join("blobs").join(name)) {
+                    Ok(bytes) => {
+                        if let Some(parent) = file.path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        match std::fs::write(&file.path, bytes) {
+                            Ok(()) => report.restored.push(file.path.clone()),
+                            Err(e) => report.failed.push((file.path.clone(), e.to_string())),
+                        }
+                    }
+                    Err(e) => report.failed.push((file.path.clone(), format!("its saved copy is gone: {e}"))),
+                },
+                Before::TooLarge => report.failed.push((
+                    file.path.clone(),
+                    format!("larger than {} MB, so no copy was kept", MAX_SNAPSHOT_BYTES / (1024 * 1024)),
+                )),
+            }
+        }
+        for file in taken_back.iter().flat_map(|t| &t.files) {
+            if let Before::Blob(name) = &file.before {
+                let _ = std::fs::remove_file(self.dir.join("blobs").join(name));
+            }
+        }
+        st.current = None;
+        self.save(&st.manifest);
+        report
+    }
+
+    /// `path` as the user thinks of it: relative to the project when inside it.
+    pub fn display_path(&self, path: &Path) -> String {
+        path.strip_prefix(&self.cwd).unwrap_or(path).display().to_string()
+    }
+
+    fn resolve(&self, raw: &str) -> PathBuf {
+        let joined = if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { self.cwd.join(raw) };
+        // Lexically, so `./a.txt` and `a.txt` are one file even before it exists.
+        let mut out = PathBuf::new();
+        for part in joined.components() {
+            match part {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    out.pop();
+                }
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+
+    fn save(&self, manifest: &Manifest) {
+        if std::fs::create_dir_all(&self.dir).is_ok() {
+            if let Ok(text) = serde_json::to_string(manifest) {
+                let _ = std::fs::write(self.dir.join("manifest.json"), text);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, tempfile::TempDir, SnapshotStore) {
+        let project = tempfile::tempdir().unwrap();
+        let snaps = tempfile::tempdir().unwrap();
+        let s = SnapshotStore::open(snaps.path(), project.path());
+        (project, snaps, s)
+    }
+
+    fn args(path: &str) -> String {
+        serde_json::json!({ "path": path }).to_string()
+    }
+
+    #[test]
+    fn taking_turns_back_restores_edited_files_and_removes_created_ones() {
+        let (project, _snaps, s) = store();
+        let a = project.path().join("a.txt");
+        std::fs::write(&a, "original").unwrap();
+
+        s.begin_turn("first prompt");
+        s.before_write("edit_file", &args("a.txt"));
+        std::fs::write(&a, "first").unwrap();
+
+        s.begin_turn("second prompt");
+        s.before_write("edit_file", &args("./a.txt"));
+        std::fs::write(&a, "second").unwrap();
+        s.before_write("write_file", &args("sub/new.txt"));
+        std::fs::create_dir_all(project.path().join("sub")).unwrap();
+        std::fs::write(project.path().join("sub/new.txt"), "new").unwrap();
+
+        let report = s.rewind(1);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "first");
+        assert!(!project.path().join("sub/new.txt").exists(), "a file the turn created is gone");
+        assert_eq!(report.restored, vec![a.clone()]);
+        assert_eq!(report.removed, vec![project.path().join("sub/new.txt")]);
+        assert!(report.failed.is_empty());
+
+        s.rewind(0);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "original");
+    }
+
+    #[test]
+    fn taking_back_several_turns_at_once_reaches_before_the_first_of_them() {
+        let (project, _snaps, s) = store();
+        let a = project.path().join("a.txt");
+        std::fs::write(&a, "original").unwrap();
+        for (prompt, text) in [("one", "1"), ("two", "2"), ("three", "3")] {
+            s.begin_turn(prompt);
+            s.before_write("write_file", &args("a.txt"));
+            std::fs::write(&a, text).unwrap();
+        }
+        s.rewind(0);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "original");
+    }
+
+    #[test]
+    fn only_how_a_file_was_before_the_turn_is_kept() {
+        let (project, _snaps, s) = store();
+        let a = project.path().join("a.txt");
+        std::fs::write(&a, "original").unwrap();
+        s.begin_turn("p");
+        s.before_write("edit_file", &args("a.txt"));
+        std::fs::write(&a, "halfway").unwrap();
+        s.before_write("edit_file", &args("a.txt"));
+        std::fs::write(&a, "done").unwrap();
+        s.rewind(0);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "original", "not the state between two edits");
+    }
+
+    #[test]
+    fn a_regenerated_answer_is_taken_back_to_before_the_first_attempt() {
+        let (project, snaps, s) = store();
+        let a = project.path().join("a.txt");
+        std::fs::write(&a, "original").unwrap();
+        s.begin_turn("fix it");
+        s.before_write("write_file", &args("a.txt"));
+        std::fs::write(&a, "attempt 1").unwrap();
+        // A resumed session regenerating the same message.
+        let resumed = SnapshotStore::open(snaps.path(), project.path());
+        resumed.continue_turn("fix it");
+        resumed.before_write("write_file", &args("a.txt"));
+        std::fs::write(&a, "attempt 2").unwrap();
+        let turns = resumed.rewindable(&["fix it"]);
+        assert_eq!(turns.len(), 1);
+        resumed.rewind(turns[0].turn);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "original");
+    }
+
+    #[test]
+    fn turns_are_found_again_after_compaction_and_steering() {
+        let (_project, _snaps, s) = store();
+        s.begin_turn("p1");
+        s.begin_turn("p2");
+        s.begin_turn("p3");
+        // p1 was compacted away; "also check the tests" was steering.
+        let found = s.rewindable(&["p2", "also check the tests", "p3"]);
+        assert_eq!(
+            found,
+            vec![
+                Rewindable { user_index: 0, turn: 1, files: 0 },
+                Rewindable { user_index: 2, turn: 2, files: 0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_session_resumed_from_disk_can_still_take_turns_back() {
+        let (project, snaps, s) = store();
+        let a = project.path().join("a.txt");
+        std::fs::write(&a, "original").unwrap();
+        s.begin_turn("p");
+        s.before_write("patch_file", &args("a.txt"));
+        std::fs::write(&a, "patched").unwrap();
+        drop(s);
+
+        let reopened = SnapshotStore::open(snaps.path(), project.path());
+        let turns = reopened.rewindable(&["p"]);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].files, 1);
+        reopened.rewind(turns[0].turn);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "original");
+    }
+
+    #[test]
+    fn nothing_is_recorded_outside_a_turn_or_for_tools_that_do_not_write_files() {
+        let (project, _snaps, s) = store();
+        std::fs::write(project.path().join("a.txt"), "x").unwrap();
+        s.before_write("write_file", &args("a.txt"));
+        s.begin_turn("p");
+        s.before_write("run_shell", r#"{"command":"rm a.txt"}"#);
+        s.before_write("memory_create", &args("a.txt"));
+        s.before_write("read_file", &args("a.txt"));
+        assert_eq!(s.rewindable(&["p"])[0].files, 0);
+    }
+
+    #[test]
+    fn a_file_too_big_to_copy_is_reported_instead_of_silently_skipped() {
+        let (project, _snaps, s) = store();
+        let big = project.path().join("big.bin");
+        std::fs::write(&big, vec![0u8; MAX_SNAPSHOT_BYTES as usize + 1]).unwrap();
+        s.begin_turn("p");
+        s.before_write("write_file", &args("big.bin"));
+        std::fs::write(&big, "small now").unwrap();
+        let report = s.rewind(0);
+        assert_eq!(report.failed.len(), 1);
+        assert!(report.failed[0].1.contains("no copy was kept"), "{:?}", report.failed);
+    }
+
+    #[test]
+    fn the_fingerprint_does_not_change_between_builds() {
+        assert_eq!(prompt_hash(""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(prompt_hash("a"), 0xaf63_dc4c_8601_ec8c);
+    }
+}
