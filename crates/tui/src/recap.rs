@@ -362,6 +362,14 @@ pub(crate) fn is_addressed_to_the_user(text: &str) -> bool {
         "your project", "your code", "your task", "your goal", "your setup", "your repo",
         "your codebase", "your use case", "your requirements", "what help", "how can i help",
         "let me know", "feel free to", "if you'd like", "if you would like",
+        // Not a question mailed at the user this time, but the same handoff in
+        // disguise: instead of asking the user for a topic, the model names
+        // the *category* ("a topic", "a question") instead of picking one.
+        // Sending that back to the assistant verbatim is meaningless, so it is
+        // dropped the same way a direct question would be.
+        "укажи тему", "задай вопрос", "задай конкретный вопрос", "конкретный вопрос по",
+        "сформулируй вопрос", "какой вопрос",
+        "specify a topic", "specify the topic", "ask a specific question", "ask a question about",
     ];
     RU_POSSESSIVE.iter().chain(HANDOFF).any(|needle| lower.contains(needle))
 }
