@@ -709,7 +709,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         }};
     }
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(80));
-    let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(3));
+    // The first look is not due yet: startup has just asked the server.
+    let mut check_interval =
+        tokio::time::interval_at(tokio::time::Instant::now() + SERVER_POLL_INTERVAL, SERVER_POLL_INTERVAL);
     check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let is_discovering = Arc::new(AtomicBool::new(false));
     let session_id = resume_session_id.clone().unwrap_or_else(|| {
@@ -1265,7 +1267,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 continue;
             }
             _ = check_interval.tick() => {
-                if !app.running && !is_discovering.load(Ordering::Relaxed) {
+                if should_poll_server(app.running, source.0.requests_in_flight(), is_discovering.load(Ordering::Relaxed)) {
                     is_discovering.store(true, Ordering::Relaxed);
                     let source_bg = source.clone();
                     let tx_bg = tx.clone();

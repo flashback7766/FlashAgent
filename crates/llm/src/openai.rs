@@ -28,6 +28,27 @@ pub struct OpenAiCompat {
     /// turns have gone. Shared, because the app sets it from outside the
     /// request path.
     effort_bias: std::sync::Arc<std::sync::atomic::AtomicI8>,
+    /// Requests to the model that have not finished yet, streams included
+    /// until their last byte. Anything that only watches the server (the
+    /// model list) waits for this to be zero rather than compete with the
+    /// work for a local server's attention.
+    in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// One request to the model, counted in `in_flight` for as long as it lives.
+struct Busy(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Busy {
+    fn new(counter: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Busy(counter.clone())
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// How many times a 400 may teach us a new request shape before we give up.
@@ -73,12 +94,18 @@ impl OpenAiCompat {
             working_models_url: std::sync::Arc::new(std::sync::RwLock::new(None)),
             max_retries: std::sync::atomic::AtomicUsize::new(0),
             effort_bias: std::sync::Arc::new(std::sync::atomic::AtomicI8::new(0)),
+            in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
     /// Base URL this backend talks to.
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Requests to the model still running, a stream counting until it ends.
+    pub fn requests_in_flight(&self) -> usize {
+        self.in_flight.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Retry budget for transport failures (the `network_retries` setting).
@@ -496,6 +523,7 @@ impl crate::LlmBackend for OpenAiCompat {
         // the error names one, otherwise fall back to fewer fields (all ->
         // no extra sampling knobs -> standard fields only). A 400 for any
         // other reason (context overflow, malformed history) then surfaces.
+        let busy = Busy::new(&self.in_flight);
         let mut fields = Fields::All;
         let mut adaptive_retries = 0u8;
         let resp = loop {
@@ -521,6 +549,9 @@ impl crate::LlmBackend for OpenAiCompat {
 
         let (tx, rx) = mpsc::channel::<Result<LlmEvent, LlmError>>(256);
         tokio::spawn(async move {
+            // The request is not over when the headers arrive: the server is
+            // still generating for as long as this task reads.
+            let _busy = busy;
             let mut sse = SseDecoder::default();
             let mut parser = ChunkParser::default();
             let mut done_sent = false;
@@ -587,6 +618,7 @@ impl OpenAiCompat {
     ///
     /// Returns tokens per pixel and the flat cost, as `(per_pixel, fixed)`.
     pub async fn measure_image_cost(&self, probe_png: &[u8], width: u32, height: u32) -> Option<(f32, f32)> {
+        let _busy = Busy::new(&self.in_flight);
         let ask = |images: Vec<String>| {
             let mut msg = ChatMessage::user("x");
             msg.images = images;
@@ -757,6 +789,41 @@ mod tests {
             }
         });
         (format!("http://{addr}/v1"), hits)
+    }
+
+    #[tokio::test]
+    async fn a_stream_counts_as_a_request_until_its_last_byte() {
+        // Watching the model list must wait for the model to finish, and
+        // the model is not finished when the headers arrive.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 65536];
+            let _ = sock.read(&mut buf).await;
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"par\"}}]}\n\n").await;
+            let _ = release_rx.await;
+            let _ = sock.write_all(b"data: [DONE]\n\n").await;
+        });
+        let b = OpenAiCompat::new(format!("http://{addr}/v1"), "m", None);
+        assert_eq!(b.requests_in_flight(), 0);
+        let mut stream = b.stream(&[ChatMessage::user("hi")], &[]).await.unwrap();
+        assert!(matches!(stream.next().await, Some(Ok(LlmEvent::TextDelta(_)))));
+        assert_eq!(b.requests_in_flight(), 1, "the server is still sending");
+        release_tx.send(()).unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(b.requests_in_flight(), 0, "the stream has ended");
+    }
+
+    #[tokio::test]
+    async fn a_request_the_server_refuses_is_not_counted_as_running() {
+        let (url, _) = canned_server("500 Internal Server Error", "boom").await;
+        let b = OpenAiCompat::new(url, "m", None);
+        assert!(b.stream(&[ChatMessage::user("hi")], &[]).await.is_err());
+        assert_eq!(b.requests_in_flight(), 0);
     }
 
     #[tokio::test]
