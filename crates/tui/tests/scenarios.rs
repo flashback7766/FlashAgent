@@ -291,6 +291,154 @@ fn compact_replaces_the_conversation_so_far_with_a_summary() {
     assert!(!sent(&turns[2]).contains("the first question"), "the summarised turns were still sent in full");
 }
 
+/// A Python that can run the MCP stub: `python3` where there is one,
+/// `python` otherwise (Windows runners have only that).
+fn python() -> &'static str {
+    for candidate in ["python3", "python"] {
+        let ok = std::process::Command::new(candidate)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if ok {
+            return candidate;
+        }
+    }
+    panic!("the MCP scenarios need Python 3 on PATH, as python3 or python");
+}
+
+/// Configure the stub MCP server for the project in `home`, with `lookup`
+/// marked read-only, and return the file it logs to.
+fn with_mcp_stub(home: &Home) -> std::path::PathBuf {
+    let log = home.path().join("mcp-stub.log");
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/mcp_stub.py");
+    let config = serde_json::json!({ "mcpServers": { "stub": {
+        "command": python(),
+        "args": [script.to_string_lossy()],
+        "env": { "MCP_STUB_LOG": log.to_string_lossy() },
+        "read_only_tools": ["lookup"],
+    } } });
+    std::fs::write(home.work().join(".mcp.json"), config.to_string()).unwrap();
+    log
+}
+
+fn stub_log(log: &std::path::Path) -> String {
+    std::fs::read_to_string(log).unwrap_or_default()
+}
+
+/// The MCP server starts in the background; a turn sent before it has listed
+/// its tools would be offered none of them.
+fn wait_for_mcp(log: &std::path::Path) {
+    let start = std::time::Instant::now();
+    while !stub_log(log).contains("listed") {
+        assert!(start.elapsed() < WAIT, "the MCP stub never listed its tools; log: {:?}", stub_log(log));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_read_only_mcp_tool_runs_without_asking() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall { name: "mcp__stub__lookup".into(), arguments: serde_json::json!({ "key": "alpha" }) },
+        Reply::Text("Alpha is known.".into()),
+    ]);
+    let home = Home::new();
+    let log = with_mcp_stub(&home);
+    let term = ready(&home, &server);
+    wait_for_mcp(&log);
+
+    // No key is pressed: a confirmation card would hold the turn until the
+    // wait runs out.
+    ask(&term, "look up alpha", "Alpha is known.");
+
+    let turns = server.turns();
+    assert!(
+        turns[0].body["tools"].to_string().contains("mcp__stub__lookup"),
+        "the model was not offered the MCP tool"
+    );
+    assert!(stub_log(&log).contains("call lookup"), "the call never reached the MCP server");
+    assert!(sent(&turns[1]).contains("value for alpha"), "the MCP result did not reach the model");
+}
+
+#[test]
+fn an_mcp_tool_that_changes_things_asks_first_and_a_refusal_never_reaches_the_server() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall { name: "mcp__stub__delete_everything".into(), arguments: serde_json::json!({}) },
+        Reply::Text("Nothing was deleted.".into()),
+    ]);
+    let home = Home::new();
+    let log = with_mcp_stub(&home);
+    let term = ready(&home, &server);
+    wait_for_mcp(&log);
+
+    term.type_text("delete everything");
+    term.send(ENTER);
+    term.wait_for("Confirm:", WAIT);
+    term.send("d");
+    term.wait_for("Nothing was deleted.", WAIT);
+
+    assert!(!stub_log(&log).contains("call delete_everything"), "a refused call reached the MCP server");
+}
+
+#[test]
+fn a_goal_runs_without_asking_reports_what_it_did_and_hands_back_the_gates() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "write_file".into(),
+            arguments: serde_json::json!({ "header": "Write the greeting", "path": "greeting.txt", "content": "hello\n" }),
+        },
+        shell_call("echo goal> goal-marker.txt"),
+        Reply::Text("The greeting is written.".into()),
+        // After the goal: the same kind of command must ask again.
+        shell_call("echo after> after-marker.txt"),
+        Reply::Text("Asked first.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("/goal write a greeting file");
+    term.send(ENTER);
+    term.wait_for("The greeting is written.", WAIT);
+    term.wait_for("Goal report:", WAIT);
+    term.wait_gone(RUNNING_HINT, WAIT);
+
+    let screen = term.screen();
+    assert!(screen.contains("+ greeting.txt"), "the report does not list the file:\n{screen}");
+    assert!(screen.contains("Shell commands: 1 ok"), "the report does not count the command:\n{screen}");
+    assert!(screen.contains("ended its turn on its own"), "the report does not say why it stopped:\n{screen}");
+    assert_eq!(std::fs::read_to_string(home.work().join("greeting.txt")).unwrap(), "hello\n");
+    assert!(home.work().join("goal-marker.txt").exists(), "the goal's command did not run");
+
+    term.type_text("leave another marker");
+    term.send(ENTER);
+    term.wait_for("Confirm:", WAIT);
+    assert!(!home.work().join("after-marker.txt").exists(), "after the goal a command ran without asking");
+    term.send("d");
+    term.wait_for("Asked first.", WAIT);
+}
+
+#[test]
+fn a_goal_stops_at_its_step_budget_and_says_it_is_not_finished() {
+    let reads: Vec<Reply> = (0..6)
+        .map(|i| Reply::ToolCall {
+            name: "read_file".into(),
+            arguments: serde_json::json!({ "header": format!("Read the notes, pass {i}"), "path": "notes.txt" }),
+        })
+        .collect();
+    let server = MockServer::start(reads);
+    let home = Home::new();
+    std::fs::write(home.work().join("notes.txt"), "nothing new\n").unwrap();
+    let term = ready(&home, &server);
+
+    term.type_text("/goal --steps 2 read the notes forever");
+    term.send(ENTER);
+    term.wait_for("Goal report:", WAIT);
+    term.wait_gone(RUNNING_HINT, WAIT);
+
+    let screen = term.screen();
+    assert!(screen.contains("cut short by a budget"), "the report does not say the budget ended it:\n{screen}");
+    assert!(server.replies_left() > 0, "the run did not stop: every scripted step was used");
+}
+
 #[test]
 fn a_saved_session_comes_back_with_resume() {
     let server = MockServer::start(vec![
