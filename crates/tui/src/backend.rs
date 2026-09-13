@@ -50,3 +50,33 @@ impl LlmSource for BackendSource {
         self.0.stream_with_options(messages, tools, options).await
     }
 }
+
+/// How often an idle session looks at the server for a switched model or a
+/// changed context window. Each look is up to two requests to a server that
+/// may be a laptop, and nobody switches models every few seconds.
+pub(crate) const SERVER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Whether to look at the server's model list now. Never while the agent is
+/// working — a turn, or anything else still talking to the model, like the
+/// recap after a turn — and never twice at once.
+pub(crate) fn should_poll_server(turn_running: bool, requests_in_flight: usize, already_polling: bool) -> bool {
+    !turn_running && requests_in_flight == 0 && !already_polling
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_server_is_looked_at_only_when_nothing_is_happening() {
+        assert!(should_poll_server(false, 0, false));
+    }
+
+    #[test]
+    fn the_server_is_left_alone_while_the_agent_works() {
+        assert!(!should_poll_server(true, 0, false), "a turn is running");
+        assert!(!should_poll_server(false, 1, false), "a recap or a probe is still talking to the model");
+        assert!(!should_poll_server(true, 2, false));
+        assert!(!should_poll_server(false, 0, true), "the last look has not come back");
+    }
+}
