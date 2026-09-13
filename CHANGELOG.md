@@ -1,5 +1,25 @@
 # Changelog
 
+## b267 — take a turn back
+
+One new thing you can use: `/rewind`.
+
+- `/rewind` lists the turns still in the conversation and how many files each
+  one changed. `/rewind 2` takes back turn 2 and everything after it: every
+  file FlashAgent wrote or edited in those turns returns to how it was
+  before, files they created are removed, the conversation goes back to
+  before turn 2, and that turn's prompt is put back in the input so you can
+  change it and send it again. It works after `--resume` too, and an answer
+  you regenerated is taken back to before its first attempt.
+- What it cannot undo, it says so: changes a shell command made (FlashAgent
+  only sees files through its own file tools), files over 8 MB (no copy is
+  kept), and folders a turn created, which stay. A turn already folded into
+  a `/compact` summary can no longer be picked.
+- The copies live in `~/.flashagent/snapshots/`, next to the saved sessions.
+- Nine unit tests and a scenario test cover it, each checked by breaking
+  what it guards: no copy before a write, a turn not recorded, the
+  conversation not cut back, the latest copy restored instead of the first.
+
 ## b266 — what the server says, not what the name suggests
 
 Two things you might notice, one fix, and the rest is internal.
