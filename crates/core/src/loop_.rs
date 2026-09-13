@@ -265,6 +265,11 @@ impl AgentLoop {
         let mut turn_opts = self.config.base_turn_options.clone();
         let mut steer_rx = self.steer_rx.lock().unwrap_or_else(|p| p.into_inner()).take();
 
+        // A reply the server cut off at its output limit is asked to go on,
+        // and the rest is written into the same message.
+        let mut continuations: usize = 0;
+        let mut continuing = false;
+
         let mut step: u32 = 0;
         loop {
             if let Some(limit) = self.config.max_steps {
@@ -289,6 +294,7 @@ impl AgentLoop {
                 events(LoopEvent::SteeringInjected(steer_msg.clone()));
                 history.push(ChatMessage::user(steer_msg));
                 transient.clear();
+                continuing = false;
             }
 
             let with_nudge: Vec<ChatMessage>;
@@ -308,6 +314,7 @@ impl AgentLoop {
                     events(LoopEvent::SteeringInjected(steer_msg.clone()));
                     history.push(ChatMessage::user(steer_msg));
                     transient.clear();
+                    continuing = false;
                     continue;
                 }
             };
@@ -328,6 +335,10 @@ impl AgentLoop {
             // The server stopped at max_tokens: any tool call may have been cut
             // off mid-arguments, and JSON repair would happily "complete" it.
             let mut truncated = false;
+            // Asked to go on, a model often starts by repeating its last words,
+            // so the start of a continuation is held back until that is known.
+            let prefix = if continuing { history.last().map(|m| m.content.clone()).unwrap_or_default() } else { String::new() };
+            let mut held: Option<String> = continuing.then(String::new);
 
             loop {
                 let item = tokio::select! {
@@ -338,7 +349,7 @@ impl AgentLoop {
                     _ = wait_cancel(&self.cancel) => {
                         // Keep what the user already saw on screen; any
                         // half-streamed tool calls are dropped (never run).
-                        push_partial_assistant(&mut history, assistant_text, assistant_reasoning);
+                        keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
                         events(LoopEvent::Done(DoneReason::Cancelled));
                         return Ok((history, DoneReason::Cancelled));
                     }
@@ -350,12 +361,23 @@ impl AgentLoop {
                 let item = match item {
                     Ok(item) => item,
                     Err(source) => {
-                        push_partial_assistant(&mut history, assistant_text, assistant_reasoning);
+                        keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
                         return Err(LoopError::Llm { source, history });
                     }
                 };
                 match item {
                     LlmEvent::TextDelta(t) => {
+                        let t = match held.as_mut() {
+                            Some(buf) => {
+                                buf.push_str(&t);
+                                if buf.chars().count() < CONTINUATION_HOLDBACK {
+                                    continue;
+                                }
+                                let buf = held.take().unwrap_or_default();
+                                strip_repeated_tail(&prefix, &buf).to_string()
+                            }
+                            None => t,
+                        };
                         for ev in scanner.feed(&t) {
                             absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
                         }
@@ -393,13 +415,18 @@ impl AgentLoop {
                     LlmEvent::Done(reason) => truncated |= reason == flashagent_llm::FinishReason::Length,
                 }
             }
+            if let Some(buf) = held.take() {
+                for ev in scanner.feed(strip_repeated_tail(&prefix, &buf)) {
+                    absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
+                }
+            }
             for ev in scanner.finish() {
                 absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
             }
 
             if let Some(steer_msg) = steered_mid_stream {
                 transient.clear();
-                push_partial_assistant(&mut history, assistant_text, assistant_reasoning);
+                keep_partial(&mut history, assistant_text, assistant_reasoning, std::mem::take(&mut continuing));
                 events(LoopEvent::SteeringInjected(steer_msg.clone()));
                 history.push(ChatMessage::user(steer_msg));
                 continue;
@@ -436,13 +463,48 @@ impl AgentLoop {
                 tool_calls: calls.clone(),
                 images: Vec::new(),
             };
-            history.push(assistant_msg);
+            let was_continuation = std::mem::take(&mut continuing);
+            let merge = was_continuation && history.last().is_some_and(|m| m.role == Role::Assistant);
+            if merge {
+                if let Some(last) = history.last_mut() {
+                    last.content.push_str(&assistant_msg.content);
+                    if let Some(more) = assistant_msg.reasoning {
+                        last.reasoning = Some(match last.reasoning.take() {
+                            Some(earlier) => format!("{earlier}\n{more}"),
+                            None => more,
+                        });
+                    }
+                    last.tool_calls = assistant_msg.tool_calls;
+                }
+            } else {
+                history.push(assistant_msg);
+            }
 
             if calls.is_empty() {
                 if let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
                     events(LoopEvent::SteeringInjected(steer_msg.clone()));
                     history.push(ChatMessage::user(steer_msg));
                     continue;
+                }
+
+                // Cut off mid-answer by the server's output limit: ask for the
+                // rest instead of leaving the answer unfinished.
+                let answer_so_far = history.last().filter(|m| m.role == Role::Assistant).map(|m| m.content.clone()).unwrap_or_default();
+                if truncated
+                    && continuations < MAX_CONTINUATIONS
+                    && !answer_so_far.trim().is_empty()
+                    && !is_pure_thinking_scratchpad(&answer_so_far)
+                {
+                    continuations += 1;
+                    continuing = true;
+                    transient = vec![ChatMessage::user(CONTINUE_NUDGE)];
+                    continue;
+                }
+                if merge {
+                    // The nudges for a stalled reply below would take away the
+                    // answer written so far; what a continuation added stands.
+                    events(LoopEvent::Done(DoneReason::Completed));
+                    return Ok((history, DoneReason::Completed));
                 }
 
                 let is_scratchpad = is_pure_thinking_scratchpad(&assistant_text);
@@ -590,6 +652,36 @@ fn synth_call_id() -> String {
 /// Sent when the model ended its turn on thinking alone.
 const STALL_NUDGE: &str = "Please provide your direct, final answer to my request now. Do not repeat the thinking process; output only your final response.";
 
+/// How many times one reply the server cut off at its output limit is asked
+/// to go on before what there is stands as the answer.
+const MAX_CONTINUATIONS: usize = 3;
+
+/// Sent, with the reply so far, after the server cut it off at its output
+/// limit. Like the stall nudge it is never stored.
+const CONTINUE_NUDGE: &str = "Your previous reply was cut off by the output length limit. Continue it from exactly where it stopped. Do not repeat anything already written, do not start over, and do not mention the interruption.";
+
+/// Continuation text held back before it is shown: long enough to tell
+/// whether the model began by repeating the end of what it had written.
+const CONTINUATION_HOLDBACK: usize = 80;
+
+/// The shortest repeat that is trimmed. Shorter overlaps ("the ", a newline)
+/// are as likely to be coincidence as repetition.
+const MIN_OVERLAP: usize = 8;
+
+/// `next` without what it repeats of the end of `prev`: asked to continue, a
+/// model often restates its last words first.
+fn strip_repeated_tail<'a>(prev: &str, next: &'a str) -> &'a str {
+    let mut cut = 0;
+    let ends = next.char_indices().map(|(i, _)| i).skip(1).chain(std::iter::once(next.len()));
+    for end in ends.take_while(|end| *end <= 2000) {
+        let head = &next[..end];
+        if head.chars().count() >= MIN_OVERLAP && prev.ends_with(head) {
+            cut = end;
+        }
+    }
+    &next[cut..]
+}
+
 /// Tool result recorded for calls the user interrupted.
 const CANCELLED_RESULT: &str = "cancelled by user before completion";
 
@@ -600,6 +692,25 @@ fn answer_cancelled(history: &mut Vec<ChatMessage>, pending: &[ToolCall]) {
     for call in pending {
         history.push(ChatMessage::tool_result(call.id.clone(), CANCELLED_RESULT));
     }
+}
+
+/// Keep what was streamed before the stream ended early. A continuation
+/// belongs to the answer it continues, so it is added to that message rather
+/// than stored as a second assistant message in a row.
+fn keep_partial(history: &mut Vec<ChatMessage>, text: String, reasoning: String, continuing: bool) {
+    if continuing {
+        if let Some(last) = history.last_mut().filter(|m| m.role == Role::Assistant) {
+            last.content.push_str(&text);
+            if !reasoning.is_empty() {
+                last.reasoning = Some(match last.reasoning.take() {
+                    Some(earlier) => format!("{earlier}\n{reasoning}"),
+                    None => reasoning,
+                });
+            }
+            return;
+        }
+    }
+    push_partial_assistant(history, text, reasoning);
 }
 
 fn push_partial_assistant(history: &mut Vec<ChatMessage>, text: String, reasoning: String) {
@@ -1569,6 +1680,69 @@ mod tests {
         assert!(tools.calls.lock().unwrap().is_empty(), "a truncated call must never run");
         assert_protocol_valid(&history);
         assert!(history[2].content.contains("not executed"));
+    }
+
+    fn cut_turn(text: &str) -> MockTurn {
+        MockTurn {
+            events: vec![Ok(LlmEvent::TextDelta(text.to_string())), Ok(LlmEvent::Done(FinishReason::Length))],
+        }
+    }
+
+    /// Run the loop and return what it showed (text deltas) with its result.
+    fn run_showing(llm: &MockLlm) -> (Vec<ChatMessage>, DoneReason, String) {
+        let tools = MockTools::new();
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let mut shown = String::new();
+        let (history, done) = run_loop(&l, llm, &tools, |e| {
+            if let LoopEvent::TurnDelta(t) = e {
+                shown.push_str(&t);
+            }
+        });
+        (history, done, shown)
+    }
+
+    #[test]
+    fn an_answer_cut_off_at_the_output_limit_is_finished_in_the_same_message() {
+        let llm = MockLlm { turns: std::sync::Mutex::new(vec![cut_turn("The answer begins"), text_turn(" and ends here.")]) };
+        let (history, done, shown) = run_showing(&llm);
+        assert_eq!(done, DoneReason::Completed);
+        assert_eq!(history.len(), 2, "one user message, one whole answer: {history:?}");
+        assert_eq!(history[1].content, "The answer begins and ends here.");
+        assert_eq!(shown, history[1].content, "what was shown is what was stored");
+        assert!(history.iter().all(|m| m.content != CONTINUE_NUDGE), "the request to go on was stored");
+    }
+
+    #[test]
+    fn a_continuation_repeating_the_end_of_the_answer_is_not_shown_or_stored_twice() {
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![
+                cut_turn("alpha beta gamma delta epsilon"),
+                text_turn("gamma delta epsilon zeta eta"),
+            ]),
+        };
+        let (history, _, shown) = run_showing(&llm);
+        assert_eq!(history[1].content, "alpha beta gamma delta epsilon zeta eta");
+        assert_eq!(shown, history[1].content);
+    }
+
+    #[test]
+    fn an_answer_cut_off_again_and_again_is_asked_to_go_on_only_a_few_times() {
+        let mut turns: Vec<MockTurn> = (0..=MAX_CONTINUATIONS).map(|i| cut_turn(&format!("part{i} "))).collect();
+        turns.push(text_turn("never asked for"));
+        let llm = MockLlm { turns: std::sync::Mutex::new(turns) };
+        let (history, done, _) = run_showing(&llm);
+        assert_eq!(done, DoneReason::Completed);
+        assert_eq!(history[1].content, "part0 part1 part2 part3 ");
+        assert_eq!(llm.turns.lock().unwrap().len(), 1, "asked to go on more than {MAX_CONTINUATIONS} times");
+    }
+
+    #[test]
+    fn only_a_real_repeat_is_trimmed_from_a_continuation() {
+        assert_eq!(strip_repeated_tail("say hello world", "hello world again"), " again");
+        assert_eq!(strip_repeated_tail("it was the", "the end"), "the end", "three shared letters are not a repeat");
+        assert_eq!(strip_repeated_tail("привет, мир", "как дела, мир?"), "как дела, мир?", "no overlap, not cut");
+        assert_eq!(strip_repeated_tail("очень длинный конец", "длинный конец и дальше"), " и дальше");
+        assert_eq!(strip_repeated_tail("abc", ""), "");
     }
 
     #[test]

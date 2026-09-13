@@ -498,6 +498,40 @@ fn a_goal_stops_at_its_step_budget_and_says_it_is_not_finished() {
 }
 
 #[test]
+fn an_answer_cut_off_by_the_output_limit_is_finished_in_the_same_message() {
+    let server = MockServer::start(vec![
+        Reply::Cut("The first half of the answer, ".into()),
+        Reply::Text("and the second half of it.".into()),
+        Reply::Text("Second answer.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    ask(&term, "explain it", "the second half of it.");
+    assert!(
+        term.screen().contains("The first half of the answer, and the second half of it."),
+        "the rest was not written into the same message:\n{}",
+        term.screen()
+    );
+
+    // The request for the rest carries the answer so far and asks to go on.
+    let turns = server.turns();
+    assert_eq!(turns.len(), 2, "one request for the answer, one for the rest");
+    let messages = turns[1].body["messages"].as_array().unwrap();
+    let n = messages.len();
+    assert_eq!(messages[n - 2]["role"], "assistant");
+    assert_eq!(messages[n - 2]["content"], "The first half of the answer, ");
+    assert_eq!(messages[n - 1]["role"], "user");
+    assert!(messages[n - 1]["content"].as_str().unwrap_or_default().contains("cut off"));
+
+    // The next turn sees one whole answer, and not the request to go on.
+    ask(&term, "and now?", "Second answer.");
+    let later = sent(&server.turns()[2]);
+    assert!(later.contains("The first half of the answer, and the second half of it."), "{later}");
+    assert!(!later.contains("cut off by the output length limit"), "the request to go on was stored: {later}");
+}
+
+#[test]
 fn an_edit_written_in_another_agents_argument_names_still_edits_the_file() {
     // OpenCode's names, one edit given flat: a model trained on another agent
     // should not fail the call over what it calls the arguments.
