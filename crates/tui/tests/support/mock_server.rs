@@ -23,6 +23,8 @@ pub enum Reply {
     /// Text that takes `per_word` per word to arrive, for a turn that is
     /// still running when the scenario acts.
     Slow { text: String, per_word: Duration },
+    /// Text the server cuts off at its output limit (`finish_reason: length`).
+    Cut(String),
 }
 
 /// One request the app made.
@@ -175,7 +177,7 @@ fn serve(
 
     if request.body["stream"] != serde_json::Value::Bool(true) {
         let text = match &reply {
-            Reply::Text(t) | Reply::Slow { text: t, .. } => t.clone(),
+            Reply::Text(t) | Reply::Slow { text: t, .. } | Reply::Cut(t) => t.clone(),
             Reply::ToolCall { .. } => String::new(),
         };
         return json(&mut out, &serde_json::json!({
@@ -200,6 +202,12 @@ fn serve(
                 std::thread::sleep(per_word);
             }
             chunk(&mut out, serde_json::json!({ "choices": [ { "delta": {}, "finish_reason": "stop" } ] }))?;
+        }
+        Reply::Cut(text) => {
+            for word in words(&text) {
+                chunk(&mut out, serde_json::json!({ "choices": [ { "delta": { "content": word } } ] }))?;
+            }
+            chunk(&mut out, serde_json::json!({ "choices": [ { "delta": {}, "finish_reason": "length" } ] }))?;
         }
         Reply::ToolCall { name, arguments } => {
             chunk(&mut out, serde_json::json!({ "choices": [ { "delta": { "tool_calls": [ {
