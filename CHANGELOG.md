@@ -1,5 +1,12 @@
 # Changelog
 
+## b285 — non-aborting context steering and unified status footer
+
+- **Non-aborting context steering.** Typing a steering directive and pressing Enter while the agent is running no longer cuts off the streaming response mid-sentence or mid-tool-argument. Generation and tool execution run to clean completion, preventing partial assistant messages and preserving the entire KV prefix cache (cache hit ~99%).
+- **Pinned steering in TUI.** While a response or tool is in progress, the steering directive is pinned at the bottom of the chat view (`❯ directive · steer queued`). Once the step finishes, the directive automatically unpins, joins the chat history as a regular user message, and the agent continues the dialogue seamlessly.
+- **Unified status footer.** Turn telemetry and prompt cache hit metrics are consolidated into line 3 of the persistent footer, eliminating redundant duplicate status messages in the chat transcript.
+- **First-turn cache display.** Suppresses `cache hit 0%` on the very first cold turn of a session when nothing was cached, keeping the footer clean.
+
 ## b284 — fix render panic and keep prefix cache across thinking changes
 
 - **Multi-turn render panic.** Fixed a runtime panic (`slice index starts at X but ends at Y`)

@@ -35,6 +35,7 @@ impl App {
         self.turn_started = None;
         self.active_turn_handle = None;
         self.active_steer_tx = None;
+        self.pending_steers.clear();
         self.cancel_requested = None;
         cx.cancel.store(false, Ordering::Relaxed);
         self.token_tracker.on_finished();
@@ -81,12 +82,8 @@ impl App {
             Ok((h, reason)) => {
                 self.history = h;
                 update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-                // What the turn cost, under the answer: time, prompt, how much
-                // of it the server's cache served, output and speed.
-                if let Some(status) = self.token_tracker.turn_status_line() {
-                    self.chat.push_system(&status);
-                    self.renderer.request_reprint();
-                }
+                // Completed turn telemetry and cache hit are displayed on Line 3 of the footer.
+                self.renderer.request_reprint();
 
                 if reason == DoneReason::Cancelled {
                     close_dangling_user(&mut self.history, "[interrupted by the user before replying]");
@@ -173,6 +170,7 @@ impl App {
                                 attachments: &[],
         background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                                 context_warn_threshold: self.config.context_warn_threshold,
+                                pending_steers: &self.pending_steers,
                             },
                         );
                         let source_compact = cx.source.clone();

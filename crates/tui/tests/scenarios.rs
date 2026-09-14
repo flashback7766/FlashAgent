@@ -935,9 +935,10 @@ fn every_answer_ends_with_a_status_line_that_names_the_cache() {
     let home = Home::new();
     let term = ready(&home, &server);
     ask(&term, "how did that go?", "Status please.");
-    term.wait_for("status:", WAIT);
+    term.wait_for("cache hit n/a", WAIT);
     let screen = term.screen();
-    let status = screen.lines().find(|l| l.contains("status:")).unwrap_or_default();
+    assert!(!screen.contains("status:"), "status line should not duplicate as a message in chat:\n{screen}");
+    let status = screen.lines().find(|l| l.contains("cache hit n/a")).unwrap_or_default();
     assert!(status.contains("prompt") && status.contains("cache hit n/a"), "{status}");
 }
 
@@ -1054,4 +1055,44 @@ fn a_saved_session_comes_back_with_resume() {
         history.contains("what is the magic number?") && history.contains("The magic number is 7."),
         "the resumed conversation did not reach the model: {history}"
     );
+}
+
+#[test]
+fn steering_during_turn_pins_message_until_completion_and_pivots() {
+    let words: Vec<String> = (1..=6).map(|i| format!("word{i}")).collect();
+    let server = MockServer::start(vec![
+        Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(500) },
+        Reply::Text("Pivoted to user steering.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("start counting");
+    term.send(ENTER);
+    term.wait_for("word2", WAIT);
+
+    // Send steer directive while model is streaming:
+    term.type_text("steer: change direction");
+    term.send(ENTER);
+
+    // Pinned message appears with steer queued
+    term.wait_for("steer queued", WAIT);
+
+    // Stream finishes cleanly (word6 arrives, NOT cut off!)
+    term.wait_for("word6", WAIT);
+
+    // The second turn starts automatically answering the steer directive!
+    term.wait_for("Pivoted to user steering.", WAIT);
+    term.wait_gone(RUNNING_HINT, WAIT);
+
+    let screen = term.screen();
+    assert!(!screen.contains("steer queued"), "steer queued indicator should unpin once injected:\n{screen}");
+    assert!(screen.contains("steer: change direction"), "steering directive should be in chat:\n{screen}");
+
+    // Verify history sent to server in turn 2 contains BOTH word6 and the steering message:
+    let turns = server.turns();
+    assert_eq!(turns.len(), 2);
+    let history = sent(&turns[1]);
+    assert!(history.contains("word6"), "turn 1 assistant response was not cut off: {history}");
+    assert!(history.contains("steer: change direction"), "steering directive was sent to model: {history}");
 }

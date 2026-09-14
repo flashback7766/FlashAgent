@@ -196,19 +196,6 @@ async fn wait_cancel(cancel: &Arc<AtomicBool>) {
     }
 }
 
-async fn next_steer(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>) -> String {
-    match rx {
-        Some(r) => match r.recv().await {
-            Some(msg) => msg,
-            None => {
-                *rx = None;
-                std::future::pending().await
-            }
-        },
-        None => std::future::pending().await,
-    }
-}
-
 fn try_recv_steer(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>) -> Option<String> {
     match rx {
         Some(r) => r.try_recv().ok(),
@@ -310,13 +297,6 @@ impl AgentLoop {
                     events(LoopEvent::Done(DoneReason::Cancelled));
                     return Ok((history, DoneReason::Cancelled));
                 }
-                steer_msg = next_steer(&mut steer_rx) => {
-                    events(LoopEvent::SteeringInjected(steer_msg.clone()));
-                    history.push(ChatMessage::user(steer_msg));
-                    transient.clear();
-                    continuing = false;
-                    continue;
-                }
             };
             let mut stream = match opened {
                 Ok(stream) => stream,
@@ -331,7 +311,6 @@ impl AgentLoop {
             // bare JSON) because the server did not parse them natively.
             let mut scanner = TextToolScanner::default();
             let mut text_calls: Vec<ToolCall> = Vec::new();
-            let mut steered_mid_stream: Option<String> = None;
             // The server stopped at max_tokens: any tool call may have been cut
             // off mid-arguments, and JSON repair would happily "complete" it.
             let mut truncated = false;
@@ -352,10 +331,6 @@ impl AgentLoop {
                         keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
                         events(LoopEvent::Done(DoneReason::Cancelled));
                         return Ok((history, DoneReason::Cancelled));
-                    }
-                    steer_msg = next_steer(&mut steer_rx) => {
-                        steered_mid_stream = Some(steer_msg);
-                        break;
                     }
                 };
                 let item = match item {
@@ -424,14 +399,6 @@ impl AgentLoop {
                 absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
             }
 
-            if let Some(steer_msg) = steered_mid_stream {
-                transient.clear();
-                keep_partial(&mut history, assistant_text, assistant_reasoning, std::mem::take(&mut continuing));
-                events(LoopEvent::SteeringInjected(steer_msg.clone()));
-                history.push(ChatMessage::user(steer_msg));
-                continue;
-            }
-
             // Assemble args.
             for (i, call) in calls.iter_mut().enumerate() {
                 call.args_json = open_args[i].clone();
@@ -481,9 +448,13 @@ impl AgentLoop {
             }
 
             if calls.is_empty() {
-                if let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
+                let mut had_steer = false;
+                while let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
                     events(LoopEvent::SteeringInjected(steer_msg.clone()));
                     history.push(ChatMessage::user(steer_msg));
+                    had_steer = true;
+                }
+                if had_steer {
                     continue;
                 }
 
@@ -1816,9 +1787,13 @@ mod tests {
         let steer_tx_clone = steer_tx.clone();
         let sent_steer = Arc::new(AtomicBool::new(false));
 
-        // Turn 1 stream with pending receiver to guarantee steering arrives mid-stream
-        let (stream1_tx, mut stream1_rx) = tokio::sync::mpsc::unbounded_channel();
-        stream1_tx.send(Ok(LlmEvent::TextDelta("Starting to write code...".into()))).unwrap();
+        // Turn 1 emits text and completes cleanly (not aborted)
+        let turn1 = MockTurn {
+            events: vec![
+                Ok(LlmEvent::TextDelta("Starting to write code...".into())),
+                Ok(LlmEvent::Done(FinishReason::Stop)),
+            ],
+        };
 
         // Turn 2 receives the steering directive and responds
         let pivoted_turn = MockTurn {
@@ -1828,29 +1803,8 @@ mod tests {
             ],
         };
 
-        struct MidStreamMockLlm {
-            turns: std::sync::Mutex<Vec<BoxStream<'static, Result<LlmEvent, LlmError>>>>,
-        }
-
-        #[async_trait]
-        impl LlmSource for MidStreamMockLlm {
-            async fn turn(
-                &self,
-                _messages: &[ChatMessage],
-                _tools: &[ToolSpec],
-            ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-                let mut turns = self.turns.lock().unwrap();
-                Ok(turns.remove(0))
-            }
-        }
-
-        let s1: BoxStream<'static, Result<LlmEvent, LlmError>> = Box::pin(futures::stream::poll_fn(move |cx| {
-            stream1_rx.poll_recv(cx)
-        }));
-        let s2: BoxStream<'static, Result<LlmEvent, LlmError>> = Box::pin(futures::stream::iter(pivoted_turn.events));
-
-        let llm = MidStreamMockLlm {
-            turns: std::sync::Mutex::new(vec![s1, s2]),
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![turn1, pivoted_turn]),
         };
         let tools = MockTools::new();
         let l = AgentLoop::with_steering(

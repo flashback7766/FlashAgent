@@ -122,6 +122,7 @@ impl App {
                         self.cancel_requested = Some(std::time::Instant::now());
                         self.turn_phase = TurnPhase::Stopping;
                         self.active_steer_tx = None;
+                        self.pending_steers.clear();
                         self.suggested_prompt = None;
                         self.custom_placeholder = Some("Interrupting...".to_string());
                     }
@@ -179,6 +180,7 @@ impl App {
                         self.cancel_requested = Some(std::time::Instant::now());
                         self.turn_phase = TurnPhase::Stopping;
                         self.active_steer_tx = None;
+                        self.pending_steers.clear();
                         self.suggested_prompt = None;
                         self.custom_placeholder = Some("Interrupting...".to_string());
                     }
@@ -567,7 +569,8 @@ impl App {
                         }
                         self.history_index = None;
                         self.current_draft.clear();
-                        let _ = steer_tx.send(text);
+                        let _ = steer_tx.send(text.clone());
+                        self.pending_steers.push(text);
                         self.renderer.request_reprint();
                     }
                 } else if !self.input.is_empty() && !self.running {
