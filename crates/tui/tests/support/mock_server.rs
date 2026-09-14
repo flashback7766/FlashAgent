@@ -82,7 +82,18 @@ impl MockServer {
             for stream in listener.incoming().flatten() {
                 let (req3, rep3, v0e3, v13, side3) = (req2.clone(), rep2.clone(), v0e2.clone(), v12.clone(), side2.clone());
                 std::thread::spawn(move || {
+                    let closer = stream.try_clone();
                     let _ = serve(stream, &req3, &rep3, &v0e3, &v13, &side3);
+                    // Close gracefully: finish our side, then read until the
+                    // app closes its own. Dropping a socket straight away
+                    // lets Windows answer with a reset, which can cut off
+                    // the end of a reply the app is still reading.
+                    if let Ok(mut socket) = closer {
+                        let _ = socket.shutdown(std::net::Shutdown::Write);
+                        let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut drain = [0u8; 1024];
+                        while matches!(socket.read(&mut drain), Ok(n) if n > 0) {}
+                    }
                 });
             }
         });
