@@ -1,6 +1,17 @@
 use super::*;
 
 impl App {
+    /// Stop a recap and suggestion still being written for the last turn.
+    /// A new turn is about to start: on a local server the recap request
+    /// would make it wait its turn, and its suggestion would be about a
+    /// conversation that has already moved on. Dropping the request closes
+    /// the connection, which stops the server generating it.
+    pub(crate) fn cancel_recap(&mut self) {
+        if let Some(task) = self.recap_task.take() {
+            task.abort();
+        }
+    }
+
     /// A turn ended: apply its history, report how it went, compact the
     /// context if it needs it, and ask for a recap.
     pub(crate) async fn finish_turn(
@@ -151,6 +162,7 @@ impl App {
                                 ttft_display: None,
                                 background: self.background.as_ref().map(|b| b.text.as_str()),
                                 channel_prompt: None,
+                                prompt_title: "",
                                 turn_phase: None,
                                 attachments: &[],
         background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
@@ -190,7 +202,8 @@ impl App {
                     let tx_bg = cx.tx.clone();
                     let history_bg = self.history.clone();
                     let turn_id = self.chat.user_turn_count() as u64;
-                    tokio::spawn(async move {
+                    self.cancel_recap();
+                    self.recap_task = Some(tokio::spawn(async move {
                         if let Some((llm_recap, llm_suggestion)) = generate_llm_recap_and_suggestion(&source_bg, &history_bg).await {
                             let _ = tx_bg.send(UiEvent::BackgroundRecap {
                                 turn_id,
@@ -198,7 +211,7 @@ impl App {
                                 suggestion: llm_suggestion,
                             });
                         }
-                    });
+                    }));
                 }
             }
             Err((e, h)) => {

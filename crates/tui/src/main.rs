@@ -95,6 +95,16 @@ async fn main() -> Result<()> {
                 };
             }
             "--continue" | "-c" => session_start = SessionStart::Continue,
+            "--uninstall" => {
+                // `-y` anywhere on the line answers every question with its
+                // default, for scripts.
+                let assume_yes = std::env::args().any(|a| a == "-y" || a == "--yes");
+                if let Err(e) = flashagent_svc::uninstall::run_interactive(assume_yes) {
+                    eprintln!("Uninstall stopped: {e}");
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             "--update" => {
                 if flashagent_svc::updater::is_dev_mode() {
                     println!("In-app updater is disabled in development mode (running from source repository or cargo target build).");
@@ -138,7 +148,7 @@ async fn main() -> Result<()> {
             "--setup" => force_setup = true,
             "-y" | "--yes" => skip_trust = true,
             "-h" | "--help" => {
-                println!("FlashAgent TUI\n\nUsage: flashagent [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Specify LLM model name\n  --url <endpoint>     API endpoint (default: http://localhost:1234/v1)\n  --setup              Run first-time setup wizard\n  --tool-test [--all-models]  Check whether the model can drive tools\n  -r, --resume [id]    Resume a saved session (without an id: pick one from this folder)\n  -c, --continue       Continue the latest session in this folder\n  -y, --yes            Skip directory trust confirmation\n  -h, --help           Show this help message");
+                println!("FlashAgent TUI\n\nUsage: flashagent [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Specify LLM model name\n  --url <endpoint>     API endpoint (default: http://localhost:1234/v1)\n  --setup              Run first-time setup wizard\n  --tool-test [--all-models]  Check whether the model can drive tools\n  -r, --resume [id]    Resume a saved session (without an id: pick one from this folder)\n  -c, --continue       Continue the latest session in this folder\n  -y, --yes            Skip directory trust confirmation\n  --uninstall [-y]     Remove FlashAgent; asks what data to delete (-y: take the defaults)\n  -h, --help           Show this help message");
                 return Ok(());
             }
             other => anyhow::bail!("usage: flashagent [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--tool-test [--all-models]] [--setup] [-r|--resume [id]] [-c|--continue] [-y|--yes] (got {other})"),
@@ -425,8 +435,21 @@ async fn main() -> Result<()> {
         }
         println!();
     }
+    if result.is_ok() && UNINSTALL_AFTER_EXIT.load(Ordering::SeqCst) {
+        if let Err(e) = flashagent_svc::uninstall::run_interactive(false) {
+            eprintln!("Uninstall stopped: {e}");
+            std::process::exit(1);
+        }
+    }
     result.map(|_| ())
 }
+
+/// Set by "yes" on the /uninstall card: the app closes and the uninstaller
+/// runs once the terminal is back to normal.
+pub(crate) static UNINSTALL_AFTER_EXIT: AtomicBool = AtomicBool::new(false);
+
+/// Title of the /uninstall card; also how the hint line knows which card it is.
+pub(crate) const UNINSTALL_TITLE: &str = "Uninstall FlashAgent";
 
 /// Which conversation the app opens with.
 enum SessionStart {
@@ -530,6 +553,11 @@ struct App {
     /// When Esc was last pressed on an empty prompt: a second press soon
     /// after quits.
     last_esc: Option<std::time::Instant>,
+    /// The /uninstall card is up.
+    uninstall_confirm: bool,
+    /// The recap and suggestion being written for the last turn, so a new
+    /// turn can stop it.
+    recap_task: Option<tokio::task::JoinHandle<()>>,
     /// The list of saved sessions (/resume), while it is open.
     session_menu: Option<SelectMenu<String>>,
     /// A session picked from that list, switched to at the top of the next
@@ -796,6 +824,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     // Esc used to quit outright, which loses a session to one stray keypress;
     // it takes two presses now.
     let last_esc: Option<std::time::Instant> = None;
+    let uninstall_confirm = false;
+    let recap_task: Option<tokio::task::JoinHandle<()>> = None;
     let session_menu: Option<SelectMenu<String>> = None;
     let pending_resume: Option<String> = None;
     let update_progress: Option<(String, flashagent_svc::updater::UpdateProgress)> = None;
@@ -977,6 +1007,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         background,
         channel_switch,
         last_esc,
+        uninstall_confirm,
+        recap_task,
         session_menu,
         pending_resume,
         update_progress,
@@ -1166,9 +1198,17 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             }
         }
 
-        let channel_prompt: Option<String> = app.channel_switch.as_ref().map(|sw| {
-            channel_switch_warning(sw.to, flashagent_svc::updater::current_version(), &sw.target)
-        });
+        let channel_prompt: Option<String> = if app.uninstall_confirm {
+            Some(
+                "Close FlashAgent and remove it? The uninstaller then shows what it will remove and asks, \
+                 part by part, which of your data to delete. Your session is saved first."
+                    .to_string(),
+            )
+        } else {
+            app.channel_switch.as_ref().map(|sw| {
+                channel_switch_warning(sw.to, flashagent_svc::updater::current_version(), &sw.target)
+            })
+        };
         let cost_now = app.image_costs.get(&app.current_model);
         let attachment_labels: Vec<String> =
             app.attachments.iter().map(|a| a.labelled(cost_now)).collect();
@@ -1222,6 +1262,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 ttft_display: if app.config.show_ttft { ttft_display.as_deref() } else { None },
                 background: app.background.as_ref().map(|b| b.text.as_str()),
                 channel_prompt: channel_prompt.as_deref(),
+                prompt_title: if app.uninstall_confirm { UNINSTALL_TITLE } else { "Switch release channel" },
                 turn_phase: app.running.then_some(&app.turn_phase),
                 attachments: &attachment_labels,
                 background_style: app.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),

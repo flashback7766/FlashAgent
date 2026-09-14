@@ -54,6 +54,17 @@ pub struct MockServer {
     /// most scenarios have no reason to care about LM Studio's v1 listing,
     /// only its v0 one).
     v1_models: Arc<Mutex<Option<serde_json::Value>>>,
+    side: Arc<SideRequests>,
+}
+
+/// How side requests (the recap, probes) are answered, and what became of
+/// the slow ones.
+#[derive(Default)]
+struct SideRequests {
+    /// Stream side answers a word at a time, this far apart.
+    per_word: Mutex<Option<Duration>>,
+    /// Slow side answers the app hung up on before they finished.
+    dropped: std::sync::atomic::AtomicUsize,
 }
 
 impl MockServer {
@@ -64,16 +75,29 @@ impl MockServer {
         let replies = Arc::new(Mutex::new(VecDeque::from(script)));
         let v0_extra_models = Arc::new(Mutex::new(Vec::new()));
         let v1_models = Arc::new(Mutex::new(None));
-        let (req2, rep2, v0e2, v12) = (requests.clone(), replies.clone(), v0_extra_models.clone(), v1_models.clone());
+        let side = Arc::new(SideRequests::default());
+        let (req2, rep2, v0e2, v12, side2) =
+            (requests.clone(), replies.clone(), v0_extra_models.clone(), v1_models.clone(), side.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let (req3, rep3, v0e3, v13) = (req2.clone(), rep2.clone(), v0e2.clone(), v12.clone());
+                let (req3, rep3, v0e3, v13, side3) = (req2.clone(), rep2.clone(), v0e2.clone(), v12.clone(), side2.clone());
                 std::thread::spawn(move || {
-                    let _ = serve(stream, &req3, &rep3, &v0e3, &v13);
+                    let _ = serve(stream, &req3, &rep3, &v0e3, &v13, &side3);
                 });
             }
         });
-        MockServer { url, requests, replies, v0_extra_models, v1_models }
+        MockServer { url, requests, replies, v0_extra_models, v1_models, side }
+    }
+
+    /// Answer side requests (the recap after a turn) slowly, a word every
+    /// `per_word`, so a scenario can act while one is still being written.
+    pub fn slow_side_requests(&self, per_word: Duration) {
+        *self.side.per_word.lock().unwrap() = Some(per_word);
+    }
+
+    /// Slow side answers the app hung up on before they were finished.
+    pub fn side_requests_dropped(&self) -> usize {
+        self.side.dropped.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn requests(&self) -> Vec<Request> {
@@ -123,6 +147,7 @@ fn serve(
     replies: &Mutex<VecDeque<Reply>>,
     v0_extra_models: &Mutex<Vec<serde_json::Value>>,
     v1_models: &Mutex<Option<serde_json::Value>>,
+    side: &SideRequests,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
@@ -167,6 +192,25 @@ fn serve(
         } else {
             out.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
         };
+    }
+
+    let slow_side = *side.per_word.lock().unwrap();
+    if let (false, Some(per_word), true) = (request.is_turn(), slow_side, request.body["stream"] == serde_json::Value::Bool(true)) {
+        // A long answer, a word at a time; a failed write means the app hung up.
+        let finished = (|| -> std::io::Result<()> {
+            out.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n")?;
+            for _ in 0..200 {
+                out.write_all(format!("data: {}\n\n", serde_json::json!({ "choices": [ { "delta": { "content": "word " } } ] })).as_bytes())?;
+                out.flush()?;
+                std::thread::sleep(per_word);
+            }
+            out.write_all(b"data: [DONE]\n\n")?;
+            out.flush()
+        })();
+        if finished.is_err() {
+            side.dropped.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        return Ok(());
     }
 
     let reply = if request.is_turn() {

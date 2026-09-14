@@ -409,6 +409,7 @@ dependencies = [
  "ring",
  "serde",
  "tar",
+ "tempfile",
 ]
 
 [[package]]

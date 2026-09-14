@@ -73,6 +73,8 @@ pub(crate) struct FrameState<'a> {
     pub(crate) attachments: &'a [String],
     /// A release-channel switch waiting for a yes or no.
     pub(crate) channel_prompt: Option<&'a str>,
+    /// Title of the yes-or-no card `channel_prompt` fills.
+    pub(crate) prompt_title: &'a str,
     pub(crate) context_warn_threshold: usize,
 }
 
@@ -307,7 +309,8 @@ impl Renderer {
             ));
             custom_cursor_col = Some(0);
         } else if let Some(prompt) = st.channel_prompt {
-            let title = " Switch release channel ";
+            let title = format!(" {} ", st.prompt_title);
+            let title = title.as_str();
             // Same treatment as an approval card: this replaces the binary
             // under the user, so it is asked in the same place and with the
             // same weight as anything else that cannot be undone by typing.
@@ -585,6 +588,8 @@ impl Renderer {
             } else {
                 "  \x1b[38;2;135;130;125m↑/↓ / 1-N — select · enter — confirm · esc — cancel\x1b[0m".to_string()
             }
+        } else if st.channel_prompt.is_some() && st.prompt_title == UNINSTALL_TITLE {
+            "  \x1b[38;2;135;130;125my / enter — close and uninstall · n / esc — keep FlashAgent\x1b[0m".to_string()
         } else if st.channel_prompt.is_some() {
             "  \x1b[38;2;135;130;125my / enter — switch · n / esc — keep the current channel\x1b[0m".to_string()
         } else if sampling_view.is_some() {

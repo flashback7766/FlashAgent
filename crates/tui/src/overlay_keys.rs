@@ -12,6 +12,23 @@ impl App {
                 self.renderer.request_reprint();
             }};
         }
+        // The uninstall card: yes closes the app, and the uninstaller runs in
+        // the restored terminal, where it asks what data to delete.
+        if self.uninstall_confirm {
+            self.uninstall_confirm = false;
+            let yes = matches!(
+                code,
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('\u{043d}')
+                    | KeyCode::Char('\u{041d}') | KeyCode::Enter
+            );
+            if yes {
+                UNINSTALL_AFTER_EXIT.store(true, Ordering::SeqCst);
+                return Flow::Quit;
+            }
+            self.renderer.request_reprint();
+            return Flow::Continue;
+        }
+
         // The channel card owns the keyboard while it is up: it is a
         // yes-or-no about replacing the binary, and typing past it
         // would leave the answer ambiguous.

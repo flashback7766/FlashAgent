@@ -136,6 +136,68 @@ fn a_conversation_is_saved_when_quitting_with_double_esc() {
 }
 
 #[test]
+fn sending_the_next_prompt_stops_the_recap_still_being_written() {
+    let server = MockServer::start(vec![
+        Reply::Text("First answer.".into()),
+        Reply::Text("Second answer.".into()),
+    ]);
+    server.slow_side_requests(Duration::from_millis(150));
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    ask(&term, "first question", "First answer.");
+    // Wait until the recap for that turn is being written.
+    let deadline = std::time::Instant::now() + WAIT;
+    while !server.requests().iter().any(|r| !r.is_turn() && r.body.to_string().contains("conversation analyzer")) {
+        assert!(std::time::Instant::now() < deadline, "no recap was asked for");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(server.side_requests_dropped(), 0);
+
+    ask(&term, "second question", "Second answer.");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while server.side_requests_dropped() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the recap kept being written after the next prompt was sent"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn uninstall_asks_first_and_no_keeps_the_app_running() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+
+    term.type_text("/uninstall");
+    term.send(ENTER);
+    term.wait_for("Uninstall FlashAgent", WAIT);
+    term.wait_for("Close FlashAgent and remove it?", WAIT);
+    term.send("n");
+    term.wait_gone("Uninstall FlashAgent", WAIT);
+    assert!(term.wait_exit(Duration::from_millis(500)).is_none(), "\"n\" closed the app");
+}
+
+#[test]
+fn yes_on_uninstall_closes_the_app_and_hands_over_to_the_uninstaller() {
+    // The test binary is a build from source, which the uninstaller refuses
+    // to touch — so this runs the whole hand-over without removing anything.
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+
+    term.type_text("/uninstall");
+    term.send(ENTER);
+    term.wait_for("Uninstall FlashAgent", WAIT);
+    term.send("y");
+    assert!(term.wait_exit(WAIT).is_some(), "\"y\" did not close the app");
+    term.wait_for("build from source", WAIT);
+    assert!(home.path().join(".flashagent").exists(), "a refused uninstall must not delete data");
+}
+
+#[test]
 fn the_next_launch_starts_in_the_mode_the_user_left_in() {
     let server = MockServer::start(Vec::new());
     let home = Home::new();
