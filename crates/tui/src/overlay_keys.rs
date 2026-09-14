@@ -567,6 +567,7 @@ impl App {
                         self.cancel_requested = Some(std::time::Instant::now());
                         self.turn_phase = TurnPhase::Stopping;
                         self.active_steer_tx = None;
+                        self.pending_steers.clear();
                         self.custom_placeholder = Some("Interrupting...".to_string());
                     }
                 }
@@ -701,6 +702,7 @@ impl App {
                         self.cancel_requested = Some(std::time::Instant::now());
                         self.turn_phase = TurnPhase::Stopping;
                         self.active_steer_tx = None;
+                        self.pending_steers.clear();
                         self.custom_placeholder = Some("Interrupting...".to_string());
                     }
                 }

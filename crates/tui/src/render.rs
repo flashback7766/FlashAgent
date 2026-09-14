@@ -76,6 +76,7 @@ pub(crate) struct FrameState<'a> {
     /// Title of the yes-or-no card `channel_prompt` fills.
     pub(crate) prompt_title: &'a str,
     pub(crate) context_warn_threshold: usize,
+    pub(crate) pending_steers: &'a [String],
 }
 
 impl Renderer {
@@ -221,6 +222,22 @@ impl Renderer {
 
         let (settled, live) = chat.render_split(width, st.reasoning_expand);
         let mut tail: Vec<RenderLine> = live;
+
+        if !st.pending_steers.is_empty() {
+            for steer in st.pending_steers {
+                let suffix = " \x1b[38;2;135;130;125m· steer queued\x1b[0m";
+                let avail = width.saturating_sub(18).max(10);
+                let wrapped = wrap_plain(steer, avail);
+                for (j, chunk) in wrapped.into_iter().enumerate() {
+                    let text = if j == 0 {
+                        format!(" \x1b[1;38;2;225;175;95m❯\x1b[0m \x1b[1;38;2;240;235;225m{chunk}\x1b[0m{suffix}")
+                    } else {
+                        format!("   \x1b[1;38;2;240;235;225m{chunk}\x1b[0m")
+                    };
+                    tail.push((LineKind::User, text));
+                }
+            }
+        }
 
         let inner_w = width.saturating_sub(2);
         let border_color = "\x1b[38;2;95;90;85m";

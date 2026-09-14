@@ -524,6 +524,7 @@ struct App {
     running: bool,
     active_turn_handle: Option<tokio::task::JoinHandle<()>>,
     active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    pending_steers: Vec<String>,
     cancel_requested: Option<std::time::Instant>,
     aborted_turn: Option<u64>,
     turn_counter: u64,
@@ -731,6 +732,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let running = false;
     let active_turn_handle: Option<tokio::task::JoinHandle<()>> = None;
     let active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
+    let pending_steers: Vec<String> = Vec::new();
     // Set when the user interrupts: the loop is asked to stop cooperatively so
     // it can hand back a consistent history; a hard abort is the fallback.
     let cancel_requested: Option<std::time::Instant> = None;
@@ -980,6 +982,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         running,
         active_turn_handle,
         active_steer_tx,
+        pending_steers,
         cancel_requested,
         aborted_turn,
         turn_counter,
@@ -1275,6 +1278,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 attachments: &attachment_labels,
                 background_style: app.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                 context_warn_threshold: app.config.context_warn_threshold,
+                pending_steers: &app.pending_steers,
             },
         );
 
@@ -1600,6 +1604,14 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     LoopEvent::Usage(u) => {
                         app.token_tracker.on_usage(u);
                     }
+                    LoopEvent::SteeringInjected(directive) => {
+                        if let Some(pos) = app.pending_steers.iter().position(|s| s == directive) {
+                            app.pending_steers.remove(pos);
+                        } else if !app.pending_steers.is_empty() {
+                            app.pending_steers.remove(0);
+                        }
+                        app.renderer.request_reprint();
+                    }
                     _ => {}
                 }
                 if let Some(ledger) = app.goal_ledger.as_mut() {
@@ -1916,6 +1928,26 @@ mod tests {
         let mut history = vec![ChatMessage::system("s"), ChatMessage::user("u"), ChatMessage::assistant("a")];
         assert_eq!(compact_context(&offline_source(), &mut history, None).await, None);
         assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn steering_injected_event_unpins_pending_steer_and_adds_user_message() {
+        let mut chat = ChatView::default();
+        chat.push_user("first prompt");
+        let mut pending_steers = vec!["please use postgres".to_string()];
+
+        let ev = LoopEvent::SteeringInjected("please use postgres".to_string());
+        if let LoopEvent::SteeringInjected(ref directive) = ev {
+            if let Some(pos) = pending_steers.iter().position(|s| s == directive) {
+                pending_steers.remove(pos);
+            }
+        }
+        chat.on_event(&ev);
+
+        assert!(pending_steers.is_empty(), "pending steers must be unpinned");
+        let (settled, live) = chat.render_split(80, false);
+        let all: Vec<String> = settled.into_iter().chain(live).map(|(_, s)| flashagent_tui::strip_ansi(&s)).collect();
+        assert!(all.iter().any(|l| l.contains("please use postgres")), "steer must become a regular user line");
     }
 
     #[test]

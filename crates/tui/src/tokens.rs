@@ -26,6 +26,7 @@ pub(crate) struct TokenTracker {
     pub(crate) turn_cached: i64,
     pub(crate) turn_calls: u32,
     pub(crate) cache_reported: bool,
+    pub(crate) total_turns: usize,
     /// The backend is LM Studio on this machine. It reports no cache figure,
     /// but its own server log says how many tokens each call really processed.
     pub(crate) lm_studio_local: bool,
@@ -119,6 +120,7 @@ impl TokenTracker {
             turn_cached: 0,
             turn_calls: 0,
             cache_reported: false,
+            total_turns: 0,
             lm_studio_local: false,
             lm_studio_log: None,
         }
@@ -146,47 +148,8 @@ impl TokenTracker {
         Some(TurnCache { prompt: self.turn_prompt, cached: self.turn_prompt - evaluated, source: CacheSource::ServerLog })
     }
 
-    /// One line summing up the turn that just finished, for under the answer:
-    /// `status: 4.6s · 6.5K prompt · cache hit 98% · 71 out · 15.3 t/s · TTFT 0.41s · 3 calls`.
-    pub(crate) fn turn_status_line(&self) -> Option<String> {
-        let elapsed = self.turn_start_time.map(|t| t.elapsed())?;
-        let dim = |s: &str| format!("\x1b[38;2;160;155;145m{s}\x1b[0m");
-        let mut parts = vec![dim(&format!("{:.1}s", elapsed.as_secs_f64()))];
-        if self.turn_prompt > 0 {
-            parts.push(dim(&format!(
-                "{} prompt",
-                flashagent_core::ContextUsage::format_used_tokens(self.turn_prompt as usize)
-            )));
-        }
-        // Always there, so a missing figure reads as "the server did not say",
-        // not as a field that quietly went away.
-        parts.push(match self.turn_cache() {
-            Some(cache) => {
-                let pct = cache.hit_percent();
-                let color = if pct >= 80.0 { "120;220;140" } else if pct >= 30.0 { "225;175;95" } else { "230;110;95" };
-                format!("\x1b[38;2;{color}mcache hit {pct:.0}%\x1b[0m")
-            }
-            None => dim("cache hit n/a"),
-        });
-        if self.total_model_tokens > 0 {
-            parts.push(dim(&format!("{} out", self.total_model_tokens)));
-        }
-        if let Some(tg) = self.last_tg.filter(|t| *t > 0.0) {
-            parts.push(dim(&format!("{tg:.1} t/s")));
-        }
-        if let Some(ttft) = self.last_ttft {
-            parts.push(dim(&format!("TTFT {:.2}s", ttft.as_secs_f64())));
-        }
-        if self.turn_calls > 1 {
-            parts.push(dim(&format!("{} calls", self.turn_calls)));
-        }
-        Some(format!(
-            "  \x1b[38;2;155;165;180mstatus:\x1b[0m {}",
-            parts.join(" \x1b[38;2;100;95;90m·\x1b[0m ")
-        ))
-    }
-
     pub(crate) fn on_turn_start(&mut self, model: String, estimated_prompt_tokens: usize) {
+        self.total_turns += 1;
         self.model = model;
         self.total_model_tokens = 0;
         self.window.clear();
@@ -361,14 +324,51 @@ impl TokenTracker {
 
         let mut parts = Vec::new();
 
-        if let Some(p) = self.prompt_tokens {
-            if p > 0 && budget >= 45 {
-                let p_str = flashagent_core::ContextUsage::format_used_tokens(p);
-                if budget >= 60 {
-                    parts.push(format!("\x1b[38;2;160;175;200m{p_str} prompt\x1b[0m"));
+        let prompt_val = if self.turn_prompt > 0 {
+            self.turn_prompt as usize
+        } else {
+            self.prompt_tokens.unwrap_or(0)
+        };
+
+        if prompt_val > 0 && budget >= 40 {
+            let p_str = flashagent_core::ContextUsage::format_used_tokens(prompt_val);
+            if budget >= 55 {
+                parts.push(format!("\x1b[38;2;160;175;200m{p_str} prompt\x1b[0m"));
+            } else {
+                parts.push(format!("\x1b[38;2;160;175;200m{p_str}\x1b[0m"));
+            }
+        }
+
+        // Cache hit: On the very first request, if cache hit is 0%, do not show it at all.
+        let cache_part = match self.turn_cache() {
+            Some(cache) => {
+                let pct = cache.hit_percent();
+                let is_first_turn_zero = self.total_turns <= 1 && pct == 0.0;
+                if is_first_turn_zero {
+                    None
                 } else {
-                    parts.push(format!("\x1b[38;2;160;175;200m{p_str}\x1b[0m"));
+                    let color = if pct >= 80.0 {
+                        "120;220;140"
+                    } else if pct >= 30.0 {
+                        "225;175;95"
+                    } else {
+                        "230;110;95"
+                    };
+                    Some(format!("\x1b[38;2;{color}mcache hit {pct:.0}%\x1b[0m"))
                 }
+            }
+            None => {
+                if prompt_val > 0 {
+                    Some("\x1b[38;2;160;155;145mcache hit n/a\x1b[0m".to_string())
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(cp) = cache_part {
+            if budget >= 45 {
+                parts.push(cp);
             }
         }
 
@@ -414,29 +414,63 @@ impl TokenTracker {
             }
         }
 
+        if self.turn_calls > 1 && budget >= 75 {
+            parts.push(format!("\x1b[38;2;160;155;145m{} calls\x1b[0m", self.turn_calls));
+        }
+
         if parts.is_empty() {
-            None
-        } else {
-            let joined = parts.join(" \x1b[38;2;100;95;90m·\x1b[0m ");
-            if visible_width(&joined) <= budget {
-                Some(joined)
-            } else {
-                let mut fallback_parts = Vec::new();
-                if let Some(ttft) = self.last_ttft {
-                    fallback_parts.push(format!("\x1b[38;2;120;220;140m{:.2}s\x1b[0m", ttft.as_secs_f64()));
-                }
-                if let Some(s) = speed {
-                    if s > 0.0 {
-                        fallback_parts.push(format!("\x1b[38;2;145;205;140m{:.1} tg\x1b[0m", s));
-                    }
-                }
-                let fallback = fallback_parts.join(" \x1b[38;2;100;95;90m·\x1b[0m ");
-                if visible_width(&fallback) <= budget && !fallback.is_empty() {
-                    Some(fallback)
-                } else {
-                    None
-                }
+            return None;
+        }
+
+        let joined = parts.join(" \x1b[38;2;100;95;90m·\x1b[0m ");
+        if visible_width(&joined) <= budget {
+            return Some(joined);
+        }
+
+        // If joined exceeds budget, try without verbose prefill speed:
+        let mut trimmed_parts = Vec::new();
+        if prompt_val > 0 && budget >= 35 {
+            let p_str = flashagent_core::ContextUsage::format_used_tokens(prompt_val);
+            trimmed_parts.push(format!("\x1b[38;2;160;175;200m{p_str} prompt\x1b[0m"));
+        }
+        if let Some(cache) = self.turn_cache() {
+            let pct = cache.hit_percent();
+            let is_first_turn_zero = self.total_turns <= 1 && pct == 0.0;
+            if !is_first_turn_zero {
+                let color = if pct >= 80.0 { "120;220;140" } else if pct >= 30.0 { "225;175;95" } else { "230;110;95" };
+                trimmed_parts.push(format!("\x1b[38;2;{color}mcache hit {pct:.0}%\x1b[0m"));
             }
+        } else if prompt_val > 0 && budget >= 50 {
+            trimmed_parts.push("\x1b[38;2;160;155;145mcache hit n/a\x1b[0m".to_string());
+        }
+        if let Some(ttft) = self.last_ttft {
+            trimmed_parts.push(format!("\x1b[38;2;120;220;140mTTFT {:.2}s\x1b[0m", ttft.as_secs_f64()));
+        }
+        if let Some(s) = speed {
+            if s > 0.0 {
+                trimmed_parts.push(format!("\x1b[38;2;145;205;140m{:.1} tg\x1b[0m", s));
+            }
+        }
+        let trimmed_joined = trimmed_parts.join(" \x1b[38;2;100;95;90m·\x1b[0m ");
+        if visible_width(&trimmed_joined) <= budget && !trimmed_joined.is_empty() {
+            return Some(trimmed_joined);
+        }
+
+        // Minimal fallback for very narrow viewports
+        let mut fallback_parts = Vec::new();
+        if let Some(ttft) = self.last_ttft {
+            fallback_parts.push(format!("\x1b[38;2;120;220;140m{:.2}s\x1b[0m", ttft.as_secs_f64()));
+        }
+        if let Some(s) = speed {
+            if s > 0.0 {
+                fallback_parts.push(format!("\x1b[38;2;145;205;140m{:.1} tg\x1b[0m", s));
+            }
+        }
+        let fallback = fallback_parts.join(" \x1b[38;2;100;95;90m·\x1b[0m ");
+        if visible_width(&fallback) <= budget && !fallback.is_empty() {
+            Some(fallback)
+        } else {
+            None
         }
     }
 
@@ -500,8 +534,8 @@ mod turn_cache_tests {
         let cache = t.turn_cache().expect("the server reported it");
         assert_eq!((cache.prompt, cache.cached, cache.source), (12_200, 12_000, CacheSource::Reported));
         assert_eq!(cache.hit_percent().round(), 98.0);
-        let line = plain(&t.turn_status_line().unwrap());
-        assert!(line.contains("status:") && line.contains("cache hit 98%") && line.contains("2 calls"), "{line}");
+        let stats = plain(&t.format_stats_width(80).unwrap());
+        assert!(stats.contains("cache hit 98%") && stats.contains("2 calls"), "{stats}");
     }
 
     #[test]
@@ -521,7 +555,8 @@ mod turn_cache_tests {
         t.on_turn_start("m".into(), 0);
         t.on_usage(&usage(6000, None));
         assert!(t.turn_cache().is_none());
-        assert!(plain(&t.turn_status_line().unwrap()).contains("cache hit n/a"));
+        let stats = plain(&t.format_stats_width(80).unwrap());
+        assert!(stats.contains("cache hit n/a"), "{stats}");
     }
 
     #[test]
@@ -553,5 +588,43 @@ mod turn_cache_tests {
         quiet.set_lm_studio_log_for_test(path, len);
         quiet.on_usage(&usage(6000, None));
         assert!(quiet.turn_cache().is_none());
+    }
+
+    #[test]
+    fn format_stats_width_omits_cache_hit_on_first_turn_zero() {
+        let mut t = TokenTracker::new("m".into());
+        // Turn 1: cold request with 0% cache hit
+        t.on_turn_start("m".into(), 0);
+        t.on_usage(&usage(6000, Some(0)));
+        t.on_finished();
+        assert_eq!(t.total_turns, 1);
+        let stats = plain(&t.format_stats_width(80).unwrap());
+        assert!(!stats.contains("cache hit"), "turn 1 with 0% cache hit should omit cache hit completely: {stats}");
+
+        // Turn 2: cache hit is 0% -> must be shown on subsequent turns
+        t.on_turn_start("m".into(), 0);
+        t.on_usage(&usage(6000, Some(0)));
+        t.on_finished();
+        assert_eq!(t.total_turns, 2);
+        let stats2 = plain(&t.format_stats_width(80).unwrap());
+        assert!(stats2.contains("cache hit 0%"), "turn 2 with 0% cache hit must show cache hit 0%: {stats2}");
+
+        // Turn 3: cache hit is 95% -> must be shown
+        t.on_turn_start("m".into(), 0);
+        t.on_usage(&usage(6000, Some(5700)));
+        t.on_finished();
+        let stats3 = plain(&t.format_stats_width(80).unwrap());
+        assert!(stats3.contains("cache hit 95%"), "turn 3 with 95% cache hit must show: {stats3}");
+    }
+
+    #[test]
+    fn format_stats_width_shows_cache_hit_on_first_turn_if_positive() {
+        let mut t = TokenTracker::new("m".into());
+        // Turn 1: system prompt hit gives 50%
+        t.on_turn_start("m".into(), 0);
+        t.on_usage(&usage(6000, Some(3000)));
+        t.on_finished();
+        let stats = plain(&t.format_stats_width(80).unwrap());
+        assert!(stats.contains("cache hit 50%"), "turn 1 with positive cache hit should be shown: {stats}");
     }
 }

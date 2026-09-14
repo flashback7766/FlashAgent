@@ -171,6 +171,7 @@ impl App {
                         self.turn_outcome = flashagent_core::TurnOutcome::default();
                         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                         self.active_steer_tx = Some(steer_tx);
+                        self.pending_steers.clear();
                         self.cancel_recap();
                         self.active_turn_handle = Some(spawn_turn(
                             cx.cancel.clone(),
@@ -301,6 +302,7 @@ impl App {
                         self.turn_outcome = flashagent_core::TurnOutcome::default();
                             let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                             self.active_steer_tx = Some(steer_tx);
+                            self.pending_steers.clear();
                             self.cancel_recap();
                             self.active_turn_handle = Some(spawn_turn(
                                 cx.cancel.clone(),
@@ -704,6 +706,7 @@ impl App {
                                 attachments: &[],
         background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                                 context_warn_threshold: self.config.context_warn_threshold,
+                                pending_steers: &self.pending_steers,
                             },
                         );
                         let before = self.context_usage.total_used();
@@ -1003,6 +1006,7 @@ impl App {
                         self.turn_outcome = flashagent_core::TurnOutcome::default();
                         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                         self.active_steer_tx = Some(steer_tx);
+                        self.pending_steers.clear();
                         self.cancel_recap();
                         self.active_turn_handle = Some(spawn_turn(
                             cx.cancel.clone(),
@@ -1088,6 +1092,7 @@ impl App {
                         self.turn_outcome = flashagent_core::TurnOutcome::default();
                     let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                     self.active_steer_tx = Some(steer_tx);
+                    self.pending_steers.clear();
                     self.cancel_recap();
                     self.active_turn_handle = Some(spawn_turn(
                         cx.cancel.clone(),
