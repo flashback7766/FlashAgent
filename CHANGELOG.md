@@ -1,5 +1,33 @@
 # Changelog
 
+## b273 — /rewind asks first, and a floor under /goal
+
+- `/rewind <n>` no longer takes turns back the moment you press Enter. The
+  composer turns into a confirmation card — the same treatment the model,
+  effort, and settings pickers get — listing every file that would change,
+  each with its own `+added -removed` count, and flagging a file the turn
+  created for removal. Nothing happens until "Yes, rewind" is confirmed;
+  "No, cancel" (or Esc) leaves the files and the conversation exactly as
+  they are.
+- The plain "Rewound to before turn N · ..." line that used to print
+  afterward is gone — the confirmation card already says what is about to
+  happen, so a second, static echo of it after the fact was just noise.
+- `/goal` now refuses a short list of shell patterns even though it normally
+  runs everything without asking: `rm -rf`, `sudo`, `git push --force`,
+  `git reset --hard`, `git clean -f`, `git branch -D`, `dd`, `mkfs`,
+  `shutdown`/`reboot`. Hitting one of these pauses the run and asks you,
+  the same as Manual mode would — even if you had earlier said "Always
+  allow" to that exact command in a normal session.
+- Every 10 completed steps, `/goal` checkpoints what it has written or
+  edited so far as a git commit — only inside a project that is already a
+  git repository, and only the files it actually touched. It sits next to
+  the file snapshots `/rewind` already used, so a long run leaves commits
+  to diff against along the way, not just "before it started" and "now".
+- `/goal` can now keep a live plan: it calls a new `update_plan` tool
+  (offered only during `/goal`) to lay out its steps and check them off as
+  it goes, shown as a small checklist above the input that updates in
+  place rather than piling up in the chat.
+
 ## b271 — a suggestion that only told you to make one
 
 This release changes nothing for you to use — it only fixes a bug.
