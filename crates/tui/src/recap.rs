@@ -87,7 +87,7 @@ pub(crate) async fn generate_llm_recap_and_suggestion(
         "You are a conversation analyzer. Return strictly JSON with the following fields:\n\
         {\n  \
           \"recap\": \"one concise past-tense sentence of what was explained or done\",\n  \
-          \"suggestion\": \"the next message the USER will send to the assistant, in imperative mood, about the work just done (e.g. 'Show Swift code examples', 'Explain how safety works', 'Run the tests and fix what fails'). It must be something the assistant can answer on its own. NEVER ask the user for information about themselves, their project or what they need: 'Tell me about your project', 'Tell me what help you need' are WRONG - those are the assistant talking to the user. Write it in the language of the conversation. Do not repeat the existing query!\"\n\
+          \"suggestion\": \"the next message the USER will send to the assistant, in imperative mood, about the work just done (e.g. 'Show Swift code examples', 'Explain how safety works', 'Run the tests and fix what fails'). It must name a concrete subject that already came up, and the assistant must be able to act on it without asking the user anything back. A message that asks the user to choose, specify or describe what they want is the assistant talking, not the user - never write one. If there is no concrete subject yet (a greeting, small talk), return an empty string. Write it in the language of the conversation. Do not repeat the existing query!\"\n\
         }\n\
         Do NOT generate any internal thinking or explanations. Start immediately with { and return only valid JSON.";
 
@@ -370,6 +370,15 @@ pub(crate) fn is_addressed_to_the_user(text: &str) -> bool {
         "укажи тему", "задай вопрос", "задай конкретный вопрос", "конкретный вопрос по",
         "сформулируй вопрос", "какой вопрос",
         "specify a topic", "specify the topic", "ask a specific question", "ask a question about",
+        // Inside a message the user sends, "you" is the assistant — and the
+        // assistant's wants never come up. So "you" joined to a verb of
+        // wanting is the user's own wants being asked about, whatever the
+        // surrounding sentence ("Specify the task you would like to work on",
+        // "Tell me what you need help with").
+        "you need", "you want", "you would like", "you'd like", "you wish", "you are interested",
+        "you're interested", "you prefer",
+        "тебе нужн", "вам нужн", "ты хочешь", "вы хотите", "хотел бы", "хотела бы", "хотели бы",
+        "тебе интересн", "вам интересн",
     ];
     RU_POSSESSIVE.iter().chain(HANDOFF).any(|needle| lower.contains(needle))
 }

@@ -2005,9 +2005,26 @@ mod tests {
             "Feel free to ask about anything else",
             "Укажи тему для анализа или задай конкретный вопрос по проекту",
             "Specify a topic for analysis or ask a specific question about the project",
+            "Specify the task you would like to work on first",
+            "Tell me what you need help with",
+            "Choose what you want to start with",
+            "Напиши, над чем ты хочешь поработать",
+            "Уточни, что тебе нужно сделать",
         ] {
             assert_eq!(sanitize_user_suggestion(bad), None, "should have been dropped: {bad}");
         }
+    }
+
+    #[test]
+    fn an_empty_suggestion_after_small_talk_keeps_the_recap_and_shows_no_suggestion() {
+        // The analyzer is told to leave the suggestion empty when nothing
+        // concrete has come up yet; that must not cost the recap.
+        let (recap, suggestion) = parse_recap_and_suggestion_json(
+            r#"{"recap": "The user said hello.", "suggestion": ""}"#,
+        )
+        .expect("the recap is still valid");
+        assert_eq!(recap, "The user said hello.");
+        assert_eq!(suggestion, None);
     }
 
     #[test]
@@ -2020,6 +2037,10 @@ mod tests {
             ("Запусти тесты и почини то, что упало", "Запусти тесты и почини то, что упало"),
             ("Explain how the permission modes differ", "Explain how the permission modes differ"),
             ("Show the diff before applying it", "Show the diff before applying it"),
+            // "you" alone is the assistant and is fine; only its wants are not.
+            ("Show what you changed in the parser", "Show what you changed in the parser"),
+            ("Explain what you can do with MCP servers", "Explain what you can do with MCP servers"),
+            ("Покажи, что ты изменил в парсере", "Покажи, что ты изменил в парсере"),
         ] {
             assert_eq!(
                 sanitize_user_suggestion(input).as_deref(),
