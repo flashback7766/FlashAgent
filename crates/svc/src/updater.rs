@@ -681,6 +681,10 @@ mod tests {
         assert!(is_writable(&exe), "{} is in a writable folder but was judged read-only", exe.display());
     }
 
+    // Unix only: on Windows the updater first moves whatever sits at the path
+    // aside (a running .exe can be renamed, not overwritten), so a directory
+    // there is moved too and the replacement genuinely succeeds.
+    #[cfg(unix)]
     #[test]
     fn a_replacement_that_did_not_happen_is_not_reported_as_done() {
         // A directory where the binary should be: the rename and the copy
