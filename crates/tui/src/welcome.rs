@@ -431,7 +431,7 @@ pub fn welcome_card_responsive_opts(
 
         let right_bot = [
             format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}for autonomy{RESET}"),
-            format!(" {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET} {M3_MUT}·{RESET} {M3_ICE}Esc{RESET} {M3_MUT}quit{RESET}"),
+            format!(" {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET} {M3_MUT}·{RESET} {M3_ICE}Esc Esc{RESET} {M3_MUT}quit{RESET}"),
             format!(" {M3_ICE}F1{RESET} {M3_MUT}context{RESET} {M3_MUT}·{RESET} {M3_ICE}F2{RESET} {M3_MUT}verbose{RESET} {M3_MUT}·{RESET} {M3_ICE}F3{RESET} {M3_MUT}model{RESET}"),
             format!(" {M3_ICE}F4{RESET} {M3_MUT}effort{RESET} {M3_MUT}·{RESET} {M3_ICE}F5{RESET} {M3_MUT}sampling{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+V{RESET} {M3_MUT}paste image{RESET}"),
             format!(" {M3_ICE}Ctrl+R{RESET} {M3_MUT}regen{RESET} {M3_MUT}·{RESET} {M3_ICE}/help{RESET} {M3_MUT}or{RESET} {M3_ICE}/skills{RESET} {M3_MUT}for more{RESET}"),
@@ -506,7 +506,7 @@ pub fn welcome_card_responsive_opts(
             let hints = fit_parts(
                 &[
                     ("Tab settings".into(), format!("{M3_ICE}Tab{RESET} {M3_MUT}settings{RESET}")),
-                    ("Esc quit".into(), format!("{M3_ICE}Esc{RESET} {M3_MUT}quit{RESET}")),
+                    ("Esc Esc quit".into(), format!("{M3_ICE}Esc Esc{RESET} {M3_MUT}quit{RESET}")),
                     ("F1..F5 hotkeys".into(), format!("{M3_ICE}F1..F5{RESET} {M3_MUT}hotkeys{RESET}")),
                 ],
                 &format!(" {M3_MUT}\u{b7}{RESET} "),
@@ -514,7 +514,7 @@ pub fn welcome_card_responsive_opts(
             );
             lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {hints}"), inner_w))));
         } else {
-            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal{RESET} {M3_MUT}·{RESET} {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET} {M3_MUT}·{RESET} {M3_ICE}Esc{RESET} {M3_MUT}quit{RESET}"), inner_w))));
+            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal{RESET} {M3_MUT}·{RESET} {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET} {M3_MUT}·{RESET} {M3_ICE}Esc Esc{RESET} {M3_MUT}quit{RESET}"), inner_w))));
         }
         lines.push((LineKind::System, bot));
     }
@@ -538,7 +538,11 @@ pub fn render_session_saved_card(session_id: &str, width: usize) -> Vec<String> 
     let top = format!("  {border_color}╭─{title_styled}{}╮{reset}", "─".repeat(dashes));
 
     let resume_cmd = format!("flashagent --resume {session_id}");
-    let msg = if inner_text_w >= 66 {
+    let msg = if inner_text_w >= 86 {
+        format!(
+            "To resume: \x1b[1;38;2;240;235;225mflashagent --continue\x1b[0m here, or \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m"
+        )
+    } else if inner_text_w >= 66 {
         format!("To resume next time: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m")
     } else {
         format!("Resume: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m")

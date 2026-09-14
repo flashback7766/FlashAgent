@@ -107,6 +107,167 @@ pub(crate) fn save_session_file(session_id: &str, model: &str, cwd: &str, histor
     None
 }
 
+/// A saved conversation, as the resume picker lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionSummary {
+    pub(crate) id: String,
+    pub(crate) timestamp: u64,
+    /// The first thing the user asked, on one line.
+    pub(crate) title: String,
+    /// Prompts and answers, not tool traffic.
+    pub(crate) messages: usize,
+}
+
+pub(crate) fn sessions_dir() -> Option<std::path::PathBuf> {
+    flashagent_home_dir().map(|home| home.join("sessions"))
+}
+
+/// A session id names one file in the sessions folder, and so does nothing
+/// but that: no separators, no `..`. It is also where the session is saved,
+/// so an id that could climb out would write outside the folder too.
+pub(crate) fn is_session_id(id: &str) -> bool {
+    !id.is_empty() && !id.contains(['/', '\\']) && !id.contains("..")
+}
+
+/// A fresh id for a conversation that has not been saved before.
+///
+/// Stamped to the second, and never one already on disk: two launches in the
+/// same second used to share an id, so the second session saved over the
+/// first.
+pub(crate) fn new_session_id() -> String {
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    unused_session_id(sessions_dir().as_deref(), ts)
+}
+
+fn unused_session_id(dir: Option<&std::path::Path>, ts: u64) -> String {
+    let taken = |id: &str| dir.is_some_and(|d| d.join(format!("{id}.json")).exists());
+    let base = format!("session_{ts}");
+    if !taken(&base) {
+        return base;
+    }
+    (2..).map(|n| format!("{base}_{n}")).find(|id| !taken(id)).unwrap_or(base)
+}
+
+/// `timestamp` as the picker says it: "just now", "5 min ago", "3 days ago".
+pub(crate) fn ago(timestamp: u64, now: u64) -> String {
+    let secs = now.saturating_sub(timestamp);
+    match secs {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{} min ago", secs / 60),
+        3600..=86_399 => format!("{} h ago", secs / 3600),
+        86_400..=172_799 => "yesterday".to_string(),
+        _ => format!("{} days ago", secs / 86_400),
+    }
+}
+
+impl App {
+    /// Open the list of this folder's saved sessions, leaving out the one
+    /// already open.
+    pub(crate) fn open_session_picker(&mut self, cwd_display: &str, current_session: &str) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let items: Vec<SelectItem<String>> = sessions_dir()
+            .map(|dir| sessions_in(&dir, cwd_display))
+            .unwrap_or_default()
+            .into_iter()
+            // Only a session with something in it is "the one already open";
+            // a fresh start has nothing to hide an older session behind.
+            .filter(|s| s.id != current_session || !worth_saving(&self.history))
+            .map(|s| {
+                let title = if s.title.is_empty() { "(no prompt)".to_string() } else { s.title };
+                SelectItem::with_description(title, format!("{} · {} messages", ago(s.timestamp, now), s.messages), s.id)
+            })
+            .collect();
+        if items.is_empty() {
+            self.custom_placeholder = Some("No other saved session in this folder".to_string());
+            self.suggested_prompt = None;
+        } else {
+            self.session_menu = Some(SelectMenu::new("Resume a Session", items).with_noun("sessions"));
+        }
+        self.renderer.request_reprint();
+    }
+}
+
+/// Saved sessions that were started in `cwd`, newest first. A file that does
+/// not parse is skipped: one broken file must not hide every other session.
+pub(crate) fn sessions_in(dir: &std::path::Path, cwd: &str) -> Vec<SessionSummary> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<SessionSummary> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .filter_map(|content| serde_json::from_str::<SavedSession>(&content).ok())
+        .filter(|s| s.cwd == cwd)
+        .map(|s| {
+            let title = s
+                .messages
+                .iter()
+                .find(|m| m.role == "user")
+                .map(|m| extract_user_prompt(&m.content).lines().next().unwrap_or("").to_string())
+                .unwrap_or_default();
+            SessionSummary {
+                messages: s.messages.iter().filter(|m| m.role == "user" || m.role == "assistant").count(),
+                id: s.id,
+                timestamp: s.timestamp,
+                title: flashagent_tui::truncate_middle(&title, 70),
+            }
+        })
+        .collect();
+    found.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| b.id.cmp(&a.id)));
+    found
+}
+
+/// Load one saved session by id. The id names a file in `dir` and nothing
+/// else: `--resume ../../somewhere` must not read a file outside it.
+pub(crate) fn read_session(dir: &std::path::Path, id: &str) -> Result<SavedSession, String> {
+    if !is_session_id(id) {
+        return Err(format!("'{id}' is not a session id; starting a new session."));
+    }
+    let path = dir.join(format!("{id}.json"));
+    let content = std::fs::read_to_string(&path)
+        .map_err(|_| format!("No saved session '{id}' in ~/.flashagent/sessions; starting fresh."))?;
+    serde_json::from_str(&content).map_err(|_| format!("Session file {} is unreadable; starting fresh.", path.display()))
+}
+
+/// Put a saved conversation back on screen and into the model's history,
+/// after the system prompt `history` already starts with. Returns how many
+/// messages came back.
+pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history: &mut Vec<ChatMessage>) -> usize {
+    let before = history.len();
+    for saved_msg in saved.messages {
+        let msg: ChatMessage = saved_msg.into();
+        match msg.role {
+            flashagent_llm::Role::User => {
+                chat.push_user(extract_user_prompt(&msg.content));
+                history.push(msg);
+            }
+            flashagent_llm::Role::Assistant => {
+                if !msg.content.trim().is_empty() {
+                    chat.push_assistant(&msg.content);
+                }
+                history.push(msg);
+            }
+            // The fresh system prompt (current cwd/model) wins; only a
+            // compaction summary carries over. A second system message
+            // mid-history breaks strict chat templates (Gemma, Qwen).
+            flashagent_llm::Role::System => {
+                // Current sessions keep the summary inside the system prompt;
+                // older ones stored it as its own system message. Both carry
+                // the marker title.
+                let title = COMPACTED_MARK.trim_start();
+                if let (Some(pos), Some(system)) = (msg.content.find(title), history.first_mut()) {
+                    system.content.push_str(COMPACTED_MARK);
+                    system.content.push_str(msg.content[pos + title.len()..].trim_start());
+                }
+            }
+            flashagent_llm::Role::Tool => history.push(msg),
+        }
+    }
+    history.len() - before
+}
+
 /// Whether this run produced a conversation worth writing to disk.
 ///
 /// `history` is never empty — it opens with the system prompt — so anything
@@ -144,5 +305,108 @@ pub(crate) fn extract_user_prompt(content: &str) -> &str {
 pub(crate) fn close_dangling_user(history: &mut Vec<ChatMessage>, note: &str) {
     if history.last().is_some_and(|m| m.role == flashagent_llm::Role::User) {
         history.push(ChatMessage::assistant(note));
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    fn write(dir: &std::path::Path, id: &str, timestamp: u64, cwd: &str, first_prompt: &str) {
+        let saved = SavedSession {
+            id: id.to_string(),
+            timestamp,
+            model: "m".into(),
+            cwd: cwd.to_string(),
+            messages: vec![
+                SavedMessage::from(&ChatMessage::system("sys")),
+                SavedMessage::from(&ChatMessage::user(first_prompt)),
+                SavedMessage::from(&ChatMessage::assistant("answer")),
+            ],
+        };
+        std::fs::write(dir.join(format!("{id}.json")), serde_json::to_string(&saved).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn only_this_folders_sessions_are_listed_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "session_100", 100, "~/proj", "first question");
+        write(dir.path(), "session_300", 300, "~/proj", "latest question\nsecond line");
+        write(dir.path(), "session_200", 200, "~/other", "elsewhere");
+        std::fs::write(dir.path().join("broken.json"), "not json").unwrap();
+
+        let listed = sessions_in(dir.path(), "~/proj");
+        let ids: Vec<&str> = listed.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["session_300", "session_100"], "a broken file or another folder's session must not show up");
+        assert_eq!(listed[0].title, "latest question", "one line of the first prompt");
+        assert_eq!(listed[0].messages, 2, "prompts and answers, not the system prompt");
+        assert!(sessions_in(dir.path(), "~/nowhere").is_empty());
+        assert!(sessions_in(&dir.path().join("missing"), "~/proj").is_empty());
+    }
+
+    #[test]
+    fn a_new_session_never_takes_the_id_of_one_already_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(unused_session_id(Some(dir.path()), 500), "session_500");
+        write(dir.path(), "session_500", 500, "~/proj", "first");
+        assert_eq!(unused_session_id(Some(dir.path()), 500), "session_500_2");
+        write(dir.path(), "session_500_2", 500, "~/proj", "second");
+        assert_eq!(unused_session_id(Some(dir.path()), 500), "session_500_3");
+        assert_eq!(unused_session_id(None, 500), "session_500");
+    }
+
+    #[test]
+    fn the_picker_says_how_long_ago_in_words() {
+        assert_eq!(ago(1000, 1030), "just now");
+        assert_eq!(ago(1000, 1000 + 5 * 60), "5 min ago");
+        assert_eq!(ago(0, 3 * 3600), "3 h ago");
+        assert_eq!(ago(0, 90_000), "yesterday");
+        assert_eq!(ago(0, 4 * 86_400), "4 days ago");
+        assert_eq!(ago(5000, 10), "just now", "a clock that moved back is not the future");
+    }
+
+    #[test]
+    fn a_session_id_cannot_reach_outside_the_sessions_folder() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("sessions");
+        std::fs::create_dir_all(dir.join("inner")).unwrap();
+        write(&dir, "session_1", 1, "~/proj", "hi");
+        // Real session files one step outside the folder and one inside a
+        // subfolder: without the id check these would be read.
+        write(home.path(), "escaped", 1, "~/proj", "outside");
+        write(&dir.join("inner"), "nested", 1, "~/proj", "nested");
+        assert!(read_session(&dir, "session_1").is_ok());
+        for bad in ["../escaped", "inner/nested", "inner\\nested", ".."] {
+            let err = read_session(&dir, bad).err().unwrap_or_else(|| panic!("{bad:?} was accepted"));
+            assert!(err.contains("not a session id"), "{bad:?}: {err}");
+        }
+        assert!(read_session(&dir, "").is_err());
+        let dir = dir.as_path();
+        let missing = read_session(dir, "session_404").err().expect("a missing session is an error");
+        assert!(missing.contains("No saved session"), "{missing}");
+    }
+
+    #[test]
+    fn restoring_keeps_the_new_system_prompt_and_only_a_summary_from_the_old_one() {
+        let saved = SavedSession {
+            id: "s".into(),
+            timestamp: 1,
+            model: "m".into(),
+            cwd: "~/proj".into(),
+            messages: vec![
+                SavedMessage::from(&ChatMessage::system(format!("old prompt{COMPACTED_MARK}what happened before"))),
+                SavedMessage::from(&ChatMessage::user("what is 2+2?")),
+                SavedMessage::from(&ChatMessage::assistant("4")),
+            ],
+        };
+        let mut chat = ChatView::default();
+        let mut history = vec![ChatMessage::system("new prompt")];
+        let restored = restore_session(saved, &mut chat, &mut history);
+        assert_eq!(restored, 2);
+        assert_eq!(history.len(), 3);
+        assert!(history[0].content.starts_with("new prompt"), "{}", history[0].content);
+        assert!(!history[0].content.contains("old prompt"), "{}", history[0].content);
+        assert!(history[0].content.contains("what happened before"), "{}", history[0].content);
+        assert_eq!(chat.user_turn_count(), 1);
     }
 }

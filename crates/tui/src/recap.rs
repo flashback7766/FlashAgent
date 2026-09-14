@@ -1,38 +1,5 @@
 use super::*;
 
-/// The language to write our own labels in, from what the user just typed.
-///
-/// `None` when the message is too short to tell — a bare "ok" is not evidence
-/// of anything, and switching on it would make the labels flicker.
-pub(crate) fn conversation_language(text: &str) -> Option<&'static str> {
-    // A slash command is our vocabulary, not theirs.
-    if text.trim_start().starts_with('/') {
-        return None;
-    }
-    let mut cyrillic = 0usize;
-    let mut latin = 0usize;
-    for c in text.chars().filter(|c| c.is_alphabetic()) {
-        match c as u32 {
-            0x0400..=0x04FF => cyrillic += 1,
-            0x0041..=0x005A | 0x0061..=0x007A => latin += 1,
-            _ => {}
-        }
-    }
-    let total = cyrillic + latin;
-    if total < 2 {
-        return None;
-    }
-    // Code and identifiers are Latin even in a Russian conversation, so a
-    // minority of Cyrillic still means Russian.
-    if cyrillic * 4 >= total {
-        Some("ru")
-    } else if latin == total {
-        Some("en")
-    } else {
-        None
-    }
-}
-
 /// The language a turn is written in, by script, when it is clearly not
 /// English. Script is a crude signal but a reliable one for the case that
 /// matters: a model answering a Russian conversation in English.
@@ -340,11 +307,13 @@ pub(crate) fn sanitize_user_suggestion(s: &str) -> Option<String> {
 
 /// A suggestion is a message the user is about to send TO the model. Models
 /// often return the opposite: the assistant asking the *user* for information
-/// ("Расскажи о своём проекте", "Tell me about your setup"). Pressing → on one
-/// of those sends the user their own question back, so they are dropped.
+/// ("Tell me about your project", "Tell me about your setup"). Pressing → on
+/// one of those sends the user their own question back, so they are dropped.
 ///
-/// The giveaway is the object, not the verb: "расскажи о архитектуре" is a
-/// fine prompt, "расскажи о своём проекте" is the assistant talking to you.
+/// The giveaway is the object, not the verb: "tell me about the architecture"
+/// is a fine prompt, "tell me about your project" is the assistant talking to
+/// you. The Russian entries below are data: they recognise the same shapes in
+/// a Russian conversation.
 pub(crate) fn is_addressed_to_the_user(text: &str) -> bool {
     let lower = text.to_lowercase();
     // Russian: reflexive/second-person possessives always point at whoever is

@@ -73,7 +73,6 @@ pub(crate) struct FrameState<'a> {
     pub(crate) attachments: &'a [String],
     /// A release-channel switch waiting for a yes or no.
     pub(crate) channel_prompt: Option<&'a str>,
-    pub(crate) quit_prompt: Option<&'a str>,
     pub(crate) context_warn_threshold: usize,
 }
 
@@ -195,6 +194,7 @@ impl Renderer {
         effort_menu: Option<&SelectMenu<String>>,
         model_menu: Option<&SelectMenu<String>>,
         rewind_confirm: Option<&RewindConfirm>,
+        session_menu: Option<&SelectMenu<String>>,
         settings_view: Option<&SettingsView>,
         sampling_view: Option<&SamplingView>,
         context_modal: Option<&ContextModal>,
@@ -306,8 +306,8 @@ impl Renderer {
                 format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
             ));
             custom_cursor_col = Some(0);
-        } else if let Some(prompt) = st.channel_prompt.or(st.quit_prompt) {
-            let title = if st.quit_prompt.is_some() { " Quit FlashAgent " } else { " Switch release channel " };
+        } else if let Some(prompt) = st.channel_prompt {
+            let title = " Switch release channel ";
             // Same treatment as an approval card: this replaces the binary
             // under the user, so it is asked in the same place and with the
             // same weight as anything else that cannot be undone by typing.
@@ -355,6 +355,21 @@ impl Renderer {
                 LineKind::System,
                 pad_box_row(&format!(" \x1b[1;38;2;240;235;225m{q_clipped}\x1b[0m"), width),
             ));
+            if let Some(deadline) = req.deadline {
+                // During /goal the run will not wait forever; say how long.
+                let left = deadline.saturating_duration_since(std::time::Instant::now()).as_secs();
+                tail.push((
+                    LineKind::System,
+                    pad_box_row(
+                        &format!(
+                            " \x1b[38;2;225;175;95mNo answer in {}:{:02} and the run carries on without one\x1b[0m",
+                            left / 60,
+                            left % 60
+                        ),
+                        width,
+                    ),
+                ));
+            }
 
             let q_state = st.question_state;
             let sel_idx = q_state.map(|s| s.selected_index).unwrap_or(0);
@@ -458,6 +473,11 @@ impl Renderer {
             custom_cursor_col = Some(0);
         } else if let Some(menu) = model_menu {
             // Morph composer into Model selection menu
+            tail.extend(menu.render(width));
+            input_line_idx = tail.len().saturating_sub(1);
+            custom_cursor_col = Some(0);
+        } else if let Some(menu) = session_menu {
+            // Morph composer into the list of saved sessions (/resume)
             tail.extend(menu.render(width));
             input_line_idx = tail.len().saturating_sub(1);
             custom_cursor_col = Some(0);
@@ -565,10 +585,6 @@ impl Renderer {
             } else {
                 "  \x1b[38;2;135;130;125m↑/↓ / 1-N — select · enter — confirm · esc — cancel\x1b[0m".to_string()
             }
-        } else if st.quit_prompt.is_some() {
-            // The question under the cursor owns the keys; the usual hints
-            // would be answering a different question.
-            "  \x1b[38;2;135;130;125my / enter — quit · n / esc — stay\x1b[0m".to_string()
         } else if st.channel_prompt.is_some() {
             "  \x1b[38;2;135;130;125my / enter — switch · n / esc — keep the current channel\x1b[0m".to_string()
         } else if sampling_view.is_some() {
@@ -577,6 +593,8 @@ impl Renderer {
             "  \x1b[38;2;135;130;125m↑/↓ — item · enter — open menu/change · esc — close\x1b[0m".to_string()
         } else if model_menu.is_some() {
             "  \x1b[38;2;135;130;125m↑/↓ — select model · enter — switch · esc — cancel\x1b[0m".to_string()
+        } else if session_menu.is_some() {
+            "  \x1b[38;2;135;130;125m↑/↓ — select session · type to filter · enter — open · esc — cancel\x1b[0m".to_string()
         } else if effort_menu.is_some() {
             "  \x1b[38;2;135;130;125m↑/↓ — select effort · enter — apply · esc — cancel\x1b[0m".to_string()
         } else if rewind_confirm.is_some() {
@@ -629,13 +647,13 @@ impl Renderer {
         } else {
             // Responsive footer shortcuts adapting cleanly to any terminal width:
             if width >= 140 {
-                "  \x1b[38;2;135;130;125menter — send · tab — settings · f1 — context · f2 — verbose · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · ctrl+c/v · esc — quit\x1b[0m".to_string()
+                "  \x1b[38;2;135;130;125menter — send · tab — settings · f1 — context · f2 — verbose · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · ctrl+c/v · esc esc — quit\x1b[0m".to_string()
             } else if width >= 115 {
-                "  \x1b[38;2;135;130;125menter — send · tab — settings · f1 — context · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · esc — quit\x1b[0m".to_string()
+                "  \x1b[38;2;135;130;125menter — send · tab — settings · f1 — context · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · esc esc — quit\x1b[0m".to_string()
             } else if width >= 92 {
-                "  \x1b[38;2;135;130;125menter — send · tab — settings · f3 — model · f4 — effort · f5 — sampling · esc — quit\x1b[0m".to_string()
+                "  \x1b[38;2;135;130;125menter — send · tab — settings · f3 — model · f4 — effort · f5 — sampling · esc esc — quit\x1b[0m".to_string()
             } else if width >= 68 {
-                "  \x1b[38;2;135;130;125menter — send · tab — settings · f3 — model · esc — quit\x1b[0m".to_string()
+                "  \x1b[38;2;135;130;125menter — send · tab — settings · f3 — model · esc esc — quit\x1b[0m".to_string()
             } else {
                 // Below ~68 columns the list is assembled from what fits,
                 // so it ends on a word rather than on half a separator.
@@ -643,7 +661,7 @@ impl Renderer {
                     &[
                         ("enter — send".into(), "enter — send".into()),
                         ("tab — menu".into(), "tab — menu".into()),
-                        ("esc — quit".into(), "esc — quit".into()),
+                        ("esc esc — quit".into(), "esc esc — quit".into()),
                     ],
                     " · ",
                     width.saturating_sub(2),

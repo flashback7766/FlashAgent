@@ -15,20 +15,6 @@ impl App {
         // The channel card owns the keyboard while it is up: it is a
         // yes-or-no about replacing the binary, and typing past it
         // would leave the answer ambiguous.
-        if self.quit_confirm {
-            self.quit_confirm = false;
-            let yes = matches!(
-                code,
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('\u{043d}')
-                    | KeyCode::Char('\u{041d}') | KeyCode::Enter
-            );
-            if yes {
-                return Flow::Quit;
-            }
-            self.renderer.request_reprint();
-            return Flow::Continue;
-        }
-
         if let Some(sw) = self.channel_switch.take() {
             let yes = matches!(
                 code,
@@ -122,9 +108,13 @@ impl App {
                         });
                     }
                     self.config = applied;
+                    // The mode chosen here is the one to start in next time,
+                    // also during /goal, where it is the mode the run hands
+                    // back when it ends.
+                    self.config.permission_mode = chosen_mode;
                     let _ = self.config.save();
                     cx.tools_arc.set_toolset_profile(self.config.toolset_profile);
-                    cx.tools_arc.set_web_enabled(self.config.free_search);
+                    cx.tools_arc.set_web_enabled(self.config.web_tools);
                     cx.source.0.set_max_retries(self.config.network_retries);
                     if self.config.model != self.current_model {
                         self.current_model = self.config.model.clone();
@@ -404,6 +394,30 @@ impl App {
                     self.renderer.request_reprint();
                 }
             }
+            return Flow::Continue;
+        }
+
+        // The list of saved sessions (/resume). Enter only records the pick:
+        // the switch happens at the top of the next loop turn, which owns the
+        // session id and the snapshot store.
+        if let Some(ref mut menu) = self.session_menu {
+            match code {
+                KeyCode::Up => menu.up(),
+                KeyCode::Down => menu.down(),
+                KeyCode::PageUp => menu.page_up(),
+                KeyCode::PageDown => menu.page_down(),
+                KeyCode::Backspace => menu.pop_filter_char(),
+                KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
+                    menu.push_filter_char(c);
+                }
+                KeyCode::Enter => {
+                    self.pending_resume = menu.selected_value().cloned();
+                    self.session_menu = None;
+                }
+                KeyCode::Esc => self.session_menu = None,
+                _ => {}
+            }
+            self.renderer.request_reprint();
             return Flow::Continue;
         }
 

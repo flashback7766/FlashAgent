@@ -29,8 +29,9 @@ pub use loop_::{AgentLoop, DoneReason, LoopConfig, LoopError, LoopEvent, LlmSour
 pub use memory_store::{Entry as MemoryEntry, Kind as MemoryEntryKind, Scope as MemoryScope, Store as MemoryStore};
 pub use memory::{collect, injection_block, outline, MemoryDoc, MemoryKind, GLOBAL_FILENAME, PROJECT_FILENAMES};
 pub use permissions::{
-    parse_chain, ApprovalGate, ApprovalRequest, Category, Decision, DenyAllGate, PermissionMode,
-    PermissionState, PermissionedTools, RuleSet, Verdict,
+    is_local_host, is_local_ip, is_read_only_shell, parse_chain, path_is_inside, url_host, ApprovalGate,
+    ApprovalRequest, Category, Decision, DenyAllGate, PermissionMode, PermissionState, PermissionedTools, RuleSet,
+    Verdict,
 };
 pub use prompt::{build_system_prompt, SystemPromptConfig};
 pub use snapshots::{FilePreview, RewindReport, Rewindable, SnapshotStore};

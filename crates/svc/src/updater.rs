@@ -428,24 +428,27 @@ pub async fn verify_checksum(
     Ok(())
 }
 
-/// Test if the destination path can be written to by the current process.
+/// Whether the current process can replace the file at `path`.
+///
+/// Replacing is a rename into the file's folder, so the folder is what has to
+/// be writable. Opening the file itself would say no for the one file that
+/// matters most: a running executable cannot be opened for writing on Linux
+/// ("text file busy"), which sent every update to `~/.local/bin` instead of
+/// over the binary that was actually run.
 pub fn is_writable(path: &Path) -> bool {
-    if path.exists() {
-        std::fs::OpenOptions::new().write(true).open(path).is_ok()
-    } else if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).is_ok()
-            && std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(parent.join(".write_test"))
-                .map(|_| {
-                    let _ = std::fs::remove_file(parent.join(".write_test"));
-                    true
-                })
-                .unwrap_or(false)
-    } else {
-        false
+    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return false;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    let probe = parent.join(format!(".flashagent-write-test.{}", std::process::id()));
+    match std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -493,26 +496,35 @@ pub fn atomic_replace_executable(target: &Path, new_binary_bytes: &[u8]) -> anyh
 
     // On Windows, running binaries cannot be overwritten in place, but can be renamed
     #[cfg(windows)]
+    let old_backup = parent.join(format!(".flashagent-old.{}.bak", std::process::id()));
+    #[cfg(windows)]
     {
         if target.exists() {
-            let old_backup = parent.join(format!(".flashagent-old.{}.bak", std::process::id()));
             let _ = std::fs::remove_file(&old_backup);
             let _ = std::fs::rename(target, &old_backup);
         }
     }
 
     // Atomic rename replaces the target inode on Unix
-    if let Err(e) = std::fs::rename(&temp_file, target) {
-        // If cross-device link error, copy and remove
-        let _ = std::fs::copy(&temp_file, target);
+    if let Err(rename_err) = std::fs::rename(&temp_file, target) {
+        // A rename across devices fails where a copy does not.
+        let copied = std::fs::copy(&temp_file, target);
         let _ = std::fs::remove_file(&temp_file);
+        if let Err(copy_err) = copied {
+            // Something still being at the path is not proof of success: it
+            // is usually the old build. Put a moved-away binary back.
+            #[cfg(windows)]
+            {
+                if !target.exists() {
+                    let _ = std::fs::rename(&old_backup, target);
+                }
+            }
+            anyhow::bail!("could not replace {}: {rename_err}; copying failed too: {copy_err}", target.display());
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755));
-        }
-        if !target.exists() {
-            return Err(e.into());
         }
     }
 
@@ -521,9 +533,10 @@ pub fn atomic_replace_executable(target: &Path, new_binary_bytes: &[u8]) -> anyh
 
 /// Download asset payload, verify it against the release checksums, and
 /// apply the in-place update.
-/// What an update is doing right now. Only the manual path (Ctrl+U) reports
-/// these; a background update stays silent by passing a callback that drops
-/// them, because an update nobody asked for must not take over the screen.
+/// What an update is doing right now. Both paths report these; the app shows
+/// a background update's progress only once the user asks to watch it
+/// (Ctrl+U), because an update nobody asked about must not take over the
+/// screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateProgress {
     /// Bytes pulled so far, and the total when the server declared one.
@@ -596,6 +609,16 @@ pub async fn download_and_apply_with_progress(
 /// Silent background worker: checks for updates, downloads, replaces executable,
 /// and returns the installed version string (e.g. "b190" or "v0.1.0") upon success.
 pub async fn check_and_apply_background(channel: UpdateChannel) -> anyhow::Result<Option<String>> {
+    check_and_apply_background_with_progress(channel, |_, _| {}).await
+}
+
+/// As [`check_and_apply_background`], reporting each stage together with the
+/// version being installed, so a download that is already under way can be
+/// watched when the user asks for it.
+pub async fn check_and_apply_background_with_progress(
+    channel: UpdateChannel,
+    mut on_progress: impl FnMut(&str, UpdateProgress),
+) -> anyhow::Result<Option<String>> {
     if is_dev_mode() {
         return Ok(None);
     }
@@ -607,7 +630,10 @@ pub async fn check_and_apply_background(channel: UpdateChannel) -> anyhow::Resul
         // Channel switches to Stable are explicit and still apply.
         UpdateStatus::UpdateAvailable { is_downgrade: true, channel: UpdateChannel::Beta, .. } => Ok(None),
         UpdateStatus::UpdateAvailable { target, asset_name, download_url, checksums_url, .. } => {
-            download_and_apply(&download_url, &asset_name, checksums_url.as_deref()).await?;
+            download_and_apply_with_progress(&download_url, &asset_name, checksums_url.as_deref(), |stage| {
+                on_progress(&target, stage)
+            })
+            .await?;
             Ok(Some(target))
         }
         UpdateStatus::UpToDate { .. } => Ok(None),
@@ -643,6 +669,28 @@ mod tests {
         assert!(!in_source_tree(&elsewhere.join("flashagent")));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_running_binary_in_a_folder_we_can_write_to_is_replaced_in_place() {
+        // This test binary is running right now, exactly like FlashAgent
+        // when it updates itself, and it sits in a folder the build owns.
+        // Replacing it needs only that folder: the rename swaps the file
+        // while the running process keeps the old one.
+        let exe = std::env::current_exe().unwrap();
+        assert!(is_writable(&exe), "{} is in a writable folder but was judged read-only", exe.display());
+    }
+
+    #[test]
+    fn a_replacement_that_did_not_happen_is_not_reported_as_done() {
+        // A directory where the binary should be: the rename and the copy
+        // both fail, and something still exists at the path.
+        let tmp = std::env::temp_dir().join(format!("fa-replace-fails-{}", std::process::id()));
+        let target = tmp.join("flashagent");
+        std::fs::create_dir_all(&target).unwrap();
+        let result = atomic_replace_executable(&target, b"new build");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(result.is_err(), "nothing was replaced, yet the update reported success");
     }
 
     #[test]

@@ -73,13 +73,70 @@ pub(crate) fn html_to_text(html: &str) -> String {
     collapsed.trim().to_string()
 }
 
+/// Most redirects one fetch follows.
+const MAX_REDIRECTS: usize = 5;
+
 /// Fetch a URL; HTML responses are reduced to plain text.
-pub async fn fetch_text(http: &reqwest::Client, url: &str) -> Result<String, ToolError> {
-    let resp = http
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| ToolError::Other(format!("fetch: {e}")))?;
+///
+/// A local address — this machine, the local network, a cloud metadata
+/// endpoint — is fetched only when the URL names it outright, because only
+/// then has the permission layer recognised it and asked the user. One that
+/// turns out local some other way (a DNS name pointing at 127.0.0.1, an IP
+/// spelled `127.1`, a redirect from a public page) is refused. The address
+/// that was checked is the one connected to, so a name cannot resolve to a
+/// public address for the check and a local one for the request, and every
+/// redirect is checked the same way before it is followed.
+pub async fn fetch_text(url: &str) -> Result<String, ToolError> {
+    let approved_local = flashagent_core::url_host(url).is_some_and(|h| flashagent_core::is_local_host(&h));
+    let mut current =
+        reqwest::Url::parse(url).map_err(|e| ToolError::Other(format!("fetch: bad URL {url}: {e}")))?;
+    for _ in 0..=MAX_REDIRECTS {
+        if !matches!(current.scheme(), "http" | "https") {
+            return Err(ToolError::Other(format!("fetch: only http and https URLs can be fetched, not {}", current.scheme())));
+        }
+        let host = current.host_str().ok_or_else(|| ToolError::Other(format!("fetch: {current} has no host")))?.to_string();
+        let bare = host.trim_start_matches('[').trim_end_matches(']').to_string();
+        let port = current.port_or_known_default().unwrap_or(80);
+        let literal = bare.parse::<std::net::IpAddr>().ok();
+        let addrs: Vec<std::net::SocketAddr> = match literal {
+            Some(ip) => vec![std::net::SocketAddr::new(ip, port)],
+            None => tokio::net::lookup_host((bare.as_str(), port))
+                .await
+                .map_err(|e| ToolError::Other(format!("fetch: cannot resolve {bare}: {e}")))?
+                .collect(),
+        };
+        let Some(first) = addrs.first().copied() else {
+            return Err(ToolError::Other(format!("fetch: {bare} has no address")));
+        };
+        if !approved_local && addrs.iter().any(|a| flashagent_core::is_local_ip(a.ip())) {
+            return Err(ToolError::Other(format!(
+                "fetch: {host} leads to a local address ({}); a local address is fetched only when the URL names it, so it can be approved",
+                first.ip()
+            )));
+        }
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none());
+        if literal.is_none() {
+            builder = builder.resolve(&bare, first);
+        }
+        let client = builder.build().map_err(|e| ToolError::Other(format!("fetch: {e}")))?;
+        let resp = client.get(current.clone()).send().await.map_err(|e| ToolError::Other(format!("fetch: {e}")))?;
+        if resp.status().is_redirection() {
+            let location = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| ToolError::Other(format!("fetch: HTTP {} without a location", resp.status())))?;
+            current = current.join(location).map_err(|e| ToolError::Other(format!("fetch: bad redirect {location}: {e}")))?;
+            continue;
+        }
+        return read_fetched(resp).await;
+    }
+    Err(ToolError::Other(format!("fetch: more than {MAX_REDIRECTS} redirects")))
+}
+
+async fn read_fetched(resp: reqwest::Response) -> Result<String, ToolError> {
     let status = resp.status();
     let content_type = resp
         .headers()
@@ -268,6 +325,53 @@ pub async fn search_free(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_http_is_fetched() {
+        let err = fetch_text("file:///etc/passwd").await.unwrap_err().to_string();
+        assert!(err.contains("only http and https"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_local_address_the_url_does_not_name_outright_is_refused() {
+        // Both are 127.0.0.1 once parsed, but neither looks local as written,
+        // so the permission layer never asked about them.
+        for url in ["http://127.1:9/", "http://0x7f.0.0.1:9/"] {
+            let err = fetch_text(url).await.unwrap_err().to_string();
+            assert!(err.contains("local address"), "{url}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_local_address_named_outright_is_left_to_the_permission_layer() {
+        // Port 9 has nothing listening: the error is the connection's, not
+        // the guard's.
+        let err = fetch_text("http://127.0.0.1:9/").await.unwrap_err().to_string();
+        assert!(!err.contains("leads to a local address"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn redirects_are_followed_one_checked_hop_at_a_time() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 2048];
+                let n = sock.read(&mut buf).await.unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let reply = if request.starts_with("GET /start") {
+                    "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello".to_string()
+                };
+                sock.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        let body = fetch_text(&format!("http://127.0.0.1:{port}/start")).await.unwrap();
+        assert_eq!(body, "hello");
+    }
 
     #[test]
     fn html_to_text_extracts_visible_text() {

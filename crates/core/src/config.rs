@@ -187,10 +187,8 @@ pub struct AppConfig {
     pub api_key: Option<String>,
     /// Selected default model ID.
     pub model: String,
-    /// Interface language ("ru" or "en"); taken from the locale when unset.
-    #[serde(default = "default_language")]
-    pub language: String,
-    /// Default permission mode on startup.
+    /// Permission mode to start in: the one the user was in last time
+    /// (Accept Edits on the very first run).
     pub permission_mode: PermissionMode,
     /// Default thinking effort preset ("default", "off", "low", "medium", "high").
     pub thinking_effort: String,
@@ -219,8 +217,20 @@ pub struct AppConfig {
     pub max_steps: Option<u32>,
     /// Context token budget for memory injection.
     pub token_budget: usize,
-    /// Whether free web search (DuckDuckGo) is enabled.
-    pub free_search: bool,
+    /// Whether `web_fetch` and `web_search` are offered to the model. On by
+    /// default; stored under a new key so the old opt-in `free_search: false`
+    /// that every earlier config was born with does not keep them off.
+    #[serde(default = "default_true")]
+    pub web_tools: bool,
+    /// `/goal` step limit; `None` = unlimited.
+    #[serde(default)]
+    pub goal_max_steps: Option<u32>,
+    /// `/goal` wall-clock limit in minutes; `None` = unlimited.
+    #[serde(default)]
+    pub goal_max_minutes: Option<u32>,
+    /// `/goal` generated-token limit; `None` = unlimited.
+    #[serde(default)]
+    pub goal_max_output_tokens: Option<i64>,
     /// Whether the first start setup wizard has been completed.
     pub setup_completed: bool,
     /// Toolset exposure profile (Auto / Full / Compact).
@@ -232,12 +242,10 @@ pub struct AppConfig {
     /// Update release channel (Beta / Stable).
     #[serde(default = "default_update_channel")]
     pub update_channel: UpdateChannel,
-    /// Whether background auto-check for updates is enabled.
+    /// Whether updates are checked for, downloaded and installed in the
+    /// background.
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
-    /// Whether silent daily update notification check without auto-download is enabled.
-    #[serde(default = "default_true")]
-    pub silent_update_check: bool,
     /// Whether animated swift mascot is shown in welcome card.
     #[serde(default = "default_true")]
     pub show_mascot: bool,
@@ -306,24 +314,6 @@ fn default_approval_mode() -> String {
 
 fn default_warn_threshold() -> usize {
     70
-}
-
-/// The language the interface writes in when nothing has been chosen.
-///
-/// Read from the locale rather than assumed: the shipped default was Russian,
-/// which meant everyone else met a Russian-labelled app until they typed
-/// enough of their own language for it to be detected.
-fn default_language() -> String {
-    let locale = std::env::var("LC_ALL")
-        .or_else(|_| std::env::var("LC_MESSAGES"))
-        .or_else(|_| std::env::var("LANG"))
-        .unwrap_or_default()
-        .to_lowercase();
-    if locale.starts_with("ru") {
-        "ru".to_string()
-    } else {
-        "en".to_string()
-    }
 }
 
 fn default_compact_threshold() -> usize {
@@ -414,7 +404,6 @@ impl Default for AppConfig {
             backend_url: "http://localhost:1234/v1".to_string(),
             api_key: None,
             model: String::new(),
-            language: default_language(),
             permission_mode: PermissionMode::AcceptEdits,
             thinking_effort: "auto".to_string(),
             sampling_preset: SamplingPreset::Coding,
@@ -426,13 +415,15 @@ impl Default for AppConfig {
             min_p: Some(0.00),
             max_steps: None, // no step limit per turn
             token_budget: 2000,
-            free_search: false, // nothing leaves the machine unless the user turns it on
+            web_tools: true,
+            goal_max_steps: None,
+            goal_max_minutes: None,
+            goal_max_output_tokens: None,
             setup_completed: false,
             toolset_profile: ToolsetProfile::Auto,
             trusted_directories: Vec::new(),
             update_channel: default_update_channel(),
             auto_check_updates: true,
-            silent_update_check: true,
             show_mascot: true,
             show_tips: true,
             show_ttft: true,
@@ -625,22 +616,27 @@ mod tests {
     }
 
     #[test]
-    fn the_interface_language_follows_the_locale() {
-        // The shipped default was Russian for everyone, so an English speaker
-        // met "Разбираю запрос" on their first run.
-        let restore = std::env::var("LANG").ok();
-        std::env::set_var("LANG", "ru_RU.UTF-8");
-        std::env::remove_var("LC_ALL");
-        std::env::remove_var("LC_MESSAGES");
-        assert_eq!(AppConfig::default().language, "ru");
-        std::env::set_var("LANG", "en_GB.UTF-8");
-        assert_eq!(AppConfig::default().language, "en");
-        std::env::set_var("LANG", "de_DE.UTF-8");
-        assert_eq!(AppConfig::default().language, "en", "anything we do not speak is English");
-        match restore {
-            Some(v) => std::env::set_var("LANG", v),
-            None => std::env::remove_var("LANG"),
-        }
+    fn web_tools_are_on_even_for_a_config_that_had_opted_out_by_default() {
+        // Every earlier config was saved with the old opt-in flag set to
+        // false, whether or not its owner ever chose that.
+        let (cfg, rejected) = AppConfig::from_json_str(r#"{"model":"kept","free_search":false}"#);
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert!(cfg.web_tools);
+        assert!(AppConfig::default().web_tools);
+        // Turning them off under the new key sticks.
+        let (off, _) = AppConfig::from_json_str(r#"{"web_tools":false}"#);
+        assert!(!off.web_tools);
+    }
+
+    #[test]
+    fn goal_limits_are_unlimited_unless_set() {
+        let cfg = AppConfig::default();
+        assert_eq!((cfg.goal_max_steps, cfg.goal_max_minutes, cfg.goal_max_output_tokens), (None, None, None));
+        let (set, rejected) = AppConfig::from_json_str(
+            r#"{"goal_max_steps":40,"goal_max_minutes":30,"goal_max_output_tokens":200000}"#,
+        );
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert_eq!((set.goal_max_steps, set.goal_max_minutes, set.goal_max_output_tokens), (Some(40), Some(30), Some(200_000)));
     }
 
     #[test]
@@ -709,12 +705,19 @@ mod tests {
     #[test]
     fn test_config_default_and_roundtrip() {
         let temp = std::env::temp_dir().join("test_flashagent_config.json");
-        let cfg = AppConfig { model: "test-model".into(), language: "ru".into(), setup_completed: true, ..Default::default() };
+        let cfg = AppConfig {
+            model: "test-model".into(),
+            permission_mode: crate::PermissionMode::Bypass,
+            goal_max_steps: Some(12),
+            setup_completed: true,
+            ..Default::default()
+        };
 
         cfg.save_to(&temp).expect("save should succeed");
         let loaded = AppConfig::load_from(&temp).expect("load should succeed");
         assert_eq!(loaded.model, "test-model");
-        assert_eq!(loaded.language, "ru");
+        assert_eq!(loaded.permission_mode, crate::PermissionMode::Bypass, "the last mode, Accept All included, comes back");
+        assert_eq!(loaded.goal_max_steps, Some(12));
         assert!(loaded.setup_completed);
         let _ = std::fs::remove_file(&temp);
     }
@@ -722,21 +725,22 @@ mod tests {
     #[test]
     fn test_backwards_compatible_deserialization_from_older_schema() {
         // Minimal older configuration JSON without newly added fields:
-        // missing: sampling_preset, top_p, top_k, max_steps, free_search, toolset_profile, trusted_directories.
+        // missing: sampling_preset, top_p, top_k, max_steps, web_tools, toolset_profile, trusted_directories.
+        // "language" and "silent_update_check" are settings that no longer exist.
         let old_json = r#"{
             "backend_url": "http://localhost:1234/v1",
             "model": "qwen2.5-coder-32b",
             "language": "ru",
+            "silent_update_check": false,
             "setup_completed": true
         }"#;
 
         let cfg: AppConfig = serde_json::from_str(old_json).expect("older schema must deserialize cleanly");
         assert_eq!(cfg.model, "qwen2.5-coder-32b");
         assert_eq!(cfg.backend_url, "http://localhost:1234/v1");
-        assert_eq!(cfg.language, "ru");
         assert!(cfg.setup_completed, "setup_completed flag must be preserved!");
         assert_eq!(cfg.sampling_preset, SamplingPreset::Coding);
-        assert!(!cfg.free_search);
+        assert!(cfg.web_tools);
         assert_eq!(cfg.toolset_profile, ToolsetProfile::Auto);
         assert!(cfg.trusted_directories.is_empty());
     }

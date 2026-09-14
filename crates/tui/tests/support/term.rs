@@ -60,7 +60,6 @@ impl Home {
             "model": super::mock_server::MODEL,
             "last_seen_version": version(),
             "auto_check_updates": false,
-            "silent_update_check": false,
         });
         if let (Some(base), Some(extra)) = (config.as_object_mut(), extra.as_object()) {
             for (k, v) in extra {

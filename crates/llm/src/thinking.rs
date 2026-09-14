@@ -446,7 +446,7 @@ impl ThinkingProfile {
 /// of English words, so a Russian prompt matched nothing, and it measured
 /// length in bytes, so any Cyrillic sentence over fifty characters counted as
 /// "long" and went to maximum reasoning. Both of those are how a model ends
-/// up thinking for forty seconds about "прочитай файл".
+/// up thinking for forty seconds about "read the file" typed in Russian.
 pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskComplexity {
     use crate::types::Role;
 
@@ -469,9 +469,9 @@ pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskCo
         .map(|m| Self::user_message_complexity(&m.content))
         .unwrap_or(TaskComplexity::Minimal);
 
-    // "делай" / "yes, go ahead" approves whatever was just proposed, and the
+    // "do it" / "yes, go ahead" approves whatever was just proposed, and the
     // proposal is the task. Without this, agreeing to a full refactor scores
-    // like the word "делай".
+    // like the two words "do it".
     let last_user_is_ack = messages
         .iter()
         .rev()
@@ -550,7 +550,7 @@ fn user_text(raw: &str) -> &str {
     }
 }
 
-/// "yes", "1", "ок", "давай" — an answer to the agent, not a task.
+/// "yes", "1", "ok", "go on" (in any language) — an answer to the agent, not a task.
 fn is_bare_acknowledgement(prompt: &str) -> bool {
     prompt.chars().count() <= 12
         && prompt.split_whitespace().count() <= 2
@@ -1436,8 +1436,8 @@ mod tests {
     fn agreeing_to_a_big_job_inherits_the_job() {
         use crate::types::ChatMessage;
 
-        // The user states the job, then approves it a message later. "делай"
-        // is two syllables; the task behind it is a week.
+        // The user states the job, then approves it a message later. "Do it"
+        // is two words; the task behind it is a week.
         let stated = vec![
             ChatMessage::user("Делаем полный рефактор проекта"),
             ChatMessage::assistant("Хорошо, начну с разбора зависимостей. Приступать?"),

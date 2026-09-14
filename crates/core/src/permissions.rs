@@ -313,6 +313,203 @@ fn blacklisted_shell_reason(cmd: &str) -> Option<&'static str> {
     parse_chain(cmd).iter().find_map(|seg| blacklisted_segment(seg))
 }
 
+/// The host a URL names: lowercased, without scheme, credentials, port or
+/// IPv6 brackets. `None` when there is no host to name.
+pub fn url_host(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host_port.strip_prefix('[') {
+        Some(inner) => inner.split(']').next()?,
+        None => host_port.split(':').next()?,
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+/// This machine, the local network, or a cloud metadata address.
+pub fn is_local_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || a == 0
+                // Carrier-grade NAT, 100.64.0.0/10: not the internet either.
+                || (a == 100 && (b & 0xC0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+                || v6.to_ipv4_mapped().is_some_and(|v4| is_local_ip(IpAddr::V4(v4)))
+        }
+    }
+}
+
+/// Whether a host, as written, names somewhere local: a local IP, `localhost`,
+/// a name under a local-only suffix, or a single-label name (`router`, `nas`)
+/// that only a local resolver answers for. An IP spelled some other way
+/// (`127.1`) is not recognised here; the fetch tool checks the address it
+/// actually connects to.
+pub fn is_local_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.').to_ascii_lowercase();
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return is_local_ip(ip);
+    }
+    host == "localhost"
+        || [".localhost", ".local", ".internal", ".lan", ".home.arpa"].iter().any(|s| host.ends_with(s))
+        || (!host.is_empty() && !host.contains('.'))
+}
+
+/// The paths a built-in file tool call names, as written. Read through the
+/// same resolver the tools use, so a path under another key name
+/// (`file_path`, `filePath`) is still seen.
+fn named_paths(tool: &str, args_json: &str) -> Vec<String> {
+    fn push(out: &mut Vec<String>, value: Option<&serde_json::Value>) {
+        if let Some(s) = value.and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            out.push(s.to_string());
+        }
+    }
+    let Some(args) = flashagent_llm::effective_args(args_json, tool) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    match tool {
+        "read_file" | "write_file" | "edit_file" | "patch_file" | "list_dir" | "outline_file" | "git_status"
+        | "git_diff" | "view_image" => {
+            push(&mut out, args.get("path"));
+            for file in args.get("files").and_then(|f| f.as_array()).into_iter().flatten() {
+                push(&mut out, if file.is_string() { Some(file) } else { file.get("path") });
+            }
+        }
+        // A glob searches from the part before its first wildcard.
+        "glob" => {
+            let pattern = args.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
+            let fixed = pattern.split(['*', '?', '[', '{']).next().unwrap_or("");
+            if !fixed.is_empty() {
+                out.push(fixed.to_string());
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Whether `raw` (relative to `root`, or absolute) stays inside `root`.
+///
+/// `..` is resolved first, then symlinks along whatever part of the path
+/// exists — so a link inside the project that points at `~/.ssh` is outside,
+/// and a file that does not exist yet is judged by the folder it would go in.
+pub fn path_is_inside(root: &std::path::Path, raw: &str) -> bool {
+    use std::path::{Component, PathBuf};
+    let joined = if std::path::Path::new(raw).is_absolute() { PathBuf::from(raw) } else { root.join(raw) };
+    let mut normal = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::ParentDir => {
+                normal.pop();
+            }
+            Component::CurDir => {}
+            other => normal.push(other.as_os_str()),
+        }
+    }
+    let mut existing = normal.clone();
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name().map(|n| n.to_os_string()) else { break };
+        missing.push(name);
+        existing.pop();
+    }
+    let mut resolved = existing.canonicalize().unwrap_or(existing);
+    for name in missing.iter().rev() {
+        resolved.push(name);
+    }
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    resolved.starts_with(&root)
+}
+
+/// Whether every part of `cmd` only reads: Planning mode runs these without
+/// asking. Deliberately a short list of programs whose effects are known,
+/// with the few flags that would make one of them write or run something
+/// else refused. Anything not on the list — including builds such as
+/// `cargo check`, whose build scripts run arbitrary code — stays refused.
+pub fn is_read_only_shell(cmd: &str) -> bool {
+    if smuggles_side_effects(cmd) {
+        return false;
+    }
+    let segments = parse_chain(cmd);
+    !segments.is_empty() && segments.iter().all(|seg| read_only_segment(seg))
+}
+
+fn read_only_segment(segment: &str) -> bool {
+    let words: Vec<String> =
+        segment.split_whitespace().map(|w| w.trim_matches(|c| c == '"' || c == '\'').to_string()).collect();
+    let Some(prog) = words.first() else { return false };
+    let args = &words[1..];
+    // `./ls` or `/tmp/ls` is whatever file sits there; `VAR=x ls` can load
+    // code into the program (LD_PRELOAD). Only a bare, known name counts.
+    if prog.contains('/') || prog.contains('=') {
+        return false;
+    }
+    // Planning reads the project and nothing else: an argument that leaves
+    // it (`/etc`, `~/.ssh`, `../..`) or names it through a variable
+    // (`$HOME`) is not a read Planning can vouch for.
+    if args.iter().any(|a| a.starts_with('/') || a.starts_with('~') || a.contains('$') || a.split('/').any(|part| part == "..")) {
+        return false;
+    }
+    let has = |bad: &[&str]| args.iter().any(|a| bad.iter().any(|b| a == b || a.starts_with(&format!("{b}="))));
+    match prog.as_str() {
+        "ls" | "cat" | "head" | "tail" | "wc" | "pwd" | "echo" | "stat" | "du" | "df" | "which" | "whoami"
+        | "uname" | "basename" | "dirname" | "realpath" | "readlink" | "grep" | "egrep" | "fgrep" | "diff"
+        | "cmp" | "cut" | "tr" | "nl" | "sha256sum" | "sha1sum" | "md5sum" => true,
+        "rg" => !args.iter().any(|a| a.starts_with("--pre")),
+        // `-o` writes the output file, also inside a cluster such as `-ro`.
+        "sort" => !args.iter().any(|a| a.starts_with("--output") || (a.starts_with('-') && !a.starts_with("--") && a.contains('o'))),
+        "tree" => !has(&["-o"]),
+        "file" => !has(&["-C", "--compile"]),
+        "find" => !has(&["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"]),
+        "git" => read_only_git(args),
+        _ => false,
+    }
+}
+
+fn read_only_git(args: &[String]) -> bool {
+    // Global options go before the subcommand; `-c core.pager=...` alone can
+    // run a program, so a subcommand has to come first.
+    let Some(sub) = args.first() else { return false };
+    let rest = &args[1..];
+    // Each of these writes a file or starts another program.
+    if rest.iter().any(|a| {
+        a.starts_with("--output")
+            || a.starts_with("--open-files-in-pager")
+            || a == "-O"
+            || a == "--ext-diff"
+            || a == "--textconv"
+            || a == "--filters"
+    }) {
+        return false;
+    }
+    let only_listing = |allowed: &[&str]| rest.iter().all(|a| allowed.contains(&a.as_str()));
+    match sub.as_str() {
+        "status" | "log" | "diff" | "show" | "blame" | "rev-parse" | "ls-files" | "grep" | "describe"
+        | "shortlog" | "rev-list" | "cat-file" | "ls-tree" => true,
+        // These both list and change; only their listing forms count.
+        "branch" => only_listing(&["-a", "-r", "-v", "-vv", "--list", "--all", "--remotes", "--show-current"]),
+        "tag" => only_listing(&["-l", "--list"]),
+        "remote" => only_listing(&["-v", "--verbose"]),
+        "stash" => rest.first().is_some_and(|a| a == "list" || a == "show"),
+        _ => false,
+    }
+}
+
 fn blacklisted_segment(segment: &str) -> Option<&'static str> {
     let words: Vec<&str> = segment.split_whitespace().collect();
     // A leading `VAR=value` prefix is still the command that follows it.
@@ -374,6 +571,12 @@ pub struct PermissionState {
     /// Here rather than on one executor: subagents share this state, and
     /// their writes must be taken back too.
     snapshots: Mutex<Option<Arc<crate::snapshots::SnapshotStore>>>,
+    /// A `/goal` run is in progress. Nobody is watching the screen then, so
+    /// a dangerous command is refused instead of waiting on a card.
+    goal_active: std::sync::atomic::AtomicBool,
+    /// The project folder. A file tool pointed outside it is asked about in
+    /// every mode, and refused where nobody can answer.
+    project_root: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl PermissionState {
@@ -385,7 +588,79 @@ impl PermissionState {
             gate,
             read_only_hint: Mutex::new(None),
             snapshots: Mutex::new(None),
+            goal_active: std::sync::atomic::AtomicBool::new(false),
+            project_root: Mutex::new(None),
         }
+    }
+
+    /// The folder the file tools work in; paths outside it are guarded.
+    pub fn set_project_root(&self, root: std::path::PathBuf) {
+        *self.project_root.lock().expect("root lock") = Some(root);
+    }
+
+    /// `web_fetch` to this machine or the local network. A page on the
+    /// internet can talk the model into it, so it is treated like a file
+    /// outside the project: asked about, and refused where nobody can answer.
+    /// The tool itself refuses a local address this did not recognise (one
+    /// hidden behind a DNS name, a redirect or an odd spelling of an IP).
+    fn local_network_verdict(&self, call: &ToolCall) -> Option<Verdict> {
+        if call.name != "web_fetch" {
+            return None;
+        }
+        let args = flashagent_llm::effective_args(&call.args_json, &call.name)?;
+        let host = url_host(args.get("url")?.as_str()?)?;
+        if !is_local_host(&host) {
+            return None;
+        }
+        if self.goal_active() {
+            return Some(Verdict::Deny(format!("{host} is a local address; local addresses are not fetched during /goal")));
+        }
+        if self.mode() == PermissionMode::Planning {
+            return Some(Verdict::Deny(format!(
+                "{host} is a local address; local addresses are not fetched in planning mode"
+            )));
+        }
+        Some(Verdict::NeedApproval { diff: Some(format!("a local address: {host}")) })
+    }
+
+    /// Reading or writing a file outside the project: never on a mode's say
+    /// alone. A card in the modes where someone is watching, a refusal in
+    /// Planning and during `/goal`.
+    fn outside_project_verdict(&self, call: &ToolCall, diff: Option<String>) -> Option<Verdict> {
+        let root = self.project_root.lock().expect("root lock").clone()?;
+        let category = self.category(&call.name);
+        if !matches!(category, Category::Read | Category::Write) {
+            return None;
+        }
+        let outside = named_paths(&call.name, &call.args_json).into_iter().find(|p| !path_is_inside(&root, p))?;
+        let done = if category == Category::Write { "written" } else { "read" };
+        if self.goal_active() {
+            return Some(Verdict::Deny(format!(
+                "{outside} is outside the project; files outside it are not {done} during /goal"
+            )));
+        }
+        if self.mode() == PermissionMode::Planning {
+            return Some(Verdict::Deny(format!(
+                "{outside} is outside the project; files outside it are not {done} in planning mode"
+            )));
+        }
+        let note = format!("outside the project: {outside}");
+        Some(Verdict::NeedApproval {
+            diff: Some(match diff {
+                Some(d) if category == Category::Write => format!("{note}\n{d}"),
+                _ => note,
+            }),
+        })
+    }
+
+    /// Mark a `/goal` run as started or finished.
+    pub fn set_goal_active(&self, active: bool) {
+        self.goal_active.store(active, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether a `/goal` run is in progress.
+    pub fn goal_active(&self) -> bool {
+        self.goal_active.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Keep files in `store` before every write that is allowed from now on.
@@ -481,11 +756,17 @@ impl PermissionState {
         if rules.denied_tools.iter().any(|t| t == &call.name) {
             return Verdict::Deny("tool is on the session blacklist".into());
         }
-        if rules.always_allow_tools.iter().any(|t| t == &call.name) {
+        let always = rules.always_allow_tools.iter().any(|t| t == &call.name);
+        drop(rules);
+        // Before any "Always": allowing a tool for the project must not
+        // stretch to ~/.ssh.
+        if let Some(verdict) = self.outside_project_verdict(call, diff.clone()).or_else(|| self.local_network_verdict(call)) {
+            return verdict;
+        }
+        if always {
             return Verdict::Allow;
         }
         let mode = self.mode();
-        drop(rules);
         match self.category(&call.name) {
             Category::Read | Category::Net => Verdict::Allow,
             Category::Write => match mode {
@@ -503,8 +784,17 @@ impl PermissionState {
                 // already ask for every shell command, and an "Always"
                 // there was the user's own explicit call on this exact
                 // command, not something a mode switch put in place.
+                // During /goal nobody is at the keyboard to answer a card,
+                // so the command is refused and the model has to find
+                // another way; in a hand-picked Accept All the user is
+                // there and gets asked.
                 if mode == PermissionMode::Bypass {
                     if let Some(reason) = cmd.as_deref().and_then(blacklisted_shell_reason) {
+                        if self.goal_active() {
+                            return Verdict::Deny(format!(
+                                "refused during /goal: {reason}; find a safer way or leave it for the user"
+                            ));
+                        }
                         return Verdict::NeedApproval { diff: Some(format!("held for review: {reason}")) };
                     }
                 }
@@ -514,9 +804,10 @@ impl PermissionState {
                 }
                 match mode {
                     PermissionMode::Bypass => Verdict::Allow,
-                    PermissionMode::Planning => {
-                        Verdict::Deny("shell command is not on the allow list in planning mode".into())
-                    }
+                    PermissionMode::Planning if cmd.as_deref().is_some_and(is_read_only_shell) => Verdict::Allow,
+                    PermissionMode::Planning => Verdict::Deny(
+                        "planning mode only runs commands that just read (ls, cat, grep, git log, ...)".into(),
+                    ),
                     PermissionMode::Manual | PermissionMode::AcceptEdits => Verdict::NeedApproval { diff: None },
                 }
             }
@@ -774,9 +1065,213 @@ mod tests {
         assert!(matches!(
             state.decide(&call("run_shell", r#"{"command":"rm -rf build"}"#), None),
             Verdict::NeedApproval { .. }
-        ), "a goal run must still ask for this, even with a standing rule");
+        ), "a hand-picked Accept All must still ask for this, even with a standing rule");
         // An ordinary command stays silent, same as always in Bypass.
         assert_eq!(state.decide(&call("run_shell", r#"{"command":"cargo test"}"#), None), Verdict::Allow);
+    }
+
+    #[test]
+    fn during_a_goal_a_blacklisted_command_is_refused_without_a_card() {
+        let state = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
+        state.allow_shell_prefix("git push");
+        state.set_goal_active(true);
+        match state.decide(&call("run_shell", r#"{"command":"git push --force origin main"}"#), None) {
+            Verdict::Deny(why) => assert!(why.contains("/goal"), "{why}"),
+            other => panic!("nobody is there to answer a card during /goal, got {other:?}"),
+        }
+        assert_eq!(
+            state.decide(&call("run_shell", r#"{"command":"cargo test"}"#), None),
+            Verdict::Allow,
+            "an ordinary command still runs during /goal"
+        );
+        state.set_goal_active(false);
+        assert!(matches!(
+            state.decide(&call("run_shell", r#"{"command":"git push --force origin main"}"#), None),
+            Verdict::NeedApproval { .. }
+        ), "after the goal, Accept All asks again");
+    }
+
+    #[test]
+    fn planning_runs_commands_that_only_read() {
+        for cmd in [
+            "ls -la",
+            "cat src/main.rs | head -20",
+            "grep -rn TODO src && wc -l README.md",
+            "git log --oneline -5",
+            "git status",
+            "git diff HEAD~1",
+            "git branch -a",
+            "find . -name '*.rs'",
+            "rg parse_chain crates",
+            "sort names.txt",
+        ] {
+            assert!(is_read_only_shell(cmd), "should count as read-only: {cmd}");
+        }
+    }
+
+    #[test]
+    fn planning_refuses_anything_that_can_write_or_run_code() {
+        for cmd in [
+            "echo hi > notes.txt",
+            "cat a | tee b",
+            "find . -name '*.tmp' -delete",
+            "find . -exec rm {} ;",
+            "sort names.txt -o names.txt",
+            "sort -ro names.txt names.txt",
+            "git grep -O pattern",
+            "rg --pre ./script.sh pattern",
+            "git -c core.pager=evil log",
+            "git diff --output=patch.diff",
+            "git branch new-feature",
+            "git tag v1.0",
+            "git stash",
+            "git checkout main",
+            "cargo check",
+            "./ls",
+            "LD_PRELOAD=x.so ls",
+            "ls $(rm -rf ~)",
+            "tree -o out.txt",
+            "",
+            "cat ~/.ssh/id_rsa",
+            "cat /etc/passwd",
+            "cat ../../secret.txt",
+            "cat $HOME/.aws/credentials",
+            "ls -la /",
+        ] {
+            assert!(!is_read_only_shell(cmd), "must not count as read-only: {cmd}");
+        }
+    }
+
+    fn project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_path_is_inside_only_when_it_stays_in_the_project() {
+        let dir = project();
+        let root = dir.path();
+        assert!(path_is_inside(root, "src/main.rs"));
+        assert!(path_is_inside(root, "./src/../src/main.rs"));
+        assert!(path_is_inside(root, "new/dir/not_yet.rs"), "a file that does not exist yet is judged by where it would go");
+        assert!(path_is_inside(root, &root.join("src/main.rs").to_string_lossy()));
+        assert!(!path_is_inside(root, "../outside.txt"));
+        assert!(!path_is_inside(root, "src/../../outside.txt"));
+        assert!(!path_is_inside(root, "/etc/passwd"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_out_of_the_project_is_outside() {
+        let dir = project();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(elsewhere.path().join("id_rsa"), "secret").unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("keys")).unwrap();
+        assert!(!path_is_inside(dir.path(), "keys/id_rsa"));
+    }
+
+    #[test]
+    fn a_file_outside_the_project_asks_in_every_mode_where_someone_can_answer() {
+        let dir = project();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("notes.txt").to_string_lossy().to_string();
+        let write_out = call("write_file", &serde_json::json!({ "path": "../escape.txt", "content": "x" }).to_string());
+        let read_out = call("read_file", &serde_json::json!({ "file_path": outside_file }).to_string());
+        for mode in [PermissionMode::Manual, PermissionMode::AcceptEdits, PermissionMode::Bypass] {
+            let state = PermissionState::new(mode, Arc::new(DenyAllGate));
+            state.set_project_root(dir.path().to_path_buf());
+            match state.decide(&write_out, Some("+x".into())) {
+                Verdict::NeedApproval { diff: Some(d) } => {
+                    assert!(d.contains("outside the project"), "{d}");
+                    assert!(d.contains("+x"), "the diff is still shown: {d}");
+                }
+                other => panic!("{mode:?}: a write outside the project must ask, got {other:?}"),
+            }
+            assert!(
+                matches!(state.decide(&read_out, None), Verdict::NeedApproval { .. }),
+                "{mode:?}: a read outside the project must ask"
+            );
+            assert_eq!(
+                state.decide(&call("read_file", r#"{"path":"src/main.rs"}"#), None),
+                Verdict::Allow,
+                "{mode:?}: reads inside the project are untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn outside_the_project_is_refused_where_nobody_can_answer() {
+        let dir = project();
+        let read_out = call("read_file", r#"{"path":"/etc/hosts"}"#);
+
+        let planning = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
+        planning.set_project_root(dir.path().to_path_buf());
+        assert!(matches!(planning.decide(&read_out, None), Verdict::Deny(_)));
+
+        let goal = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
+        goal.set_project_root(dir.path().to_path_buf());
+        goal.set_goal_active(true);
+        match goal.decide(&call("edit_file", r#"{"files":[{"path":"src/main.rs"},{"path":"../../x.rs"}]}"#), None) {
+            Verdict::Deny(why) => assert!(why.contains("/goal") && why.contains("../../x.rs"), "{why}"),
+            other => panic!("one file of a batch edit outside the project must refuse the call, got {other:?}"),
+        }
+        assert!(matches!(goal.decide(&read_out, None), Verdict::Deny(_)));
+        assert!(matches!(goal.decide(&call("glob", r#"{"pattern":"/etc/*.conf"}"#), None), Verdict::Deny(_)));
+        assert_eq!(goal.decide(&call("glob", r#"{"pattern":"src/**/*.rs"}"#), None), Verdict::Allow);
+    }
+
+    #[test]
+    fn local_addresses_are_told_apart_from_the_internet() {
+        for local in [
+            "localhost", "127.0.0.1", "10.0.0.5", "192.168.1.1", "172.20.3.4", "169.254.169.254", "100.100.1.1",
+            "0.0.0.0", "::1", "[::1]", "fd00::1", "fe80::1", "::ffff:127.0.0.1", "router", "nas.local",
+            "metadata.google.internal", "app.localhost",
+        ] {
+            assert!(is_local_host(local), "should be local: {local}");
+        }
+        for public in ["docs.rs", "8.8.8.8", "github.com", "2606:4700::1111", "172.32.0.1", "100.128.0.1"] {
+            assert!(!is_local_host(public), "should be public: {public}");
+        }
+        assert_eq!(url_host("https://user:pw@Docs.RS:443/serde?x=1#y").as_deref(), Some("docs.rs"));
+        assert_eq!(url_host("http://[::1]:8080/admin").as_deref(), Some("::1"));
+        assert_eq!(url_host("localhost:3000/api").as_deref(), Some("localhost"));
+        assert_eq!(url_host("http:///nothing"), None);
+    }
+
+    #[test]
+    fn fetching_a_local_address_asks_and_is_refused_where_nobody_can_answer() {
+        let router = call("web_fetch", r#"{"url":"http://192.168.1.1/admin"}"#);
+        let public = call("web_fetch", r#"{"url":"https://docs.rs/serde"}"#);
+        for mode in [PermissionMode::Manual, PermissionMode::AcceptEdits, PermissionMode::Bypass] {
+            let state = PermissionState::new(mode, Arc::new(DenyAllGate));
+            state.allow_tool_always("web_fetch");
+            match state.decide(&router, None) {
+                Verdict::NeedApproval { diff: Some(d) } => assert!(d.contains("192.168.1.1"), "{d}"),
+                other => panic!("{mode:?}: a local address must ask, even with web_fetch always allowed; got {other:?}"),
+            }
+            assert_eq!(state.decide(&public, None), Verdict::Allow, "{mode:?}: the internet needs no card");
+        }
+        let planning = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
+        assert!(matches!(planning.decide(&router, None), Verdict::Deny(_)));
+        assert_eq!(planning.decide(&public, None), Verdict::Allow);
+        let goal = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
+        goal.set_goal_active(true);
+        assert!(matches!(goal.decide(&call("web_fetch", r#"{"url":"http://localhost:1234/v1/models"}"#), None), Verdict::Deny(_)));
+    }
+
+    #[test]
+    fn always_allowing_a_tool_does_not_reach_outside_the_project() {
+        let dir = project();
+        let state = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
+        state.set_project_root(dir.path().to_path_buf());
+        state.allow_tool_always("write_file");
+        assert_eq!(state.decide(&call("write_file", r#"{"path":"src/new.rs","content":"x"}"#), None), Verdict::Allow);
+        assert!(matches!(
+            state.decide(&call("write_file", r#"{"path":"../../.bashrc","content":"x"}"#), None),
+            Verdict::NeedApproval { .. }
+        ));
     }
 
     #[test]
@@ -825,7 +1320,7 @@ mod tests {
         state.set_read_only_hint(Arc::new(|name: &str| name == "mcp__db__execute_mutation" || name == "run_shell"));
         assert_eq!(state.decide(&mutating, None), Verdict::Allow);
         // Built-in categories are fixed: a hint can never make shell read-only.
-        assert!(matches!(state.decide(&call("run_shell", r#"{"command":"ls"}"#), None), Verdict::Deny(_)));
+        assert!(matches!(state.decide(&call("run_shell", r#"{"command":"cargo build"}"#), None), Verdict::Deny(_)));
     }
 
     #[test]
@@ -845,7 +1340,7 @@ mod tests {
             "opening a picture in the project is a read, not a change"
         );
             assert_eq!(state.decide(&call("grep", r#"{"pattern":"x"}"#), None), Verdict::Allow);
-            assert_eq!(state.decide(&call("web_fetch", r#"{"url":"https://x"}"#), None), Verdict::Allow);
+            assert_eq!(state.decide(&call("web_fetch", r#"{"url":"https://example.com"}"#), None), Verdict::Allow);
         }
     }
 
@@ -892,10 +1387,12 @@ mod tests {
     #[test]
     fn planning_denies_unlisted_shell_but_allows_listed() {
         let state = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
-        let ls = call("run_shell", r#"{"command":"ls -la"}"#);
-        assert!(matches!(state.decide(&ls, None), Verdict::Deny(_)));
-        state.allow_shell_prefix("ls");
-        assert_eq!(state.decide(&call("run_shell", r#"{"command":"ls"}"#), None), Verdict::Allow);
+        let build = call("run_shell", r#"{"command":"cargo build --release"}"#);
+        assert!(matches!(state.decide(&build, None), Verdict::Deny(_)));
+        state.allow_shell_prefix("cargo build");
+        assert_eq!(state.decide(&build, None), Verdict::Allow);
+        // Commands that only read need no rule at all.
+        assert_eq!(state.decide(&call("run_shell", r#"{"command":"ls -la"}"#), None), Verdict::Allow);
     }
 
     #[test]

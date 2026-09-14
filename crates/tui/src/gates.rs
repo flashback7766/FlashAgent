@@ -115,6 +115,8 @@ pub struct QuestionRequest {
     pub question: String,
     pub options: Option<Vec<String>>,
     pub multi_select: bool,
+    /// When an unanswered question stops waiting (during `/goal`).
+    pub deadline: Option<std::time::Instant>,
 }
 
 pub(crate) type QuestionSlot = Option<(QuestionRequest, Option<(String, bool)>)>;
@@ -163,11 +165,18 @@ impl TuiQuestionGate {
 
 #[async_trait]
 impl flashagent_tools::QuestionGate for TuiQuestionGate {
-    async fn ask(&self, question: &str, options: Option<&[String]>, multi_select: bool) -> Result<(String, bool), String> {
+    async fn ask(
+        &self,
+        question: &str,
+        options: Option<&[String]>,
+        multi_select: bool,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(String, bool), String> {
         let req = QuestionRequest {
             question: question.to_string(),
             options: options.map(|opts| opts.to_vec()),
             multi_select,
+            deadline,
         };
         *self.pending.lock() = Some((req, None));
         let _clear = ClearOnDrop(&self.pending, &self.changed);

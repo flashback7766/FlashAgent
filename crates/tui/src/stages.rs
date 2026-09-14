@@ -157,50 +157,6 @@ pub fn derive_stage_from_tool(last_tool_group: Option<&ToolGroupKind>) -> String
     }
 }
 
-/// Say one of the stage labels this app writes itself in the language of the
-/// conversation.
-///
-/// Only labels FlashAgent invents are translated. A stage lifted out of the
-/// model's own reasoning is the model's wording and is left exactly as it
-/// wrote it — putting Russian words in its mouth would be a lie about what it
-/// said.
-pub fn localize_stage(stage: &str, language: &str) -> String {
-    if !language.eq_ignore_ascii_case("ru") {
-        return stage.to_string();
-    }
-    const RU: &[(&str, &str)] = &[
-        ("Analyzing Request", "Разбираю запрос"),
-        ("Evaluating Search Results", "Оцениваю результаты поиска"),
-        ("Deepening Code Search", "Углубляю поиск по коду"),
-        ("Analyzing File Contents", "Разбираю содержимое файлов"),
-        ("Evaluating Explored Context", "Оцениваю найденное"),
-        ("Evaluating Command Output", "Оцениваю вывод команды"),
-        ("Verifying Code Changes", "Проверяю правки"),
-        ("Evaluating Subagent Output", "Оцениваю ответ субагента"),
-        ("Reviewing Project Memory", "Просматриваю память проекта"),
-        ("Evaluating Tool Results", "Оцениваю результаты инструментов"),
-        ("Synthesizing Findings", "Свожу выводы"),
-        ("Planning Implementation", "Планирую реализацию"),
-        ("Refining Solution", "Уточняю решение"),
-        ("Verifying Solution", "Проверяю решение"),
-        ("Formulating Response", "Формулирую ответ"),
-    ];
-    // A repeated stage comes back as "Name (part 2)"; the suffix is ours too.
-    let (base, part) = match stage.split_once(" (part ") {
-        Some((base, rest)) => (base, rest.trim_end_matches(')').parse::<u32>().ok()),
-        None => (stage, None),
-    };
-    let translated = RU
-        .iter()
-        .find(|(en, _)| en.eq_ignore_ascii_case(base))
-        .map(|(_, ru)| (*ru).to_string());
-    match (translated, part) {
-        (Some(ru), Some(n)) => format!("{ru} (часть {n})"),
-        (Some(ru), None) => ru,
-        (None, _) => stage.to_string(),
-    }
-}
-
 /// Contextual reasoning stage resolver.
 /// Determines a non-repeating, progress-advancing stage label for a reasoning block
 /// based on the text, what tools have already run in the current turn, and what stages

@@ -1,21 +1,35 @@
 //! Interactive user questioning tool (`ask_user`).
 //!
 //! Enables the model to request guidance, clarification, or choices from the user.
-//! In autonomous `/goal` mode, this tool is disabled to ensure independent execution.
+//! During an autonomous `/goal` run nobody may be at the keyboard, so a
+//! question waits [`GOAL_QUESTION_TIMEOUT`] for an answer and then tells the
+//! model to carry on with its own best choice.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::ToolError;
 
+/// How long a question asked during `/goal` waits before the run carries on
+/// without an answer.
+pub const GOAL_QUESTION_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Async gate implemented by the UI/TUI to present interactive questions.
 #[async_trait]
 pub trait QuestionGate: Send + Sync {
-    /// Prompt the user with a question and optional choices.
+    /// Prompt the user with a question and optional choices. `deadline` is
+    /// when an unanswered question stops waiting, so the card can say so.
     /// Returns `(answer_string, is_write_in_flag)`.
-    async fn ask(&self, question: &str, options: Option<&[String]>, multi_select: bool) -> Result<(String, bool), String>;
+    async fn ask(
+        &self,
+        question: &str,
+        options: Option<&[String]>,
+        multi_select: bool,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(String, bool), String>;
 }
 
 /// Flexible helper to deserialize either a list of strings or a comma-separated string.
@@ -97,12 +111,20 @@ pub async fn run_ask_user(
     is_goal_mode: &Arc<AtomicBool>,
     args: AskUserArgs,
 ) -> Result<String, ToolError> {
-    if is_goal_mode.load(Ordering::Relaxed) {
-        return Err(ToolError::Other(
-            "ask_user is disabled in autonomous /goal mode; you must operate independently without querying the user."
-                .into(),
-        ));
-    }
+    run_ask_user_within(gate, is_goal_mode, args, GOAL_QUESTION_TIMEOUT).await
+}
+
+/// [`run_ask_user`] with the `/goal` wait as a parameter, so it can be tested
+/// without waiting two minutes.
+async fn run_ask_user_within(
+    gate: Option<&Arc<dyn QuestionGate>>,
+    is_goal_mode: &Arc<AtomicBool>,
+    args: AskUserArgs,
+    goal_timeout: Duration,
+) -> Result<String, ToolError> {
+    // One deadline for the whole call: several questions in a row must not
+    // each get the full wait while the run stands still.
+    let deadline = is_goal_mode.load(Ordering::Relaxed).then(|| tokio::time::Instant::now() + goal_timeout);
 
     let gate = gate.ok_or_else(|| {
         ToolError::Other("interactive question gate is not available in this environment".into())
@@ -157,14 +179,20 @@ pub async fn run_ask_user(
         }
     }
 
-    if items.len() == 1 {
-        let item = &items[0];
+    let mut answered: Vec<String> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
         let question = item.question.trim();
         let multi_select = item.multi_select.unwrap_or(false);
-        let (answer, is_write_in) = gate
-            .ask(question, item.options.as_deref(), multi_select)
-            .await
-            .map_err(ToolError::Other)?;
+        let asked = gate.ask(question, item.options.as_deref(), multi_select, deadline.map(|d| d.into_std()));
+        let reply = match deadline {
+            Some(d) => match tokio::time::timeout_at(d, asked).await {
+                Ok(reply) => reply,
+                // Dropping the pending ask takes its card off the screen.
+                Err(_) => return Ok(no_answer(&answered, goal_timeout)),
+            },
+            None => asked.await,
+        };
+        let (answer, is_write_in) = reply.map_err(ToolError::Other)?;
 
         let answer_trimmed = answer.trim();
         let final_answer = if is_write_in {
@@ -172,27 +200,24 @@ pub async fn run_ask_user(
         } else {
             answer_trimmed.to_string()
         };
-        Ok(final_answer)
-    } else {
-        let mut results = Vec::new();
-        for (i, item) in items.iter().enumerate() {
-            let question = item.question.trim();
-            let multi_select = item.multi_select.unwrap_or(false);
-            let (answer, is_write_in) = gate
-                .ask(question, item.options.as_deref(), multi_select)
-                .await
-                .map_err(ToolError::Other)?;
-
-            let answer_trimmed = answer.trim();
-            let final_answer = if is_write_in {
-                format!("{answer_trimmed} (write-in)")
-            } else {
-                answer_trimmed.to_string()
-            };
-            results.push(format!("{}. {}: {}", i + 1, question, final_answer));
-        }
-        Ok(results.join("\n"))
+        answered.push(if items.len() == 1 { final_answer } else { format!("{}. {}: {}", i + 1, question, final_answer) });
     }
+    Ok(answered.join("\n"))
+}
+
+/// What the model is told when a `/goal` question went unanswered.
+fn no_answer(answered: &[String], waited: Duration) -> String {
+    let secs = waited.as_secs();
+    let waited = if secs >= 60 && secs.is_multiple_of(60) { format!("{} minutes", secs / 60) } else { format!("{secs} seconds") };
+    let mut out = String::new();
+    if !answered.is_empty() {
+        out.push_str(&format!("Answered before the user went quiet:\n{}\n\n", answered.join("\n")));
+    }
+    out.push_str(&format!(
+        "No answer within {waited}: the user is not at the keyboard. Choose the most reasonable \
+         option yourself, carry on, and name that choice in your final summary."
+    ));
+    out
 }
 
 #[cfg(test)]
@@ -219,7 +244,13 @@ mod tests {
 
     #[async_trait]
     impl QuestionGate for MockGate {
-        async fn ask(&self, _question: &str, _options: Option<&[String]>, _multi_select: bool) -> Result<(String, bool), String> {
+        async fn ask(
+            &self,
+            _question: &str,
+            _options: Option<&[String]>,
+            _multi_select: bool,
+            _deadline: Option<std::time::Instant>,
+        ) -> Result<(String, bool), String> {
             let mut lock = self.responses.lock();
             if lock.is_empty() {
                 Ok(("default".into(), false))
@@ -229,25 +260,99 @@ mod tests {
         }
     }
 
+    /// Answers the first `answers` questions, then never answers again — the
+    /// user who walked away mid-run. Records the deadline it was given.
+    struct WalksAwayGate {
+        answers: parking_lot::Mutex<usize>,
+        deadline_seen: parking_lot::Mutex<Option<std::time::Instant>>,
+    }
+
+    #[async_trait]
+    impl QuestionGate for WalksAwayGate {
+        async fn ask(
+            &self,
+            _question: &str,
+            _options: Option<&[String]>,
+            _multi_select: bool,
+            deadline: Option<std::time::Instant>,
+        ) -> Result<(String, bool), String> {
+            *self.deadline_seen.lock() = deadline;
+            let answer_now = {
+                let mut left = self.answers.lock();
+                let yes = *left > 0;
+                *left = left.saturating_sub(1);
+                yes
+            };
+            if answer_now {
+                return Ok(("SQLite".into(), false));
+            }
+            std::future::pending().await
+        }
+    }
+
+    fn database_question() -> AskUserArgs {
+        AskUserArgs {
+            question: Some("Choose a database".into()),
+            options: Some(vec!["SQLite".into(), "Postgres".into()]),
+            multi_select: None,
+            questions: None,
+        }
+    }
+
     #[tokio::test]
-    async fn ask_user_goal_mode_is_blocked() {
+    async fn during_a_goal_a_question_is_still_asked_and_answered() {
         let gate: Arc<dyn QuestionGate> = Arc::new(MockGate::single(("Option 1".into(), false)));
         let goal_flag = Arc::new(AtomicBool::new(true));
+        let res = run_ask_user(Some(&gate), &goal_flag, database_question()).await.unwrap();
+        assert_eq!(res, "Option 1");
+    }
 
-        let res = run_ask_user(
-            Some(&gate),
-            &goal_flag,
-            AskUserArgs {
-                question: Some("Choose a database".into()),
-                options: Some(vec!["SQLite".into(), "Postgres".into()]),
-                multi_select: None,
-                questions: None,
-            },
+    #[tokio::test]
+    async fn during_a_goal_an_unanswered_question_lets_the_run_carry_on() {
+        let concrete = Arc::new(WalksAwayGate { answers: parking_lot::Mutex::new(0), deadline_seen: parking_lot::Mutex::new(None) });
+        let gate: Arc<dyn QuestionGate> = concrete.clone();
+        let goal_flag = Arc::new(AtomicBool::new(true));
+        let started = std::time::Instant::now();
+        let res = run_ask_user_within(Some(&gate), &goal_flag, database_question(), Duration::from_millis(80))
+            .await
+            .expect("an unanswered question is not an error: the run goes on");
+        assert!(res.contains("No answer within"), "{res}");
+        assert!(res.contains("Choose the most reasonable option yourself"), "{res}");
+        assert!(started.elapsed() < Duration::from_secs(5), "it must stop waiting at the deadline");
+        assert!(concrete.deadline_seen.lock().is_some(), "the card is told when it stops waiting");
+    }
+
+    #[tokio::test]
+    async fn answers_given_before_the_user_went_quiet_are_kept() {
+        let gate: Arc<dyn QuestionGate> =
+            Arc::new(WalksAwayGate { answers: parking_lot::Mutex::new(1), deadline_seen: parking_lot::Mutex::new(None) });
+        let goal_flag = Arc::new(AtomicBool::new(true));
+        let args = AskUserArgs {
+            question: None,
+            options: None,
+            multi_select: None,
+            questions: Some(vec![
+                QuestionItemOrString::Simple("Which database?".into()),
+                QuestionItemOrString::Simple("Which port?".into()),
+            ]),
+        };
+        let res = run_ask_user_within(Some(&gate), &goal_flag, args, Duration::from_millis(80)).await.unwrap();
+        assert!(res.contains("1. Which database?: SQLite"), "{res}");
+        assert!(res.contains("No answer within"), "{res}");
+    }
+
+    #[tokio::test]
+    async fn outside_a_goal_a_question_waits_for_as_long_as_it_takes() {
+        let concrete = Arc::new(WalksAwayGate { answers: parking_lot::Mutex::new(0), deadline_seen: parking_lot::Mutex::new(None) });
+        let gate: Arc<dyn QuestionGate> = concrete.clone();
+        let goal_flag = Arc::new(AtomicBool::new(false));
+        let waited = tokio::time::timeout(
+            Duration::from_millis(300),
+            run_ask_user_within(Some(&gate), &goal_flag, database_question(), Duration::from_millis(80)),
         )
         .await;
-
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("disabled in autonomous /goal mode"));
+        assert!(waited.is_err(), "the goal wait must not apply to an ordinary chat question");
+        assert!(concrete.deadline_seen.lock().is_none());
     }
 
     #[tokio::test]

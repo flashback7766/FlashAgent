@@ -154,8 +154,9 @@ impl BackgroundNotice {
 
 pub(crate) enum UpdateNotice {
     Available { version: String, asset_name: String, download_url: String, checksums_url: Option<String> },
-    /// Only the manual update (Ctrl+U) sends these; a background update stays
-    /// silent so it never takes over a screen the user is reading.
+    /// Both the background and the manual update send these. They are drawn
+    /// only once the user asks to watch (Ctrl+U), so an update nobody asked
+    /// about never takes over a screen the user is reading.
     Progress { version: String, stage: flashagent_svc::updater::UpdateProgress },
     Ready { version: String },
     UpToDate { version: String },
@@ -192,3 +193,46 @@ pub(crate) fn update_progress_line(version: &str, stage: flashagent_svc::updater
 
 /// Marks the single line that manual-update progress rewrites in place.
 pub(crate) const UPDATE_LINE_PREFIX: &str = "Update ";
+
+/// What Ctrl+U (or /update) does, given what is already going on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateKeyAction {
+    /// A build from source never replaces itself.
+    DevMode,
+    /// A download is under way, background or not: show it.
+    ShowProgress,
+    /// A check is under way: wait for its answer instead of starting another.
+    WatchCheck,
+    /// An update was found earlier: install it.
+    InstallPending,
+    /// Nothing is going on: check, and install what is found.
+    CheckAndInstall,
+}
+
+pub(crate) fn update_key_action(dev_mode: bool, downloading: bool, busy: bool, pending: bool) -> UpdateKeyAction {
+    if dev_mode {
+        UpdateKeyAction::DevMode
+    } else if downloading {
+        UpdateKeyAction::ShowProgress
+    } else if busy {
+        UpdateKeyAction::WatchCheck
+    } else if pending {
+        UpdateKeyAction::InstallPending
+    } else {
+        UpdateKeyAction::CheckAndInstall
+    }
+}
+
+#[cfg(test)]
+mod update_key_tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_u_joins_an_update_already_under_way_instead_of_starting_a_second() {
+        assert_eq!(update_key_action(false, true, true, false), UpdateKeyAction::ShowProgress);
+        assert_eq!(update_key_action(false, false, true, true), UpdateKeyAction::WatchCheck);
+        assert_eq!(update_key_action(false, false, false, true), UpdateKeyAction::InstallPending);
+        assert_eq!(update_key_action(false, false, false, false), UpdateKeyAction::CheckAndInstall);
+        assert_eq!(update_key_action(true, true, true, true), UpdateKeyAction::DevMode);
+    }
+}
