@@ -2211,6 +2211,59 @@ mod tests {
     }
 
     #[test]
+    fn bold_stage_titles_with_no_lead_in_are_still_recognized_as_thinking() {
+        // What this project's own prompt actually asks a model without a
+        // native reasoning channel to write: bold stage titles, each with a
+        // paragraph under it, and no "Thinking Process:"/"Thinking:\n" lead-in
+        // wrapped around the whole thing. Seen live: it used to print in
+        // full as the assistant's answer instead of collapsing.
+        let text = "**Understanding the Request**\n\
+                     The user wants me to explore the project structure. I must plan, \
+                     execute, and verify without user input.\n\n\
+                     **Analyzing the Task**\n\
+                     To look around the project, I need to start by listing the contents \
+                     of the current directory.\n\n\
+                     **Planning Implementation**\n\
+                     1. List the contents of the current directory.\n\
+                     2. Update the plan to reflect the initial exploration step.\n\n\
+                     **Formulating Response**\n\
+                     I will start by listing the files in the current directory.";
+        let (think, ans) = extract_thinking_from_text(text);
+        let think = think.expect("four progressing stage titles must be recognized as thinking");
+        assert!(think.contains("Understanding the Request"), "{think}");
+        assert!(think.contains("Formulating Response"), "{think}");
+        assert_eq!(ans, "", "nothing followed the last stage yet, so there is no answer to show");
+    }
+
+    #[test]
+    fn a_bold_stage_title_followed_by_the_real_answer_splits_at_the_answer() {
+        let text = "**Understanding the Request**\n\
+                     The user wants the tests fixed.\n\n\
+                     **Formulating Response**\n\
+                     Planning the fix.\n\n\
+                     Done — the failing test now passes.";
+        let (think, ans) = extract_thinking_from_text(text);
+        let think = think.expect("two stage titles must be recognized as thinking");
+        assert!(!think.contains("Done"), "{think}");
+        assert_eq!(ans, "Done — the failing test now passes.");
+    }
+
+    #[test]
+    fn a_real_answer_that_opens_with_its_own_heading_is_not_swallowed() {
+        // A single heading is not a stage progression; it must survive.
+        let (think, ans) = extract_thinking_from_text("**Summary**\nHere is what changed.");
+        assert!(think.is_none(), "a lone heading must not be read as thinking");
+        assert_eq!(ans, "**Summary**\nHere is what changed.");
+
+        // Two headings, but neither is stage vocabulary: still a real answer.
+        let (think2, ans2) = extract_thinking_from_text(
+            "**Summary**\nHere is what changed.\n\n**Next Steps**\nRun the tests.",
+        );
+        assert!(think2.is_none(), "headings outside the stage vocabulary must not be read as thinking");
+        assert_eq!(ans2, "**Summary**\nHere is what changed.\n\n**Next Steps**\nRun the tests.");
+    }
+
+    #[test]
     fn duplicate_reasoning_in_assistant_text_is_deduplicated() {
         let mut v = ChatView::default();
         v.push_user("do something");

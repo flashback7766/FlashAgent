@@ -308,7 +308,54 @@ pub fn extract_thinking_from_text(text: &str) -> (Option<String>, String) {
         }
     }
 
+    // A model with no native reasoning channel, and none of the lead-ins
+    // above either, can still narrate its thinking exactly the way this
+    // project's own prompt asks for it (see REASONING INSTRUCTIONS in
+    // prompt.rs): paragraphs each opening with a bold stage title drawn from
+    // a small known vocabulary, with no overall marker wrapped around them.
+    // Paragraphs are split on blank lines; thinking runs through every one
+    // that opens with such a title, and stops at the first that does not —
+    // that one is the real, user-facing answer. Matching against the
+    // vocabulary, not just any bold heading, and requiring at least two in a
+    // row, keeps an answer that opens with its own heading (`**Summary**`)
+    // from being swallowed as if it were thinking.
+    let blocks: Vec<&str> = text.split("\n\n").map(str::trim).filter(|b| !b.is_empty()).collect();
+    let mut split_at = 0;
+    for block in &blocks {
+        let first_line = block.lines().next().unwrap_or("").trim();
+        if looks_like_a_stage_title(first_line) {
+            split_at += 1;
+        } else {
+            break;
+        }
+    }
+    if split_at >= 2 {
+        let think_str = blocks[..split_at].join("\n\n").trim().to_string();
+        let ans_str = blocks[split_at..].join("\n\n").trim().to_string();
+        if !think_str.is_empty() {
+            return (Some(think_str), ans_str);
+        }
+    }
+
     (None, text.to_string())
+}
+
+/// Words drawn from the stage titles this project's own prompt asks a model
+/// to use (see prompt.rs's REASONING INSTRUCTIONS and this file's own
+/// `reasoning_stage` candidates). A line matches only if it is already
+/// step-shaped (bold, heading, bracketed, or a numbered/bulleted title) *and*
+/// carries one of these words — the vocabulary is what keeps a real answer's
+/// own heading from qualifying by accident.
+const STAGE_KEYWORDS: &[&str] = &[
+    "understanding", "analyz", "evaluat", "inspecting", "planning", "formulating", "synthesizing",
+    "deepening", "refining", "verifying",
+];
+
+fn looks_like_a_stage_title(line: &str) -> bool {
+    is_step_line(line) && {
+        let lower = line.to_lowercase();
+        STAGE_KEYWORDS.iter().any(|k| lower.contains(k))
+    }
 }
 
 pub(crate) fn is_step_line(line: &str) -> bool {
