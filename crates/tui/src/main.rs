@@ -1094,6 +1094,14 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         // The face reports the one thing that decides whether anything works:
         // did the model server answer. Discovery reruns every few seconds, so
         // starting the server later turns the face around on its own.
+        // LM Studio on this machine writes what each call really processed to
+        // a log the cache figure can be read from; on another host that log
+        // is not ours to read.
+        app.token_tracker.lm_studio_local = source
+            .discovery()
+            .is_some_and(|d| d.kind == flashagent_llm::thinking::ServerKind::LmStudio)
+            && flashagent_core::url_host(&app.config.backend_url)
+                .is_some_and(|h| h == "localhost" || h.starts_with("127.") || h == "::1");
         let mascot_mood = if source.discovery().is_some() {
             MascotMood::Happy
         } else if started_at.elapsed() < std::time::Duration::from_secs(5) {

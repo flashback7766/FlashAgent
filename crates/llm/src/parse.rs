@@ -93,14 +93,36 @@ impl ChunkParser {
             })
         });
 
+        // llama.cpp's own server says what it took from its cache in `timings`.
+        let timings = v.get("timings").filter(|t| t.is_object()).and_then(|t| {
+            let cache_n = t.get("cache_n").and_then(Value::as_i64)?;
+            let prompt_n = t.get("prompt_n").and_then(Value::as_i64).unwrap_or(0);
+            Some((prompt_n + cache_n, cache_n))
+        });
+
         if let Some(usage) = v.get("usage").filter(|u| u.is_object()) {
-            let prompt = usage.get("prompt_tokens").and_then(Value::as_i64);
+            let mut prompt = usage.get("prompt_tokens").and_then(Value::as_i64);
             let completion = usage.get("completion_tokens").and_then(Value::as_i64);
+            // Every provider names it differently: OpenAI, OpenRouter, Gemini,
+            // xAI and vLLM `prompt_tokens_details.cached_tokens`; DeepSeek
+            // `prompt_cache_hit_tokens`; Anthropic-style APIs
+            // `cache_read_input_tokens`; llama.cpp its `timings`.
+            let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_i64);
             let cached = usage
                 .get("prompt_tokens_details")
                 .and_then(|d| d.get("cached_tokens"))
                 .or_else(|| usage.get("cached_tokens"))
-                .and_then(Value::as_i64);
+                .or_else(|| usage.get("prompt_cache_hit_tokens"))
+                .and_then(Value::as_i64)
+                .or(cache_read)
+                .or(timings.map(|(_, cached)| cached));
+            // Anthropic counts cache reads apart from the input tokens: more
+            // read from cache than the whole prompt means the prompt is both.
+            if let (Some(p), Some(read)) = (prompt, cache_read) {
+                if read > p {
+                    prompt = Some(p + read);
+                }
+            }
             let mtp = mtp.or_else(|| {
                 let details = usage.get("completion_tokens_details")?;
                 let accepted = details.get("accepted_prediction_tokens").and_then(Value::as_u64)?;
@@ -115,6 +137,13 @@ impl ChunkParser {
                 prompt,
                 completion,
                 cached,
+                mtp,
+            }));
+        } else if let Some((prompt, cached)) = timings {
+            events.push(LlmEvent::Usage(crate::types::Usage {
+                prompt: Some(prompt),
+                completion: None,
+                cached: Some(cached),
                 mtp,
             }));
         } else if let Some(m) = mtp {
@@ -616,6 +645,38 @@ mod tests {
             e,
             LlmEvent::ToolCallDelta { args_delta, .. } if args_delta == "_done"
         )));
+    }
+
+    fn usage_of(payload: &str) -> crate::types::Usage {
+        let events = ChunkParser::default().feed(payload);
+        events
+            .into_iter()
+            .find_map(|e| match e {
+                LlmEvent::Usage(u) => Some(u),
+                _ => None,
+            })
+            .expect("a usage event")
+    }
+
+    #[test]
+    fn the_cache_figure_is_read_whatever_the_provider_calls_it() {
+        // OpenAI, OpenRouter, Gemini, xAI, vLLM.
+        let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":900}}}"#);
+        assert_eq!((u.prompt, u.cached), (Some(1000), Some(900)));
+        // DeepSeek.
+        let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":5,"prompt_cache_hit_tokens":750,"prompt_cache_miss_tokens":250}}"#);
+        assert_eq!((u.prompt, u.cached), (Some(1000), Some(750)));
+        // Anthropic-style, cache reads counted apart from the input.
+        let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":5,"cache_read_input_tokens":960}}"#);
+        assert_eq!((u.prompt, u.cached), (Some(1000), Some(960)));
+        // llama.cpp: timings alone, and timings next to usage without a cache field.
+        let u = usage_of(r#"{"choices":[],"timings":{"prompt_n":15,"cache_n":3500}}"#);
+        assert_eq!((u.prompt, u.cached), (Some(3515), Some(3500)));
+        let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":3515,"completion_tokens":5},"timings":{"prompt_n":15,"cache_n":3500}}"#);
+        assert_eq!((u.prompt, u.cached), (Some(3515), Some(3500)));
+        // LM Studio: nothing about the cache.
+        let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":2913,"completion_tokens":5}}"#);
+        assert_eq!(u.cached, None);
     }
 
     #[test]
