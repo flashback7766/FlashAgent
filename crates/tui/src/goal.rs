@@ -7,6 +7,7 @@
 //! why the run stopped) next to the model's summary, so a goal that stopped
 //! at a budget cannot read as a goal that finished.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use flashagent_core::{DoneReason, LoopEvent};
@@ -15,6 +16,8 @@ use flashagent_core::{DoneReason, LoopEvent};
 pub const DEFAULT_STEPS: u32 = 250;
 /// Wall-clock budget used when `/goal` is given no `--time`.
 pub const DEFAULT_TIME: Duration = Duration::from_secs(60 * 60);
+/// How many completed steps pass between milestone commits.
+pub const MILESTONE_COMMIT_INTERVAL: u32 = 10;
 
 /// Budgets for one `/goal` run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,7 +218,8 @@ pub struct GoalLedger {
     shell_ok: usize,
     shell_failed: Vec<String>,
     tool_failures: Vec<String>,
-    open_calls: Vec<(String, String, String, Vec<String>)>, // id, tool name, subject, files it names
+    open_calls: Vec<(String, String, String, Vec<String>, String)>, // id, tool name, subject, files it names, raw args
+    plan: Vec<flashagent_tools::plan_tool::PlanStep>,
 }
 
 impl GoalLedger {
@@ -233,6 +237,7 @@ impl GoalLedger {
             shell_failed: Vec::new(),
             tool_failures: Vec::new(),
             open_calls: Vec::new(),
+            plan: Vec::new(),
         }
     }
 
@@ -251,21 +256,37 @@ impl GoalLedger {
         self.started.elapsed()
     }
 
-    /// Feed one loop event.
-    pub fn on_event(&mut self, ev: &LoopEvent) {
+    /// Every file written or edited so far, deduplicated — what a milestone
+    /// commit stages. Order is written-then-edited, each in first-touched
+    /// order; nothing here is about *when* within the run it happened.
+    pub fn changed_files(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        self.written.iter().chain(self.edited.iter()).filter(|f| seen.insert((*f).clone())).cloned().collect()
+    }
+
+    /// The plan as the model last left it — empty until it calls
+    /// `update_plan` at least once.
+    pub fn plan(&self) -> &[flashagent_tools::plan_tool::PlanStep] {
+        &self.plan
+    }
+
+    /// Feed one loop event. Returns `true` when this call changed the plan,
+    /// so the caller knows to redraw it — everything else it records is only
+    /// read later, from the report or the live progress line.
+    pub fn on_event(&mut self, ev: &LoopEvent) -> bool {
         match ev {
             LoopEvent::StepStarted { step, .. } => self.step = *step,
             LoopEvent::Usage(u) => self.output_tokens += u.completion.unwrap_or(0),
             LoopEvent::ToolStarted { id, name, args_json } => {
                 let subject = subject_of(name, args_json);
                 let files = files_of(name, args_json);
-                self.open_calls.push((id.clone(), name.clone(), subject, files));
+                self.open_calls.push((id.clone(), name.clone(), subject, files, args_json.clone()));
             }
             LoopEvent::ToolFinished { id, is_error, result, .. } => {
-                let Some(pos) = self.open_calls.iter().position(|(cid, _, _, _)| cid == id) else {
-                    return;
+                let Some(pos) = self.open_calls.iter().position(|(cid, ..)| cid == id) else {
+                    return false;
                 };
-                let (_, name, subject, files) = self.open_calls.remove(pos);
+                let (_, name, subject, files, args_json) = self.open_calls.remove(pos);
                 match (name.as_str(), *is_error) {
                     ("write_file", false) => push_unique(&mut self.written, subject),
                     ("edit_file" | "patch_file", false) => {
@@ -280,6 +301,12 @@ impl GoalLedger {
                         let why = first_line(result.as_deref().unwrap_or(""));
                         self.shell_failed.push(format!("{subject} — {why}"));
                     }
+                    ("update_plan", false) => {
+                        if let Some(steps) = flashagent_tools::plan_tool::parse_plan(&args_json) {
+                            self.plan = steps;
+                            return true;
+                        }
+                    }
                     (_, true) => {
                         let why = first_line(result.as_deref().unwrap_or(""));
                         self.tool_failures.push(format!("{name}({subject}) — {why}"));
@@ -289,6 +316,7 @@ impl GoalLedger {
             }
             _ => {}
         }
+        false
     }
 
     /// Live progress for the status line: `step 12/250 · 4.2k tok · 3m05s/1h0m`.
@@ -377,6 +405,60 @@ impl GoalLedger {
         });
         out
     }
+}
+
+/// The plan as a small checklist for the chat, updated in place each time it
+/// changes rather than appended — `update_or_push_turn_system("plan:", ...)`
+/// finds the previous one by this same leading label and replaces it.
+pub fn format_plan(steps: &[flashagent_tools::plan_tool::PlanStep]) -> String {
+    use flashagent_tools::plan_tool::PlanStatus;
+    let done = steps.iter().filter(|s| s.status == PlanStatus::Completed).count();
+    let mut out = format!("  \x1b[38;2;155;165;180mplan:\x1b[0m \x1b[38;2;160;155;145m{done}/{}\x1b[0m", steps.len());
+    for step in steps {
+        let color = match step.status {
+            PlanStatus::Completed => "\x1b[38;2;145;205;140m",
+            PlanStatus::InProgress => "\x1b[38;2;225;175;95m",
+            PlanStatus::Pending => "\x1b[38;2;160;155;145m",
+        };
+        out.push_str(&format!("\n    {color}[{}]\x1b[0m {}", step.status.glyph(), step.text));
+    }
+    out
+}
+
+/// Checkpoint whatever the goal has written or edited since it started, as a
+/// git commit next to the file snapshots `/rewind` uses — a long run leaves
+/// something to diff against besides "before the whole thing began". Does
+/// nothing, quietly, outside a git repository or when there is nothing to
+/// commit (including "already committed by the user mid-run": a failed
+/// `git commit` is not treated as an error).
+pub fn commit_goal_milestone(ledger: &GoalLedger, cwd: &Path, completed_steps: u32) -> Option<String> {
+    let files = ledger.changed_files();
+    if files.is_empty() {
+        return None;
+    }
+    let in_repo = std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(cwd)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !in_repo {
+        return None;
+    }
+    let mut add = std::process::Command::new("git");
+    add.arg("add").arg("--").args(&files).current_dir(cwd);
+    if !add.output().is_ok_and(|o| o.status.success()) {
+        return None;
+    }
+    let subject = crate::truncate_middle(&ledger.task, 60);
+    let message = format!("goal checkpoint: {subject} (step {completed_steps})");
+    let commit = std::process::Command::new("git").args(["commit", "-m", &message]).current_dir(cwd).output().ok()?;
+    if !commit.status.success() {
+        return None;
+    }
+    Some(format!(
+        "  \x1b[38;2;155;165;180mcheckpoint:\x1b[0m \x1b[38;2;225;230;240mcommitted {} file(s) after step {completed_steps}\x1b[0m",
+        files.len()
+    ))
 }
 
 fn stop_line(reason: DoneReason, budgets: &GoalBudgets, step: u32) -> String {
@@ -594,5 +676,154 @@ mod tests {
         let report = l.report(DoneReason::Completed).join("\n");
         assert!(report.contains("~ src/a.rs") && report.contains("~ src/b.rs"), "{report}");
         assert!(report.contains("Files changed: 2"), "{report}");
+    }
+
+    #[test]
+    fn changed_files_has_every_path_once() {
+        let mut l = GoalLedger::new("t".into(), GoalBudgets::default());
+        l.on_event(&ev_started("1", "write_file", r#"{"path":"a.txt"}"#));
+        l.on_event(&ev_finished("1", false, "wrote a.txt"));
+        l.on_event(&ev_started("2", "edit_file", r#"{"path":"b.txt","edits":[]}"#));
+        l.on_event(&ev_finished("2", false, "applied 1 edit(s) to 1 file(s)"));
+        // Touched twice: still one entry.
+        l.on_event(&ev_started("3", "edit_file", r#"{"path":"a.txt","edits":[]}"#));
+        l.on_event(&ev_finished("3", false, "applied 1 edit(s) to 1 file(s)"));
+        let mut files = l.changed_files();
+        files.sort();
+        assert_eq!(files, vec!["a.txt".to_string(), "b.txt".to_string()]);
+    }
+
+    #[test]
+    fn a_successful_update_plan_call_replaces_the_plan_and_reports_it_changed() {
+        let mut l = GoalLedger::new("t".into(), GoalBudgets::default());
+        assert!(l.plan().is_empty());
+
+        let changed = l.on_event(&ev_started("1", "update_plan", r#"{"steps":[{"text":"read the notes"}]}"#));
+        assert!(!changed, "nothing changes until the call finishes");
+        let changed = l.on_event(&ev_finished("1", false, "Plan recorded: 1 step(s) (0 done, 0 in progress)"));
+        assert!(changed);
+        assert_eq!(l.plan(), &[flashagent_tools::plan_tool::PlanStep {
+            text: "read the notes".into(),
+            status: flashagent_tools::plan_tool::PlanStatus::Pending,
+        }]);
+
+        // A later call replaces the plan outright, it does not merge into it.
+        l.on_event(&ev_started("2", "update_plan", r#"{"steps":[{"text":"a","status":"completed"},{"text":"b"}]}"#));
+        let changed = l.on_event(&ev_finished("2", false, "Plan recorded: 2 step(s) (1 done, 0 in progress)"));
+        assert!(changed);
+        assert_eq!(l.plan().len(), 2);
+    }
+
+    #[test]
+    fn a_failed_update_plan_call_does_not_touch_the_plan() {
+        let mut l = GoalLedger::new("t".into(), GoalBudgets::default());
+        l.on_event(&ev_started("1", "update_plan", r#"{"steps":[{"text":"a"}]}"#));
+        l.on_event(&ev_finished("1", false, "ok"));
+        assert_eq!(l.plan().len(), 1);
+
+        l.on_event(&ev_started("2", "update_plan", r#"{}"#));
+        let changed = l.on_event(&ev_finished("2", true, "error: update_plan needs `steps`"));
+        assert!(!changed);
+        assert_eq!(l.plan().len(), 1, "the earlier plan must survive a rejected call");
+    }
+
+    #[test]
+    fn format_plan_marks_each_step_by_its_status() {
+        use flashagent_tools::plan_tool::{PlanStatus, PlanStep};
+        let steps = vec![
+            PlanStep { text: "done step".into(), status: PlanStatus::Completed },
+            PlanStep { text: "doing step".into(), status: PlanStatus::InProgress },
+            PlanStep { text: "next step".into(), status: PlanStatus::Pending },
+        ];
+        let text = format_plan(&steps);
+        let plain = strip_ansi_for_test(&text);
+        assert!(plain.contains("plan: 1/3"), "{plain}");
+        assert!(plain.contains("[x] done step"), "{plain}");
+        assert!(plain.contains("[~] doing step"), "{plain}");
+        assert!(plain.contains("[ ] next step"), "{plain}");
+    }
+
+    fn strip_ansi_for_test(s: &str) -> String {
+        let mut out = String::new();
+        let mut in_escape = false;
+        for c in s.chars() {
+            if in_escape {
+                if c == 'm' {
+                    in_escape = false;
+                }
+            } else if c == '\x1b' {
+                in_escape = true;
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git").args(args).current_dir(dir).output().expect("run git");
+        assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    fn init_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["config", "user.email", "test@example.com"]);
+        git(dir.path(), &["config", "user.name", "Test"]);
+        std::fs::write(dir.path().join("README.md"), "hi\n").unwrap();
+        git(dir.path(), &["add", "README.md"]);
+        git(dir.path(), &["commit", "-q", "-m", "initial"]);
+        dir
+    }
+
+    #[test]
+    fn a_milestone_commit_stages_and_commits_what_the_goal_touched() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+        let mut l = GoalLedger::new("rewrite the parser".into(), GoalBudgets::default());
+        l.on_event(&ev_started("1", "write_file", r#"{"path":"a.txt"}"#));
+        l.on_event(&ev_finished("1", false, "wrote a.txt"));
+
+        let note = commit_goal_milestone(&l, repo.path(), 10);
+        assert!(note.is_some(), "should report a checkpoint");
+        assert!(note.unwrap().contains("committed 1 file"));
+
+        let log = std::process::Command::new("git").args(["log", "--oneline"]).current_dir(repo.path()).output().unwrap();
+        let log = String::from_utf8_lossy(&log.stdout);
+        assert!(log.contains("goal checkpoint: rewrite the parser (step 10)"), "{log}");
+        assert_eq!(log.lines().count(), 2, "one checkpoint on top of the initial commit: {log}");
+    }
+
+    #[test]
+    fn no_files_touched_means_no_commit_and_no_message() {
+        let repo = init_repo();
+        let l = GoalLedger::new("t".into(), GoalBudgets::default());
+        assert_eq!(commit_goal_milestone(&l, repo.path(), 10), None);
+        let log = std::process::Command::new("git").args(["log", "--oneline"]).current_dir(repo.path()).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).lines().count(), 1, "only the initial commit");
+    }
+
+    #[test]
+    fn outside_a_git_repository_nothing_happens() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        let mut l = GoalLedger::new("t".into(), GoalBudgets::default());
+        l.on_event(&ev_started("1", "write_file", r#"{"path":"a.txt"}"#));
+        l.on_event(&ev_finished("1", false, "wrote a.txt"));
+        assert_eq!(commit_goal_milestone(&l, dir.path(), 10), None);
+    }
+
+    #[test]
+    fn a_file_already_committed_by_the_user_is_not_reported_as_an_error() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+        let mut l = GoalLedger::new("t".into(), GoalBudgets::default());
+        l.on_event(&ev_started("1", "write_file", r#"{"path":"a.txt"}"#));
+        l.on_event(&ev_finished("1", false, "wrote a.txt"));
+        // The user (or an earlier checkpoint) already committed this exact
+        // content — nothing left to stage, so the second attempt is silent.
+        git(repo.path(), &["add", "a.txt"]);
+        git(repo.path(), &["commit", "-q", "-m", "user beat the checkpoint to it"]);
+        assert_eq!(commit_goal_milestone(&l, repo.path(), 10), None);
     }
 }

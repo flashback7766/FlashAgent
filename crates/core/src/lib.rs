@@ -33,7 +33,7 @@ pub use permissions::{
     PermissionState, PermissionedTools, RuleSet, Verdict,
 };
 pub use prompt::{build_system_prompt, SystemPromptConfig};
-pub use snapshots::{RewindReport, Rewindable, SnapshotStore};
+pub use snapshots::{FilePreview, RewindReport, Rewindable, SnapshotStore};
 pub use subagents::{
     AgentRole, SubagentHandle, SubagentHost, SubagentMsg, SubagentResult, SubagentSpec,
     SubagentTool, SubagentToolFactory,

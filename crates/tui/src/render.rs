@@ -194,6 +194,7 @@ impl Renderer {
         question_gate: &TuiQuestionGate,
         effort_menu: Option<&SelectMenu<String>>,
         model_menu: Option<&SelectMenu<String>>,
+        rewind_confirm: Option<&RewindConfirm>,
         settings_view: Option<&SettingsView>,
         sampling_view: Option<&SamplingView>,
         context_modal: Option<&ContextModal>,
@@ -465,6 +466,11 @@ impl Renderer {
             tail.extend(menu.render(width));
             input_line_idx = tail.len().saturating_sub(1);
             custom_cursor_col = Some(0);
+        } else if let Some(rc) = rewind_confirm {
+            // Morph composer into the /rewind confirmation card
+            tail.extend(rc.render(width));
+            input_line_idx = tail.len().saturating_sub(1);
+            custom_cursor_col = Some(0);
         } else if let Some(modal) = context_modal {
             // Morph composer into Context breakdown modal
             tail.extend(modal.render(width));
@@ -573,6 +579,8 @@ impl Renderer {
             "  \x1b[38;2;135;130;125m↑/↓ — select model · enter — switch · esc — cancel\x1b[0m".to_string()
         } else if effort_menu.is_some() {
             "  \x1b[38;2;135;130;125m↑/↓ — select effort · enter — apply · esc — cancel\x1b[0m".to_string()
+        } else if rewind_confirm.is_some() {
+            "  \x1b[38;2;135;130;125m↑/↓ — choose · enter — confirm · esc — cancel\x1b[0m".to_string()
         } else if context_modal.is_some() {
             "  \x1b[38;2;135;130;125mf1 / enter / esc — close context breakdown\x1b[0m".to_string()
         } else if mcp_modal.is_some() {

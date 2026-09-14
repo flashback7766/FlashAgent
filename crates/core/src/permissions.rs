@@ -111,7 +111,7 @@ impl Category {
             "read_file" | "list_dir" | "glob" | "grep" | "outline_file" | "git_status" | "git_diff"
             // Looking at a picture in the project is a read like any other,
             // and the tool refuses to leave the working directory.
-            | "view_image" | "env_info" | "memory_read" | "ask_user" => Category::Read,
+            | "view_image" | "env_info" | "memory_read" | "ask_user" | "update_plan" => Category::Read,
             // Spawning grants nothing by itself: every call the child makes
             // goes through this same permission state.
             "spawn_agent" => Category::Read,
@@ -304,6 +304,61 @@ fn shell_command(args_json: &str) -> Option<String> {
     flashagent_llm::effective_args(args_json, "run_shell")?.get("command")?.as_str().map(str::to_string)
 }
 
+/// Shell patterns that always stop for a human, no matter the permission
+/// mode or an existing "Always allow" rule: they reach further than the
+/// file snapshots that make `/rewind` possible, or leave the project
+/// altogether. `/goal` is the one place this actually changes anything —
+/// it is the only mode that would otherwise run these without asking.
+fn blacklisted_shell_reason(cmd: &str) -> Option<&'static str> {
+    parse_chain(cmd).iter().find_map(|seg| blacklisted_segment(seg))
+}
+
+fn blacklisted_segment(segment: &str) -> Option<&'static str> {
+    let words: Vec<&str> = segment.split_whitespace().collect();
+    // A leading `VAR=value` prefix is still the command that follows it.
+    let start = words.iter().position(|w| !w.contains('=') || w.starts_with('-')).unwrap_or(words.len());
+    let words = &words[start..];
+    let prog = *words.first()?;
+    let prog = prog.rsplit('/').next().unwrap_or(prog);
+
+    // Case matters here: `git branch -D` force-deletes in one flag, while
+    // `-d` alone refuses on an unmerged branch — so flags are read as
+    // written, never lowercased.
+    let mut short_flags = String::new();
+    let mut long_flags: Vec<&str> = Vec::new();
+    for w in &words[1..] {
+        if let Some(rest) = w.strip_prefix("--") {
+            long_flags.push(rest.split('=').next().unwrap_or(rest));
+        } else if let Some(rest) = w.strip_prefix('-') {
+            short_flags.push_str(rest);
+        }
+    }
+    let has_short = |c: char| short_flags.contains(c);
+    let has_long = |name: &str| long_flags.contains(&name);
+
+    match prog {
+        "rm" if (has_short('r') || has_short('R') || has_long("recursive")) && (has_short('f') || has_long("force")) => {
+            Some("rm -rf reaches further than the file snapshots /rewind uses")
+        }
+        "sudo" => Some("sudo runs as another user"),
+        "dd" => Some("dd can overwrite a whole disk"),
+        p if p.starts_with("mkfs") => Some("mkfs formats a filesystem"),
+        "shutdown" | "reboot" | "halt" | "poweroff" => Some("shuts the machine down"),
+        "git" => match words.get(1).copied() {
+            Some("push") if has_short('f') || has_long("force") || has_long("force-with-lease") => {
+                Some("git push --force can overwrite the remote's history")
+            }
+            Some("reset") if has_long("hard") => Some("git reset --hard discards uncommitted work"),
+            Some("clean") if has_short('f') || has_long("force") => Some("git clean -f deletes untracked files for good"),
+            Some("branch") if has_short('D') || has_long("delete") && (has_short('f') || has_long("force")) => {
+                Some("git branch -D force-deletes a branch")
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// "Did the user mark this external tool read-only?" — answered by the layer
 /// that owns the config (MCP `read_only` / `read_only_tools` in `.mcp.json`).
 /// `core` stays protocol-free.
@@ -442,6 +497,17 @@ impl PermissionState {
             },
             Category::Shell => {
                 let cmd = shell_command(&call.args_json);
+                // Bypass is the one mode that would otherwise run these
+                // without asking — including on a standing "Always allow"
+                // rule from an earlier Bypass run. Manual and AcceptEdits
+                // already ask for every shell command, and an "Always"
+                // there was the user's own explicit call on this exact
+                // command, not something a mode switch put in place.
+                if mode == PermissionMode::Bypass {
+                    if let Some(reason) = cmd.as_deref().and_then(blacklisted_shell_reason) {
+                        return Verdict::NeedApproval { diff: Some(format!("held for review: {reason}")) };
+                    }
+                }
                 let allowed_by_rule = cmd.as_deref().is_some_and(|c| self.rules.lock().expect("rules lock").shell_allows(c));
                 if allowed_by_rule {
                     return Verdict::Allow;
@@ -650,6 +716,76 @@ mod tests {
         assert!(!rules.shell_allows(r#"npm test \" > ~/.bashrc \""#));
         assert!(!rules.shell_allows(r#"npm test \"; rm -rf ~; echo \""#));
         assert!(!rules.shell_allows("npm test $'; rm -rf ~; echo $'"));
+    }
+
+    #[test]
+    fn the_blacklist_catches_its_intended_patterns() {
+        for cmd in [
+            "rm -rf build",
+            "rm -fr build",
+            "rm -r -f build",
+            "rm --recursive --force build",
+            "/bin/rm -rf /",
+            "FOO=1 rm -rf /tmp/x",
+            "sudo apt install foo",
+            "dd if=/dev/zero of=/dev/sda",
+            "mkfs.ext4 /dev/sda1",
+            "shutdown -h now",
+            "reboot",
+            "git push --force origin main",
+            "git push -f origin main",
+            "git push origin main --force-with-lease",
+            "git reset --hard",
+            "git reset --hard HEAD~3",
+            "git clean -fd",
+            "git clean -df",
+            "git branch -D old-feature",
+            "git branch --delete --force old-feature",
+            "echo hi && rm -rf /tmp/x",
+        ] {
+            assert!(blacklisted_shell_reason(cmd).is_some(), "should be caught: {cmd}");
+        }
+    }
+
+    #[test]
+    fn everyday_commands_the_blacklist_must_not_catch() {
+        for cmd in [
+            "rm file.txt",
+            "rm -f file.txt",
+            "rmdir empty_dir",
+            "git push origin main",
+            "git reset --mixed",
+            "git reset HEAD~1",
+            "git clean -n",
+            "git clean --dry-run",
+            "git branch -d merged-feature",
+            "git branch feature",
+            "cargo test",
+            "npm run build",
+        ] {
+            assert!(blacklisted_shell_reason(cmd).is_none(), "should not be caught: {cmd}");
+        }
+    }
+
+    #[test]
+    fn the_blacklist_outranks_bypass_mode_and_a_standing_always_allow_rule() {
+        let state = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
+        state.allow_shell_prefix("rm -rf");
+        assert!(matches!(
+            state.decide(&call("run_shell", r#"{"command":"rm -rf build"}"#), None),
+            Verdict::NeedApproval { .. }
+        ), "a goal run must still ask for this, even with a standing rule");
+        // An ordinary command stays silent, same as always in Bypass.
+        assert_eq!(state.decide(&call("run_shell", r#"{"command":"cargo test"}"#), None), Verdict::Allow);
+    }
+
+    #[test]
+    fn planning_mode_still_denies_a_blacklisted_command_outright() {
+        let state = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
+        assert!(matches!(
+            state.decide(&call("run_shell", r#"{"command":"rm -rf build"}"#), None),
+            Verdict::Deny(_)
+        ), "planning mode has no path to running it at all, blacklisted or not");
     }
 
     #[test]

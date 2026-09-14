@@ -465,6 +465,29 @@ impl App {
             return Flow::Continue;
         }
 
+        // If a /rewind confirmation card is open, it captures navigation.
+        // Only Enter on "Yes, rewind" ever touches a file; everything else
+        // just closes the card.
+        if let Some(ref mut rc) = self.rewind_confirm {
+            match code {
+                KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::Left | KeyCode::Right => rc.toggle(),
+                KeyCode::Enter => {
+                    let commit = rc.confirm;
+                    let target = rc.target.clone();
+                    self.rewind_confirm = None;
+                    if commit {
+                        self.commit_rewind(cx, target);
+                    }
+                }
+                KeyCode::Esc => {
+                    self.rewind_confirm = None;
+                }
+                _ => {}
+            }
+            self.renderer.request_reprint();
+            return Flow::Continue;
+        }
+
         // If effort selection menu is open, it captures navigation
         if let Some(ref mut menu) = self.effort_menu {
             match code {
