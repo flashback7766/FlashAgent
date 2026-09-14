@@ -14,6 +14,7 @@ pub mod image_tool;
 pub mod memory_tools;
 pub mod outline;
 pub mod patch;
+pub mod plan_tool;
 pub mod shell;
 pub mod subagents;
 pub mod web;
@@ -294,6 +295,7 @@ impl BuiltinTools {
                 let a: ask_user::AskUserArgs = parse_args(&call.args_json, &call.name)?;
                 ask_user::run_ask_user(self.question_gate.as_ref(), &self.is_goal_mode, a).await
             }
+            "update_plan" => plan_tool::run_update_plan(&self.is_goal_mode, &call.args_json),
             "memory_read" => {
                 let a: memory_tools::MemoryReadArgs = parse_args(&call.args_json, &call.name)?;
                 memory_tools::memory_read(&self.cwd, a)
@@ -427,6 +429,17 @@ impl ToolExec for BuiltinTools {
                 parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "One short line, in the user's language, saying what this call is for — e.g. 'Read the loop that applies the patch'. The user sees it instead of the raw call, so write one for every call, including reads and searches."}, "scope": {"type": "string", "enum": ["project", "global", "all"], "description": "Which memory to look at; 'all' by default."}, "name": {"type": "string", "description": "Name of one memory to read in full. Omit to list what is remembered."}}, "required": ["header"]}"#.into(),
             },
         ];
+
+        // Only meaningful during an autonomous run: offering it in an
+        // ordinary chat turn would just invite a plan nobody asked for, and
+        // the tool refuses itself there anyway.
+        if self.is_goal_mode.load(Ordering::Relaxed) {
+            specs.push(ToolSpec {
+                name: "update_plan".into(),
+                description: "Record or update your step-by-step plan for this /goal run, so its progress is visible while it runs. Call it with the whole plan again whenever a step finishes or the plan changes, not just the delta.".into(),
+                parameters_json: r#"{"type": "object", "properties": {"steps": {"type": "array", "description": "The whole plan, in order", "items": {"type": "object", "properties": {"text": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["text"]}}}, "required": ["steps"]}"#.into(),
+            });
+        }
 
         // Extended tools: offered unless the context window is too small to afford their schemas.
         let profile = self.toolset_profile.read().map(|p| *p).unwrap_or(ToolsetProfile::Auto);
@@ -896,6 +909,34 @@ mod tests {
         let names_compact: Vec<&str> = specs_compact.iter().map(|s| s.name.as_str()).collect();
         assert!(names_compact.contains(&"ask_user"));
         assert!(!names_compact.contains(&"patch_file"));
+    }
+
+    #[tokio::test]
+    async fn update_plan_only_appears_and_only_works_during_a_goal_run() {
+        let tools = BuiltinTools::new(BuiltinToolsConfig {
+            cwd: testing::tempdir(),
+            brave_api_key: None,
+            question_gate: None,
+            is_goal_mode: None,
+            toolset_profile: Some(ToolsetProfile::Auto),
+            web_enabled: None,
+            context_window: None,
+            mcp_manager: None,
+        })
+        .unwrap();
+        assert!(!tools.specs().iter().any(|s| s.name == "update_plan"), "not offered outside /goal");
+        let out = tools
+            .execute(&ToolCall { id: "t".into(), name: "update_plan".into(), args_json: r#"{"steps":[{"text":"a"}]}"#.into() })
+            .await;
+        assert!(out.is_error, "must refuse itself outside /goal even if called");
+
+        tools.set_goal_mode(true);
+        assert!(tools.specs().iter().any(|s| s.name == "update_plan"), "offered once /goal starts");
+        let out = tools
+            .execute(&ToolCall { id: "t".into(), name: "update_plan".into(), args_json: r#"{"steps":[{"text":"a"}]}"#.into() })
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("1 step"), "{}", out.content);
     }
 
     #[tokio::test]

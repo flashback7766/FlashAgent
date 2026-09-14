@@ -67,6 +67,19 @@ pub struct RewindReport {
     pub failed: Vec<(PathBuf, String)>,
 }
 
+/// What taking a turn back would do to one file, worked out without touching
+/// it, so it can be shown before the user commits to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePreview {
+    pub path: PathBuf,
+    pub added: usize,
+    pub removed: usize,
+    /// The turn being taken back is the one that created this file.
+    pub will_delete: bool,
+    /// No copy was kept; taking the turn back would leave this file as it is.
+    pub too_large: bool,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Manifest {
     turns: Vec<TurnSnapshot>,
@@ -254,6 +267,53 @@ impl SnapshotStore {
         st.current = None;
         self.save(&st.manifest);
         report
+    }
+
+    /// What `rewind(turn)` would do to each file it touches, without doing
+    /// it. Follows the same "first record wins" rule `rewind` uses: a file's
+    /// diff is against how it was before the earliest of the turns being
+    /// taken back, since that is the state it would return to.
+    pub fn preview_rewind(&self, turn: usize) -> Vec<FilePreview> {
+        let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if turn >= st.manifest.turns.len() {
+            return Vec::new();
+        }
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for file in st.manifest.turns[turn..].iter().flat_map(|t| &t.files) {
+            if !seen.insert(file.path.clone()) {
+                continue;
+            }
+            match &file.before {
+                Before::Missing => {
+                    let current = std::fs::read_to_string(&file.path).unwrap_or_default();
+                    out.push(FilePreview {
+                        path: file.path.clone(),
+                        added: 0,
+                        removed: current.lines().count(),
+                        will_delete: true,
+                        too_large: false,
+                    });
+                }
+                Before::TooLarge => {
+                    out.push(FilePreview { path: file.path.clone(), added: 0, removed: 0, will_delete: false, too_large: true });
+                }
+                Before::Blob(name) => {
+                    let current = std::fs::read_to_string(&file.path).unwrap_or_default();
+                    let before = std::fs::read(self.dir.join("blobs").join(name))
+                        .map(|b| String::from_utf8_lossy(&b).into_owned())
+                        .unwrap_or_default();
+                    // What going back to `before` changes, from where the
+                    // file stands now: `+` is a line the rewind brings back,
+                    // `-` one it takes away.
+                    let diff = crate::diff::unified(Some(&current), &before, "f", 0);
+                    let added = diff.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count();
+                    let removed = diff.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count();
+                    out.push(FilePreview { path: file.path.clone(), added, removed, will_delete: false, too_large: false });
+                }
+            }
+        }
+        out
     }
 
     /// `path` as the user thinks of it: relative to the project when inside it.
@@ -449,6 +509,83 @@ mod tests {
         assert_eq!(std::fs::read_to_string(project.path().join("a.txt")).unwrap(), "a");
         assert_eq!(std::fs::read_to_string(project.path().join("b.txt")).unwrap(), "b");
         assert_eq!(report.restored.len(), 2);
+    }
+
+    #[test]
+    fn a_preview_reports_the_change_without_making_it() {
+        let (project, _snaps, s) = store();
+        let a = project.path().join("a.txt");
+        std::fs::write(&a, "one\ntwo\nthree\n").unwrap();
+        s.begin_turn("p");
+        s.before_write("edit_file", &args("a.txt"));
+        std::fs::write(&a, "one\nTWO\nthree\nfour\n").unwrap();
+
+        let preview = s.preview_rewind(0);
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].path, a);
+        // Going back removes the line the turn changed and the one it
+        // added, and brings back the original wording of the middle line.
+        assert_eq!(preview[0].removed, 2, "{preview:?}");
+        assert_eq!(preview[0].added, 1, "{preview:?}");
+        assert!(!preview[0].will_delete);
+        assert!(!preview[0].too_large);
+
+        // A preview looks, it does not touch: the file and the store are
+        // exactly as they were.
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "one\nTWO\nthree\nfour\n");
+        assert_eq!(s.rewindable(&["p"]).len(), 1);
+    }
+
+    #[test]
+    fn previewing_a_file_the_turn_created_shows_it_will_be_removed() {
+        let (project, _snaps, s) = store();
+        s.begin_turn("p");
+        s.before_write("write_file", &args("new.txt"));
+        std::fs::write(project.path().join("new.txt"), "one\ntwo\n").unwrap();
+
+        let preview = s.preview_rewind(0);
+        assert_eq!(preview.len(), 1);
+        assert!(preview[0].will_delete);
+        assert_eq!(preview[0].removed, 2);
+        assert_eq!(preview[0].added, 0);
+    }
+
+    #[test]
+    fn previewing_several_turns_reaches_before_the_first_of_them() {
+        let (project, _snaps, s) = store();
+        let a = project.path().join("a.txt");
+        std::fs::write(&a, "original\n").unwrap();
+        for (prompt, text) in [("one", "1\n"), ("two", "2\n"), ("three", "3\n")] {
+            s.begin_turn(prompt);
+            s.before_write("write_file", &args("a.txt"));
+            std::fs::write(&a, text).unwrap();
+        }
+        // Only one FilePreview for the file all three turns touched, and it
+        // diffs against the very first "before" — matching what rewind(0)
+        // actually restores.
+        let preview = s.preview_rewind(0);
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].added, 1, "brings back \"original\"");
+        assert_eq!(preview[0].removed, 1, "drops \"3\"");
+
+        s.rewind(0);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "original\n");
+    }
+
+    #[test]
+    fn previewing_a_file_too_big_to_copy_says_so_without_a_diff() {
+        let (project, _snaps, s) = store();
+        let big = project.path().join("big.bin");
+        std::fs::write(&big, vec![0u8; MAX_SNAPSHOT_BYTES as usize + 1]).unwrap();
+        s.begin_turn("p");
+        s.before_write("write_file", &args("big.bin"));
+        std::fs::write(&big, "small now").unwrap();
+
+        let preview = s.preview_rewind(0);
+        assert_eq!(preview.len(), 1);
+        assert!(preview[0].too_large);
+        assert_eq!(preview[0].added, 0);
+        assert_eq!(preview[0].removed, 0);
     }
 
     #[test]

@@ -18,7 +18,7 @@ use flashagent_core::{
 };
 use flashagent_llm::{ChatMessage, LlmBackend};
 use flashagent_tools::{BuiltinTools, BuiltinToolsConfig};
-use flashagent_tui::goal::{GoalBudgets, GoalLedger};
+use flashagent_tui::goal::{commit_goal_milestone, format_plan, GoalBudgets, GoalLedger, MILESTONE_COMMIT_INTERVAL};
 use flashagent_tui::MascotMood;
 use flashagent_tui::{
     clip_ansi, pad_box_row, render_session_saved_card, restore_line_color,
@@ -493,6 +493,7 @@ struct App {
     current_effort: String,
     effort_menu: Option<SelectMenu<String>>,
     model_menu: Option<SelectMenu<String>>,
+    rewind_confirm: Option<RewindConfirm>,
     settings_view: Option<SettingsView>,
     sampling_view: Option<SamplingView>,
     context_modal: Option<ContextModal>,
@@ -685,6 +686,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let current_effort = initial_effort;
     let effort_menu: Option<SelectMenu<String>> = None;
     let model_menu: Option<SelectMenu<String>> = None;
+    let rewind_confirm: Option<RewindConfirm> = None;
     let settings_view: Option<SettingsView> = None;
     let sampling_view: Option<SamplingView> = None;
     let context_modal: Option<ContextModal> = None;
@@ -737,7 +739,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let snapshot_dir = flashagent_home_dir()
         .map(|home| home.join("snapshots").join(&session_id))
         .unwrap_or_else(|| std::env::temp_dir().join("flashagent-snapshots").join(&session_id));
-    perm.state().set_snapshots(Arc::new(flashagent_core::SnapshotStore::open(snapshot_dir, cwd)));
+    perm.state().set_snapshots(Arc::new(flashagent_core::SnapshotStore::open(snapshot_dir, cwd.clone())));
 
     // Things that turn up on their own — an update installing, the context
     // being compacted — go on the line under the input. The composer is where
@@ -928,6 +930,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         current_effort,
         effort_menu,
         model_menu,
+        rewind_confirm,
         settings_view,
         sampling_view,
         context_modal,
@@ -997,6 +1000,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             && app.input.starts_with('/')
             && app.effort_menu.is_none()
             && app.model_menu.is_none()
+            && app.rewind_confirm.is_none()
             && app.settings_view.is_none()
             && app.sampling_view.is_none()
             && app.context_modal.is_none()
@@ -1108,6 +1112,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             &question_gate,
             app.effort_menu.as_ref(),
             app.model_menu.as_ref(),
+            app.rewind_confirm.as_ref(),
             app.settings_view.as_ref(),
             app.sampling_view.as_ref(),
             app.context_modal.as_ref(),
@@ -1464,9 +1469,21 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     _ => {}
                 }
                 if let Some(ledger) = app.goal_ledger.as_mut() {
-                    ledger.on_event(&e);
-                    if matches!(e, LoopEvent::StepStarted { .. }) {
+                    let plan_changed = ledger.on_event(&e);
+                    if plan_changed {
+                        let block = format_plan(ledger.plan());
+                        app.chat.update_or_push_turn_system("plan:", &block);
                         app.renderer.request_reprint();
+                    }
+                    if let LoopEvent::StepStarted { step, .. } = &e {
+                        app.renderer.request_reprint();
+                        let completed = step.saturating_sub(1);
+                        if completed > 0 && completed % MILESTONE_COMMIT_INTERVAL == 0 {
+                            if let Some(note) = commit_goal_milestone(ledger, &cwd, completed) {
+                                app.chat.push_system(&note);
+                                app.renderer.request_reprint();
+                            }
+                        }
                     }
                 }
                 app.chat.on_event(&e);
@@ -1557,7 +1574,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         for ch in sanitized.chars() {
                             sm.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);
                         }
-                    } else if app.effort_menu.is_none() && app.model_menu.is_none() && app.settings_view.is_none() && app.context_modal.is_none() && app.mcp_modal.is_none() {
+                    } else if app.effort_menu.is_none() && app.model_menu.is_none() && app.rewind_confirm.is_none() && app.settings_view.is_none() && app.context_modal.is_none() && app.mcp_modal.is_none() {
                         app.input.push_str(&sanitized);
                         app.history_index = None;
                         app.autocomplete_idx = 0;

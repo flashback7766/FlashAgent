@@ -115,6 +115,7 @@ impl App {
                             None,
                             None,
                             None,
+                            None,
                             // The command that started this is gone from the
                             // composer; its suggestion list must go with it.
                             None,

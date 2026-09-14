@@ -113,7 +113,11 @@ impl App {
                              1. Do NOT ask clarifying questions or seek user confirmation. All tool actions are pre-approved.\n\
                              2. Plan, research, edit, execute, and verify completely on your own.\n\
                              3. Thoroughly test and verify your changes before finishing.\n\
-                             4. Conclude with a clear structured summary of what was accomplished.\n\n\
+                             4. Conclude with a clear structured summary of what was accomplished.\n\
+                             5. Call update_plan with your whole step-by-step plan before starting, \
+                             and again whenever a step finishes or the plan changes — the person \
+                             who started this run watches it live and has no other way to see where \
+                             the run stands.\n\n\
                              Budget for this run: {}. When it runs out the run is stopped wherever it \
                              is, so do the load-bearing work first and say plainly what is left \
                              unfinished or unverified rather than claiming success.",
@@ -643,6 +647,7 @@ impl App {
                             None,
                             None,
                             None,
+                            None,
                             &self.context_usage,
                             FrameState {
                                 input: &self.input,
@@ -844,51 +849,16 @@ impl App {
                         }
 
                         let target = turns[n - 1].clone();
-                        let report = store.rewind(target.turn);
-                        let taken_back = prompts.len() - target.user_index;
-                        let cut = self
-                            .history
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, m)| m.role == flashagent_llm::Role::User)
-                            .nth(target.user_index)
-                            .map(|(i, _)| i);
-                        if let Some(cut) = cut {
-                            self.history.truncate(cut);
-                        }
-                        self.chat.truncate_before_nth_last_user(taken_back);
-                        self.renderer.scroll_to_bottom();
-                        self.renderer.printed_settled = 0;
-                        self.renderer.prev_expansion = None;
-                        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-                        self.suggested_prompt = None;
-                        self.latest_suggestion = None;
-                        self.custom_placeholder = None;
-
-                        let names = |paths: &[std::path::PathBuf]| {
-                            paths.iter().map(|p| store.display_path(p)).collect::<Vec<_>>().join(", ")
-                        };
-                        let mut summary = format!("Rewound to before turn {n}");
-                        if !report.restored.is_empty() {
-                            summary.push_str(&format!(" · put back {}", names(&report.restored)));
-                        }
-                        if !report.removed.is_empty() {
-                            summary.push_str(&format!(" · removed {}", names(&report.removed)));
-                        }
-                        if report.restored.is_empty() && report.removed.is_empty() && report.failed.is_empty() {
-                            summary.push_str(" · no files to put back");
-                        }
-                        summary.push_str(" · its prompt is back in the input · changes made by shell commands are not undone");
-                        self.chat.push_system(&summary);
-                        for (path, why) in &report.failed {
-                            self.chat.push_line(LineKind::ToolError, format!("Not put back: {} — {why}", store.display_path(path)));
-                        }
-                        // The words, not the scaffolding a goal or the first
-                        // message's memory block wrapped them in.
-                        self.input = extract_user_prompt(&prompts[target.user_index]).to_string();
-                        if self.config.auto_save_sessions {
-                            save_session_file(cx.session_id, &self.current_model, cx.cwd_display, &self.history);
-                        }
+                        let prompt_label = flashagent_tui::truncate_middle(
+                            extract_user_prompt(&prompts[target.user_index]).lines().next().unwrap_or(""),
+                            60,
+                        );
+                        let files = store
+                            .preview_rewind(target.turn)
+                            .into_iter()
+                            .map(|f| RewindFileRow::from((store.as_ref(), f)))
+                            .collect();
+                        self.rewind_confirm = Some(RewindConfirm { target, prompt_label, files, confirm: true });
                         self.renderer.request_reprint();
                         return Flow::Continue;
                     }
@@ -1116,5 +1086,55 @@ impl App {
                         self.turn_counter,
                     ));
         Flow::Next
+    }
+
+    /// Takes turn `target` and everything after it back: the files it
+    /// changed return to how they were, and its prompt goes back in the
+    /// input. Only reached after the confirmation card the user was shown
+    /// answered "yes" — `/rewind <n>` itself only opens that card.
+    pub(crate) fn commit_rewind(&mut self, cx: &mut LoopCtx<'_>, target: flashagent_core::Rewindable) {
+        let Some(store) = cx.perm.state().snapshots() else {
+            return;
+        };
+        let prompts: Vec<String> = self
+            .history
+            .iter()
+            .filter(|m| m.role == flashagent_llm::Role::User)
+            .map(|m| m.content.clone())
+            .collect();
+        let Some(prompt) = prompts.get(target.user_index).cloned() else {
+            return;
+        };
+        let report = store.rewind(target.turn);
+        let taken_back = prompts.len() - target.user_index;
+        let cut = self
+            .history
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == flashagent_llm::Role::User)
+            .nth(target.user_index)
+            .map(|(i, _)| i);
+        if let Some(cut) = cut {
+            self.history.truncate(cut);
+        }
+        self.chat.truncate_before_nth_last_user(taken_back);
+        self.renderer.scroll_to_bottom();
+        self.renderer.printed_settled = 0;
+        self.renderer.prev_expansion = None;
+        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        self.suggested_prompt = None;
+        self.latest_suggestion = None;
+        self.custom_placeholder = None;
+
+        for (path, why) in &report.failed {
+            self.chat.push_line(LineKind::ToolError, format!("Not put back: {} — {why}", store.display_path(path)));
+        }
+        // The words, not the scaffolding a goal or the first message's
+        // memory block wrapped them in.
+        self.input = extract_user_prompt(&prompt).to_string();
+        if self.config.auto_save_sessions {
+            save_session_file(cx.session_id, &self.current_model, cx.cwd_display, &self.history);
+        }
+        self.renderer.request_reprint();
     }
 }

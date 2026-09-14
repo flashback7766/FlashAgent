@@ -498,6 +498,69 @@ fn a_goal_stops_at_its_step_budget_and_says_it_is_not_finished() {
 }
 
 #[test]
+fn a_goal_checkpoints_what_it_changed_every_ten_steps() {
+    let mut replies: Vec<Reply> = (0..10)
+        .map(|i| Reply::ToolCall {
+            name: "write_file".into(),
+            arguments: serde_json::json!({ "header": format!("write file {i}"), "path": format!("f{i}.txt"), "content": "x\n" }),
+        })
+        .collect();
+    replies.push(Reply::Text("Done.".into()));
+    let server = MockServer::start(replies);
+    let home = Home::new();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git").args(args).current_dir(home.work()).output().expect("run git");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "T"]);
+    std::fs::write(home.work().join("README.md"), "hi\n").unwrap();
+    git(&["add", "README.md"]);
+    git(&["commit", "-q", "-m", "initial"]);
+    let term = ready(&home, &server);
+
+    term.type_text("/goal --steps 15 write ten files");
+    term.send(ENTER);
+    term.wait_for("checkpoint:", WAIT);
+    term.wait_for("Done.", WAIT);
+
+    let log = std::process::Command::new("git").args(["log", "--oneline"]).current_dir(home.work()).output().unwrap();
+    let log = String::from_utf8_lossy(&log.stdout);
+    assert!(log.contains("goal checkpoint"), "no checkpoint commit was made:\n{log}");
+    assert_eq!(log.lines().count(), 2, "one checkpoint on top of the initial commit:\n{log}");
+}
+
+#[test]
+fn a_goal_shows_its_live_plan_and_updates_it_in_place() {
+    let plan_step = |a: &str, b: &str| {
+        Reply::ToolCall {
+            name: "update_plan".into(),
+            arguments: serde_json::json!({ "steps": [
+                { "text": "read the failing test", "status": a },
+                { "text": "fix it", "status": b },
+            ] }),
+        }
+    };
+    let server = MockServer::start(vec![
+        plan_step("in_progress", "pending"),
+        plan_step("completed", "in_progress"),
+        Reply::Text("Done.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("/goal fix the failing test");
+    term.send(ENTER);
+    term.wait_for("Done.", WAIT);
+
+    let screen = term.screen();
+    assert!(screen.contains("plan: 1/2"), "{screen}");
+    assert!(screen.contains("[x] read the failing test"), "{screen}");
+    assert!(screen.contains("[~] fix it"), "{screen}");
+    assert_eq!(screen.matches("plan:").count(), 1, "the plan updates in place, it does not pile up:\n{screen}");
+}
+
+#[test]
 fn an_answer_cut_off_by_the_output_limit_is_finished_in_the_same_message() {
     let server = MockServer::start(vec![
         Reply::Cut("The first half of the answer, ".into()),
@@ -643,7 +706,17 @@ fn rewind_takes_the_files_and_the_conversation_back_to_before_a_turn() {
 
     term.type_text("/rewind 2");
     term.send(ENTER);
-    term.wait_for("Rewound to before turn 2", WAIT);
+    // The composer morphs into a confirmation card naming what will change,
+    // before anything actually does.
+    term.wait_for("Confirm Rewind", WAIT);
+    term.wait_for("notes.txt", WAIT);
+    term.wait_for("added.txt", WAIT);
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "second\n", "the card must not touch files before it is answered");
+    assert!(added.exists(), "the card must not touch files before it is answered");
+
+    term.send(ENTER); // "Yes, rewind" is selected by default
+    // The rewound turn drops off the screen; no confirmation line is shown.
+    term.wait_gone("Changed it twice.", WAIT);
     assert_eq!(std::fs::read_to_string(&notes).unwrap(), "first\n", "the edit of the taken-back turn was not undone");
     assert!(!added.exists(), "a file the taken-back turn created is still there");
 
@@ -656,6 +729,38 @@ fn rewind_takes_the_files_and_the_conversation_back_to_before_a_turn() {
     assert!(last.contains("change them again"), "the prompt put back in the input is not what was sent: {last}");
     assert!(last.contains("Changed it once."), "the turn before the rewind point was lost: {last}");
     assert!(!last.contains("Changed it twice."), "the taken-back answer was still sent to the model: {last}");
+}
+
+#[test]
+fn declining_the_rewind_card_leaves_everything_as_it_is() {
+    let edit = |old: &str, new: &str| Reply::ToolCall {
+        name: "edit_file".into(),
+        arguments: serde_json::json!({
+            "header": "Change the notes",
+            "path": "notes.txt",
+            "edits": [ { "old_string": old, "new_string": new } ]
+        }),
+    };
+    let server = MockServer::start(vec![edit("original", "first"), Reply::Text("Changed it.".into())]);
+    let home = Home::new();
+    let notes = home.work().join("notes.txt");
+    std::fs::write(&notes, "original\n").unwrap();
+    let term = ready(&home, &server);
+
+    ask(&term, "change the notes", "Changed it.");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "first\n");
+
+    term.type_text("/rewind 1");
+    term.send(ENTER);
+    term.wait_for("Confirm Rewind", WAIT);
+
+    // Move off "Yes, rewind" onto "No, cancel", then confirm that.
+    term.send("\x1b[B"); // Down
+    term.send(ENTER);
+    term.wait_gone("Confirm Rewind", WAIT);
+
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "first\n", "declining must not touch the file");
+    assert!(term.screen().contains("Changed it."), "declining must not drop the turn from the conversation");
 }
 
 #[test]
