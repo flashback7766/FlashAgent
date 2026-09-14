@@ -1,5 +1,25 @@
 # Changelog
 
+## b282 — the prompt cache works again
+
+This release changes nothing for you to use — it only fixes a bug, but one
+you will feel: on a local server every reply after the first can start
+many times sooner.
+
+- **Every turn re-read the whole conversation.** On LM Studio and llama.cpp
+  each new message was processed from the first token again — thousands of
+  tokens and tens of seconds before the first word, with the cache reuse
+  (f_keep) in the status line near zero. The cause was FlashAgent itself: it
+  rewrote the start of the system prompt whenever thinking was switched on or
+  off for a turn, and automatic effort switches it often (a greeting gets no
+  thinking, a real task does). The server can only reuse its cache up to the
+  first token that differs, and that token was the very first one.
+- Now the system prompt is sent exactly the same every turn. When thinking is
+  off for a reply, that is said in one line at the end of your newest message
+  instead, which the server has not seen yet anyway. Measured against LM
+  Studio with a 3 500-token prompt: flipping thinking between turns keeps
+  f_keep at 0.998 and only the new message is processed.
+
 ## b281 — a proper way to uninstall
 
 ### Uninstalling
