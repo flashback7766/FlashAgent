@@ -54,6 +54,10 @@ impl Drop for Busy {
 /// How many times a 400 may teach us a new request shape before we give up.
 const MAX_ADAPTIVE_RETRIES: u8 = 2;
 
+/// Appended to the newest user message when thinking is off for a turn.
+const THINKING_OFF_NOTE: &str =
+    "\n\n(Thinking is off for this reply: answer directly, with no internal reasoning and no stage headers.)";
+
 /// Which optional request fields a body carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fields {
@@ -407,30 +411,13 @@ impl OpenAiCompat {
                 }
                 Role::System => {
                     has_system = true;
-                    let content = if is_effort_off {
-                        if let Some(idx) = m.content.find("REASONING INSTRUCTIONS:") {
-                            let (pre, post) = m.content.split_at(idx);
-                            let post_rest = if let Some(task_idx) = post.find("TASK EXECUTION") {
-                                &post[task_idx..]
-                            } else {
-                                ""
-                            };
-                            format!("{pre}<|think_off|>THINKING DISABLED:\n- Internal reasoning and thinking are turned off for this turn.\n- Do not generate any internal thinking, reasoning process, or stage headers.\n- Provide your direct response or tool calls immediately.\n\n{post_rest}")
-                        } else if !m.content.contains("<|think_off|>") {
-                            format!("<|think_off|>THINKING DISABLED:\n- Internal reasoning is disabled for this turn. Answer directly without thoughts or stages.\n\n{}", m.content)
-                        } else {
-                            m.content.clone()
-                        }
-                    } else if is_local_or_lmstudio {
-                        if !m.content.contains("<|think_on|>") && !m.content.contains("<|think_off|>") {
-                            format!("<|think_on|>{}", m.content)
-                        } else {
-                            m.content.clone()
-                        }
-                    } else {
-                        m.content.clone()
-                    };
-                    serde_json::json!({ "role": "system", "content": content })
+                    // Sent exactly as it is, whatever the thinking setting.
+                    // It is the start of every prompt: rewriting it when
+                    // thinking flipped between turns made the server's cache
+                    // miss from the first token and re-read the whole
+                    // conversation (f_keep near 0, tens of seconds on a local
+                    // model). The per-turn instruction goes at the end instead.
+                    serde_json::json!({ "role": "system", "content": m.content })
                 }
                 Role::User => {
                     if m.images.is_empty() {
@@ -455,6 +442,21 @@ impl OpenAiCompat {
                 }
             })
             .collect();
+
+        // Thinking off for this turn is said at the end of the newest user
+        // message, which is new to the server anyway, so everything before it
+        // stays cached. Only the request carries it, never the history.
+        if is_effort_off {
+            if let Some(last_user) = msgs.iter_mut().rev().find(|m| m["role"] == "user") {
+                match &mut last_user["content"] {
+                    serde_json::Value::String(text) => text.push_str(THINKING_OFF_NOTE),
+                    serde_json::Value::Array(parts) => {
+                        parts.push(serde_json::json!({ "type": "text", "text": THINKING_OFF_NOTE.trim_start() }))
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         if !has_system && is_local_or_lmstudio {
             msgs.insert(0, serde_json::json!({
@@ -775,7 +777,10 @@ mod tests {
         // Every server accepts a plain string; only a message with images
         // needs the list form.
         let llm = OpenAiCompat::new("http://localhost:1234/v1", "m", None);
-        let body = llm.body(&[ChatMessage::user("hello")], &[], &crate::types::TurnOptions::default());
+        // Thinking left to the server's default, so no per-turn note is added
+        // to the text; the note has its own test.
+        let options = crate::types::TurnOptions { thinking: crate::types::ThinkingEffort::Default, ..Default::default() };
+        let body = llm.body(&[ChatMessage::user("hello")], &[], &options);
         let user = body["messages"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap().clone();
         assert_eq!(user["content"], "hello");
     }
@@ -1048,8 +1053,9 @@ mod tests {
         assert_eq!(body_lm_auto_hi["enable_thinking"], false);
         assert_eq!(body_lm_auto_hi["chat_template_kwargs"]["enable_thinking"], false);
         let sys_hi = body_lm_auto_hi["messages"][0]["content"].as_str().unwrap();
-        assert!(sys_hi.contains("<|think_off|>THINKING DISABLED:"));
-        assert!(!sys_hi.contains("REASONING INSTRUCTIONS:"));
+        assert_eq!(sys_hi, sys_template, "the system prompt is never rewritten: it is the cached prefix");
+        let user_hi = body_lm_auto_hi["messages"][1]["content"].as_str().unwrap();
+        assert!(user_hi.starts_with("Hello!") && user_hi.ends_with(THINKING_OFF_NOTE), "{user_hi}");
 
         // Auto mode for coding task: dynamically selects "on"
         let body_lm_auto_code = b_lm.body(
@@ -1064,8 +1070,24 @@ mod tests {
         assert_eq!(body_lm_auto_code["enable_thinking"], true);
         assert_eq!(body_lm_auto_code["chat_template_kwargs"]["enable_thinking"], true);
         let sys_code = body_lm_auto_code["messages"][0]["content"].as_str().unwrap();
-        assert!(sys_code.contains("<|think_on|>"));
-        assert!(sys_code.contains("REASONING INSTRUCTIONS:"));
+        assert_eq!(sys_code, sys_hi, "thinking on or off, the prompt starts with the same bytes");
+        assert_eq!(body_lm_auto_code["messages"][1]["content"], "Write a parser function in Rust");
+
+        // Only the newest user message carries the note; earlier ones are
+        // sent as they were, so they match what the server cached.
+        let body_later = b_lm.body(
+            &[
+                ChatMessage::system(sys_template),
+                ChatMessage::user("Write a parser function in Rust"),
+                ChatMessage::assistant("Done."),
+                ChatMessage::user("thanks"),
+            ],
+            &[],
+            &crate::types::TurnOptions { thinking: crate::types::ThinkingEffort::Off, ..Default::default() },
+        );
+        assert_eq!(body_later["messages"][0]["content"], sys_template);
+        assert_eq!(body_later["messages"][1]["content"], "Write a parser function in Rust");
+        assert!(body_later["messages"][3]["content"].as_str().unwrap().ends_with(THINKING_OFF_NOTE));
 
         let body_lm_off = b_lm.body(
             &[ChatMessage::user("hi")],
