@@ -928,6 +928,20 @@ fn writing_outside_the_project_asks_even_in_accept_edits() {
 }
 
 #[test]
+fn every_answer_ends_with_a_status_line_that_names_the_cache() {
+    // The mock server reports prompt tokens but nothing about its cache, like
+    // LM Studio over the network: the line says so instead of inventing a number.
+    let server = MockServer::start(vec![Reply::Text("Status please.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+    ask(&term, "how did that go?", "Status please.");
+    term.wait_for("status:", WAIT);
+    let screen = term.screen();
+    let status = screen.lines().find(|l| l.contains("status:")).unwrap_or_default();
+    assert!(status.contains("prompt") && status.contains("cache hit n/a"), "{status}");
+}
+
+#[test]
 fn continue_opens_the_latest_session_of_this_folder() {
     let server = MockServer::start(vec![
         Reply::Text("First answer.".into()),

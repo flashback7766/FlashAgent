@@ -249,6 +249,9 @@ fn serve(
                 chunk(&mut out, serde_json::json!({ "choices": [ { "delta": { "content": word } } ] }))?;
             }
             chunk(&mut out, serde_json::json!({ "choices": [ { "delta": {}, "finish_reason": "stop" } ] }))?;
+            // The usage chunk a server sends when asked to (`include_usage`),
+            // with nothing about its cache — the way LM Studio reports.
+            chunk(&mut out, serde_json::json!({ "choices": [], "usage": { "prompt_tokens": 1200, "completion_tokens": 4 } }))?;
         }
         Reply::Slow { text, per_word } => {
             for word in words(&text) {
