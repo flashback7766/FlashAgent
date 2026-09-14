@@ -1,5 +1,23 @@
 # Changelog
 
+## b274 — thinking that forgot to say so
+
+This release changes nothing for you to use — it only fixes a bug.
+
+- A model with no native "reasoning" channel is asked to narrate its
+  thinking as plain bold stage titles (`**Understanding the Request**`,
+  `**Planning Implementation**`, ...) so it can still be collapsed like real
+  reasoning. The code that collapses it, though, only recognized that
+  narration when it opened with a literal lead-in line ("Thinking
+  Process:", "Thinking:") — a lead-in the prompt never actually asked the
+  model to write. A model that jumped straight to its first bold title
+  (as instructed) had its whole multi-stage narration printed as the
+  answer instead of collapsing under a "Thought: ..." line. It is now
+  recognized by the stage titles themselves — at least two in a row,
+  matched against the same short list of stage words FlashAgent's own
+  prompt asks for — so a real answer that happens to open with its own
+  heading (`**Summary**`) is left alone.
+
 ## b273 — /rewind asks first, and a floor under /goal
 
 - `/rewind <n>` no longer takes turns back the moment you press Enter. The
