@@ -54,10 +54,6 @@ impl Drop for Busy {
 /// How many times a 400 may teach us a new request shape before we give up.
 const MAX_ADAPTIVE_RETRIES: u8 = 2;
 
-/// Appended to the newest user message when thinking is off for a turn.
-const THINKING_OFF_NOTE: &str =
-    "\n\n(Thinking is off for this reply: answer directly, with no internal reasoning and no stage headers.)";
-
 /// Which optional request fields a body carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fields {
@@ -369,11 +365,6 @@ impl OpenAiCompat {
             || current_profile.protocol == crate::thinking::ThinkingProtocol::LmStudio
             || current_profile.protocol == crate::thinking::ThinkingProtocol::BooleanFlag;
 
-        let is_effort_off = resolved_effort
-            .as_deref()
-            .map(|e| e == "off" || e == "disabled" || e == "none" || e == "false" || e == "0")
-            .unwrap_or(false);
-
         let mut has_system = false;
         let mut msgs: Vec<serde_json::Value> = messages
             .iter()
@@ -442,21 +433,6 @@ impl OpenAiCompat {
                 }
             })
             .collect();
-
-        // Thinking off for this turn is said at the end of the newest user
-        // message, which is new to the server anyway, so everything before it
-        // stays cached. Only the request carries it, never the history.
-        if is_effort_off {
-            if let Some(last_user) = msgs.iter_mut().rev().find(|m| m["role"] == "user") {
-                match &mut last_user["content"] {
-                    serde_json::Value::String(text) => text.push_str(THINKING_OFF_NOTE),
-                    serde_json::Value::Array(parts) => {
-                        parts.push(serde_json::json!({ "type": "text", "text": THINKING_OFF_NOTE.trim_start() }))
-                    }
-                    _ => {}
-                }
-            }
-        }
 
         if !has_system && is_local_or_lmstudio {
             msgs.insert(0, serde_json::json!({
@@ -1055,7 +1031,7 @@ mod tests {
         let sys_hi = body_lm_auto_hi["messages"][0]["content"].as_str().unwrap();
         assert_eq!(sys_hi, sys_template, "the system prompt is never rewritten: it is the cached prefix");
         let user_hi = body_lm_auto_hi["messages"][1]["content"].as_str().unwrap();
-        assert!(user_hi.starts_with("Hello!") && user_hi.ends_with(THINKING_OFF_NOTE), "{user_hi}");
+        assert_eq!(user_hi, "Hello!", "user messages are never rewritten: keeps prefix KV cache valid");
 
         // Auto mode for coding task: dynamically selects "on"
         let body_lm_auto_code = b_lm.body(
@@ -1073,8 +1049,7 @@ mod tests {
         assert_eq!(sys_code, sys_hi, "thinking on or off, the prompt starts with the same bytes");
         assert_eq!(body_lm_auto_code["messages"][1]["content"], "Write a parser function in Rust");
 
-        // Only the newest user message carries the note; earlier ones are
-        // sent as they were, so they match what the server cached.
+        // Message contents are preserved verbatim across turns so earlier KV caches are never invalidated.
         let body_later = b_lm.body(
             &[
                 ChatMessage::system(sys_template),
@@ -1087,7 +1062,7 @@ mod tests {
         );
         assert_eq!(body_later["messages"][0]["content"], sys_template);
         assert_eq!(body_later["messages"][1]["content"], "Write a parser function in Rust");
-        assert!(body_later["messages"][3]["content"].as_str().unwrap().ends_with(THINKING_OFF_NOTE));
+        assert_eq!(body_later["messages"][3]["content"], "thanks");
 
         let body_lm_off = b_lm.body(
             &[ChatMessage::user("hi")],

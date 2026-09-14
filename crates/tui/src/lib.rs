@@ -1390,6 +1390,7 @@ impl ChatView {
         let mut turn_reasoning_stages = Vec::<String>::new();
         let mut turn_tools_executed = 0usize;
         let mut last_tool_group: Option<ToolGroupKind> = None;
+        let mut current_turn_user_idx = 0usize;
 
         let has_cached = cached_settled_match.is_some();
         if let Some(cached) = cached_settled_match {
@@ -1399,6 +1400,7 @@ impl ChatView {
         for (i, line) in self.lines.iter().enumerate() {
             if i < boundary && has_cached {
                 if line.kind == LineKind::User {
+                    current_turn_user_idx = i;
                     turn_reasoning_stages.clear();
                     turn_tools_executed = 0;
                     last_tool_group = None;
@@ -1417,7 +1419,8 @@ impl ChatView {
                 } else if line.kind == LineKind::Assistant {
                     let (think_opt, _) = extract_thinking_from_text(&line.text);
                     if let Some(think_text) = think_opt {
-                        let has_native_reasoning = self.lines[last_user_idx..i]
+                        let slice_start = current_turn_user_idx.min(i);
+                        let has_native_reasoning = self.lines[slice_start..i]
                             .iter()
                             .any(|l| l.kind == LineKind::Reasoning);
                         if !has_native_reasoning {
@@ -1442,6 +1445,7 @@ impl ChatView {
             let is_expanded = expansion.all || (expansion.last && is_last_turn);
 
             if line.kind == LineKind::User {
+                current_turn_user_idx = i;
                 turn_reasoning_stages.clear();
                 turn_tools_executed = 0;
                 last_tool_group = None;
@@ -1468,7 +1472,8 @@ impl ChatView {
             if line.kind == LineKind::Assistant {
                 let (think_opt, answer) = extract_thinking_from_text(&line.text);
                 if let Some(think_text) = think_opt {
-                    let has_native_reasoning = self.lines[last_user_idx..i]
+                    let slice_start = current_turn_user_idx.min(i);
+                    let has_native_reasoning = self.lines[slice_start..i]
                         .iter()
                         .any(|l| l.kind == LineKind::Reasoning);
                     if !has_native_reasoning {
@@ -2919,6 +2924,24 @@ mod tests {
             assert!(card[2].ends_with("╯\x1b[0m"));
             assert!(card[1].contains("session_1789119858"));
         }
+    }
+
+    #[test]
+    fn multi_turn_chat_with_extracted_thinking_never_panics_on_render() {
+        let mut chat = ChatView::default();
+        // Turn 1: user + assistant with embedded thinking tags
+        chat.push_user("Hello");
+        chat.push_line(LineKind::Assistant, "<think>First turn thoughts</think>First answer");
+        // Turn 2: user + assistant
+        chat.push_user("Second question");
+        chat.push_line(LineKind::Assistant, "Second answer");
+        // Rendering across settled and live boundaries must never panic from inverted slices
+        let (settled, live) = chat.render_split(80, false);
+        assert!(!settled.is_empty() || !live.is_empty());
+
+        // Also test with expansion.all and expansion.last
+        chat.render_split(80, true);
+        chat.render_split(80, ReasoningExpansion { all: false, last: true });
     }
 }
 
