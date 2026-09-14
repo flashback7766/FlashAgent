@@ -1,5 +1,43 @@
 # Changelog
 
+## b281 — a proper way to uninstall
+
+### Uninstalling
+
+- **`flashagent --uninstall`** removes FlashAgent. It first shows what it
+  will remove — every copy of the program, the PATH lines the installer
+  added — then asks, part by part and with sizes, which data in
+  `~/.flashagent` to delete. Caches and `/rewind` copies are ticked by
+  default; settings, saved sessions, memory, MCP servers and skills are not.
+  Nothing is touched until you confirm. `--uninstall -y` takes the defaults
+  without asking, for scripts.
+- **`/uninstall`** inside the app asks on a card first; yes saves the
+  session, closes the app and runs the same uninstaller in the terminal.
+- **`uninstall.sh` and `uninstall.ps1`** for when the binary is already
+  broken or gone:
+  `curl -fsSL https://raw.githubusercontent.com/flashback7766/FlashAgent/main/uninstall.sh | bash`
+  or `irm https://raw.githubusercontent.com/flashback7766/FlashAgent/main/uninstall.ps1 | iex`.
+  With a working binary they hand over to `flashagent --uninstall`.
+- **PATH lines** are removed only where the installer wrote them (the lines
+  under `# FlashAgent`), only once their folder holds nothing else, and a
+  backup of each edited file is kept next to it
+  (`.bashrc.flashagent-uninstall.bak`). A line you wrote yourself is never
+  touched. The fish universal path and the Windows user PATH are cleaned the
+  same way.
+- **Package installs** (pacman, dpkg, xbps) are removed through the package
+  manager — `sudo pacman -R flashagent-bin` and the like — so its database
+  never lists files that are gone.
+- A build from source refuses to uninstall itself: delete the checkout.
+- The README has an Uninstall section.
+
+### Faster next turn
+
+- **Sending the next prompt stops the recap still being written.** The recap
+  and suggestion for the previous turn used to keep generating after you had
+  already sent another prompt — on a local server that made your new turn
+  wait behind it. Now the request is dropped the moment the next turn starts
+  (a prompt, `/goal`, or regenerate), and the server stops generating it.
+
 ## b280 — how FlashAgent is meant to behave, written down and enforced
 
 A full audit against a written spec of expected behaviour. This release

@@ -19,7 +19,7 @@
 
 </div>
 
-> **Status:** Beta b280 — actively developed by a solo maintainer. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
+> **Status:** Beta b281 — actively developed by a solo maintainer. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
 
 ---
 
@@ -94,6 +94,20 @@ irm https://raw.githubusercontent.com/flashback7766/FlashAgent/main/install.ps1 
 ```
 
 Packages for Arch (`pacman -U`), Debian/Ubuntu (`dpkg -i`), Void, AppImage, macOS and Windows are attached to every [release](https://github.com/flashback7766/FlashAgent/releases), together with a `SHA256SUMS` file.
+
+<details>
+<summary>Uninstall</summary>
+
+`flashagent --uninstall` (or `/uninstall` inside the app) removes every copy of the program, the PATH lines the installer added (keeping a backup of each file it edits), and asks part by part which data in `~/.flashagent` to delete — caches and `/rewind` copies are ticked, settings, sessions and memory are not. An install from a package (pacman, dpkg, xbps) is removed through that package manager. If the binary is already gone or broken:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/flashback7766/FlashAgent/main/uninstall.sh | bash
+```
+
+```powershell
+irm https://raw.githubusercontent.com/flashback7766/FlashAgent/main/uninstall.ps1 | iex
+```
+</details>
 
 <details>
 <summary>Build from source</summary>
