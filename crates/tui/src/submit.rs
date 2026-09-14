@@ -39,6 +39,7 @@ impl App {
                              • /update (or Ctrl+U) · /channel <stable|beta> — check, download and install an update, with progress\n\
                              • /skill:<name>          — invoke a skill from .agents/skills/\n\
                              • /exit                  — save the session and quit\n\
+                             • /uninstall             — close FlashAgent and remove it; asks what data to delete\n\
                              • Tab                    — autocomplete popup or settings tab\n\
                              • Esc                    — dismiss suggestions / interrupt; twice on an empty prompt quits"
                         );
@@ -170,6 +171,7 @@ impl App {
                         self.turn_outcome = flashagent_core::TurnOutcome::default();
                         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                         self.active_steer_tx = Some(steer_tx);
+                        self.cancel_recap();
                         self.active_turn_handle = Some(spawn_turn(
                             cx.cancel.clone(),
                             cx.source.clone(),
@@ -299,6 +301,7 @@ impl App {
                         self.turn_outcome = flashagent_core::TurnOutcome::default();
                             let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                             self.active_steer_tx = Some(steer_tx);
+                            self.cancel_recap();
                             self.active_turn_handle = Some(spawn_turn(
                                 cx.cancel.clone(),
                                 cx.source.clone(),
@@ -437,6 +440,15 @@ impl App {
                             self.custom_placeholder = Some(format!("Permission mode set to: {}", mode.label()));
                             self.suggested_prompt = None;
                         }
+                        self.renderer.request_reprint();
+                        return Flow::Continue;
+                    }
+
+                    if trimmed == "/uninstall" {
+                        self.input.clear();
+                        self.autocomplete_idx = 0;
+                        self.uninstall_confirm = true;
+                        self.suggested_prompt = None;
                         self.renderer.request_reprint();
                         return Flow::Continue;
                     }
@@ -687,6 +699,7 @@ impl App {
                                 ttft_display: None,
                                 background: self.background.as_ref().map(|b| b.text.as_str()),
                                 channel_prompt: None,
+                                prompt_title: "",
                                 turn_phase: None,
                                 attachments: &[],
         background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
@@ -990,6 +1003,7 @@ impl App {
                         self.turn_outcome = flashagent_core::TurnOutcome::default();
                         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                         self.active_steer_tx = Some(steer_tx);
+                        self.cancel_recap();
                         self.active_turn_handle = Some(spawn_turn(
                             cx.cancel.clone(),
                             cx.source.clone(),
@@ -1074,6 +1088,7 @@ impl App {
                         self.turn_outcome = flashagent_core::TurnOutcome::default();
                     let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
                     self.active_steer_tx = Some(steer_tx);
+                    self.cancel_recap();
                     self.active_turn_handle = Some(spawn_turn(
                         cx.cancel.clone(),
                         cx.source.clone(),

@@ -65,6 +65,7 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/editor", "Open external editor (nano/vim/code) to craft prompt", AutocompleteCategory::Command),
         AutocompleteItem::new("/export", "Export chat session to markdown, HTML, or JSONL", AutocompleteCategory::Command),
         AutocompleteItem::new("/exit", "Save the session and quit", AutocompleteCategory::Command),
+        AutocompleteItem::new("/uninstall", "Close FlashAgent and remove it; asks what data to delete", AutocompleteCategory::Command),
         AutocompleteItem::new("/skills", "List skills from .agents/skills and ~/.flashagent/skills", AutocompleteCategory::Command),
     ]
 }
