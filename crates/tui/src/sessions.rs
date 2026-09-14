@@ -205,7 +205,14 @@ pub(crate) fn sessions_in(dir: &std::path::Path, cwd: &str) -> Vec<SessionSummar
                 .messages
                 .iter()
                 .find(|m| m.role == "user")
-                .map(|m| extract_user_prompt(&m.content).lines().next().unwrap_or("").to_string())
+                .map(|m| {
+                    let prompt = extract_user_prompt(&m.content).lines().next().unwrap_or("").trim();
+                    if prompt.is_empty() && !m.images.is_empty() {
+                        "[image]".to_string()
+                    } else {
+                        prompt.to_string()
+                    }
+                })
                 .unwrap_or_default();
             SessionSummary {
                 messages: s.messages.iter().filter(|m| m.role == "user" || m.role == "assistant").count(),
@@ -240,7 +247,12 @@ pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history:
         let msg: ChatMessage = saved_msg.into();
         match msg.role {
             flashagent_llm::Role::User => {
-                chat.push_user(extract_user_prompt(&msg.content));
+                let prompt = extract_user_prompt(&msg.content);
+                if prompt.is_empty() && !msg.images.is_empty() {
+                    chat.push_user("[image]");
+                } else {
+                    chat.push_user(prompt);
+                }
                 history.push(msg);
             }
             flashagent_llm::Role::Assistant => {
@@ -409,4 +421,30 @@ mod session_tests {
         assert!(history[0].content.contains("what happened before"), "{}", history[0].content);
         assert_eq!(chat.user_turn_count(), 1);
     }
+
+    #[test]
+    fn restoring_an_image_only_prompt_shows_image_placeholder() {
+        let mut user_msg = ChatMessage::user("");
+        user_msg.images.push("data:image/png;base64,AAAA".to_string());
+        let saved = SavedSession {
+            id: "s_img".into(),
+            timestamp: 1,
+            model: "m".into(),
+            cwd: "~/proj".into(),
+            messages: vec![
+                SavedMessage::from(&ChatMessage::system("sys")),
+                SavedMessage::from(&user_msg),
+                SavedMessage::from(&ChatMessage::assistant("I see an image")),
+            ],
+        };
+        let mut chat = ChatView::default();
+        let mut history = vec![ChatMessage::system("new prompt")];
+        let restored = restore_session(saved, &mut chat, &mut history);
+        assert_eq!(restored, 2);
+        assert_eq!(history[1].content, "");
+        assert_eq!(history[1].images.len(), 1);
+        let rendered = chat.render(100);
+        assert!(rendered.iter().any(|(kind, text)| *kind == LineKind::User && text.contains("[image]")));
+    }
 }
+

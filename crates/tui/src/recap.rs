@@ -38,7 +38,12 @@ pub(crate) async fn generate_llm_recap_and_suggestion(
 ) -> Option<(String, Option<String>)> {
     let last_user_idx = history.iter().rposition(|m| m.role == flashagent_llm::Role::User)?;
     let user_msg = history.get(last_user_idx)?;
-    let user_prompt = extract_user_prompt(&user_msg.content);
+    let raw_prompt = extract_user_prompt(&user_msg.content);
+    let user_prompt = if raw_prompt.trim().is_empty() && !user_msg.images.is_empty() {
+        "[image]"
+    } else {
+        raw_prompt
+    };
 
     let turn_messages = &history[last_user_idx..];
     let assistant_msg = turn_messages.iter().rev().find(|m| m.role == flashagent_llm::Role::Assistant);

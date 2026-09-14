@@ -1,5 +1,13 @@
 # Changelog
 
+## b286 — send screenshots without prompt text
+
+- **Image-only message submission.** Pasting a screenshot from the clipboard (`Ctrl+V`) or dropping an image file on the terminal can now be submitted directly by pressing Enter without having to type any accompanying text.
+- **Visual composer indicator.** When an image is attached and the prompt is empty, the input placeholder guides the user: `Press Enter to send image, or type a message...`.
+- **Clean transcript formatting.** An image-only message renders cleanly as `❯ [screenshot 1920×1080]` in chat, without awkward leading spaces or empty lines.
+- **Provider & protocol compliance.** Serializes image-only messages as content parts carrying only the `image_url` object with no empty text block, ensuring full compatibility with OpenAI, Anthropic, vLLM, and local vision models.
+- **Session, rewind & export safety.** Gracefully handles image-only turns in session saving, restore, `/rewind`, `/compact`, `/export` (HTML/Markdown), and conversation recap.
+
 ## b285 — non-aborting context steering and unified status footer
 
 - **Non-aborting context steering.** Typing a steering directive and pressing Enter while the agent is running no longer cuts off the streaming response mid-sentence or mid-tool-argument. Generation and tool execution run to clean completion, preventing partial assistant messages and preserving the entire KV prefix cache (cache hit ~99%).

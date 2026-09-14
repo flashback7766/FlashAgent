@@ -749,6 +749,20 @@ mod tests {
     }
 
     #[test]
+    fn an_image_only_message_has_no_text_part() {
+        let llm = OpenAiCompat::new("http://localhost:1234/v1", "vlm", None);
+        let mut msg = ChatMessage::user("");
+        msg.images.push("data:image/png;base64,AAAA".to_string());
+        let body = llm.body(&[msg], &[], &crate::types::TurnOptions::default());
+        let user = body["messages"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap().clone();
+        let parts = user["content"].as_array().expect("content is a list of parts");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "image_url");
+        assert_eq!(parts[0]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+
+    #[test]
     fn a_message_without_pictures_is_sent_exactly_as_before() {
         // Every server accepts a plain string; only a message with images
         // needs the list form.
