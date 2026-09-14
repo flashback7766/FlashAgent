@@ -1,5 +1,26 @@
 # Changelog
 
+## b283 — how much of each prompt came from cache
+
+Every finished answer now prints a status line underneath:
+`status: 4.6s · 6.5K prompt · cache hit 98% · 71 out · 15.3 t/s · TTFT 0.41s · 3 calls`
+
+- **Prompt cache visibility.** On local servers and cloud APIs that report
+  prompt caching, you can see immediately how much of the conversation the
+  server served from its cache versus what it had to evaluate from scratch.
+  In multi-tool turns, prompt and cached tokens are summed across every call.
+- **Provider support.** Reads cache hit metrics from OpenAI, OpenRouter,
+  Gemini, xAI, vLLM (`prompt_tokens_details.cached_tokens`), DeepSeek
+  (`prompt_cache_hit_tokens`), Anthropic-style APIs (`cache_read_input_tokens`),
+  and llama.cpp (`timings.cache_n`).
+- **Local LM Studio.** LM Studio's HTTP API does not return cache metrics, but
+  its local server log records exact processed tokens for every call. When
+  connected to LM Studio on localhost, FlashAgent reads the server log to
+  compute the exact cache hit.
+- **No guessing.** When a server reports no cache information and no server
+  log is available, the status line shows `cache hit n/a` rather than an
+  invented estimate.
+
 ## b282 — the prompt cache works again
 
 This release changes nothing for you to use — it only fixes a bug, but one
