@@ -70,6 +70,6 @@ fn main() {
         }
     }
 
-    // 4. Default fallback: b275
-    println!("cargo:rustc-env=FLASHAGENT_VERSION=b275");
+    // 4. Default fallback: b280
+    println!("cargo:rustc-env=FLASHAGENT_VERSION=b280");
 }
