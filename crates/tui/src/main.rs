@@ -1712,6 +1712,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 if let Some(att) = Attachment::from_dropped_path(&pasted) {
                     let label = att.label();
                     app.attachments.push(att);
+                    app.suggested_prompt = None;
                     app.background = Some(BackgroundNotice::fading(
                         format!("{label} attached · Ctrl+Z removes it"),
                         8,
@@ -2505,5 +2506,24 @@ mod tests {
             "card rows must line up with the border: {widths:?}"
         );
     }
+
+    #[test]
+    fn image_only_submission_formats_cleanly_without_leading_spaces() {
+        let att = Attachment {
+            name: "screenshot".to_string(),
+            data_url: "data:image/png;base64,AAAA".to_string(),
+            size: Some((1920, 1080)),
+        };
+        let labels = [att.label()];
+        let text = "";
+        let shown = if text.trim().is_empty() {
+            format!("[{}]", labels.join(", "))
+        } else {
+            format!("{text}  [{}]", labels.join(", "))
+        };
+        assert_eq!(shown, "[screenshot 1920×1080]");
+        assert!(!shown.starts_with(' '));
+    }
 }
+
 

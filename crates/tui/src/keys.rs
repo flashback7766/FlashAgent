@@ -135,6 +135,10 @@ impl App {
                         self.suggested_prompt = self.latest_suggestion.clone();
                     }
                     self.renderer.request_reprint();
+                } else if !self.attachments.is_empty() {
+                    self.attachments.clear();
+                    self.background = Some(BackgroundNotice::fading("Attachments cleared".to_string(), 4));
+                    self.renderer.request_reprint();
                 } else if self.mcp_modal.is_some() {
                     self.mcp_modal = None;
                     self.renderer.request_reprint();
@@ -225,6 +229,7 @@ impl App {
                     let att = Attachment::from_clipboard(image);
                     let label = att.label();
                     self.attachments.push(att);
+                    self.suggested_prompt = None;
                     if !model_sees_images(cx.source, &self.current_model) {
                         self.background = Some(BackgroundNotice::sticky(format!(
                             "{label} attached · {} cannot see images — press F3 for one that can", self.current_model
@@ -295,7 +300,12 @@ impl App {
                         // Same message, same turn: taking it back must reach
                         // before the first attempt, even after --resume.
                         if let Some(store) = cx.perm.state().snapshots() {
-                            store.continue_turn(&self.history[user_idx].content);
+                            let prompt_for_snapshot = if self.history[user_idx].content.is_empty() {
+                                "[image]"
+                            } else {
+                                &self.history[user_idx].content
+                            };
+                            store.continue_turn(prompt_for_snapshot);
                         }
                         self.chat.truncate_to_last_user();
                         self.renderer.scroll_to_bottom();
@@ -573,7 +583,7 @@ impl App {
                         self.pending_steers.push(text);
                         self.renderer.request_reprint();
                     }
-                } else if !self.input.is_empty() && !self.running {
+                } else if (!self.input.is_empty() || !self.attachments.is_empty()) && !self.running {
                     match self.submit_input(cx).await {
                         Flow::Continue => return Flow::Continue,
                         Flow::Quit => return Flow::Quit,

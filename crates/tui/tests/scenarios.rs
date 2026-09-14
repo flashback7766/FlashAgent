@@ -1096,3 +1096,52 @@ fn steering_during_turn_pins_message_until_completion_and_pivots() {
     assert!(history.contains("word6"), "turn 1 assistant response was not cut off: {history}");
     assert!(history.contains("steer: change direction"), "steering directive was sent to model: {history}");
 }
+
+#[test]
+fn sending_only_an_image_submits_the_turn_with_image_part_and_no_text() {
+    let server = MockServer::start(vec![
+        Reply::Text("I see the picture.".into()),
+    ]);
+    let home = Home::new();
+    let image_path = home.work().join("shot.png");
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend_from_slice(&[0, 0, 0, 13]);
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&800u32.to_be_bytes());
+    bytes.extend_from_slice(&600u32.to_be_bytes());
+    bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+    std::fs::write(&image_path, &bytes).unwrap();
+
+    let term = ready(&home, &server);
+
+    // Simulate drag & drop (bracketed paste) of an image path:
+    term.send(&format!("\x1b[200~{}\x1b[201~", image_path.display()));
+
+    // Verify attachment banner and image placeholder appear:
+    term.wait_for("shot.png 800×600", WAIT);
+    term.wait_for("Enter to send image", WAIT);
+
+    // Press Enter with empty input:
+    term.send(ENTER);
+
+    // Assistant answers:
+    term.wait_for("I see the picture.", WAIT);
+
+    // Verify chat transcript shows [shot.png 800×600]:
+    let screen = term.screen();
+    assert!(screen.contains("[shot.png 800×600]"), "chat transcript should show image label:\n{screen}");
+
+    // Verify the request body to the model has NO text part and only image_url part:
+    let turns = server.turns();
+    assert_eq!(turns.len(), 1);
+    let user_msg = turns[0].body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("user message present");
+    let parts = user_msg["content"].as_array().expect("content parts array");
+    assert_eq!(parts.len(), 1, "only image part present, no text: {parts:?}");
+    assert_eq!(parts[0]["type"], "image_url");
+}
+

@@ -278,7 +278,12 @@ impl App {
                             // Same message, same turn: taking it back must reach
                             // before the first attempt, even after --resume.
                             if let Some(store) = cx.perm.state().snapshots() {
-                                store.continue_turn(&self.history[user_idx].content);
+                                let prompt_for_snapshot = if self.history[user_idx].content.is_empty() {
+                                    "[image]"
+                                } else {
+                                    &self.history[user_idx].content
+                                };
+                                store.continue_turn(prompt_for_snapshot);
                             }
                             self.chat.truncate_to_last_user();
                             self.renderer.scroll_to_bottom();
@@ -935,7 +940,12 @@ impl App {
                                 let mut html = String::from("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>FlashAgent Session</title><style>body{font-family:sans-serif;max-width:800px;margin:2rem auto;line-height:1.6;background:#1e1e2e;color:#cdd6f4;}pre{background:#181825;padding:1rem;border-radius:6px;overflow-x:auto;}h3{color:#89b4fa;}</style></head><body>");
                                 for m in &self.history {
                                     let role = m.role.as_str();
-                                    let escaped = m.content.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+                                    let text = if m.content.trim().is_empty() && !m.images.is_empty() {
+                                        format!("[{} attached image{}]", m.images.len(), if m.images.len() == 1 { "" } else { "s" })
+                                    } else {
+                                        m.content.clone()
+                                    };
+                                    let escaped = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
                                     html.push_str(&format!("<h3>Role: {role}</h3><pre>{escaped}</pre>"));
                                 }
                                 html.push_str("</body></html>");
@@ -955,7 +965,12 @@ impl App {
                             _ => {
                                 let mut md = format!("# FlashAgent Session Export\n- **Session ID**: `{}`\n- **Model**: `{}`\n\n---\n\n", cx.session_id, self.current_model);
                                 for m in &self.history {
-                                    md.push_str(&format!("### {}\n\n{}\n\n", m.role.as_str().to_uppercase(), m.content));
+                                    let text = if m.content.trim().is_empty() && !m.images.is_empty() {
+                                        format!("[{} attached image{}]", m.images.len(), if m.images.len() == 1 { "" } else { "s" })
+                                    } else {
+                                        m.content.clone()
+                                    };
+                                    md.push_str(&format!("### {}\n\n{}\n\n", m.role.as_str().to_uppercase(), text));
                                 }
                                 md
                             }
@@ -1023,7 +1038,7 @@ impl App {
                     }
 
                     let text = std::mem::take(&mut self.input);
-                    if self.input_history.last() != Some(&text) {
+                    if !text.is_empty() && self.input_history.last() != Some(&text) {
                         self.input_history.push(text.clone());
                     }
                     self.history_index = None;
@@ -1057,12 +1072,20 @@ impl App {
                         // answer refers to something invisible.
                         let labels: Vec<String> =
                             self.attachments.iter().map(|a| a.label()).collect();
-                        format!("{text}  [{}]", labels.join(", "))
+                        if text.trim().is_empty() {
+                            format!("[{}]", labels.join(", "))
+                        } else {
+                            format!("{text}  [{}]", labels.join(", "))
+                        }
                     };
                     self.chat.push_user(&shown);
                     let first = !self.history.iter().any(|m| m.role == flashagent_llm::Role::User);
                     let content = if first && !cx.memory_block.is_empty() {
-                        format!("{}\n\n---\n\n{text}", cx.memory_block)
+                        if text.trim().is_empty() {
+                            cx.memory_block.to_string()
+                        } else {
+                            format!("{}\n\n---\n\n{text}", cx.memory_block)
+                        }
                     } else {
                         text
                     };
@@ -1074,7 +1097,12 @@ impl App {
                     }
                     self.history.push(user_msg);
                     if let (Some(store), Some(msg)) = (cx.perm.state().snapshots(), self.history.last()) {
-                        store.begin_turn(&msg.content);
+                        let prompt_for_snapshot = if msg.content.is_empty() {
+                            "[image]"
+                        } else {
+                            &msg.content
+                        };
+                        store.begin_turn(prompt_for_snapshot);
                     }
                     update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                     cx.cancel.store(false, Ordering::Relaxed);

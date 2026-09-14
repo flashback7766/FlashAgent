@@ -134,7 +134,12 @@ pub(crate) fn fallback_summary(messages: &[ChatMessage], prior: Option<&str>) ->
             flashagent_llm::Role::Tool => "Tool",
         };
         let clean = if msg.role == flashagent_llm::Role::User {
-            extract_user_prompt(&msg.content)
+            let prompt = extract_user_prompt(&msg.content);
+            if prompt.is_empty() && !msg.images.is_empty() {
+                "[image]"
+            } else {
+                prompt
+            }
         } else {
             msg.content.as_str()
         };

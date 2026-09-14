@@ -565,6 +565,15 @@ impl Renderer {
                     format!(" {prompt_styled}  \x1b[38;2;155;160;175m{sug}\x1b[0m \x1b[38;2;100;105;120m(→ to use)\x1b[0m")
                 } else if let Some(custom) = st.custom_placeholder {
                     format!(" {prompt_styled}  \x1b[38;2;135;140;155m{custom}\x1b[0m")
+                } else if !st.attachments.is_empty() {
+                    let prompt_text = if width >= 60 {
+                        "Press Enter to send image, or type a message..."
+                    } else if width >= 40 {
+                        "Enter to send image..."
+                    } else {
+                        "Enter to send..."
+                    };
+                    format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
                 } else {
                     // The long form is friendlier; the short one is what fits.
                     let prompt_text = if width >= 60 {
