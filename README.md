@@ -19,7 +19,7 @@
 
 </div>
 
-> **Status:** Beta b275 — actively developed by a solo maintainer. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
+> **Status:** Beta b280 — actively developed by a solo maintainer. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
 
 ---
 
@@ -128,18 +128,18 @@ flashagent --url http://localhost:11434/v1 --model qwen2.5-coder:32b   # one-off
 
 ## What it can do
 
-**Tools** — `read_file`, `write_file`, `edit_file` (exact replacements, tolerant of CRLF and quote styles), `patch_file` (unified diffs), `list_dir`, `glob`, `grep` (parallel), `outline_file`, `git_status`, `git_diff`, `run_shell` (foreground with timeout or background tasks you can poll and kill; timeouts kill the whole process tree), `env_info`, `ask_user` (interactive choices in the composer), memory tools, `spawn_agent` (subagents that inherit your permissions), and opt-in `web_fetch` / `web_search`. The toolset shrinks automatically for small context windows.
+**Tools** — `read_file`, `write_file`, `edit_file` (exact replacements, tolerant of CRLF and quote styles), `patch_file` (unified diffs), `list_dir`, `glob`, `grep` (parallel), `outline_file`, `git_status`, `git_diff`, `run_shell` (foreground with timeout or background tasks you can poll and kill; timeouts kill the whole process tree), `env_info`, `ask_user` (interactive choices in the composer), memory tools, `spawn_agent` (subagents that inherit your permissions), and `web_fetch` / `web_search` (on by default, run like a read; turn them off in Settings). The toolset shrinks automatically for small context windows.
 
 **Permission modes** — cycle with <kbd>Shift</kbd>+<kbd>Tab</kbd> or `/mode`:
 
 | Mode | File edits | Shell | External (MCP) tools |
 | :--- | :--- | :--- | :--- |
-| **Planning** | refused | refused (unless allowed by a rule) | only tools you marked `read_only` |
+| **Planning** | refused | commands that only read (`ls`, `cat`, `grep`, `git log`, ...) run; the rest are refused unless allowed by a rule | only tools you marked `read_only` |
 | **Manual** | ask, with diff | ask | ask (`read_only` ones run) |
-| **Accept Edits** (default) | run | ask | ask (`read_only` ones run) |
-| **Accept All** | run | run | run |
+| **Accept Edits** (first run) | run | ask | ask (`read_only` ones run) |
+| **Accept All** | run | run, except dangerous commands (`rm -rf`, `sudo`, `git push --force`, `git reset --hard`, ...), which ask | run |
 
-Reads are always allowed. Approval cards offer **Allow**, **Always** and **Deny**; "Always" on a shell command stores a narrow per-command rule for the session.
+FlashAgent starts in the mode you left it in. Reads inside the project and web tools are always allowed. Reading or writing a file outside the project, or fetching a local address (`localhost`, your local network, a cloud metadata endpoint), asks in every mode and is refused in Planning and during `/goal`. Approval cards offer **Allow**, **Always** and **Deny**; "Always" on a shell command stores a narrow per-command rule for the session.
 
 **MCP** — add servers in `.mcp.json` (project) or `~/.flashagent/mcp.json` (global), browse a small vetted marketplace with `/mcp market`, install with `/mcp add <id>`, test with `/mcp test <name>`. Mark a server or individual tools `read_only` to skip approval for them — only your config can do that; a server's own claims (tool names, `readOnlyHint`) never bypass an approval card.
 
@@ -153,15 +153,15 @@ Reads are always allowed. Approval cards offer **Allow**, **Always** and **Deny*
 
 **Memory & rules** — `MEMORY.md`, `CLAUDE.md`, `AGENTS.md`, `.cursorrules`, `.agents/rules/*.md` and `~/.flashagent/MEMORY.md` are picked up automatically and injected within a token budget (whole files when they fit, outlines when they do not).
 
-**Sessions** — conversations are saved on exit; resume with `flashagent --resume <session_id>`. `/compact` summarises older turns to free context, and it happens automatically near the limit.
+**Sessions** — conversations are saved on exit. `flashagent --continue` picks up the latest one in the current folder; `flashagent --resume` (or `/resume` inside the app) lists this folder's sessions to choose from; `flashagent --resume <session_id>` opens one directly. `/compact` summarises older turns to free context, and it happens automatically near the limit.
 
-**Autonomous mode (`/goal [--steps N] [--time 30m] [--tokens 200k] <task>`)** — runs the task end to end in Accept All mode with maximum reasoning effort and no questions, under a budget (default: 250 steps and one hour; `--tokens` counts generated tokens only). The status line shows the burn-down live, and the run ends with a factual report card — steps, generated tokens, elapsed, files created and edited, shell commands that failed, and whether a budget cut the run short — built from what the loop did, not from what the model says it did. Your previous permission mode and effort are restored afterwards. Filesystem snapshots and milestone commits are on the [roadmap](ROADMAP.md).
+**Autonomous mode (`/goal <task>`)** — runs the task end to end in Accept All mode with maximum reasoning effort. It has no limits unless you set them in Settings → Goal (steps, time, generated tokens). Dangerous shell commands are refused outright during the run. If the model asks you something and you do not answer within two minutes, it picks the most reasonable option itself and says so in its summary. It keeps a live plan on screen, commits what it changed every ten steps inside a git repository, and ends with a factual report card — steps, generated tokens, elapsed, files created and edited, shell commands that failed, and whether a limit cut the run short — built from what the loop did, not from what the model says it did. Your previous permission mode and effort are restored afterwards, and `/rewind` takes the run's file changes back.
 
 <img src="docs/screenshots/gifs/goal-budget.gif" width="100%" alt="A goal stopped by its step budget, with the report card">
 
 <sub>Here a four-step budget cuts the run short and the card says so — <b>INCOMPLETE</b>, one file created, no shell commands — while the model's own closing summary sits above it.</sub>
 
-**Updates** — <kbd>Ctrl</kbd>+<kbd>U</kbd> in the app, `flashagent --update`, or automatic background checks. A manual update checks, downloads and installs in one press and shows each stage; a background one stays silent. Downloads are verified against the release checksums; `--channel stable|beta` or `/channel` switches channels.
+**Updates** — installed in the background: a new release is downloaded, verified against the release checksums and installed on its own, and the status line tells you to restart once it is in. <kbd>Ctrl</kbd>+<kbd>U</kbd> (or `/update`) shows the progress of a download that is already under way, or checks and installs right away when nothing is running; `flashagent --update` does the same from the shell. Background updates can be turned off in Settings; `--channel stable|beta` or `/channel` switches channels.
 
 <img src="docs/screenshots/gifs/update-progress.gif" width="100%" alt="Ctrl+U checking, downloading and installing an update">
 
@@ -172,7 +172,7 @@ Reads are always allowed. Approval cards offer **Allow**, **Always** and **Deny*
 | Key | Action |
 | :--- | :--- |
 | <kbd>Enter</kbd> | Send prompt · while the model works: steer it |
-| <kbd>Esc</kbd> | Close menu / dismiss suggestion / interrupt the running turn · on an empty prompt: quit |
+| <kbd>Esc</kbd> | Close menu / dismiss suggestion / interrupt the running turn · twice on an empty prompt: quit |
 | <kbd>Ctrl</kbd>+<kbd>C</kbd> | Interrupt the running turn · otherwise copy input or last answer · twice on an empty prompt: quit |
 | <kbd>Tab</kbd> | Settings (empty prompt) · complete a `/command` |
 | <kbd>Shift</kbd>+<kbd>Tab</kbd> | Cycle permission mode |

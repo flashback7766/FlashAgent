@@ -1,5 +1,127 @@
 # Changelog
 
+## b280 — how FlashAgent is meant to behave, written down and enforced
+
+A full audit against a written spec of expected behaviour. This release
+changes how several everyday things work — read the list before updating.
+
+### Quitting and starting
+
+- **Esc twice to quit.** One Esc on an empty prompt used to close the app
+  (or open a "Quit FlashAgent?" dialog). Now the first press says "Press Esc
+  again to quit" and the second, within two seconds, quits. The session is
+  saved either way. The first press also clears a pending suggestion, so
+  quitting right after an answer is still two presses, not three. A late
+  second press counts as a new first one. The welcome card and the hint line
+  now say "Esc Esc quit".
+- **FlashAgent starts in the mode you left it in.** The very first run starts
+  in Accept Edits; after that, Shift+Tab, `/mode` and Settings all save the
+  mode as the one to start in next time — Accept All included. The Accept
+  All that `/goal` switches on for itself is never remembered; the mode it
+  hands back is.
+
+### Sessions
+
+- **`flashagent --continue`** (or `-c`) opens the most recent session saved
+  in the current folder.
+- **`flashagent --resume`** (or `-r`) without an id opens a list of this
+  folder's saved sessions — first prompt, how long ago, how many messages —
+  to pick from. `--resume <id>` still opens one directly.
+- **`/resume`** inside the app opens the same list. Picking a session saves
+  the one that was open first, then swaps the conversation on screen, the
+  model's history and where `/rewind` keeps its copies.
+- The "Session Saved" card now mentions `--continue`.
+- Fixed: `--resume ../../somewhere` could read a file outside the sessions
+  folder and later save the session there. A session id is now a plain file
+  name or it is refused.
+- Fixed: two launches in the same second got the same session id, and the
+  second session was saved over the first.
+
+### Permissions
+
+- **Files outside the project are asked about in every mode.** Reading or
+  writing a file outside the folder FlashAgent was started in — `~/.bashrc`,
+  `~/.ssh/id_rsa`, `../other-project` — now shows an approval card even in
+  Accept Edits and Accept All, and is refused in Planning and during `/goal`,
+  where nobody is there to answer. `..` and symlinks are resolved first, so
+  a link inside the project that points at `~/.ssh` counts as outside. An
+  "Always" given for a tool does not reach outside the project. This covers
+  every file tool (read, write, edit, patch, list, outline, glob, git) and
+  subagents too.
+- **Dangerous shell commands during `/goal` are refused outright.** Force
+  pushes, hard resets, recursive force deletes, `sudo`, `dd`, `mkfs` and the
+  like used to stop a `/goal` run on an approval card nobody was watching.
+  Now the command is refused and the model is told to find a safer way. In
+  a hand-picked Accept All they still ask.
+- **Planning runs commands that only read.** `ls`, `cat`, `head`, `grep`,
+  `rg`, `find`, `wc`, `diff`, `git status/log/diff/show/blame`, the listing
+  forms of `git branch/tag/remote` and similar run without asking. Anything
+  that could write or run other code — redirections, `find -delete`/`-exec`,
+  `sort -o`, `rg --pre`, `git -c`, builds such as `cargo check` — is still
+  refused, and so is any argument that leaves the project (`/etc`, `~`, `..`,
+  `$HOME`).
+
+### Web tools
+
+- **`web_fetch` and `web_search` are on by default** and run like a read, in
+  every mode. They can be turned off in Settings → LLM & Reasoning → Web
+  Tools. An old config's `free_search: false` no longer keeps them off.
+- **Local addresses are asked about.** Fetching `localhost`, your local
+  network, a router, or a cloud metadata address (`169.254.169.254`) shows a
+  card in every mode and is refused in Planning and during `/goal` — a page on
+  the internet can talk the model into such a fetch.
+- A local address hidden some other way is always refused: a name that
+  resolves to a local IP, an IP spelled oddly (`127.1`, `0x7f.0.0.1`), or a
+  redirect from a public page. The address that was checked is the one
+  connected to, and every redirect is checked before it is followed. Only
+  `http` and `https` URLs are fetched.
+
+### `/goal`
+
+- **No limits by default.** A run used to stop at 250 steps or one hour.
+  Now it runs until the task is done or you press Esc.
+- **Limits live in Settings → Goal** (new tab 5): step limit, time limit,
+  generated-token limit, each cycling through a few sizes and back to
+  "Unlimited". The `--steps`, `--time` and `--tokens` flags are gone; typing
+  one says where the limits went instead of starting a run.
+- **The model may ask you something.** `ask_user` was blocked during
+  `/goal`. Now a question shows its card with a countdown; if nobody answers
+  within two minutes, the model picks the most reasonable option itself,
+  carries on, and names that choice in its summary. Answers given before
+  the timeout are kept.
+- The report card says "cut short by a limit" and points to Settings.
+
+### Updates
+
+- **Updates install themselves in the background**, verified against the
+  release checksums; the status line says "Updated to bNNN · restart
+  FlashAgent to use it" once one is in. Background updates can be turned off
+  in Settings → Updates.
+- **Ctrl+U and `/update` join an update already under way** and show its
+  progress, or check and install right away when nothing is running. The
+  background updater and Ctrl+U never download at the same time.
+- The "Silent Daily Notice" setting is gone: the background updater does
+  the whole job.
+- Fixed: an update to a binary in a folder you own was installed into
+  `~/.local/bin` instead. The check opened the running executable for
+  writing, which Linux refuses ("text file busy"); it now checks the folder,
+  which is what replacing the file needs.
+- Fixed: when the new binary could not be put in place, the update still
+  reported success. It now says what failed, and on Windows the old binary is
+  put back.
+
+### Language
+
+- **The interface is English only.** The Russian names for thinking stages
+  ("Разбираю запрос") and the language setting behind them are gone. The
+  model still answers in the language you write in.
+
+### Documentation
+
+- README, ARCHITECTURE.md, PHILOSOPHY.md, `/help` and the command list now
+  describe all of the above: the permission table, sessions, `/goal`,
+  updates, web tools and the keybindings.
+
 ## b275 — suggestions that stop asking you back
 
 This release changes nothing for you to use — it only fixes a bug.
