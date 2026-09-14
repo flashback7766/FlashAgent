@@ -1,5 +1,14 @@
 # Changelog
 
+## b284 — fix render panic and keep prefix cache across thinking changes
+
+- **Multi-turn render panic.** Fixed a runtime panic (`slice index starts at X but ends at Y`)
+  in the TUI renderer when viewing multi-turn sessions where earlier turns contained
+  extracted `<think>` reasoning blocks.
+- **Prefix KV cache preservation.** Turning thinking off (e.g. auto-effort on greetings)
+  no longer appends a note to the user prompt. User messages remain identical across turns,
+  preventing the server from discarding KV prefix cache when subsequent turns switch thinking on.
+
 ## b283 — how much of each prompt came from cache
 
 Every finished answer now prints a status line underneath:
