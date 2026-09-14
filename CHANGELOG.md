@@ -1,5 +1,21 @@
 # Changelog
 
+## b275 — suggestions that stop asking you back
+
+This release changes nothing for you to use — it only fixes a bug.
+
+- The grey suggestion above the input box is meant to be your likely next
+  message, but models kept filling it with the assistant's own question to
+  you ("Specify the task you would like to work on first", "Tell me what
+  you need help with"). The analyzer's prompt quoted a wrong example that
+  models copied almost word for word, and it gave no way out after a plain
+  greeting, where there is nothing concrete to suggest. The prompt now
+  requires a subject that already came up and allows an empty suggestion,
+  in which case none is shown. The filter now catches the pattern rather
+  than individual sentences: in a message you send, "you" is the
+  assistant, so "you" joined to a verb of wanting ("you need", "you would
+  like") is always the assistant asking about your wants.
+
 ## b274 — thinking that forgot to say so
 
 This release changes nothing for you to use — it only fixes a bug.
