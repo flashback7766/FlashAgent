@@ -31,7 +31,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use shell::ShellRegistry;
 
-pub use ask_user::QuestionGate;
+pub use ask_user::{QuestionGate, GOAL_QUESTION_TIMEOUT};
 pub use subagents::{agent_tools, BuiltinSubagentFactory, CompositeTools, ToolSubset};
 
 /// Hard cap on tool result text fed back to the model.
@@ -77,7 +77,7 @@ pub struct BuiltinToolsConfig {
     pub is_goal_mode: Option<Arc<AtomicBool>>,
     /// Toolset exposure profile.
     pub toolset_profile: Option<ToolsetProfile>,
-    /// Whether web fetch and search are enabled. Off unless the user opts in.
+    /// Whether web fetch and search are offered. On unless turned off in Settings.
     pub web_enabled: Option<bool>,
     /// Discovered model context window size; small windows get fewer tools.
     pub context_window: Option<usize>,
@@ -120,7 +120,7 @@ impl BuiltinTools {
             question_gate: config.question_gate,
             is_goal_mode: config.is_goal_mode.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             toolset_profile: std::sync::RwLock::new(config.toolset_profile.unwrap_or(ToolsetProfile::Auto)),
-            web_enabled: Arc::new(AtomicBool::new(config.web_enabled.unwrap_or(false))),
+            web_enabled: Arc::new(AtomicBool::new(config.web_enabled.unwrap_or(true))),
             context_window: Arc::new(std::sync::RwLock::new(config.context_window)),
             vision_supported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_manager,
@@ -314,14 +314,14 @@ impl BuiltinTools {
             }
             "web_fetch" => {
                 if !self.web_enabled.load(Ordering::Relaxed) {
-                    return Err(ToolError::Other("web_fetch is disabled by default per PHILOSOPHY.md §3 (local-first; web tools require explicit opt-in). Enable in settings/config.".into()));
+                    return Err(ToolError::Other("web_fetch is turned off in Settings (LLM & Reasoning → Web Tools).".into()));
                 }
                 let a: FetchArgs = parse_args(&call.args_json, &call.name)?;
-                web::fetch_text(&self.http, &a.url).await
+                web::fetch_text(&a.url).await
             }
             "web_search" => {
                 if !self.web_enabled.load(Ordering::Relaxed) {
-                    return Err(ToolError::Other("web_search is disabled by default per PHILOSOPHY.md §3 (local-first; web tools require explicit opt-in). Enable in settings/config.".into()));
+                    return Err(ToolError::Other("web_search is turned off in Settings (LLM & Reasoning → Web Tools).".into()));
                 }
                 let a: SearchArgs = parse_args(&call.args_json, &call.name)?;
                 if let Some(ref key) = self.brave_key {
@@ -881,7 +881,7 @@ mod tests {
         })
         .unwrap();
         let specs_auto = tools_auto.specs();
-        assert_eq!(specs_auto.len(), 17); // 9 core + 8 extended; web is off by default
+        assert_eq!(specs_auto.len(), 19); // 9 core + 8 extended + 2 web, on by default
         let names_auto: Vec<&str> = specs_auto.iter().map(|s| s.name.as_str()).collect();
         assert!(names_auto.contains(&"ask_user"));
         assert!(names_auto.contains(&"outline_file"));
@@ -891,7 +891,8 @@ mod tests {
         assert!(names_auto.contains(&"env_info"));
         assert!(names_auto.contains(&"memory_read"));
         assert!(names_auto.contains(&"memory_create"));
-        assert!(!names_auto.contains(&"web_search")); // opt-in only
+        assert!(names_auto.contains(&"web_search"));
+        assert!(names_auto.contains(&"web_fetch"));
 
         let tools_compact = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
@@ -940,7 +941,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn web_tools_require_opt_in_per_philosophy() {
+    async fn web_tools_turned_off_in_settings_are_neither_offered_nor_run() {
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
             brave_api_key: None,
@@ -958,9 +959,10 @@ mod tests {
             args_json: r#"{"query":"rust"}"#.into(),
         }).await;
         assert!(out.is_error);
-        assert!(out.content.contains("PHILOSOPHY.md §3"));
+        assert!(out.content.contains("turned off in Settings"), "{}", out.content);
+        assert!(!tools.specs().iter().any(|s| s.name == "web_fetch"), "a tool that is off must not be offered");
 
-        // When opt-in enabled:
+        // Turned back on:
         tools.set_web_enabled(true);
         let specs = tools.specs();
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();

@@ -1,26 +1,23 @@
-//! `/goal` budgets and the end-of-run report.
+//! `/goal` limits and the end-of-run report.
 //!
-//! Two jobs, both deliberately dumb and testable: parse the budget flags off
-//! the command line, and keep a ledger of what actually happened during the
-//! run — built from [`LoopEvent`]s, never from the model's own account of its
-//! work. The final card states facts (files touched, commands that failed,
-//! why the run stopped) next to the model's summary, so a goal that stopped
-//! at a budget cannot read as a goal that finished.
+//! Two jobs, both deliberately dumb and testable: turn the limits the user
+//! set in Settings into budgets, and keep a ledger of what actually happened
+//! during the run — built from [`LoopEvent`]s, never from the model's own
+//! account of its work. The final card states facts (files touched, commands
+//! that failed, why the run stopped) next to the model's summary, so a goal
+//! that stopped at a budget cannot read as a goal that finished.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use flashagent_core::{DoneReason, LoopEvent};
 
-/// Step budget used when `/goal` is given no `--steps`.
-pub const DEFAULT_STEPS: u32 = 250;
-/// Wall-clock budget used when `/goal` is given no `--time`.
-pub const DEFAULT_TIME: Duration = Duration::from_secs(60 * 60);
 /// How many completed steps pass between milestone commits.
 pub const MILESTONE_COMMIT_INTERVAL: u32 = 10;
 
-/// Budgets for one `/goal` run.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Budgets for one `/goal` run. Each one is off unless the user set it in
+/// Settings → Goal.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GoalBudgets {
     /// Loop iterations.
     pub steps: Option<u32>,
@@ -30,25 +27,36 @@ pub struct GoalBudgets {
     pub output_tokens: Option<i64>,
 }
 
-impl Default for GoalBudgets {
-    fn default() -> Self {
-        Self { steps: Some(DEFAULT_STEPS), time: Some(DEFAULT_TIME), output_tokens: None }
-    }
-}
-
 impl GoalBudgets {
+    /// The limits from Settings → Goal. A zero is read as "no limit": a run
+    /// that may take no steps at all is not something anyone means.
+    pub fn from_config(config: &flashagent_core::config::AppConfig) -> Self {
+        Self {
+            steps: config.goal_max_steps.filter(|n| *n > 0),
+            time: config.goal_max_minutes.filter(|m| *m > 0).map(|m| Duration::from_secs(u64::from(m) * 60)),
+            output_tokens: config.goal_max_output_tokens.filter(|t| *t > 0),
+        }
+    }
+
     /// Budgets for an ordinary chat turn: the session's step cap and nothing
     /// else — time and token budgets exist only for `/goal`.
     pub fn steps_only(steps: Option<u32>) -> Self {
         Self { steps, time: None, output_tokens: None }
     }
 
+    /// Whether nothing but the task itself (or the user) ends the run.
+    pub fn is_unlimited(&self) -> bool {
+        self.steps.is_none() && self.time.is_none() && self.output_tokens.is_none()
+    }
+
     /// One-line summary for the framing card.
     pub fn summary(&self) -> String {
+        if self.is_unlimited() {
+            return "no limits".to_string();
+        }
         let mut parts = Vec::new();
-        match self.steps {
-            Some(n) => parts.push(format!("{n} steps")),
-            None => parts.push("unlimited steps".to_string()),
+        if let Some(n) = self.steps {
+            parts.push(format!("{n} steps"));
         }
         if let Some(t) = self.time {
             parts.push(format!("{} max", human_duration(t)));
@@ -60,124 +68,22 @@ impl GoalBudgets {
     }
 }
 
-/// Parse `[--steps N] [--time 30m] [--tokens 200k] <task>`.
+/// The task of a `/goal` command, spacing and newlines kept as typed.
 ///
-/// Flags are only recognised before the task text: `/goal fix --tokens in the
-/// parser` keeps `--tokens` as part of the task. Returns the budgets and the
-/// task, or a message to show the user.
-pub fn parse_goal_command(rest: &str) -> Result<(GoalBudgets, String), String> {
-    let mut budgets = GoalBudgets::default();
-    let mut words = rest.split_whitespace().peekable();
-    let mut consumed = 0usize;
-
-    while let Some(word) = words.peek().copied() {
-        if !word.starts_with("--") {
-            break;
-        }
-        let (flag, inline) = match word.split_once('=') {
-            Some((f, v)) => (f, Some(v.to_string())),
-            None => (word, None),
-        };
-        let known = matches!(flag, "--steps" | "--time" | "--tokens");
-        if !known {
-            return Err(format!(
-                "Unknown option {flag}. Usage: /goal [--steps N] [--time 30m] [--tokens 200k] <task>"
-            ));
-        }
-        words.next();
-        consumed += 1;
-        let value = match inline {
-            Some(v) => v,
-            None => {
-                let v = words
-                    .next()
-                    .ok_or_else(|| format!("{flag} needs a value, e.g. {}", flag_example(flag)))?;
-                consumed += 1;
-                v.to_string()
-            }
-        };
-        match flag {
-            "--steps" => {
-                budgets.steps = Some(parse_limit(&value, flag)?.try_into().map_err(|_| {
-                    format!("{flag}: {value} is too large")
-                })?)
-            }
-            "--time" => budgets.time = Some(parse_duration(&value)?),
-            "--tokens" => budgets.output_tokens = Some(parse_limit(&value, flag)?),
-            _ => unreachable!(),
-        }
+/// Limits used to be flags in front of the task. They live in Settings now,
+/// so a command still written the old way is told where they went instead
+/// of starting a run whose task begins with "--steps 40".
+pub fn parse_goal_task(rest: &str) -> Result<String, String> {
+    let task = rest.trim();
+    let first = task.split_whitespace().next().unwrap_or("");
+    let flag = first.split('=').next().unwrap_or("");
+    if matches!(flag, "--steps" | "--time" | "--tokens") {
+        return Err(format!("{flag} is gone: /goal limits are set in Settings → Goal now. Usage: /goal <task>"));
     }
-
-    // Re-derive the task from the original text so its internal spacing and
-    // newlines survive: splitting on whitespace would flatten them.
-    let task = skip_words(rest, consumed).trim().to_string();
     if task.is_empty() {
-        return Err("Nothing to do. Usage: /goal [--steps N] [--time 30m] [--tokens 200k] <task>"
-            .to_string());
+        return Err("Nothing to do. Usage: /goal <task>".to_string());
     }
-    Ok((budgets, task))
-}
-
-fn flag_example(flag: &str) -> &'static str {
-    match flag {
-        "--steps" => "--steps 120",
-        "--time" => "--time 30m",
-        _ => "--tokens 200k",
-    }
-}
-
-/// Return `text` with the first `n` whitespace-separated words removed,
-/// keeping everything after them byte for byte.
-fn skip_words(text: &str, n: usize) -> &str {
-    let mut rest = text;
-    for _ in 0..n {
-        rest = rest.trim_start();
-        match rest.find(char::is_whitespace) {
-            Some(i) => rest = &rest[i..],
-            None => return "",
-        }
-    }
-    rest
-}
-
-fn parse_limit(value: &str, flag: &str) -> Result<i64, String> {
-    let v = value.trim().to_lowercase();
-    let (digits, mult) = match v.strip_suffix('k') {
-        Some(d) => (d, 1_000i64),
-        None => match v.strip_suffix('m') {
-            Some(d) => (d, 1_000_000i64),
-            None => (v.as_str(), 1),
-        },
-    };
-    let n: f64 = digits
-        .parse()
-        .map_err(|_| format!("{flag}: expected a number, got {value}"))?;
-    if !(n.is_finite() && n > 0.0) {
-        return Err(format!("{flag}: expected a positive number, got {value}"));
-    }
-    Ok((n * mult as f64).round() as i64)
-}
-
-fn parse_duration(value: &str) -> Result<Duration, String> {
-    let v = value.trim().to_lowercase();
-    let (digits, unit_secs) = if let Some(d) = v.strip_suffix('h') {
-        (d, 3600.0)
-    } else if let Some(d) = v.strip_suffix("min") {
-        (d, 60.0)
-    } else if let Some(d) = v.strip_suffix('m') {
-        (d, 60.0)
-    } else if let Some(d) = v.strip_suffix('s') {
-        (d, 1.0)
-    } else {
-        (v.as_str(), 60.0) // a bare number means minutes
-    };
-    let n: f64 = digits
-        .parse()
-        .map_err(|_| format!("--time: expected a duration like 30m, 90s or 2h, got {value}"))?;
-    if !(n.is_finite() && n > 0.0) {
-        return Err(format!("--time: expected a positive duration, got {value}"));
-    }
-    Ok(Duration::from_secs_f64(n * unit_secs))
+    Ok(task.to_string())
 }
 
 /// `93s` → `1m33s`, `3600s` → `1h0m`. Under a minute keeps one decimal, so a
@@ -399,8 +305,8 @@ impl GoalLedger {
                 "The backend failed mid-run; work listed above already happened on disk."
                     .to_string()
             }
-            _ => "The goal was cut short by a budget — it is not finished. Raise the budget \
-                  and re-run, or continue in the chat."
+            _ => "The goal was cut short by a limit — it is not finished. Raise the limit in \
+                  Settings → Goal and re-run, or continue in the chat."
                 .to_string(),
         });
         out
@@ -545,56 +451,55 @@ mod tests {
     }
 
     #[test]
-    fn defaults_apply_when_no_flags_are_given() {
-        let (b, task) = parse_goal_command("fix the parser").unwrap();
-        assert_eq!(b.steps, Some(DEFAULT_STEPS));
-        assert_eq!(b.time, Some(DEFAULT_TIME));
-        assert_eq!(b.output_tokens, None);
-        assert_eq!(task, "fix the parser");
+    fn a_goal_has_no_limits_unless_settings_give_it_some() {
+        let b = GoalBudgets::from_config(&flashagent_core::config::AppConfig::default());
+        assert!(b.is_unlimited(), "{b:?}");
+        assert_eq!(b.summary(), "no limits");
     }
 
     #[test]
-    fn flags_are_parsed_in_both_spellings() {
-        let (b, task) =
-            parse_goal_command("--steps 40 --time=90s --tokens 200k rewrite the loop").unwrap();
+    fn limits_come_from_settings() {
+        let cfg = flashagent_core::config::AppConfig {
+            goal_max_steps: Some(40),
+            goal_max_minutes: Some(30),
+            goal_max_output_tokens: Some(200_000),
+            ..Default::default()
+        };
+        let b = GoalBudgets::from_config(&cfg);
         assert_eq!(b.steps, Some(40));
-        assert_eq!(b.time, Some(Duration::from_secs(90)));
+        assert_eq!(b.time, Some(Duration::from_secs(1800)));
         assert_eq!(b.output_tokens, Some(200_000));
-        assert_eq!(task, "rewrite the loop");
+        assert_eq!(b.summary(), "40 steps · 30m00s max · 200.0k generated tokens");
     }
 
     #[test]
-    fn durations_accept_h_m_s_and_bare_minutes() {
-        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
-        assert_eq!(parse_duration("30m").unwrap(), Duration::from_secs(1800));
-        assert_eq!(parse_duration("45min").unwrap(), Duration::from_secs(2700));
-        assert_eq!(parse_duration("90s").unwrap(), Duration::from_secs(90));
-        assert_eq!(parse_duration("15").unwrap(), Duration::from_secs(900));
-        assert!(parse_duration("soon").is_err());
-        assert!(parse_duration("-5m").is_err());
-        assert!(parse_duration("0").is_err());
+    fn a_zero_limit_is_no_limit() {
+        let cfg = flashagent_core::config::AppConfig {
+            goal_max_steps: Some(0),
+            goal_max_minutes: Some(0),
+            goal_max_output_tokens: Some(0),
+            ..Default::default()
+        };
+        assert!(GoalBudgets::from_config(&cfg).is_unlimited());
     }
 
     #[test]
-    fn a_flag_inside_the_task_is_task_text() {
-        let (b, task) = parse_goal_command("make --tokens work in the cli").unwrap();
-        assert_eq!(b.output_tokens, None, "a flag after the task must not be a budget");
-        assert_eq!(task, "make --tokens work in the cli");
+    fn the_task_is_kept_as_typed() {
+        assert_eq!(parse_goal_task("  fix   this:\n  line two  ").unwrap(), "fix   this:\n  line two");
+        assert_eq!(
+            parse_goal_task("make --tokens work in the cli").unwrap(),
+            "make --tokens work in the cli",
+            "a flag inside the task is task text"
+        );
     }
 
     #[test]
-    fn task_spacing_and_newlines_survive_flag_parsing() {
-        let (_b, task) = parse_goal_command("--steps 3 fix   this:\n  line two").unwrap();
-        assert_eq!(task, "fix   this:\n  line two");
-    }
-
-    #[test]
-    fn bad_input_explains_itself_instead_of_running() {
-        assert!(parse_goal_command("--steps").is_err());
-        assert!(parse_goal_command("--steps 10").is_err(), "no task");
-        assert!(parse_goal_command("--nope 1 do it").unwrap_err().contains("--nope"));
-        assert!(parse_goal_command("--steps abc do it").unwrap_err().contains("number"));
-        assert!(parse_goal_command("--tokens 0 do it").is_err());
+    fn an_old_budget_flag_says_where_the_limits_went() {
+        for old in ["--steps 40 fix it", "--time=30m fix it", "--tokens 200k fix it"] {
+            let err = parse_goal_task(old).unwrap_err();
+            assert!(err.contains("Settings"), "{old}: {err}");
+        }
+        assert!(parse_goal_task("   ").is_err(), "no task");
     }
 
     #[test]
@@ -654,7 +559,8 @@ mod tests {
 
     #[test]
     fn progress_shows_the_step_against_its_budget() {
-        let mut l = GoalLedger::new("t".into(), GoalBudgets::default());
+        let budgets = GoalBudgets { steps: Some(250), time: Some(Duration::from_secs(3600)), output_tokens: None };
+        let mut l = GoalLedger::new("t".into(), budgets);
         l.on_event(&LoopEvent::StepStarted { step: 12, max_steps: Some(250) });
         let p = l.progress();
         assert!(p.starts_with("step 12/250"), "{p}");

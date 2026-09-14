@@ -71,27 +71,55 @@ fn the_wizard_sets_up_a_custom_server_and_opens_the_app() {
     assert_eq!(config["backend_url"], server.url.as_str());
     assert_eq!(config["model"], MODEL);
 
-    term.send(ESC);
-    assert!(term.wait_exit(WAIT).is_some(), "Esc on a fresh session quits");
+    quit_with_double_esc(&mut term);
 }
 
+/// Esc, then Esc again once the app has said that is what it takes.
+fn quit_with_double_esc(term: &mut Term) {
+    term.send(ESC);
+    term.wait_for(ESC_AGAIN, WAIT);
+    term.send(ESC);
+    assert!(term.wait_exit(WAIT).is_some(), "a second Esc did not quit; the screen was:\n{}", term.screen());
+}
+
+const ESC_AGAIN: &str = "Press Esc again to quit";
+
 #[test]
-fn esc_on_an_empty_session_quits_without_asking_or_saving() {
+fn one_esc_on_an_empty_prompt_does_not_quit_and_a_second_one_does() {
     let server = MockServer::start(Vec::new());
     let home = Home::new();
     let mut term = ready(&home, &server);
 
     term.send(ESC);
+    term.wait_for(ESC_AGAIN, WAIT);
+    assert!(term.wait_exit(Duration::from_millis(500)).is_none(), "one stray Esc quit the app");
+
+    term.send(ESC);
     let status = term.wait_exit(WAIT);
     let screen = term.screen();
-    assert!(status.is_some(), "still running after Esc; the screen was:\n{screen}");
-    assert!(!screen.contains("Quit FlashAgent"), "asked about quitting a session with nothing in it:\n{screen}");
+    assert!(status.is_some(), "still running after the second Esc; the screen was:\n{screen}");
     assert!(!screen.contains("Session Saved"), "offered to resume a session that was not saved:\n{screen}");
     assert!(home.sessions().is_empty(), "saved an empty session: {:?}", home.sessions());
 }
 
 #[test]
-fn a_session_with_a_conversation_asks_before_quitting() {
+fn a_late_second_esc_asks_again_instead_of_quitting() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+
+    term.send(ESC);
+    term.wait_for(ESC_AGAIN, WAIT);
+    // Longer than the double-press window: this is a new first press.
+    std::thread::sleep(Duration::from_millis(2500));
+    term.send(ESC);
+    assert!(term.wait_exit(Duration::from_millis(800)).is_none(), "an Esc long after the first one quit");
+    term.send(ESC);
+    assert!(term.wait_exit(WAIT).is_some(), "a quick second press did not quit");
+}
+
+#[test]
+fn a_conversation_is_saved_when_quitting_with_double_esc() {
     let server = MockServer::start(vec![Reply::Text("Hello from the mock model.".into())]);
     let home = Home::new();
     let mut term = ready(&home, &server);
@@ -102,18 +130,48 @@ fn a_session_with_a_conversation_asks_before_quitting() {
     // The answer is on screen before the turn has finished settling.
     term.wait_for(PROMPT, WAIT);
 
-    term.send(ESC);
-    term.wait_for("Quit FlashAgent", WAIT);
-    term.send("n");
-    term.wait_gone("Quit FlashAgent", WAIT);
-    assert!(term.wait_exit(Duration::from_millis(500)).is_none(), "\"n\" quit anyway");
-
-    term.send(ESC);
-    term.wait_for("Quit FlashAgent", WAIT);
-    term.send("y");
-    assert!(term.wait_exit(WAIT).is_some(), "\"y\" did not quit");
+    quit_with_double_esc(&mut term);
     term.wait_for("Session Saved", WAIT);
     assert_eq!(home.sessions().len(), 1, "the conversation was not saved");
+}
+
+#[test]
+fn the_next_launch_starts_in_the_mode_the_user_left_in() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    {
+        let mut term = ready(&home, &server);
+        // Accept Edits → Accept All: the one mode people might expect to be
+        // forgotten, and it is remembered too.
+        term.send("\x1b[Z");
+        term.wait_for("Permission mode set to: Accept All", WAIT);
+        quit_with_double_esc(&mut term);
+    }
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
+    let saved = config["permission_mode"].as_str().unwrap_or_default().to_lowercase();
+    assert!(saved.contains("bypass") || saved.contains("all"), "the mode was not saved: {config}");
+
+    let term = Term::start(&home, &["-y"], COLS, ROWS);
+    term.wait_for(PROMPT, WAIT);
+    term.wait_for("Accept All", WAIT);
+}
+
+#[test]
+fn planning_mode_runs_a_command_that_only_reads_without_asking() {
+    let server = MockServer::start(vec![shell_call("ls"), Reply::Text("Listed the folder.".into())]);
+    let home = Home::new();
+    std::fs::write(home.work().join("visible.txt"), "x\n").unwrap();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Planning" }));
+
+    term.type_text("what is in this folder?");
+    term.send(ENTER);
+    term.wait_for("Listed the folder.", WAIT);
+    let screen = term.screen();
+    assert!(!screen.contains("Confirm:"), "a read-only command asked in Planning:\n{screen}");
+    let turns = server.turns();
+    let last = sent(turns.last().expect("the model was asked again after the command"));
+    assert!(last.contains("visible.txt"), "the command's output did not reach the model: {last}");
 }
 
 #[test]
@@ -475,6 +533,26 @@ fn a_goal_runs_without_asking_reports_what_it_did_and_hands_back_the_gates() {
 }
 
 #[test]
+fn a_goal_refuses_a_dangerous_command_without_waiting_on_a_card() {
+    let server = MockServer::start(vec![
+        shell_call("rm -rf build && echo ran > ran.txt"),
+        Reply::Text("Left it alone.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("/goal clean the build folder");
+    term.send(ENTER);
+    term.wait_for("Left it alone.", WAIT);
+    term.wait_for("Goal report:", WAIT);
+
+    assert!(!term.screen().contains("Confirm:"), "a goal stopped on a card nobody is there to answer:\n{}", term.screen());
+    assert!(!home.work().join("ran.txt").exists(), "the dangerous command ran during /goal");
+    let history = sent(server.turns().last().unwrap());
+    assert!(history.contains("refused during /goal"), "the model was not told why: {history}");
+}
+
+#[test]
 fn a_goal_stops_at_its_step_budget_and_says_it_is_not_finished() {
     let reads: Vec<Reply> = (0..6)
         .map(|i| Reply::ToolCall {
@@ -485,15 +563,16 @@ fn a_goal_stops_at_its_step_budget_and_says_it_is_not_finished() {
     let server = MockServer::start(reads);
     let home = Home::new();
     std::fs::write(home.work().join("notes.txt"), "nothing new\n").unwrap();
-    let term = ready(&home, &server);
+    // The limit is set in Settings → Goal, which saves it to the config.
+    let term = ready_with(&home, &server, serde_json::json!({ "goal_max_steps": 2 }));
 
-    term.type_text("/goal --steps 2 read the notes forever");
+    term.type_text("/goal read the notes forever");
     term.send(ENTER);
     term.wait_for("Goal report:", WAIT);
     term.wait_gone(RUNNING_HINT, WAIT);
 
     let screen = term.screen();
-    assert!(screen.contains("cut short by a budget"), "the report does not say the budget ended it:\n{screen}");
+    assert!(screen.contains("cut short by a limit"), "the report does not say the limit ended it:\n{screen}");
     assert!(server.replies_left() > 0, "the run did not stop: every scripted step was used");
 }
 
@@ -519,7 +598,7 @@ fn a_goal_checkpoints_what_it_changed_every_ten_steps() {
     git(&["commit", "-q", "-m", "initial"]);
     let term = ready(&home, &server);
 
-    term.type_text("/goal --steps 15 write ten files");
+    term.type_text("/goal write ten files");
     term.send(ENTER);
     term.wait_for("checkpoint:", WAIT);
     term.wait_for("Done.", WAIT);
@@ -764,6 +843,115 @@ fn declining_the_rewind_card_leaves_everything_as_it_is() {
 }
 
 #[test]
+fn writing_outside_the_project_asks_even_in_accept_edits() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "write_file".into(),
+            arguments: serde_json::json!({ "header": "Write next to the project", "path": "../outside.txt", "content": "x\n" }),
+        },
+        Reply::Text("Stayed inside.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("write a file next to the project");
+    term.send(ENTER);
+    term.wait_for("Confirm:", WAIT);
+    term.wait_for("outside the project", WAIT);
+    let target = home.path().join("outside.txt");
+    assert!(!target.exists(), "the file was written before anyone answered");
+    term.send("d");
+    term.wait_for("Stayed inside.", WAIT);
+    assert!(!target.exists(), "a denied write outside the project still happened");
+}
+
+#[test]
+fn continue_opens_the_latest_session_of_this_folder() {
+    let server = MockServer::start(vec![
+        Reply::Text("First answer.".into()),
+        Reply::Text("Second answer.".into()),
+    ]);
+    let home = Home::new();
+    {
+        let mut term = ready(&home, &server);
+        ask(&term, "first question", "First answer.");
+        quit_with_double_esc(&mut term);
+    }
+    // Session ids are stamped to the second.
+    std::thread::sleep(Duration::from_millis(1100));
+    {
+        let mut term = Term::start(&home, &["-y"], COLS, ROWS);
+        term.wait_for(PROMPT, WAIT);
+        ask(&term, "second question", "Second answer.");
+        quit_with_double_esc(&mut term);
+    }
+    assert_eq!(home.sessions().len(), 2);
+
+    let term = Term::start(&home, &["-y", "--continue"], COLS, ROWS);
+    term.wait_for("Resumed session", WAIT);
+    term.wait_for("Second answer.", WAIT);
+    assert!(!term.screen().contains("First answer."), "--continue opened an older session:\n{}", term.screen());
+}
+
+#[test]
+fn resume_without_an_id_lists_this_folders_sessions_to_pick_from() {
+    let server = MockServer::start(vec![
+        Reply::Text("The magic number is 7.".into()),
+        Reply::Text("Yes, still 7.".into()),
+    ]);
+    let home = Home::new();
+    {
+        let mut term = ready(&home, &server);
+        ask(&term, "what is the magic number?", "The magic number is 7.");
+        quit_with_double_esc(&mut term);
+    }
+
+    let term = Term::start(&home, &["-y", "--resume"], COLS, ROWS);
+    term.wait_for("Resume a Session", WAIT);
+    term.wait_for("what is the magic number?", WAIT);
+    term.send(ENTER);
+    term.wait_for("Resumed session", WAIT);
+    term.wait_for("The magic number is 7.", WAIT);
+    ask(&term, "is it still the same?", "Yes, still 7.");
+    let history = sent(server.turns().last().unwrap());
+    assert!(history.contains("what is the magic number?"), "the picked session did not reach the model: {history}");
+}
+
+#[test]
+fn slash_resume_switches_sessions_and_saves_the_one_that_was_open() {
+    let server = MockServer::start(vec![
+        Reply::Text("Old answer.".into()),
+        Reply::Text("New answer.".into()),
+        Reply::Text("Back in the old one.".into()),
+    ]);
+    let home = Home::new();
+    {
+        let mut term = ready(&home, &server);
+        ask(&term, "old question", "Old answer.");
+        quit_with_double_esc(&mut term);
+    }
+    std::thread::sleep(Duration::from_millis(1100));
+
+    let mut term = Term::start(&home, &["-y"], COLS, ROWS);
+    term.wait_for(PROMPT, WAIT);
+    ask(&term, "new question", "New answer.");
+    term.type_text("/resume");
+    term.send(ENTER);
+    term.wait_for("Resume a Session", WAIT);
+    term.wait_for("old question", WAIT);
+    term.send(ENTER);
+    term.wait_for("Resumed session", WAIT);
+    term.wait_for("Old answer.", WAIT);
+    assert_eq!(home.sessions().len(), 2, "the session that was open was not saved before switching");
+
+    ask(&term, "and now?", "Back in the old one.");
+    let history = sent(server.turns().last().unwrap());
+    assert!(history.contains("old question"), "the model did not get the resumed conversation: {history}");
+    assert!(!history.contains("new question"), "the conversation switched away from leaked into the resumed one: {history}");
+    quit_with_double_esc(&mut term);
+}
+
+#[test]
 fn a_saved_session_comes_back_with_resume() {
     let server = MockServer::start(vec![
         Reply::Text("The magic number is 7.".into()),
@@ -773,10 +961,7 @@ fn a_saved_session_comes_back_with_resume() {
     {
         let mut term = ready(&home, &server);
         ask(&term, "what is the magic number?", "The magic number is 7.");
-        term.send(ESC);
-        term.wait_for("Quit FlashAgent", WAIT);
-        term.send("y");
-        assert!(term.wait_exit(WAIT).is_some());
+        quit_with_double_esc(&mut term);
     }
     let session = home.sessions().pop().expect("the conversation was saved");
     let id = session.file_stem().unwrap().to_string_lossy().to_string();

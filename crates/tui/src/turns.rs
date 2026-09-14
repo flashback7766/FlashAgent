@@ -47,6 +47,7 @@ impl App {
         // Roll back any temporary goal state
         if let Some(saved) = self.goal_state.take() {
             cx.tools_arc.set_goal_mode(false);
+            cx.perm.state().set_goal_active(false);
             cx.perm.state().set_mode(saved.mode);
             self.current_effort = saved.effort.clone();
             self.max_steps = saved.max_steps;
@@ -116,6 +117,7 @@ impl App {
                             None,
                             None,
                             None,
+                            None,
                             // The command that started this is gone from the
                             // composer; its suggestion list must go with it.
                             None,
@@ -149,7 +151,6 @@ impl App {
                                 ttft_display: None,
                                 background: self.background.as_ref().map(|b| b.text.as_str()),
                                 channel_prompt: None,
-                                quit_prompt: None,
                                 turn_phase: None,
                                 attachments: &[],
         background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),

@@ -22,11 +22,11 @@ Eliminated by design:
 
 ## 3. Locality and Network
 
-Everything is local by default. EXPLICITLY permitted network operations (opt-in only):
-- OTA updates: GitHub Releases, "Restart to Update" button, applied on the subsequent launch.
+Inference and data stay local by default. The network operations FlashAgent makes:
+- OTA updates: GitHub Releases, checked, downloaded and installed in the background (checksum-verified), used from the next launch; can be turned off in Settings.
 - MCP servers configured by the user (confirmation required with argument preview for non-read-only actions).
 - Anonymous opt-in telemetry: launch counter, version, OS, active backends/tools. Zero session content. Crash reports: opt-in, sanitized stack traces only, no memory dumps.
-- Agent web tools (`web_fetch`/`web_search`), only when explicitly enabled by the user.
+- Agent web tools (`web_fetch`/`web_search`): on by default and treated like reading a file, in every permission mode; they can be turned off in Settings.
 
 ## 4. Technology Stack (Definitively Decided)
 
@@ -45,7 +45,7 @@ Everything is local by default. EXPLICITLY permitted network operations (opt-in 
 | License | **MIT** |
 | Documentation | Repository-generated site (mdBook on GitHub Pages); concise entrypoint in README |
 | Releases | Stable + Beta channels, SemVer from day one |
-| i18n | i18n framework from day one, English-only at launch, Russian/multilingual later |
+| i18n | The interface and the repository are English only; the model always answers in the language the user wrote in |
 
 ## 5. Tool Calling — Reliability is Sacred
 
@@ -61,7 +61,7 @@ Everything is local by default. EXPLICITLY permitted network operations (opt-in 
 
 ## 7. Autonomous Execution (/goal)
 
-- Task envelope: step count limit, token budget, execution timeout, action blacklist.
+- Task envelope: step count limit, token budget, execution timeout (all set in Settings, unlimited by default), action blacklist (refused outright during `/goal`). A question the agent asks waits two minutes, then the run carries on with its own best choice.
 - Reporting: live plan document in UI + final structured report (completed / omitted / manual verification required).
 - File safety: pre-task filesystem snapshot + milestone git commits.
 - Subagents: fully dynamic orchestration — dynamic roles, concurrency throttling, parent review gate, inter-agent messaging; UI: interactive tree with live cards, subagent tabs, and overlay HUD.

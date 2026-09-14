@@ -205,8 +205,6 @@ pub struct ChatView {
     needs_reprint: bool,
     /// Cached render of settled lines to avoid expensive markdown & wrap re-parsing every frame.
     settled_cache: Mutex<SettledRenderCache>,
-    /// Language of the conversation, for the labels this view writes itself.
-    language: String,
 }
 
 pub fn format_explore(is_running: bool, files: usize, searches: usize, last_target: &str) -> String {
@@ -404,16 +402,6 @@ impl ChatView {
     }
 
     /// Number of user lines (prompts and steering directives) so far.
-    /// Tell the view which language the conversation is in, so the labels it
-    /// writes itself do not arrive in English in a Russian chat.
-    pub fn set_language(&mut self, language: &str) {
-        if self.language != language {
-            self.language = language.to_string();
-            *self.settled_cache.lock() = SettledRenderCache::default();
-            self.needs_reprint = true;
-        }
-    }
-
     pub fn user_turn_count(&self) -> usize {
         self.lines.iter().filter(|l| l.kind == LineKind::User).count()
     }
@@ -1472,7 +1460,6 @@ impl ChatView {
                     turn_tools_executed,
                 );
                 turn_reasoning_stages.push(stage.clone());
-                let stage = localize_stage(&stage, &self.language);
                 let is_streaming = self.streaming_reasoning == Some(i);
                 push_reasoning(target, &line.text, line.reasoning_secs, is_streaming, is_expanded, &stage);
                 continue;
@@ -1492,7 +1479,6 @@ impl ChatView {
                             turn_tools_executed,
                         );
                         turn_reasoning_stages.push(stage.clone());
-                        let stage = localize_stage(&stage, &self.language);
                         let is_streaming = self.streaming == Some(i);
                         push_reasoning(target, &think_text, line.reasoning_secs, is_streaming, is_expanded, &stage);
                     }
@@ -1845,7 +1831,7 @@ mod tests {
     #[test]
     fn a_finished_thought_is_not_still_called_thinking() {
         // Seen in a screenshot: the answer and its recap were on the screen
-        // and the block above them still read "Thinking: Разбираю запрос".
+        // and the block above them still read "Thinking: Analyzing Request".
         let mut v = ChatView::default();
         v.push_user("Hi!");
         v.on_event(&LoopEvent::ReasoningDelta("The user sent a greeting.".into()));
@@ -2005,41 +1991,18 @@ mod tests {
     }
 
     #[test]
-    fn the_labels_we_write_ourselves_follow_the_conversation() {
-        // A Russian chat showed "Thought: Analyzing Request": the fallback
-        // stage names were English constants with no way out.
-        assert_eq!(localize_stage("Analyzing Request", "ru"), "Разбираю запрос");
-        assert_eq!(localize_stage("Planning Implementation", "ru"), "Планирую реализацию");
-        assert_eq!(localize_stage("Analyzing Request", "en"), "Analyzing Request");
-        assert_eq!(
-            localize_stage("Formulating Response (part 2)", "ru"),
-            "Формулирую ответ (часть 2)",
-            "the repeat suffix is ours too"
-        );
-    }
-
-    #[test]
-    fn the_models_own_words_are_left_alone() {
-        // A stage lifted out of the model's reasoning is a quote. Translating
-        // it would put words in its mouth.
-        assert_eq!(
-            localize_stage("Checking the apply lines in Close", "ru"),
-            "Checking the apply lines in Close"
-        );
-    }
-
-    #[test]
-    fn a_russian_chat_shows_russian_stages() {
+    fn the_interface_stays_english_in_a_russian_chat() {
+        // The interface is English only; the model answers in the user's
+        // language, but the labels FlashAgent writes itself do not follow.
         let mut chat = ChatView::default();
-        chat.set_language("ru");
         chat.push_user("Осмотри проект и расскажи что он делает");
         chat.on_event(&LoopEvent::ReasoningDelta("Сначала посмотрю структуру проекта.".into()));
         chat.on_event(&LoopEvent::TurnDelta("Готово.".into()));
         chat.on_event(&LoopEvent::Done(DoneReason::Completed));
         let (settled, live) = chat.render_split(100, ReasoningExpansion::default());
         let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
-        assert!(dump.contains("Разбираю запрос"), "{dump}");
-        assert!(!dump.contains("Analyzing Request"), "{dump}");
+        assert!(dump.contains("Analyzing Request"), "{dump}");
+        assert!(dump.contains("Готово."), "the model's own answer is shown as it wrote it: {dump}");
     }
 
     #[test]

@@ -36,11 +36,16 @@ cancels, because strict servers reject a history with an unanswered call.
 
 ## Permissions
 
-Four modes: Planning (read-only), Manual (ask before anything that is not a
-read), Accept Edits (file changes allowed, shell asks), Accept All. Shell
-approvals can be remembered per command prefix, and a prefix never covers a
-different subcommand: approving `npm test` does not approve `npm publish`.
-A declined call is returned to the model as an error it must not retry.
+Four modes: Planning (read-only; shell commands on a short list of programs
+that only read run, everything else is refused), Manual (ask before anything
+that is not a read), Accept Edits (file changes allowed, shell asks), Accept
+All. Shell approvals can be remembered per command prefix, and a prefix never
+covers a different subcommand: approving `npm test` does not approve
+`npm publish`. A short blacklist of dangerous commands (recursive force
+deletes, `sudo`, force pushes, hard resets, ...) still asks in Accept All and
+is refused outright during `/goal`, where nobody is there to answer. A
+declined call is returned to the model as an error it must not retry. The
+mode the user is in is saved as the one to start in next time.
 
 ## Model backend
 

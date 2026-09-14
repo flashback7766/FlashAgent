@@ -68,9 +68,9 @@ async fn main() -> Result<()> {
     let mut config = AppConfig::load();
     let mut force_setup = false;
     let mut skip_trust = false;
-    let mut resume_session_id = None;
+    let mut session_start = SessionStart::New;
     let mut tool_test: Option<bool> = None;
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--url" => {
@@ -87,13 +87,14 @@ async fn main() -> Result<()> {
                 println!("FlashAgent {}", flashagent_svc::updater::current_version());
                 return Ok(());
             }
-            "--resume" => {
-                if let Some(val) = args.next() {
-                    resume_session_id = Some(val);
-                } else {
-                    anyhow::bail!("--resume requires a session ID");
-                }
+            "--resume" | "-r" => {
+                // Without an id: list this folder's sessions to pick from.
+                session_start = match args.next_if(|next| !next.starts_with('-')) {
+                    Some(id) => SessionStart::Resume(id),
+                    None => SessionStart::Pick,
+                };
             }
+            "--continue" | "-c" => session_start = SessionStart::Continue,
             "--update" => {
                 if flashagent_svc::updater::is_dev_mode() {
                     println!("In-app updater is disabled in development mode (running from source repository or cargo target build).");
@@ -137,10 +138,10 @@ async fn main() -> Result<()> {
             "--setup" => force_setup = true,
             "-y" | "--yes" => skip_trust = true,
             "-h" | "--help" => {
-                println!("FlashAgent TUI\n\nUsage: flashagent [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Specify LLM model name\n  --url <endpoint>     API endpoint (default: http://localhost:1234/v1)\n  --setup              Run first-time setup wizard\n  --tool-test [--all-models]  Check whether the model can drive tools\n  --resume <id>        Resume a previously saved chat session\n  -y, --yes            Skip directory trust confirmation\n  -h, --help           Show this help message");
+                println!("FlashAgent TUI\n\nUsage: flashagent [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Specify LLM model name\n  --url <endpoint>     API endpoint (default: http://localhost:1234/v1)\n  --setup              Run first-time setup wizard\n  --tool-test [--all-models]  Check whether the model can drive tools\n  -r, --resume [id]    Resume a saved session (without an id: pick one from this folder)\n  -c, --continue       Continue the latest session in this folder\n  -y, --yes            Skip directory trust confirmation\n  -h, --help           Show this help message");
                 return Ok(());
             }
-            other => anyhow::bail!("usage: flashagent [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--tool-test [--all-models]] [--setup] [--resume <id>] [-y|--yes] (got {other})"),
+            other => anyhow::bail!("usage: flashagent [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--tool-test [--all-models]] [--setup] [-r|--resume [id]] [-c|--continue] [-y|--yes] (got {other})"),
         }
     }
 
@@ -322,6 +323,9 @@ async fn main() -> Result<()> {
     });
 
     let state = Arc::new(PermissionState::new(config.permission_mode, gate.clone()));
+    // Files outside the folder FlashAgent was started in are never read or
+    // written on a mode's say alone.
+    state.set_project_root(cwd.clone());
     // MCP config `read_only`/`read_only_tools` and server readOnlyHint
     // annotations decide what counts as a read for external tools.
     let hint_mgr = mcp_manager.clone();
@@ -332,7 +336,7 @@ async fn main() -> Result<()> {
         question_gate: Some(question_gate.clone()),
         is_goal_mode: None,
         toolset_profile: Some(config.toolset_profile),
-        web_enabled: Some(config.free_search),
+        web_enabled: Some(config.web_tools),
         context_window: Some(context_capacity),
         mcp_manager: Some(mcp_manager.clone()),
     })?);
@@ -399,7 +403,7 @@ async fn main() -> Result<()> {
         cwd_display,
         initial_effort,
         available_models,
-        resume_session_id,
+        session_start,
         cwd: cwd.clone(),
         first_run_verdict,
     })
@@ -422,6 +426,18 @@ async fn main() -> Result<()> {
         println!();
     }
     result.map(|_| ())
+}
+
+/// Which conversation the app opens with.
+enum SessionStart {
+    /// A new one.
+    New,
+    /// `--resume <id>`.
+    Resume(String),
+    /// `--continue`: the newest session of this folder.
+    Continue,
+    /// `--resume` without an id: this folder's sessions, to pick from.
+    Pick,
 }
 
 #[derive(Clone)]
@@ -459,6 +475,8 @@ struct LoopCtx<'a> {
     update_tx: &'a tokio::sync::mpsc::UnboundedSender<UpdateNotice>,
     channel_watch_tx: &'a tokio::sync::watch::Sender<flashagent_core::config::UpdateChannel>,
     channel_probe_tx: &'a tokio::sync::mpsc::UnboundedSender<ChannelTarget>,
+    /// Set while an update is being checked for or installed.
+    update_busy: &'a Arc<AtomicBool>,
     session_id: &'a String,
     /// The mascot's mood this frame.
     mascot_mood: MascotMood,
@@ -509,7 +527,19 @@ struct App {
     renderer: Renderer,
     background: Option<BackgroundNotice>,
     channel_switch: Option<ChannelSwitch>,
-    quit_confirm: bool,
+    /// When Esc was last pressed on an empty prompt: a second press soon
+    /// after quits.
+    last_esc: Option<std::time::Instant>,
+    /// The list of saved sessions (/resume), while it is open.
+    session_menu: Option<SelectMenu<String>>,
+    /// A session picked from that list, switched to at the top of the next
+    /// loop turn, where the session id and the snapshot store live.
+    pending_resume: Option<String>,
+    /// The latest stage of an update download, background or manual.
+    update_progress: Option<(String, flashagent_svc::updater::UpdateProgress)>,
+    /// Whether the user asked to see how an update is going (Ctrl+U,
+    /// /update); until then a background update goes unannounced.
+    update_watched: bool,
     turn_phase: TurnPhase,
     effort_memory: flashagent_core::EffortMemory,
     turn_outcome: flashagent_core::TurnOutcome,
@@ -547,7 +577,7 @@ struct AppContext {
     cwd: std::path::PathBuf,
     initial_effort: String,
     available_models: Vec<String>,
-    resume_session_id: Option<String>,
+    session_start: SessionStart,
     /// Verdict of the first-run tool check, to be said in the conversation.
     first_run_verdict: Option<String>,
 }
@@ -610,7 +640,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         cwd_display,
         initial_effort,
         available_models,
-        resume_session_id,
+        session_start,
         cwd,
         first_run_verdict,
     } = ctx;
@@ -670,7 +700,6 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let current_draft = String::new();
     let confirm_select = ConfirmSelect::new();
     let mut chat = ChatView::default();
-    chat.set_language(&app_config.language);
     let running = false;
     let active_turn_handle: Option<tokio::task::JoinHandle<()>> = None;
     let active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
@@ -727,13 +756,30 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         tokio::time::interval_at(tokio::time::Instant::now() + SERVER_POLL_INTERVAL, SERVER_POLL_INTERVAL);
     check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let is_discovering = Arc::new(AtomicBool::new(false));
-    let session_id = resume_session_id.clone().unwrap_or_else(|| {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        format!("session_{ts}")
-    });
+    // --continue opens the newest session of this folder; --resume without an
+    // id opens the list of them once the app is up.
+    let mut open_session_picker = false;
+    let mut session_note: Option<String> = None;
+    let resume_session_id = match session_start {
+        SessionStart::New => None,
+        SessionStart::Resume(id) if is_session_id(&id) => Some(id),
+        SessionStart::Resume(id) => {
+            session_note = Some(format!("'{id}' is not a session id; starting a new session."));
+            None
+        }
+        SessionStart::Pick => {
+            open_session_picker = true;
+            None
+        }
+        SessionStart::Continue => {
+            let newest = sessions_dir().and_then(|dir| sessions_in(&dir, &cwd_display).into_iter().next());
+            if newest.is_none() {
+                session_note = Some("No saved session in this folder yet; starting a new one.".to_string());
+            }
+            newest.map(|s| s.id)
+        }
+    };
+    let mut session_id = resume_session_id.clone().unwrap_or_else(new_session_id);
     // How files were before each turn changed them, kept beside the sessions
     // so /rewind still works after --resume.
     let snapshot_dir = flashagent_home_dir()
@@ -747,8 +793,13 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     // must not take that spot.
     let background: Option<BackgroundNotice> = None;
     let channel_switch: Option<ChannelSwitch> = None;
-    // Esc used to quit outright, which loses a session to one stray keypress.
-    let quit_confirm = false;
+    // Esc used to quit outright, which loses a session to one stray keypress;
+    // it takes two presses now.
+    let last_esc: Option<std::time::Instant> = None;
+    let session_menu: Option<SelectMenu<String>> = None;
+    let pending_resume: Option<String> = None;
+    let update_progress: Option<(String, flashagent_svc::updater::UpdateProgress)> = None;
+    let update_watched = false;
     let turn_phase = TurnPhase::Waiting;
     // Auto effort guesses the task before the model has said a word. How its
     // turns actually go is the only evidence of whether the guess fits this
@@ -766,44 +817,52 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     let pending_update: Option<(String, String, String, Option<String>)> = None;
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
     let (channel_watch_tx, mut channel_watch_rx) = tokio::sync::watch::channel(app_config.update_channel);
+    // One update at a time: the background updater and Ctrl+U both claim
+    // this before they start, so they never download over each other.
+    let update_busy = Arc::new(AtomicBool::new(false));
     if app_config.auto_check_updates && !flashagent_svc::updater::is_dev_mode() {
         let update_tx_clone = update_tx.clone();
+        let busy = update_busy.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(flashagent_svc::updater::BACKGROUND_UPDATE_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let ch = *channel_watch_rx.borrow();
-                        if let Ok(Some(target_ver)) = flashagent_svc::updater::check_and_apply_background(ch).await {
-                            let _ = update_tx_clone.send(UpdateNotice::Ready { version: target_ver });
-                            break;
-                        }
-                    }
+                let ch = tokio::select! {
+                    _ = interval.tick() => *channel_watch_rx.borrow(),
                     changed = channel_watch_rx.changed() => {
-                        if changed.is_ok() {
-                            let ch = *channel_watch_rx.borrow();
-                            interval.reset();
-                            if let Ok(Some(target_ver)) = flashagent_svc::updater::check_and_apply_background(ch).await {
-                                let _ = update_tx_clone.send(UpdateNotice::Ready { version: target_ver });
-                                break;
-                            }
-                        } else {
+                        if changed.is_err() {
                             break;
                         }
+                        interval.reset();
+                        *channel_watch_rx.borrow()
+                    }
+                };
+                // An update the user started is under way; look again later.
+                if busy.swap(true, Ordering::SeqCst) {
+                    continue;
+                }
+                let progress_tx = update_tx_clone.clone();
+                let result = flashagent_svc::updater::check_and_apply_background_with_progress(ch, move |version, stage| {
+                    let _ = progress_tx.send(UpdateNotice::Progress { version: version.to_string(), stage });
+                })
+                .await;
+                busy.store(false, Ordering::SeqCst);
+                // Up to date and failed are only said to someone watching;
+                // the app decides that.
+                match result {
+                    Ok(Some(version)) => {
+                        let _ = update_tx_clone.send(UpdateNotice::Ready { version });
+                        break;
+                    }
+                    Ok(None) => {
+                        let _ = update_tx_clone.send(UpdateNotice::UpToDate {
+                            version: flashagent_svc::updater::current_version().to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = update_tx_clone.send(UpdateNotice::Failed { error: e.to_string() });
                     }
                 }
-            }
-        });
-    } else if app_config.silent_update_check && !flashagent_svc::updater::is_dev_mode() {
-        let silent_tx_clone = update_tx.clone();
-        let ch = app_config.update_channel;
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-            if let Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, checksums_url, .. }) =
-                flashagent_svc::updater::check_for_updates(ch, flashagent_svc::updater::DEFAULT_RELEASES_API).await
-            {
-                let _ = silent_tx_clone.send(UpdateNotice::Available { version: target, asset_name, download_url, checksums_url });
             }
         });
     }
@@ -844,48 +903,19 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     }
 
     if let Some(ref resume_id) = resume_session_id {
-        if let Some(home) = flashagent_home_dir() {
-            let session_path = home.join("sessions").join(format!("{resume_id}.json"));
-            if let Ok(content) = std::fs::read_to_string(&session_path) {
-                if let Ok(saved) = serde_json::from_str::<SavedSession>(&content) {
-                    for saved_msg in saved.messages {
-                        let msg: ChatMessage = saved_msg.into();
-                        match msg.role {
-                            flashagent_llm::Role::User => {
-                                chat.push_user(extract_user_prompt(&msg.content));
-                                history.push(msg);
-                            }
-                            flashagent_llm::Role::Assistant => {
-                                if !msg.content.trim().is_empty() {
-                                    chat.push_assistant(&msg.content);
-                                }
-                                history.push(msg);
-                            }
-                            // The fresh system prompt (current cwd/model) wins;
-                            // only a compaction summary carries over. A second
-                            // system message mid-history breaks strict chat
-                            // templates (Gemma, Qwen).
-                            flashagent_llm::Role::System => {
-                                // Current sessions keep the summary inside the
-                                // system prompt; older ones stored it as its own
-                                // system message. Both carry the marker title.
-                                let title = COMPACTED_MARK.trim_start();
-                                if let Some(pos) = msg.content.find(title) {
-                                    history[0].content.push_str(COMPACTED_MARK);
-                                    history[0].content.push_str(msg.content[pos + title.len()..].trim_start());
-                                }
-                            }
-                            flashagent_llm::Role::Tool => history.push(msg),
-                        }
-                    }
-                    notice!(&format!("Resumed session '{resume_id}' ({} messages loaded).", history.len()));
-                } else {
-                    chat.push_line(LineKind::ToolError, format!("Session file {} is unreadable; starting fresh.", session_path.display()));
-                }
-            } else {
-                chat.push_line(LineKind::ToolError, format!("No saved session '{resume_id}' in ~/.flashagent/sessions; starting fresh."));
+        match sessions_dir()
+            .ok_or_else(|| "No home directory to read sessions from; starting fresh.".to_string())
+            .and_then(|dir| read_session(&dir, resume_id))
+        {
+            Ok(saved) => {
+                let restored = restore_session(saved, &mut chat, &mut history);
+                notice!(&format!("Resumed session '{resume_id}' ({restored} messages loaded)."));
             }
+            Err(why) => chat.push_line(LineKind::ToolError, why),
         }
+    }
+    if let Some(note) = session_note {
+        notice!(&note);
     }
 
     let turn_started: Option<std::time::Instant> = None;
@@ -946,7 +976,11 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         renderer,
         background,
         channel_switch,
-        quit_confirm,
+        last_esc,
+        session_menu,
+        pending_resume,
+        update_progress,
+        update_watched,
         turn_phase,
         effort_memory,
         turn_outcome,
@@ -966,6 +1000,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         config: app_config,
         available_models,
     };
+    if open_session_picker {
+        app.open_session_picker(&cwd_display, &session_id);
+    }
 
     macro_rules! notice {
         ($text:expr) => {{
@@ -986,6 +1023,42 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     }
 
     'main_loop: loop {
+        // A session picked in /resume: the one open now is saved first, then
+        // the picked one takes its place on screen, in the model's history,
+        // and in where /rewind keeps its copies.
+        if let Some(id) = app.pending_resume.take().filter(|id| *id != session_id) {
+            if app.config.auto_save_sessions && worth_saving(&app.history) {
+                save_session_file(&session_id, &app.current_model, &cwd_display, &app.history);
+            }
+            match sessions_dir()
+                .ok_or_else(|| "No home directory to read sessions from".to_string())
+                .and_then(|dir| read_session(&dir, &id))
+            {
+                Ok(saved) => {
+                    let base_system = app
+                        .history
+                        .first()
+                        .map(|m| m.content.split(COMPACTED_MARK).next().unwrap_or_default().to_string())
+                        .unwrap_or_default();
+                    app.history = vec![ChatMessage::system(base_system)];
+                    app.chat.clear();
+                    let restored = restore_session(saved, &mut app.chat, &mut app.history);
+                    session_id = id;
+                    if let Some(home) = flashagent_home_dir() {
+                        perm.state().set_snapshots(Arc::new(flashagent_core::SnapshotStore::open(
+                            home.join("snapshots").join(&session_id),
+                            cwd.clone(),
+                        )));
+                    }
+                    app.latest_suggestion = None;
+                    app.renderer.printed_settled = 0;
+                    app.renderer.prev_expansion = None;
+                    update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
+                    notice!(&format!("Resumed session '{session_id}' ({restored} messages loaded)."));
+                }
+                Err(why) => notice!(&why),
+            }
+        }
         // The face reports the one thing that decides whether anything works:
         // did the model server answer. Discovery reruns every few seconds, so
         // starting the server later turns the face around on its own.
@@ -1001,6 +1074,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             && app.effort_menu.is_none()
             && app.model_menu.is_none()
             && app.rewind_confirm.is_none()
+            && app.session_menu.is_none()
             && app.settings_view.is_none()
             && app.sampling_view.is_none()
             && app.context_modal.is_none()
@@ -1055,6 +1129,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     update_tx: &update_tx,
                     channel_watch_tx: &channel_watch_tx,
                     channel_probe_tx: &channel_probe_tx,
+                    update_busy: &update_busy,
                     session_id: &session_id,
                     mascot_mood,
                     tip_lines: &tip_lines,
@@ -1097,9 +1172,6 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         let cost_now = app.image_costs.get(&app.current_model);
         let attachment_labels: Vec<String> =
             app.attachments.iter().map(|a| a.labelled(cost_now)).collect();
-        let quit_prompt: Option<&str> = app.quit_confirm.then_some(
-            "Quit FlashAgent? The session is saved either way and comes back with --resume.",
-        );
         let goal_progress: Option<String> =
             app.goal_ledger.as_ref().filter(|_| app.running).map(|l| l.progress());
         let live_prefill = app.token_tracker.live_prefill_status();
@@ -1113,6 +1185,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             app.effort_menu.as_ref(),
             app.model_menu.as_ref(),
             app.rewind_confirm.as_ref(),
+            app.session_menu.as_ref(),
             app.settings_view.as_ref(),
             app.sampling_view.as_ref(),
             app.context_modal.as_ref(),
@@ -1149,7 +1222,6 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 ttft_display: if app.config.show_ttft { ttft_display.as_deref() } else { None },
                 background: app.background.as_ref().map(|b| b.text.as_str()),
                 channel_prompt: channel_prompt.as_deref(),
-                quit_prompt,
                 turn_phase: app.running.then_some(&app.turn_phase),
                 attachments: &attachment_labels,
                 background_style: app.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
@@ -1177,13 +1249,20 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         }
                     }
                     UpdateNotice::Progress { version, stage } => {
-                        app.background = Some(BackgroundNotice::sticky(update_progress_line(&version, stage)));
+                        // Kept either way, so Ctrl+U can show a download
+                        // that started before anyone asked about it.
+                        if app.update_watched {
+                            app.background = Some(BackgroundNotice::sticky(update_progress_line(&version, stage)));
+                        }
+                        app.update_progress = Some((version, stage));
                         app.renderer.request_reprint();
                     }
                     UpdateNotice::Ready { version } => {
                         app.pending_update = None;
+                        app.update_progress = None;
+                        app.update_watched = false;
                         app.background = Some(BackgroundNotice::sticky(format!(
-                            "Update ready: {version} · restart FlashAgent to run it"
+                            "Updated to {version} \u{b7} restart FlashAgent to use it"
                         )));
                         if let Some(ref mut s) = app.settings_view {
                             s.update_check_status = Some(format!("Ready: {version} (restart to apply)"));
@@ -1193,19 +1272,24 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         if let Some(ref mut s) = app.settings_view {
                             s.update_check_status = Some(format!("Up to date ({version})"));
                         }
-                        app.background = Some(BackgroundNotice::fading(
-                            format!("FlashAgent {version} is up to date"),
-                            6,
-                        ));
+                        if std::mem::take(&mut app.update_watched) {
+                            app.background = Some(BackgroundNotice::fading(
+                                format!("FlashAgent {version} is up to date"),
+                                6,
+                            ));
+                        }
                     }
                     UpdateNotice::Failed { error } => {
+                        app.update_progress = None;
                         if let Some(ref mut s) = app.settings_view {
                             s.update_check_status = Some(format!("Error: {error}"));
                         }
-                        app.background = Some(BackgroundNotice::fading(
-                            format!("Update failed: {}", flashagent_tui::truncate_middle(&error, 90)),
-                            10,
-                        ));
+                        if std::mem::take(&mut app.update_watched) {
+                            app.background = Some(BackgroundNotice::fading(
+                                format!("Update failed: {}", flashagent_tui::truncate_middle(&error, 90)),
+                                10,
+                            ));
+                        }
                     }
                 }
                 app.renderer.request_reprint();
@@ -1237,6 +1321,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     app.token_tracker.on_finished();
                     if let Some(saved) = app.goal_state.take() {
                         tools_arc.set_goal_mode(false);
+                        perm.state().set_goal_active(false);
                         perm.state().set_mode(saved.mode);
                         app.current_effort = saved.effort.clone();
                         app.max_steps = saved.max_steps;
@@ -1534,6 +1619,13 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         _ => {}
                     }
                     app.renderer.request_reprint();
+                } else if let Some(ref mut menu) = app.session_menu {
+                    match m.kind {
+                        MouseEventKind::ScrollUp => menu.up(),
+                        MouseEventKind::ScrollDown => menu.down(),
+                        _ => {}
+                    }
+                    app.renderer.request_reprint();
                 } else if let Some(ref mut menu) = app.effort_menu {
                     match m.kind {
                         MouseEventKind::ScrollUp => menu.up(),
@@ -1574,7 +1666,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         for ch in sanitized.chars() {
                             sm.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);
                         }
-                    } else if app.effort_menu.is_none() && app.model_menu.is_none() && app.rewind_confirm.is_none() && app.settings_view.is_none() && app.context_modal.is_none() && app.mcp_modal.is_none() {
+                    } else if app.effort_menu.is_none() && app.model_menu.is_none() && app.rewind_confirm.is_none() && app.session_menu.is_none() && app.settings_view.is_none() && app.context_modal.is_none() && app.mcp_modal.is_none() {
                         app.input.push_str(&sanitized);
                         app.history_index = None;
                         app.autocomplete_idx = 0;
@@ -1882,22 +1974,6 @@ mod tests {
         // Quoted, the way a terminal writes a path with spaces in it.
         let quoted = format!("'{}'", png.to_str().unwrap());
         assert!(Attachment::from_dropped_path(&quoted).is_some());
-    }
-
-    #[test]
-    fn the_labels_follow_the_language_in_both_directions() {
-        // An English chat was labelled in Russian because the config said ru
-        // and detection only ever switched one way.
-        assert_eq!(conversation_language("Hi!"), Some("en"));
-        assert_eq!(conversation_language("Привет!"), Some("ru"));
-        assert_eq!(conversation_language("посмотри main.rs и скажи что там"), Some("ru"));
-        assert_eq!(
-            conversation_language("read main.rs and tell me what it does"),
-            Some("en")
-        );
-        assert_eq!(conversation_language("ok"), Some("en"));
-        assert_eq!(conversation_language("/help"), None, "a command says nothing about language");
-        assert_eq!(conversation_language("42"), None);
     }
 
     #[test]

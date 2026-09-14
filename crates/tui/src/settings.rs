@@ -38,6 +38,7 @@ pub enum SettingsTab {
     Updates,
     Aesthetics,
     Reasoning,
+    Goal,
     Tools,
 }
 
@@ -48,6 +49,7 @@ impl SettingsTab {
             SettingsTab::Updates,
             SettingsTab::Aesthetics,
             SettingsTab::Reasoning,
+            SettingsTab::Goal,
             SettingsTab::Tools,
         ]
     }
@@ -58,7 +60,8 @@ impl SettingsTab {
             Self::Updates => "2. Updates",
             Self::Aesthetics => "3. UI & Themes",
             Self::Reasoning => "4. LLM & Reasoning",
-            Self::Tools => "5. Tools & MCP",
+            Self::Goal => "5. Goal",
+            Self::Tools => "6. Tools & MCP",
         }
     }
 
@@ -67,7 +70,8 @@ impl SettingsTab {
             Self::General => Self::Updates,
             Self::Updates => Self::Aesthetics,
             Self::Aesthetics => Self::Reasoning,
-            Self::Reasoning => Self::Tools,
+            Self::Reasoning => Self::Goal,
+            Self::Goal => Self::Tools,
             Self::Tools => Self::General,
         }
     }
@@ -78,8 +82,46 @@ impl SettingsTab {
             Self::Updates => Self::General,
             Self::Aesthetics => Self::Updates,
             Self::Reasoning => Self::Aesthetics,
-            Self::Tools => Self::Reasoning,
+            Self::Goal => Self::Reasoning,
+            Self::Tools => Self::Goal,
         }
+    }
+}
+
+/// Choices the `/goal` limits cycle through; `None` is "unlimited" and is
+/// both where they start and where they come back round to.
+const GOAL_STEP_CHOICES: &[Option<u32>] = &[None, Some(25), Some(50), Some(100), Some(250), Some(500), Some(1000)];
+const GOAL_MINUTE_CHOICES: &[Option<u32>] = &[None, Some(15), Some(30), Some(60), Some(120), Some(240), Some(480)];
+const GOAL_TOKEN_CHOICES: &[Option<i64>] =
+    &[None, Some(50_000), Some(100_000), Some(200_000), Some(500_000), Some(1_000_000), Some(2_000_000)];
+
+/// The choice after (or, with a negative `delta`, before) `current`. A value
+/// typed into the config by hand that is not on the list starts again from
+/// the first choice.
+fn cycle_choice<T: PartialEq + Copy>(choices: &[Option<T>], current: Option<T>, delta: i32) -> Option<T> {
+    let n = choices.len();
+    let next = match choices.iter().position(|c| *c == current) {
+        Some(i) if delta < 0 => (i + n - 1) % n,
+        Some(i) => (i + 1) % n,
+        None => 0,
+    };
+    choices[next]
+}
+
+fn goal_minutes_label(minutes: Option<u32>) -> String {
+    match minutes {
+        None | Some(0) => "Unlimited".to_string(),
+        Some(m) if m % 60 == 0 => format!("{} h", m / 60),
+        Some(m) => format!("{m} min"),
+    }
+}
+
+fn goal_tokens_label(tokens: Option<i64>) -> String {
+    match tokens {
+        None | Some(0) => "Unlimited".to_string(),
+        Some(t) if t >= 1_000_000 && t % 1_000_000 == 0 => format!("{}M generated tokens", t / 1_000_000),
+        Some(t) if t >= 1_000 => format!("{}k generated tokens", t / 1_000),
+        Some(t) => format!("{t} generated tokens"),
     }
 }
 
@@ -118,9 +160,10 @@ impl SettingsView {
     pub fn total_items(&self) -> usize {
         match self.active_tab {
             SettingsTab::General => 6,
-            SettingsTab::Updates => 4,
+            SettingsTab::Updates => 3,
             SettingsTab::Aesthetics => 5,
             SettingsTab::Reasoning => 7,
+            SettingsTab::Goal => 3,
             SettingsTab::Tools => 3,
         }
     }
@@ -189,6 +232,11 @@ impl SettingsView {
                 SettingsAction::None
             }
             KeyCode::Char('5') => {
+                self.active_tab = SettingsTab::Goal;
+                self.selected_index = 0;
+                SettingsAction::None
+            }
+            KeyCode::Char('6') => {
                 self.active_tab = SettingsTab::Tools;
                 self.selected_index = 0;
                 SettingsAction::None
@@ -252,14 +300,13 @@ impl SettingsView {
                     self.is_dirty = true;
                     SettingsAction::None
                 }
-                2 => {
-                    self.config.silent_update_check = !self.config.silent_update_check;
-                    self.is_dirty = true;
-                    SettingsAction::None
-                }
-                3 => SettingsAction::CheckUpdatesNow,
+                2 => SettingsAction::CheckUpdatesNow,
                 _ => SettingsAction::None,
             },
+            SettingsTab::Goal => {
+                self.adjust_selected(1);
+                SettingsAction::None
+            }
             SettingsTab::Aesthetics => match self.selected_index {
                 0 => {
                     self.config.show_mascot = !self.config.show_mascot;
@@ -307,7 +354,7 @@ impl SettingsView {
                     SettingsAction::None
                 }
                 5 => {
-                    self.config.free_search = !self.config.free_search;
+                    self.config.web_tools = !self.config.web_tools;
                     self.is_dirty = true;
                     SettingsAction::None
                 }
@@ -344,7 +391,15 @@ impl SettingsView {
             SettingsTab::Updates => match self.selected_index {
                 0 => self.config.auto_check_updates = !self.config.auto_check_updates,
                 1 => self.config.update_channel = self.config.update_channel.toggle(),
-                2 => self.config.silent_update_check = !self.config.silent_update_check,
+                _ => {}
+            },
+            SettingsTab::Goal => match self.selected_index {
+                0 => self.config.goal_max_steps = cycle_choice(GOAL_STEP_CHOICES, self.config.goal_max_steps, delta),
+                1 => self.config.goal_max_minutes = cycle_choice(GOAL_MINUTE_CHOICES, self.config.goal_max_minutes, delta),
+                2 => {
+                    self.config.goal_max_output_tokens =
+                        cycle_choice(GOAL_TOKEN_CHOICES, self.config.goal_max_output_tokens, delta)
+                }
                 _ => {}
             },
             SettingsTab::Aesthetics => match self.selected_index {
@@ -361,7 +416,7 @@ impl SettingsView {
                 2 => self.adjust_temperature(if delta > 0 { 0.05 } else { -0.05 }),
                 3 => self.cycle_warn_threshold(),
                 4 => self.config.auto_compact_context = !self.config.auto_compact_context,
-                5 => self.config.free_search = !self.config.free_search,
+                5 => self.config.web_tools = !self.config.web_tools,
                 6 => self.cycle_network_retries(),
                 _ => {}
             },
@@ -469,7 +524,7 @@ impl SettingsView {
         };
 
         // Header
-        let title_styled = " \x1b[1;38;2;225;175;95mFlashAgent Settings Wizard\x1b[0m \x1b[38;2;160;155;145m(Tab 1-5 to switch)\x1b[0m ";
+        let title_styled = " \x1b[1;38;2;225;175;95mFlashAgent Settings Wizard\x1b[0m \x1b[38;2;160;155;145m(Tab 1-6 to switch)\x1b[0m ";
         let title_vis = crate::visible_width(title_styled);
         let dashes = box_w.saturating_sub(title_vis + 1);
         lines.push((
@@ -506,9 +561,8 @@ impl SettingsView {
                 ("Setup Wizard", "Launch initial configuration wizard".into()),
             ],
             SettingsTab::Updates => vec![
-                ("Auto-Check Updates *", if self.config.auto_check_updates { "Enabled (every 4m)".into() } else { "Disabled (manual only)".into() }),
+                ("Auto-Update *", if self.config.auto_check_updates { "On (installs in the background)".into() } else { "Off (Ctrl+U or /update only)".into() }),
                 ("Release Channel", self.config.update_channel.label().to_string()),
-                ("Silent Daily Notice", if self.config.silent_update_check { "Enabled (status bar notice)".into() } else { "Disabled".into() }),
                 ("Check Updates Now", self.update_check_status.clone().unwrap_or_else(|| "Check GitHub Releases API now".into())),
             ],
             SettingsTab::Aesthetics => vec![
@@ -531,8 +585,16 @@ impl SettingsView {
                         pct => format!("Enabled (at {pct}%)"),
                     }
                 } else { "Disabled".into() }),
-                ("Web Tools", if self.config.free_search { "Enabled (web_fetch, web_search)".into() } else { "Disabled (local-first)".into() }),
+                ("Web Tools", if self.config.web_tools { "Enabled (web_fetch, web_search)".into() } else { "Disabled".into() }),
                 ("Network Retries", format!("{} retries on connection failure", self.config.network_retries)),
+            ],
+            SettingsTab::Goal => vec![
+                ("Step Limit", match self.config.goal_max_steps {
+                    None | Some(0) => "Unlimited".to_string(),
+                    Some(n) => format!("{n} steps"),
+                }),
+                ("Time Limit", goal_minutes_label(self.config.goal_max_minutes)),
+                ("Token Limit", goal_tokens_label(self.config.goal_max_output_tokens)),
             ],
             SettingsTab::Tools => vec![
                 ("Toolset Profile", self.config.toolset_profile.label().to_string()),
@@ -569,7 +631,7 @@ impl SettingsView {
             lines.push((LineKind::System, pad_row("")));
         }
 
-        lines.push((LineKind::System, pad_row("\x1b[38;2;135;130;125mTab/1-5 switch tab · ↑/↓ navigate · Enter/←/→ toggle value · Esc save & return\x1b[0m")));
+        lines.push((LineKind::System, pad_row("\x1b[38;2;135;130;125mTab/1-6 switch tab · ↑/↓ navigate · Enter/←/→ toggle value · Esc save & return\x1b[0m")));
 
         lines.push((
             LineKind::System,
@@ -599,7 +661,11 @@ mod tests {
         assert_eq!(tab, SettingsTab::Reasoning);
 
         tab = tab.next();
+        assert_eq!(tab, SettingsTab::Goal);
+
+        tab = tab.next();
         assert_eq!(tab, SettingsTab::Tools);
+        assert_eq!(tab.prev(), SettingsTab::Goal);
 
         tab = tab.next();
         assert_eq!(tab, SettingsTab::General);
@@ -632,8 +698,8 @@ mod tests {
         view.handle_key(KeyCode::Right, KeyModifiers::empty());
         assert!(!view.config.show_mascot);
 
-        // Jump to Tools via '5'; its items all reach real actions
-        view.handle_key(KeyCode::Char('5'), KeyModifiers::empty());
+        // Jump to Tools via '6'; its items all reach real actions
+        view.handle_key(KeyCode::Char('6'), KeyModifiers::empty());
         assert_eq!(view.active_tab, SettingsTab::Tools);
         view.handle_key(KeyCode::Down, KeyModifiers::empty());
         assert_eq!(view.handle_key(KeyCode::Enter, KeyModifiers::empty()), SettingsAction::OpenMcpMenu);
@@ -643,6 +709,34 @@ mod tests {
         // Esc closes and saves
         let act = view.handle_key(KeyCode::Esc, KeyModifiers::empty());
         assert_eq!(act, SettingsAction::Close);
+    }
+
+    #[test]
+    fn goal_limits_start_unlimited_and_cycle_both_ways() {
+        let mut view = SettingsView::new(AppConfig::default(), Vec::new());
+        view.handle_key(KeyCode::Char('5'), KeyModifiers::empty());
+        assert_eq!(view.active_tab, SettingsTab::Goal);
+        let shown = |v: &SettingsView| v.render(100).iter().map(|(_, t)| t.clone()).collect::<Vec<_>>().join("\n");
+        assert!(shown(&view).contains("Unlimited"), "{}", shown(&view));
+
+        view.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(view.config.goal_max_steps, Some(25));
+        view.handle_key(KeyCode::Left, KeyModifiers::empty());
+        view.handle_key(KeyCode::Left, KeyModifiers::empty());
+        assert_eq!(view.config.goal_max_steps, Some(1000), "going left from unlimited wraps to the largest");
+
+        view.handle_key(KeyCode::Down, KeyModifiers::empty());
+        view.handle_key(KeyCode::Right, KeyModifiers::empty());
+        view.handle_key(KeyCode::Right, KeyModifiers::empty());
+        view.handle_key(KeyCode::Right, KeyModifiers::empty());
+        assert_eq!(view.config.goal_max_minutes, Some(60));
+        assert!(shown(&view).contains("1 h"), "{}", shown(&view));
+
+        view.handle_key(KeyCode::Down, KeyModifiers::empty());
+        view.handle_key(KeyCode::Right, KeyModifiers::empty());
+        view.handle_key(KeyCode::Right, KeyModifiers::empty());
+        assert_eq!(view.config.goal_max_output_tokens, Some(100_000));
+        assert!(shown(&view).contains("100k generated tokens"), "{}", shown(&view));
     }
 
     #[test]

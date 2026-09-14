@@ -1,6 +1,106 @@
 use super::*;
 
+/// How soon a second Esc on an empty prompt has to follow the first to quit.
+pub(crate) const ESC_QUIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl App {
+    /// The next launch starts in the mode the user is in now — whichever it
+    /// is, Accept All included. A `/goal` run's Accept All is its own and is
+    /// never remembered; the mode it hands back already was.
+    pub(crate) fn remember_mode(&mut self, mode: PermissionMode) {
+        if self.goal_state.is_some() || self.config.permission_mode == mode {
+            return;
+        }
+        self.config.permission_mode = mode;
+        let _ = self.config.save();
+    }
+
+    /// Ctrl+U and /update: show the update that is already under way —
+    /// started in the background before anyone asked — or start one that
+    /// checks, downloads and installs in one go.
+    pub(crate) fn start_or_watch_update(&mut self, cx: &LoopCtx<'_>) {
+        let action = update_key_action(
+            flashagent_svc::updater::is_dev_mode(),
+            self.update_progress.is_some(),
+            cx.update_busy.load(Ordering::SeqCst),
+            self.pending_update.is_some(),
+        );
+        self.renderer.request_reprint();
+        let checking = |channel: flashagent_core::config::UpdateChannel| {
+            BackgroundNotice::fading(format!("{UPDATE_LINE_PREFIX}\u{b7} checking the {} channel...", channel.label()), 30)
+        };
+        match action {
+            UpdateKeyAction::DevMode => {
+                self.background = Some(BackgroundNotice::fading("Auto-updater is disabled in dev mode", 6));
+                return;
+            }
+            UpdateKeyAction::ShowProgress => {
+                self.update_watched = true;
+                if let Some((version, stage)) = &self.update_progress {
+                    self.background = Some(BackgroundNotice::sticky(update_progress_line(version, *stage)));
+                }
+                return;
+            }
+            UpdateKeyAction::WatchCheck => {
+                self.update_watched = true;
+                self.background = Some(checking(self.config.update_channel));
+                return;
+            }
+            UpdateKeyAction::InstallPending | UpdateKeyAction::CheckAndInstall => {}
+        }
+        // Claimed here, not just read above: the background updater may have
+        // started in between.
+        if cx.update_busy.swap(true, Ordering::SeqCst) {
+            self.update_watched = true;
+            self.background = Some(checking(self.config.update_channel));
+            return;
+        }
+        self.update_watched = true;
+        let update_tx = cx.update_tx.clone();
+        let busy = cx.update_busy.clone();
+        let pending = if action == UpdateKeyAction::InstallPending { self.pending_update.clone() } else { None };
+        self.background = Some(match &pending {
+            Some((version, ..)) => BackgroundNotice::sticky(format!("{UPDATE_LINE_PREFIX}{version} \u{b7} starting download...")),
+            None => checking(self.config.update_channel),
+        });
+        let channel = self.config.update_channel;
+        tokio::spawn(async move {
+            let target = match pending {
+                Some(found) => Ok(Some(found)),
+                None => match flashagent_svc::updater::check_for_updates(channel, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
+                    Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, checksums_url, .. }) => {
+                        Ok(Some((target, asset_name, download_url, checksums_url)))
+                    }
+                    Ok(flashagent_svc::updater::UpdateStatus::UpToDate { current, .. }) => Err(UpdateNotice::UpToDate { version: current }),
+                    Err(e) => Err(UpdateNotice::Failed { error: e.to_string() }),
+                },
+            };
+            let notice = match target {
+                Ok(Some((version, asset_name, download_url, checksums_url))) => {
+                    let progress_tx = update_tx.clone();
+                    let for_progress = version.clone();
+                    let result = flashagent_svc::updater::download_and_apply_with_progress(
+                        &download_url,
+                        &asset_name,
+                        checksums_url.as_deref(),
+                        move |stage| {
+                            let _ = progress_tx.send(UpdateNotice::Progress { version: for_progress.clone(), stage });
+                        },
+                    )
+                    .await;
+                    match result {
+                        Ok(_) => UpdateNotice::Ready { version },
+                        Err(e) => UpdateNotice::Failed { error: e.to_string() },
+                    }
+                }
+                Ok(None) => return,
+                Err(notice) => notice,
+            };
+            busy.store(false, Ordering::SeqCst);
+            let _ = update_tx.send(notice);
+        });
+    }
+
     /// A key the overlays did not claim: typing, editing the prompt, history,
     /// function keys and shortcuts, and Enter.
     pub(crate) async fn handle_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Flow {
@@ -37,17 +137,17 @@ impl App {
                 } else if self.mcp_modal.is_some() {
                     self.mcp_modal = None;
                     self.renderer.request_reprint();
-                } else if self.suggested_prompt.is_some() || self.custom_placeholder.is_some() {
-                    self.suggested_prompt = None;
-                    self.latest_suggestion = None;
-                    self.custom_placeholder = None;
-                    self.renderer.request_reprint();
-                } else if !worth_saving(&self.history) {
-                    // Nothing was said, so nothing is saved and there is no
-                    // session to come back to: the question protects nothing.
+                } else if self.last_esc.is_some_and(|t| t.elapsed() < ESC_QUIT_WINDOW) {
+                    // The second press of a double Esc. One stray Esc used
+                    // to quit outright; a session is saved either way.
                     return Flow::Quit;
                 } else {
-                    self.quit_confirm = true;
+                    // The first press also clears a suggestion, so quitting
+                    // right after an answer is still two presses, not three.
+                    self.suggested_prompt = None;
+                    self.latest_suggestion = None;
+                    self.last_esc = Some(std::time::Instant::now());
+                    self.custom_placeholder = Some("Press Esc again to quit".to_string());
                     self.renderer.request_reprint();
                 }
             }
@@ -293,83 +393,7 @@ impl App {
             KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Char('\u{0433}') | KeyCode::Char('\u{0413}')
                 if mods.contains(KeyModifiers::CONTROL) =>
             {
-                if let Some((target_ver, asset_name, download_url, checksums_url)) = self.pending_update.clone() {
-                    self.background = Some(BackgroundNotice::sticky(format!(
-                        "{UPDATE_LINE_PREFIX}{target_ver} \u{b7} starting download..."
-                    )));
-                    self.renderer.request_reprint();
-                    let update_tx_clone = cx.update_tx.clone();
-                    tokio::spawn(async move {
-                        let progress_tx = update_tx_clone.clone();
-                        let ver_for_progress = target_ver.clone();
-                        let result = flashagent_svc::updater::download_and_apply_with_progress(
-                            &download_url,
-                            &asset_name,
-                            checksums_url.as_deref(),
-                            move |stage| {
-                                let _ = progress_tx.send(UpdateNotice::Progress {
-                                    version: ver_for_progress.clone(),
-                                    stage,
-                                });
-                            },
-                        )
-                        .await;
-                        let notice = match result {
-                            Ok(_) => UpdateNotice::Ready { version: target_ver },
-                            Err(e) => UpdateNotice::Failed { error: e.to_string() },
-                        };
-                        let _ = update_tx_clone.send(notice);
-                    });
-                } else if !flashagent_svc::updater::is_dev_mode() {
-                    self.background = Some(BackgroundNotice::fading(
-                        format!(
-                            "{UPDATE_LINE_PREFIX}\u{b7} checking the {} channel...",
-                            self.config.update_channel.label()
-                        ),
-                        30,
-                    ));
-                    self.renderer.request_reprint();
-                    let update_tx_clone = cx.update_tx.clone();
-                    let ch = self.config.update_channel;
-                    tokio::spawn(async move {
-                        match flashagent_svc::updater::check_for_updates(ch, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
-                            // Asked for by hand: go straight on to the
-                            // download instead of making the user press
-                            // Ctrl+U a second time.
-                            Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, checksums_url, .. }) => {
-                                let progress_tx = update_tx_clone.clone();
-                                let ver_for_progress = target.clone();
-                                let result = flashagent_svc::updater::download_and_apply_with_progress(
-                                    &download_url,
-                                    &asset_name,
-                                    checksums_url.as_deref(),
-                                    move |stage| {
-                                        let _ = progress_tx.send(UpdateNotice::Progress {
-                                            version: ver_for_progress.clone(),
-                                            stage,
-                                        });
-                                    },
-                                )
-                                .await;
-                                let _ = update_tx_clone.send(match result {
-                                    Ok(_) => UpdateNotice::Ready { version: target },
-                                    Err(e) => UpdateNotice::Failed { error: e.to_string() },
-                                });
-                            }
-                            Ok(flashagent_svc::updater::UpdateStatus::UpToDate { current, .. }) => {
-                                let _ = update_tx_clone.send(UpdateNotice::UpToDate {
-                                    version: current,
-                                });
-                            }
-                            Err(e) => {
-                                let _ = update_tx_clone.send(UpdateNotice::Failed { error: e.to_string() });
-                            }
-                        }
-                    });
-                } else {
-                    self.background = Some(BackgroundNotice::fading("Auto-updater is disabled in dev mode", 6));
-                    self.renderer.request_reprint();
-                }
+                self.start_or_watch_update(cx);
             }
 
             // F4 or CTRL + T or ALT + T: open Thinking Effort menu (supports alternative keyboard layouts)
@@ -414,6 +438,7 @@ impl App {
             KeyCode::BackTab | KeyCode::Tab if matches!(code, KeyCode::BackTab) || mods.contains(KeyModifiers::SHIFT) => {
                 let next_mode = cx.perm.state().mode().next();
                 cx.perm.state().set_mode(next_mode);
+                self.remember_mode(next_mode);
                 refresh_welcome_card_if_before_user_msg(
                     &mut self.chat,
                     &mut self.renderer,

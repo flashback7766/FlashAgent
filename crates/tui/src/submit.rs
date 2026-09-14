@@ -18,7 +18,8 @@ impl App {
                         self.autocomplete_idx = 0;
                         self.chat.push_system(
                             "Commands & Skills (Tab to autocomplete):\n\
-                             • /goal [--steps N] [--time 30m] [--tokens 200k] <task> — autonomous run under a budget\n\
+                             • /goal <task>           — autonomous run; its limits live in Settings → Goal\n\
+                             • /resume                — pick a saved session from this folder and continue it\n\
                              • /settings (or Tab)     — open settings configuration tab\n\
                              • /context               — show detailed context window breakdown\n\
                              • /verbose [all|last|off] — toggle verbose mode (or press F2 / Alt+O / Ctrl+O)\n\
@@ -39,7 +40,7 @@ impl App {
                              • /skill:<name>          — invoke a skill from .agents/skills/\n\
                              • /exit                  — save the session and quit\n\
                              • Tab                    — autocomplete popup or settings tab\n\
-                             • Esc                    — dismiss suggestions / interrupt; quits on an empty prompt"
+                             • Esc                    — dismiss suggestions / interrupt; twice on an empty prompt quits"
                         );
                         return Flow::Continue;
                     }
@@ -49,26 +50,29 @@ impl App {
                         self.autocomplete_idx = 0;
                         self.chat.push_system(&format!(
                             "Autonomous Goal Mode:\n\
-                             Usage: /goal [--steps N] [--time 30m] [--tokens 200k] <task description>\n\
-                             Example: /goal --time 20m Refactor error handling in core crate and run test suite\n\
-                             Budgets default to {} and stop the run when reached; --tokens counts generated tokens only.\n\
-                             In goal mode, FlashAgent lifts all permission gates, maximizes reasoning, and executes autonomously without human interruption until a budget or the task ends it.",
-                            GoalBudgets::default().summary()
+                             Usage: /goal <task description>\n\
+                             Example: /goal Refactor error handling in the core crate and run the test suite\n\
+                             Limits: {} — change them in Settings → Goal.\n\
+                             In goal mode FlashAgent approves its own tool calls (dangerous shell commands are refused), \
+                             thinks at maximum effort and works on its own. A question it asks you waits {} for an answer, \
+                             then the run carries on without it.",
+                            GoalBudgets::from_config(&self.config).summary(),
+                            flashagent_tui::goal::human_duration(flashagent_tools::GOAL_QUESTION_TIMEOUT)
                         ));
                         return Flow::Continue;
                     } else if let Some(task) = trimmed.strip_prefix("/goal ") {
                         let task = task.to_string();
                         self.input.clear();
                         self.autocomplete_idx = 0;
-                        let (goal_budgets, task_desc) =
-                            match flashagent_tui::goal::parse_goal_command(&task) {
-                                Ok(parsed) => parsed,
-                                Err(msg) => {
-                                    notice!(&msg);
-                                    self.renderer.request_reprint();
-                                    return Flow::Continue;
-                                }
-                            };
+                        let task_desc = match flashagent_tui::goal::parse_goal_task(&task) {
+                            Ok(task) => task,
+                            Err(msg) => {
+                                notice!(&msg);
+                                self.renderer.request_reprint();
+                                return Flow::Continue;
+                            }
+                        };
+                        let goal_budgets = GoalBudgets::from_config(&self.config);
 
                         // Save previous state to roll back upon goal completion
                         self.goal_state = Some(SavedGoalState {
@@ -82,6 +86,7 @@ impl App {
 
                         // Lift restrictions for autonomous execution
                         cx.perm.state().set_mode(PermissionMode::Bypass);
+                        cx.perm.state().set_goal_active(true);
                         self.current_effort = "high".to_string();
                         cx.tools_arc.set_goal_mode(true);
 
@@ -110,7 +115,11 @@ impl App {
                              You are operating in fully autonomous /goal mode.\n\
                              Target goal: {}\n\n\
                              Autonomous Rules:\n\
-                             1. Do NOT ask clarifying questions or seek user confirmation. All tool actions are pre-approved.\n\
+                             1. Work on your own: tool actions are pre-approved, except dangerous shell commands \
+                             (force pushes, hard resets, recursive force deletes, sudo), which are refused. Ask the \
+                             user with ask_user only when you are truly blocked on a decision that is theirs; if no \
+                             answer comes within {}, pick the most reasonable option yourself, carry on, and name \
+                             that choice in your summary.\n\
                              2. Plan, research, edit, execute, and verify completely on your own.\n\
                              3. Thoroughly test and verify your changes before finishing.\n\
                              4. Conclude with a clear structured summary of what was accomplished.\n\
@@ -118,11 +127,21 @@ impl App {
                              and again whenever a step finishes or the plan changes — the person \
                              who started this run watches it live and has no other way to see where \
                              the run stands.\n\n\
-                             Budget for this run: {}. When it runs out the run is stopped wherever it \
-                             is, so do the load-bearing work first and say plainly what is left \
-                             unfinished or unverified rather than claiming success.",
+                             {}",
                             task_desc,
-                            goal_budgets.summary()
+                            flashagent_tui::goal::human_duration(flashagent_tools::GOAL_QUESTION_TIMEOUT),
+                            if goal_budgets.is_unlimited() {
+                                "This run has no budget: it ends when you finish or the user stops it. Say plainly \
+                                 what is left unfinished or unverified rather than claiming success."
+                                    .to_string()
+                            } else {
+                                format!(
+                                    "Budget for this run: {}. When it runs out the run is stopped wherever it \
+                                     is, so do the load-bearing work first and say plainly what is left \
+                                     unfinished or unverified rather than claiming success.",
+                                    goal_budgets.summary()
+                                )
+                            }
                         );
 
                         let first = !self.history.iter().any(|m| m.role == flashagent_llm::Role::User);
@@ -363,6 +382,7 @@ impl App {
                         self.autocomplete_idx = 0;
                         let next_mode = cx.perm.state().mode().next();
                         cx.perm.state().set_mode(next_mode);
+                        self.remember_mode(next_mode);
                         refresh_welcome_card_if_before_user_msg(
                             &mut self.chat,
                             &mut self.renderer,
@@ -400,6 +420,7 @@ impl App {
                         };
                         if let Some(mode) = m {
                             cx.perm.state().set_mode(mode);
+                            self.remember_mode(mode);
                             refresh_welcome_card_if_before_user_msg(
                                 &mut self.chat,
                                 &mut self.renderer,
@@ -420,6 +441,13 @@ impl App {
                         return Flow::Continue;
                     }
 
+                    if trimmed == "/resume" {
+                        self.input.clear();
+                        self.autocomplete_idx = 0;
+                        self.open_session_picker(cx.cwd_display, cx.session_id);
+                        return Flow::Continue;
+                    }
+
                     if trimmed == "/update" {
                         self.input.clear();
                         self.autocomplete_idx = 0;
@@ -427,29 +455,9 @@ impl App {
                             self.chat.push_system("  \x1b[38;2;225;175;95mAuto-updater is disabled in dev mode\x1b[0m (running from source repository / cargo build).\n  To update your dev build, pull latest git commits and run `cargo build --release`.");
                             return Flow::Continue;
                         }
-                        let channel = self.config.update_channel;
-                        notice!(&format!("Checking for updates on {} channel...", channel.label()));
-                        let update_tx_clone = cx.update_tx.clone();
-                        tokio::spawn(async move {
-                            match flashagent_svc::updater::check_for_updates(channel, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
-                                Ok(flashagent_svc::updater::UpdateStatus::UpdateAvailable { target, asset_name, download_url, checksums_url, .. }) => {
-                                    let _ = update_tx_clone.send(UpdateNotice::Available {
-                                        version: target,
-                                        asset_name,
-                                        download_url,
-                                        checksums_url,
-                                    });
-                                }
-                                Ok(flashagent_svc::updater::UpdateStatus::UpToDate { current, .. }) => {
-                                    let _ = update_tx_clone.send(UpdateNotice::UpToDate {
-                                        version: current,
-                                    });
-                                }
-                                Err(e) => {
-                                    let _ = update_tx_clone.send(UpdateNotice::Failed { error: e.to_string() });
-                                }
-                            }
-                        });
+                        // The same as Ctrl+U: check, download and install in
+                        // one go, or show the update already under way.
+                        self.start_or_watch_update(cx);
                         return Flow::Continue;
                     }
 
@@ -648,6 +656,7 @@ impl App {
                             None,
                             None,
                             None,
+                            None,
                             &self.context_usage,
                             FrameState {
                                 input: &self.input,
@@ -678,7 +687,6 @@ impl App {
                                 ttft_display: None,
                                 background: self.background.as_ref().map(|b| b.text.as_str()),
                                 channel_prompt: None,
-                                quit_prompt: None,
                                 turn_phase: None,
                                 attachments: &[],
         background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
@@ -1005,14 +1013,6 @@ impl App {
                     // Sending a new prompt collapses the previous turn's expanded thinking.
                     self.last_expanded = false;
 
-                    // What the user types decides what the labels are
-                    // written in — in both directions. Detecting only
-                    // Russian left an English conversation labelled
-                    // "Разбираю запрос" for anyone whose config said
-                    // ru, and nothing they typed could change it back.
-                    if let Some(lang) = conversation_language(&text) {
-                        self.chat.set_language(lang);
-                    }
                     // A path typed out is still the user pointing at
                     // a picture — but only a path. Naming a file in a
                     // sentence ("open diagram.png and tell me...") is
