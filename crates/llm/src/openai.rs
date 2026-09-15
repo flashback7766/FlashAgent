@@ -85,7 +85,7 @@ impl OpenAiCompat {
             // legitimately stream for many minutes. An idle read timeout
             // catches a server that stopped sending instead.
             client: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
+                .connect_timeout(Duration::from_secs(3))
                 .read_timeout(Duration::from_secs(300))
                 .build()
                 .unwrap_or_default(),
@@ -209,6 +209,84 @@ impl OpenAiCompat {
         self.profile.read().ok().and_then(|p| p.clone())
     }
 
+    async fn probe_candidate(
+        client: &reqwest::Client,
+        url: &str,
+        api_key: Option<&str>,
+    ) -> Option<serde_json::Value> {
+        let mut req = client.get(url).timeout(std::time::Duration::from_millis(1500));
+        if let Some(key) = api_key {
+            req = req.bearer_auth(key);
+        }
+        if let Ok(resp) = req.send().await {
+            if resp.status().is_success() {
+                return resp.json::<serde_json::Value>().await.ok();
+            }
+        }
+        None
+    }
+
+    fn apply_discovery(
+        &self,
+        url: &str,
+        val: &serde_json::Value,
+        extra_v0: Option<&serde_json::Value>,
+    ) -> Option<crate::thinking::ServerDiscovery> {
+        let kind = if url.ends_with("/api/v1/models") || url.ends_with("/api/v0/models") {
+            crate::thinking::ServerKind::LmStudio
+        } else if val["data"]
+            .as_array()
+            .is_some_and(|d| d.iter().any(|m| m["owned_by"] == "llamacpp"))
+        {
+            crate::thinking::ServerKind::LlamaCpp
+        } else {
+            crate::thinking::ServerKind::Other
+        };
+
+        let mut models = crate::thinking::parse_server_models(val);
+        if let Some(extra) = extra_v0 {
+            models = crate::thinking::merge_server_models(models, crate::thinking::parse_server_models(extra));
+        }
+
+        if models.is_empty() {
+            return None;
+        }
+
+        if let Ok(mut lock) = self.working_models_url.write() {
+            *lock = Some(url.to_string());
+        }
+        let current_model = self.model();
+        let active_opt = models
+            .iter()
+            .find(|m| m.is_loaded && !current_model.is_empty() && (m.id == current_model || m.id.contains(&current_model) || current_model.contains(&m.id)))
+            .cloned()
+            .or_else(|| models.iter().find(|m| m.is_loaded).cloned())
+            .or_else(|| models.iter().find(|m| !current_model.is_empty() && (m.id == current_model || m.id.contains(&current_model) || current_model.contains(&m.id))).cloned())
+            .or_else(|| models.first().cloned());
+
+        if let Some(ref active) = active_opt {
+            self.set_model(&active.id);
+            if let Ok(mut lock) = self.profile.write() {
+                if active.thinking.supported || lock.is_none() {
+                    *lock = Some(active.thinking.clone());
+                }
+            }
+        }
+
+        let disc = crate::thinking::ServerDiscovery {
+            base_url: self.base_url.clone(),
+            models,
+            active_model: active_opt,
+            kind,
+        };
+
+        if let Ok(mut lock) = self.discovery.write() {
+            *lock = Some(disc.clone());
+        }
+
+        Some(disc)
+    }
+
     /// Discover available models, loaded instances, context windows, and
     /// reasoning capabilities across LM Studio `/api/v1/models`, `/api/v0/models`,
     /// or standard `/v1/models`.
@@ -216,113 +294,73 @@ impl OpenAiCompat {
         let root = self.base_url.strip_suffix("/v1").unwrap_or(&self.base_url);
         let cached_url = self.working_models_url.read().ok().and_then(|u| u.clone());
 
-        let urls_to_try: Vec<String> = if let Some(ref url) = cached_url {
-            let mut list = vec![url.clone()];
-            let defaults = [
-                format!("{root}/api/v1/models"),
-                format!("{root}/api/v0/models"),
-                format!("{}/models", self.base_url),
-                format!("{root}/models"),
-            ];
-            for d in defaults {
-                if &d != url {
-                    list.push(d);
+        // Fast path: if a previous look already found a working endpoint, try it first
+        if let Some(ref url) = cached_url {
+            if let Some(val) = Self::probe_candidate(&self.client, url, self.api_key.as_deref()).await {
+                let mut extra_v0 = None;
+                let extra_holder;
+                if url.ends_with("/api/v1/models") {
+                    let v0_url = format!("{root}/api/v0/models");
+                    extra_holder = Self::probe_candidate(&self.client, &v0_url, self.api_key.as_deref()).await;
+                    extra_v0 = extra_holder.as_ref();
+                }
+                if let Some(disc) = self.apply_discovery(url, &val, extra_v0) {
+                    return Some(disc);
                 }
             }
-            list
-        } else {
-            vec![
-                format!("{root}/api/v1/models"),
-                format!("{root}/api/v0/models"),
-                format!("{}/models", self.base_url),
-                format!("{root}/models"),
-            ]
-        };
-
-        for url in urls_to_try {
-            let mut req = self.client.get(&url).timeout(std::time::Duration::from_secs(2));
-            if let Some(key) = &self.api_key {
-                req = req.bearer_auth(key);
+            if let Ok(mut lock) = self.working_models_url.write() {
+                *lock = None;
             }
-            if let Ok(resp) = req.send().await {
-                if resp.status().is_success() {
-                    if let Ok(val) = resp.json::<serde_json::Value>().await {
-                        let kind = if url.ends_with("/api/v1/models") || url.ends_with("/api/v0/models") {
-                            crate::thinking::ServerKind::LmStudio
-                        } else if val["data"]
-                            .as_array()
-                            .is_some_and(|d| d.iter().any(|m| m["owned_by"] == "llamacpp"))
-                        {
-                            crate::thinking::ServerKind::LlamaCpp
-                        } else {
-                            crate::thinking::ServerKind::Other
-                        };
-                        let mut models = crate::thinking::parse_server_models(&val);
-                        if !models.is_empty() && url.ends_with("/api/v1/models") {
-                            // LM Studio's v1 listing can leave models out,
-                            // the loaded one included; v0 lists them all.
-                            let mut req = self.client.get(format!("{root}/api/v0/models")).timeout(std::time::Duration::from_secs(2));
-                            if let Some(key) = &self.api_key {
-                                req = req.bearer_auth(key);
-                            }
-                            if let Ok(resp) = req.send().await {
-                                if resp.status().is_success() {
-                                    if let Ok(extra) = resp.json::<serde_json::Value>().await {
-                                        models = crate::thinking::merge_server_models(models, crate::thinking::parse_server_models(&extra));
-                                    }
-                                }
-                            }
-                        }
-                        if !models.is_empty() {
-                            if let Ok(mut lock) = self.working_models_url.write() {
-                                *lock = Some(url);
-                            }
-                            let current_model = self.model();
-                            // Pick active model:
-                            // 1. Current model if it matches an entry and is loaded in server memory
-                            // 2. Any model that is actively loaded in server memory
-                            // 3. Current model if it matches an entry (for servers not reporting loaded state)
-                            // 4. Otherwise first model in the list
-                            let active_opt = models
-                                .iter()
-                                .find(|m| m.is_loaded && !current_model.is_empty() && (m.id == current_model || m.id.contains(&current_model) || current_model.contains(&m.id)))
-                                .cloned()
-                                .or_else(|| models.iter().find(|m| m.is_loaded).cloned())
-                                .or_else(|| models.iter().find(|m| !current_model.is_empty() && (m.id == current_model || m.id.contains(&current_model) || current_model.contains(&m.id))).cloned())
-                                .or_else(|| models.first().cloned());
+        }
 
-                            if let Some(ref active) = active_opt {
-                                self.set_model(&active.id);
-                                // Presets the server lists always win. Anything
-                                // less — "no", or saying nothing — only fills an
-                                // empty slot: without a profile the request falls
-                                // back to a guess, but a profile the server's own
-                                // errors taught must survive the next look, which
-                                // comes every 15 seconds.
-                                if let Ok(mut lock) = self.profile.write() {
-                                    if active.thinking.supported || lock.is_none() {
-                                        *lock = Some(active.thinking.clone());
-                                    }
-                                }
-                            }
+        // Candidates to probe concurrently, ordered by priority
+        let mut candidate_urls = Vec::with_capacity(4);
+        let defaults = [
+            format!("{root}/api/v1/models"),
+            format!("{root}/api/v0/models"),
+            format!("{}/models", self.base_url),
+            format!("{root}/models"),
+        ];
+        for d in defaults {
+            if !candidate_urls.contains(&d) {
+                candidate_urls.push(d);
+            }
+        }
 
-                            let disc = crate::thinking::ServerDiscovery {
-                                base_url: self.base_url.clone(),
-                                models,
-                                active_model: active_opt,
-                                kind,
-                            };
+        // Probe candidate URLs concurrently to prevent sequential timeout stalls
+        let probe_futs: Vec<_> = candidate_urls
+            .iter()
+            .map(|u| {
+                let u = u.clone();
+                let client = self.client.clone();
+                let key = self.api_key.clone();
+                async move {
+                    let val = Self::probe_candidate(&client, &u, key.as_deref()).await;
+                    (u, val)
+                }
+            })
+            .collect();
+        let results = futures::future::join_all(probe_futs).await;
 
-                            if let Ok(mut lock) = self.discovery.write() {
-                                *lock = Some(disc.clone());
-                            }
+        let v0_url = format!("{root}/api/v0/models");
+        let v0_cached = results
+            .iter()
+            .find(|(u, v)| u == &v0_url && v.is_some())
+            .and_then(|(_, v)| v.as_ref());
 
-                            return Some(disc);
-                        }
-                    }
+        for (url, maybe_val) in &results {
+            if let Some(val) = maybe_val {
+                let extra_v0 = if url.ends_with("/api/v1/models") {
+                    v0_cached
+                } else {
+                    None
+                };
+                if let Some(disc) = self.apply_discovery(url, val, extra_v0) {
+                    return Some(disc);
                 }
             }
         }
+
         None
     }
 

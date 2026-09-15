@@ -63,7 +63,7 @@ struct QuestionUiState {
     selected_indices: std::collections::BTreeSet<usize>,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     let mut config = AppConfig::load();
     let mut force_setup = false;
@@ -211,7 +211,7 @@ async fn main() -> Result<()> {
     // Spawn server discovery in background immediately so it collects
     // models, context window, and thinking presets concurrently while the user interacts with the startup screen.
     let backend_initial = flashagent_llm::OpenAiCompat::new(&url, &model, api_key.clone());
-    let discovery_task = tokio::spawn(async move {
+    let mut discovery_task = tokio::spawn(async move {
         backend_initial.discover_server().await
     });
 
@@ -245,7 +245,16 @@ async fn main() -> Result<()> {
     // &'static references (the process is the session).
     let backend = flashagent_llm::OpenAiCompat::new(&url, &model, api_key);
     backend.set_max_retries(config.network_retries);
-    let discovery = discovery_task.await.unwrap_or(None);
+
+    let startup_timeout = if model.is_empty() {
+        std::time::Duration::from_millis(2000)
+    } else {
+        std::time::Duration::from_millis(500)
+    };
+    let (discovery, pending_discovery) = match tokio::time::timeout(startup_timeout, &mut discovery_task).await {
+        Ok(res) => (res.unwrap_or(None), None),
+        Err(_) => (None, Some(discovery_task)),
+    };
 
     // If model was not specified, auto-detect loaded model or first available model
     if model.is_empty() {
@@ -416,6 +425,7 @@ async fn main() -> Result<()> {
         session_start,
         cwd: cwd.clone(),
         first_run_verdict,
+        pending_discovery,
     })
     .await;
     let _ = crossterm::execute!(
@@ -609,6 +619,7 @@ struct AppContext {
     session_start: SessionStart,
     /// Verdict of the first-run tool check, to be said in the conversation.
     first_run_verdict: Option<String>,
+    pending_discovery: Option<tokio::task::JoinHandle<Option<flashagent_llm::ServerDiscovery>>>,
 }
 
 fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::io::Result<String> {
@@ -672,10 +683,20 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         session_start,
         cwd,
         first_run_verdict,
+        pending_discovery,
     } = ctx;
     let cancel = Arc::new(AtomicBool::new(false));
     let question_ui_state = QuestionUiState::default();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
+
+    if let Some(task) = pending_discovery {
+        let tx_disc = tx.clone();
+        tokio::spawn(async move {
+            if let Ok(Some(disc)) = task.await {
+                let _ = tx_disc.send(UiEvent::ServerDiscovered(disc));
+            }
+        });
+    }
 
     // Keyboard and mouse reader thread: crossterm is blocking, tokio is async.
     {
