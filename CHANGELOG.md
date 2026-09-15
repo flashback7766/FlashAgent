@@ -1,5 +1,13 @@
 # Changelog
 
+## b287 — fast non-blocking startup and memory footprint optimization
+
+- **Instant startup (no 10-second freeze).** Discovery of local and remote LLM endpoints now runs candidate probes concurrently (`/api/v1/models`, `/api/v0/models`, `/models`) with a short 1.5s probe timeout instead of blocking on 4 sequential requests.
+- **Fast-path cached discovery.** Subsequent discovery polls (and server checks) reuse the working models endpoint directly, eliminating redundant endpoint scans.
+- **Non-blocking TUI initialization.** Startup waits at most 500ms for server discovery before rendering the initial TUI frame. If the LLM server is remote, slow, or offline, FlashAgent renders immediately and completes discovery asynchronously in the background, forwarding results seamlessly without freezing the terminal.
+- **Memory footprint cut by 55% (~9.7 MB RSS).** Tuned the Tokio multi-thread runtime worker pool (`worker_threads = 4`) and reduced thread stack allocation, cutting idle RSS from 23 MB down to ~9.7 MB and dropping thread count from 18+ to 6.
+- **Connection timeout reduction.** Reduced `reqwest` connection timeout from 10s to 3s to prevent hung TCP SYN connections on unreachable or firewalled hosts.
+
 ## b286 — send screenshots without prompt text
 
 - **Image-only message submission.** Pasting a screenshot from the clipboard (`Ctrl+V`) or dropping an image file on the terminal can now be submitted directly by pressing Enter without having to type any accompanying text.
