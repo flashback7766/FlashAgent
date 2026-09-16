@@ -118,9 +118,40 @@ fn canonical_names(tool: &str, mut value: serde_json::Value) -> serde_json::Valu
     if tool == "edit_file" {
         normalize_edit_target(obj);
         if let Some(files) = obj.get_mut("files").and_then(|f| f.as_array_mut()) {
-            for item in files.iter_mut().filter_map(|f| f.as_object_mut()) {
-                rename_first(item, "path", PATH_ALIASES);
-                normalize_edit_target(item);
+            for item in files.iter_mut() {
+                if let Some(path) = item.as_str().map(str::to_string) {
+                    *item = serde_json::json!({ "path": path });
+                } else if let Some(entry) = item.as_object_mut() {
+                    rename_first(entry, "path", PATH_ALIASES);
+                    normalize_edit_target(entry);
+                }
+            }
+        }
+        if let Some(files) = obj.get("files").and_then(|f| f.as_array()).cloned() {
+            if files.len() == 1 {
+                let first = &files[0];
+                let file_path = first.get("path").and_then(|p| p.as_str()).map(str::to_string);
+                let file_edits = first.get("edits").cloned();
+                if let Some(p) = file_path {
+                    if !obj.contains_key("path") {
+                        obj.insert("path".to_string(), serde_json::Value::String(p));
+                    }
+                }
+                if let Some(e) = file_edits {
+                    if !obj.contains_key("edits") {
+                        obj.insert("edits".to_string(), e);
+                    }
+                }
+                obj.remove("files");
+            } else if !files.is_empty() && obj.contains_key("edits") {
+                let top_edits = obj.remove("edits").unwrap();
+                if let Some(files_mut) = obj.get_mut("files").and_then(|f| f.as_array_mut()) {
+                    for f in files_mut.iter_mut().filter_map(|f| f.as_object_mut()) {
+                        if !f.contains_key("edits") {
+                            f.insert("edits".to_string(), top_edits.clone());
+                        }
+                    }
+                }
             }
         }
     }
@@ -700,6 +731,22 @@ mod tests {
                 { "path": "a.rs", "edits": [ { "old_string": "x", "new_string": "y" } ] },
                 { "path": "b.rs", "edits": [ { "old_string": "p", "new_string": "q" } ] }
             ] })
+        );
+    }
+
+    #[test]
+    fn single_file_in_files_array_with_root_edits_becomes_path_and_edits() {
+        assert_eq!(
+            args("edit_file", r#"{"files":[{"path":"src/parser.rs"}],"edits":[{"old_string":"a","new_string":"b"}]}"#),
+            serde_json::json!({ "path": "src/parser.rs", "edits": [ { "old_string": "a", "new_string": "b" } ] })
+        );
+        assert_eq!(
+            args("edit_file", r#"{"files":["src/parser.rs"],"edits":[{"old_string":"a","new_string":"b"}]}"#),
+            serde_json::json!({ "path": "src/parser.rs", "edits": [ { "old_string": "a", "new_string": "b" } ] })
+        );
+        assert_eq!(
+            args("edit_file", r#"{"files":[{"path":"src/parser.rs","edits":[{"old_string":"a","new_string":"b"}]}]}"#),
+            serde_json::json!({ "path": "src/parser.rs", "edits": [ { "old_string": "a", "new_string": "b" } ] })
         );
     }
 

@@ -3,10 +3,19 @@ import os
 import subprocess
 import time
 import sys
+import shutil
+import json
 
 def main():
     cast_path = "/tmp/tools.cast"
     gif_path = os.path.abspath("docs/screenshots/gifs/tools-diff.gif")
+    workdir = "/tmp/parser-demo"
+
+    if os.path.exists(workdir):
+        shutil.rmtree(workdir)
+    os.makedirs(os.path.join(workdir, "src"), exist_ok=True)
+    with open(os.path.join(workdir, "src", "parser.rs"), "w") as f:
+        f.write("fn a() {}\n\npub fn parse_duration() {}\n")
 
     subprocess.run(["tmux", "kill-session", "-t", "demo-tools"], stderr=subprocess.DEVNULL)
     time.sleep(0.5)
@@ -17,13 +26,22 @@ def main():
     if os.path.exists(cast_path):
         os.remove(cast_path)
 
-    cmd = f"asciinema rec -f asciicast-v2 {cast_path} -c ./target/release/flashagent"
-    print(f"Launching tmux session for tools ({cols}x{rows})...")
-    subprocess.run(["tmux", "new-session", "-d", "-s", "demo-tools", "-x", str(cols), "-y", str(rows), cmd], check=True)
+    cfg_path = "/tmp/fa_tools_cfg.json"
+    with open(os.path.expanduser("~/.flashagent/config.json")) as f:
+        cfg = json.load(f)
+    cfg["permission_mode"] = "Manual"
+    with open(cfg_path, "w") as f:
+        json.dump(cfg, f)
+
+    bin_path = os.path.abspath("./target/release/flashagent")
+    cmd = f"asciinema rec -f asciicast-v2 {cast_path} -c {bin_path}"
+    print(f"Launching tmux session for tools in {workdir} ({cols}x{rows})...")
+    env = dict(os.environ, FLASHAGENT_TRUST_DIR="1", FLASHAGENT_CONFIG_PATH=cfg_path)
+    subprocess.run(["tmux", "new-session", "-d", "-s", "demo-tools", "-c", workdir, "-x", str(cols), "-y", str(rows), cmd], check=True, env=env)
 
     # Wait for startup
     print("Waiting for startup...")
-    for _ in range(20):
+    for _ in range(25):
         time.sleep(0.4)
         out = subprocess.run(["tmux", "capture-pane", "-t", "demo-tools", "-p"], capture_output=True, text=True).stdout
         if "FlashAgent" in out or "Welcome" in out:
@@ -31,37 +49,40 @@ def main():
 
     time.sleep(1.8)
 
-    prompt = "Read Cargo.toml and list workspace members"
+    prompt = "Add doc comment /// A bare number means minutes. before pub fn parse_duration() in src/parser.rs"
     print(f"Typing prompt: {prompt}")
     for char in prompt:
         subprocess.run(["tmux", "send-keys", "-t", "demo-tools", "-l", char])
-        time.sleep(0.035)
+        time.sleep(0.025)
 
     time.sleep(0.6)
     subprocess.run(["tmux", "send-keys", "-t", "demo-tools", "Enter"])
-    print("Sent Enter, monitoring tool execution...")
+    print("Sent Enter, monitoring tool execution and diff approval card...")
 
     start_time = time.time()
-    seen_generation = False
-    idle_count = 0
+    approved = False
+    seen_edit = False
 
-    while time.time() - start_time < 50:
+    while time.time() - start_time < 90:
         time.sleep(0.6)
         out = subprocess.run(["tmux", "capture-pane", "-t", "demo-tools", "-p"], capture_output=True, text=True).stdout
         
-        is_generating = ("Prefill" in out or "Tokens -" in out or "Working" in out)
-        if is_generating:
-            seen_generation = True
-            idle_count = 0
-            for line in out.splitlines():
-                if "Tokens -" in line or "Prefill" in line or "Tool" in line:
-                    print(f"  [streaming] {line.strip()[:70]}")
-                    break
-        elif seen_generation:
-            idle_count += 1
-            if idle_count >= 5:
-                print("Generation complete!")
-                break
+        # Check if approval card appeared
+        if ("Allow" in out or "Deny" in out or "Confirm:" in out) and not approved:
+            print("Detected diff approval card! Pausing for viewer...")
+            time.sleep(2.5)
+            print("Sending Enter to Allow edit...")
+            subprocess.run(["tmux", "send-keys", "-t", "demo-tools", "Enter"])
+            approved = True
+            time.sleep(1.5)
+            continue
+
+        if ("Edited" in out or "Edited parser.rs" in out) and approved:
+            seen_edit = True
+
+        if seen_edit and not ("Tokens -" in out or "Working" in out or "Prefill" in out):
+            print("Tool execution and diff approved cleanly!")
+            break
 
     time.sleep(3.5)
     print("Stopping asciinema cleanly on completed screen...")
@@ -70,6 +91,9 @@ def main():
         subprocess.run(["kill", "-INT", pane_pid])
         time.sleep(1.0)
     subprocess.run(["tmux", "kill-session", "-t", "demo-tools"], stderr=subprocess.DEVNULL)
+
+    if os.path.exists(workdir):
+        shutil.rmtree(workdir, ignore_errors=True)
 
     print(f"Rendering tools-diff.gif to {gif_path}...")
     agg_cmd = [

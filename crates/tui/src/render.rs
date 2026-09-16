@@ -270,10 +270,19 @@ impl Renderer {
                 )
             };
             let value_w = inner_w.saturating_sub(14).max(20);
-            let (label, value) = if let Some(cmd) = field("command") {
+            let (label, value): (&str, String) = if let Some(cmd) = field("command") {
                 ("command:", cmd)
             } else if let Some(path) = field("path") {
                 ("target:", flashagent_tui::relative_to_cwd(&path))
+            } else if let Some(files) = args.get("files").and_then(|f| f.as_array()) {
+                if let Some(first_path) = files.first().and_then(|f| f.get("path").or_else(|| f.get("filePath"))).and_then(|p| p.as_str()) {
+                    let extra = if files.len() > 1 { format!(" (+{} more)", files.len() - 1) } else { String::new() };
+                    ("target:", format!("{}{extra}", flashagent_tui::relative_to_cwd(first_path)))
+                } else if args.as_object().is_some_and(|o| !o.is_empty()) {
+                    ("args:", card_safe(&args.to_string()))
+                } else {
+                    ("", String::new())
+                }
             } else if args.as_object().is_some_and(|o| !o.is_empty()) {
                 ("args:", card_safe(&args.to_string()))
             } else {
