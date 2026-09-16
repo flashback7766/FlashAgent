@@ -387,8 +387,8 @@ impl TextToolScanner {
         Some(self.buf.drain(..cut).collect())
     }
 
-    /// Offset of a bare-JSON candidate (`{` + whitespace + `"name"` or tool
-    /// key) at the start of a line and outside fences. None when absent.
+    /// Offset of a bare-JSON candidate (`{` or `[` + whitespace + `"name"` or tool
+    /// key) at the start of a line, or fenced with ```json. None when absent.
     fn find_bare_start(&self) -> Option<usize> {
         let line_starts = std::iter::once(0)
             .filter(|_| !self.mid_line)
@@ -400,8 +400,22 @@ impl TextToolScanner {
             let rest = &self.buf[start..];
             let trimmed = rest.trim_start_matches([' ', '\t']);
             let at = start + (rest.len() - trimmed.len());
-            if trimmed.strip_prefix('{').is_some_and(is_tool_call_start) && !self.in_fence_at(at) {
+            if (trimmed.strip_prefix('{').is_some_and(is_tool_call_start)
+                || trimmed.strip_prefix('[').is_some_and(is_tool_call_start))
+                && !self.in_fence_at(at)
+            {
                 return Some(at);
+            }
+            if let Some(after_fence) = trimmed.strip_prefix("```") {
+                let after_lang = after_fence.strip_prefix("json").unwrap_or(after_fence);
+                if let Some(after_nl) = after_lang.strip_prefix("\r\n").or_else(|| after_lang.strip_prefix('\n')) {
+                    let inner = after_nl.trim_start_matches([' ', '\t']);
+                    if inner.strip_prefix('{').is_some_and(is_tool_call_start)
+                        || inner.strip_prefix('[').is_some_and(is_tool_call_start)
+                    {
+                        return Some(at);
+                    }
+                }
             }
         }
         None
@@ -458,14 +472,39 @@ impl TextToolScanner {
         Some((rest[open..open + len].to_string(), START_MISTRAL.len() + open + len))
     }
 
-    /// Bare JSON object starting at a line beginning with `{` + tool indicator.
+    /// Bare JSON object or array starting at a line beginning with `{` or `[` + tool indicator,
+    /// or wrapped in a ```json code fence.
     fn find_bare(&self) -> Option<(String, usize)> {
         let start = self.find_bare_start()?;
         if start != 0 {
             return None;
         }
-        let len = balanced_len(&self.buf)?;
-        Some((self.buf[..len].to_string(), len))
+        let rest = &self.buf;
+        let trimmed = rest.trim_start_matches([' ', '\t']);
+        let offset = rest.len() - trimmed.len();
+        if let Some(after_fence) = trimmed.strip_prefix("```") {
+            let after_lang = after_fence.strip_prefix("json").unwrap_or(after_fence);
+            let header_len = after_lang.as_ptr() as usize - trimmed.as_ptr() as usize;
+            let (after_nl, nl_len) = if let Some(s) = after_lang.strip_prefix("\r\n") {
+                (s, 2)
+            } else {
+                let s = after_lang.strip_prefix('\n')?;
+                (s, 1)
+            };
+            let inner = after_nl.trim_start_matches([' ', '\t']);
+            let inner_offset = after_nl.len() - inner.len();
+            let json_len = balanced_len(inner)?;
+            let after_json = &inner[json_len..];
+            let close_fence_len = if let Some(p) = after_json.find("```") {
+                p + 3
+            } else {
+                0
+            };
+            let consumed = offset + header_len + nl_len + inner_offset + json_len + close_fence_len;
+            return Some((inner[..json_len].to_string(), consumed));
+        }
+        let len = balanced_len(trimmed)?;
+        Some((trimmed[..len].to_string(), offset + len))
     }
 }
 
@@ -509,9 +548,24 @@ fn is_complete_json(body: &str) -> bool {
 /// Parse a block body into calls. An array yields one call per element and
 /// fails as a whole if any element is not a call.
 fn parse_calls(body: &str) -> Option<Vec<(String, String)>> {
-    let repaired = repair_json(body.trim())?;
+    let raw = body.trim();
+    let unquoted = if let Some(rest) = raw.strip_prefix("```") {
+        let rest = rest.strip_prefix("json").unwrap_or(rest);
+        let rest = rest.strip_prefix('\n').unwrap_or(rest);
+        rest.strip_suffix("```").unwrap_or(rest).trim()
+    } else {
+        raw
+    };
+    let repaired = repair_json(unquoted)?;
     let v: Value = serde_json::from_str(&repaired).ok()?;
     match v {
+        Value::Array(ref items)
+            if items.len() == 2 && items[0].is_string() && items[1].is_object() =>
+        {
+            let name = items[0].as_str()?.to_string();
+            let args_json = serde_json::to_string(&items[1]).ok()?;
+            Some(vec![(name, args_json)])
+        }
         Value::Array(items) => items.into_iter().map(parse_call_object).collect(),
         other => parse_call_object(other).map(|c| vec![c]),
     }
@@ -871,6 +925,17 @@ mod tests {
         assert!(out.iter().any(|e| matches!(
             e,
             ScannerEvent::ToolCall { name, args_json, .. } if name == "ask_user" && args_json.contains("\"multi_select\":false")
+        )));
+    }
+
+    #[test]
+    fn scanner_fenced_json_array_tool_call() {
+        let mut s = TextToolScanner::default();
+        let delta = "Reading Cargo.toml...\n```json\n[\n  \"read_file\",\n  {\n    \"files\": [\"Cargo.toml\"]\n  }\n]\n```\ndone";
+        let out = s.feed(delta);
+        assert!(out.iter().any(|e| matches!(
+            e,
+            ScannerEvent::ToolCall { name, args_json, .. } if name == "read_file" && args_json.contains("Cargo.toml")
         )));
     }
 
