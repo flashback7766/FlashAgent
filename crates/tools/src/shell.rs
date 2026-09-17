@@ -38,12 +38,22 @@ where
         None => return,
     };
     let mut chunk = [0u8; 8192];
+    // A character split across two reads is held back until its last bytes
+    // arrive; decoding each read on its own turned it into two U+FFFD.
+    let mut carry: Vec<u8> = Vec::new();
     loop {
         match stream.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) | Err(_) => {
+                if !carry.is_empty() {
+                    buffer.lock().push_str(&String::from_utf8_lossy(&carry));
+                }
+                break;
+            }
             Ok(n) => {
+                carry.extend_from_slice(&chunk[..n]);
+                let text = decode_complete(&mut carry);
                 let mut buf = buffer.lock();
-                buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                buf.push_str(&text);
                 if buf.len() > BUFFER_CAP {
                     let mut cut = buf.len() - BUFFER_CAP / 2;
                     while !buf.is_char_boundary(cut) {
@@ -54,6 +64,40 @@ where
             }
         }
     }
+}
+
+/// Decode what `bytes` holds up to a character still missing its last
+/// bytes, which stays in `bytes`. Invalid sequences decode as U+FFFD.
+fn decode_complete(bytes: &mut Vec<u8>) -> String {
+    let mut out = String::new();
+    let mut rest: &[u8] = bytes;
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(text) => {
+                out.push_str(text);
+                rest = &[];
+                break;
+            }
+            Err(e) => {
+                let (valid, after) = rest.split_at(e.valid_up_to());
+                out.push_str(std::str::from_utf8(valid).unwrap_or_default());
+                match e.error_len() {
+                    Some(bad) => {
+                        out.push('\u{FFFD}');
+                        rest = &after[bad..];
+                    }
+                    // Incomplete at the end: wait for the next read.
+                    None => {
+                        rest = after;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let keep = rest.to_vec();
+    *bytes = keep;
+    out
 }
 
 fn shell_command(cmd: &str) -> tokio::process::Command {
@@ -233,6 +277,21 @@ impl ShellRegistry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_character_split_across_reads_decodes_whole() {
+        let word = "привет".as_bytes();
+        let mut carry = word[..3].to_vec();
+        let first = super::decode_complete(&mut carry);
+        assert_eq!(first, "п");
+        assert_eq!(carry.len(), 1);
+        carry.extend_from_slice(&word[3..]);
+        assert_eq!(first + &super::decode_complete(&mut carry), "привет");
+        assert!(carry.is_empty());
+
+        let mut bad = vec![b'a', 0xff, b'b'];
+        assert_eq!(super::decode_complete(&mut bad), "a\u{FFFD}b");
+    }
+
     use super::*;
 
     #[tokio::test]

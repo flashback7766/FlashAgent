@@ -132,27 +132,25 @@ pub fn is_dev_mode() -> bool {
     false
 }
 
+/// Whether `rel` is offered on `channel`.
+///
+/// - Stable: stable releases only (`vX.Y.Z`, or the rolling `stable` /
+///   `release` release).
+/// - Beta: everything. The newest wins, so someone on beta also moves to a
+///   stable release that is newer than their build.
 fn on_channel(rel: &GitHubRelease, channel: UpdateChannel) -> bool {
     match channel {
-        // Stable: the rolling `stable`/`release` tag, or any non-prerelease
-        // that is not a beta build.
+        UpdateChannel::Beta => true,
         UpdateChannel::Stable => {
-            rel.tag_name == "stable"
-                || rel.tag_name == "release"
-                || (!rel.prerelease && rel.tag_name != "beta" && (rel.tag_name.starts_with('v') || !rel.tag_name.starts_with('b')))
+            if matches!(rel.tag_name.as_str(), "stable" | "release") {
+                return true;
+            }
+            if rel.prerelease || rel.tag_name == "beta" {
+                return false;
+            }
+            crate::Version::parse(&extract_release_version(rel)).is_some_and(|v| !v.is_beta())
         }
-        // Beta: the rolling `beta` tag, a pre-release, or a `b<N>` tag.
-        UpdateChannel::Beta => rel.tag_name == "beta" || rel.prerelease || rel.tag_name.starts_with('b'),
     }
-}
-
-/// Sortable rank of a version string: `b233` → (233,0,0), `v1.2.3` → (1,2,3).
-fn version_rank(version: &str) -> Option<(u64, u64, u64)> {
-    if let Some(n) = version.strip_prefix('b') {
-        return n.parse().ok().map(|b| (b, 0, 0));
-    }
-    let mut parts = version.strip_prefix('v')?.split(['.', '-']).map(|p| p.parse::<u64>().ok());
-    Some((parts.next()??, parts.next().flatten().unwrap_or(0), parts.next().flatten().unwrap_or(0)))
 }
 
 /// The newest release on `channel`. Chosen by version, not by list position:
@@ -163,56 +161,28 @@ pub fn find_target_release(releases: &[GitHubRelease], channel: UpdateChannel) -
     candidates
         .iter()
         .copied()
-        .filter_map(|r| version_rank(&extract_release_version(r)).map(|rank| (rank, r)))
+        .filter_map(|r| crate::Version::parse(&extract_release_version(r)).map(|version| (version, r)))
         .max_by_key(|(rank, _)| *rank)
         .map(|(_, r)| r)
         .or_else(|| candidates.first().copied())
 }
 
-/// Extract effective version string from release (from title like "FlashAgent b200", tag_name, or assets).
+/// The version a release carries, spelled canonically (`b287`, `v1.0.0`).
+///
+/// Rolling releases (`beta`, `stable`) are tagged with the channel, not the
+/// version, so it is looked for in order: the title ("FlashAgent b287"), the
+/// tag, the asset names, the notes. A release that names none gives the
+/// running version, so it never reads as an update.
 pub fn extract_release_version(rel: &GitHubRelease) -> String {
-    // 1. First search title (e.g. "FlashAgent b200" or "FlashAgent v1.0.0")
-    if let Some(ref name) = rel.name {
-        for word in name.split_whitespace() {
-            let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.');
-            if (clean.starts_with('b') && clean.len() > 1 && clean[1..].chars().all(|c| c.is_ascii_digit()))
-                || (clean.starts_with('v') && clean.len() > 1 && clean[1..].chars().next().is_some_and(|c| c.is_ascii_digit()))
-            {
-                return clean.to_string();
-            }
-        }
-    }
-
-    // 2. If tag_name is an actual version tag (not a channel tag like "beta" or "release")
-    let lower_tag = rel.tag_name.to_lowercase();
-    if lower_tag != "beta" && lower_tag != "release" && lower_tag != "stable" && lower_tag != "latest" {
-        return rel.tag_name.clone();
-    }
-
-    // 3. Search assets for version pattern like -b200- or _b200
-    for asset in &rel.assets {
-        for part in asset.name.split(['-', '_', '.']) {
-            if part.starts_with('b') && part.len() > 1 && part[1..].chars().all(|c| c.is_ascii_digit()) {
-                return part.to_string();
-            }
-            if part.starts_with('v') && part.len() > 1 && part[1..].chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                return part.to_string();
-            }
-        }
-    }
-
-    // 4. Search release body
-    if let Some(ref body) = rel.body {
-        for word in body.split_whitespace() {
-            let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.');
-            if clean.starts_with('b') && clean.len() > 1 && clean[1..].chars().all(|c| c.is_ascii_digit()) {
-                return clean.to_string();
-            }
-        }
-    }
-
-    // Fallback: never return rolling channel name as a version
-    current_version().to_string()
+    use crate::Version;
+    rel.name
+        .as_deref()
+        .and_then(Version::find_in)
+        .or_else(|| Version::parse(&rel.tag_name))
+        .or_else(|| rel.assets.iter().find_map(|a| Version::find_in(&a.name)))
+        .or_else(|| rel.body.as_deref().and_then(Version::find_in))
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| current_version().to_string())
 }
 
 /// Detect best matching asset for the current OS and architecture.
@@ -262,19 +232,13 @@ pub fn find_platform_asset(assets: &[ReleaseAsset]) -> Option<&ReleaseAsset> {
     None
 }
 
-/// Determine whether `target` represents a downgrade from `current`.
-pub fn is_downgrade(current: &str, target: &str, channel: UpdateChannel) -> bool {
-    if channel == UpdateChannel::Stable && current.starts_with('b') && target.starts_with('v') {
-        // Switching from Beta to Stable is a downgrade to official release
-        return true;
+/// Whether moving from `current` to `target` goes back in time, by the
+/// ordering in [`crate::version`]. Unparseable versions are never a downgrade.
+pub fn is_downgrade(current: &str, target: &str) -> bool {
+    match (crate::Version::parse(current), crate::Version::parse(target)) {
+        (Some(c), Some(t)) => t < c,
+        _ => false,
     }
-    // Simple tag / build number comparison
-    if let (Some(cur_b), Some(tgt_b)) = (current.strip_prefix('b'), target.strip_prefix('b')) {
-        if let (Ok(c), Ok(t)) = (cur_b.parse::<u64>(), tgt_b.parse::<u64>()) {
-            return t < c;
-        }
-    }
-    false
 }
 
 /// Checks GitHub releases API and returns update status.
@@ -316,10 +280,13 @@ pub async fn check_for_updates(channel: UpdateChannel, api_url: &str) -> anyhow:
 
     if let Some(target_rel) = find_target_release(&releases, channel) {
         let version = extract_release_version(target_rel);
-        let tag = target_rel.tag_name.clone();
-        // Check if version differs from current running version
-        let needs_update = (version != cur && version != format!("v{cur}")) || (tag != cur && tag != "beta" && tag != "release");
-        if needs_update && version != cur {
+        // Anything other than the version running now: a newer one, or an
+        // older one on the channel the user moved to (flagged a downgrade).
+        let differs = match (crate::Version::parse(&version), crate::Version::parse(cur)) {
+            (Some(target), Some(running)) => target != running,
+            _ => version != cur,
+        };
+        if differs {
             if let Some(asset) = find_platform_asset(&target_rel.assets) {
                 let checksums_url = target_rel
                     .assets
@@ -329,7 +296,7 @@ pub async fn check_for_updates(channel: UpdateChannel, api_url: &str) -> anyhow:
                 return Ok(UpdateStatus::UpdateAvailable {
                     target: version.clone(),
                     channel,
-                    is_downgrade: is_downgrade(cur, &version, channel),
+                    is_downgrade: is_downgrade(cur, &version),
                     asset_name: asset.name.clone(),
                     download_url: asset.browser_download_url.clone(),
                     checksums_url,
@@ -728,7 +695,7 @@ mod tests {
             },
             GitHubRelease {
                 tag_name: "v0.1.0".into(),
-                name: Some("FlashAgent v0.1.0".into()),
+                name: Some("FlashAgent v0.1.0+b180".into()),
                 prerelease: false,
                 published_at: None,
                 body: None,
@@ -740,6 +707,7 @@ mod tests {
             },
         ];
 
+        // The stable was cut from b180: on beta, the newer b190 wins.
         let beta = find_target_release(&releases, UpdateChannel::Beta).unwrap();
         assert_eq!(beta.tag_name, "b190");
 
@@ -768,9 +736,12 @@ mod tests {
             },
         ];
 
+        // A stable release naming no build is newer than every beta, so the
+        // beta channel moves onto it too.
         let beta = find_target_release(&releases, UpdateChannel::Beta).unwrap();
-        assert_eq!(beta.tag_name, "beta");
-        assert_eq!(extract_release_version(beta), "b200");
+        assert_eq!(beta.tag_name, "release");
+        let rolling_beta = releases.iter().find(|r| r.tag_name == "beta").unwrap();
+        assert_eq!(extract_release_version(rolling_beta), "b200");
 
         let stable = find_target_release(&releases, UpdateChannel::Stable).unwrap();
         assert_eq!(stable.tag_name, "release");
@@ -796,13 +767,14 @@ mod tests {
     }
 
     #[test]
-    fn test_is_downgrade_logic() {
-        // Beta to Stable is always considered a downgrade to official release
-        assert!(is_downgrade("b190", "v0.1.0", UpdateChannel::Stable));
-        // Lower beta number is downgrade
-        assert!(is_downgrade("b191", "b190", UpdateChannel::Beta));
-        // Higher beta number is NOT downgrade
-        assert!(!is_downgrade("b190", "b191", UpdateChannel::Beta));
+    fn a_downgrade_is_decided_by_the_version_ordering() {
+        assert!(is_downgrade("b191", "b190"));
+        assert!(!is_downgrade("b190", "b191"));
+        // The first stable release is an upgrade from any beta build...
+        assert!(!is_downgrade("b287", "v1.0.0"));
+        // ...but one cut from an older build than the beta running is not.
+        assert!(is_downgrade("b300", "v1.0.0+b290"));
+        assert!(!is_downgrade("dev", "b1"), "an unknown version is never called a downgrade");
     }
 
     #[test]

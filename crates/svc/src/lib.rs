@@ -2,3 +2,6 @@
 
 pub mod uninstall;
 pub mod updater;
+pub mod version;
+
+pub use version::Version;

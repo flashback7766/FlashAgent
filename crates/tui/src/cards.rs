@@ -1,69 +1,47 @@
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn refresh_welcome_card_if_before_user_msg(
-    chat: &mut ChatView,
-    renderer: &mut Renderer,
-    model: &str,
-    cwd_display: &str,
-    mode_str: &str,
-    memory_docs: usize,
-    source: &BackendSource,
-    current_effort: &str,
-    context_display: Option<&str>,
-    show_mascot: bool,
-    mood: MascotMood,
-) {
-    refresh_welcome_card_animated(
-        chat, renderer, model, cwd_display, mode_str, memory_docs, source, current_effort,
-        context_display, 0, None, show_mascot, mood, None,
-    );
-}
+impl App {
+    /// Redraw the welcome card with the session as it is now — model, mode,
+    /// effort — while the conversation has not started.
+    pub(crate) fn refresh_welcome(&mut self, source: &BackendSource, mode: PermissionMode, mood: MascotMood) {
+        self.animate_welcome(source, mode, mood, None, None);
+    }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn refresh_welcome_card_animated(
-    chat: &mut ChatView,
-    renderer: &mut Renderer,
-    model: &str,
-    cwd_display: &str,
-    mode_str: &str,
-    memory_docs: usize,
-    source: &BackendSource,
-    current_effort: &str,
-    context_display: Option<&str>,
-    tick_n: usize,
-    width_override: Option<usize>,
-    show_mascot: bool,
-    mood: MascotMood,
-    // `reveal_rows`: draw only this many rows — the start-up reveal, where the
-    // card appears to draw itself from the top down. `None` draws all of it.
-    reveal_rows: Option<usize>,
-) {
-    if !chat.has_user_message() {
-        let (term_w, term_h) = {
-            let (w, h) = crossterm::terminal::size().unwrap_or((100, 24));
-            (width_override.unwrap_or(w as usize), h as usize)
-        };
-        let th_sum = thinking_summary_str(source, current_effort);
+    /// As `refresh_welcome`, on this tick of the mascot's animation. `width`
+    /// overrides the terminal's; `reveal_rows` draws only that many rows — the
+    /// start-up reveal, where the card draws itself from the top down.
+    pub(crate) fn animate_welcome(
+        &mut self,
+        source: &BackendSource,
+        mode: PermissionMode,
+        mood: MascotMood,
+        width: Option<usize>,
+        reveal_rows: Option<usize>,
+    ) {
+        if self.chat.has_user_message() {
+            return;
+        }
+        let (w, h) = crossterm::terminal::size().unwrap_or((100, 24));
+        let th_sum = thinking_summary_str(source, &self.current_effort);
         let card = welcome_card_responsive_opts(
-            model,
-            cwd_display,
-            mode_str,
-            memory_docs,
+            &self.current_model,
+            &self.cwd_display,
+            mode.label(),
+            self.memory_docs,
             Some(&th_sum),
-            context_display,
-            term_w,
-            term_h,
-            tick_n,
-            show_mascot,
+            self.current_context.as_deref(),
+            width.unwrap_or(w as usize),
+            h as usize,
+            self.tick_n,
+            self.config.show_mascot,
             mood,
         );
         let card = match reveal_rows {
             Some(rows) => card.into_iter().take(rows.max(1)).collect(),
             None => card,
         };
-        chat.update_welcome_card(card);
-        renderer.request_reprint();
+        self.chat.update_welcome_card(card);
+        self.renderer.request_reprint();
     }
 }
 

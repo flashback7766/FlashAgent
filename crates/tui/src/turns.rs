@@ -12,6 +12,104 @@ impl App {
         }
     }
 
+    /// Esc or Ctrl+C during a turn. Cooperative: the loop answers pending
+    /// tool calls, keeps partial text and returns its history via Finished,
+    /// so model memory matches the screen; the tick loop aborts it if it
+    /// does not wind down in time.
+    pub(crate) fn interrupt(&mut self, cx: &LoopCtx<'_>) {
+        if self.running && self.cancel_requested.is_none() {
+            cx.cancel.store(true, Ordering::Relaxed);
+            self.cancel_requested = Some(std::time::Instant::now());
+            self.turn_phase = TurnPhase::Stopping;
+            self.active_steer_tx = None;
+            self.pending_steers.clear();
+            self.notice("Interrupting...");
+        }
+        self.renderer.request_reprint();
+    }
+
+    /// Rebuild the system prompt for the current style and tone, keeping a
+    /// compacted summary that rides at its end.
+    pub(crate) fn apply_personality(&mut self) {
+        let base = build_system_prompt(&self.prompt_config.clone().with_personality(&self.config.personality));
+        if let Some(first) = self.history.first_mut().filter(|m| m.role == flashagent_llm::Role::System) {
+            let summary = first.content.find(COMPACTED_MARK).map(|i| first.content[i..].to_string()).unwrap_or_default();
+            first.content = base + &summary;
+        }
+    }
+
+    /// Start a turn on the history as it stands: the last message in it is
+    /// what the model answers.
+    pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
+        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        cx.cancel.store(false, Ordering::Relaxed);
+        self.suggested_prompt = None;
+        self.custom_placeholder = None;
+        self.running = true;
+        self.turn_phase = TurnPhase::Waiting;
+        self.turn_started = Some(std::time::Instant::now());
+        self.token_tracker.on_turn_start(self.current_model.clone(), self.context_usage.total_used());
+        cx.source.set_model(&self.current_model);
+        cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
+        cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
+        let turn_opts = build_turn_options(&self.config, &self.current_effort);
+        self.turn_counter += 1;
+        self.turn_outcome = flashagent_core::TurnOutcome::default();
+        self.speed_history.clear();
+        self.turn_flash = None;
+        let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.active_steer_tx = Some(steer_tx);
+        self.pending_steers.clear();
+        self.cancel_recap();
+        self.active_turn_handle = Some(spawn_turn(
+            cx.cancel.clone(),
+            cx.source.clone(),
+            cx.perm,
+            self.history.clone(),
+            budgets,
+            turn_opts,
+            cx.tx.clone(),
+            steer_rx,
+            self.turn_counter,
+        ));
+    }
+
+    /// Ctrl+R and /regenerate: drop the last answer and ask again. Returns
+    /// false when there is no prompt to answer again.
+    pub(crate) fn regenerate(&mut self, cx: &LoopCtx<'_>) -> bool {
+        let Some(user_idx) = self.history.iter().rposition(|m| m.role == flashagent_llm::Role::User) else {
+            return false;
+        };
+        // Asking for the same answer again is the user saying the last one
+        // was not good enough — the one signal that the model was given too
+        // little room to think.
+        let steps = self.effort_memory.observe(
+            &self.current_model,
+            &flashagent_core::TurnOutcome { regenerated: true, ..Default::default() },
+        );
+        self.effort_memory.save();
+        cx.source.set_effort_bias(steps);
+        self.history.truncate(user_idx + 1);
+        // Same message, same turn: taking it back must reach before the first
+        // attempt, even after --resume.
+        if let Some(store) = cx.perm.state().snapshots() {
+            let prompt_for_snapshot = if self.history[user_idx].content.is_empty() {
+                "[image]"
+            } else {
+                &self.history[user_idx].content
+            };
+            store.continue_turn(prompt_for_snapshot);
+        }
+        self.chat.truncate_to_last_user();
+        self.renderer.scroll_to_bottom();
+        self.renderer.printed_settled = 0;
+        self.renderer.prev_expansion = None;
+        self.renderer.request_reprint();
+        self.last_expanded = false;
+        self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
+        true
+    }
+
     /// A turn ended: apply its history, report how it went, compact the
     /// context if it needs it, and ask for a recap.
     pub(crate) async fn finish_turn(
@@ -20,13 +118,6 @@ impl App {
         turn_id: u64,
         res: Result<(Vec<ChatMessage>, DoneReason), (String, Vec<ChatMessage>)>,
     ) -> Flow {
-        macro_rules! notice {
-            ($text:expr) => {{
-                self.custom_placeholder = Some(($text).to_string());
-                self.suggested_prompt.take();
-                self.renderer.request_reprint();
-            }};
-        }
         if turn_id != self.turn_counter || self.aborted_turn == Some(turn_id) {
             // A turn that was hard-aborted (or superseded) reporting late.
             return Flow::Continue;
@@ -35,10 +126,20 @@ impl App {
         self.turn_started = None;
         self.active_turn_handle = None;
         self.active_steer_tx = None;
-        self.pending_steers.clear();
+        // A steer typed as the turn was ending never reached the model; it
+        // goes back in the prompt rather than vanishing.
+        let unsent = std::mem::take(&mut self.pending_steers);
+        if !unsent.is_empty() && self.input.is_empty() {
+            self.input = unsent.join(" ");
+            self.background = Some(BackgroundNotice::fading(
+                "The turn ended before your message reached it · Enter sends it now",
+                8,
+            ));
+        }
         self.cancel_requested = None;
         cx.cancel.store(false, Ordering::Relaxed);
         self.token_tracker.on_finished();
+        self.flash_turn_end(res.as_ref().ok().map(|(_, reason)| *reason));
 
         // What the turn cost against what it produced is the only
         // honest evidence about whether auto guessed right for this
@@ -70,7 +171,7 @@ impl App {
                 };
                 push_goal_report(&mut self.chat, &ledger, reason);
             }
-            notice!(&format!(
+            self.notice(format!(
                 "[Goal \"{}\" finished · Restored mode to {} and thinking to {}]",
                 flashagent_tui::truncate_middle(&saved.task, 40),
                 saved.mode.label(),
@@ -118,61 +219,9 @@ impl App {
                         // the conversation itself.
                         self.chat.push_system("Compacting context...");
                         self.renderer.request_reprint();
-                        let tg_speed = self.token_tracker.tg_3s();
-                        self.renderer.frame(
-                            &self.chat,
-                            cx.gate,
-                            cx.question_gate,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            // The command that started this is gone from the
-                            // composer; its suggestion list must go with it.
-                            None,
-                            &self.context_usage,
-                            FrameState {
-                                input: &self.input,
-                                mode: cx.perm.state().mode(),
-                                is_goal_active: self.goal_state.is_some(),
-                                goal_progress: None,
-                                tip: Some(self.tip_animator.tip_text),
-                                tip_animated: None,
-                                tip_lines: Some(cx.tip_lines),
-                                token_tracker: Some(&self.token_tracker),
-                                reasoning_expand: ReasoningExpansion {
-                                    all: self.all_expanded,
-                                    last: self.last_expanded,
-                                },
-                                tick_n: self.tick_n,
-                                running: self.running,
-                                elapsed_secs: self.turn_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                                face_phase: self.turn_started.map(|t| (t.elapsed().as_millis() / 80) as usize).unwrap_or(0),
-                                model_tokens: self.token_tracker.total_model_tokens,
-                                tokens_per_sec: tg_speed,
-                                f_keep: self.token_tracker.last_f_keep,
-                                confirm_selection: self.confirm_select.decision(),
-                                question_state: Some(&self.question_ui_state),
-                                custom_placeholder: self.custom_placeholder.as_deref(),
-                                suggested_prompt: self.suggested_prompt.as_deref(),
-                                copy_toast: None,
-                                prefill_status: None,
-                                ttft_display: None,
-                                background: self.background.as_ref().map(|b| b.text.as_str()),
-                                channel_prompt: None,
-                                prompt_title: "",
-                                turn_phase: None,
-                                attachments: &[],
-        background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
-                                context_warn_threshold: self.config.context_warn_threshold,
-                                pending_steers: &self.pending_steers,
-                            },
-                        );
+                        // Shown before the wait: the command that started it
+                        // is gone from the composer, and its suggestions with it.
+                        self.draw(cx, None);
                         let source_compact = cx.source.clone();
                         let before = self.context_usage.total_used();
                         match compact_context(&source_compact, &mut self.history, None).await {
@@ -246,7 +295,7 @@ impl App {
                         format!("  \x1b[38;2;120;115;110m{}\x1b[0m", explained.raw.trim()),
                     );
                 }
-                notice!("Ctrl+R retries the last prompt");
+                self.notice("Ctrl+R retries the last prompt");
             }
         }
 

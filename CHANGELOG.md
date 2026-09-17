@@ -1,5 +1,14 @@
 # Changelog
 
+## b300 — style & tone, memory summary, animations and a clean version scheme
+
+- **Style and tone.** Settings → 7 Style picks how replies sound: a base style (Professional, Friendly, Candid, Quirky, Efficient, Cynical) plus Warm, Enthusiastic, Headers & Lists and Emoji at More / Default / Less. It changes tone only; tools and code are unaffected. Applies from the next message.
+- **Memory summary.** `/memory summary` (or `s` on the memory screen) shows an overview of everything remembered, grouped by topic, with "Dive deeper" questions and an "Ask or update" field. Cached, marked stale when memories change, Ctrl+R rewrites it.
+- **Animations.** Shimmer on thinking and running tools, cards that unfold, approval cards that breathe, a composer border that flashes by how a turn ended, a speed sparkline and a blinking caret. Settings → UI → Animations reduces them to spinners.
+- **One version ordering everywhere.** Betas are `bN`, stable releases `vX.Y.Z+bN`. The updater, the channel card and what's new now agree; switching channel says plainly "Update: A → B" or "Downgrade: A → B". The beta channel also moves onto newer stable releases. See VERSIONING.md.
+- **Safer keys.** An approval card that appears over open settings or the uninstall card now gets the keypress, not the screen under it. `/channel` asks before switching.
+- **Fixes.** Long prompts stay visible while typing; the external editor (Ctrl+E) no longer loses keystrokes; Cyrillic command output is no longer garbled; the setup wizard opened mid-turn no longer hangs the app; a message sent as a turn ends is kept; `/clear` repaints; mistyped commands suggest the right one; `--url` applies to one run only; no flicker on repaint and no CPU use while idle.
+
 ## b287 — fast non-blocking startup and memory footprint optimization
 
 - **Instant startup (no 10-second freeze).** Discovery of local and remote LLM endpoints now runs candidate probes concurrently (`/api/v1/models`, `/api/v0/models`, `/models`) with a short 1.5s probe timeout instead of blocking on 4 sequential requests.

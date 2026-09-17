@@ -16,6 +16,8 @@ pub struct SystemPromptConfig {
     pub effort: Option<String>,
     /// List of enabled tool names.
     pub tools: Vec<String>,
+    /// The user's style-and-tone section, when they chose one.
+    pub personality: Option<String>,
 }
 
 impl SystemPromptConfig {
@@ -40,6 +42,11 @@ impl SystemPromptConfig {
 
     pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
         self.effort = Some(effort.into());
+        self
+    }
+
+    pub fn with_personality(mut self, personality: &crate::personality::Personality) -> Self {
+        self.personality = personality.prompt_section();
         self
     }
 
@@ -195,6 +202,11 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
          - NO CONVERSATIONAL CHATTER BEFORE OR DURING TOOL CALLS: When invoking tools, do NOT include premature greetings or closing pleasantries in the tool-calling turn. If you emit user-facing text alongside tool calls, keep it strictly to a brief status note explaining the immediate action (e.g. \"Checking workspace structure...\"). Deliver your full conversational response only after all tool executions are complete, and NEVER greet the user twice across multiple steps of the same turn."
             .to_string(),
     );
+
+    // Last, so it reads as the user's word on everything above it.
+    if let Some(ref personality) = config.personality {
+        sections.push(personality.clone());
+    }
 
     sections.join("\n\n")
 }

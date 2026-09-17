@@ -693,6 +693,8 @@ fn a_goal_shows_its_live_plan_and_updates_it_in_place() {
     term.type_text("/goal fix the failing test");
     term.send(ENTER);
     term.wait_for("Done.", WAIT);
+    // A repaint can be caught half-written; wait for the finished frame.
+    term.wait_for("[~] fix it", WAIT);
 
     let screen = term.screen();
     assert!(screen.contains("plan: 1/2"), "{screen}");
@@ -1145,3 +1147,236 @@ fn sending_only_an_image_submits_the_turn_with_image_part_and_no_text() {
     assert_eq!(parts[0]["type"], "image_url");
 }
 
+
+#[test]
+fn the_end_of_a_prompt_longer_than_the_terminal_stays_in_view() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    let long = format!("{} TAILMARK", "word ".repeat(COLS as usize / 4));
+    term.type_text(&long);
+    term.wait_for("TAILMARK", WAIT);
+}
+
+#[test]
+fn a_mistyped_command_is_caught_instead_of_being_sent_to_the_model() {
+    let server = MockServer::start(vec![Reply::Text("should never be asked".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("/hlep");
+    term.send(ENTER);
+    term.wait_for("did you mean /help?", WAIT);
+    assert!(server.turns().is_empty(), "a typo reached the model");
+}
+
+#[test]
+fn clear_takes_the_conversation_off_the_screen() {
+    let server = MockServer::start(vec![Reply::Text("An answer worth clearing.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("hello");
+    term.send(ENTER);
+    term.wait_for("An answer worth clearing.", WAIT);
+    term.wait_for(PROMPT, WAIT);
+    term.type_text("/clear");
+    term.send(ENTER);
+    term.wait_gone("An answer worth clearing.", WAIT);
+}
+
+#[test]
+fn an_approval_that_comes_up_over_open_settings_gets_the_answer() {
+    let server = MockServer::start(vec![shell_call("echo marker> marker.txt"), Reply::Text("The marker is there.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("leave a marker");
+    term.send(ENTER);
+    // Settings opened while the turn runs; the approval card is drawn over
+    // them and must be the one Enter answers.
+    term.send("\t");
+    term.wait_for("Confirm:", WAIT);
+    term.send(ENTER);
+    term.wait_for("The marker is there.", WAIT);
+    assert!(home.work().join("marker.txt").exists(), "Enter went to the settings under the card");
+}
+
+const F1: &str = "\x1bOP";
+const F3: &str = "\x1bOR";
+const F4: &str = "\x1bOS";
+const F5: &str = "\x1b[15~";
+const TAB: &str = "\t";
+const DOWN: &str = "\x1b[B";
+const RIGHT: &str = "\x1b[C";
+
+#[test]
+fn every_panel_opens_over_the_composer_and_esc_puts_the_composer_back() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    for (key, title) in [
+        (F1, "Context Window Breakdown"),
+        (F3, "Select Model"),
+        (F4, "Select Thinking Effort"),
+        (F5, "Sampling Parameters"),
+        (TAB, "FlashAgent Settings"),
+    ] {
+        term.send(key);
+        term.wait_for(title, WAIT);
+        term.wait_gone(PROMPT, WAIT);
+        term.send(ESC);
+        term.wait_gone(title, WAIT);
+        term.wait_for(PROMPT, WAIT);
+    }
+}
+
+#[test]
+fn a_sampling_change_is_applied_and_saved() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.send(F5);
+    term.wait_for("Sampling Parameters", WAIT);
+    // Down to Temperature, one step up, Enter applies.
+    term.send(DOWN);
+    term.send(RIGHT);
+    term.wait_for("[ Custom ]", WAIT);
+    term.send(ENTER);
+    term.wait_for("Sampling parameters updated", WAIT);
+    let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
+    assert_eq!(config["sampling_preset"], "Custom", "{config}");
+}
+
+#[test]
+fn turning_tips_off_in_settings_takes_the_tip_line_away() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let term = ready(&home, &server);
+    term.wait_for("Tip:", WAIT);
+
+    term.send(TAB);
+    term.wait_for("FlashAgent Settings", WAIT);
+    term.send("3");
+    term.wait_for("Developer Tips", WAIT);
+    term.send(DOWN);
+    term.send(ENTER);
+    term.wait_for("Disabled", WAIT);
+    term.send(ESC);
+    term.wait_for("Settings saved", WAIT);
+    term.wait_gone("Tip:", WAIT);
+}
+
+#[test]
+fn a_question_from_the_model_is_answered_from_its_card() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "ask_user".into(),
+            arguments: serde_json::json!({ "question": "Which database?", "options": ["Postgres", "SQLite"] }),
+        },
+        Reply::Text("Going with it.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("pick a database");
+    term.send(ENTER);
+    term.wait_for("Which database?", WAIT);
+    term.send(DOWN);
+    term.send(ENTER);
+    term.wait_for("Going with it.", WAIT);
+    let turns = server.turns();
+    assert!(sent(turns.last().unwrap()).contains("SQLite"), "the model was not told the answer");
+}
+
+#[test]
+fn slash_channel_asks_before_switching() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("/channel beta");
+    term.send(ENTER);
+    term.wait_for("Switch release channel", WAIT);
+    term.send("n");
+    term.wait_for("Still on the Stable channel", WAIT);
+    let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
+    assert_ne!(config["update_channel"], "beta", "switched without a yes: {config}");
+}
+
+#[test]
+fn export_writes_the_conversation_next_to_the_project() {
+    let server = MockServer::start(vec![Reply::Text("Worth keeping.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("hello");
+    term.send(ENTER);
+    term.wait_for("Worth keeping.", WAIT);
+    term.wait_for(PROMPT, WAIT);
+    term.type_text("/export");
+    term.send(ENTER);
+    term.wait_for("Exported conversation to:", WAIT);
+    let exported = std::fs::read_dir(home.work())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|e| e.file_name().to_string_lossy().ends_with(".md"))
+        .expect("no export file");
+    assert!(std::fs::read_to_string(exported.path()).unwrap().contains("Worth keeping."));
+}
+
+#[test]
+fn a_style_chosen_in_settings_reaches_the_next_message() {
+    let server = MockServer::start(vec![Reply::Text("Hi there!".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.send(TAB);
+    term.wait_for("FlashAgent Settings", WAIT);
+    term.send("7");
+    term.wait_for("Base style and tone", WAIT);
+    term.send(RIGHT);
+    term.send(RIGHT);
+    term.wait_for("Friendly — Warm and chatty", WAIT);
+    term.send(ESC);
+    term.wait_for("style (Friendly)", WAIT);
+
+    term.type_text("hello");
+    term.send(ENTER);
+    term.wait_for("Hi there!", WAIT);
+    assert!(sent(&server.turns()[0]).contains("warm and chatty"), "the style did not reach the model");
+    let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
+    assert_eq!(config["personality"]["base"], "friendly", "{config}");
+}
+
+#[test]
+fn the_memory_summary_is_written_by_the_model_and_a_dive_deeper_question_is_sent() {
+    let server = MockServer::start(vec![Reply::Text("Here is the comparison.".into())]);
+    server.answer_side_requests(
+        "summarize what a coding assistant remembers",
+        r#"{"overview": "You drive a BYD and teach.", "sections": [{"title": "Car", "text": "A BYD Sealion 07 with DiLink 5.0."}], "dive_deeper": ["Compare DiLink versions", "Describe the lesson plans"]}"#,
+    );
+    let home = Home::new();
+    let memory = home.path().join(".flashagent").join("memory");
+    std::fs::create_dir_all(&memory).unwrap();
+    std::fs::write(
+        memory.join("drives-byd.md"),
+        "---\nname: drives-byd\ndescription: drives a BYD Sealion 07\nmetadata:\n  type: user\n---\n\nBYD Sealion 07, DiLink 5.0.\n",
+    )
+    .unwrap();
+    let term = ready(&home, &server);
+
+    term.type_text("/memory summary");
+    term.send(ENTER);
+    term.wait_for("Memory summary", WAIT);
+    term.wait_for("A BYD Sealion 07 with DiLink 5.0.", WAIT);
+    term.wait_for("Compare DiLink versions", WAIT);
+    assert!(home.path().join(".flashagent").join("memory_summary.json").exists(), "the summary was not kept");
+
+    term.send(ENTER);
+    term.wait_for("Here is the comparison.", WAIT);
+    assert!(sent(server.turns().last().unwrap()).contains("Compare DiLink versions"));
+}

@@ -71,7 +71,9 @@ Plain files under `~/.flashagent/`: `config.json`, `sessions/*.json`,
 
 ## Updates
 
-GitHub Releases, `beta` and `stable` channels. The updater downloads the
+GitHub Releases, `beta` and `stable` channels. Version formats (`b287`,
+`v1.0.0+b290`), how they compare, and how to release are in
+[VERSIONING.md](VERSIONING.md). The updater downloads the
 release asset, checks it against `SHA256SUMS`, and replaces the binary; the
 new version runs on the next start.
 

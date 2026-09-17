@@ -36,6 +36,22 @@ impl AutocompleteItem {
     }
 }
 
+/// Levenshtein distance by characters, for "did you mean" on a mistyped
+/// command.
+pub fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let swap = prev[j] + usize::from(ca != *cb);
+            cur[j + 1] = swap.min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
 /// Built-in slash commands.
 pub fn builtin_commands() -> Vec<AutocompleteItem> {
     vec![
@@ -78,6 +94,11 @@ pub fn sub_commands(input: &str) -> Option<Vec<AutocompleteItem>> {
             AutocompleteItem::new("/verbose all", "Expand both thoughts and tool calls permanently", AutocompleteCategory::Command),
             AutocompleteItem::new("/verbose last", "Expand thoughts and tool calls for latest turn", AutocompleteCategory::Command),
             AutocompleteItem::new("/verbose off", "Collapse thoughts and tool calls to concise summary", AutocompleteCategory::Command),
+        ])
+    } else if lower.starts_with("/memory ") || lower == "/memory" {
+        Some(vec![
+            AutocompleteItem::new("/memory", "List what FlashAgent remembers; forget or correct a fact", AutocompleteCategory::Command),
+            AutocompleteItem::new("/memory summary", "An overview of everything remembered, by topic", AutocompleteCategory::Command),
         ])
     } else if lower.starts_with("/effort ") || lower == "/effort" {
         Some(vec![

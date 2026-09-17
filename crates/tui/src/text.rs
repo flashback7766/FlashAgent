@@ -198,6 +198,31 @@ pub fn visible_width(text: &str) -> usize {
     cells
 }
 
+/// The end of `text` that fits in `width` cells, with an ellipsis in front
+/// when the start had to go, and how many cells it takes. The composer shows
+/// this: what the user is typing is at the end, and a prompt clipped on the
+/// right hides exactly the part being written.
+pub fn tail_window(text: &str, width: usize) -> (String, usize) {
+    let total: usize = text.chars().map(|c| c.width().unwrap_or(0)).sum();
+    if total <= width {
+        return (text.to_string(), total);
+    }
+    let room = width.saturating_sub(1);
+    let mut kept = Vec::new();
+    let mut cells = 0usize;
+    for c in text.chars().rev() {
+        let w = c.width().unwrap_or(0);
+        if cells + w > room {
+            break;
+        }
+        cells += w;
+        kept.push(c);
+    }
+    let mut out = String::from("\u{2026}");
+    out.extend(kept.into_iter().rev());
+    (out, cells + 1)
+}
+
 /// Strips all ANSI escape sequences from `text`.
 pub fn strip_ansi(text: &str) -> String {
     let mut out = String::new();
@@ -255,6 +280,16 @@ pub fn truncate_middle(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tail_window_keeps_the_end_and_counts_wide_characters() {
+        assert_eq!(tail_window("short", 10), ("short".to_string(), 5));
+        assert_eq!(tail_window("abcdefghij", 5), ("\u{2026}ghij".to_string(), 5));
+        // Two cells each: only one fits next to the ellipsis in four cells.
+        let (shown, cells) = tail_window("日本語テキスト", 4);
+        assert_eq!(shown, "\u{2026}ト");
+        assert!(cells <= 4);
+    }
 
     #[test]
     fn a_wrapped_styled_line_does_not_start_its_continuation_with_a_space() {

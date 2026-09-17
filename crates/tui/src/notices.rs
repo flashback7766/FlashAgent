@@ -1,3 +1,4 @@
+use crate::App;
 #[derive(Debug, Clone)]
 /// A release-channel change waiting to be confirmed.
 ///
@@ -30,7 +31,7 @@ pub(crate) fn channel_switch_warning(
     current: &str,
     target: &ChannelTarget,
 ) -> String {
-    use flashagent_core::config::UpdateChannel;
+    use flashagent_svc::Version;
     let channel = to.label().to_lowercase();
     let destination = match target {
         ChannelTarget::Version(v) => v.clone(),
@@ -41,18 +42,35 @@ pub(crate) fn channel_switch_warning(
             )
         }
         // Still checking, or the feed could not be reached: name the channel
-        // rather than invent a version.
-        ChannelTarget::Checking | ChannelTarget::Unknown => format!("the newest {channel} release"),
+        // rather than invent a version, and do not guess which way it goes.
+        ChannelTarget::Checking | ChannelTarget::Unknown => {
+            return format!(
+                "You will move from {current} to the newest {channel} release once it is found. \
+                 Whether that is an update or a downgrade is shown here as soon as it is known. Continue?"
+            )
+        }
     };
-    match to {
-        UpdateChannel::Stable => format!(
-            "You will be moved from {current} down to {destination}. Features added since may \
-             disappear or behave differently, and settings they introduced can be reset. Continue?"
+    // Update or downgrade is decided by the versions, the same rule the
+    // updater uses — not by which channel is picked. A beta newer than the
+    // last stable release is left for an older build; a stable release newer
+    // than the beta running now is an update.
+    match (Version::parse(current), Version::parse(&destination)) {
+        (Some(from), Some(to_version)) if to_version < from => format!(
+            "Downgrade: {current} → {destination}. {destination} is older than what you run, so features \
+             added since may disappear or behave differently, and settings they introduced can be reset. Continue?"
         ),
-        UpdateChannel::Beta => format!(
-            "You will be moved from {current} to {destination}. Beta builds land often and can \
-             regress; that is the point of them. Continue?"
+        (Some(from), Some(to_version)) if to_version == from => format!(
+            "You already run {current}; the {channel} channel has the same release. Switch anyway?"
         ),
+        (Some(_), Some(_)) => format!(
+            "Update: {current} → {destination}. You get everything added since {current}.{} Continue?",
+            if Version::parse(&destination).is_some_and(|v| v.is_beta()) {
+                " Beta builds land often and can regress; that is the point of them."
+            } else {
+                ""
+            }
+        ),
+        _ => format!("You will move from {current} to {destination}. Continue?"),
     }
 }
 
@@ -99,7 +117,12 @@ impl TurnPhase {
 pub(crate) struct BackgroundNotice {
     pub(crate) text: String,
     pub(crate) expires: Option<std::time::Instant>,
+    /// When it appeared: it fades in rather than popping onto the line.
+    pub(crate) born: std::time::Instant,
 }
+
+/// How long a notice takes to fade in.
+const NOTICE_FADE_IN_MS: f32 = 350.0;
 
 /// How brightly a background notice is drawn. A notice that is about to
 /// expire dims over its last second, so it leaves the line instead of
@@ -122,21 +145,25 @@ impl NoticeStyle {
 }
 
 impl BackgroundNotice {
-    /// Full brightness until the last second of its life, then a ramp down.
+    /// Rises to full brightness over its first moment, stays there until
+    /// the last second of its life, then ramps down.
     pub(crate) fn style(&self) -> NoticeStyle {
-        match self.expires {
-            None => NoticeStyle::FULL,
-            Some(at) => {
-                let left = at.saturating_duration_since(std::time::Instant::now()).as_secs_f32();
-                NoticeStyle { fade: left.clamp(0.0, 1.0) }
-            }
-        }
+        let fade_in = if flashagent_tui::anim::enabled() {
+            flashagent_tui::anim::ease_out(self.born.elapsed().as_millis() as f32 / NOTICE_FADE_IN_MS)
+        } else {
+            1.0
+        };
+        let fade_out = match self.expires {
+            None => 1.0,
+            Some(at) => at.saturating_duration_since(std::time::Instant::now()).as_secs_f32().clamp(0.0, 1.0),
+        };
+        NoticeStyle { fade: fade_in.min(fade_out) }
     }
 
     /// Stays until something replaces it — use for anything the user still
     /// has to act on ("restart to run the new build").
     pub(crate) fn sticky(text: impl Into<String>) -> Self {
-        Self { text: text.into(), expires: None }
+        Self { text: text.into(), expires: None, born: std::time::Instant::now() }
     }
 
     /// Disappears after `secs`.
@@ -144,6 +171,7 @@ impl BackgroundNotice {
         Self {
             text: text.into(),
             expires: Some(std::time::Instant::now() + std::time::Duration::from_secs(secs)),
+            born: std::time::Instant::now(),
         }
     }
 
@@ -161,6 +189,18 @@ pub(crate) enum UpdateNotice {
     Ready { version: String },
     UpToDate { version: String },
     Failed { error: String },
+}
+
+impl App {
+    /// A one-line notice in the composer. It goes under the cursor rather
+    /// than into the transcript: it is addressed to the person at the
+    /// keyboard, not to the conversation. A suggestion drawn in the same spot
+    /// would hide it, so that goes.
+    pub(crate) fn notice(&mut self, text: impl Into<String>) {
+        self.custom_placeholder = Some(text.into());
+        self.suggested_prompt = None;
+        self.renderer.request_reprint();
+    }
 }
 
 /// One line of manual-update progress, e.g.

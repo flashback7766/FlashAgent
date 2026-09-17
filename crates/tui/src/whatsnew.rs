@@ -34,17 +34,11 @@ pub struct Release {
     pub items: Vec<String>,
 }
 
-/// Sortable rank of a version: `b238` → (0, 238, 0), `v1.2.3` → (1, 2, 3).
-///
-/// Betas live below 1.0 on purpose: the move from `b238` to `v1.0.0` is the
-/// one release where a user most wants to read what changed, and a plain
-/// numeric comparison would call it a downgrade and say nothing.
-fn rank(version: &str) -> Option<(u64, u64, u64)> {
-    if let Some(n) = version.strip_prefix('b') {
-        return n.parse().ok().map(|b| (0, b, 0));
-    }
-    let mut parts = version.strip_prefix('v')?.split(['.', '-']).map(|p| p.parse::<u64>().ok());
-    Some((parts.next()??, parts.next().flatten().unwrap_or(0), parts.next().flatten().unwrap_or(0)))
+/// A changelog heading's version, compared by the one ordering the whole app
+/// uses (`flashagent_svc::version`): the move from `b287` to `v1.0.0` is news,
+/// not a downgrade.
+fn rank(version: &str) -> Option<flashagent_svc::Version> {
+    flashagent_svc::Version::parse(version)
 }
 
 /// Collapse a wrapped changelog bullet back into one paragraph.

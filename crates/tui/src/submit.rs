@@ -1,1139 +1,703 @@
 use super::*;
 
+const HELP: &str = "Commands & Skills (Tab to autocomplete):\n\
+     • /goal <task>           — autonomous run; its limits live in Settings → Goal\n\
+     • /resume                — pick a saved session from this folder and continue it\n\
+     • /settings (or Tab)     — open settings configuration tab\n\
+     • /context               — show detailed context window breakdown\n\
+     • /memory [summary]      — what FlashAgent remembers; the summary groups it by topic\n\
+     • /verbose [all|last|off] — toggle verbose mode (or press F2 / Alt+O / Ctrl+O)\n\
+     • /effort (or /t)        — choose thinking effort preset (or press F4 / Ctrl+T)\n\
+     • /model  (or /m)        — choose and switch model (or press F3)\n\
+     • /mode [plan|man|edits|all] — switch permission mode (or press Shift+Tab)\n\
+     • /mcp [list|market|test|add|reload] — manage Model Context Protocol servers\n\
+     • /sampling              — sampling parameters (or press F5)\n\
+     • /compact [focus]       — summarize older turns to free context\n\
+     • /clear                 — clear chat scrollback\n\
+     • /regenerate (or Ctrl+R) — regenerate last model response from scratch\n\
+     • /rewind [n]            — take turns back: files and conversation return to before turn n\n\
+     • /diff · /commit <msg>  — git diff --stat / commit staged changes\n\
+     • /export [md|html|jsonl] — write the conversation to a file\n\
+     • /editor (or Ctrl+E)    — compose the prompt in an external editor\n\
+     • Ctrl+V                 — paste a screenshot (Ctrl+Z takes it back); dropping an image works too\n\
+     • /update (or Ctrl+U) · /channel <stable|beta> — check, download and install an update\n\
+     • /skill:<name>          — invoke a skill from .agents/skills/\n\
+     • /exit                  — save the session and quit\n\
+     • /uninstall             — close FlashAgent and remove it; asks what data to delete\n\
+     • Tab                    — autocomplete popup or settings tab\n\
+     • Esc                    — dismiss suggestions / interrupt; twice on an empty prompt quits";
+
 impl App {
     /// The user pressed Enter on a non-empty prompt while no turn was running:
     /// a slash command, a skill, or a message to send.
     pub(crate) async fn submit_input(&mut self, cx: &mut LoopCtx<'_>) -> Flow {
-        macro_rules! notice {
-            ($text:expr) => {{
-                self.custom_placeholder = Some(($text).to_string());
-                self.suggested_prompt.take();
-                self.renderer.request_reprint();
-            }};
+        let line = self.input.trim().to_string();
+        if let Some(rest) = line.strip_prefix('/') {
+            let (name, arg) = match rest.split_once(char::is_whitespace) {
+                Some((name, arg)) => (name, arg.trim()),
+                None => (rest, ""),
+            };
+            if let Some(flow) = self.run_command(cx, name, arg).await {
+                return flow;
+            }
         }
-
-                    let trimmed = self.input.trim();
-                    if trimmed == "/help" || trimmed == "/?" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        self.chat.push_system(
-                            "Commands & Skills (Tab to autocomplete):\n\
-                             • /goal <task>           — autonomous run; its limits live in Settings → Goal\n\
-                             • /resume                — pick a saved session from this folder and continue it\n\
-                             • /settings (or Tab)     — open settings configuration tab\n\
-                             • /context               — show detailed context window breakdown\n\
-                             • /verbose [all|last|off] — toggle verbose mode (or press F2 / Alt+O / Ctrl+O)\n\
-                             • /effort (or /t)        — choose thinking effort preset (or press F4 / Ctrl+T)\n\
-                             • /model  (or /m)        — choose and switch model (or press F3)\n\
-                             • /mode [plan|man|edits|all] — switch permission mode (or press Shift+Tab)\n\
-                             • /mcp [list|market|test|add|reload] — manage Model Context Protocol servers\n\
-                             • /sampling              — sampling parameters (or press F5)\n\
-                             • /compact [focus]       — summarize older turns to free context\n\
-                             • /clear                 — clear chat scrollback\n\
-                             • /regenerate (or Ctrl+R) — regenerate last model response from scratch\n\
-                             • /rewind [n]            — take turns back: the files FlashAgent changed and the conversation return to before turn n\n\
-                             • /diff · /commit <msg>  — git diff --stat / commit staged changes\n\
-                             • /export [md|html|jsonl] — write the conversation to a file\n\
-                             • /editor (or Ctrl+E)    — compose the prompt in an external editor\n\
-                             • Ctrl+V                 — paste a screenshot for a vision model (Ctrl+Z takes it back); dropping an image file works too\n\
-                             • /update (or Ctrl+U) · /channel <stable|beta> — check, download and install an update, with progress\n\
-                             • /skill:<name>          — invoke a skill from .agents/skills/\n\
-                             • /exit                  — save the session and quit\n\
-                             • /uninstall             — close FlashAgent and remove it; asks what data to delete\n\
-                             • Tab                    — autocomplete popup or settings tab\n\
-                             • Esc                    — dismiss suggestions / interrupt; twice on an empty prompt quits"
-                        );
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/goal" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        self.chat.push_system(&format!(
-                            "Autonomous Goal Mode:\n\
-                             Usage: /goal <task description>\n\
-                             Example: /goal Refactor error handling in the core crate and run the test suite\n\
-                             Limits: {} — change them in Settings → Goal.\n\
-                             In goal mode FlashAgent approves its own tool calls (dangerous shell commands are refused), \
-                             thinks at maximum effort and works on its own. A question it asks you waits {} for an answer, \
-                             then the run carries on without it.",
-                            GoalBudgets::from_config(&self.config).summary(),
-                            flashagent_tui::goal::human_duration(flashagent_tools::GOAL_QUESTION_TIMEOUT)
-                        ));
-                        return Flow::Continue;
-                    } else if let Some(task) = trimmed.strip_prefix("/goal ") {
-                        let task = task.to_string();
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let task_desc = match flashagent_tui::goal::parse_goal_task(&task) {
-                            Ok(task) => task,
-                            Err(msg) => {
-                                notice!(&msg);
-                                self.renderer.request_reprint();
-                                return Flow::Continue;
-                            }
-                        };
-                        let goal_budgets = GoalBudgets::from_config(&self.config);
-
-                        // Save previous state to roll back upon goal completion
-                        self.goal_state = Some(SavedGoalState {
-                            mode: cx.perm.state().mode(),
-                            effort: self.current_effort.clone(),
-                            max_steps: self.max_steps,
-                            task: task_desc.clone(),
-                        });
-                        self.goal_ledger =
-                            Some(GoalLedger::new(task_desc.clone(), goal_budgets.clone()));
-
-                        // Lift restrictions for autonomous execution
-                        cx.perm.state().set_mode(PermissionMode::Bypass);
-                        cx.perm.state().set_goal_active(true);
-                        self.current_effort = "high".to_string();
-                        cx.tools_arc.set_goal_mode(true);
-
-                        let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
-                        let card_w = (w as usize).saturating_sub(4).clamp(44, 110);
-                        let inner_w = card_w.saturating_sub(2);
-                        let border_color = "\x1b[38;2;225;175;95m";
-                        let reset = "\x1b[0m";
-
-                        let title = format!(" Goal: {} ", flashagent_tui::truncate_middle(&task_desc, inner_w.saturating_sub(10)));
-                        let dash_count = inner_w.saturating_sub(title.chars().count() + 1);
-                        self.chat.push_line(LineKind::System, format!("{border_color}╭─\x1b[1;38;2;245;240;232m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)));
-                        let meta_line = "Mode: Autonomous · Permissions: Auto-Approved · Thinking: Max · Esc to stop";
-                        let pad_len = inner_w.saturating_sub(meta_line.chars().count() + 1);
-                        self.chat.push_line(LineKind::System, format!("{border_color}│{reset} \x1b[38;2;160;155;145m{meta_line}\x1b[0m{border_color}{}│{reset}", " ".repeat(pad_len)));
-                        let budget_line = format!("Budget: {}", goal_budgets.summary());
-                        let budget_line = flashagent_tui::truncate_middle(&budget_line, inner_w.saturating_sub(2));
-                        let pad_len = inner_w.saturating_sub(budget_line.chars().count() + 1);
-                        self.chat.push_line(LineKind::System, format!("{border_color}│{reset} \x1b[38;2;160;155;145m{budget_line}\x1b[0m{border_color}{}│{reset}", " ".repeat(pad_len)));
-                        self.chat.push_line(LineKind::System, format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)));
-
-                        self.chat.push_user(&format!("/goal {task_desc}"));
-
-                        let autonomous_directive = format!(
-                            "[AUTONOMOUS GOAL DIRECTIVE]\n\
-                             You are operating in fully autonomous /goal mode.\n\
-                             Target goal: {}\n\n\
-                             Autonomous Rules:\n\
-                             1. Work on your own: tool actions are pre-approved, except dangerous shell commands \
-                             (force pushes, hard resets, recursive force deletes, sudo), which are refused. Ask the \
-                             user with ask_user only when you are truly blocked on a decision that is theirs; if no \
-                             answer comes within {}, pick the most reasonable option yourself, carry on, and name \
-                             that choice in your summary.\n\
-                             2. Plan, research, edit, execute, and verify completely on your own.\n\
-                             3. Thoroughly test and verify your changes before finishing.\n\
-                             4. Conclude with a clear structured summary of what was accomplished.\n\
-                             5. Call update_plan with your whole step-by-step plan before starting, \
-                             and again whenever a step finishes or the plan changes — the person \
-                             who started this run watches it live and has no other way to see where \
-                             the run stands.\n\n\
-                             {}",
-                            task_desc,
-                            flashagent_tui::goal::human_duration(flashagent_tools::GOAL_QUESTION_TIMEOUT),
-                            if goal_budgets.is_unlimited() {
-                                "This run has no budget: it ends when you finish or the user stops it. Say plainly \
-                                 what is left unfinished or unverified rather than claiming success."
-                                    .to_string()
-                            } else {
-                                format!(
-                                    "Budget for this run: {}. When it runs out the run is stopped wherever it \
-                                     is, so do the load-bearing work first and say plainly what is left \
-                                     unfinished or unverified rather than claiming success.",
-                                    goal_budgets.summary()
-                                )
-                            }
-                        );
-
-                        let first = !self.history.iter().any(|m| m.role == flashagent_llm::Role::User);
-                        let content = if first && !cx.memory_block.is_empty() {
-                            format!("{}\n\n---\n\n{autonomous_directive}", cx.memory_block)
-                        } else {
-                            autonomous_directive
-                        };
-                        self.history.push(ChatMessage::user(content));
-                        if let (Some(store), Some(msg)) = (cx.perm.state().snapshots(), self.history.last()) {
-                            store.begin_turn(&msg.content);
-                        }
-                        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-                        cx.cancel.store(false, Ordering::Relaxed);
-                        self.suggested_prompt = None;
-                        self.custom_placeholder = None;
-                        self.running = true;
-                        self.turn_phase = TurnPhase::Waiting;
-                        self.turn_started = Some(std::time::Instant::now());
-                        self.token_tracker.on_turn_start(self.current_model.clone(), self.context_usage.total_used());
-                        cx.source.set_model(&self.current_model);
-                        cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
-                        cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
-                        let turn_opts = build_turn_options(&self.config, &self.current_effort);
-                        self.turn_counter += 1;
-                        self.turn_outcome = flashagent_core::TurnOutcome::default();
-                        let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
-                        self.active_steer_tx = Some(steer_tx);
-                        self.pending_steers.clear();
-                        self.cancel_recap();
-                        self.active_turn_handle = Some(spawn_turn(
-                            cx.cancel.clone(),
-                            cx.source.clone(),
-                            cx.perm,
-                            self.history.clone(),
-                            goal_budgets,
-                            turn_opts,
-                            cx.tx.clone(),
-                            steer_rx,
-                            self.turn_counter,
-                        ));
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/skills" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let skills = flashagent_tui::autocomplete::load_skills(std::path::Path::new("."));
-                        let listed: Vec<String> = skills
-                            .iter()
-                            .filter(|s| s.trigger.starts_with("/skill:"))
-                            .map(|s| format!("  • {} — {}", s.trigger, s.description))
-                            .collect();
-                        if listed.is_empty() {
-                            notice!("[No skills found. Add .agents/skills/<name>.md (project) or ~/.flashagent/skills/<name>.md (global).]");
-                        } else {
-                            self.chat.push_system(&format!("Skills:\n{}", listed.join("\n")));
-                        }
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/settings" || trimmed == "/config" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let runtime_mode = self.goal_state.as_ref().map_or(cx.perm.state().mode(), |g| g.mode);
-                        let effort = self.goal_state.as_ref().map_or(self.current_effort.as_str(), |g| g.effort.as_str());
-                        self.settings_view = Some(settings_for_runtime(&self.config, runtime_mode, effort, &self.current_model, &self.available_models, self.context_usage.total_capacity));
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/whatsnew" || trimmed == "/changelog" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let now = flashagent_svc::updater::current_version();
-                        // Asked for on purpose, so there is no
-                        // "nothing changed" case worth a blank
-                        // screen: fall back to the last few releases.
-                        let mut news = flashagent_tui::whatsnew::since(
-                            self.config.last_seen_version.as_deref(),
-                            now,
-                        );
-                        if news.is_empty() {
-                            news = flashagent_tui::whatsnew::latest(3);
-                        }
-                        if news.is_empty() {
-                            notice!("[No changelog is bundled with this build.]");
-                        } else {
-                            flashagent_tui::whatsnew::run_channel(news, now, cx.rx)
-                                .await
-                                .ok();
-                            self.renderer.request_reprint();
-                        }
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/memory" || trimmed == "/memories" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        self.memory_modal = Some(flashagent_tui::memory_view::MemoryModal::new(&std::env::current_dir().unwrap_or_default()));
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/context" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-                        self.context_modal = Some(ContextModal::new(self.context_usage.clone()));
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/clear" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        self.chat.clear();
-                        self.renderer.printed_settled = 0;
-                        self.renderer.prev_expansion = None;
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/regenerate" || trimmed == "/retry" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        if let Some(user_idx) = self.history.iter().rposition(|m| m.role == flashagent_llm::Role::User) {
-                            let steps = self.effort_memory.observe(
-                                &self.current_model,
-                                &flashagent_core::TurnOutcome { regenerated: true, ..Default::default() },
-                            );
-                            self.effort_memory.save();
-                            cx.source.set_effort_bias(steps);
-                            self.history.truncate(user_idx + 1);
-                            // Same message, same turn: taking it back must reach
-                            // before the first attempt, even after --resume.
-                            if let Some(store) = cx.perm.state().snapshots() {
-                                let prompt_for_snapshot = if self.history[user_idx].content.is_empty() {
-                                    "[image]"
-                                } else {
-                                    &self.history[user_idx].content
-                                };
-                                store.continue_turn(prompt_for_snapshot);
-                            }
-                            self.chat.truncate_to_last_user();
-                            self.renderer.scroll_to_bottom();
-                            self.renderer.printed_settled = 0;
-                            self.renderer.prev_expansion = None;
-                            self.renderer.request_reprint();
-                            update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-                            cx.cancel.store(false, Ordering::Relaxed);
-                            self.suggested_prompt = None;
-                            self.custom_placeholder = None;
-                            self.last_expanded = false;
-                            self.running = true;
-                        self.turn_phase = TurnPhase::Waiting;
-                            self.turn_started = Some(std::time::Instant::now());
-                            self.token_tracker.on_turn_start(self.current_model.clone(), self.context_usage.total_used());
-                            cx.source.set_model(&self.current_model);
-                            cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
-                            cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
-                            let turn_opts = build_turn_options(&self.config, &self.current_effort);
-                            self.turn_counter += 1;
-                        self.turn_outcome = flashagent_core::TurnOutcome::default();
-                            let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
-                            self.active_steer_tx = Some(steer_tx);
-                            self.pending_steers.clear();
-                            self.cancel_recap();
-                            self.active_turn_handle = Some(spawn_turn(
-                                cx.cancel.clone(),
-                                cx.source.clone(),
-                                cx.perm,
-                                self.history.clone(),
-                                GoalBudgets::steps_only(self.max_steps),
-                                turn_opts,
-                                cx.tx.clone(),
-                                steer_rx,
-                                self.turn_counter,
-                            ));
-                        } else {
-                            notice!("[No previous turn to regenerate]");
-                            self.renderer.request_reprint();
-                        }
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/effort" || trimmed == "/thinking" || trimmed == "/t" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let mut menu = build_effort_menu(cx.source, &self.effort_memory, &self.current_model);
-                        menu.select_by_value(&self.current_effort);
-                        self.effort_menu = Some(menu);
-                        return Flow::Continue;
-                    } else if let Some(arg) = trimmed.strip_prefix("/effort ") {
-                        let arg_val = arg.trim().to_lowercase();
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let mut known: Vec<String> = ["auto", "default", "off", "low", "medium", "high"].iter().map(|s| s.to_string()).collect();
-                        if let Some(p) = cx.source.profile() {
-                            known.extend(p.presets.iter().cloned());
-                        }
-                        if !known.contains(&arg_val) {
-                            known.dedup();
-                            notice!(&format!("[Unknown effort '{arg_val}'. Available: {}]", known.join(", ")));
-                            self.renderer.request_reprint();
-                            return Flow::Continue;
-                        }
-                        self.current_effort = arg_val.clone();
-                        refresh_welcome_card_if_before_user_msg(
-                            &mut self.chat,
-                            &mut self.renderer,
-                            &self.current_model,
-                            cx.cwd_display,
-                            cx.perm.state().mode().label(),
-                            cx.memory_docs,
-                            cx.source,
-                            &self.current_effort,
-                            self.current_context.as_deref(),
-                            self.config.show_mascot,
-                            cx.mascot_mood,
-                        );
-                        self.custom_placeholder = Some(format!("Thinking effort set to: {arg_val}"));
-                        self.suggested_prompt = None;
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/model" || trimmed == "/models" || trimmed == "/m" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        if let Some(mut menu) = build_model_menu(cx.source) {
-                            menu.select_by_value(&self.current_model);
-                            self.model_menu = Some(menu);
-                        } else {
-                            notice!("[No models discovered from server]");
-                        }
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/sampling" || trimmed == "/params" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        self.sampling_view = Some(SamplingView::new(&self.config));
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/mode" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let next_mode = cx.perm.state().mode().next();
-                        cx.perm.state().set_mode(next_mode);
-                        self.remember_mode(next_mode);
-                        refresh_welcome_card_if_before_user_msg(
-                            &mut self.chat,
-                            &mut self.renderer,
-                            &self.current_model,
-                            cx.cwd_display,
-                            next_mode.label(),
-                            cx.memory_docs,
-                            cx.source,
-                            &self.current_effort,
-                            self.current_context.as_deref(),
-                            self.config.show_mascot,
-                            cx.mascot_mood,
-                        );
-                        self.custom_placeholder = Some(format!("Permission mode set to: {}", next_mode.label()));
-                        self.suggested_prompt = None;
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    } else if let Some(arg) = trimmed.strip_prefix("/mode ") {
-                        let arg_val = arg.trim().to_lowercase();
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let m = match arg_val.as_str() {
-                            "planning" | "plan" => Some(PermissionMode::Planning),
-                            "manual" | "man" => Some(PermissionMode::Manual),
-                            "acceptedits" | "accept_edits" | "edits" | "auto" | "default" => Some(PermissionMode::AcceptEdits),
-                            "bypass" | "accept_all" | "all" => Some(PermissionMode::Bypass),
-                            "autonomic" => {
-                                notice!("[Autonomic mode is temporary and activated exclusively during `/goal <task>` execution]");
-                                None
-                            }
-                            _ => {
-                                notice!("[Usage: /mode planning | /mode manual | /mode edits | /mode all]");
-                                None
-                            }
-                        };
-                        if let Some(mode) = m {
-                            cx.perm.state().set_mode(mode);
-                            self.remember_mode(mode);
-                            refresh_welcome_card_if_before_user_msg(
-                                &mut self.chat,
-                                &mut self.renderer,
-                                &self.current_model,
-                                cx.cwd_display,
-                                mode.label(),
-                                cx.memory_docs,
-                                cx.source,
-                                &self.current_effort,
-                                self.current_context.as_deref(),
-                                self.config.show_mascot,
-                                cx.mascot_mood,
-                            );
-                            self.custom_placeholder = Some(format!("Permission mode set to: {}", mode.label()));
-                            self.suggested_prompt = None;
-                        }
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/uninstall" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        self.uninstall_confirm = true;
-                        self.suggested_prompt = None;
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/resume" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        self.open_session_picker(cx.cwd_display, cx.session_id);
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/update" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        if flashagent_svc::updater::is_dev_mode() {
-                            self.chat.push_system("  \x1b[38;2;225;175;95mAuto-updater is disabled in dev mode\x1b[0m (running from source repository / cargo build).\n  To update your dev build, pull latest git commits and run `cargo build --release`.");
-                            return Flow::Continue;
-                        }
-                        // The same as Ctrl+U: check, download and install in
-                        // one go, or show the update already under way.
-                        self.start_or_watch_update(cx);
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/channel" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        self.chat.push_system(&format!(
-                            "Current release channel: \x1b[1m{}\x1b[0m\nUsage: /channel <stable|beta>\n• /channel stable — Official stable releases (v*)\n• /channel beta   — Latest beta pre-releases (b*)",
-                            self.config.update_channel.label()
-                        ));
-                        return Flow::Continue;
-                    } else if let Some(arg) = trimmed.strip_prefix("/channel ") {
-                        let choice = arg.trim().to_lowercase();
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let target_ch = match choice.as_str() {
-                            "stable" | "v" => Some(flashagent_core::config::UpdateChannel::Stable),
-                            "beta" | "b" => Some(flashagent_core::config::UpdateChannel::Beta),
-                            _ => None,
-                        };
-                        if let Some(ch) = target_ch {
-                            self.config.update_channel = ch;
-                            let _ = self.config.save();
-                            notice!(&format!(
-                                "Switched to \x1b[1m{}\x1b[0m channel. Checking for releases in background...",
-                                ch.label()
-                            ));
-                            if !flashagent_svc::updater::is_dev_mode() {
-                                if cx.channel_watch_tx.receiver_count() > 0 {
-                                    let _ = cx.channel_watch_tx.send(ch);
-                                } else {
-                                    let update_tx_clone = cx.update_tx.clone();
-                                    tokio::spawn(async move {
-                                        if let Ok(Some(target_ver)) = flashagent_svc::updater::check_and_apply_background(ch).await {
-                                            let _ = update_tx_clone.send(UpdateNotice::Ready { version: target_ver });
-                                        }
-                                    });
-                                }
-                            }
-                        } else {
-                            notice!("Invalid channel. Choose either: /channel stable or /channel beta");
-                        }
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/mcp" || trimmed == "/mcp help" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let mgr = cx.tools_arc.mcp_manager();
-                        let paths = mgr.loaded_paths();
-                        let statuses = mgr.server_status_list().await;
-                        self.effort_menu = None;
-                        self.model_menu = None;
-                        self.settings_view = None;
-                        self.sampling_view = None;
-                        self.context_modal = None;
-                        self.mcp_modal = Some(McpModal::new(paths, statuses, McpViewTab::Overview));
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/mcp list" || trimmed == "/mcp ls" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let mgr = cx.tools_arc.mcp_manager();
-                        let paths = mgr.loaded_paths();
-                        let statuses = mgr.server_status_list().await;
-                        self.effort_menu = None;
-                        self.model_menu = None;
-                        self.settings_view = None;
-                        self.sampling_view = None;
-                        self.context_modal = None;
-                        self.mcp_modal = Some(McpModal::new(paths, statuses, McpViewTab::Servers));
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/mcp market" || trimmed == "/mcp marketplace" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let mgr = cx.tools_arc.mcp_manager();
-                        let paths = mgr.loaded_paths();
-                        let statuses = mgr.server_status_list().await;
-                        self.effort_menu = None;
-                        self.model_menu = None;
-                        self.settings_view = None;
-                        self.sampling_view = None;
-                        self.context_modal = None;
-                        self.mcp_modal = Some(McpModal::new(paths, statuses, McpViewTab::Marketplace));
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if let Some(target) = trimmed.strip_prefix("/mcp test ") {
-                        let server_name = target.trim().to_string();
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        notice!(&format!("Testing MCP server '{}'...", server_name));
-                        let mgr = cx.tools_arc.mcp_manager();
-                        match mgr.test_server(&server_name).await {
-                            Ok(report) => {
-                                let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
-                                for line in flashagent_tui::mcp_view::render_mcp_test_report(&report, w as usize) {
-                                    self.chat.push_line(LineKind::System, line);
-                                }
-                            }
-                            Err(e) => {
-                                self.chat.push_system(&format!("\x1b[38;2;245;120;120mMCP server '{server_name}' test failed:\x1b[0m\n{e}"));
-                            }
-                        }
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    } else if trimmed == "/mcp test" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        self.chat.push_system("Usage: /mcp test <server_name>\nExample: /mcp test sqlite");
-                        return Flow::Continue;
-                    }
-
-                    if let Some(target) = trimmed.strip_prefix("/mcp add ") {
-                        let id = target.trim().to_string();
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        if let Some(item) = flashagent_tools::mcp::find_marketplace_item(&id) {
-                            let cfg = flashagent_tools::mcp::scaffold_config(item);
-                            match flashagent_tools::mcp::save_server_to_project(std::path::Path::new("."), item.id, cfg) {
-                                Ok(path) => {
-                                    let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
-                                    for line in flashagent_tui::mcp_view::render_mcp_add_success(item, &path, w as usize) {
-                                        self.chat.push_line(LineKind::System, line);
-                                    }
-                                    // Start in background
-                                    let mgr = cx.tools_arc.mcp_manager();
-                                    let server_id = item.id.to_string();
-                                    tokio::spawn(async move {
-                                        let _ = mgr.reload().await;
-                                        let _ = mgr.start_server(&server_id).await;
-                                    });
-                                }
-                                Err(e) => {
-                                    notice!(&format!("\x1b[38;2;245;120;120mFailed to save MCP configuration:\x1b[0m {e}"));
-                                }
-                            }
-                        } else {
-                            notice!(&format!("Unknown marketplace extension: '{id}'. Type /mcp market to see available items."));
-                        }
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    } else if trimmed == "/mcp add" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        self.chat.push_system("Usage: /mcp add <marketplace_id>\nExample: /mcp add sqlite\nType /mcp market to browse extensions.");
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/mcp reload" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let mgr = cx.tools_arc.mcp_manager();
-                        match mgr.reload().await {
-                            Ok(()) => {
-                                let statuses = mgr.server_status_list().await;
-                                let active = statuses.iter().filter(|s| s.state == flashagent_tools::mcp::ServerConnectionState::Active).count();
-                                let tools: usize = statuses.iter().map(|s| s.tool_count).sum();
-                                notice!(&format!(
-                                    "\x1b[38;2;135;220;145m✔ MCP reload complete:\x1b[0m {} active server(s), {} discovered tool(s).",
-                                    active, tools
-                                ));
-                            }
-                            Err(e) => {
-                                notice!(&format!("\x1b[38;2;245;120;120mMCP reload failed:\x1b[0m {e}"));
-                            }
-                        }
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/compact" || trimmed.starts_with("/compact ") {
-                        let focus = trimmed.strip_prefix("/compact").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        self.chat.push_system("Compacting context...");
-                        self.custom_placeholder = None;
-                        self.suggested_prompt = None;
-                        let tg_speed = self.token_tracker.tg_3s();
-                        self.renderer.frame(
-                            &self.chat,
-                            cx.gate,
-                            cx.question_gate,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            &self.context_usage,
-                            FrameState {
-                                input: &self.input,
-                                mode: cx.perm.state().mode(),
-                                is_goal_active: self.goal_state.is_some(),
-                                goal_progress: None,
-                                tip: Some(self.tip_animator.tip_text),
-                                tip_animated: None,
-                                tip_lines: Some(cx.tip_lines),
-                                token_tracker: Some(&self.token_tracker),
-                                reasoning_expand: ReasoningExpansion {
-                                    all: self.all_expanded,
-                                    last: self.last_expanded,
-                                },
-                                tick_n: self.tick_n,
-                                running: self.running,
-                                elapsed_secs: self.turn_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                                face_phase: self.turn_started.map(|t| (t.elapsed().as_millis() / 80) as usize).unwrap_or(0),
-                                model_tokens: self.token_tracker.total_model_tokens,
-                                tokens_per_sec: tg_speed,
-                                f_keep: self.token_tracker.last_f_keep,
-                                confirm_selection: self.confirm_select.decision(),
-                                question_state: Some(&self.question_ui_state),
-                                custom_placeholder: self.custom_placeholder.as_deref(),
-                                suggested_prompt: self.suggested_prompt.as_deref(),
-                                copy_toast: None,
-                                prefill_status: None,
-                                ttft_display: None,
-                                background: self.background.as_ref().map(|b| b.text.as_str()),
-                                channel_prompt: None,
-                                prompt_title: "",
-                                turn_phase: None,
-                                attachments: &[],
-        background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
-                                context_warn_threshold: self.config.context_warn_threshold,
-                                pending_steers: &self.pending_steers,
-                            },
-                        );
-                        let before = self.context_usage.total_used();
-                        if compact_context(cx.source, &mut self.history, focus.as_deref()).await.is_some() {
-                            update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-                            let saved = before.saturating_sub(self.context_usage.total_used());
-                            // Said in the transcript, like the
-                            // automatic one: it is the conversation
-                            // that changed.
-                            self.chat.replace_last_system(&format!(
-                                "Context compacted · {} saved · the conversation so far is now a summary",
-                                ContextUsage::format_tokens(saved)
-                            ));
-                            self.custom_placeholder = None;
-                        } else {
-                            self.chat.replace_last_system("Nothing to compact yet");
-                        }
-                        self.suggested_prompt = None;
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/verbose" || trimmed == "/expand" || trimmed == "/think" || trimmed == "/o" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        if !self.last_expanded && !self.all_expanded {
-                            self.last_expanded = true;
-                            self.all_expanded = false;
-                        } else if self.last_expanded && !self.all_expanded {
-                            self.last_expanded = false;
-                            self.all_expanded = true;
-                        } else {
-                            self.last_expanded = false;
-                            self.all_expanded = false;
-                        }
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    } else if let Some(arg) = trimmed.strip_prefix("/verbose ")
-                        .or_else(|| trimmed.strip_prefix("/expand "))
-                        .or_else(|| trimmed.strip_prefix("/think "))
-                        .or_else(|| trimmed.strip_prefix("/o "))
-                    {
-                        let arg_val = arg.trim().to_string();
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        match arg_val.as_str() {
-                            "all" => {
-                                self.all_expanded = true;
-                                self.last_expanded = false;
-                            }
-                            "last" => {
-                                self.all_expanded = false;
-                                self.last_expanded = true;
-                            }
-                            "off" | "none" | "collapse" => {
-                                self.all_expanded = false;
-                                self.last_expanded = false;
-                            }
-                            _ => {
-                                notice!("[Usage: /verbose all | /verbose last | /verbose off]");
-                            }
-                        };
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/exit" || trimmed == "/quit" || trimmed == "/q" {
-                        return Flow::Quit;
-                    }
-
-                    if trimmed == "/editor" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        match open_in_external_editor("", &self.config.external_editor) {
-                            Ok(edited) => {
-                                self.input = edited;
-                            }
-                            Err(err) => {
-                                notice!(&format!("Failed to launch external editor: {err}"));
-                            }
-                        }
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/diff" {
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        match std::process::Command::new("git").args(["diff", "--stat"]).output() {
-                            Ok(out) => {
-                                let s = String::from_utf8_lossy(&out.stdout);
-                                if s.trim().is_empty() {
-                                    // `git diff` says nothing about files
-                                    // git has never seen, and "clean" next
-                                    // to three untracked files is a lie.
-                                    let untracked = std::process::Command::new("git")
-                                        .args(["ls-files", "--others", "--exclude-standard"])
-                                        .output()
-                                        .ok()
-                                        .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
-                                        .unwrap_or(0);
-                                    match untracked {
-                                        0 => notice!("[No changes to tracked files]"),
-                                        1 => notice!("[No changes to tracked files · 1 untracked file]"),
-                                        n => notice!(&format!("[No changes to tracked files · {n} untracked files]")),
-                                    }
-                                } else {
-                                    self.chat.push_system(&format!("Git diff summary:\n{}", s.trim_end()));
-                                }
-                            }
-                            Err(e) => {
-                                notice!(&format!("Failed to run git diff: {e}"));
-                            }
-                        }
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/rewind" || trimmed.starts_with("/rewind ") {
-                        let arg = trimmed.strip_prefix("/rewind").map(|s| s.trim().to_string()).unwrap_or_default();
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let Some(store) = cx.perm.state().snapshots() else {
-                            notice!("[Rewind is not available in this session]");
-                            return Flow::Continue;
-                        };
-                        let prompts: Vec<String> = self
-                            .history
-                            .iter()
-                            .filter(|m| m.role == flashagent_llm::Role::User)
-                            .map(|m| m.content.clone())
-                            .collect();
-                        let prompt_refs: Vec<&str> = prompts.iter().map(String::as_str).collect();
-                        let turns = store.rewindable(&prompt_refs);
-                        if turns.is_empty() {
-                            notice!("[Nothing to rewind to yet]");
-                            return Flow::Continue;
-                        }
-                        let chosen = arg.parse::<usize>().ok().filter(|n| (1..=turns.len()).contains(n));
-                        let Some(n) = chosen else {
-                            if !arg.is_empty() {
-                                notice!(&format!("[No turn {arg} to rewind to: pick 1 to {}]", turns.len()));
-                            }
-                            let mut text = String::from(
-                                "Turns you can go back to. The files FlashAgent changed and the conversation return to how they were before the turn:\n",
-                            );
-                            for (i, turn) in turns.iter().enumerate() {
-                                let first_line = extract_user_prompt(&prompts[turn.user_index]).lines().next().unwrap_or("").to_string();
-                                let files = match turn.files {
-                                    0 => "no file changes".to_string(),
-                                    1 => "1 file".to_string(),
-                                    k => format!("{k} files"),
-                                };
-                                text.push_str(&format!("  {}. {} · {files}\n", i + 1, flashagent_tui::truncate_middle(&first_line, 60)));
-                            }
-                            text.push_str("Type /rewind <number>. Changes made by shell commands are not undone.");
-                            self.chat.push_system(&text);
-                            self.renderer.request_reprint();
-                            return Flow::Continue;
-                        };
-                        if self.running {
-                            notice!("[Wait for the turn to finish before rewinding]");
-                            return Flow::Continue;
-                        }
-
-                        let target = turns[n - 1].clone();
-                        let prompt_label = flashagent_tui::truncate_middle(
-                            extract_user_prompt(&prompts[target.user_index]).lines().next().unwrap_or(""),
-                            60,
-                        );
-                        let files = store
-                            .preview_rewind(target.turn)
-                            .into_iter()
-                            .map(|f| RewindFileRow::from((store.as_ref(), f)))
-                            .collect();
-                        self.rewind_confirm = Some(RewindConfirm { target, prompt_label, files, confirm: true });
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/commit" || trimmed.starts_with("/commit ") {
-                        let msg_arg = trimmed.strip_prefix("/commit ").map(|s| s.trim().to_string()).unwrap_or_default();
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        let commit_msg = if !msg_arg.is_empty() {
-                            msg_arg.to_string()
-                        } else {
-                            let ts = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0);
-                            format!("chore: checkpoint update ({ts})")
-                        };
-                        match std::process::Command::new("git").args(["commit", "-m", &commit_msg]).output() {
-                            Ok(out) if out.status.success() => {
-                                let s = String::from_utf8_lossy(&out.stdout);
-                                self.chat.push_system(&format!("Git commit succeeded:\n{}", s.trim_end()));
-                            }
-                            Ok(out) => {
-                                let err = String::from_utf8_lossy(&out.stderr);
-                                let s = String::from_utf8_lossy(&out.stdout);
-                                self.chat.push_system(&format!("Git commit status:\n{}{}", s, err));
-                            }
-                            Err(e) => {
-                                notice!(&format!("Failed to run git commit: {e}"));
-                            }
-                        }
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    if trimmed == "/export" || trimmed.starts_with("/export ") {
-                        let format_arg = trimmed.strip_prefix("/export ").map(|s| s.trim().to_lowercase()).unwrap_or_else(|| "md".to_string());
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        // The id already starts with "session_"; the
-                        // old line produced session_session_1789.md.
-                        let stem = cx.session_id.strip_prefix("session_").unwrap_or(cx.session_id);
-                        let filename = match format_arg.as_str() {
-                            "html" => format!("session_{stem}.html"),
-                            "jsonl" | "json" => format!("session_{stem}.jsonl"),
-                            _ => format!("session_{stem}.md"),
-                        };
-                        let content = match format_arg.as_str() {
-                            "html" => {
-                                let mut html = String::from("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>FlashAgent Session</title><style>body{font-family:sans-serif;max-width:800px;margin:2rem auto;line-height:1.6;background:#1e1e2e;color:#cdd6f4;}pre{background:#181825;padding:1rem;border-radius:6px;overflow-x:auto;}h3{color:#89b4fa;}</style></head><body>");
-                                for m in &self.history {
-                                    let role = m.role.as_str();
-                                    let text = if m.content.trim().is_empty() && !m.images.is_empty() {
-                                        format!("[{} attached image{}]", m.images.len(), if m.images.len() == 1 { "" } else { "s" })
-                                    } else {
-                                        m.content.clone()
-                                    };
-                                    let escaped = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-                                    html.push_str(&format!("<h3>Role: {role}</h3><pre>{escaped}</pre>"));
-                                }
-                                html.push_str("</body></html>");
-                                html
-                            }
-                            "jsonl" | "json" => {
-                                let mut buf = String::new();
-                                for m in &self.history {
-                                    let saved = SavedMessage::from(m);
-                                    if let Ok(line) = serde_json::to_string(&saved) {
-                                        buf.push_str(&line);
-                                        buf.push('\n');
-                                    }
-                                }
-                                buf
-                            }
-                            _ => {
-                                let mut md = format!("# FlashAgent Session Export\n- **Session ID**: `{}`\n- **Model**: `{}`\n\n---\n\n", cx.session_id, self.current_model);
-                                for m in &self.history {
-                                    let text = if m.content.trim().is_empty() && !m.images.is_empty() {
-                                        format!("[{} attached image{}]", m.images.len(), if m.images.len() == 1 { "" } else { "s" })
-                                    } else {
-                                        m.content.clone()
-                                    };
-                                    md.push_str(&format!("### {}\n\n{}\n\n", m.role.as_str().to_uppercase(), text));
-                                }
-                                md
-                            }
-                        };
-                        match std::fs::write(&filename, content) {
-                            Ok(_) => notice!(&format!("Exported conversation to: \x1b[1m{filename}\x1b[0m")),
-                            Err(e) => notice!(&format!("Failed to export conversation: {e}")),
-                        }
-                        self.renderer.request_reprint();
-                        return Flow::Continue;
-                    }
-
-                    // Check if the command invokes a skill (/skill:<name> or /<name>)
-                    let explicit_skill = trimmed.strip_prefix("/skill:").map(|rest| rest.trim().to_string());
-                    let skill_name = explicit_skill.clone().or_else(|| {
-                        let cand = trimmed.strip_prefix('/').filter(|c| !c.contains(' '))?;
-                        find_skill_file(cand).map(|_| cand.to_string())
-                    });
-
-                    if let Some(sname) = skill_name {
-                        let Some(skill_content) = find_skill_file(&sname).and_then(|p| std::fs::read_to_string(p).ok()) else {
-                            self.input.clear();
-                            notice!(&format!("[Unknown skill '{sname}'. Type /skills to list available skills.]"));
-                            self.renderer.request_reprint();
-                            return Flow::Continue;
-                        };
-                        self.input.clear();
-                        self.autocomplete_idx = 0;
-                        self.chat.push_user(&format!("/skill:{sname}"));
-                        let prompt = format!("Execute skill: {sname}\n\nSkill Instructions:\n{skill_content}");
-                        self.history.push(ChatMessage::user(prompt));
-                        if let (Some(store), Some(msg)) = (cx.perm.state().snapshots(), self.history.last()) {
-                            store.begin_turn(&msg.content);
-                        }
-                        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-                        cx.cancel.store(false, Ordering::Relaxed);
-                        self.suggested_prompt = None;
-                        self.custom_placeholder = None;
-                        self.running = true;
-                        self.turn_phase = TurnPhase::Waiting;
-                        self.turn_started = Some(std::time::Instant::now());
-                        self.token_tracker.on_turn_start(self.current_model.clone(), self.context_usage.total_used());
-                        cx.source.set_model(&self.current_model);
-                        cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
-                        cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
-                        let turn_opts = build_turn_options(&self.config, &self.current_effort);
-                        self.turn_counter += 1;
-                        self.turn_outcome = flashagent_core::TurnOutcome::default();
-                        let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
-                        self.active_steer_tx = Some(steer_tx);
-                        self.pending_steers.clear();
-                        self.cancel_recap();
-                        self.active_turn_handle = Some(spawn_turn(
-                            cx.cancel.clone(),
-                            cx.source.clone(),
-                            cx.perm,
-                            self.history.clone(),
-                            GoalBudgets::steps_only(self.max_steps),
-                            turn_opts,
-                            cx.tx.clone(),
-                            steer_rx,
-                            self.turn_counter,
-                        ));
-                        return Flow::Continue;
-                    }
-
-                    let text = std::mem::take(&mut self.input);
-                    if !text.is_empty() && self.input_history.last() != Some(&text) {
-                        self.input_history.push(text.clone());
-                    }
-                    self.history_index = None;
-                    self.current_draft.clear();
-                    // Sending a new prompt collapses the previous turn's expanded thinking.
-                    self.last_expanded = false;
-
-                    // A path typed out is still the user pointing at
-                    // a picture — but only a path. Naming a file in a
-                    // sentence ("open diagram.png and tell me...") is
-                    // a mention, and the model has view_image for
-                    // that; silently attaching a megabyte because a
-                    // word ended in .png would be a surprise.
-                    for token in text.split_whitespace().filter(|t| {
-                        t.contains('/') || t.contains('\\')
-                    }) {
-                        if self.attachments.len() >= 8 {
-                            break;
-                        }
-                        if let Some(att) = Attachment::from_dropped_path(token) {
-                            if !self.attachments.iter().any(|a| a.data_url == att.data_url) {
-                                self.attachments.push(att);
-                            }
-                        }
-                    }
-                    let shown = if self.attachments.is_empty() {
-                        text.clone()
-                    } else {
-                        // The transcript has to show that a picture
-                        // went with the message; otherwise the
-                        // answer refers to something invisible.
-                        let labels: Vec<String> =
-                            self.attachments.iter().map(|a| a.label()).collect();
-                        if text.trim().is_empty() {
-                            format!("[{}]", labels.join(", "))
-                        } else {
-                            format!("{text}  [{}]", labels.join(", "))
-                        }
-                    };
-                    self.chat.push_user(&shown);
-                    let first = !self.history.iter().any(|m| m.role == flashagent_llm::Role::User);
-                    let content = if first && !cx.memory_block.is_empty() {
-                        if text.trim().is_empty() {
-                            cx.memory_block.to_string()
-                        } else {
-                            format!("{}\n\n---\n\n{text}", cx.memory_block)
-                        }
-                    } else {
-                        text
-                    };
-                    self.context_before_turn = self.context_usage.total_used();
-                    let mut user_msg = ChatMessage::user(content);
-                    if !self.attachments.is_empty() {
-                        user_msg.images = self.attachments.iter().map(|a| a.data_url.clone()).collect();
-                        self.attachments.clear();
-                    }
-                    self.history.push(user_msg);
-                    if let (Some(store), Some(msg)) = (cx.perm.state().snapshots(), self.history.last()) {
-                        let prompt_for_snapshot = if msg.content.is_empty() {
-                            "[image]"
-                        } else {
-                            &msg.content
-                        };
-                        store.begin_turn(prompt_for_snapshot);
-                    }
-                    update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-                    cx.cancel.store(false, Ordering::Relaxed);
-                    self.suggested_prompt = None;
-                    self.custom_placeholder = None;
-                    self.running = true;
-                    self.turn_phase = TurnPhase::Waiting;
-                    self.turn_started = Some(std::time::Instant::now());
-                    self.token_tracker.on_turn_start(self.current_model.clone(), self.context_usage.total_used());
-                    cx.source.set_model(&self.current_model);
-                    cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
-                    cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
-                    let turn_opts = build_turn_options(&self.config, &self.current_effort);
-                    self.turn_counter += 1;
-                        self.turn_outcome = flashagent_core::TurnOutcome::default();
-                    let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
-                    self.active_steer_tx = Some(steer_tx);
-                    self.pending_steers.clear();
-                    self.cancel_recap();
-                    self.active_turn_handle = Some(spawn_turn(
-                        cx.cancel.clone(),
-                        cx.source.clone(),
-                        cx.perm,
-                        self.history.clone(),
-                        GoalBudgets::steps_only(self.max_steps),
-                        turn_opts,
-                        cx.tx.clone(),
-                        steer_rx,
-                        self.turn_counter,
-                    ));
+        self.send_prompt(cx);
         Flow::Next
+    }
+
+    /// `/name arg`. `None` when it is not a command after all — a path such as
+    /// `/tmp/shot.png` — and the line goes to the model.
+    async fn run_command(&mut self, cx: &mut LoopCtx<'_>, name: &str, arg: &str) -> Option<Flow> {
+        // A command takes the line out of the composer; a typo leaves it there
+        // to fix.
+        let typed = std::mem::take(&mut self.input);
+        self.autocomplete_idx = 0;
+        match name {
+            "help" | "?" => self.chat.push_system(HELP),
+            "goal" if arg.is_empty() => self.show_goal_usage(),
+            "goal" => self.start_goal(cx, arg),
+            "skills" => self.list_skills(),
+            "settings" | "config" => {
+                let view = self.runtime_settings(cx.perm.state().mode());
+                self.open_overlay(Overlay::Settings(Box::new(view)));
+            }
+            "whatsnew" | "changelog" => self.show_whatsnew(cx).await,
+            "memory" | "memories" => {
+                let mut modal = open_memory_modal();
+                // "/memory summary" opens straight on the overview.
+                if matches!(arg, "summary" | "s") && !modal.rows.is_empty() {
+                    modal.tab = flashagent_tui::memory_view::MemoryTab::Summary;
+                    if modal.summary_is_stale() {
+                        modal.summary = flashagent_tui::memory_view::SummaryState::Writing;
+                        spawn_summary(cx.source.clone(), modal.rows.clone(), cx.tx.clone());
+                    }
+                }
+                self.open_overlay(Overlay::Memory(modal));
+            }
+            "context" => {
+                update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                self.open_overlay(Overlay::Context(ContextModal::new(self.context_usage.clone())));
+            }
+            "clear" => self.clear_chat(),
+            "regenerate" | "retry" => {
+                if !self.regenerate(cx) {
+                    self.notice("[No previous turn to regenerate]");
+                }
+            }
+            "effort" | "thinking" | "t" if arg.is_empty() => self.open_effort_menu(cx.source),
+            "effort" | "thinking" | "t" => self.set_effort(cx, arg),
+            "model" | "models" | "m" => {
+                self.open_model_menu(cx.source);
+                // "/model qwen" opens the list already narrowed to it.
+                if let Some(Overlay::Model(menu)) = self.overlay.as_mut() {
+                    arg.chars().for_each(|c| menu.push_filter_char(c));
+                }
+            }
+            "sampling" | "params" => self.open_overlay(Overlay::Sampling(SamplingView::new(&self.config))),
+            "mode" => self.mode_command(cx, arg),
+            "uninstall" => {
+                self.uninstall_confirm = true;
+                self.suggested_prompt = None;
+                self.renderer.request_reprint();
+            }
+            "resume" => self.open_session_picker(cx.cwd_display, cx.session_id),
+            "update" => {
+                if flashagent_svc::updater::is_dev_mode() {
+                    self.chat.push_system("  \x1b[38;2;225;175;95mAuto-updater is disabled in dev mode\x1b[0m (running from source repository / cargo build).\n  To update your dev build, pull latest git commits and run `cargo build --release`.");
+                } else {
+                    // The same as Ctrl+U: check, download and install in one
+                    // go, or show the update already under way.
+                    self.start_or_watch_update(cx);
+                }
+            }
+            "channel" => self.channel_command(cx, arg),
+            "mcp" => self.mcp_command(cx, arg).await,
+            "compact" => self.compact_command(cx, arg).await,
+            "verbose" | "expand" | "think" | "o" => self.verbose_command(arg),
+            "exit" | "quit" | "q" => return Some(Flow::Quit),
+            "editor" => match open_in_external_editor("", &self.config.external_editor) {
+                Ok(edited) => self.input = edited,
+                Err(err) => self.notice(format!("Failed to launch external editor: {err}")),
+            },
+            "diff" => self.git_diff_summary(),
+            "rewind" => self.rewind_command(cx, arg),
+            "commit" => self.git_commit(arg),
+            "export" => self.export_conversation(cx, arg),
+            _ => {
+                if let Some(skill) = name.strip_prefix("skill:") {
+                    self.run_skill(cx, skill);
+                } else if arg.is_empty() && find_skill_file(name).is_some() {
+                    self.run_skill(cx, name);
+                } else if name.is_empty() || name.contains(['/', '\\', '.']) {
+                    self.input = typed;
+                    return None;
+                } else {
+                    self.input = typed;
+                    self.unknown_command(name);
+                }
+            }
+        }
+        self.renderer.request_reprint();
+        Some(Flow::Continue)
+    }
+
+    /// "/hlep" is a typo, not a question for the model.
+    fn unknown_command(&mut self, name: &str) {
+        let word = format!("/{name}");
+        let known = flashagent_tui::autocomplete::builtin_commands();
+        let guess = known
+            .iter()
+            .map(|c| c.trigger.as_str())
+            .filter(|t| !t.contains(' '))
+            .min_by_key(|t| flashagent_tui::autocomplete::edit_distance(t, &word))
+            .filter(|t| flashagent_tui::autocomplete::edit_distance(t, &word) <= 2);
+        // The typo stays in the prompt to fix, and the placeholder only shows
+        // on an empty one.
+        let said = match guess {
+            Some(g) => format!("Unknown command {word} · did you mean {g}?"),
+            None => format!("Unknown command {word} · /help lists them"),
+        };
+        self.background = Some(BackgroundNotice::fading(said, 6));
+    }
+
+    /// A message for the model: the typed text and any pictures going with it.
+    fn send_prompt(&mut self, cx: &LoopCtx<'_>) {
+        let text = std::mem::take(&mut self.input);
+        if !text.is_empty() && self.input_history.last() != Some(&text) {
+            self.input_history.push(text.clone());
+        }
+        self.history_index = None;
+        self.current_draft.clear();
+        // Sending a new prompt collapses the previous turn's expanded thinking.
+        self.last_expanded = false;
+
+        // A path typed out is still the user pointing at a picture — but only
+        // a path. Naming a file in a sentence ("open diagram.png and tell
+        // me...") is a mention, and the model has view_image for that;
+        // silently attaching a megabyte because a word ended in .png would be
+        // a surprise.
+        for token in text.split_whitespace().filter(|t| t.contains('/') || t.contains('\\')) {
+            if self.attachments.len() >= 8 {
+                break;
+            }
+            if let Some(att) = Attachment::from_dropped_path(token) {
+                if !self.attachments.iter().any(|a| a.data_url == att.data_url) {
+                    self.attachments.push(att);
+                }
+            }
+        }
+        let shown = if self.attachments.is_empty() {
+            text.clone()
+        } else {
+            // The transcript has to show that a picture went with the
+            // message; otherwise the answer refers to something invisible.
+            let labels: Vec<String> = self.attachments.iter().map(|a| a.label()).collect();
+            if text.trim().is_empty() {
+                format!("[{}]", labels.join(", "))
+            } else {
+                format!("{text}  [{}]", labels.join(", "))
+            }
+        };
+        self.chat.push_user(&shown);
+        let content = self.with_memory_if_first(cx, text);
+        self.context_before_turn = self.context_usage.total_used();
+        let mut user_msg = ChatMessage::user(content);
+        if !self.attachments.is_empty() {
+            user_msg.images = self.attachments.drain(..).map(|a| a.data_url).collect();
+        }
+        self.history.push(user_msg);
+        self.begin_snapshot_turn(cx);
+        self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
+    }
+
+    /// The memory block rides in front of the first user message.
+    fn with_memory_if_first(&self, cx: &LoopCtx<'_>, text: String) -> String {
+        let first = !self.history.iter().any(|m| m.role == flashagent_llm::Role::User);
+        if !first || cx.memory_block.is_empty() {
+            text
+        } else if text.trim().is_empty() {
+            cx.memory_block.to_string()
+        } else {
+            format!("{}\n\n---\n\n{text}", cx.memory_block)
+        }
+    }
+
+    /// Mark where /rewind can take the files back to: before the message just
+    /// pushed onto the history.
+    fn begin_snapshot_turn(&self, cx: &LoopCtx<'_>) {
+        if let (Some(store), Some(msg)) = (cx.perm.state().snapshots(), self.history.last()) {
+            store.begin_turn(if msg.content.is_empty() { "[image]" } else { &msg.content });
+        }
+    }
+
+    fn show_goal_usage(&mut self) {
+        self.chat.push_system(&format!(
+            "Autonomous Goal Mode:\n\
+             Usage: /goal <task description>\n\
+             Example: /goal Refactor error handling in the core crate and run the test suite\n\
+             Limits: {} — change them in Settings → Goal.\n\
+             In goal mode FlashAgent approves its own tool calls (dangerous shell commands are refused), \
+             thinks at maximum effort and works on its own. A question it asks you waits {} for an answer, \
+             then the run carries on without it.",
+            GoalBudgets::from_config(&self.config).summary(),
+            flashagent_tui::goal::human_duration(flashagent_tools::GOAL_QUESTION_TIMEOUT)
+        ));
+    }
+
+    fn start_goal(&mut self, cx: &LoopCtx<'_>, task: &str) {
+        let task_desc = match flashagent_tui::goal::parse_goal_task(task) {
+            Ok(task) => task,
+            Err(msg) => {
+                self.notice(msg);
+                return;
+            }
+        };
+        let goal_budgets = GoalBudgets::from_config(&self.config);
+
+        // Save previous state to roll back upon goal completion
+        self.goal_state = Some(SavedGoalState {
+            mode: cx.perm.state().mode(),
+            effort: self.current_effort.clone(),
+            max_steps: self.max_steps,
+            task: task_desc.clone(),
+        });
+        self.goal_ledger = Some(GoalLedger::new(task_desc.clone(), goal_budgets.clone()));
+
+        // Lift restrictions for autonomous execution
+        cx.perm.state().set_mode(PermissionMode::Bypass);
+        cx.perm.state().set_goal_active(true);
+        self.current_effort = "high".to_string();
+        cx.tools_arc.set_goal_mode(true);
+
+        let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+        let card_w = (w as usize).saturating_sub(4).clamp(44, 110);
+        let inner_w = card_w.saturating_sub(2);
+        let border_color = "\x1b[38;2;225;175;95m";
+        let reset = "\x1b[0m";
+
+        let title = format!(" Goal: {} ", flashagent_tui::truncate_middle(&task_desc, inner_w.saturating_sub(10)));
+        let dash_count = inner_w.saturating_sub(visible_width(&title) + 1);
+        self.chat.push_line(
+            LineKind::System,
+            format!("{border_color}╭─\x1b[1;38;2;245;240;232m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)),
+        );
+        let meta_line = "Mode: Autonomous · Permissions: Auto-Approved · Thinking: Max · Esc to stop";
+        let budget_line = flashagent_tui::truncate_middle(&format!("Budget: {}", goal_budgets.summary()), inner_w.saturating_sub(2));
+        for row in [meta_line, budget_line.as_str()] {
+            let pad_len = inner_w.saturating_sub(visible_width(row) + 1);
+            self.chat.push_line(
+                LineKind::System,
+                format!("{border_color}│{reset} \x1b[38;2;160;155;145m{row}\x1b[0m{border_color}{}│{reset}", " ".repeat(pad_len)),
+            );
+        }
+        self.chat.push_line(LineKind::System, format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)));
+
+        self.chat.push_user(&format!("/goal {task_desc}"));
+
+        let budget_rule = if goal_budgets.is_unlimited() {
+            "This run has no budget: it ends when you finish or the user stops it. Say plainly \
+             what is left unfinished or unverified rather than claiming success."
+                .to_string()
+        } else {
+            format!(
+                "Budget for this run: {}. When it runs out the run is stopped wherever it \
+                 is, so do the load-bearing work first and say plainly what is left \
+                 unfinished or unverified rather than claiming success.",
+                goal_budgets.summary()
+            )
+        };
+        let autonomous_directive = format!(
+            "[AUTONOMOUS GOAL DIRECTIVE]\n\
+             You are operating in fully autonomous /goal mode.\n\
+             Target goal: {}\n\n\
+             Autonomous Rules:\n\
+             1. Work on your own: tool actions are pre-approved, except dangerous shell commands \
+             (force pushes, hard resets, recursive force deletes, sudo), which are refused. Ask the \
+             user with ask_user only when you are truly blocked on a decision that is theirs; if no \
+             answer comes within {}, pick the most reasonable option yourself, carry on, and name \
+             that choice in your summary.\n\
+             2. Plan, research, edit, execute, and verify completely on your own.\n\
+             3. Thoroughly test and verify your changes before finishing.\n\
+             4. Conclude with a clear structured summary of what was accomplished.\n\
+             5. Call update_plan with your whole step-by-step plan before starting, \
+             and again whenever a step finishes or the plan changes — the person \
+             who started this run watches it live and has no other way to see where \
+             the run stands.\n\n\
+             {budget_rule}",
+            task_desc,
+            flashagent_tui::goal::human_duration(flashagent_tools::GOAL_QUESTION_TIMEOUT),
+        );
+        let content = self.with_memory_if_first(cx, autonomous_directive);
+        self.history.push(ChatMessage::user(content));
+        self.begin_snapshot_turn(cx);
+        self.start_turn(cx, goal_budgets);
+    }
+
+    fn list_skills(&mut self) {
+        let skills = flashagent_tui::autocomplete::load_skills(std::path::Path::new("."));
+        let listed: Vec<String> = skills
+            .iter()
+            .filter(|s| s.trigger.starts_with("/skill:"))
+            .map(|s| format!("  • {} — {}", s.trigger, s.description))
+            .collect();
+        if listed.is_empty() {
+            self.notice("[No skills found. Add .agents/skills/<name>.md (project) or ~/.flashagent/skills/<name>.md (global).]");
+        } else {
+            self.chat.push_system(&format!("Skills:\n{}", listed.join("\n")));
+        }
+    }
+
+    fn run_skill(&mut self, cx: &LoopCtx<'_>, name: &str) {
+        let name = name.trim();
+        let Some(skill_content) = find_skill_file(name).and_then(|p| std::fs::read_to_string(p).ok()) else {
+            self.notice(format!("[Unknown skill '{name}'. Type /skills to list available skills.]"));
+            return;
+        };
+        self.chat.push_user(&format!("/skill:{name}"));
+        self.history.push(ChatMessage::user(format!("Execute skill: {name}\n\nSkill Instructions:\n{skill_content}")));
+        self.begin_snapshot_turn(cx);
+        self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
+    }
+
+    async fn show_whatsnew(&mut self, cx: &mut LoopCtx<'_>) {
+        let now = flashagent_svc::updater::current_version();
+        // Asked for on purpose, so there is no "nothing changed" case worth a
+        // blank screen: fall back to the last few releases.
+        let mut news = flashagent_tui::whatsnew::since(self.config.last_seen_version.as_deref(), now);
+        if news.is_empty() {
+            news = flashagent_tui::whatsnew::latest(3);
+        }
+        if news.is_empty() {
+            self.notice("[No changelog is bundled with this build.]");
+        } else {
+            flashagent_tui::whatsnew::run_channel(news, now, cx.rx).await.ok();
+        }
+    }
+
+    fn clear_chat(&mut self) {
+        self.chat.clear();
+        self.renderer.printed_settled = 0;
+        self.renderer.prev_expansion = None;
+        self.renderer.scroll_to_bottom();
+        // Nothing new is printed after a clear, so only a full repaint takes
+        // the old lines off the screen.
+        self.renderer.request_reprint();
+    }
+
+    fn set_effort(&mut self, cx: &LoopCtx<'_>, arg: &str) {
+        let wanted = arg.to_lowercase();
+        let mut known: Vec<String> = ["auto", "default", "off", "low", "medium", "high"].iter().map(|s| s.to_string()).collect();
+        if let Some(p) = cx.source.profile() {
+            known.extend(p.presets.iter().filter(|p| !known.contains(p)).cloned().collect::<Vec<_>>());
+        }
+        if !known.contains(&wanted) {
+            self.notice(format!("[Unknown effort '{wanted}'. Available: {}]", known.join(", ")));
+            return;
+        }
+        self.current_effort = wanted;
+        self.refresh_welcome(cx.source, cx.perm.state().mode(), cx.mascot_mood);
+        self.notice(format!("Thinking effort set to: {}", self.current_effort));
+    }
+
+    fn mode_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {
+        let mode = match arg.to_lowercase().as_str() {
+            "" => cx.perm.state().mode().next(),
+            "planning" | "plan" => PermissionMode::Planning,
+            "manual" | "man" => PermissionMode::Manual,
+            "acceptedits" | "accept_edits" | "edits" | "auto" | "default" => PermissionMode::AcceptEdits,
+            "bypass" | "accept_all" | "all" => PermissionMode::Bypass,
+            "autonomic" => {
+                self.notice("[Autonomic mode is temporary and activated exclusively during `/goal <task>` execution]");
+                return;
+            }
+            _ => {
+                self.notice("[Usage: /mode planning | /mode manual | /mode edits | /mode all]");
+                return;
+            }
+        };
+        cx.perm.state().set_mode(mode);
+        self.remember_mode(mode);
+        self.refresh_welcome(cx.source, mode, cx.mascot_mood);
+        self.notice(format!("Permission mode set to: {}", mode.label()));
+    }
+
+    fn channel_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {
+        use flashagent_core::config::UpdateChannel;
+        let wanted = match arg.to_lowercase().as_str() {
+            "" => {
+                self.chat.push_system(&format!(
+                    "Current release channel: \x1b[1m{}\x1b[0m\nUsage: /channel <stable|beta>\n• /channel stable — Official stable releases (v*)\n• /channel beta   — Latest beta pre-releases (b*)",
+                    self.config.update_channel.label()
+                ));
+                return;
+            }
+            "stable" | "v" => UpdateChannel::Stable,
+            "beta" | "b" => UpdateChannel::Beta,
+            _ => {
+                self.notice("Invalid channel. Choose either: /channel stable or /channel beta");
+                return;
+            }
+        };
+        if wanted == self.config.update_channel {
+            self.notice(format!("Already on the {} channel", wanted.label()));
+            return;
+        }
+        // The same yes-or-no card as Settings: switching can replace the
+        // binary with an older one, so it is never done on the command alone.
+        self.ask_channel_switch(cx, wanted);
+    }
+
+    async fn mcp_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {
+        let (sub, rest) = match arg.split_once(char::is_whitespace) {
+            Some((sub, rest)) => (sub, rest.trim()),
+            None => (arg, ""),
+        };
+        match sub {
+            "" | "help" => self.open_mcp(cx, McpViewTab::Overview).await,
+            "list" | "ls" => self.open_mcp(cx, McpViewTab::Servers).await,
+            "market" | "marketplace" => self.open_mcp(cx, McpViewTab::Marketplace).await,
+            "test" if rest.is_empty() => self.chat.push_system("Usage: /mcp test <server_name>\nExample: /mcp test sqlite"),
+            "test" => {
+                self.notice(format!("Testing MCP server '{rest}'..."));
+                // Shown before the wait, which can take a while.
+                self.draw(cx, None);
+                match cx.tools_arc.mcp_manager().test_server(rest).await {
+                    Ok(report) => {
+                        let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+                        for line in flashagent_tui::mcp_view::render_mcp_test_report(&report, w as usize) {
+                            self.chat.push_line(LineKind::System, line);
+                        }
+                        self.custom_placeholder = None;
+                    }
+                    Err(e) => {
+                        self.chat.push_system(&format!("\x1b[38;2;245;120;120mMCP server '{rest}' test failed:\x1b[0m\n{e}"));
+                        self.custom_placeholder = None;
+                    }
+                }
+            }
+            "add" if rest.is_empty() => self.chat.push_system(
+                "Usage: /mcp add <marketplace_id>\nExample: /mcp add sqlite\nType /mcp market to browse extensions.",
+            ),
+            "add" => {
+                let Some(item) = flashagent_tools::mcp::find_marketplace_item(rest) else {
+                    self.notice(format!("Unknown marketplace extension: '{rest}'. Type /mcp market to see available items."));
+                    return;
+                };
+                let cfg = flashagent_tools::mcp::scaffold_config(item);
+                match flashagent_tools::mcp::save_server_to_project(std::path::Path::new("."), item.id, cfg) {
+                    Ok(path) => {
+                        let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+                        for line in flashagent_tui::mcp_view::render_mcp_add_success(item, &path, w as usize) {
+                            self.chat.push_line(LineKind::System, line);
+                        }
+                        let mgr = cx.tools_arc.mcp_manager();
+                        let server_id = item.id.to_string();
+                        tokio::spawn(async move {
+                            let _ = mgr.reload().await;
+                            let _ = mgr.start_server(&server_id).await;
+                        });
+                    }
+                    Err(e) => self.notice(format!("\x1b[38;2;245;120;120mFailed to save MCP configuration:\x1b[0m {e}")),
+                }
+            }
+            "reload" => {
+                let mgr = cx.tools_arc.mcp_manager();
+                match mgr.reload().await {
+                    Ok(()) => {
+                        let statuses = mgr.server_status_list().await;
+                        let active = statuses.iter().filter(|s| s.state == flashagent_tools::mcp::ServerConnectionState::Active).count();
+                        let tools: usize = statuses.iter().map(|s| s.tool_count).sum();
+                        self.notice(format!(
+                            "\x1b[38;2;135;220;145m✔ MCP reload complete:\x1b[0m {active} active server(s), {tools} discovered tool(s)."
+                        ));
+                    }
+                    Err(e) => self.notice(format!("\x1b[38;2;245;120;120mMCP reload failed:\x1b[0m {e}")),
+                }
+            }
+            _ => self.notice("[Usage: /mcp list | market | test <server> | add <id> | reload]"),
+        }
+    }
+
+    async fn compact_command(&mut self, cx: &LoopCtx<'_>, focus: &str) {
+        self.chat.push_system("Compacting context...");
+        self.custom_placeholder = None;
+        self.suggested_prompt = None;
+        // Shown before the wait: the command that started it is gone from the
+        // composer, and its suggestions with it.
+        self.draw(cx, None);
+        let before = self.context_usage.total_used();
+        let focus = (!focus.is_empty()).then_some(focus);
+        if compact_context(cx.source, &mut self.history, focus).await.is_some() {
+            update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+            let saved = before.saturating_sub(self.context_usage.total_used());
+            // Said in the transcript, like the automatic one: it is the
+            // conversation that changed.
+            self.chat.replace_last_system(&format!(
+                "Context compacted · {} saved · the conversation so far is now a summary",
+                ContextUsage::format_tokens(saved)
+            ));
+        } else {
+            self.chat.replace_last_system("Nothing to compact yet");
+        }
+    }
+
+    fn verbose_command(&mut self, arg: &str) {
+        (self.last_expanded, self.all_expanded) = match arg {
+            // Cycles none -> last -> all -> none, like F2.
+            "" => match (self.last_expanded, self.all_expanded) {
+                (false, false) => (true, false),
+                (true, false) => (false, true),
+                _ => (false, false),
+            },
+            "all" => (false, true),
+            "last" => (true, false),
+            "off" | "none" | "collapse" => (false, false),
+            _ => {
+                self.notice("[Usage: /verbose all | /verbose last | /verbose off]");
+                return;
+            }
+        };
+    }
+
+    fn git_diff_summary(&mut self) {
+        match std::process::Command::new("git").args(["diff", "--stat"]).output() {
+            Ok(out) => {
+                let s = String::from_utf8_lossy(&out.stdout);
+                if !s.trim().is_empty() {
+                    self.chat.push_system(&format!("Git diff summary:\n{}", s.trim_end()));
+                    return;
+                }
+                // `git diff` says nothing about files git has never seen, and
+                // "clean" next to three untracked files is a lie.
+                let untracked = std::process::Command::new("git")
+                    .args(["ls-files", "--others", "--exclude-standard"])
+                    .output()
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+                    .unwrap_or(0);
+                match untracked {
+                    0 => self.notice("[No changes to tracked files]"),
+                    1 => self.notice("[No changes to tracked files · 1 untracked file]"),
+                    n => self.notice(format!("[No changes to tracked files · {n} untracked files]")),
+                }
+            }
+            Err(e) => self.notice(format!("Failed to run git diff: {e}")),
+        }
+    }
+
+    fn rewind_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {
+        let Some(store) = cx.perm.state().snapshots() else {
+            self.notice("[Rewind is not available in this session]");
+            return;
+        };
+        let prompts: Vec<String> =
+            self.history.iter().filter(|m| m.role == flashagent_llm::Role::User).map(|m| m.content.clone()).collect();
+        let prompt_refs: Vec<&str> = prompts.iter().map(String::as_str).collect();
+        let turns = store.rewindable(&prompt_refs);
+        if turns.is_empty() {
+            self.notice("[Nothing to rewind to yet]");
+            return;
+        }
+        let Some(n) = arg.parse::<usize>().ok().filter(|n| (1..=turns.len()).contains(n)) else {
+            if !arg.is_empty() {
+                self.notice(format!("[No turn {arg} to rewind to: pick 1 to {}]", turns.len()));
+            }
+            let mut text = String::from(
+                "Turns you can go back to. The files FlashAgent changed and the conversation return to how they were before the turn:\n",
+            );
+            for (i, turn) in turns.iter().enumerate() {
+                let first_line = extract_user_prompt(&prompts[turn.user_index]).lines().next().unwrap_or("").to_string();
+                let files = match turn.files {
+                    0 => "no file changes".to_string(),
+                    1 => "1 file".to_string(),
+                    k => format!("{k} files"),
+                };
+                text.push_str(&format!("  {}. {} · {files}\n", i + 1, flashagent_tui::truncate_middle(&first_line, 60)));
+            }
+            text.push_str("Type /rewind <number>. Changes made by shell commands are not undone.");
+            self.chat.push_system(&text);
+            return;
+        };
+        if self.running {
+            self.notice("[Wait for the turn to finish before rewinding]");
+            return;
+        }
+        let target = turns[n - 1].clone();
+        let prompt_label = flashagent_tui::truncate_middle(
+            extract_user_prompt(&prompts[target.user_index]).lines().next().unwrap_or(""),
+            60,
+        );
+        let files = store.preview_rewind(target.turn).into_iter().map(|f| RewindFileRow::from((store.as_ref(), f))).collect();
+        self.open_overlay(Overlay::Rewind(RewindConfirm { target, prompt_label, files, confirm: true }));
+    }
+
+    fn git_commit(&mut self, message: &str) {
+        let commit_msg = if message.is_empty() {
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            format!("chore: checkpoint update ({ts})")
+        } else {
+            message.to_string()
+        };
+        match std::process::Command::new("git").args(["commit", "-m", &commit_msg]).output() {
+            Ok(out) if out.status.success() => {
+                self.chat.push_system(&format!("Git commit succeeded:\n{}", String::from_utf8_lossy(&out.stdout).trim_end()));
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let s = String::from_utf8_lossy(&out.stdout);
+                self.chat.push_system(&format!("Git commit status:\n{s}{err}"));
+            }
+            Err(e) => self.notice(format!("Failed to run git commit: {e}")),
+        }
+    }
+
+    fn export_conversation(&mut self, cx: &LoopCtx<'_>, format_arg: &str) {
+        let format_arg = format_arg.to_lowercase();
+        // The id already starts with "session_"; the old line produced
+        // session_session_1789.md.
+        let stem = cx.session_id.strip_prefix("session_").unwrap_or(cx.session_id);
+        let text_of = |m: &ChatMessage| {
+            if m.content.trim().is_empty() && !m.images.is_empty() {
+                format!("[{} attached image{}]", m.images.len(), if m.images.len() == 1 { "" } else { "s" })
+            } else {
+                m.content.clone()
+            }
+        };
+        let (filename, content) = match format_arg.as_str() {
+            "html" => {
+                let mut html = String::from("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>FlashAgent Session</title><style>body{font-family:sans-serif;max-width:800px;margin:2rem auto;line-height:1.6;background:#1e1e2e;color:#cdd6f4;}pre{background:#181825;padding:1rem;border-radius:6px;overflow-x:auto;}h3{color:#89b4fa;}</style></head><body>");
+                for m in &self.history {
+                    let escaped = text_of(m).replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+                    html.push_str(&format!("<h3>Role: {}</h3><pre>{escaped}</pre>", m.role.as_str()));
+                }
+                html.push_str("</body></html>");
+                (format!("session_{stem}.html"), html)
+            }
+            "jsonl" | "json" => {
+                let mut buf = String::new();
+                for m in &self.history {
+                    if let Ok(line) = serde_json::to_string(&SavedMessage::from(m)) {
+                        buf.push_str(&line);
+                        buf.push('\n');
+                    }
+                }
+                (format!("session_{stem}.jsonl"), buf)
+            }
+            _ => {
+                let mut md = format!(
+                    "# FlashAgent Session Export\n- **Session ID**: `{}`\n- **Model**: `{}`\n\n---\n\n",
+                    cx.session_id, self.current_model
+                );
+                for m in &self.history {
+                    md.push_str(&format!("### {}\n\n{}\n\n", m.role.as_str().to_uppercase(), text_of(m)));
+                }
+                (format!("session_{stem}.md"), md)
+            }
+        };
+        match std::fs::write(&filename, content) {
+            Ok(_) => self.notice(format!("Exported conversation to: {filename}")),
+            Err(e) => self.notice(format!("Failed to export conversation: {e}")),
+        }
     }
 
     /// Takes turn `target` and everything after it back: the files it

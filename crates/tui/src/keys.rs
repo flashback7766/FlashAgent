@@ -104,29 +104,10 @@ impl App {
     /// A key the overlays did not claim: typing, editing the prompt, history,
     /// function keys and shortcuts, and Enter.
     pub(crate) async fn handle_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Flow {
-        macro_rules! notice {
-            ($text:expr) => {{
-                self.custom_placeholder = Some(($text).to_string());
-                self.suggested_prompt.take();
-                self.renderer.request_reprint();
-            }};
-        }
         match code {
             KeyCode::Esc => {
                 if self.running {
-                    // Cooperative: the loop answers pending tool calls,
-                    // keeps partial text and returns its history via
-                    // Finished, so model memory matches the screen.
-                    if self.cancel_requested.is_none() {
-                        cx.cancel.store(true, Ordering::Relaxed);
-                        self.cancel_requested = Some(std::time::Instant::now());
-                        self.turn_phase = TurnPhase::Stopping;
-                        self.active_steer_tx = None;
-                        self.pending_steers.clear();
-                        self.suggested_prompt = None;
-                        self.custom_placeholder = Some("Interrupting...".to_string());
-                    }
-                    self.renderer.request_reprint();
+                    self.interrupt(cx);
                 } else if !self.input.is_empty() {
                     self.input.clear();
                     self.autocomplete_idx = 0;
@@ -138,9 +119,6 @@ impl App {
                 } else if !self.attachments.is_empty() {
                     self.attachments.clear();
                     self.background = Some(BackgroundNotice::fading("Attachments cleared".to_string(), 4));
-                    self.renderer.request_reprint();
-                } else if self.mcp_modal.is_some() {
-                    self.mcp_modal = None;
                     self.renderer.request_reprint();
                 } else if self.last_esc.is_some_and(|t| t.elapsed() < ESC_QUIT_WINDOW) {
                     // The second press of a double Esc. One stray Esc used
@@ -158,17 +136,7 @@ impl App {
             }
             // F1: toggle context modal
             KeyCode::F(1) => {
-                if self.context_modal.is_some() {
-                    self.context_modal = None;
-                } else {
-                    self.effort_menu = None;
-                    self.model_menu = None;
-                    self.settings_view = None;
-                    self.sampling_view = None;
-                    self.mcp_modal = None;
-                    self.context_modal = Some(ContextModal::new(self.context_usage.clone()));
-                }
-                self.renderer.request_reprint();
+                self.open_overlay(Overlay::Context(ContextModal::new(self.context_usage.clone())));
             }
 
             // Ctrl+C / Ctrl+Shift+C (handles both Latin and alternate physical keycodes)
@@ -176,19 +144,7 @@ impl App {
                 if mods.contains(KeyModifiers::CONTROL) =>
             {
                 if self.running {
-                    // Cooperative: the loop answers pending tool calls,
-                    // keeps partial text and returns its history via
-                    // Finished, so model memory matches the screen.
-                    if self.cancel_requested.is_none() {
-                        cx.cancel.store(true, Ordering::Relaxed);
-                        self.cancel_requested = Some(std::time::Instant::now());
-                        self.turn_phase = TurnPhase::Stopping;
-                        self.active_steer_tx = None;
-                        self.pending_steers.clear();
-                        self.suggested_prompt = None;
-                        self.custom_placeholder = Some("Interrupting...".to_string());
-                    }
-                    self.renderer.request_reprint();
+                    self.interrupt(cx);
                 } else {
                     let now = std::time::Instant::now();
                     let is_double_tap = self.last_ctrl_c.map(|t| now.duration_since(t).as_millis() < 1200).unwrap_or(false);
@@ -279,73 +235,12 @@ impl App {
                 if !self.running
                     && cx.gate.pending().is_none()
                     && cx.question_gate.pending().is_none()
-                    && self.effort_menu.is_none()
-                    && self.model_menu.is_none()
-                    && self.settings_view.is_none()
-                    && self.sampling_view.is_none()
-                    && self.context_modal.is_none()
+                    && self.overlay.is_none()
+                    && !self.regenerate(cx)
                 {
-                    if let Some(user_idx) = self.history.iter().rposition(|m| m.role == flashagent_llm::Role::User) {
-                        // Asking for the same answer again is the
-                        // user saying the last one was not good
-                        // enough — the one signal that the model was
-                        // given too little room to think.
-                        let steps = self.effort_memory.observe(
-                            &self.current_model,
-                            &flashagent_core::TurnOutcome { regenerated: true, ..Default::default() },
-                        );
-                        self.effort_memory.save();
-                        cx.source.set_effort_bias(steps);
-                        self.history.truncate(user_idx + 1);
-                        // Same message, same turn: taking it back must reach
-                        // before the first attempt, even after --resume.
-                        if let Some(store) = cx.perm.state().snapshots() {
-                            let prompt_for_snapshot = if self.history[user_idx].content.is_empty() {
-                                "[image]"
-                            } else {
-                                &self.history[user_idx].content
-                            };
-                            store.continue_turn(prompt_for_snapshot);
-                        }
-                        self.chat.truncate_to_last_user();
-                        self.renderer.scroll_to_bottom();
-                        self.renderer.printed_settled = 0;
-                        self.renderer.prev_expansion = None;
-                        self.renderer.request_reprint();
-                        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-                        cx.cancel.store(false, Ordering::Relaxed);
-                        self.suggested_prompt = None;
-                        self.custom_placeholder = None;
-                        self.last_expanded = false;
-                        self.running = true;
-                        self.turn_phase = TurnPhase::Waiting;
-                        self.turn_started = Some(std::time::Instant::now());
-                        self.token_tracker.on_turn_start(self.current_model.clone(), self.context_usage.total_used());
-                        cx.source.set_model(&self.current_model);
-                        cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
-                        cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
-                        let turn_opts = build_turn_options(&self.config, &self.current_effort);
-                        self.turn_counter += 1;
-                        self.turn_outcome = flashagent_core::TurnOutcome::default();
-                        let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
-                        self.active_steer_tx = Some(steer_tx);
-                        self.cancel_recap();
-                        self.active_turn_handle = Some(spawn_turn(
-                            cx.cancel.clone(),
-                            cx.source.clone(),
-                            cx.perm,
-                            self.history.clone(),
-                            GoalBudgets::steps_only(self.max_steps),
-                            turn_opts,
-                            cx.tx.clone(),
-                            steer_rx,
-                            self.turn_counter,
-                        ));
-                    } else {
-                        let now = std::time::Instant::now();
-                        self.copy_toast = Some(("No previous turn to regenerate".to_string(), now));
-                        self.renderer.request_reprint();
-                    }
+                    let now = std::time::Instant::now();
+                    self.copy_toast = Some(("No previous turn to regenerate".to_string(), now));
+                    self.renderer.request_reprint();
                 }
             }
 
@@ -396,7 +291,7 @@ impl App {
                         self.autocomplete_idx = 0;
                     }
                     Err(err) => {
-                        notice!(&format!("Failed to launch external editor: {err}"));
+                        self.notice(format!("Failed to launch external editor: {err}"));
                     }
                 }
                 self.renderer.request_reprint();
@@ -414,9 +309,7 @@ impl App {
             | KeyCode::Char('t') | KeyCode::Char('T') | KeyCode::Char('\u{0435}') | KeyCode::Char('\u{0415}')
                 if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) || matches!(code, KeyCode::F(4)) =>
             {
-                let mut menu = build_effort_menu(cx.source, &self.effort_memory, &self.current_model);
-                menu.select_by_value(&self.current_effort);
-                self.effort_menu = Some(menu);
+                self.open_effort_menu(cx.source);
             }
 
             // F3 or CTRL + M or ALT + M: open Model menu (supports alternative keyboard layouts)
@@ -424,27 +317,12 @@ impl App {
             | KeyCode::Char('m') | KeyCode::Char('M') | KeyCode::Char('\u{044c}') | KeyCode::Char('\u{042c}')
                 if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) || matches!(code, KeyCode::F(3)) =>
             {
-                if let Some(mut menu) = build_model_menu(cx.source) {
-                    menu.select_by_value(&self.current_model);
-                    self.model_menu = Some(menu);
-                } else {
-                    notice!("[No models discovered from server]");
-                }
+                self.open_model_menu(cx.source);
             }
 
             // F5: open Sampling Parameters menu
             KeyCode::F(5) => {
-                if self.sampling_view.is_some() {
-                    self.sampling_view = None;
-                } else {
-                    self.effort_menu = None;
-                    self.model_menu = None;
-                    self.settings_view = None;
-                    self.context_modal = None;
-                    self.mcp_modal = None;
-                    self.sampling_view = Some(SamplingView::new(&self.config));
-                }
-                self.renderer.request_reprint();
+                self.open_overlay(Overlay::Sampling(SamplingView::new(&self.config)));
             }
 
             // Mode cycling with Shift+Tab (both KeyCode::BackTab and Tab+Shift)
@@ -452,34 +330,15 @@ impl App {
                 let next_mode = cx.perm.state().mode().next();
                 cx.perm.state().set_mode(next_mode);
                 self.remember_mode(next_mode);
-                refresh_welcome_card_if_before_user_msg(
-                    &mut self.chat,
-                    &mut self.renderer,
-                    &self.current_model,
-                    cx.cwd_display,
-                    next_mode.label(),
-                    cx.memory_docs,
-                    cx.source,
-                    &self.current_effort,
-                    self.current_context.as_deref(),
-                    self.config.show_mascot,
-                    cx.mascot_mood,
-                );
+                self.refresh_welcome(cx.source, cx.perm.state().mode(), cx.mascot_mood);
                 self.custom_placeholder = Some(format!("Permission mode set to: {}", next_mode.label()));
                 self.suggested_prompt = None;
                 self.renderer.request_reprint();
             }
             // Tab on empty input: toggle settings tab
-            KeyCode::Tab if self.input.is_empty() && cx.gate.pending().is_none() && self.effort_menu.is_none() && self.model_menu.is_none() && self.sampling_view.is_none() && self.mcp_modal.is_none() => {
-                if self.settings_view.is_some() {
-                    self.settings_view = None;
-                } else {
-                    self.mcp_modal = None;
-                    let runtime_mode = self.goal_state.as_ref().map_or(cx.perm.state().mode(), |g| g.mode);
-                    let effort = self.goal_state.as_ref().map_or(self.current_effort.as_str(), |g| g.effort.as_str());
-                    self.settings_view = Some(settings_for_runtime(&self.config, runtime_mode, effort, &self.current_model, &self.available_models, self.context_usage.total_capacity));
-                }
-                self.renderer.request_reprint();
+            KeyCode::Tab if self.input.is_empty() && cx.gate.pending().is_none() => {
+                let view = self.runtime_settings(cx.perm.state().mode());
+                self.open_overlay(Overlay::Settings(Box::new(view)));
             }
             // Tab: complete autocomplete suggestion if input starts with `/`, or toggle approval choice when pending
             KeyCode::Tab if cx.gate.pending().is_some() => {

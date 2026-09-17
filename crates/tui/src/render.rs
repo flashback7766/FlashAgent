@@ -1,4 +1,5 @@
 use super::*;
+use flashagent_tui::anim::{self, Rgb};
 
 pub(crate) fn color(kind: LineKind) -> crossterm::style::Color {
     // Truecolor dark warm aesthetic (M3 Expressive / Charcoal & Amber / Sand).
@@ -12,6 +13,12 @@ pub(crate) fn color(kind: LineKind) -> crossterm::style::Color {
         LineKind::System => crossterm::style::Color::Rgb { r: 225, g: 175, b: 95 },
     }
 }
+
+/// Synchronized output: a terminal that knows the mode shows the frame only
+/// once all of it has arrived, so a full repaint never flickers through a
+/// cleared screen; one that does not ignores it.
+const SYNC_BEGIN: &str = "\x1b[?2026h";
+const SYNC_END: &str = "\x1b[?2026l";
 
 /// Print-and-forget renderer: settled lines are
 /// printed to the terminal scrollback once and never redrawn; only the live
@@ -32,6 +39,14 @@ pub(crate) struct Renderer {
     pub(crate) prev_cursor_tail_offset: u16,
     /// Vertical scroll offset (lines scrolled back from the bottom). 0 = anchored to bottom.
     pub(crate) scroll_offset: usize,
+    /// How far back the last frame could be scrolled: all its lines, settled
+    /// and tail, less what fits on screen.
+    pub(crate) max_scroll: usize,
+    /// What the last frame wrote, so an idle tick that would write the same
+    /// bytes again writes nothing.
+    last_frame: String,
+    /// The card on screen last frame and when it opened.
+    card: (CardKey, u64),
 }
 
 pub(crate) struct FrameState<'a> {
@@ -77,7 +92,29 @@ pub(crate) struct FrameState<'a> {
     pub(crate) prompt_title: &'a str,
     pub(crate) context_warn_threshold: usize,
     pub(crate) pending_steers: &'a [String],
+    /// Recent generation speeds, oldest first, for the footer sparkline.
+    pub(crate) speed_history: &'a [f64],
+    /// The composer border lit up by how the last turn ended: the colour,
+    /// and how far (0..=1) it has faded back.
+    pub(crate) composer_flash: Option<(Rgb, f32)>,
 }
+
+/// Which card stands in for the composer, to know when a new one opens and
+/// should unfold.
+#[derive(Clone, Copy, PartialEq)]
+enum CardKey {
+    Composer,
+    Approval,
+    Channel,
+    Question,
+    Overlay(std::mem::Discriminant<Overlay>),
+}
+
+/// How long a card takes to unfold.
+const UNFOLD_MS: u64 = 180;
+/// The resting colour of box borders.
+const BORDER: Rgb = Rgb(95, 90, 85);
+const BORDER_ESC: &str = "\x1b[38;2;95;90;85m";
 
 impl Renderer {
     pub(crate) fn new() -> Self {
@@ -89,7 +126,18 @@ impl Renderer {
             needs_reprint: false,
             prev_cursor_tail_offset: 0,
             scroll_offset: 0,
+            max_scroll: 0,
+            last_frame: String::new(),
+            card: (CardKey::Composer, 0),
         }
+    }
+
+    /// Whether a card is still unfolding, so frames should come faster than
+    /// the idle tick.
+    pub(crate) fn animating(&self) -> bool {
+        self.card.0 != CardKey::Composer
+            && anim::enabled()
+            && anim::now_ms().saturating_sub(self.card.1) < UNFOLD_MS + 40
     }
 
     pub(crate) fn request_reprint(&mut self) {
@@ -116,9 +164,17 @@ impl Renderer {
         }
     }
 
-    pub(crate) fn scroll_up(&mut self, lines: usize, max_scroll: usize) {
-        self.scroll_offset = (self.scroll_offset + lines).min(max_scroll);
-        self.needs_reprint = true;
+    pub(crate) fn scroll_up(&mut self, lines: usize) {
+        let old = self.scroll_offset;
+        self.scroll_offset = (self.scroll_offset + lines).min(self.max_scroll);
+        if old != self.scroll_offset {
+            self.needs_reprint = true;
+        }
+    }
+
+    /// Scroll back to the first line.
+    pub(crate) fn scroll_to_top(&mut self) {
+        self.scroll_up(self.max_scroll);
     }
 
     pub(crate) fn scroll_down(&mut self, lines: usize) {
@@ -194,15 +250,7 @@ impl Renderer {
         chat: &ChatView,
         gate: &TuiGate,
         question_gate: &TuiQuestionGate,
-        effort_menu: Option<&SelectMenu<String>>,
-        model_menu: Option<&SelectMenu<String>>,
-        rewind_confirm: Option<&RewindConfirm>,
-        session_menu: Option<&SelectMenu<String>>,
-        settings_view: Option<&SettingsView>,
-        sampling_view: Option<&SamplingView>,
-        context_modal: Option<&ContextModal>,
-        mcp_modal: Option<&McpModal>,
-        memory_modal: Option<&flashagent_tui::memory_view::MemoryModal>,
+        overlay: Option<&Overlay>,
         autocomplete: Option<&AutocompletePopup>,
         context_usage: &ContextUsage,
         st: FrameState<'_>,
@@ -240,10 +288,30 @@ impl Renderer {
         }
 
         let inner_w = width.saturating_sub(2);
-        let border_color = "\x1b[38;2;95;90;85m";
+        let t = anim::now_ms();
+        let card_key = if gate.pending().is_some() {
+            CardKey::Approval
+        } else if st.channel_prompt.is_some() {
+            CardKey::Channel
+        } else if question_gate.pending().is_some() {
+            CardKey::Question
+        } else if let Some(overlay) = overlay {
+            CardKey::Overlay(std::mem::discriminant(overlay))
+        } else {
+            CardKey::Composer
+        };
+        // A card waiting on the user breathes amber; the composer lights up
+        // for a moment in the colour of how the last turn ended.
+        let border_rgb = match card_key {
+            CardKey::Approval | CardKey::Question => anim::pulse(t, 1800, BORDER, Rgb(225, 175, 95)),
+            CardKey::Composer => st.composer_flash.map_or(BORDER, |(lit, faded)| lit.mix(BORDER, faded)),
+            _ => BORDER,
+        };
+        let border_color = border_rgb.fg();
         let reset = "\x1b[0m";
+        let card_start = tail.len();
 
-        let input_line_idx;
+        let mut input_line_idx;
         let mut custom_cursor_col: Option<u16> = None;
 
         if let Some(req) = gate.pending() {
@@ -340,7 +408,7 @@ impl Renderer {
             // Same treatment as an approval card: this replaces the binary
             // under the user, so it is asked in the same place and with the
             // same weight as anything else that cannot be undone by typing.
-            let border_color = "\x1b[38;2;225;175;95m";
+            let border_color = anim::pulse(t, 1800, Rgb(225, 175, 95), Rgb(250, 215, 150)).fg();
             let reset = "\x1b[0m";
             let dash_w = inner_w.saturating_sub(visible_width(title) + 1);
             tail.push((
@@ -490,49 +558,9 @@ impl Renderer {
                 LineKind::System,
                 format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
             ));
-        } else if let Some(sm) = sampling_view {
-            // Morph composer into Sampling Parameters menu
-            tail.extend(sm.render(width));
-            input_line_idx = tail.len().saturating_sub(1);
-            custom_cursor_col = Some(0);
-        } else if let Some(settings) = settings_view {
-            // Morph composer into Settings tab
-            tail.extend(settings.render(width));
-            input_line_idx = tail.len().saturating_sub(1);
-            custom_cursor_col = Some(0);
-        } else if let Some(menu) = model_menu {
-            // Morph composer into Model selection menu
-            tail.extend(menu.render(width));
-            input_line_idx = tail.len().saturating_sub(1);
-            custom_cursor_col = Some(0);
-        } else if let Some(menu) = session_menu {
-            // Morph composer into the list of saved sessions (/resume)
-            tail.extend(menu.render(width));
-            input_line_idx = tail.len().saturating_sub(1);
-            custom_cursor_col = Some(0);
-        } else if let Some(menu) = effort_menu {
-            // Morph composer into Thinking effort menu
-            tail.extend(menu.render(width));
-            input_line_idx = tail.len().saturating_sub(1);
-            custom_cursor_col = Some(0);
-        } else if let Some(rc) = rewind_confirm {
-            // Morph composer into the /rewind confirmation card
-            tail.extend(rc.render(width));
-            input_line_idx = tail.len().saturating_sub(1);
-            custom_cursor_col = Some(0);
-        } else if let Some(modal) = context_modal {
-            // Morph composer into Context breakdown modal
-            tail.extend(modal.render(width));
-            input_line_idx = tail.len().saturating_sub(1);
-            custom_cursor_col = Some(0);
-        } else if let Some(modal) = mcp_modal {
-            // Morph composer into MCP modal
-            tail.extend(modal.render(width));
-            input_line_idx = tail.len().saturating_sub(1);
-            custom_cursor_col = Some(0);
-        } else if let Some(modal) = memory_modal {
-            // Morph composer into the memory screen
-            tail.extend(modal.render(width));
+        } else if let Some(overlay) = overlay {
+            // The composer turns into the open menu or screen.
+            tail.extend(overlay.render(width));
             input_line_idx = tail.len().saturating_sub(1);
             custom_cursor_col = Some(0);
         } else {
@@ -563,13 +591,9 @@ impl Renderer {
                 if let Some(prefill) = st.prefill_status {
                     format!(" {prompt_styled}  {prefill}")
                 } else if st.running {
-                    let dots = match (st.tick_n / 4) % 3 {
-                        0 => ".  ",
-                        1 => ".. ",
-                        _ => "...",
-                    };
                     let what = st.turn_phase.map_or_else(|| "Working on task".to_string(), TurnPhase::label);
-                    format!(" {prompt_styled} \x1b[38;2;135;130;125m{what}{dots}\x1b[0m")
+                    let glow = if matches!(st.turn_phase, Some(TurnPhase::Stopping)) { Rgb(235, 150, 120) } else { Rgb(235, 225, 205) };
+                    format!(" {prompt_styled} {}", anim::shimmer(&format!("{what}…"), t, 2000, Rgb(135, 130, 125), glow))
                 } else if let Some(sug) = st.suggested_prompt {
                     format!(" {prompt_styled}  \x1b[38;2;155;160;175m{sug}\x1b[0m \x1b[38;2;100;105;120m(→ to use)\x1b[0m")
                 } else if let Some(custom) = st.custom_placeholder {
@@ -595,7 +619,10 @@ impl Renderer {
                     format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
                 }
             } else {
-                format!(" {prompt_styled} {}", st.input)
+                // Borders, " ❯ " and a cell for the cursor after the text.
+                let (shown, cells) = flashagent_tui::tail_window(st.input, width.saturating_sub(6));
+                custom_cursor_col = Some((cells + 4).min(width.saturating_sub(2)) as u16);
+                format!(" {prompt_styled} {shown}")
             };
             tail.push((LineKind::User, pad_box_row(&input_row_content, width)));
 
@@ -604,6 +631,29 @@ impl Renderer {
                 LineKind::System,
                 format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
             ));
+        }
+
+        // The sides of a boxed card take the same colour as its top and bottom.
+        if border_rgb != BORDER && !matches!(card_key, CardKey::Overlay(_)) {
+            for (_, row) in tail[card_start..].iter_mut() {
+                *row = row.replace(BORDER_ESC, &border_color);
+            }
+        }
+        // A card that just opened unfolds from its title down: its first rows,
+        // then its bottom edge, until all of it is there.
+        if self.card.0 != card_key {
+            self.card = (card_key, t);
+        }
+        let total = tail.len() - card_start;
+        if card_key != CardKey::Composer && total > 2 {
+            let k = anim::progress(self.card.1, t, UNFOLD_MS);
+            let shown = ((total as f32 * k).ceil() as usize).clamp(2, total);
+            if shown < total {
+                let bottom = tail.len() - 1;
+                tail.drain(card_start + shown - 1..bottom);
+                input_line_idx = input_line_idx.min(tail.len() - 1);
+                custom_cursor_col = Some(0);
+            }
         }
 
         // Autocomplete popup under composer
@@ -617,34 +667,21 @@ impl Renderer {
             format!("  \x1b[1;38;2;135;215;165m{toast}\x1b[0m")
         } else if gate.pending().is_some() {
             "  \x1b[38;2;135;130;125menter — allow · a — always · d / esc — deny\x1b[0m".to_string()
-        } else if let Some(req) = question_gate.pending() {
-            if req.multi_select {
-                "  \x1b[38;2;135;130;125mSpace — toggle [x] · 1-N / ↑↓ — select · enter — confirm · esc — cancel\x1b[0m".to_string()
-            } else {
-                "  \x1b[38;2;135;130;125m↑/↓ / 1-N — select · enter — confirm · esc — cancel\x1b[0m".to_string()
-            }
+        } else if question_gate.pending().is_some() {
+            // The card lists its own keys, and they differ between a choice
+            // and a written answer.
+            st.background.map(|text| format!("  {}", st.background_style.paint(text))).unwrap_or_default()
         } else if st.channel_prompt.is_some() && st.prompt_title == UNINSTALL_TITLE {
             "  \x1b[38;2;135;130;125my / enter — close and uninstall · n / esc — keep FlashAgent\x1b[0m".to_string()
         } else if st.channel_prompt.is_some() {
             "  \x1b[38;2;135;130;125my / enter — switch · n / esc — keep the current channel\x1b[0m".to_string()
-        } else if sampling_view.is_some() {
-            "  \x1b[38;2;135;130;125mtype digits/./- · ←/→ adjust · ↑/↓ navigate · enter apply · esc back\x1b[0m".to_string()
-        } else if settings_view.is_some() {
-            "  \x1b[38;2;135;130;125m↑/↓ — item · enter — open menu/change · esc — close\x1b[0m".to_string()
-        } else if model_menu.is_some() {
-            "  \x1b[38;2;135;130;125m↑/↓ — select model · enter — switch · esc — cancel\x1b[0m".to_string()
-        } else if session_menu.is_some() {
-            "  \x1b[38;2;135;130;125m↑/↓ — select session · type to filter · enter — open · esc — cancel\x1b[0m".to_string()
-        } else if effort_menu.is_some() {
-            "  \x1b[38;2;135;130;125m↑/↓ — select effort · enter — apply · esc — cancel\x1b[0m".to_string()
-        } else if rewind_confirm.is_some() {
-            "  \x1b[38;2;135;130;125m↑/↓ — choose · enter — confirm · esc — cancel\x1b[0m".to_string()
-        } else if context_modal.is_some() {
-            "  \x1b[38;2;135;130;125mf1 / enter / esc — close context breakdown\x1b[0m".to_string()
-        } else if mcp_modal.is_some() {
+        } else if overlay.is_some_and(Overlay::has_own_hints) {
+            // These draw their own keys inside the box; saying them twice
+            // only pushes the box up. Something that turned up on its own
+            // still gets the line.
+            st.background.map(|text| format!("  {}", st.background_style.paint(text))).unwrap_or_default()
+        } else if overlay.is_some() {
             "  \x1b[38;2;135;130;125mtab/1-3 — switch tab · ↑/↓ — navigate · enter — select · esc — close\x1b[0m".to_string()
-        } else if memory_modal.is_some() {
-            "  \x1b[38;2;135;130;125m↑/↓ — select · e — tell the model · d — forget · esc — close\x1b[0m".to_string()
         } else if autocomplete.is_some() {
             "  \x1b[38;2;135;130;125mtab — complete · ↑/↓ — select · enter — send · esc — dismiss\x1b[0m".to_string()
         } else if st.running {
@@ -658,9 +695,15 @@ impl Renderer {
             } else {
                 String::new()
             };
+            // How the speed has moved over the last few seconds.
+            let spark = if st.speed_history.len() >= 2 && st.speed_history.iter().any(|v| *v > 0.0) {
+                format!(" \x1b[38;2;138;180;248m{}\x1b[0m", anim::sparkline(st.speed_history))
+            } else {
+                String::new()
+            };
             let live = format!(
-                "  {} \x1b[38;2;168;199;250mTokens - \x1b[1;38;2;235;240;250m{}\x1b[0m \x1b[38;2;194;231;255m({:.1}/s)\x1b[0m{cache_str}{ttft_str} \x1b[38;2;75;99;130m·\x1b[0m \x1b[38;2;155;165;180m{}s\x1b[0m",
-                SPINNER[st.tick_n % SPINNER.len()],
+                "  {} \x1b[38;2;168;199;250mTokens - \x1b[1;38;2;235;240;250m{}\x1b[0m \x1b[38;2;194;231;255m({:.1}/s)\x1b[0m{spark}{cache_str}{ttft_str} \x1b[38;2;75;99;130m·\x1b[0m \x1b[38;2;155;165;180m{}s\x1b[0m",
+                anim::spinner(t),
                 st.model_tokens,
                 st.tokens_per_sec,
                 st.elapsed_secs,
@@ -680,20 +723,26 @@ impl Renderer {
                         format!("{live}{notice}")
                     }
                 }
-                None => format!("{live} {tail_hint}"),
+                // The longest hint that fits, never one cut mid-word.
+                None => [tail_hint, "\x1b[38;2;135;130;125m· esc to interrupt\x1b[0m", ""]
+                    .into_iter()
+                    .map(|hint| if hint.is_empty() { live.clone() } else { format!("{live} {hint}") })
+                    .find(|line| visible_width(line) <= width)
+                    .unwrap_or_else(|| live.clone()),
             }
         } else if let Some(text) = st.background {
             format!("  {}", st.background_style.paint(text))
         } else {
-            // Responsive footer shortcuts adapting cleanly to any terminal width:
-            if width >= 140 {
-                "  \x1b[38;2;135;130;125menter — send · tab — settings · f1 — context · f2 — verbose · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · ctrl+c/v · esc esc — quit\x1b[0m".to_string()
-            } else if width >= 115 {
-                "  \x1b[38;2;135;130;125menter — send · tab — settings · f1 — context · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · esc esc — quit\x1b[0m".to_string()
-            } else if width >= 92 {
-                "  \x1b[38;2;135;130;125menter — send · tab — settings · f3 — model · f4 — effort · f5 — sampling · esc esc — quit\x1b[0m".to_string()
-            } else if width >= 68 {
-                "  \x1b[38;2;135;130;125menter — send · tab — settings · f3 — model · esc esc — quit\x1b[0m".to_string()
+            // The longest list of shortcuts that fits: measured, since fixed
+            // column thresholds let the longer lists clip mid-word.
+            const FOOTERS: [&str; 4] = [
+                "enter — send · tab — settings · f1 — context · f2 — verbose · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · ctrl+c/v · esc esc — quit",
+                "enter — send · tab — settings · f1 — context · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · esc esc — quit",
+                "enter — send · tab — settings · f3 — model · f4 — effort · f5 — sampling · esc esc — quit",
+                "enter — send · tab — settings · f3 — model · esc esc — quit",
+            ];
+            if let Some(fits) = FOOTERS.iter().find(|f| visible_width(f) + 2 <= width) {
+                format!("  \x1b[38;2;135;130;125m{fits}\x1b[0m")
             } else {
                 // Below ~68 columns the list is assembled from what fits,
                 // so it ends on a word rather than on half a separator.
@@ -721,9 +770,7 @@ impl Renderer {
             let raw_tip = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m {anim}");
             let tip_row = clip_ansi(&raw_tip, width.saturating_sub(2));
             tail.push((LineKind::System, tip_row));
-        } else {
-            let default_tip = "Press Tab or type /settings to configure FlashAgent";
-            let tip_content = st.tip.unwrap_or(default_tip);
+        } else if let Some(tip_content) = st.tip {
             let avail1 = width.saturating_sub(8);
             if width >= 30 && tip_content.chars().count() > avail1 {
                 let (l1, l2) = flashagent_tui::tips::split_tip_at_word_boundary(tip_content, avail1);
@@ -759,7 +806,6 @@ impl Renderer {
             gauge_base
         };
         let gauge_vis = visible_width(&gauge_str);
-        let budget = width.saturating_sub(gauge_vis + 4);
 
         let expand_status = if st.reasoning_expand.all {
             " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: all]\x1b[0m"
@@ -768,6 +814,8 @@ impl Renderer {
         } else {
             ""
         };
+        // The turn stats give way to the verbose tag rather than clipping it.
+        let budget = width.saturating_sub(gauge_vis + 4 + visible_width(expand_status));
 
         let left_telemetry = format_status_left(
             st.running,
@@ -793,17 +841,21 @@ impl Renderer {
         };
         tail.push((LineKind::System, status_row));
 
+        let view_h = (height as usize).saturating_sub(2).max(5);
+        self.max_scroll = (settled.len() + tail.len()).saturating_sub(view_h);
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll);
+
         // When scroll_offset > 0, render shifted history view
         if self.scroll_offset > 0 {
             let mut all_lines: Vec<RenderLine> = settled.clone();
             all_lines.extend(tail.clone());
             let total_len = all_lines.len();
-            let view_h = (height as usize).saturating_sub(2).max(5);
             let end = total_len.saturating_sub(self.scroll_offset);
             let start = end.saturating_sub(view_h);
             let visible_slice = &all_lines[start..end];
 
-            let mut out = String::from("\x1b[H\x1b[2J");
+            let mut out = String::from(SYNC_BEGIN);
+            out.push_str("\x1b[H\x1b[2J");
             let mut first = true;
             for (kind, text) in visible_slice {
                 if !first {
@@ -822,6 +874,11 @@ impl Renderer {
                 self.scroll_offset
             );
             out.push_str(&clip_ansi(&scroll_status, width));
+            out.push_str(SYNC_END);
+            if !reprint_all && out == self.last_frame {
+                return;
+            }
+            self.last_frame.clone_from(&out);
             crossterm::queue!(
                 std::io::stdout(),
                 crossterm::cursor::MoveToColumn(0),
@@ -832,7 +889,7 @@ impl Renderer {
             return;
         }
 
-        let mut out = String::new();
+        let mut out = String::from(SYNC_BEGIN);
         if reprint_all {
             // Full repaint: home + clear, then reprint including settled.
             // When on the initial welcome screen, also purge scrollback (\x1b[3J) so
@@ -866,6 +923,7 @@ impl Renderer {
             out.push_str(&restore_line_color(&clipped, &prefix));
             out.push_str("\x1b[39m");
         };
+        let prints_settled = reprint_all || settled.len() > self.printed_settled;
         if reprint_all {
             for (k, t) in &settled {
                 print_line(&mut out, k, t);
@@ -886,14 +944,132 @@ impl Renderer {
 
         let lift_up = (tail.len() - 1 - input_line_idx) as u16;
         let cursor_col = custom_cursor_col.unwrap_or_else(|| ((st.input.chars().count() + 4) as u16).min(width.saturating_sub(2) as u16));
+        // Park the cursor on the input line; the frame ends there.
+        if lift_up > 0 {
+            out.push_str(&format!("\x1b[{lift_up}A"));
+        }
+        out.push_str(&format!("\x1b[{}G", cursor_col + 1));
+        out.push_str(SYNC_END);
+        if !prints_settled && out == self.last_frame {
+            return;
+        }
+        self.last_frame.clone_from(&out);
         crossterm::queue!(
             std::io::stdout(),
             crossterm::cursor::MoveToColumn(0),
             crossterm::style::Print(out),
-            crossterm::cursor::MoveUp(lift_up),
-            crossterm::cursor::MoveToColumn(cursor_col),
         )
         .ok();
         std::io::stdout().flush().ok();
+    }
+}
+
+impl App {
+    /// Paint one frame of the app as it stands.
+    pub(crate) fn draw(&mut self, cx: &LoopCtx<'_>, autocomplete: Option<&AutocompletePopup>) {
+        anim::set_enabled(self.config.animations);
+        let composer_flash = self.composer_flash();
+        let channel_prompt: Option<String> = if self.uninstall_confirm {
+            Some(
+                "Close FlashAgent and remove it? The uninstaller then shows what it will remove and asks, \
+                 part by part, which of your data to delete. Your session is saved first."
+                    .to_string(),
+            )
+        } else {
+            self.channel_switch.as_ref().map(|sw| {
+                channel_switch_warning(sw.to, flashagent_svc::updater::current_version(), &sw.target)
+            })
+        };
+        let cost_now = self.image_costs.get(&self.current_model);
+        let attachment_labels: Vec<String> = self.attachments.iter().map(|a| a.labelled(cost_now)).collect();
+        let goal_progress: Option<String> = self.goal_ledger.as_ref().filter(|_| self.running).map(|l| l.progress());
+        let live_prefill = self.token_tracker.live_prefill_status();
+        let ttft_display = self.token_tracker.ttft_display();
+        let tg_speed = self.token_tracker.tg_3s();
+        let config = &self.config;
+        let turn_clock = |ms_per_step: u128| self.turn_started.map(|t| (t.elapsed().as_millis() / ms_per_step) as usize).unwrap_or(0);
+
+        self.renderer.frame(
+            &self.chat,
+            cx.gate,
+            cx.question_gate,
+            self.overlay.as_ref(),
+            autocomplete,
+            &self.context_usage,
+            FrameState {
+                input: &self.input,
+                mode: cx.perm.state().mode(),
+                is_goal_active: self.goal_state.is_some(),
+                goal_progress: goal_progress.as_deref(),
+                tip: config.show_tips.then_some(self.tip_animator.tip_text),
+                tip_animated: None,
+                tip_lines: config.show_tips.then_some(cx.tip_lines.as_slice()),
+                token_tracker: config.show_tokens.then_some(&self.token_tracker),
+                reasoning_expand: ReasoningExpansion { all: self.all_expanded, last: self.last_expanded },
+                tick_n: self.tick_n,
+                running: self.running,
+                elapsed_secs: turn_clock(1000) as u64,
+                face_phase: turn_clock(80),
+                model_tokens: if config.show_tokens { self.token_tracker.total_model_tokens } else { 0 },
+                tokens_per_sec: if config.show_tokens { tg_speed } else { 0.0 },
+                f_keep: if config.show_tokens { self.token_tracker.last_f_keep } else { None },
+                confirm_selection: self.confirm_select.decision(),
+                question_state: Some(&self.question_ui_state),
+                custom_placeholder: self.custom_placeholder.as_deref(),
+                suggested_prompt: self.suggested_prompt.as_deref(),
+                copy_toast: if config.show_toasts { self.copy_toast.as_ref().map(|(msg, _)| msg.as_str()) } else { None },
+                prefill_status: if config.show_ttft { live_prefill.as_deref() } else { None },
+                ttft_display: if config.show_ttft { ttft_display.as_deref() } else { None },
+                background: self.background.as_ref().map(|b| b.text.as_str()),
+                channel_prompt: channel_prompt.as_deref(),
+                prompt_title: if self.uninstall_confirm { UNINSTALL_TITLE } else { "Switch release channel" },
+                turn_phase: self.running.then_some(&self.turn_phase),
+                attachments: &attachment_labels,
+                background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
+                context_warn_threshold: config.context_warn_threshold,
+                pending_steers: &self.pending_steers,
+                speed_history: &self.speed_history,
+                composer_flash,
+            },
+        );
+    }
+
+    /// Whether frames should come faster than the idle tick right now.
+    pub(crate) fn animating(&self) -> bool {
+        self.renderer.animating() || self.composer_flash().is_some()
+    }
+
+    /// The composer border's flash for the turn that just ended, while it
+    /// lasts.
+    fn composer_flash(&self) -> Option<(Rgb, f32)> {
+        const FLASH_MS: u64 = 1400;
+        let (colour, started) = self.turn_flash?;
+        let faded = anim::progress(started, anim::now_ms(), FLASH_MS);
+        (faded < 1.0).then_some((colour, faded))
+    }
+
+    /// Light the composer border in the colour of how a turn ended.
+    pub(crate) fn flash_turn_end(&mut self, reason: Option<DoneReason>) {
+        let colour = match reason {
+            Some(DoneReason::Completed) => Rgb(120, 220, 140),
+            None | Some(DoneReason::Failed) => Rgb(230, 110, 95),
+            Some(_) => Rgb(225, 175, 95),
+        };
+        self.turn_flash = Some((colour, anim::now_ms()));
+    }
+
+    /// Take a speed sample for the footer sparkline, a few times a second.
+    pub(crate) fn sample_speed(&mut self) {
+        const EVERY_MS: u64 = 250;
+        const KEEP: usize = 24;
+        let t = anim::now_ms();
+        if !self.running || t.saturating_sub(self.last_speed_sample) < EVERY_MS {
+            return;
+        }
+        self.last_speed_sample = t;
+        self.speed_history.push(self.token_tracker.tg_3s());
+        if self.speed_history.len() > KEEP {
+            self.speed_history.remove(0);
+        }
     }
 }

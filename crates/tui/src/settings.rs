@@ -1,7 +1,7 @@
 //! Interactive Settings Wizard opened via `/settings` or `Tab` on empty input.
 //! Multi-tab layout for configuring backend, models, updates, aesthetics, reasoning, and tools.
 
-use flashagent_core::{AppConfig, BackendPreset, SamplingPreset};
+use flashagent_core::{AppConfig, BackendPreset, PersonalityTrait, SamplingPreset};
 use crossterm::event::{KeyCode, KeyModifiers};
 use crate::{LineKind, RenderLine};
 
@@ -40,6 +40,8 @@ pub enum SettingsTab {
     Reasoning,
     Goal,
     Tools,
+    /// How replies sound: base style and characteristics.
+    Style,
 }
 
 impl SettingsTab {
@@ -51,17 +53,19 @@ impl SettingsTab {
             SettingsTab::Reasoning,
             SettingsTab::Goal,
             SettingsTab::Tools,
+            SettingsTab::Style,
         ]
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::General => "1. General",
-            Self::Updates => "2. Updates",
-            Self::Aesthetics => "3. UI & Themes",
-            Self::Reasoning => "4. LLM & Reasoning",
-            Self::Goal => "5. Goal",
-            Self::Tools => "6. Tools & MCP",
+            Self::General => "1 General",
+            Self::Updates => "2 Updates",
+            Self::Aesthetics => "3 UI",
+            Self::Reasoning => "4 LLM",
+            Self::Goal => "5 Goal",
+            Self::Tools => "6 Tools",
+            Self::Style => "7 Style",
         }
     }
 
@@ -72,13 +76,15 @@ impl SettingsTab {
             Self::Aesthetics => Self::Reasoning,
             Self::Reasoning => Self::Goal,
             Self::Goal => Self::Tools,
-            Self::Tools => Self::General,
+            Self::Tools => Self::Style,
+            Self::Style => Self::General,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::General => Self::Tools,
+            Self::General => Self::Style,
+            Self::Style => Self::Tools,
             Self::Updates => Self::General,
             Self::Aesthetics => Self::Updates,
             Self::Reasoning => Self::Aesthetics,
@@ -161,10 +167,11 @@ impl SettingsView {
         match self.active_tab {
             SettingsTab::General => 6,
             SettingsTab::Updates => 3,
-            SettingsTab::Aesthetics => 5,
+            SettingsTab::Aesthetics => 6,
             SettingsTab::Reasoning => 7,
             SettingsTab::Goal => 3,
             SettingsTab::Tools => 3,
+            SettingsTab::Style => 1 + PersonalityTrait::ALL.len(),
         }
     }
 
@@ -241,6 +248,11 @@ impl SettingsView {
                 self.selected_index = 0;
                 SettingsAction::None
             }
+            KeyCode::Char('7') => {
+                self.active_tab = SettingsTab::Style;
+                self.selected_index = 0;
+                SettingsAction::None
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 let total = self.total_items();
                 self.selected_index = (self.selected_index + total - 1) % total;
@@ -303,7 +315,7 @@ impl SettingsView {
                 2 => SettingsAction::CheckUpdatesNow,
                 _ => SettingsAction::None,
             },
-            SettingsTab::Goal => {
+            SettingsTab::Goal | SettingsTab::Style => {
                 self.adjust_selected(1);
                 SettingsAction::None
             }
@@ -330,6 +342,11 @@ impl SettingsView {
                 }
                 4 => {
                     self.config.show_toasts = !self.config.show_toasts;
+                    self.is_dirty = true;
+                    SettingsAction::None
+                }
+                5 => {
+                    self.config.animations = !self.config.animations;
                     self.is_dirty = true;
                     SettingsAction::None
                 }
@@ -380,6 +397,16 @@ impl SettingsView {
 
     fn adjust_selected(&mut self, delta: i32) {
         match self.active_tab {
+            SettingsTab::Style => {
+                let personality = &mut self.config.personality;
+                match self.selected_index.checked_sub(1).and_then(|i| PersonalityTrait::ALL.get(i)) {
+                    None => personality.base = personality.base.cycle(delta > 0),
+                    Some(t) => {
+                        let level = personality.level_mut(*t);
+                        *level = level.cycle(delta > 0);
+                    }
+                }
+            }
             SettingsTab::General => match self.selected_index {
                 0 => self.cycle_backend_preset(),
                 1 => self.cycle_model(),
@@ -408,6 +435,7 @@ impl SettingsView {
                 2 => self.config.show_ttft = !self.config.show_ttft,
                 3 => self.config.show_tokens = !self.config.show_tokens,
                 4 => self.config.show_toasts = !self.config.show_toasts,
+                5 => self.config.animations = !self.config.animations,
                 _ => {}
             },
             SettingsTab::Reasoning => match self.selected_index {
@@ -524,7 +552,7 @@ impl SettingsView {
         };
 
         // Header
-        let title_styled = " \x1b[1;38;2;225;175;95mFlashAgent Settings Wizard\x1b[0m \x1b[38;2;160;155;145m(Tab 1-6 to switch)\x1b[0m ";
+        let title_styled = " \x1b[1;38;2;225;175;95mFlashAgent Settings Wizard\x1b[0m \x1b[38;2;160;155;145m(Tab 1-7 to switch)\x1b[0m ";
         let title_vis = crate::visible_width(title_styled);
         let dashes = box_w.saturating_sub(title_vis + 1);
         lines.push((
@@ -571,6 +599,7 @@ impl SettingsView {
                 ("TTFT & Prefill Speed", if self.config.show_ttft { "Enabled (lightning badge)".into() } else { "Disabled".into() }),
                 ("Token Counters", if self.config.show_tokens { "Enabled (prompt/gen count)".into() } else { "Disabled".into() }),
                 ("Clipboard Toasts", if self.config.show_toasts { "Enabled".into() } else { "Disabled".into() }),
+                ("Animations", if self.config.animations { "Enabled (sweeps, pulses, unfolding panels)".into() } else { "Reduced (spinners only)".into() }),
             ],
             SettingsTab::Reasoning => vec![
                 ("Thinking Effort", self.config.thinking_effort.clone()),
@@ -596,6 +625,19 @@ impl SettingsView {
                 ("Time Limit", goal_minutes_label(self.config.goal_max_minutes)),
                 ("Token Limit", goal_tokens_label(self.config.goal_max_output_tokens)),
             ],
+            SettingsTab::Style => {
+                let p = &self.config.personality;
+                let mut rows = vec![("Base style and tone", format!("{} — {}", p.base.label(), p.base.blurb()))];
+                for t in PersonalityTrait::ALL {
+                    let level = p.level(t);
+                    let blurb = t.blurb(level);
+                    rows.push((
+                        t.label(),
+                        if blurb.is_empty() { level.label().to_string() } else { format!("{} — {blurb}", level.label()) },
+                    ));
+                }
+                rows
+            }
             SettingsTab::Tools => vec![
                 ("Toolset Profile", self.config.toolset_profile.label().to_string()),
                 ("MCP Manager", "Overview & Server Registry".into()),
@@ -627,11 +669,16 @@ impl SettingsView {
                 LineKind::System,
                 pad_row("\x1b[38;2;225;175;95m* Marked options require app restart to take effect\x1b[0m"),
             ));
+        } else if self.active_tab == SettingsTab::Style {
+            lines.push((
+                LineKind::System,
+                pad_row("\x1b[38;2;135;130;125mTone only — tools and code are unaffected. Applies from your next message.\x1b[0m"),
+            ));
         } else {
             lines.push((LineKind::System, pad_row("")));
         }
 
-        lines.push((LineKind::System, pad_row("\x1b[38;2;135;130;125mTab/1-6 switch tab · ↑/↓ navigate · Enter/←/→ toggle value · Esc save & return\x1b[0m")));
+        lines.push((LineKind::System, pad_row("\x1b[38;2;135;130;125mTab/1-7 switch tab · ↑/↓ navigate · Enter/←/→ toggle value · Esc save & return\x1b[0m")));
 
         lines.push((
             LineKind::System,
@@ -649,7 +696,7 @@ mod tests {
     #[test]
     fn test_settings_tab_navigation() {
         let mut tab = SettingsTab::General;
-        assert_eq!(tab.label(), "1. General");
+        assert_eq!(tab.label(), "1 General");
 
         tab = tab.next();
         assert_eq!(tab, SettingsTab::Updates);
@@ -667,6 +714,8 @@ mod tests {
         assert_eq!(tab, SettingsTab::Tools);
         assert_eq!(tab.prev(), SettingsTab::Goal);
 
+        tab = tab.next();
+        assert_eq!(tab, SettingsTab::Style);
         tab = tab.next();
         assert_eq!(tab, SettingsTab::General);
     }
@@ -767,5 +816,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_style_tab_cycles_the_voice_and_its_characteristics() {
+        let mut view = SettingsView::new(AppConfig::default(), Vec::new());
+        view.handle_key(KeyCode::Char('7'), KeyModifiers::empty());
+        assert_eq!(view.active_tab, SettingsTab::Style);
+        view.handle_key(KeyCode::Right, KeyModifiers::empty());
+        view.handle_key(KeyCode::Right, KeyModifiers::empty());
+        assert_eq!(view.config.personality.base, flashagent_core::BaseStyle::Friendly);
+        // Down to Emoji, the last row, and one step left: Less.
+        for _ in 0..4 {
+            view.handle_key(KeyCode::Down, KeyModifiers::empty());
+        }
+        view.handle_key(KeyCode::Left, KeyModifiers::empty());
+        assert_eq!(view.config.personality.emoji, flashagent_core::TraitLevel::Less);
+        let shown = view.render(100).iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("Friendly — Warm and chatty"), "{shown}");
+        assert!(shown.contains("Less — Don't use as many emoji"), "{shown}");
+        assert!(shown.lines().all(|l| crate::visible_width(l) <= 100), "{shown}");
     }
 }
