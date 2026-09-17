@@ -80,7 +80,7 @@ pub fn render_command_card(
 
     let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
     let status_header = if is_running {
-        format!("  {TEXT_MUTED}Running{RESET} {TEXT_BRIGHT}{cmd}{RESET} ⠋")
+        format!("  {TEXT_MUTED}Running{RESET} {TEXT_BRIGHT}{cmd}{RESET} {}", crate::anim::spinner(crate::anim::now_ms()))
     } else if is_error {
         format!("  {TEXT_RED}Failed{RESET} {TEXT_BRIGHT}{cmd}{RESET} {chevron}")
     } else {
@@ -186,7 +186,7 @@ pub fn render_directory_card(
     let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
 
     let header = if is_running {
-        format!("  {TEXT_MUTED}Analyzing{RESET} {TEXT_BRIGHT}{path}{RESET} ⠋")
+        format!("  {TEXT_MUTED}Analyzing{RESET} {TEXT_BRIGHT}{path}{RESET} {}", crate::anim::spinner(crate::anim::now_ms()))
     } else {
         format!("  {TEXT_MUTED}Analyzed{RESET} {TEXT_BRIGHT}{path}{RESET} {chevron}")
     };
@@ -469,7 +469,7 @@ pub fn render_subagent_card(
     let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
 
     let header = if is_running {
-        format!("  {TEXT_LAVENDER}Subagent{RESET} {TEXT_MUTED}executing task...{RESET} ⠋")
+        format!("  {TEXT_LAVENDER}Subagent{RESET} {TEXT_MUTED}executing task...{RESET} {}", crate::anim::spinner(crate::anim::now_ms()))
     } else {
         format!("  {TEXT_LAVENDER}Subagent{RESET} {TEXT_MUTED}finished task{RESET} {chevron}")
     };

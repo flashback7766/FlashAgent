@@ -22,6 +22,114 @@ pub enum MemoryAction {
     Forget { name: String, scope: Scope },
     /// Send this to the model as a turn: the user's note about a memory.
     Tell { message: String },
+    /// Write the summary; `force` rewrites one that is still current.
+    Summarize { force: bool },
+}
+
+/// The overview of everything remembered, written by the model.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MemorySummary {
+    /// Titled paragraphs, the overview first.
+    pub sections: Vec<(String, String)>,
+    /// Follow-up questions the user can send with one key.
+    pub dive_deeper: Vec<String>,
+    /// When it was written, seconds since the epoch.
+    pub updated: u64,
+    /// The memories it was written from, so a changed memory marks it stale.
+    pub fingerprint: String,
+}
+
+/// Where the summary stands.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SummaryState {
+    None,
+    Writing,
+    Ready(MemorySummary),
+    Failed(String),
+}
+
+/// Which half of the screen is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryTab {
+    List,
+    Summary,
+}
+
+/// What the memories are, as one string: a summary written from other
+/// memories is out of date.
+pub fn fingerprint(rows: &[Row]) -> String {
+    let mut parts: Vec<String> =
+        rows.iter().map(|r| format!("{}:{}:{}:{}", r.scope.label(), r.entry.name, r.entry.recorded, r.entry.body.len())).collect();
+    parts.sort();
+    parts.join("|")
+}
+
+/// The request for a summary of `rows`: a system prompt and the memories.
+/// `language` names the language to write in when it is known.
+pub fn summary_request(rows: &[Row], language: Option<&str>) -> (String, String) {
+    let lang = match language {
+        Some(l) => format!("Write every string in {l}."),
+        None => "Write in the language most of the memories are written in.".to_string(),
+    };
+    let system = format!(
+        "You summarize what a coding assistant remembers about its user and their projects. \
+         Return strictly JSON: {{\"overview\": \"2-3 sentences addressed to the user as 'you', naming the main themes\", \
+         \"sections\": [{{\"title\": \"a short topic name\", \"text\": \"one paragraph addressed to the user\"}}], \
+         \"dive_deeper\": [\"a question or request the user could send next about these memories\", \"...\"]}}. \
+         Group related memories into 2-4 sections. Give exactly 2 dive_deeper items, each under 90 characters. \
+         Only state what the memories say; never invent facts. {lang} \
+         Do not think out loud. Start with {{ and return only the JSON."
+    );
+    let mut user = String::from("Memories:\n");
+    for r in rows {
+        user.push_str(&format!(
+            "- [{}] {} ({}, {}): {}\n",
+            r.scope.label(),
+            r.entry.name,
+            r.entry.description,
+            r.entry.recorded,
+            r.entry.body.trim()
+        ));
+    }
+    (system, user)
+}
+
+/// Titled paragraphs and dive-deeper questions, as read from the model.
+pub type ParsedSummary = (Vec<(String, String)>, Vec<String>);
+
+/// Read the model's answer to [`summary_request`].
+pub fn parse_summary(raw: &str) -> Option<ParsedSummary> {
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    let v: serde_json::Value = serde_json::from_str(raw.get(start..=end)?).ok()?;
+    let text = |v: &serde_json::Value| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let mut sections = Vec::new();
+    if let Some(overview) = v.get("overview").and_then(text) {
+        sections.push(("Overview".to_string(), overview));
+    }
+    for sec in v.get("sections").and_then(|s| s.as_array()).into_iter().flatten() {
+        if let (Some(title), Some(body)) = (sec.get("title").and_then(text), sec.get("text").and_then(text)) {
+            sections.push((title, body));
+        }
+    }
+    let dive = v
+        .get("dive_deeper")
+        .and_then(|d| d.as_array())
+        .map(|a| a.iter().filter_map(text).take(3).collect())
+        .unwrap_or_default();
+    (!sections.is_empty()).then_some((sections, dive))
+}
+
+/// "just now", "5 minutes ago", "3 hours ago", "2 days ago".
+pub fn ago(then: u64, now: u64) -> String {
+    let secs = now.saturating_sub(then);
+    let (n, unit) = match secs {
+        0..=59 => return "just now".to_string(),
+        60..=3599 => (secs / 60, "minute"),
+        3600..=86_399 => (secs / 3600, "hour"),
+        _ => (secs / 86_400, "day"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
 /// One row: a memory and where it lives.
@@ -37,6 +145,12 @@ pub struct MemoryModal {
     pub selected: usize,
     /// Typed note, when the user is writing one.
     pub note: Option<String>,
+    pub tab: MemoryTab,
+    pub summary: SummaryState,
+    /// What is typed into "Ask or update" on the summary.
+    pub ask: String,
+    /// The dive-deeper item under the cursor.
+    pub dive_selected: usize,
 }
 
 impl MemoryModal {
@@ -48,7 +162,7 @@ impl MemoryModal {
                 rows.extend(store.list().into_iter().map(|entry| Row { entry, scope }));
             }
         }
-        Self { rows, selected: 0, note: None }
+        Self { rows, selected: 0, note: None, tab: MemoryTab::List, summary: SummaryState::None, ask: String::new(), dive_selected: 0 }
     }
 
     /// The memory under the cursor.
@@ -56,7 +170,72 @@ impl MemoryModal {
         self.rows.get(self.selected)
     }
 
+    /// Whether the summary needs writing before it can be shown.
+    pub fn summary_is_stale(&self) -> bool {
+        match &self.summary {
+            SummaryState::Ready(s) => s.fingerprint != fingerprint(&self.rows),
+            SummaryState::Writing => false,
+            SummaryState::None | SummaryState::Failed(_) => true,
+        }
+    }
+
+    fn summary_key(&mut self, code: KeyCode, mods: KeyModifiers) -> MemoryAction {
+        let dives = match &self.summary {
+            SummaryState::Ready(s) => s.dive_deeper.clone(),
+            _ => Vec::new(),
+        };
+        match code {
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.tab = MemoryTab::List;
+                MemoryAction::None
+            }
+            KeyCode::Esc if !self.ask.is_empty() => {
+                self.ask.clear();
+                MemoryAction::None
+            }
+            KeyCode::Esc => MemoryAction::Close,
+            KeyCode::Up => {
+                self.dive_selected = self.dive_selected.saturating_sub(1);
+                MemoryAction::None
+            }
+            KeyCode::Down => {
+                if self.dive_selected + 1 < dives.len() {
+                    self.dive_selected += 1;
+                }
+                MemoryAction::None
+            }
+            KeyCode::Enter => {
+                let message = if self.ask.trim().is_empty() {
+                    match dives.get(self.dive_selected) {
+                        Some(d) => d.clone(),
+                        None => return MemoryAction::None,
+                    }
+                } else {
+                    format!("About what you remember of me: {}", std::mem::take(&mut self.ask).trim())
+                };
+                MemoryAction::Tell { message }
+            }
+            // Ctrl+R: write it again even though nothing changed.
+            KeyCode::Char('r') if mods.contains(KeyModifiers::CONTROL) => {
+                self.summary = SummaryState::Writing;
+                MemoryAction::Summarize { force: true }
+            }
+            KeyCode::Backspace => {
+                self.ask.pop();
+                MemoryAction::None
+            }
+            KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => {
+                self.ask.push(c);
+                MemoryAction::None
+            }
+            _ => MemoryAction::None,
+        }
+    }
+
     pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> MemoryAction {
+        if self.tab == MemoryTab::Summary && self.note.is_none() {
+            return self.summary_key(code, mods);
+        }
         // While a note is being typed the keys belong to the note.
         if let Some(note) = self.note.as_mut() {
             return match code {
@@ -97,6 +276,17 @@ impl MemoryModal {
 
         match code {
             KeyCode::Esc | KeyCode::Char('q') => MemoryAction::Close,
+            KeyCode::Tab | KeyCode::Char('s') => {
+                if self.rows.is_empty() {
+                    return MemoryAction::None;
+                }
+                self.tab = MemoryTab::Summary;
+                if self.summary_is_stale() {
+                    self.summary = SummaryState::Writing;
+                    return MemoryAction::Summarize { force: false };
+                }
+                MemoryAction::None
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.selected = self.selected.saturating_sub(1);
                 MemoryAction::None
@@ -123,6 +313,9 @@ impl MemoryModal {
     }
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
+        if self.tab == MemoryTab::Summary {
+            return self.render_summary(width);
+        }
         let border = "\x1b[38;2;100;95;90m";
         let reset = "\x1b[0m";
         let dim = "\x1b[38;2;135;130;125m";
@@ -197,10 +390,98 @@ impl MemoryModal {
             None => {
                 lines.push((
                     LineKind::System,
-                    pad(&format!("{dim}↑/↓ — select · e — tell the model what to change · d — forget · esc — close{reset}")),
+                    pad(&format!("{dim}↑/↓ — select · s — summary · e — tell the model what to change · d — forget · esc — close{reset}")),
                 ));
             }
         }
+        lines.push((LineKind::System, format!("  {border}└{}┘{reset}", "─".repeat(inner_w))));
+        lines
+    }
+
+    fn render_summary(&self, width: usize) -> Vec<RenderLine> {
+        let border = "\x1b[38;2;100;95;90m";
+        let reset = "\x1b[0m";
+        let dim = "\x1b[38;2;135;130;125m";
+        let text = "\x1b[38;2;200;195;185m";
+        let heading = "\x1b[1;38;2;240;235;225m";
+        let accent = "\x1b[1;38;2;225;175;95m";
+        let link = "\x1b[4;38;2;168;199;250m";
+        let inner_w = width.saturating_sub(6).clamp(24, 96);
+        let t = crate::anim::now_ms();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+
+        let updated = match &self.summary {
+            SummaryState::Ready(s) => format!(" {dim}updated {}{reset} ", ago(s.updated, now)),
+            _ => String::new(),
+        };
+        let title = format!(" {accent}Memory summary{reset}{updated}");
+        let dashes = inner_w.saturating_sub(crate::visible_width(&title) + 1);
+        let mut lines: Vec<RenderLine> =
+            vec![(LineKind::System, format!("  {border}┌─{title}{border}{}┐{reset}", "─".repeat(dashes)))];
+        let pad = |content: &str| -> String {
+            let max_w = inner_w.saturating_sub(2);
+            let clipped = crate::clip_ansi(content, max_w);
+            let fill = " ".repeat(max_w.saturating_sub(crate::visible_width(&clipped)));
+            format!("  {border}│{reset} {clipped}{fill} {border}│{reset}")
+        };
+        let body_w = inner_w.saturating_sub(4);
+        lines.push((LineKind::System, pad("")));
+        match &self.summary {
+            SummaryState::None | SummaryState::Writing => {
+                let words = crate::anim::shimmer(
+                    "Reading what FlashAgent remembers and writing it up…",
+                    t,
+                    2000,
+                    crate::anim::Rgb(135, 130, 125),
+                    crate::anim::Rgb(240, 235, 225),
+                );
+                lines.push((LineKind::System, pad(&format!("\x1b[38;2;138;180;248m{}{reset} {words}", crate::anim::spinner(t)))));
+            }
+            SummaryState::Failed(why) => {
+                lines.push((LineKind::System, pad(&format!("\x1b[38;2;230;110;95mCould not write the summary:{reset} {text}{why}{reset}"))));
+                lines.push((LineKind::System, pad(&format!("{dim}ctrl+r — try again{reset}"))));
+            }
+            SummaryState::Ready(summary) => {
+                if summary.fingerprint != fingerprint(&self.rows) {
+                    lines.push((LineKind::System, pad(&format!("{dim}Memories changed since this was written · ctrl+r rewrites it{reset}"))));
+                    lines.push((LineKind::System, pad("")));
+                }
+                for (i, (name, body)) in summary.sections.iter().enumerate() {
+                    if i > 0 {
+                        lines.push((LineKind::System, pad("")));
+                    }
+                    lines.push((LineKind::System, pad(&format!("{heading}{name}{reset}"))));
+                    for row in crate::wrap_styled(&format!("{text}{body}{reset}"), body_w) {
+                        lines.push((LineKind::System, pad(&row)));
+                    }
+                }
+                if !summary.dive_deeper.is_empty() {
+                    lines.push((LineKind::System, pad("")));
+                    lines.push((LineKind::System, pad(&format!("{heading}Dive deeper{reset}"))));
+                    for (i, q) in summary.dive_deeper.iter().enumerate() {
+                        let row = if i == self.dive_selected && self.ask.is_empty() {
+                            format!("{accent}↳{reset} {link}{q}{reset}")
+                        } else {
+                            format!("{dim}↳ {q}{reset}")
+                        };
+                        lines.push((LineKind::System, pad(&row)));
+                    }
+                }
+            }
+        }
+        lines.push((LineKind::System, pad("")));
+        let ask = if self.ask.is_empty() {
+            format!("{accent}❯{reset} {dim}Ask or update…{reset}")
+        } else {
+            let (shown, _) = crate::tail_window(&self.ask, body_w.saturating_sub(2));
+            let caret = if crate::anim::blink_on(t) { "\x1b[7m \x1b[27m" } else { " " };
+            format!("{accent}❯{reset} {text}{shown}{caret}{reset}")
+        };
+        lines.push((LineKind::System, pad(&ask)));
+        lines.push((
+            LineKind::System,
+            pad(&format!("{dim}type — ask · ↑/↓ + enter — dive deeper · ctrl+r — rewrite · tab — list · esc — close{reset}")),
+        ));
         lines.push((LineKind::System, format!("  {border}└{}┘{reset}", "─".repeat(inner_w))));
         lines
     }
@@ -228,6 +509,10 @@ mod tests {
                 .collect(),
             selected: 0,
             note: None,
+            tab: MemoryTab::List,
+            summary: SummaryState::None,
+            ask: String::new(),
+            dive_selected: 0,
         }
     }
 
@@ -303,5 +588,49 @@ mod tests {
                 assert!(crate::visible_width(&row) <= width, "{width}: {:?}", crate::strip_ansi(&row));
             }
         }
+    }
+
+    #[test]
+    fn the_summary_is_asked_for_once_and_shown_when_it_arrives() {
+        let mut m = modal_with(vec![("uses-byd", "drives a BYD Sealion 07", Scope::Global)]);
+        assert_eq!(m.handle_key(KeyCode::Char('s'), KeyModifiers::NONE), MemoryAction::Summarize { force: false });
+        let dump = |m: &MemoryModal| m.render(90).iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump(&m).contains("writing it up"), "{}", dump(&m));
+
+        let (sections, dive) = parse_summary(
+            r#"```json
+{"overview": "Вы интересуетесь автомобилем.", "sections": [{"title": "Автомобиль", "text": "BYD Sealion 07."}], "dive_deeper": ["Сравните версии DiLink"]}
+```"#,
+        )
+        .unwrap();
+        m.summary = SummaryState::Ready(MemorySummary { sections, dive_deeper: dive, updated: 0, fingerprint: fingerprint(&m.rows) });
+        let shown = dump(&m);
+        assert!(shown.contains("Overview") && shown.contains("Автомобиль") && shown.contains("↳ Сравните версии DiLink"), "{shown}");
+        assert!(shown.lines().all(|l| crate::visible_width(l) <= 90), "{shown}");
+
+        // Going back to the list and in again does not ask a second time.
+        m.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(m.handle_key(KeyCode::Tab, KeyModifiers::NONE), MemoryAction::None);
+        // Enter on a dive-deeper item sends it.
+        assert_eq!(
+            m.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+            MemoryAction::Tell { message: "Сравните версии DiLink".into() }
+        );
+        // Typing asks instead, and a forgotten memory marks the summary stale.
+        for c in "а что ещё?".chars() {
+            m.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        let MemoryAction::Tell { message } = m.handle_key(KeyCode::Enter, KeyModifiers::NONE) else { panic!() };
+        assert!(message.contains("а что ещё?"));
+        m.rows.clear();
+        assert!(m.summary_is_stale());
+    }
+
+    #[test]
+    fn time_since_reads_naturally() {
+        assert_eq!(ago(100, 110), "just now");
+        assert_eq!(ago(0, 60), "1 minute ago");
+        assert_eq!(ago(0, 3 * 3600 + 5), "3 hours ago");
+        assert_eq!(ago(0, 2 * 86_400), "2 days ago");
     }
 }

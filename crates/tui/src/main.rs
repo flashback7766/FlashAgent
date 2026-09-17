@@ -25,7 +25,7 @@ use flashagent_tui::{
     visible_width, welcome_card_responsive_opts, AutocompletePopup, ChatView, ConfirmSelect,
     ContextModal, LineKind, McpModal, McpModalAction, McpViewTab, PrefillTracker, ReasoningExpansion,
     RenderLine, SamplingAction, SamplingView, SelectItem, SelectMenu, SettingsAction, SettingsView,
-    TuiGate, TuiQuestionGate, UiEvent, SPINNER,
+    TuiGate, TuiQuestionGate, UiEvent,
 };
 
 mod render;
@@ -43,7 +43,10 @@ mod submit;
 mod overlay_keys;
 mod keys;
 mod turns;
+mod overlay;
+mod memory_summary;
 use render::*;
+use overlay::Overlay;
 use tokens::*;
 use backend::*;
 use menus::*;
@@ -51,6 +54,7 @@ use notices::*;
 use attachments::*;
 use sessions::*;
 use recap::*;
+use memory_summary::*;
 use compact::*;
 use cards::*;
 use toolcheck_cli::*;
@@ -75,6 +79,8 @@ async fn main() -> Result<()> {
         match a.as_str() {
             "--url" => {
                 if let Some(val) = args.next() {
+                    // For this run: saving keeps the URL the config file had.
+                    config.url_override = Some((val.clone(), config.backend_url.clone()));
                     config.backend_url = val;
                 }
             }
@@ -500,7 +506,6 @@ struct LoopCtx<'a> {
     question_gate: &'a Arc<TuiQuestionGate>,
     tools_arc: &'a Arc<BuiltinTools>,
     memory_block: &'a String,
-    memory_docs: usize,
     cwd_display: &'a String,
     cancel: &'a Arc<AtomicBool>,
     tx: &'a tokio::sync::mpsc::UnboundedSender<UiEvent>,
@@ -535,6 +540,8 @@ struct App {
     active_turn_handle: Option<tokio::task::JoinHandle<()>>,
     active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     pending_steers: Vec<String>,
+    /// Set when the user interrupts: the loop is asked to stop cooperatively
+    /// so it can hand back a consistent history; a hard abort is the fallback.
     cancel_requested: Option<std::time::Instant>,
     aborted_turn: Option<u64>,
     turn_counter: u64,
@@ -543,22 +550,34 @@ struct App {
     current_model: String,
     current_context: Option<String>,
     current_effort: String,
-    effort_menu: Option<SelectMenu<String>>,
-    model_menu: Option<SelectMenu<String>>,
-    rewind_confirm: Option<RewindConfirm>,
-    settings_view: Option<SettingsView>,
-    sampling_view: Option<SamplingView>,
-    context_modal: Option<ContextModal>,
-    memory_modal: Option<flashagent_tui::memory_view::MemoryModal>,
+    /// What the system prompt is built from, so it can be rebuilt when the
+    /// user changes how replies should sound.
+    prompt_config: SystemPromptConfig,
+    /// The folder as shown to the user (`~/project`).
+    cwd_display: String,
+    /// Rule and memory files loaded into the prompt, for the welcome card.
+    memory_docs: usize,
+    /// Generation speed sampled a few times a second while a turn runs.
+    speed_history: Vec<f64>,
+    /// When the last speed sample was taken, on the animation clock.
+    last_speed_sample: u64,
+    /// How the last turn ended, lit on the composer border: the colour and
+    /// when, on the animation clock.
+    turn_flash: Option<(flashagent_tui::anim::Rgb, u64)>,
+    /// The menu or screen standing in for the composer, if one is open.
+    overlay: Option<overlay::Overlay>,
     last_tool_name: Option<String>,
+    /// Pictures waiting to go with the next message.
     attachments: Vec<Attachment>,
+    /// What a picture costs, measured once per model and remembered.
     image_costs: flashagent_tui::image_cost::ImageCosts,
     image_cost_probe: Option<String>,
-    mcp_modal: Option<McpModal>,
     context_usage: ContextUsage,
     autocomplete_idx: usize,
     tick_n: usize,
     renderer: Renderer,
+    /// Things that turn up on their own — an update installing, the context
+    /// being compacted — go on the line under the input, not in the composer.
     background: Option<BackgroundNotice>,
     channel_switch: Option<ChannelSwitch>,
     /// When Esc was last pressed on an empty prompt: a second press soon
@@ -569,8 +588,6 @@ struct App {
     /// The recap and suggestion being written for the last turn, so a new
     /// turn can stop it.
     recap_task: Option<tokio::task::JoinHandle<()>>,
-    /// The list of saved sessions (/resume), while it is open.
-    session_menu: Option<SelectMenu<String>>,
     /// A session picked from that list, switched to at the top of the next
     /// loop turn, where the session id and the snapshot store live.
     pending_resume: Option<String>,
@@ -580,8 +597,12 @@ struct App {
     /// /update); until then a background update goes unannounced.
     update_watched: bool,
     turn_phase: TurnPhase,
+    /// How auto effort's guesses turned out per model, nudged one step at a
+    /// time by how its turns actually go.
     effort_memory: flashagent_core::EffortMemory,
     turn_outcome: flashagent_core::TurnOutcome,
+    /// How much the last turn added to the context, so the next one can be
+    /// sized before it is started rather than after it overflows.
     last_turn_growth: usize,
     context_before_turn: usize,
     pending_update: Option<(String, String, String, Option<String>)>,
@@ -590,10 +611,14 @@ struct App {
     token_tracker: TokenTracker,
     max_steps: Option<u32>,
     goal_state: Option<SavedGoalState>,
+    /// Facts about the running /goal, accumulated from loop events for the
+    /// live progress line and the final report.
     goal_ledger: Option<GoalLedger>,
     copy_toast: Option<(String, std::time::Instant)>,
     last_ctrl_c: Option<std::time::Instant>,
     last_mascot_mood: MascotMood,
+    /// What the user has already been told about the server, so a mood that
+    /// flickers does not re-announce itself.
     announced_mood: MascotMood,
     config: AppConfig,
     available_models: Vec<String>,
@@ -622,6 +647,9 @@ struct AppContext {
     pending_discovery: Option<tokio::task::JoinHandle<Option<flashagent_llm::ServerDiscovery>>>,
 }
 
+/// Set while an external editor has the terminal; the key reader waits.
+static INPUT_PAUSED: AtomicBool = AtomicBool::new(false);
+
 fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::io::Result<String> {
     let editor = if !preferred_editor.is_empty() {
         preferred_editor.to_string()
@@ -635,6 +663,9 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     let temp_file = temp_dir.join(format!("flashagent_prompt_{}.md", std::process::id()));
     std::fs::write(&temp_file, initial_text)?;
 
+    INPUT_PAUSED.store(true, Ordering::SeqCst);
+    // Let a poll already under way in the reader thread run out first.
+    std::thread::sleep(std::time::Duration::from_millis(60));
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -643,21 +674,33 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
         crossterm::terminal::LeaveAlternateScreen
     );
 
-    let status = std::process::Command::new(&editor)
-        .arg(&temp_file)
-        .status();
+    // `$EDITOR` may carry its own flags ("code --wait").
+    let mut words = editor.split_whitespace();
+    let status = match words.next() {
+        Some(program) => std::process::Command::new(program).args(words).arg(&temp_file).status(),
+        None => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no editor configured")),
+    };
 
     let _ = crossterm::terminal::enable_raw_mode();
     let _ = crossterm::execute!(
         std::io::stdout(),
-        crossterm::cursor::Hide,
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableMouseCapture
     );
 
+    INPUT_PAUSED.store(false, Ordering::SeqCst);
+
     let result = match status {
-        Ok(s) if s.success() => std::fs::read_to_string(&temp_file).unwrap_or_else(|_| initial_text.to_string()),
-        _ => initial_text.to_string(),
+        // The composer is one line, as a paste is: line breaks become spaces,
+        // and the newline editors add at the end goes.
+        Ok(s) if s.success() => std::fs::read_to_string(&temp_file)
+            .map(|text| text.trim_end().replace("\r\n", " ").replace(['\n', '\r'], " "))
+            .unwrap_or_else(|_| initial_text.to_string()),
+        Ok(_) => initial_text.to_string(),
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_file);
+            return Err(e);
+        }
     };
 
     let _ = std::fs::remove_file(&temp_file);
@@ -686,7 +729,6 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         pending_discovery,
     } = ctx;
     let cancel = Arc::new(AtomicBool::new(false));
-    let question_ui_state = QuestionUiState::default();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
 
     if let Some(task) = pending_discovery {
@@ -703,6 +745,17 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         let tx = tx.clone();
         std::thread::spawn(move || {
             loop {
+                // While an external editor owns the terminal, its keys are
+                // its own: reading here would steal every other one.
+                if INPUT_PAUSED.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    continue;
+                }
+                match crossterm::event::poll(std::time::Duration::from_millis(50)) {
+                    Ok(true) if !INPUT_PAUSED.load(Ordering::SeqCst) => {}
+                    Ok(_) => continue,
+                    Err(_) => return,
+                }
                 match crossterm::event::read() {
                     Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => {
                         if tx.send(UiEvent::Key(k.code, k.modifiers)).is_err() {
@@ -736,71 +789,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         .with_platform(std::env::consts::OS)
         .with_model(&model)
         .with_effort(&initial_effort);
-    let system_prompt_text = build_system_prompt(&system_prompt_config);
-    let mut history: Vec<ChatMessage> = vec![ChatMessage::system(system_prompt_text)];
-    let input = String::new();
-    let mut custom_placeholder: Option<String> = None;
-    let mut suggested_prompt: Option<String> = None;
+    let system_prompt_text =
+        build_system_prompt(&system_prompt_config.clone().with_personality(&app_config.personality));
 
-
-    let latest_suggestion: Option<String> = None;
-    let tip_animator = flashagent_tui::tips::TipAnimator::new();
-    let input_history: Vec<String> = Vec::new();
-    let history_index: Option<usize> = None;
-    let current_draft = String::new();
-    let confirm_select = ConfirmSelect::new();
-    let mut chat = ChatView::default();
-    let running = false;
-    let active_turn_handle: Option<tokio::task::JoinHandle<()>> = None;
-    let active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
-    let pending_steers: Vec<String> = Vec::new();
-    // Set when the user interrupts: the loop is asked to stop cooperatively so
-    // it can hand back a consistent history; a hard abort is the fallback.
-    let cancel_requested: Option<std::time::Instant> = None;
-    let aborted_turn: Option<u64> = None;
-    let turn_counter: u64 = 0;
-    let all_expanded = false;
-    let last_expanded = false;
-    let current_model = model;
-    let current_context = context_display;
-    let current_effort = initial_effort;
-    let effort_menu: Option<SelectMenu<String>> = None;
-    let model_menu: Option<SelectMenu<String>> = None;
-    let rewind_confirm: Option<RewindConfirm> = None;
-    let settings_view: Option<SettingsView> = None;
-    let sampling_view: Option<SamplingView> = None;
-    let context_modal: Option<ContextModal> = None;
-    let memory_modal: Option<flashagent_tui::memory_view::MemoryModal> = None;
-    let last_tool_name: Option<String> = None;
-    // Pictures waiting to go with the next message. A screenshot is the
-    // fastest way to say "this is what I mean", and typing it out is the
-    // slowest.
-    let attachments: Vec<Attachment> = Vec::new();
-    // What a picture costs is measured once per model and remembered.
-    let image_costs = flashagent_tui::image_cost::ImageCosts::load();
-    let image_cost_probe: Option<String> = None;
-    let mcp_modal: Option<McpModal> = None;
-    let mut context_usage = ContextUsage::new(context_capacity);
-    update_context_usage(&mut context_usage, &history, &memory_block, &chat, perm);
-    let autocomplete_idx = 0usize;
-    let tick_n = 0usize;
-    let mut renderer = Renderer::new();
-
-    /// A one-line system notice. These go under the cursor rather than into
-    /// the transcript: they are addressed to the person at the keyboard, not
-    /// to the conversation, and a chat full of "[No models discovered]" is a
-    /// chat you stop reading. Anything with structure — a listing, a diff, a
-    /// report — still belongs in the transcript.
-    macro_rules! notice {
-        ($text:expr) => {{
-            custom_placeholder = Some(($text).to_string());
-            // A pending suggestion is drawn in the same spot and would hide
-            // the notice; take() rather than assign, so a site that sets it
-            // again right after is not flagged as a dead store.
-            suggested_prompt.take();
-            renderer.request_reprint();
-        }};
-    }
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(80));
     // The first look is not due yet: startup has just asked the server.
     let mut check_interval =
@@ -838,36 +829,11 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         .unwrap_or_else(|| std::env::temp_dir().join("flashagent-snapshots").join(&session_id));
     perm.state().set_snapshots(Arc::new(flashagent_core::SnapshotStore::open(snapshot_dir, cwd.clone())));
 
-    // Things that turn up on their own — an update installing, the context
-    // being compacted — go on the line under the input. The composer is where
-    // the user's own actions are answered; a message they did not ask for
-    // must not take that spot.
-    let background: Option<BackgroundNotice> = None;
-    let channel_switch: Option<ChannelSwitch> = None;
-    // Esc used to quit outright, which loses a session to one stray keypress;
-    // it takes two presses now.
-    let last_esc: Option<std::time::Instant> = None;
-    let uninstall_confirm = false;
-    let recap_task: Option<tokio::task::JoinHandle<()>> = None;
-    let session_menu: Option<SelectMenu<String>> = None;
-    let pending_resume: Option<String> = None;
-    let update_progress: Option<(String, flashagent_svc::updater::UpdateProgress)> = None;
-    let update_watched = false;
-    let turn_phase = TurnPhase::Waiting;
-    // Auto effort guesses the task before the model has said a word. How its
-    // turns actually go is the only evidence of whether the guess fits this
-    // model, so the turns are watched and the guess is nudged by one step.
     let effort_memory = flashagent_core::EffortMemory::load();
-    let turn_outcome = flashagent_core::TurnOutcome::default();
-    // How much the last turn added to the context, so the next one can be
-    // sized before it is started rather than after it overflows.
-    let last_turn_growth: usize = 0;
-    let context_before_turn: usize = 0;
-    source.set_effort_bias(effort_memory.steps(&current_model));
-    tools_arc.set_vision_supported(model_sees_images(&source, &current_model));
+    source.set_effort_bias(effort_memory.steps(&model));
+    tools_arc.set_vision_supported(model_sees_images(&source, &model));
     let (channel_probe_tx, mut channel_probe_rx) =
         tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
-    let pending_update: Option<(String, String, String, Option<String>)> = None;
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
     let (channel_watch_tx, mut channel_watch_rx) = tokio::sync::watch::channel(app_config.update_channel);
     // One update at a time: the background updater and Ctrl+U both claim
@@ -920,39 +886,108 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         });
     }
 
-    let (term_w, term_h) = crossterm::terminal::size().unwrap_or((100, 24));
-    let last_term_size = (term_w, term_h);
+    let started_at = std::time::Instant::now();
+    let mut app = App {
+        question_ui_state: QuestionUiState::default(),
+        history: vec![ChatMessage::system(system_prompt_text)],
+        input: String::new(),
+        custom_placeholder: None,
+        suggested_prompt: None,
+        latest_suggestion: None,
+        tip_animator: flashagent_tui::tips::TipAnimator::new(),
+        input_history: Vec::new(),
+        history_index: None,
+        current_draft: String::new(),
+        confirm_select: ConfirmSelect::new(),
+        chat: ChatView::default(),
+        running: false,
+        active_turn_handle: None,
+        active_steer_tx: None,
+        pending_steers: Vec::new(),
+        cancel_requested: None,
+        aborted_turn: None,
+        turn_counter: 0,
+        all_expanded: false,
+        last_expanded: false,
+        token_tracker: TokenTracker::new(model.clone()),
+        current_model: model,
+        current_context: context_display,
+        current_effort: initial_effort,
+        prompt_config: system_prompt_config,
+        cwd_display: cwd_display.clone(),
+        memory_docs,
+        speed_history: Vec::new(),
+        last_speed_sample: 0,
+        turn_flash: None,
+        overlay: None,
+        last_tool_name: None,
+        attachments: Vec::new(),
+        image_costs: flashagent_tui::image_cost::ImageCosts::load(),
+        image_cost_probe: None,
+        context_usage: ContextUsage::new(context_capacity),
+        autocomplete_idx: 0,
+        tick_n: 0,
+        renderer: Renderer::new(),
+        background: None,
+        channel_switch: None,
+        last_esc: None,
+        uninstall_confirm: false,
+        recap_task: None,
+        pending_resume: None,
+        update_progress: None,
+        update_watched: false,
+        turn_phase: TurnPhase::Waiting,
+        effort_memory,
+        turn_outcome: flashagent_core::TurnOutcome::default(),
+        last_turn_growth: 0,
+        context_before_turn: 0,
+        pending_update: None,
+        last_term_size: crossterm::terminal::size().unwrap_or((100, 24)),
+        turn_started: None,
+        max_steps: app_config.max_steps,
+        goal_state: None,
+        goal_ledger: None,
+        copy_toast: None,
+        last_ctrl_c: None,
+        last_mascot_mood: MascotMood::Checking,
+        announced_mood: MascotMood::Checking,
+        config: app_config,
+        available_models,
+    };
+    update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
+
+    let (term_w, term_h) = app.last_term_size;
     let thinking_summary = if let Some(ref p) = source.profile() {
         if p.supported && !p.presets.is_empty() {
-            format!("{} [{}]", current_effort, p.presets.join(", "))
+            format!("{} [{}]", app.current_effort, p.presets.join(", "))
         } else if !p.supported && !p.is_unreported() {
             "disabled (unsupported)".to_string()
         } else {
-            current_effort.clone()
+            app.current_effort.clone()
         }
     } else {
-        current_effort.clone()
+        app.current_effort.clone()
     };
     let initial_card = welcome_card_responsive_opts(
-        &current_model,
+        &app.current_model,
         &cwd_display,
         perm.state().mode().label(),
         memory_docs,
         Some(&thinking_summary),
-        current_context.as_deref(),
+        app.current_context.as_deref(),
         term_w as usize,
         term_h as usize,
         0,
-        app_config.show_mascot,
+        app.config.show_mascot,
         MascotMood::Checking,
     );
     // The reveal is driven by the tick loop, which stops touching the card as
     // soon as the transcript has a user message in it. A resumed session puts
     // messages up immediately, so its card would stay stuck at whatever row
     // the reveal had reached — draw it whole instead.
-    chat.update_welcome_card(opening_card(initial_card, resume_session_id.is_none()));
+    app.chat.update_welcome_card(opening_card(initial_card, resume_session_id.is_none()));
     if let Some(verdict) = first_run_verdict {
-        chat.push_system(&verdict);
+        app.chat.push_system(&verdict);
     }
 
     if let Some(ref resume_id) = resume_session_id {
@@ -961,112 +996,20 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             .and_then(|dir| read_session(&dir, resume_id))
         {
             Ok(saved) => {
-                let restored = restore_session(saved, &mut chat, &mut history);
-                notice!(&format!("Resumed session '{resume_id}' ({restored} messages loaded)."));
+                let restored = restore_session(saved, &mut app.chat, &mut app.history);
+                update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
+                app.notice(format!("Resumed session '{resume_id}' ({restored} messages loaded)."));
             }
-            Err(why) => chat.push_line(LineKind::ToolError, why),
+            Err(why) => app.chat.push_line(LineKind::ToolError, why),
         }
     }
     if let Some(note) = session_note {
-        notice!(&note);
+        app.notice(note);
     }
-
-    let turn_started: Option<std::time::Instant> = None;
-    let token_tracker = TokenTracker::new(current_model.clone());
-    let max_steps: Option<u32> = app_config.max_steps;
-    let goal_state: Option<SavedGoalState> = None;
-    // Facts about the running /goal, accumulated from loop events for the
-    // live progress line and the final report.
-    let goal_ledger: Option<GoalLedger> = None;
-    let copy_toast: Option<(String, std::time::Instant)> = None;
-    let last_ctrl_c: Option<std::time::Instant> = None;
-    let started_at = std::time::Instant::now();
-    let last_mascot_mood = MascotMood::Checking;
-    // What the user has already been told about the server, so a mood that
-    // flickers does not re-announce itself.
-    let announced_mood = MascotMood::Checking;
-
-
-    let mut app = App {
-        question_ui_state,
-        history,
-        input,
-        custom_placeholder,
-        suggested_prompt,
-        latest_suggestion,
-        tip_animator,
-        input_history,
-        history_index,
-        current_draft,
-        confirm_select,
-        chat,
-        running,
-        active_turn_handle,
-        active_steer_tx,
-        pending_steers,
-        cancel_requested,
-        aborted_turn,
-        turn_counter,
-        all_expanded,
-        last_expanded,
-        current_model,
-        current_context,
-        current_effort,
-        effort_menu,
-        model_menu,
-        rewind_confirm,
-        settings_view,
-        sampling_view,
-        context_modal,
-        memory_modal,
-        last_tool_name,
-        attachments,
-        image_costs,
-        image_cost_probe,
-        mcp_modal,
-        context_usage,
-        autocomplete_idx,
-        tick_n,
-        renderer,
-        background,
-        channel_switch,
-        last_esc,
-        uninstall_confirm,
-        recap_task,
-        session_menu,
-        pending_resume,
-        update_progress,
-        update_watched,
-        turn_phase,
-        effort_memory,
-        turn_outcome,
-        last_turn_growth,
-        context_before_turn,
-        pending_update,
-        last_term_size,
-        turn_started,
-        token_tracker,
-        max_steps,
-        goal_state,
-        goal_ledger,
-        copy_toast,
-        last_ctrl_c,
-        last_mascot_mood,
-        announced_mood,
-        config: app_config,
-        available_models,
-    };
     if open_session_picker {
         app.open_session_picker(&cwd_display, &session_id);
     }
 
-    macro_rules! notice {
-        ($text:expr) => {{
-            app.custom_placeholder = Some(($text).to_string());
-            app.suggested_prompt.take();
-            app.renderer.request_reprint();
-        }};
-    }
     macro_rules! finish {
         () => {
             if app.config.auto_save_sessions && worth_saving(&app.history) {
@@ -1110,9 +1053,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     app.renderer.printed_settled = 0;
                     app.renderer.prev_expansion = None;
                     update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
-                    notice!(&format!("Resumed session '{session_id}' ({restored} messages loaded)."));
+                    app.notice(format!("Resumed session '{session_id}' ({restored} messages loaded)."));
                 }
-                Err(why) => notice!(&why),
+                Err(why) => app.notice(why),
             }
         }
         // The face reports the one thing that decides whether anything works:
@@ -1135,14 +1078,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         };
         let autocomplete = if !app.running
             && app.input.starts_with('/')
-            && app.effort_menu.is_none()
-            && app.model_menu.is_none()
-            && app.rewind_confirm.is_none()
-            && app.session_menu.is_none()
-            && app.settings_view.is_none()
-            && app.sampling_view.is_none()
-            && app.context_modal.is_none()
-            && app.mcp_modal.is_none()
+            && app.overlay.is_none()
             && gate.pending().is_none()
             && question_gate.pending().is_none()
         {
@@ -1155,22 +1091,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         if (term_w, term_h) != app.last_term_size {
             app.last_term_size = (term_w, term_h);
             if !app.chat.has_user_message() {
-                refresh_welcome_card_animated(
-                    &mut app.chat,
-                    &mut app.renderer,
-                    &app.current_model,
-                    &cwd_display,
-                    perm.state().mode().label(),
-                    memory_docs,
-                    &source,
-                    &app.current_effort,
-                    app.current_context.as_deref(),
-                    app.tick_n,
-                    Some(term_w as usize),
-                    app.config.show_mascot,
-                    mascot_mood,
-                    None,
-                );
+                app.animate_welcome(&source, perm.state().mode(), mascot_mood, Some(term_w as usize), None);
             }
         }
         let tip_lines = app.tip_animator.render_lines(app.tick_n, term_w as usize);
@@ -1185,7 +1106,6 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     question_gate: &question_gate,
                     tools_arc: &tools_arc,
                     memory_block: &memory_block,
-                    memory_docs,
                     cwd_display: &cwd_display,
                     cancel: &cancel,
                     tx: &tx,
@@ -1206,7 +1126,6 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 app.copy_toast = None;
             }
         }
-        let active_toast = app.copy_toast.as_ref().map(|(msg, _)| msg.as_str());
         // Recomputed every frame: the elapsed part of it moves on its own.
         // The server being unreachable is not something to discover by typing
         // a prompt and waiting. Said once when it happens, taken back when it
@@ -1230,78 +1149,10 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
             }
         }
 
-        let channel_prompt: Option<String> = if app.uninstall_confirm {
-            Some(
-                "Close FlashAgent and remove it? The uninstaller then shows what it will remove and asks, \
-                 part by part, which of your data to delete. Your session is saved first."
-                    .to_string(),
-            )
-        } else {
-            app.channel_switch.as_ref().map(|sw| {
-                channel_switch_warning(sw.to, flashagent_svc::updater::current_version(), &sw.target)
-            })
-        };
-        let cost_now = app.image_costs.get(&app.current_model);
-        let attachment_labels: Vec<String> =
-            app.attachments.iter().map(|a| a.labelled(cost_now)).collect();
-        let goal_progress: Option<String> =
-            app.goal_ledger.as_ref().filter(|_| app.running).map(|l| l.progress());
-        let live_prefill = app.token_tracker.live_prefill_status();
-        let ttft_display = app.token_tracker.ttft_display();
-        let tg_speed = app.token_tracker.tg_3s();
-
-        app.renderer.frame(
-            &app.chat,
-            &gate,
-            &question_gate,
-            app.effort_menu.as_ref(),
-            app.model_menu.as_ref(),
-            app.rewind_confirm.as_ref(),
-            app.session_menu.as_ref(),
-            app.settings_view.as_ref(),
-            app.sampling_view.as_ref(),
-            app.context_modal.as_ref(),
-            app.mcp_modal.as_ref(),
-            app.memory_modal.as_ref(),
-            autocomplete.as_ref(),
-            &app.context_usage,
-            FrameState {
-                input: &app.input,
-                mode: perm.state().mode(),
-                is_goal_active: app.goal_state.is_some(),
-                goal_progress: goal_progress.as_deref(),
-                tip: if app.config.show_tips { Some(app.tip_animator.tip_text) } else { None },
-                tip_animated: None,
-                tip_lines: if app.config.show_tips { Some(&tip_lines) } else { None },
-                token_tracker: if app.config.show_tokens { Some(&app.token_tracker) } else { None },
-                reasoning_expand: ReasoningExpansion {
-                    all: app.all_expanded,
-                    last: app.last_expanded,
-                },
-                tick_n: app.tick_n,
-                running: app.running,
-                elapsed_secs: app.turn_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                face_phase: app.turn_started.map(|t| (t.elapsed().as_millis() / 80) as usize).unwrap_or(0),
-                model_tokens: if app.config.show_tokens { app.token_tracker.total_model_tokens } else { 0 },
-                tokens_per_sec: if app.config.show_tokens { tg_speed } else { 0.0 },
-                f_keep: if app.config.show_tokens { app.token_tracker.last_f_keep } else { None },
-                confirm_selection: app.confirm_select.decision(),
-                question_state: Some(&app.question_ui_state),
-                custom_placeholder: app.custom_placeholder.as_deref(),
-                suggested_prompt: app.suggested_prompt.as_deref(),
-                copy_toast: if app.config.show_toasts { active_toast } else { None },
-                prefill_status: if app.config.show_ttft { live_prefill.as_deref() } else { None },
-                ttft_display: if app.config.show_ttft { ttft_display.as_deref() } else { None },
-                background: app.background.as_ref().map(|b| b.text.as_str()),
-                channel_prompt: channel_prompt.as_deref(),
-                prompt_title: if app.uninstall_confirm { UNINSTALL_TITLE } else { "Switch release channel" },
-                turn_phase: app.running.then_some(&app.turn_phase),
-                attachments: &attachment_labels,
-                background_style: app.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
-                context_warn_threshold: app.config.context_warn_threshold,
-                pending_steers: &app.pending_steers,
-            },
-        );
+        {
+            let cx = loop_ctx!();
+            app.draw(&cx, autocomplete.as_ref());
+        }
 
         let ev = tokio::select! {
             Some(target) = channel_probe_rx.recv() => {
@@ -1318,7 +1169,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         app.background = Some(BackgroundNotice::sticky(format!(
                             "Update available: {version} · press Ctrl+U to install"
                         )));
-                        if let Some(ref mut s) = app.settings_view {
+                        if let Some(s) = app.settings_view_mut() {
                             s.update_check_status = Some(format!("Available: {version} (Press Ctrl+U)"));
                         }
                     }
@@ -1338,12 +1189,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         app.background = Some(BackgroundNotice::sticky(format!(
                             "Updated to {version} \u{b7} restart FlashAgent to use it"
                         )));
-                        if let Some(ref mut s) = app.settings_view {
+                        if let Some(s) = app.settings_view_mut() {
                             s.update_check_status = Some(format!("Ready: {version} (restart to apply)"));
                         }
                     }
                     UpdateNotice::UpToDate { version } => {
-                        if let Some(ref mut s) = app.settings_view {
+                        if let Some(s) = app.settings_view_mut() {
                             s.update_check_status = Some(format!("Up to date ({version})"));
                         }
                         if std::mem::take(&mut app.update_watched) {
@@ -1355,7 +1206,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     }
                     UpdateNotice::Failed { error } => {
                         app.update_progress = None;
-                        if let Some(ref mut s) = app.settings_view {
+                        if let Some(s) = app.settings_view_mut() {
                             s.update_check_status = Some(format!("Error: {error}"));
                         }
                         if std::mem::take(&mut app.update_watched) {
@@ -1369,13 +1220,24 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 app.renderer.request_reprint();
                 continue;
             }
-            Some(ev) = rx.recv() => {
-                app.tick_n += 1;
-                ev
+            // Animations run on the clock alone: counting events too made
+            // every spinner race whenever the model streamed quickly.
+            Some(ev) = rx.recv() => ev,
+            // While something is moving (a card unfolding, the welcome card
+            // drawing in, the composer flash), frames come every 16 ms rather
+            // than on the idle tick.
+            _ = tokio::time::sleep(std::time::Duration::from_millis(16)),
+                if app.animating() || (welcome_reveal_rows(started_at).is_some() && !app.chat.has_user_message()) =>
+            {
+                if let Some(rows) = welcome_reveal_rows(started_at).filter(|_| !app.running) {
+                    app.animate_welcome(&source, perm.state().mode(), mascot_mood, None, Some(rows));
+                }
+                continue;
             }
             _ = tick.tick() => {
                 app.tick_n += 1;
                 app.tip_animator.tick();
+                app.sample_speed();
                 if app.background.as_ref().is_some_and(BackgroundNotice::expired) {
                     app.background = None;
                     app.renderer.request_reprint();
@@ -1404,6 +1266,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         }
                     }
                     app.chat.on_event(&flashagent_core::LoopEvent::Done(flashagent_core::DoneReason::Cancelled));
+                    app.flash_turn_end(Some(DoneReason::Cancelled));
                     app.custom_placeholder = Some("Turn aborted; its partial output was not kept in the model context".to_string());
                     app.renderer.request_reprint();
                 }
@@ -1425,22 +1288,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         || reveal_rows.is_some()
                         || flashagent_tui::mascot_needs_repaint(app.tick_n))
                 {
-                    refresh_welcome_card_animated(
-                        &mut app.chat,
-                        &mut app.renderer,
-                        &app.current_model,
-                        &cwd_display,
-                        perm.state().mode().label(),
-                        memory_docs,
-                        &source,
-                        &app.current_effort,
-                        app.current_context.as_deref(),
-                        app.tick_n,
-                        Some(current_term_size.0 as usize),
-                        app.config.show_mascot,
-                        mascot_mood,
-                        reveal_rows,
-                    );
+                    app.animate_welcome(&source, perm.state().mode(), mascot_mood, Some(current_term_size.0 as usize), reveal_rows);
                 }
                 if term_resized {
                     app.renderer.request_reprint();
@@ -1483,6 +1331,18 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     app.renderer.request_reprint();
                 }
             }
+            UiEvent::MemorySummary(result) => {
+                if let Ok(summary) = &result {
+                    save_summary(summary);
+                }
+                if let Some(Overlay::Memory(modal)) = app.overlay.as_mut() {
+                    modal.summary = match result {
+                        Ok(summary) => flashagent_tui::memory_view::SummaryState::Ready(summary),
+                        Err(why) => flashagent_tui::memory_view::SummaryState::Failed(why),
+                    };
+                }
+                app.renderer.request_reprint();
+            }
             UiEvent::ImageCost { model, per_pixel, fixed } => {
                 app.image_costs.set(&model, flashagent_tui::image_cost::ImageCost { per_pixel, fixed });
                 app.image_costs.save();
@@ -1490,9 +1350,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 app.renderer.request_reprint();
             }
             UiEvent::ToolTestResult(verdict) => {
-                match app.settings_view.as_mut() {
+                match app.settings_view_mut() {
                     Some(s) => s.tool_test_status = Some(verdict),
-                    None => notice!(&format!("Tool test: {verdict}")),
+                    None => app.notice(format!("Tool test: {verdict}")),
                 }
                 app.renderer.request_reprint();
             }
@@ -1535,20 +1395,8 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                             }
                         }
 
-                        let ctx_tag = app.current_context.as_deref().unwrap_or("");
-                        refresh_welcome_card_if_before_user_msg(
-                            &mut app.chat,
-                            &mut app.renderer,
-                            &app.current_model,
-                            &cwd_display,
-                            perm.state().mode().label(),
-                            memory_docs,
-                            &source,
-                            &app.current_effort,
-                            app.current_context.as_deref(),
-                            app.config.show_mascot,
-                            mascot_mood,
-                        );
+                        app.refresh_welcome(&source, perm.state().mode(), mascot_mood);
+                        let ctx_tag = app.current_context.clone().unwrap_or_default();
 
                         if model_changed {
                             let msg = format!(
@@ -1671,54 +1519,25 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 let term_resized = (cols, rows) != app.last_term_size;
                 app.last_term_size = (cols, rows);
                 if !app.chat.has_user_message() && term_resized {
-                    refresh_welcome_card_animated(
-                        &mut app.chat,
-                        &mut app.renderer,
-                        &app.current_model,
-                        &cwd_display,
-                        perm.state().mode().label(),
-                        memory_docs,
-                        &source,
-                        &app.current_effort,
-                        app.current_context.as_deref(),
-                        app.tick_n,
-                        Some(cols as usize),
-                        app.config.show_mascot,
-                        mascot_mood,
-                        None,
-                    );
+                    app.animate_welcome(&source, perm.state().mode(), mascot_mood, Some(cols as usize), None);
                 }
                 app.renderer.request_reprint();
             }
             UiEvent::Mouse(m) => {
-                let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
-                let total_chat_lines = app.chat.render_split(width as usize, ReasoningExpansion { all: app.all_expanded, last: app.last_expanded }).0.len() + 15;
-                let max_scroll = total_chat_lines.saturating_sub(height as usize);
-                if let Some(ref mut menu) = app.model_menu {
+                if let Some(menu) = app.overlay.as_mut().and_then(Overlay::select_menu_mut) {
                     match m.kind {
                         MouseEventKind::ScrollUp => menu.up(),
                         MouseEventKind::ScrollDown => menu.down(),
                         _ => {}
                     }
                     app.renderer.request_reprint();
-                } else if let Some(ref mut menu) = app.session_menu {
-                    match m.kind {
-                        MouseEventKind::ScrollUp => menu.up(),
-                        MouseEventKind::ScrollDown => menu.down(),
-                        _ => {}
-                    }
-                    app.renderer.request_reprint();
-                } else if let Some(ref mut menu) = app.effort_menu {
-                    match m.kind {
-                        MouseEventKind::ScrollUp => menu.up(),
-                        MouseEventKind::ScrollDown => menu.down(),
-                        _ => {}
-                    }
-                    app.renderer.request_reprint();
+                } else if app.overlay.is_some() {
+                    // A screen that is not a list: the wheel must not scroll
+                    // the transcript hidden behind it.
                 } else {
                     match m.kind {
                         MouseEventKind::ScrollUp => {
-                            app.renderer.scroll_up(3, max_scroll);
+                            app.renderer.scroll_up(3);
                         }
                         MouseEventKind::ScrollDown => {
                             app.renderer.scroll_down(3);
@@ -1745,11 +1564,11 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 if !sanitized.is_empty() {
                     if question_gate.pending().is_some() {
                         app.question_ui_state.write_in_text.push_str(&sanitized);
-                    } else if let Some(ref mut sm) = app.sampling_view {
+                    } else if let Some(Overlay::Sampling(sm)) = app.overlay.as_mut() {
                         for ch in sanitized.chars() {
                             sm.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);
                         }
-                    } else if app.effort_menu.is_none() && app.model_menu.is_none() && app.rewind_confirm.is_none() && app.session_menu.is_none() && app.settings_view.is_none() && app.context_modal.is_none() && app.mcp_modal.is_none() {
+                    } else if app.overlay.is_none() {
                         app.input.push_str(&sanitized);
                         app.history_index = None;
                         app.autocomplete_idx = 0;
@@ -2384,40 +2203,34 @@ mod tests {
     }
 
     #[test]
-    fn switching_channel_says_what_it_will_do() {
+    fn switching_channel_says_update_or_downgrade_by_version() {
         use flashagent_core::config::UpdateChannel;
+        let version = |v: &str| ChannelTarget::Version(v.into());
 
-        // Going back to stable is a downgrade, and the user is told so in
-        // those words before anything is replaced.
-        let down = channel_switch_warning(
-            UpdateChannel::Stable,
-            "b238",
-            &ChannelTarget::Version("v1.0.0".into()),
-        );
-        assert!(down.contains("from b238 down to v1.0.0"), "{down}");
+        // A stable release newer than the beta running is an update...
+        let up = channel_switch_warning(UpdateChannel::Stable, "b287", &version("v1.0.0"));
+        assert!(up.starts_with("Update: b287 → v1.0.0"), "{up}");
+        // ...and one cut from an older build is a downgrade.
+        let down = channel_switch_warning(UpdateChannel::Stable, "b300", &version("v1.0.0+b290"));
+        assert!(down.starts_with("Downgrade: b300 → v1.0.0+b290"), "{down}");
         assert!(down.contains("disappear"), "{down}");
-        assert!(down.ends_with("Continue?"), "{down}");
+        // The same rule the other way: a newer beta is an update, with the
+        // beta caveat; an older one a downgrade.
+        let beta_up = channel_switch_warning(UpdateChannel::Beta, "v1.0.0+b290", &version("b300"));
+        assert!(beta_up.starts_with("Update:") && beta_up.contains("regress"), "{beta_up}");
+        let beta_down = channel_switch_warning(UpdateChannel::Beta, "v1.0.0", &version("b300"));
+        assert!(beta_down.starts_with("Downgrade:"), "{beta_down}");
+        assert!(down.ends_with("Continue?") && up.ends_with("Continue?"));
 
-        let up = channel_switch_warning(
-            UpdateChannel::Beta,
-            "v1.0.0",
-            &ChannelTarget::Version("b238".into()),
-        );
-        assert!(up.contains("from v1.0.0 to b238"), "{up}");
-        assert!(up.contains("regress"), "{up}");
-
-        // The feed has not answered yet, or could not be reached: name the
-        // channel rather than invent a version.
+        // Not known yet: no guess either way.
         for unknown in [ChannelTarget::Checking, ChannelTarget::Unknown] {
             let text = channel_switch_warning(UpdateChannel::Stable, "b238", &unknown);
             assert!(text.contains("the newest stable release"), "{text}");
+            assert!(!text.starts_with("Update") && !text.starts_with("Downgrade"), "{text}");
         }
 
-        // Nothing published there yet — the honest answer is that you would
-        // stay where you are.
         let empty = channel_switch_warning(UpdateChannel::Stable, "b238", &ChannelTarget::Empty);
-        assert!(empty.contains("Nothing is published"), "{empty}");
-        assert!(empty.contains("stay on b238"), "{empty}");
+        assert!(empty.contains("Nothing is published") && empty.contains("stay on b238"), "{empty}");
     }
 
     #[test]

@@ -10,6 +10,7 @@ use flashagent_core::{ApprovalGate, ApprovalRequest, Decision, DoneReason, LoopE
 use parking_lot::Mutex;
 use unicode_width::UnicodeWidthChar;
 
+pub mod anim;
 pub mod autocomplete;
 pub mod backend_error;
 pub mod clipboard;
@@ -72,6 +73,8 @@ pub enum UiEvent {
     ToolTestResult(String),
     /// What a picture costs this model, measured against the server.
     ImageCost { model: String, per_pixel: f32, fixed: f32 },
+    /// The /memory summary the model wrote, or why it could not.
+    MemorySummary(Result<memory_view::MemorySummary, String>),
     BackgroundRecap {
         turn_id: u64,
         recap: String,
@@ -1331,7 +1334,14 @@ impl ChatView {
             if !is_expanded {
                 let chevron = "\x1b[38;2;120;125;140m›\x1b[0m";
                 let text_styled = if is_streaming {
-                    format!("  \x1b[1;38;2;194;231;255mThinking:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m {chevron}")
+                    // A sweep of light across the words, and a spinner in
+                    // the margin: still working, without a word saying so.
+                    let t = anim::now_ms();
+                    format!(
+                        " \x1b[38;2;138;180;248m{}\x1b[0m \x1b[1m{}\x1b[0m {chevron}",
+                        anim::spinner(t),
+                        anim::shimmer(&format!("Thinking: {stage}"), t, 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255)),
+                    )
                 } else if let Some(s) = secs {
                     format!("  \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m \x1b[38;2;140;145;160m({s}s)\x1b[0m {chevron}")
                 } else {
@@ -1353,9 +1363,16 @@ impl ChatView {
                     _ => String::new(),
                 };
                 let title_vis = format!("{verb}: {stage}{elapsed}");
-                let title_styled = format!(
-                    "\x1b[1;38;2;194;231;255m{verb}:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m\x1b[38;2;140;145;160m{elapsed}\x1b[0m"
-                );
+                let title_styled = if is_streaming {
+                    format!(
+                        "\x1b[1m{}\x1b[0m",
+                        anim::shimmer(&format!("{verb}: {stage}"), anim::now_ms(), 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255))
+                    )
+                } else {
+                    format!(
+                        "\x1b[1;38;2;194;231;255m{verb}:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m\x1b[38;2;140;145;160m{elapsed}\x1b[0m"
+                    )
+                };
                 let box_w = width.saturating_sub(4).clamp(30, 84);
                 let border_color = "\x1b[38;2;75;99;130m";
                 let reset = "\x1b[0m";
@@ -1498,6 +1515,14 @@ impl ChatView {
                     for chunk in render_markdown_text(&line.text, width) {
                         target.push((LineKind::Assistant, chunk));
                     }
+                    // A blinking caret where the next words will land.
+                    if self.streaming == Some(i) {
+                        if let Some((_, last)) = target.last_mut().filter(|(k, _)| *k == LineKind::Assistant) {
+                            if visible_width(last) < width && anim::blink_on(anim::now_ms()) {
+                                last.push_str("\x1b[38;2;225;175;95m▍\x1b[0m");
+                            }
+                        }
+                    }
                     continue;
                 }
             }
@@ -1527,6 +1552,20 @@ impl ChatView {
                         }
                         continue;
                     }
+                }
+                if self.open_tool == Some(i) && line.kind == LineKind::Tool {
+                    // The call in flight: a spinner in the margin and a sweep
+                    // across its words.
+                    let t = anim::now_ms();
+                    let words = strip_ansi(&line.text);
+                    let words = words.trim_start().trim_end_matches('›').trim_end();
+                    let row = format!(
+                        " \x1b[38;2;135;185;205m{}\x1b[0m {}",
+                        anim::spinner(t),
+                        anim::shimmer(words, t, 1800, anim::Rgb(150, 160, 175), anim::Rgb(240, 245, 255)),
+                    );
+                    target.push((line.kind, clip_ansi(&row, width)));
+                    continue;
                 }
                 target.push((line.kind, line.text.clone()));
                 continue;
@@ -1575,7 +1614,7 @@ use crossterm::style::Stylize;
 pub type RenderLine = (LineKind, String);
 
 /// Spinner frames — braille dots.
-pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub const SPINNER: &[&str] = anim::SPINNER;
 
 /// Prompt chevron icon for user inputs (clean geometric glyph, no emojis).
 pub const GLYPH_PROMPT: &str = "❯";

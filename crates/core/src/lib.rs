@@ -12,6 +12,7 @@ pub mod loop_;
 pub mod memory;
 pub mod memory_store;
 pub mod permissions;
+pub mod personality;
 pub mod prompt;
 pub mod snapshots;
 pub mod subagents;
@@ -33,6 +34,7 @@ pub use permissions::{
     ApprovalRequest, Category, Decision, DenyAllGate, PermissionMode, PermissionState, PermissionedTools, RuleSet,
     Verdict,
 };
+pub use personality::{BaseStyle, Level as TraitLevel, Personality, Trait as PersonalityTrait};
 pub use prompt::{build_system_prompt, SystemPromptConfig};
 pub use snapshots::{FilePreview, RewindReport, Rewindable, SnapshotStore};
 pub use subagents::{

@@ -65,6 +65,8 @@ struct SideRequests {
     per_word: Mutex<Option<Duration>>,
     /// Slow side answers the app hung up on before they finished.
     dropped: std::sync::atomic::AtomicUsize,
+    /// Answer to side requests whose system prompt contains the key.
+    answers: Mutex<Vec<(String, String)>>,
 }
 
 impl MockServer {
@@ -102,6 +104,12 @@ impl MockServer {
 
     /// Answer side requests (the recap after a turn) slowly, a word every
     /// `per_word`, so a scenario can act while one is still being written.
+    /// Answer side requests whose system prompt mentions `key` with `text`
+    /// instead of "ok".
+    pub fn answer_side_requests(&self, key: &str, text: &str) {
+        self.side.answers.lock().unwrap().push((key.to_string(), text.to_string()));
+    }
+
     pub fn slow_side_requests(&self, per_word: Duration) {
         *self.side.per_word.lock().unwrap() = Some(per_word);
     }
@@ -227,7 +235,9 @@ fn serve(
     let reply = if request.is_turn() {
         replies.lock().unwrap().pop_front().unwrap_or_else(|| Reply::Text("(the script has no more replies)".into()))
     } else {
-        Reply::Text("ok".into())
+        let system = request.body["messages"][0]["content"].as_str().unwrap_or_default().to_string();
+        let answer = side.answers.lock().unwrap().iter().find(|(key, _)| system.contains(key.as_str())).map(|(_, t)| t.clone());
+        Reply::Text(answer.unwrap_or_else(|| "ok".into()))
     };
 
     if request.body["stream"] != serde_json::Value::Bool(true) {

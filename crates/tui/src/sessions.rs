@@ -181,7 +181,7 @@ impl App {
             self.custom_placeholder = Some("No other saved session in this folder".to_string());
             self.suggested_prompt = None;
         } else {
-            self.session_menu = Some(SelectMenu::new("Resume a Session", items).with_noun("sessions"));
+            self.open_overlay(Overlay::Sessions(SelectMenu::new("Resume a Session", items).with_noun("sessions")));
         }
         self.renderer.request_reprint();
     }

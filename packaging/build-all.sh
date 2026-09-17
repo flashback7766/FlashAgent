@@ -8,7 +8,8 @@ if [ -z "${VERSION}" ] || [ "${VERSION}" = "beta" ] || [ "${VERSION}" = "release
     VERSION="$(git -C "${ROOT_DIR}" describe --tags --match 'b[0-9]*' --exact-match 2>/dev/null || git -C "${ROOT_DIR}" describe --tags --match 'b[0-9]*' 2>/dev/null || git -C "${ROOT_DIR}" describe --tags --match 'v*' 2>/dev/null || echo "b286")"
 fi
 RAW_VER="${VERSION#v}"
-ARCH_VER="${RAW_VER//-/_}"
+# Arch pkgver allows neither '-' nor '+' (v1.0.0+b290 → 1.0.0_b290).
+ARCH_VER="${RAW_VER//[-+]/_}"
 export FLASHAGENT_VERSION="${VERSION}"
 
 echo "=== Building FlashAgent Release Packages (${VERSION}) ==="

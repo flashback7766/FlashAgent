@@ -157,12 +157,16 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           # Beta builds (bNNN) publish to the rolling `beta` pre-release,
           # stable versions (vX.Y.Z) to the rolling `stable` release.
+          # See VERSIONING.md: betas are bN, stables vX.Y.Z+bN.
           if [[ "${VERSION}" =~ ^b[0-9]+$ ]]; then
             echo "tag=beta" >> "$GITHUB_OUTPUT"
             echo "flags=--prerelease --latest=false" >> "$GITHUB_OUTPUT"
-          else
+          elif [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\+b[0-9]+$ ]]; then
             echo "tag=stable" >> "$GITHUB_OUTPUT"
             echo "flags=--latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::'${VERSION}' is not a release version: use bN or vX.Y.Z+bN (packaging/bump.sh makes both)"
+            exit 1
           fi
 
       - name: Prepare release notes

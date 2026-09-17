@@ -12,8 +12,41 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 #   ./packaging/bump.sh big small-feature mini  # sums to +14 (capped at +15)
 #   ./packaging/bump.sh <number>         # explicit custom increment (capped at +15)
 
+# Stable release: ./packaging/bump.sh stable 1.0.0
+# Tags vX.Y.Z+bN, where bN is the newest beta build: the stable release is
+# that build, released, so the updater can tell whether a later beta is newer.
+if [ "${1:-}" = "stable" ]; then
+    SEMVER="${2:-}"
+    if ! [[ "${SEMVER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Usage: $0 stable <MAJOR.MINOR.PATCH>   e.g. $0 stable 1.0.0" >&2
+        exit 1
+    fi
+    BUILD_TAG="$(git -C "${ROOT_DIR}" describe --tags --match 'b[0-9]*' --abbrev=0 2>/dev/null || true)"
+    if ! [[ "${BUILD_TAG}" =~ ^b[0-9]+$ ]]; then
+        echo "No beta build tag (bN) found to cut the stable release from." >&2
+        exit 1
+    fi
+    if git -C "${ROOT_DIR}" tag --list "v${SEMVER}+b*" | grep -q .; then
+        echo "v${SEMVER} is already released: $(git -C "${ROOT_DIR}" tag --list "v${SEMVER}+b*")" >&2
+        exit 1
+    fi
+    NEW_TAG="v${SEMVER}+${BUILD_TAG}"
+    echo "=========================================="
+    echo " FlashAgent Stable Release"
+    echo " Cut from build : ${BUILD_TAG}"
+    echo " New release   : ${NEW_TAG}"
+    echo "=========================================="
+    if [ -f "${ROOT_DIR}/README.md" ]; then
+        sed -i "s/> \*\*Status:\*\* .*/> **Status:** Stable v${SEMVER}/" "${ROOT_DIR}/README.md"
+    fi
+    git -C "${ROOT_DIR}" tag -a "${NEW_TAG}" -m "FlashAgent ${NEW_TAG}"
+    echo "Tag ${NEW_TAG} created. Push it to publish: git push origin '${NEW_TAG}'"
+    exit 0
+fi
+
 if [ "$#" -eq 0 ]; then
-    echo "Usage: $0 <mini|small-feature|medium|big|major|N> ..."
+    echo "Usage: $0 <mini|small-feature|medium|big|major|N> ...   (beta build)"
+    echo "       $0 stable <MAJOR.MINOR.PATCH>                    (stable release)"
     echo "  mini          : +1 (typo, padding, small formatting error)"
     echo "  small-feature : +3 (handy shortcut, indicator, small feature)"
     echo "  medium        : +5 (medium bugfix, input, session restoration)"

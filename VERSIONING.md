@@ -1,0 +1,100 @@
+# Versioning
+
+FlashAgent has two release channels and one version format for each. All
+version logic lives in `crates/svc/src/version.rs`; the updater, the
+channel-switch card and the what's-new screen use it and nothing else.
+
+## Formats
+
+| Channel | Format | Example | Meaning |
+|---|---|---|---|
+| Beta | `b<N>` | `b287` | Build counter. Only ever grows. |
+| Stable | `v<MAJOR>.<MINOR>.<PATCH>+b<N>` | `v1.0.0+b290` | A SemVer release, cut from beta build `N`. |
+
+- The `+b<N>` part is SemVer build metadata. It records which beta build the
+  stable release is. It never changes how two stable releases compare.
+- When reading a version, the leading `v` is optional, `v1.2` means `v1.2.0`,
+  and a stable version without `+b<N>` is accepted (see rule 3 below).
+- Rolling release names (`beta`, `stable`, `release`, `latest`) are not
+  versions. The real version of a rolling release is read from its title
+  ("FlashAgent b287"), then its tag, asset names and notes.
+
+## Ordering
+
+One rule, used everywhere:
+
+1. Two betas compare by `N`: `b238 < b287`.
+2. Two stables compare by `MAJOR.MINOR.PATCH`: `v1.2.9 < v1.2.10`.
+3. A beta and a stable compare by build number. On a tie the stable is
+   newer, because it is that build, released: `b290 < v1.0.0+b290 < b291`.
+4. A stable without `+b<N>` is newer than every beta. This only exists so
+   that a hand-made `v1.0.0` still reads as an upgrade.
+
+## What the app says
+
+**Background updates** install the newest release on the chosen channel, and
+only when it is newer than the running one. A background update never goes
+backwards.
+
+- **Stable channel**: stable releases only.
+- **Beta channel**: betas *and* stable releases. The newest wins, so a beta
+  user also moves to a stable release built after their beta.
+
+**Switching channel** (Settings → Updates, or `/channel`) asks first. The card
+compares the running version with the newest release on the target channel,
+using the ordering above, and says which it is:
+
+- **Update: b287 → v1.0.0+b290**: the target is newer. You get everything
+  added since.
+- **Downgrade: b300 → v1.0.0+b290**: the target is older. Features added since
+  may disappear, and settings they introduced can be reset.
+
+The same wording is used in both directions. Beta → stable can be an update,
+and stable → beta can be a downgrade. It depends only on the versions.
+
+**What's new**: after an update, the app shows every `CHANGELOG.md` section
+newer than the last version the user saw, up to the running one.
+
+## Making a release
+
+Beta build (the usual case):
+
+```bash
+./packaging/bump.sh small-feature    # b287 → b290; also: mini +1, medium +5, big +10, major +15
+git push origin b290
+```
+
+Stable release, cut from the newest beta build:
+
+```bash
+./packaging/bump.sh stable 1.0.0     # tags v1.0.0+b290
+git push origin 'v1.0.0+b290'
+```
+
+Pushing the tag runs `.github/workflows/release.yml`. It embeds the tag in
+the binary (`FLASHAGENT_VERSION`), publishes the assets to the rolling
+`beta` or `stable` release, and rejects any tag that is neither `bN` nor
+`vX.Y.Z+bN`.
+
+Before tagging, add a `CHANGELOG.md` section headed with the exact version:
+
+```markdown
+## b290 — short title
+## v1.0.0+b290 — short title
+```
+
+### Choosing MAJOR.MINOR.PATCH for a stable release
+
+- **PATCH**: bug fixes only.
+- **MINOR**: new features. Existing configs, sessions and commands still work.
+- **MAJOR**: something users rely on stops working as before, for example a
+  config field is removed or a command or keybinding changes meaning.
+
+Beta build numbers stay the same across stable releases: the next beta after
+`v1.0.0+b290` is `b291` or higher.
+
+## Local builds
+
+A build without `FLASHAGENT_VERSION` reports the workspace version from
+`Cargo.toml` (`0.1.0`). Builds from the source tree or `target/` never
+self-update (see `is_dev_mode` in `crates/svc/src/updater.rs`).

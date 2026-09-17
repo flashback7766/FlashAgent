@@ -982,18 +982,22 @@ impl SetupWizard {
 
 /// Run interactive setup wizard in alternate screen using an active event channel.
 /// Eliminates stdin contention with the main event reader thread during in-app execution.
+///
+/// Everything on `rx` that is not for the wizard — a running turn's events,
+/// server discovery, a recap — goes into `deferred`, in order, for the app to
+/// handle once the wizard closes; dropping them left a turn that finished
+/// meanwhile running forever.
 pub async fn run_wizard_channel(
     config: &mut AppConfig,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::UiEvent>,
+    deferred: &mut Vec<crate::UiEvent>,
 ) -> anyhow::Result<bool> {
-    use crossterm::{
-        cursor,
-        execute,
-        terminal::{EnterAlternateScreen, LeaveAlternateScreen},
-    };
+    use crossterm::{cursor, execute};
 
+    // The app is already on the alternate screen; entering it again and then
+    // leaving would drop the app onto the main screen and into scrollback.
     let mut stdout = std::io::stdout();
-    let _ = execute!(stdout, EnterAlternateScreen, cursor::Hide);
+    let _ = execute!(stdout, cursor::Hide);
 
     let mut wizard = SetupWizard::new(config.clone());
 
@@ -1038,8 +1042,8 @@ pub async fn run_wizard_channel(
                     crate::UiEvent::Paste(text) => {
                         wizard.handle_paste(&text);
                     }
-                    crate::UiEvent::Resize(_, _) => {}
-                    _ => {}
+                    crate::UiEvent::Resize(_, _) | crate::UiEvent::Mouse(_) => {}
+                    other => deferred.push(other),
                 }
             }
         }
@@ -1049,7 +1053,8 @@ pub async fn run_wizard_channel(
         *config = wizard.config;
     }
 
-    let _ = execute!(stdout, cursor::Show, LeaveAlternateScreen);
+    let _ = stdout.write_all(b"\x1b[H\x1b[2J");
+    let _ = execute!(stdout, cursor::Show);
     // Raw mode is intentionally preserved since run_app remains active
     Ok(completed)
 }

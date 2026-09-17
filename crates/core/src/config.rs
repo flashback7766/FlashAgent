@@ -261,6 +261,19 @@ pub struct AppConfig {
     /// Whether clipboard and notification toasts are shown.
     #[serde(default = "default_true")]
     pub show_toasts: bool,
+    /// `--url` for this run only: the URL given on the command line and the
+    /// one the config file had. Saving writes the file's URL back unless the
+    /// user has since picked another in Settings, so a one-off launch against
+    /// another server does not move every later launch there.
+    /// How replies sound: base style and characteristics (Settings → Style).
+    #[serde(default)]
+    pub personality: crate::personality::Personality,
+    #[serde(skip)]
+    pub url_override: Option<(String, String)>,
+    /// Whether the interface moves: sweeps, pulses, panels unfolding. Off
+    /// keeps spinners but nothing decorative.
+    #[serde(default = "default_true")]
+    pub animations: bool,
     /// Whether reasoning/thinking accordion box is shown.
     #[serde(default = "default_true")]
     pub show_reasoning_accordion: bool,
@@ -429,6 +442,9 @@ impl Default for AppConfig {
             show_ttft: true,
             show_tokens: true,
             show_toasts: true,
+            animations: true,
+            url_override: None,
+            personality: Default::default(),
             show_reasoning_accordion: true,
             color_theme: "dark".to_string(),
             approval_mode: "destructive".to_string(),
@@ -568,15 +584,10 @@ impl AppConfig {
 
     /// Save configuration to disk.
     pub fn save(&self) -> Result<(), std::io::Error> {
-        if let Some(path) = Self::default_path() {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let json = serde_json::to_string_pretty(self)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            std::fs::write(&path, json)?;
+        match Self::default_path() {
+            Some(path) => self.save_to(&path),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// Save to explicit file path (useful for testing).
@@ -584,8 +595,15 @@ impl AppConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let json = match &self.url_override {
+            Some((cli, on_disk)) if *cli == self.backend_url => {
+                let mut stored = self.clone();
+                stored.backend_url = on_disk.clone();
+                serde_json::to_string_pretty(&stored)
+            }
+            _ => serde_json::to_string_pretty(self),
+        }
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(path, json)?;
         Ok(())
     }
@@ -601,6 +619,21 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_url_given_for_one_run_is_not_saved_but_one_chosen_later_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = AppConfig { backend_url: "http://on-disk/v1".into(), ..Default::default() };
+        cfg.url_override = Some(("http://cli/v1".into(), cfg.backend_url.clone()));
+        cfg.backend_url = "http://cli/v1".into();
+        cfg.save_to(&path).unwrap();
+        assert_eq!(AppConfig::load_from(&path).unwrap().backend_url, "http://on-disk/v1");
+
+        cfg.backend_url = "http://picked-in-settings/v1".into();
+        cfg.save_to(&path).unwrap();
+        assert_eq!(AppConfig::load_from(&path).unwrap().backend_url, "http://picked-in-settings/v1");
+    }
+
     #[test]
     fn stored_values_are_read_whatever_their_case() {
         // A config is edited by hand; "Beta" must not mean something else
