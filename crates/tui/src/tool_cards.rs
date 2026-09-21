@@ -24,19 +24,28 @@ fn chevron() -> String {
     format!("{FAINT}›{OFF}")
 }
 
-/// A tool line: a verb, optionally what it acted on, and the chevron.
+/// The mark in the margin that says this line is a tool call and not
+/// something the model said. While the call runs a spinner takes its place.
+pub(crate) const TOOL_MARK: &str = "▸";
+
+/// A tool line: the margin mark, a verb, optionally what it acted on, and
+/// the chevron that says the card can be opened.
 fn card_line(verb: &str, subject: Option<&str>) -> String {
     match subject {
-        Some(subject) => format!("  {MUTED}{verb}{OFF} {STRONG}{subject}{OFF} {}", chevron()),
-        None => format!("  {MUTED}{verb}{OFF} {}", chevron()),
+        Some(subject) => {
+            format!("  {FAINT}{TOOL_MARK}{OFF} {MUTED}{verb}{OFF} {STRONG}{subject}{OFF} {}", chevron())
+        }
+        None => format!("  {FAINT}{TOOL_MARK}{OFF} {MUTED}{verb}{OFF} {}", chevron()),
     }
 }
 
 /// The same line, in the colour of something that did not work.
 fn failed_line(verb: &str, subject: Option<&str>) -> String {
     match subject {
-        Some(subject) => format!("  {FAILED}{verb}{OFF} {STRONG}{subject}{OFF} {}", chevron()),
-        None => format!("  {FAILED}{verb}{OFF} {}", chevron()),
+        Some(subject) => {
+            format!("  {FAILED}{TOOL_MARK}{OFF} {FAILED}{verb}{OFF} {STRONG}{subject}{OFF} {}", chevron())
+        }
+        None => format!("  {FAILED}{TOOL_MARK}{OFF} {FAILED}{verb}{OFF} {}", chevron()),
     }
 }
 
@@ -245,7 +254,7 @@ impl ChatView {
             })
             .map(|f| format!(" {FAINT}·{OFF} {MUTED}{f}{OFF}"))
             .unwrap_or_default();
-        let run = format!("  {MUTED}{header}{OFF}{facts} {}", chevron());
+        let run = format!("  {FAINT}{TOOL_MARK}{OFF} {MUTED}{header}{OFF}{facts} {}", chevron());
         let labels = Labels {
             done: run.clone(),
             fail: failed_line(&format!("Failed to {}", lower_first(header)), None),
@@ -382,7 +391,7 @@ impl ChatView {
             }
         };
 
-        let text = format!("  {MUTED}Editing{OFF} \x1b[1;38;2;225;230;240m{basename}{OFF} {}", chevron());
+        let text = format!("  {FAINT}{TOOL_MARK}{OFF} {MUTED}Editing{OFF} \x1b[1;38;2;225;230;240m{basename}{OFF} {}", chevron());
         let mut line = ChatLine::with_details(LineKind::Tool, text, args_json.to_string());
         line.tool_name = Some(name.to_string());
         line.tool_group = Some(ToolGroupKind::Edit { path, added, deleted, is_running: true });
@@ -497,7 +506,7 @@ fn finished_text(group: &mut ToolGroupKind, is_error: bool) -> String {
             let basename =
                 std::path::Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path);
             format!(
-                "  {MUTED}Edited{OFF} \x1b[1;38;2;225;230;240m{basename}{OFF} \x1b[38;2;145;205;140m+{added}{OFF} {FAILED}-{deleted}{OFF}"
+                "  {FAINT}{TOOL_MARK}{OFF} {MUTED}Edited{OFF} \x1b[1;38;2;225;230;240m{basename}{OFF} \x1b[38;2;145;205;140m+{added}{OFF} {FAILED}-{deleted}{OFF}"
             )
         }
         ToolGroupKind::Subagent { count, last_task, is_running } => {
@@ -548,37 +557,37 @@ mod tests {
     #[test]
     fn a_tool_line_names_the_tool_and_what_it_acts_on() {
         let chat = started("web_search", r#"{"query":"rust ownership"}"#);
-        assert_eq!(text_of(&chat), "  Searching web: \"rust ownership\" ›");
+        assert_eq!(text_of(&chat), "  ▸ Searching web: \"rust ownership\" ›");
         let chat = started("outline_file", r#"{"path":"src/main.rs"}"#);
-        assert_eq!(text_of(&chat), "  Outlining src/main.rs ›");
+        assert_eq!(text_of(&chat), "  ▸ Outlining src/main.rs ›");
         let chat = started("git_diff", r#"{"staged":true}"#);
-        assert_eq!(text_of(&chat), "  Checking staged git diff ›");
+        assert_eq!(text_of(&chat), "  ▸ Checking staged git diff ›");
     }
 
     #[test]
     fn a_tool_nobody_wrote_a_card_for_still_gets_a_readable_line() {
         // An MCP server's tools arrive with names this build has never seen.
         let chat = started("mcp__sqlite__query", r#"{"query":"select 1"}"#);
-        assert_eq!(text_of(&chat), "  Running mcp__sqlite__query [select 1] ›");
+        assert_eq!(text_of(&chat), "  ▸ Running mcp__sqlite__query [select 1] ›");
         let chat = started("mcp__clock__now", "{}");
-        assert_eq!(text_of(&chat), "  Running mcp__clock__now ›");
+        assert_eq!(text_of(&chat), "  ▸ Running mcp__clock__now ›");
     }
 
     #[test]
     fn what_the_model_said_the_call_is_for_wins_over_the_tool_name() {
         let chat = started("edit_file", r#"{"header":"Add the missing null check","path":"src/parse.rs","edits":[]}"#);
-        assert!(text_of(&chat).starts_with("  Add the missing null check"), "{}", text_of(&chat));
+        assert!(text_of(&chat).starts_with("  ▸ Add the missing null check"), "{}", text_of(&chat));
     }
 
     #[test]
     fn a_finished_call_says_what_happened_and_a_failed_one_says_it_failed() {
         let mut chat = started("web_fetch", r#"{"url":"https://example.com"}"#);
         chat.tool_finished(false, 10, Some("page"));
-        assert_eq!(text_of(&chat), "  Fetched https://example.com ›");
+        assert_eq!(text_of(&chat), "  ▸ Fetched https://example.com ›");
 
         let mut chat = started("web_fetch", r#"{"url":"https://example.com"}"#);
         chat.tool_finished(true, 0, Some("404"));
-        assert_eq!(text_of(&chat), "  Failed to fetch https://example.com ›");
+        assert_eq!(text_of(&chat), "  ▸ Failed to fetch https://example.com ›");
         assert_eq!(chat.lines.last().unwrap().kind, LineKind::ToolError);
     }
 
@@ -589,7 +598,7 @@ mod tests {
         chat.tool_started("run_shell", r#"{"command":"pwd"}"#);
         chat.tool_finished(false, 1, Some("/tmp"));
         assert_eq!(chat.lines.len(), 1, "two commands should share one line");
-        assert_eq!(text_of(&chat), "  Ran 2 commands ›");
+        assert_eq!(text_of(&chat), "  ▸ Ran 2 commands ›");
 
         let mut chat = started("read_file", r#"{"path":"a.rs"}"#);
         chat.tool_finished(false, 1, Some("..."));

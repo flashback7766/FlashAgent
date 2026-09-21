@@ -444,7 +444,10 @@ const SCREENS: &[(&str, &str)] = &[
     ("/settings", "Settings"),
     ("/memory", "remembers"),
     ("/mcp", "MCP"),
-    ("/help", "Commands"),
+    // Printed into the transcript rather than put up as a screen, so the
+    // marker is its last line: in a short terminal the first has scrolled
+    // away by then, which is what a transcript is supposed to do.
+    ("/help", "/uninstall"),
 ];
 
 fn lines_of(term: &Term) -> Vec<String> {
