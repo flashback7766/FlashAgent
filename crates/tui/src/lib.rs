@@ -188,11 +188,16 @@ impl ChatLine {
 
 #[derive(Default, Clone)]
 struct SettledRenderCache {
-    lines: Vec<RenderLine>,
+    lines: SettledLines,
     boundary: usize,
     width: usize,
     expansion: ReasoningExpansion,
 }
+
+/// The part of the transcript that no longer changes, rendered. Shared, not
+/// copied: a long session has tens of thousands of these rows, and copying
+/// them on every frame made each frame cost as much as the whole history.
+pub type SettledLines = std::sync::Arc<Vec<RenderLine>>;
 
 /// Accumulates the conversation from [`LoopEvent`]s and renders it to lines.
 #[derive(Default)]
@@ -895,10 +900,10 @@ impl ChatView {
         &self,
         width: usize,
         expansion: impl Into<ReasoningExpansion>,
-    ) -> (Vec<RenderLine>, Vec<RenderLine>) {
+    ) -> (SettledLines, Vec<RenderLine>) {
         let expansion = expansion.into();
         let boundary = self.settled_boundary();
-        let mut settled = Vec::new();
+        let mut settled: Vec<RenderLine> = Vec::new();
         let mut live = Vec::new();
         let mut previous_block: Option<Block> = None;
         let last_user_idx = self.lines.iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0);
@@ -992,11 +997,16 @@ impl ChatView {
         let mut current_turn_user_idx = 0usize;
 
         let has_cached = cached_settled_match.is_some();
-        if let Some(cached) = cached_settled_match {
-            settled = cached;
-        }
+        // With the settled rows cached, only the turn the boundary falls in
+        // is read again, for the state the live rows continue from; every
+        // turn before it ended at its next question, and that state resets.
+        let scan_from = if has_cached {
+            self.lines[..boundary.min(self.lines.len())].iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0)
+        } else {
+            0
+        };
 
-        for (i, line) in self.lines.iter().enumerate() {
+        for (i, line) in self.lines.iter().enumerate().skip(scan_from) {
             if i < boundary && has_cached {
                 if line.kind == LineKind::User {
                     current_turn_user_idx = i;
@@ -1183,19 +1193,27 @@ impl ChatView {
                 target.push((line.kind, text));
             }
         }
-        if boundary > 0 {
-            let mut cache = self.settled_cache.lock();
-            cache.lines = settled.clone();
-            cache.boundary = boundary;
-            cache.width = width;
-            cache.expansion = expansion;
-        }
+        let settled = match cached_settled_match {
+            Some(cached) => cached,
+            None => {
+                let settled = std::sync::Arc::new(settled);
+                if boundary > 0 {
+                    let mut cache = self.settled_cache.lock();
+                    cache.lines = settled.clone();
+                    cache.boundary = boundary;
+                    cache.width = width;
+                    cache.expansion = expansion;
+                }
+                settled
+            }
+        };
         (settled, live)
     }
 
     /// Render everything wrapped to `width`, with `❯`-prefix on user lines.
     pub fn render(&self, width: usize) -> Vec<(LineKind, String)> {
-        let (mut all, live) = self.render_split(width, true);
+        let (settled, live) = self.render_split(width, true);
+        let mut all = std::sync::Arc::unwrap_or_clone(settled);
         all.extend(live);
         all
     }
@@ -1339,7 +1357,7 @@ mod tests {
         });
         v.on_event(&LoopEvent::ToolFinished { id: "t2".into(), is_error: true, result_len: 0, result: None });
         let (settled, live) = v.render_split(80, false);
-        let lines: Vec<_> = settled.into_iter().chain(live).collect();
+        let lines: Vec<_> = settled.iter().cloned().chain(live).collect();
         assert!(lines.iter().any(|(k, t)| *k == LineKind::ToolError && t.contains("Failed") && t.contains("false") && (t.contains('›') || t.contains('>'))));
     }
 
@@ -1354,7 +1372,7 @@ mod tests {
         });
         v.on_event(&LoopEvent::ToolFinished { id: "c1".into(), is_error: false, result_len: 100, result: None });
         let (settled, live) = v.render_split(100, false);
-        let all: Vec<_> = settled.into_iter().chain(live).collect();
+        let all: Vec<_> = settled.iter().cloned().chain(live).collect();
         assert!(all.iter().any(|(_, t)| t.contains("Ran") && t.contains("cargo test -p flashagent-llm") && (t.contains('›') || t.contains('>'))));
 
         // 2. Multiple commands consolidation
@@ -1378,7 +1396,7 @@ mod tests {
         });
         v2.on_event(&LoopEvent::ToolFinished { id: "c3".into(), is_error: false, result_len: 10, result: None });
         let (settled2, live2) = v2.render_split(100, false);
-        let all2: Vec<_> = settled2.into_iter().chain(live2).collect();
+        let all2: Vec<_> = settled2.iter().cloned().chain(live2).collect();
         assert!(all2.iter().any(|(_, t)| t.contains("Ran 3 commands") && (t.contains('›') || t.contains('>'))));
 
         // 3. Edit file formatting with crab icon and diff stats
@@ -1390,7 +1408,7 @@ mod tests {
         });
         v3.on_event(&LoopEvent::ToolFinished { id: "e1".into(), is_error: false, result_len: 50, result: None });
         let (settled3, live3) = v3.render_split(100, false);
-        let all3: Vec<_> = settled3.into_iter().chain(live3).collect();
+        let all3: Vec<_> = settled3.iter().cloned().chain(live3).collect();
         assert!(all3.iter().any(|(_, t)| t.contains("Edited") && t.contains("lib.rs") && t.contains("+2") && t.contains("-0")));
 
         // 4. Consecutive exploration consolidation: 4 files, 1 search
@@ -1410,7 +1428,7 @@ mod tests {
         });
         v4.on_event(&LoopEvent::ToolFinished { id: "s1".into(), is_error: false, result_len: 10, result: None });
         let (settled4, live4) = v4.render_split(100, false);
-        let all4: Vec<_> = settled4.into_iter().chain(live4).collect();
+        let all4: Vec<_> = settled4.iter().cloned().chain(live4).collect();
         assert!(all4.iter().any(|(_, t)| t.contains("Explored 4 files, 1 search") && (t.contains('›') || t.contains('>'))));
 
         // 5. Memory tool formatting
@@ -1422,7 +1440,7 @@ mod tests {
         });
         v5.on_event(&LoopEvent::ToolFinished { id: "m1".into(), is_error: false, result_len: 100, result: None });
         let (settled5, live5) = v5.render_split(100, false);
-        let all5: Vec<_> = settled5.into_iter().chain(live5).collect();
+        let all5: Vec<_> = settled5.iter().cloned().chain(live5).collect();
         assert!(all5.iter().any(|(_, t)| t.contains("Read memory") && t.contains("[project]") && (t.contains('›') || t.contains('>'))));
         assert!(!all5.iter().any(|(_, t)| t.contains("{\"scope\":\"project\"}")));
 
@@ -1441,7 +1459,7 @@ mod tests {
         });
         v5b.on_event(&LoopEvent::ToolFinished { id: "m2".into(), is_error: false, result_len: 50, result: None });
         let (settled5b, live5b) = v5b.render_split(100, false);
-        let all5b: Vec<_> = settled5b.into_iter().chain(live5b).collect();
+        let all5b: Vec<_> = settled5b.iter().cloned().chain(live5b).collect();
         assert_eq!(all5b.len(), 1, "Consecutive memory_read calls must consolidate into a single line");
         assert!(all5b.iter().any(|(_, t)| t.contains("Read memory") && t.contains("[project, global]")));
 
@@ -1454,7 +1472,7 @@ mod tests {
         });
         v6.on_event(&LoopEvent::ToolFinished { id: "u1".into(), is_error: false, result_len: 5, result: None });
         let (settled6, live6) = v6.render_split(100, false);
-        let all6: Vec<_> = settled6.into_iter().chain(live6).collect();
+        let all6: Vec<_> = settled6.iter().cloned().chain(live6).collect();
         assert!(all6.iter().any(|(_, t)| t.contains("Asked user:") && t.contains("Deploy now?") && (t.contains('›') || t.contains('>'))));
     }
 
@@ -1999,7 +2017,7 @@ mod tests {
         let mut v = ChatView::default();
         v.lines.push(ChatLine::new(LineKind::Reasoning, "Analyzing the request and formulating a thorough step-by-step resolution."));
         let (settled, live) = v.render_split(80, ReasoningExpansion { all: true, last: true });
-        let all: Vec<_> = settled.into_iter().chain(live).collect();
+        let all: Vec<_> = settled.iter().cloned().chain(live).collect();
         assert!(all.len() >= 3);
         let top_line = &all[0].1;
         let bot_line = &all[all.len() - 1].1;
@@ -2480,14 +2498,14 @@ mod tests {
 
         // 1. In collapsed mode: one line summaries
         let (settled_collapsed, live_collapsed) = chat.render_split(100, false);
-        let all_collapsed: Vec<_> = settled_collapsed.into_iter().chain(live_collapsed).collect();
+        let all_collapsed: Vec<_> = settled_collapsed.iter().cloned().chain(live_collapsed).collect();
         let collapsed_text = all_collapsed.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
         assert!(collapsed_text.contains("Ran") && collapsed_text.contains("cargo check"));
         assert!(collapsed_text.contains("Explored") || collapsed_text.contains("Read"));
 
         // 2. In expanded mode: rich visual cards
         let (settled_expanded, live_expanded) = chat.render_split(100, true);
-        let all_expanded: Vec<_> = settled_expanded.into_iter().chain(live_expanded).collect();
+        let all_expanded: Vec<_> = settled_expanded.iter().cloned().chain(live_expanded).collect();
         let expanded_text = all_expanded.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
         let plain_expanded = strip_ansi(&expanded_text);
 
@@ -2518,7 +2536,7 @@ mod tests {
         chat.attach_turn_recap(1, "recap: explained first question in detail");
 
         let (settled, live) = chat.render_split(80, false);
-        let all: Vec<_> = settled.into_iter().chain(live).collect();
+        let all: Vec<_> = settled.iter().cloned().chain(live).collect();
         let full_text = all.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
 
         assert!(full_text.contains("recap: explained first question in detail"));

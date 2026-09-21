@@ -76,7 +76,7 @@ fn transcript() -> ChatView {
 
 fn drawn(chat: &ChatView, width: usize) -> Vec<(LineKind, String)> {
     let (settled, live) = chat.render_split(width, ReasoningExpansion::none());
-    settled.into_iter().chain(live).map(|(k, t)| (k, strip_ansi(&t))).collect()
+    settled.iter().cloned().chain(live).map(|(k, t)| (k, strip_ansi(&t))).collect()
 }
 
 #[test]
@@ -146,4 +146,33 @@ fn show_chat() {
         };
         println!("{mark}|{text}");
     }
+}
+
+#[test]
+fn a_transcript_drawn_frame_by_frame_matches_one_drawn_at_once() {
+    // Frames reuse what has settled and read only the turn still open. That
+    // must never change what is drawn: build the same conversation twice,
+    // draw one of them after every event and the other only at the end.
+    fn build(draw_each_step: bool) -> Vec<(LineKind, String)> {
+        let mut chat = ChatView::default();
+        let draw = |chat: &ChatView| {
+            if draw_each_step {
+                let _ = chat.render_split(100, ReasoningExpansion::none());
+            }
+        };
+        for n in 0..5 {
+            chat.push_user(&format!("question {n}"));
+            draw(&chat);
+            chat.on_event(&LoopEvent::ReasoningDelta(format!("thinking about {n}")));
+            draw(&chat);
+            tool(&mut chat, "grep", serde_json::json!({ "header": "Searching", "pattern": "x" }), "found");
+            draw(&chat);
+            chat.on_event(&LoopEvent::TurnDelta(format!("answer {n}\n\n- a point\n")));
+            draw(&chat);
+            chat.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
+            draw(&chat);
+        }
+        drawn(&chat, 100)
+    }
+    assert_eq!(build(true), build(false));
 }
