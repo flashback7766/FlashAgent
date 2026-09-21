@@ -71,6 +71,7 @@ impl App {
             cx.tx.clone(),
             steer_rx,
             self.turn_counter,
+            self.config.personality.voice_prelude(),
         ));
     }
 
