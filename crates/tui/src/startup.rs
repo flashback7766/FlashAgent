@@ -213,19 +213,10 @@ impl TrustScreen {
     }
 }
 
-/// Helper to expand `~` and parse paths.
+/// Helper to expand `~` and parse paths. What a `~` means is decided in one
+/// place for the whole app, so the folder picker and the tools agree.
 pub fn resolve_path(input: &str) -> PathBuf {
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"));
-    if input == "~" {
-        if let Ok(h) = home {
-            return PathBuf::from(h);
-        }
-    } else if let Some(rest) = input.strip_prefix("~/") {
-        if let Ok(h) = home {
-            return PathBuf::from(h).join(rest);
-        }
-    }
-    PathBuf::from(input)
+    PathBuf::from(flashagent_core::expand_home(input).as_ref())
 }
 
 /// Helper to wrap text without breaking words.

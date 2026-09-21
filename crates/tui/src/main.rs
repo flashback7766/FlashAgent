@@ -357,7 +357,9 @@ async fn main() -> Result<()> {
     state.set_read_only_hint(Arc::new(move |tool: &str| hint_mgr.is_tool_read_only(tool)));
     let tools_arc: Arc<BuiltinTools> = Arc::new(BuiltinTools::new(BuiltinToolsConfig {
         cwd: cwd.clone(),
-        brave_api_key: None,
+        // Search goes through DuckDuckGo unless the environment names a
+        // Brave key; nothing has to be configured for it to work.
+        brave_api_key: std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.trim().is_empty()),
         question_gate: Some(question_gate.clone()),
         is_goal_mode: None,
         toolset_profile: Some(config.toolset_profile),

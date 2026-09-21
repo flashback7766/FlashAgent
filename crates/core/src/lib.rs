@@ -11,6 +11,7 @@ pub mod effort_memory;
 pub mod loop_;
 pub mod memory;
 pub mod memory_store;
+pub mod paths;
 pub mod permissions;
 pub mod personality;
 pub mod prompt;
@@ -29,6 +30,7 @@ pub use effort_memory::{EffortMemory, ModelBias, TurnOutcome};
 pub use loop_::{AgentLoop, DoneReason, LoopConfig, LoopError, LoopEvent, LlmSource, ToolExec, ToolOutput, WritePreview};
 pub use memory_store::{Entry as MemoryEntry, Kind as MemoryEntryKind, Scope as MemoryScope, Store as MemoryStore};
 pub use memory::{collect, injection_block, outline, MemoryDoc, MemoryKind, GLOBAL_FILENAME, PROJECT_FILENAMES};
+pub use paths::{expand_home, resolve_path};
 pub use permissions::{
     is_local_host, is_local_ip, is_read_only_shell, parse_chain, path_is_inside, url_host, ApprovalGate,
     ApprovalRequest, Category, Decision, DenyAllGate, PermissionMode, PermissionState, PermissionedTools, RuleSet,

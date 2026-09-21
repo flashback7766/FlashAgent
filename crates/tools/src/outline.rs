@@ -8,7 +8,7 @@ use crate::ToolError;
 
 /// Outlines structural symbols from the target file with 1-based line numbers.
 pub fn outline_file(cwd: &Path, rel_path: &str) -> Result<String, ToolError> {
-    let full = cwd.join(rel_path);
+    let full = flashagent_core::resolve_path(cwd, rel_path);
     if !full.exists() {
         return Err(ToolError::Other(format!("file not found: {rel_path}")));
     }

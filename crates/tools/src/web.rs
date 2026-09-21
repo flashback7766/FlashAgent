@@ -60,13 +60,7 @@ pub(crate) fn html_to_text(html: &str) -> String {
             i = next;
         }
     }
-    let out = out
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'");
+    let out = decode_entities(&out);
     let mut collapsed = String::with_capacity(out.len());
     let mut prev_ws = false;
     for ch in out.chars() {
@@ -77,6 +71,66 @@ pub(crate) fn html_to_text(html: &str) -> String {
         prev_ws = ws;
     }
     collapsed.trim().to_string()
+}
+
+/// Turn HTML entities into the characters they stand for: the named ones
+/// that appear in running text, and any numbered one (`&#39;`, `&#x27;`),
+/// which pages use for apostrophes and dashes in titles.
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+        let Some(semi) = rest[..rest.len().min(12)].find(';') else {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        };
+        let entity = &rest[1..semi];
+        let decoded = match entity {
+            "nbsp" => Some(' '),
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "mdash" => Some('—'),
+            "ndash" => Some('–'),
+            "hellip" => Some('…'),
+            "lsquo" => Some('‘'),
+            "rsquo" => Some('’'),
+            "ldquo" => Some('“'),
+            "rdquo" => Some('”'),
+            "middot" => Some('·'),
+            "bull" => Some('•'),
+            "laquo" => Some('«'),
+            "raquo" => Some('»'),
+            "copy" => Some('©'),
+            "reg" => Some('®'),
+            "trade" => Some('™'),
+            "deg" => Some('°'),
+            "times" => Some('×'),
+            "euro" => Some('€'),
+            "pound" => Some('£'),
+            _ => entity.strip_prefix('#').and_then(|number| match number.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                None => number.parse().ok(),
+            }).and_then(char::from_u32),
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &rest[semi + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Most redirects one fetch follows.
@@ -210,77 +264,130 @@ pub struct SearchResult {
     pub snippet: String,
 }
 
-/// Parse HTML from DuckDuckGo search.
+/// The class names DuckDuckGo marks a result with. The full page
+/// (`html.duckduckgo.com`) and the small one (`lite.duckduckgo.com`) wrap
+/// their results in different elements, quote their attributes differently
+/// and shuffle the surrounding markup from time to time; the class on the
+/// link and the class on the snippet are what both have kept.
+const LINK_CLASSES: [&str; 2] = ["result__a", "result-link"];
+const SNIPPET_CLASSES: [&str; 2] = ["result__snippet", "result-snippet"];
+
+/// Read the results out of a DuckDuckGo results page.
+///
+/// Anchored on the two class names above rather than on the shape of the
+/// page around them: each result is a link, and the first snippet after it
+/// belongs to it.
 pub fn parse_duckduckgo_html(html: &str, limit: usize) -> Vec<SearchResult> {
-    let mut results = Vec::new();
     let lower = html.to_lowercase();
-    let mut cursor = 0;
+    let mut marks: Vec<(usize, bool)> = tags_with_class(&lower, &LINK_CLASSES)
+        .into_iter()
+        .map(|at| (at, true))
+        .chain(tags_with_class(&lower, &SNIPPET_CLASSES).into_iter().map(|at| (at, false)))
+        .collect();
+    marks.sort_unstable();
+    marks.dedup();
 
-    while let Some(rel_start) = lower[cursor..].find("class=\"result__body\"")
-        .or_else(|| lower[cursor..].find("class=\"result-link\""))
-        .or_else(|| lower[cursor..].find("<div class=\"result "))
-    {
-        let abs_start = cursor + rel_start;
-        let block_end = lower[abs_start..].find("</div>\n</div>")
-            .or_else(|| lower[abs_start..].find("</td></tr>"))
-            .or_else(|| lower[abs_start..].find("<div class=\"result "))
-            .map(|e| abs_start + e)
-            .unwrap_or_else(|| (abs_start + 1500).min(html.len()));
-
-        let block = &html[abs_start..block_end];
-
-        let mut title = String::new();
-        let mut url = String::new();
-        let mut snippet = String::new();
-
-        if let Some(href_pos) = block.find("href=\"") {
-            let rest = &block[href_pos + 6..];
-            if let Some(quote_end) = rest.find('"') {
-                let raw_url = &rest[..quote_end];
-                if let Some(uddg) = raw_url.split("uddg=").nth(1) {
-                    let clean = uddg.split('&').next().unwrap_or(uddg);
-                    url = urlencoding_decode(clean);
-                } else if !raw_url.starts_with("//duckduckgo") {
-                    url = raw_url.to_string();
-                }
-                if let Some(tag_end) = rest[quote_end..].find('>') {
-                    let after_tag = &rest[quote_end + tag_end + 1..];
-                    if let Some(a_close) = after_tag.find("</a>") {
-                        title = html_to_text(&after_tag[..a_close]);
-                    }
-                }
-            }
-        }
-
-        if let Some(snip_pos) = block.find("class=\"result__snippet\"")
-            .or_else(|| block.find("class=\"result-snippet\""))
-        {
-            let rest = &block[snip_pos..];
-            if let Some(tag_end) = rest.find('>') {
-                let after_tag = &rest[tag_end + 1..];
-                if let Some(tag_close) = after_tag.find("</") {
-                    snippet = html_to_text(&after_tag[..tag_close]);
-                }
-            }
-        }
-
-        if !title.is_empty() || !url.is_empty() {
+    let mut results: Vec<SearchResult> = Vec::new();
+    for (tag, is_link) in marks {
+        if is_link {
+            let Some(href) = attribute(html, tag, "href") else { continue };
+            let Some(url) = result_url(&href) else { continue };
+            let mut title = inner_text(html, tag);
             if title.is_empty() {
                 title = "(no title)".to_string();
             }
-            results.push(SearchResult { title, url, snippet });
-            if results.len() >= limit {
-                break;
+            results.push(SearchResult { title, url, snippet: String::new() });
+        } else if let Some(last) = results.last_mut() {
+            if last.snippet.is_empty() {
+                last.snippet = inner_text(html, tag);
             }
         }
+    }
+    results.truncate(limit);
+    results
+}
 
-        cursor = block_end.max(abs_start + 20);
-        if cursor >= html.len() {
-            break;
+/// Where every tag carrying one of `classes` starts. The class has to be a
+/// whole name in the attribute, not the beginning of a longer one.
+fn tags_with_class(lower: &str, classes: &[&str; 2]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for class in classes {
+        let mut from = 0;
+        while let Some(found) = lower[from..].find(class) {
+            let at = from + found;
+            from = at + class.len();
+            let part_of_a_longer_name = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+            if lower[..at].ends_with(part_of_a_longer_name) || lower[from..].starts_with(part_of_a_longer_name) {
+                continue;
+            }
+            if let Some(tag) = lower[..at].rfind('<') {
+                out.push(tag);
+            }
         }
     }
+    out
+}
 
-    results
+/// The text of the `<...>` starting at `tag`.
+fn tag_text(html: &str, tag: usize) -> Option<&str> {
+    let rest = html.get(tag..)?;
+    let end = rest.find('>')?;
+    Some(&rest[..end])
+}
+
+/// The value of an attribute of the tag starting at `tag`, in either kind of
+/// quotes. Entities are left as written; the callers decode what they need.
+fn attribute(html: &str, tag: usize, name: &str) -> Option<String> {
+    let text = tag_text(html, tag)?;
+    let lower = text.to_lowercase();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(name) {
+        let at = from + found;
+        from = at + name.len();
+        let before_is_space = lower[..at].ends_with(char::is_whitespace);
+        let rest = lower[from..].trim_start();
+        if !before_is_space || !rest.starts_with('=') {
+            continue;
+        }
+        let value = text[from..].trim_start().strip_prefix('=')?.trim_start();
+        let quote = value.chars().next()?;
+        return match quote {
+            '"' | '\'' => value[1..].split(quote).next().map(str::to_string),
+            _ => value.split_whitespace().next().map(str::to_string),
+        };
+    }
+    None
+}
+
+/// The visible text of the element starting at `tag`, up to its closing tag.
+fn inner_text(html: &str, tag: usize) -> String {
+    let Some(text) = tag_text(html, tag) else { return String::new() };
+    let name: String = text
+        .trim_start_matches('<')
+        .chars()
+        .take_while(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .to_lowercase();
+    let body_at = tag + text.len() + 1;
+    let Some(body) = html.get(body_at..) else { return String::new() };
+    let end = find_ci(body, &format!("</{name}")).unwrap_or(body.len());
+    html_to_text(&body[..end])
+}
+
+/// The page a result link leads to. DuckDuckGo wraps it in a redirect of its
+/// own (`/l/?uddg=...`); its ads and its own pages are not results.
+fn result_url(href: &str) -> Option<String> {
+    let href = href.replace("&amp;", "&");
+    if let Some(target) = href.split("uddg=").nth(1) {
+        let encoded = target.split('&').next().unwrap_or(target);
+        let url = urlencoding_decode(encoded);
+        return url.starts_with("http").then_some(url);
+    }
+    let bare = href.trim_start_matches("https:").trim_start_matches("http:");
+    if bare.starts_with("//duckduckgo.com") || bare.starts_with("//ad.") || bare.starts_with('/') {
+        return None;
+    }
+    href.starts_with("http").then_some(href)
 }
 
 fn urlencoding_decode(input: &str) -> String {
@@ -301,16 +408,54 @@ fn urlencoding_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-/// Free web search via DuckDuckGo (zero API keys, 100% free).
-pub async fn search_free(
-    http: &reqwest::Client,
-    query: &str,
-    count: u32,
-) -> Result<String, ToolError> {
+/// The pages DuckDuckGo serves without an API key, in the order they are
+/// tried: the full results page first, the small one as a fallback for when
+/// the first answers with something that is not a results page at all.
+const FREE_ENDPOINTS: [&str; 2] =
+    ["https://html.duckduckgo.com/html/", "https://lite.duckduckgo.com/lite/"];
+
+/// Free web search via DuckDuckGo, no API key.
+///
+/// A query that genuinely matches nothing says so. A page that is not a
+/// results page — a rate-limit notice, a bot check, a redesign the parser
+/// does not know — is an error, not an empty answer, because the model can
+/// do something about the first and nothing about the second.
+pub async fn search_free(http: &reqwest::Client, query: &str, count: u32) -> Result<String, ToolError> {
+    let mut trouble = String::new();
+    for endpoint in FREE_ENDPOINTS {
+        let body = match fetch_results_page(http, endpoint, query).await {
+            Ok(body) => body,
+            Err(e) => {
+                trouble = e.to_string();
+                continue;
+            }
+        };
+        let results = parse_duckduckgo_html(&body, count as usize);
+        if !results.is_empty() {
+            let mut out = String::new();
+            for (i, r) in results.iter().enumerate() {
+                out.push_str(&format!("{}. {}\n{}\n{}\n\n", i + 1, r.title, r.url, r.snippet));
+            }
+            return Ok(out);
+        }
+        if says_there_is_nothing(&body) {
+            return Ok("no results".into());
+        }
+        trouble = describe_unusable_page(&body);
+    }
+    Err(ToolError::Other(format!(
+        "search: DuckDuckGo did not return results ({trouble}). Trying again in a moment usually works; \
+         set BRAVE_API_KEY in the environment to search with a key instead."
+    )))
+}
+
+async fn fetch_results_page(http: &reqwest::Client, endpoint: &str, query: &str) -> Result<String, ToolError> {
     let resp = http
-        .get("https://html.duckduckgo.com/html/")
+        .get(endpoint)
         .query(&[("q", query)])
         .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0")
+        .header("Accept", "text/html,application/xhtml+xml")
+        .header("Accept-Language", "en-US,en;q=0.9")
         .send()
         .await
         .map_err(|e| ToolError::Other(format!("search: {e}")))?;
@@ -319,15 +464,25 @@ pub async fn search_free(
     if !status.is_success() {
         return Err(ToolError::Other(format!("HTTP {status}: {}", truncate_body(&body, 500))));
     }
-    let results = parse_duckduckgo_html(&body, count as usize);
-    if results.is_empty() {
-        return Ok("no results".into());
+    Ok(body)
+}
+
+/// Whether the page is a results page reporting that it found nothing.
+fn says_there_is_nothing(body: &str) -> bool {
+    let text = html_to_text(body).to_lowercase();
+    text.contains("no results") || text.contains("not match any documents")
+}
+
+/// What to say about a page with no results on it that does not claim to
+/// have none: usually a bot check, otherwise a page shaped differently than
+/// the parser expects.
+fn describe_unusable_page(body: &str) -> String {
+    let text = html_to_text(body).to_lowercase();
+    if text.contains("anomaly") || text.contains("unusual traffic") || text.contains("are you a robot") {
+        "it asked for a bot check instead".to_string()
+    } else {
+        format!("the page it sent holds no results ({} characters)", body.len())
     }
-    let mut out = String::new();
-    for (i, r) in results.iter().enumerate() {
-        out.push_str(&format!("{}. {}\n{}\n{}\n\n", i + 1, r.title, r.url, r.snippet));
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -424,20 +579,77 @@ mod tests {
         assert!(truncate_body(&s, 7).is_char_boundary(0));
     }
 
+    /// One result, written the way `html.duckduckgo.com` writes it: the
+    /// class names are not alone in their attributes, and the link is
+    /// DuckDuckGo's own redirect.
+    const FULL_PAGE: &str = r##"
+    <div class="result results_links results_links_deep web-result ">
+      <div class="links_main links_deep result__body">
+        <h2 class="result__title">
+          <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Frust%2Dlang.org%2F&amp;rut=13d8">Rust Programming Language</a>
+        </h2>
+        <div class="result__extras"><a class="result__url" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Frust%2Dlang.org%2F&amp;rut=13d8">rust-lang.org</a></div>
+        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Frust%2Dlang.org%2F&amp;rut=13d8"><b>Rust</b> is fast and it&#x27;s reliable.</a>
+      </div>
+    </div>
+    "##;
+
+    /// The same result from `lite.duckduckgo.com`: a table, single-quoted
+    /// attributes, the snippet in a later row.
+    const LITE_PAGE: &str = r##"
+    <table>
+      <tr><td class='result-snippet'>Not this one, it belongs to nothing.</td></tr>
+      <tr><td>
+        <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Frust%2Dlang.org%2F&amp;rut=13d8" class='result-link'>Rust Programming Language</a>
+      </td></tr>
+      <tr><td class='result-snippet'><b>Rust</b> is fast and it&#x27;s reliable.</td></tr>
+    </table>
+    "##;
+
     #[test]
-    fn parse_duckduckgo_html_extracts_results() {
-        let sample = r#"
-        <div class="result result--default">
-            <div class="result__body">
-                <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Ftest">Example Title</a>
-                <a class="result__snippet">This is an example snippet.</a>
-            </div>
-        </div>
-        "#;
-        let results = parse_duckduckgo_html(sample, 5);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Example Title");
-        assert_eq!(results[0].url, "https://example.com/test");
-        assert_eq!(results[0].snippet, "This is an example snippet.");
+    fn a_result_is_read_from_the_page_duckduckgo_actually_serves() {
+        for (name, page) in [("full", FULL_PAGE), ("lite", LITE_PAGE)] {
+            let results = parse_duckduckgo_html(page, 5);
+            assert_eq!(results.len(), 1, "{name}: {results:?}");
+            assert_eq!(results[0].title, "Rust Programming Language", "{name}");
+            // Unwrapped from DuckDuckGo's redirect, and the escapes undone.
+            assert_eq!(results[0].url, "https://rust-lang.org/", "{name}");
+            assert_eq!(results[0].snippet, "Rust is fast and it's reliable.", "{name}");
+        }
+    }
+
+    #[test]
+    fn a_snippet_belongs_to_the_link_above_it() {
+        let two = format!("{FULL_PAGE}{FULL_PAGE}");
+        let results = parse_duckduckgo_html(&two, 5);
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.snippet == "Rust is fast and it's reliable."), "{results:?}");
+        assert_eq!(parse_duckduckgo_html(&two, 1).len(), 1, "the limit is kept");
+    }
+
+    #[test]
+    fn duckduckgos_own_links_and_ads_are_not_results() {
+        let page = r##"
+        <a class="result__a" href="//duckduckgo.com/y.js?ad_provider=bing">An advert</a>
+        <a class="result__a" href="/settings">Settings</a>
+        <a class="result__a-different" href="https://example.com/">Not a result link at all</a>
+        "##;
+        assert_eq!(parse_duckduckgo_html(page, 5), Vec::new());
+    }
+
+    #[test]
+    fn a_page_without_results_is_told_apart_from_one_that_found_nothing() {
+        assert!(says_there_is_nothing("<div>No results.</div>"));
+        assert!(!says_there_is_nothing("<div>Our servers are busy</div>"));
+        assert!(describe_unusable_page("<p>If this error persists, please let us know: this error was reported as an anomaly.</p>")
+            .contains("bot check"));
+        assert!(describe_unusable_page("<p>Something new</p>").contains("no results"));
+    }
+
+    #[test]
+    fn entities_become_the_characters_they_stand_for() {
+        assert_eq!(html_to_text("<p>a &amp; b &#39;c&#39; &#x27;d&#x27; &mdash; e&nbsp;f</p>"), "a & b 'c' 'd' — e f");
+        // Something that is not an entity is left alone.
+        assert_eq!(html_to_text("<p>Fish &amp chips &#zz; R&D</p>"), "Fish &amp chips &#zz; R&D");
     }
 }
