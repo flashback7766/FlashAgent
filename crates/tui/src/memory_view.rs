@@ -58,10 +58,11 @@ pub enum MemoryTab {
 /// What the memories are, as one string: a summary written from other
 /// memories is out of date.
 pub fn fingerprint(rows: &[Row]) -> String {
-    let mut parts: Vec<String> =
-        rows.iter().map(|r| format!("{}:{}:{}:{}", r.scope.label(), r.entry.name, r.entry.recorded, r.entry.body.len())).collect();
+    let mut parts: Vec<String> = rows.iter().map(|r| {
+        format!("{:?}", (r.scope.label(), &r.entry.name, &r.entry.recorded, &r.entry.description, &r.entry.body))
+    }).collect();
     parts.sort();
-    parts.join("|")
+    format!("v2:{:016x}", flashagent_core::snapshots::prompt_hash(&parts.join("|")))
 }
 
 /// The request for a summary of `rows`: a system prompt and the memories.
@@ -624,6 +625,24 @@ mod tests {
         assert!(message.contains("а что ещё?"));
         m.rows.clear();
         assert!(m.summary_is_stale());
+    }
+
+    #[test]
+    fn changing_memory_text_or_description_invalidates_the_summary() {
+        let mut m = modal_with(vec![("editor", "preferred editor", Scope::Global)]);
+        m.rows[0].entry.body = "Use vim".into();
+        m.summary = SummaryState::Ready(MemorySummary {
+            sections: vec![("Overview".into(), "You use vim.".into())],
+            dive_deeper: Vec::new(),
+            updated: 0,
+            fingerprint: fingerprint(&m.rows),
+        });
+        m.rows[0].entry.body = "Use zed".into();
+        assert!(m.summary_is_stale(), "equal-length edits must invalidate the summary");
+        m.rows[0].entry.body = "Use vim".into();
+        assert!(!m.summary_is_stale());
+        m.rows[0].entry.description = "former editor".into();
+        assert!(m.summary_is_stale(), "description edits must invalidate the summary");
     }
 
     #[test]

@@ -111,6 +111,14 @@ pub fn human_count(n: i64) -> String {
 }
 
 /// What a `/goal` run actually did, accumulated from loop events.
+struct OpenToolCall {
+    id: String,
+    name: String,
+    subject: String,
+    files: Vec<String>,
+    args_json: String,
+}
+
 pub struct GoalLedger {
     /// The task as the user phrased it.
     pub task: String,
@@ -124,7 +132,7 @@ pub struct GoalLedger {
     shell_ok: usize,
     shell_failed: Vec<String>,
     tool_failures: Vec<String>,
-    open_calls: Vec<(String, String, String, Vec<String>, String)>, // id, tool name, subject, files it names, raw args
+    open_calls: Vec<OpenToolCall>,
     plan: Vec<flashagent_tools::plan_tool::PlanStep>,
 }
 
@@ -186,18 +194,28 @@ impl GoalLedger {
             LoopEvent::ToolStarted { id, name, args_json } => {
                 let subject = subject_of(name, args_json);
                 let files = files_of(name, args_json);
-                self.open_calls.push((id.clone(), name.clone(), subject, files, args_json.clone()));
+                self.open_calls.push(OpenToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    subject,
+                    files,
+                    args_json: args_json.clone(),
+                });
             }
             LoopEvent::ToolFinished { id, is_error, result, .. } => {
-                let Some(pos) = self.open_calls.iter().position(|(cid, ..)| cid == id) else {
+                let Some(pos) = self.open_calls.iter().position(|call| call.id == *id) else {
                     return false;
                 };
-                let (_, name, subject, files, args_json) = self.open_calls.remove(pos);
-                match (name.as_str(), *is_error) {
-                    ("write_file", false) => push_unique(&mut self.written, subject),
+                let call = self.open_calls.remove(pos);
+                match (call.name.as_str(), *is_error) {
+                    ("write_file", false) => push_unique(&mut self.written, call.subject),
                     ("edit_file" | "patch_file", false) => {
                         // A batch edit changed every file it names.
-                        let changed = if files.is_empty() { vec![subject] } else { files };
+                        let changed = if call.files.is_empty() {
+                            vec![call.subject]
+                        } else {
+                            call.files
+                        };
                         for file in changed {
                             push_unique(&mut self.edited, file);
                         }
@@ -205,17 +223,17 @@ impl GoalLedger {
                     ("run_shell", false) => self.shell_ok += 1,
                     ("run_shell", true) => {
                         let why = first_line(result.as_deref().unwrap_or(""));
-                        self.shell_failed.push(format!("{subject} — {why}"));
+                        self.shell_failed.push(format!("{} — {why}", call.subject));
                     }
                     ("update_plan", false) => {
-                        if let Some(steps) = flashagent_tools::plan_tool::parse_plan(&args_json) {
+                        if let Some(steps) = flashagent_tools::plan_tool::parse_plan(&call.args_json) {
                             self.plan = steps;
                             return true;
                         }
                     }
                     (_, true) => {
                         let why = first_line(result.as_deref().unwrap_or(""));
-                        self.tool_failures.push(format!("{name}({subject}) — {why}"));
+                        self.tool_failures.push(format!("{}({}) — {why}", call.name, call.subject));
                     }
                     _ => {}
                 }

@@ -45,7 +45,7 @@ pub fn approval_card_with_selection(req: &ApprovalRequest, selected: Decision) -
 }
 
 /// An approval gate answered from the terminal: the UI loop picks up
-/// [`pending`] and calls [`TuiGate::respond`] with the user's key press.
+/// [`TuiGate::pending`] and calls [`TuiGate::respond`] with the user's key press.
 #[derive(Default)]
 pub struct TuiGate {
     pending: Mutex<Option<(ApprovalRequest, Option<Decision>)>>,

@@ -11,11 +11,11 @@
 //!
 //! Ordering, the one rule every part of the app uses:
 //!
-//! 1. Two betas compare by build number; two stables by MAJOR.MINOR.PATCH.
-//! 2. A beta and a stable that names its build compare by build number; on a
-//!    tie the stable is newer (it is that build, released).
-//! 3. A stable that names no build is newer than every beta. This is what
-//!    makes the first `v1.0.0` an upgrade from any `b<N>`.
+//! 1. All versions with a build number compare by that number first.
+//! 2. On a tied build the stable is newer than the beta; tied stables compare
+//!    by MAJOR.MINOR.PATCH.
+//! 3. Legacy stables without a build number sort after all numbered builds,
+//!    and compare with each other by MAJOR.MINOR.PATCH.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -91,8 +91,13 @@ impl Ord for Version {
         use Version::*;
         match (*self, *other) {
             (Beta { build: a }, Beta { build: b }) => a.cmp(&b),
-            (Stable { major, minor, patch, .. }, Stable { major: m2, minor: n2, patch: p2, .. }) => {
-                (major, minor, patch).cmp(&(m2, n2, p2))
+            (Stable { major, minor, patch, build: a }, Stable { major: m2, minor: n2, patch: p2, build: b }) => {
+                match (a, b) {
+                    (Some(a), Some(b)) => a.cmp(&b),
+                    (None, Some(_)) => Ordering::Greater,
+                    (Some(_), None) => Ordering::Less,
+                    (None, None) => Ordering::Equal,
+                }.then_with(|| (major, minor, patch).cmp(&(m2, n2, p2)))
             }
             (Stable { build: Some(s), .. }, Beta { build: b }) => s.cmp(&b).then(Ordering::Greater),
             (Stable { build: None, .. }, Beta { .. }) => Ordering::Greater,
@@ -101,7 +106,7 @@ impl Ord for Version {
     }
 }
 
-/// Equal when neither is newer: `v1.0.0+b290` and `v1.0.0` are one release.
+/// Equal when build number, release kind and stable version agree.
 impl PartialEq for Version {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
@@ -165,8 +170,26 @@ mod tests {
         assert!(v("v1.0.0+b290") > v("b290"));
         assert!(v("v1.0.0+b290") < v("b291"));
         assert!(v("v1.0.0+b290") > v("b287"));
-        // Build metadata does not change how two stables compare.
-        assert_eq!(v("v1.0.0+b290").cmp(&v("v1.0.0")), Ordering::Equal);
+        assert!(v("v1.0.0+b290") < v("v1.0.0+b291"));
+        assert!(v("v2.0.0+b290") < v("v1.0.0+b291"));
+        assert!(v("v1.0.0+b290") < v("v1.0.0"));
+        assert!(v("v1.0.0+b290") < v("v2.0.0+b290"));
+    }
+
+    #[test]
+    fn comparison_is_transitive_across_release_kinds_and_metadata() {
+        let versions = ["b290", "b291", "v1.0.0+b290", "v1.0.0", "v1.0.0+b292", "v0.9.0+b293", "v2.0.0"]
+            .map(v);
+        for a in versions {
+            for b in versions {
+                assert_eq!(a.cmp(&b), b.cmp(&a).reverse());
+                for c in versions {
+                    if a <= b && b <= c {
+                        assert!(a <= c, "{a} <= {b} <= {c}, but {a} > {c}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

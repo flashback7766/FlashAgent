@@ -767,6 +767,22 @@ mod tests {
     }
 
     #[test]
+    fn stable_updates_follow_build_numbers_even_when_semver_is_lower() {
+        let releases: Vec<GitHubRelease> = ["v2.0.0+b290", "v1.0.0+b291"]
+            .into_iter()
+            .map(|tag| GitHubRelease {
+                tag_name: tag.into(), name: None, prerelease: false,
+                published_at: None, body: None, assets: vec![],
+            })
+            .collect();
+        for channel in [UpdateChannel::Stable, UpdateChannel::Beta] {
+            assert_eq!(find_target_release(&releases, channel).unwrap().tag_name, "v1.0.0+b291");
+        }
+        assert!(!is_downgrade("v2.0.0+b290", "v1.0.0+b291"));
+        assert!(is_downgrade("v1.0.0+b291", "v2.0.0+b290"));
+    }
+
+    #[test]
     fn a_downgrade_is_decided_by_the_version_ordering() {
         assert!(is_downgrade("b191", "b190"));
         assert!(!is_downgrade("b190", "b191"));

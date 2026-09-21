@@ -875,6 +875,37 @@ fn rewind_takes_the_files_and_the_conversation_back_to_before_a_turn() {
 }
 
 #[test]
+fn a_failed_rewind_keeps_history_and_can_be_retried() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "write_file".into(),
+            arguments: serde_json::json!({ "path": "notes.txt", "content": "changed" }),
+        },
+        Reply::Text("Notes changed.".into()),
+    ]);
+    let home = Home::new();
+    let notes = home.work().join("notes.txt");
+    std::fs::write(&notes, "original").unwrap();
+    let term = ready(&home, &server);
+    ask(&term, "change notes", "Notes changed.");
+    std::fs::remove_file(&notes).unwrap();
+    std::fs::create_dir(&notes).unwrap();
+    term.type_text("/rewind 1");
+    term.send(ENTER);
+    term.wait_for("Confirm Rewind", WAIT);
+    term.send(ENTER);
+    term.wait_for("Rewind incomplete", WAIT);
+    assert!(term.screen().contains("Notes changed."), "failed rewind lost the conversation");
+    std::fs::remove_dir(&notes).unwrap();
+    term.type_text("/rewind 1");
+    term.send(ENTER);
+    term.wait_for("Confirm Rewind", WAIT);
+    term.send(ENTER);
+    term.wait_gone("Notes changed.", WAIT);
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "original");
+}
+
+#[test]
 fn declining_the_rewind_card_leaves_everything_as_it_is() {
     let edit = |old: &str, new: &str| Reply::ToolCall {
         name: "edit_file".into(),
@@ -907,6 +938,29 @@ fn declining_the_rewind_card_leaves_everything_as_it_is() {
 }
 
 #[test]
+fn an_ambiguous_patch_leaves_the_file_unchanged_and_reports_the_error_to_the_model() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "patch_file".into(),
+            arguments: serde_json::json!({
+                "path": "notes.txt", "patch": "@@ -2,1 +2,1 @@\n-same\n+changed\n"
+            }),
+        },
+        Reply::Text("More context needed.".into()),
+    ]);
+    let home = Home::new();
+    let path = home.work().join("notes.txt");
+    let original = "same\nother\nsame\n";
+    std::fs::write(&path, original).unwrap();
+    let term = ready_with(&home, &server, serde_json::json!({ "toolset_profile": "Full" }));
+    ask(&term, "patch the notes", "More context needed.");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    let turns = server.turns();
+    let result = turns[1].body["messages"].as_array().unwrap().iter().find(|m| m["role"] == "tool").unwrap();
+    assert!(result["content"].as_str().unwrap().contains("matches multiple locations"), "{result}");
+}
+
+#[test]
 fn writing_outside_the_project_asks_even_in_accept_edits() {
     let server = MockServer::start(vec![
         Reply::ToolCall {
@@ -927,6 +981,33 @@ fn writing_outside_the_project_asks_even_in_accept_edits() {
     term.send("d");
     term.wait_for("Stayed inside.", WAIT);
     assert!(!target.exists(), "a denied write outside the project still happened");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_write_through_a_symlink_parent_asks_before_touching_the_external_file() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "write_file".into(),
+            arguments: serde_json::json!({ "path": "link/../outside.txt", "content": "changed" }),
+        },
+        Reply::Text("Write refused.".into()),
+    ]);
+    let home = Home::new();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(outside.path().join("child")).unwrap();
+    let target = outside.path().join("outside.txt");
+    std::fs::write(&target, "original").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("child"), home.work().join("link")).unwrap();
+    let term = ready(&home, &server);
+    term.type_text("write through the link");
+    term.send(ENTER);
+    term.wait_for("Confirm:", WAIT);
+    term.wait_for("outside the project", WAIT);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+    term.send("d");
+    term.wait_for("Write refused.", WAIT);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
 }
 
 #[test]

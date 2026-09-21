@@ -718,6 +718,14 @@ impl App {
             return;
         };
         let report = store.rewind(target.turn);
+        if !report.failed.is_empty() {
+            for (path, why) in &report.failed {
+                self.chat.push_line(LineKind::ToolError, format!("Not put back: {} — {why}", store.display_path(path)));
+            }
+            self.notice("Rewind incomplete. History and failed snapshots kept; fix the reported errors and retry /rewind.".to_string());
+            self.renderer.request_reprint();
+            return;
+        }
         let taken_back = prompts.len() - target.user_index;
         let cut = self
             .history
@@ -738,9 +746,6 @@ impl App {
         self.latest_suggestion = None;
         self.custom_placeholder = None;
 
-        for (path, why) in &report.failed {
-            self.chat.push_line(LineKind::ToolError, format!("Not put back: {} — {why}", store.display_path(path)));
-        }
         // The words, not the scaffolding a goal or the first message's
         // memory block wrapped them in.
         self.input = extract_user_prompt(&prompt).to_string();
