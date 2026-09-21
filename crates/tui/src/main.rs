@@ -719,6 +719,64 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     Ok(result)
 }
 
+/// The text a key press types: a character, or a newline for Enter.
+fn typed_char(k: &crossterm::event::KeyEvent) -> Option<char> {
+    let plain = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    match k.code {
+        KeyCode::Char(c) if plain => Some(c),
+        KeyCode::Enter if k.modifiers.is_empty() => Some('\n'),
+        _ => None,
+    }
+}
+
+/// Read the keys already waiting after `first`. With a newline among them
+/// and more than one line's worth of text, they are a paste; otherwise the
+/// keys go on as they came.
+fn gather_burst(first: char) -> Vec<UiEvent> {
+    let mut text = String::from(first);
+    let mut rest: Vec<UiEvent> = Vec::new();
+    while matches!(crossterm::event::poll(std::time::Duration::ZERO), Ok(true)) {
+        match crossterm::event::read() {
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Release => {}
+            Ok(Event::Key(k)) => match typed_char(&k) {
+                Some(c) => text.push(c),
+                None => {
+                    rest.push(UiEvent::Key(k.code, k.modifiers));
+                    break;
+                }
+            },
+            Ok(Event::Paste(s)) => {
+                rest.push(UiEvent::Paste(s));
+                break;
+            }
+            _ => break,
+        }
+    }
+    let mut out = burst_events(&text);
+    out.extend(rest);
+    out
+}
+
+/// Keys read together as `text`: one paste when a newline is inside it with
+/// text after it, each key by itself otherwise. A newline only at the end
+/// is someone typing a word and pressing Enter in one go.
+fn burst_events(text: &str) -> Vec<UiEvent> {
+    let body = text.trim_end_matches('\n');
+    if body.contains('\n') {
+        let mut out = vec![UiEvent::Paste(body.to_string())];
+        // The Enters after the text were keys, and one of them may be the
+        // user sending it.
+        out.extend((body.len()..text.len()).map(|_| UiEvent::Key(KeyCode::Enter, KeyModifiers::NONE)));
+        return out;
+    }
+    text.chars()
+        .map(|c| match c {
+            '\n' => UiEvent::Key(KeyCode::Enter, KeyModifiers::NONE),
+            c => UiEvent::Key(KeyCode::Char(c), KeyModifiers::NONE),
+        })
+        .collect()
+}
+
 /// Where /rewind keeps how files were before each turn changed them: beside
 /// the sessions, under the session's id, so it still works after --resume.
 fn open_snapshots(perm: &PermissionedTools, session_id: &str, cwd: &std::path::Path) {
@@ -783,8 +841,20 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 }
                 match crossterm::event::read() {
                     Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => {
-                        if tx.send(UiEvent::Key(k.code, k.modifiers)).is_err() {
-                            return;
+                        // Terminals without bracketed paste (Windows' console)
+                        // deliver a paste as keystrokes, each newline an Enter
+                        // that would send the prompt line by line. Keys that
+                        // are already waiting when one is read were not typed
+                        // by a person; if they carry a newline, they are one
+                        // paste.
+                        let events = match typed_char(&k) {
+                            Some(first) => gather_burst(first),
+                            None => vec![UiEvent::Key(k.code, k.modifiers)],
+                        };
+                        for ev in events {
+                            if tx.send(ev).is_err() {
+                                return;
+                            }
                         }
                     }
                     Ok(Event::Paste(s)) => {
@@ -1746,6 +1816,25 @@ fn find_skill_file(name: &str) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_that_arrive_together_with_a_newline_inside_are_one_paste() {
+        let events = burst_events("fn main() {\n    x\n}");
+        assert!(matches!(events.as_slice(), [UiEvent::Paste(p)] if p == "fn main() {\n    x\n}"));
+        // Pasted with a trailing newline: the text, then the Enter, as keys.
+        let events = burst_events("a\nb\n");
+        assert!(matches!(events.as_slice(), [UiEvent::Paste(p), UiEvent::Key(KeyCode::Enter, _)] if p == "a\nb"));
+    }
+
+    #[test]
+    fn a_word_and_enter_typed_together_stay_keys() {
+        let events = burst_events("hi\n");
+        assert!(matches!(
+            events.as_slice(),
+            [UiEvent::Key(KeyCode::Char('h'), _), UiEvent::Key(KeyCode::Char('i'), _), UiEvent::Key(KeyCode::Enter, _)]
+        ));
+        assert!(matches!(burst_events("\n").as_slice(), [UiEvent::Key(KeyCode::Enter, _)]));
+    }
 
     fn offline_source() -> BackendSource {
         // Nothing listens on port 9: every request fails fast, so compaction

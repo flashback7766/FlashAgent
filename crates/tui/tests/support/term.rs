@@ -149,10 +149,19 @@ impl Term {
         self.parser.lock().unwrap().screen().contents()
     }
 
-    /// Type keys: text, or the constants above.
+    /// Type keys: text, or the constants above. A short pause follows, as
+    /// after a real key press: the app reads keys that arrive together with
+    /// a newline among them as a paste, the way a Windows console delivers
+    /// one, and a person never types an Enter and the next key at once.
     pub fn send(&self, keys: &str) {
+        self.write(keys);
+        std::thread::sleep(Duration::from_millis(15));
+    }
+
+    /// Bytes to the terminal as they are, all at once.
+    pub fn write(&self, bytes: &str) {
         let mut w = self.writer.lock().unwrap();
-        w.write_all(keys.as_bytes()).unwrap();
+        w.write_all(bytes.as_bytes()).unwrap();
         w.flush().unwrap();
     }
 
