@@ -482,7 +482,7 @@ fn nothing_is_drawn_outside_a_small_terminal() {
 #[test]
 fn every_screen_fits_a_small_terminal() {
     for (cols, rows) in [SMALL, TINY] {
-        for (command, marker, way_out) in SCREENS {
+        for (command, _title, way_out) in SCREENS {
             let server = MockServer::start(vec![Reply::Text("ok".into())]);
             let home = Home::new();
             home.set_up(&server.url);
@@ -491,9 +491,10 @@ fn every_screen_fits_a_small_terminal() {
 
             term.type_text(command);
             term.send(ENTER);
-            term.wait_for(marker, WAIT);
             // The way out is the last line the card draws, so waiting for it
-            // waits for the whole card.
+            // waits for the whole card. Not the title: in 14 rows a card taller
+            // than the screen has it only while unfolding, which a slow machine
+            // can miss.
             term.wait_for(way_out, WAIT);
 
             let lines = lines_of(&term);
