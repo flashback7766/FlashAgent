@@ -86,12 +86,12 @@ fn a_question_its_work_and_its_answer_are_three_things_on_screen() {
 
     for (i, (kind, _)) in rows.iter().enumerate() {
         let Some((previous, _)) = i.checked_sub(1).and_then(|p| rows.get(p)) else { continue };
-        let crossing = match (previous, kind) {
-            (LineKind::User, LineKind::Reasoning | LineKind::Tool) => true,
-            (LineKind::Tool | LineKind::Reasoning, LineKind::Assistant) => true,
-            (LineKind::Assistant, LineKind::Tool | LineKind::Reasoning | LineKind::User) => true,
-            _ => false,
-        };
+        let crossing = matches!(
+            (previous, kind),
+            (LineKind::User, LineKind::Reasoning | LineKind::Tool)
+                | (LineKind::Tool | LineKind::Reasoning, LineKind::Assistant)
+                | (LineKind::Assistant, LineKind::Tool | LineKind::Reasoning | LineKind::User)
+        );
         assert!(
             !crossing,
             "row {i} moves from one part of the turn to the next with nothing between them:\n{}",
