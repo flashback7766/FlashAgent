@@ -626,8 +626,13 @@ impl AppConfig {
             _ => serde_json::to_string_pretty(self),
         }
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, json)?;
-        Ok(())
+        // Written beside the file and renamed over it: a crash mid-write
+        // must not leave half a config, which would read as no config at
+        // all and send the user back through the setup wizard.
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, path)).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
     }
 
     /// Load from explicit file path.
@@ -641,6 +646,19 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saving_replaces_the_config_whole_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = AppConfig::default();
+        cfg.save_to(&path).unwrap();
+        cfg.backend_url = "http://second/v1".into();
+        cfg.save_to(&path).unwrap();
+        assert_eq!(AppConfig::load_from(&path).unwrap().backend_url, "http://second/v1");
+        let files: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(files.len(), 1, "a temporary file was left behind: {files:?}");
+    }
+
     #[test]
     fn a_url_given_for_one_run_is_not_saved_but_one_chosen_later_is() {
         let dir = tempfile::tempdir().unwrap();
