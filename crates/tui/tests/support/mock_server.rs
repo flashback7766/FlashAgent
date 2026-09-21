@@ -67,6 +67,9 @@ struct SideRequests {
     dropped: std::sync::atomic::AtomicUsize,
     /// Answer to side requests whose system prompt contains the key.
     answers: Mutex<Vec<(String, String)>>,
+    /// Held back this long before a turn is answered at all, so a scenario
+    /// can do something while the model is still thinking.
+    turn_delay: Mutex<Option<Duration>>,
 }
 
 impl MockServer {
@@ -104,6 +107,13 @@ impl MockServer {
 
     /// Answer side requests (the recap after a turn) slowly, a word every
     /// `per_word`, so a scenario can act while one is still being written.
+    /// Wait `delay` before answering each turn, so the scenario can act
+    /// while the model is still thinking — pressing a key that must land
+    /// before the answer, for instance.
+    pub fn delay_turns(&self, delay: Duration) {
+        *self.side.turn_delay.lock().unwrap() = Some(delay);
+    }
+
     /// Answer side requests whose system prompt mentions `key` with `text`
     /// instead of "ok".
     pub fn answer_side_requests(&self, key: &str, text: &str) {
@@ -230,6 +240,12 @@ fn serve(
             side.dropped.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         return Ok(());
+    }
+
+    if request.is_turn() {
+        if let Some(delay) = *side.turn_delay.lock().unwrap() {
+            std::thread::sleep(delay);
+        }
     }
 
     let reply = if request.is_turn() {

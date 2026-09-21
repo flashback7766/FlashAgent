@@ -1288,14 +1288,17 @@ fn clear_takes_the_conversation_off_the_screen() {
 #[test]
 fn an_approval_that_comes_up_over_open_settings_gets_the_answer() {
     let server = MockServer::start(vec![shell_call("echo marker> marker.txt"), Reply::Text("The marker is there.".into())]);
+    // The model takes its time, so the settings are certainly open before the
+    // approval card is drawn over them.
+    server.delay_turns(Duration::from_secs(2));
     let home = Home::new();
     let term = ready(&home, &server);
 
     term.type_text("leave a marker");
     term.send(ENTER);
-    // Settings opened while the turn runs; the approval card is drawn over
-    // them and must be the one Enter answers.
-    term.send("\t");
+    term.send(TAB);
+    term.wait_for("FlashAgent Settings", WAIT);
+    // The card comes up over the settings and must be the one Enter answers.
     term.wait_for("Confirm:", WAIT);
     term.send(ENTER);
     term.wait_for("The marker is there.", WAIT);
