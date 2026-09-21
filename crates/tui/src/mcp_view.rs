@@ -301,7 +301,19 @@ impl McpModal {
             lines.push((LineKind::System, pad_row("")));
         }
 
-        lines.push((LineKind::System, pad_row("\x1b[38;2;135;130;125mTab/1-3 switch tab · ↑/↓ navigate · Enter select · Esc close\x1b[0m")));
+        // Dropped from the middle in a narrow window, so "Esc close" stays.
+        let dim = "\x1b[38;2;135;130;125m";
+        let hints = crate::fit_hints(
+            &[
+                ("Tab/1-3 switch tab".into(), format!("{dim}Tab/1-3 switch tab\x1b[0m")),
+                ("↑/↓ navigate".into(), format!("{dim}↑/↓ navigate\x1b[0m")),
+                ("Enter select".into(), format!("{dim}Enter select\x1b[0m")),
+                ("Esc close".into(), format!("{dim}Esc close\x1b[0m")),
+            ],
+            &format!("{dim} · \x1b[0m"),
+            inner_text_w.saturating_sub(1),
+        );
+        lines.push((LineKind::System, pad_row(&hints)));
 
         lines.push((
             LineKind::System,

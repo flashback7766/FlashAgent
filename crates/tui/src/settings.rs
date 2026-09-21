@@ -692,7 +692,19 @@ impl SettingsView {
             lines.push((LineKind::System, pad_row("")));
         }
 
-        lines.push((LineKind::System, pad_row("\x1b[38;2;135;130;125mTab/1-7 switch tab · ↑/↓ navigate · Enter/←/→ toggle value · Esc save & return\x1b[0m")));
+        // Dropped from the middle in a narrow window, so the way out stays.
+        let dim = "\x1b[38;2;135;130;125m";
+        let hints = crate::fit_hints(
+            &[
+                ("Tab/1-7 switch tab".into(), format!("{dim}Tab/1-7 switch tab\x1b[0m")),
+                ("↑/↓ navigate".into(), format!("{dim}↑/↓ navigate\x1b[0m")),
+                ("Enter/←/→ toggle value".into(), format!("{dim}Enter/←/→ toggle value\x1b[0m")),
+                ("Esc save & return".into(), format!("{dim}Esc save & return\x1b[0m")),
+            ],
+            &format!("{dim} · \x1b[0m"),
+            inner_text_w.saturating_sub(1),
+        );
+        lines.push((LineKind::System, pad_row(&hints)));
 
         lines.push((
             LineKind::System,

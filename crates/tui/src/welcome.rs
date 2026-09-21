@@ -271,6 +271,44 @@ pub fn fit_parts(parts: &[(String, String)], separator: &str, width: usize) -> S
     out
 }
 
+/// Join `parts` to fit `width`, dropping from the middle rather than the end.
+///
+/// The last hint on a card is how to leave it. Dropping in order, as
+/// [`fit_parts`] does, takes that one first, and a card in a narrow window
+/// that does not say how to close it is a trap.
+pub fn fit_hints(parts: &[(String, String)], separator: &str, width: usize) -> String {
+    let Some((last_plain, last_styled)) = parts.last() else { return String::new() };
+    let sep_w = visible_width(separator);
+    let joined = fit_parts(parts, separator, width);
+    if visible_width(&joined) >= plain_width(parts, sep_w) {
+        return joined;
+    }
+    // Keep the way out, then as many of the others from the front as fit.
+    let mut kept: Vec<&(String, String)> = Vec::new();
+    let mut used = last_plain.chars().count();
+    for part in &parts[..parts.len() - 1] {
+        let cost = part.0.chars().count() + sep_w;
+        if used + cost > width {
+            break;
+        }
+        used += cost;
+        kept.push(part);
+    }
+    let mut out = String::new();
+    for part in kept {
+        out.push_str(&part.1);
+        out.push_str(separator);
+    }
+    out.push_str(last_styled);
+    out
+}
+
+/// What the parts would take if all of them were joined.
+fn plain_width(parts: &[(String, String)], sep_w: usize) -> usize {
+    let text: usize = parts.iter().map(|(plain, _)| plain.chars().count()).sum();
+    text + sep_w * parts.len().saturating_sub(1)
+}
+
 /// Rows the screen keeps for itself under the welcome card: the composer's
 /// three, the hint line, the tip and the status line. The card gets what is
 /// left.
@@ -578,4 +616,31 @@ pub fn render_session_saved_card(session_id: &str, width: usize) -> Vec<String> 
     let bottom = format!("  {border_color}╰{}╯{reset}", "─".repeat(box_w));
 
     vec![top, body, bottom]
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+
+    fn parts(names: &[&str]) -> Vec<(String, String)> {
+        names.iter().map(|n| (n.to_string(), format!("\x1b[2m{n}\x1b[0m"))).collect()
+    }
+
+    #[test]
+    fn the_way_out_is_the_last_hint_to_be_dropped() {
+        let hints = parts(&["↑/↓ — select", "s — summary", "d — forget", "esc — close"]);
+        // Everything fits: everything is shown, in order.
+        let wide = strip_ansi(&fit_hints(&hints, " · ", 80));
+        assert_eq!(wide, "↑/↓ — select · s — summary · d — forget · esc — close");
+
+        // Too narrow: the middle goes, the way out stays.
+        let narrow = strip_ansi(&fit_hints(&hints, " · ", 30));
+        assert!(narrow.ends_with("esc — close"), "{narrow:?}");
+        assert!(narrow.chars().count() <= 30, "{narrow:?}");
+        assert!(narrow.starts_with("↑/↓ — select"), "the first hint should survive too: {narrow:?}");
+
+        // Nothing but the way out fits.
+        let tiny = strip_ansi(&fit_hints(&hints, " · ", 12));
+        assert_eq!(tiny, "esc — close");
+    }
 }

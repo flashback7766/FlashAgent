@@ -247,14 +247,18 @@ async fn a_command_runs_and_a_failing_one_reports_its_exit_code() {
     assert!(out.contains("marker"), "{out}");
     assert!(out.contains("exit code: 0"), "{out}");
 
+    // `exit 3` is spelled the same in both shells; the loop below is not.
     let failed = project.raw("run_shell", serde_json::json!({ "command": "exit 3" })).await;
     assert!(failed.is_error, "a non-zero exit must be an error: {}", failed.content);
     assert!(failed.content.contains("exit code: 3"), "{}", failed.content);
 
-    // Output that would swamp the context is cut, and says that it was.
-    let long = project
-        .call("run_shell", serde_json::json!({ "command": "for i in $(seq 1 20000); do echo line $i; done" }))
-        .await;
+    // Output that would swamp the context is cut.
+    let many_lines = if cfg!(windows) {
+        "for /L %i in (1,1,20000) do @echo line %i"
+    } else {
+        "for i in $(seq 1 20000); do echo line $i; done"
+    };
+    let long = project.call("run_shell", serde_json::json!({ "command": many_lines })).await;
     assert!(long.len() < 100_000, "a long output must be capped, got {} chars", long.len());
 }
 
