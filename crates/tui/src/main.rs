@@ -1004,7 +1004,9 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     // soon as the transcript has a user message in it. A resumed session puts
     // messages up immediately, so its card would stay stuck at whatever row
     // the reveal had reached — draw it whole instead.
-    app.chat.update_welcome_card(opening_card(initial_card, resume_session_id.is_none()));
+    // Before anything is drawn: the first frame already follows the setting.
+    flashagent_tui::anim::set_enabled(app.config.animations);
+    app.chat.update_welcome_card(opening_card(initial_card, resume_session_id.is_none() && app.config.animations));
     if let Some(verdict) = first_run_verdict {
         app.chat.push_system(&verdict);
     }

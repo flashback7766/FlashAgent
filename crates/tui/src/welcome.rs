@@ -161,6 +161,9 @@ pub(crate) fn breath_level(tick_n: usize) -> u8 {
 /// The welcome card is rebuilt only when this says so: breathing must not cost
 /// a full card repaint 12 times a second.
 pub fn mascot_needs_repaint(tick_n: usize) -> bool {
+    if !crate::anim::enabled() {
+        return false;
+    }
     let blink = |t: usize| (t % 50 == 46) || (t % 50 == 47);
     let prev = tick_n.wrapping_sub(1);
     blink(tick_n) != blink(prev) || breath_level(tick_n) != breath_level(prev)
@@ -215,6 +218,8 @@ pub fn thinking_face(phase: usize) -> &'static str {
 /// Every line is exactly 16 columns wide, transparent pixels included, so the
 /// rows stay aligned with each other when the card centres them.
 pub fn mascot_swift_lines_mood(tick_n: usize, mood: MascotMood) -> [String; 6] {
+    // Still, eyes open, with motion off.
+    let tick_n = if crate::anim::enabled() { tick_n } else { 0 };
     let blink = (tick_n % 50 == 46) || (tick_n % 50 == 47);
     let grid = mascot_grid(blink, mood);
     let breath = breath_level(tick_n);

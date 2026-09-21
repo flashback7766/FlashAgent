@@ -60,6 +60,9 @@ pub(crate) fn opening_card(card: Vec<RenderLine>, animate: bool) -> Vec<RenderLi
 /// How many rows of the welcome card to draw, so it appears to draw itself
 /// from the top down over the first half second. `None` once it is whole.
 pub(crate) fn welcome_reveal_rows(started_at: std::time::Instant) -> Option<usize> {
+    if !flashagent_tui::anim::enabled() {
+        return None;
+    }
     const ROW_MS: u128 = 35;
     const ROWS: u128 = 15;
     let elapsed = started_at.elapsed().as_millis();
