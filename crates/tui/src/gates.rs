@@ -1,49 +1,5 @@
 use super::*;
 
-/// Render an approval card with default (Allow) selection.
-pub fn approval_card(req: &ApprovalRequest) -> Vec<(LineKind, String)> {
-    approval_card_with_selection(req, Decision::Allow)
-}
-
-/// Render an approval card with interactive Allow / Deny selection.
-pub fn approval_card_with_selection(req: &ApprovalRequest, selected: Decision) -> Vec<(LineKind, String)> {
-    let mut out = vec![
-        (LineKind::System, "╭─ approval required ─────".to_string()),
-        (LineKind::Tool, format!("│ tool: {}", req.tool)),
-    ];
-    let short: String = req.args_json.chars().take(120).collect();
-    let more = if req.args_json.chars().count() > 120 { "…" } else { "" };
-    out.push((LineKind::Tool, format!("│ args: {short}{more}")));
-    if let Some(diff) = &req.diff {
-        out.push((LineKind::Tool, "│ diff:".into()));
-        for l in diff.lines().take(60) {
-            let kind = if l.starts_with('+') {
-                LineKind::Diff
-            } else if l.starts_with('-') {
-                LineKind::ToolError
-            } else {
-                LineKind::System
-            };
-            out.push((kind, format!("│ {l}")));
-        }
-    }
-    let (allow_btn, deny_btn) = match selected {
-        Decision::Allow => (
-            "\x1b[1;38;2;145;205;140m❯ [Allow]\x1b[0m",
-            "\x1b[38;2;140;135;130m  [Deny]\x1b[0m",
-        ),
-        Decision::Deny => (
-            "\x1b[38;2;140;135;130m  [Allow]\x1b[0m",
-            "\x1b[1;38;2;230;110;95m❯ [Deny]\x1b[0m",
-        ),
-    };
-    out.push((
-        LineKind::System,
-        format!("╰─ {allow_btn}   {deny_btn}   \x1b[38;2;135;130;125m(←/→ select · enter confirm)\x1b[0m ───"),
-    ));
-    out
-}
-
 /// An approval gate answered from the terminal: the UI loop picks up
 /// [`TuiGate::pending`] and calls [`TuiGate::respond`] with the user's key press.
 #[derive(Default)]

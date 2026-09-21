@@ -146,14 +146,6 @@ impl McpManager {
         Ok(client)
     }
 
-    /// Stop an active server.
-    pub async fn stop_server(&self, name: &str) {
-        let client = { self.clients.write().remove(name) };
-        if let Some(client) = client {
-            client.kill().await;
-        }
-    }
-
     /// Reload configurations from disk and restart enabled servers.
     pub async fn reload(&self) -> Result<(), String> {
         // 1. Kill all running servers

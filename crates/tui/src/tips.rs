@@ -45,25 +45,6 @@ pub static TIPS_POOL: &[&str] = &[
     "Pictures cost tokens: the attachment label shows the measured cost for this model.",
 ];
 
-/// Pick a tip from the pool given a pseudo-random seed or tick counter.
-pub fn get_tip(seed: usize) -> &'static str {
-    TIPS_POOL[seed % TIPS_POOL.len()]
-}
-
-/// Pick a random tip using system time with a splitmix64 scramble.
-pub fn random_tip() -> &'static str {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let mut z = nanos.wrapping_add(0x9e3779b97f4a7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
-    let hash = z ^ (z >> 31);
-    get_tip(hash as usize)
-}
-
 fn next_rand(seed: &mut u64) -> u64 {
     *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     *seed
@@ -335,8 +316,6 @@ mod tests {
                 }
             }
         }
-        assert!(!get_tip(0).is_empty());
-        assert!(!random_tip().is_empty());
     }
 
 
