@@ -19,7 +19,7 @@
 
 </div>
 
-> **Status:** Beta b328 — actively developed by a solo maintainer. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
+> **Status:** Beta b330 — actively developed by a solo maintainer. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
 
 ---
 
