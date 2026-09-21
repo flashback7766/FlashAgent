@@ -240,9 +240,7 @@ impl App {
                         self.renderer.request_reprint();
                     }
 
-                    if self.config.auto_save_sessions {
-                        save_session_file(cx.session_id, &self.current_model, cx.cwd_display, &self.history);
-                    }
+                    self.autosave(cx.session_id, cx.cwd_display);
 
                     // Clear any existing ghost suggestion.
                     // No hardcoded or heuristic fallback strings for recap or write-in suggestions:

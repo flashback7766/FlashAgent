@@ -85,9 +85,27 @@ pub(crate) fn flashagent_home_dir() -> Option<std::path::PathBuf> {
         .map(|h| std::path::PathBuf::from(h).join(".flashagent"))
 }
 
-pub(crate) fn save_session_file(session_id: &str, model: &str, cwd: &str, history: &[ChatMessage]) -> Option<std::path::PathBuf> {
-    let base_dir = flashagent_home_dir()?.join("sessions");
-    let _ = std::fs::create_dir_all(&base_dir);
+/// Write the conversation to `~/.flashagent/sessions/<id>.json`.
+///
+/// The file is written beside its final name and then renamed over it, so a
+/// crash, a full disk or a second instance mid-write leaves either the old
+/// session or the new one on disk, never half of each. The error says what
+/// went wrong in words the user can act on; it is shown, not swallowed —
+/// a conversation the user believes is saved and is not is the worst kind
+/// of loss, because nobody goes looking for it until it is gone.
+pub(crate) fn save_session_file(session_id: &str, model: &str, cwd: &str, history: &[ChatMessage]) -> Result<std::path::PathBuf, String> {
+    let base_dir = sessions_dir().ok_or("no home directory to save sessions in")?;
+    save_session_in(&base_dir, session_id, model, cwd, history)
+}
+
+pub(crate) fn save_session_in(
+    base_dir: &std::path::Path,
+    session_id: &str,
+    model: &str,
+    cwd: &str,
+    history: &[ChatMessage],
+) -> Result<std::path::PathBuf, String> {
+    std::fs::create_dir_all(base_dir).map_err(|e| format!("cannot create {}: {e}", base_dir.display()))?;
     let path = base_dir.join(format!("{session_id}.json"));
     let saved = SavedSession {
         id: session_id.to_string(),
@@ -99,12 +117,38 @@ pub(crate) fn save_session_file(session_id: &str, model: &str, cwd: &str, histor
         cwd: cwd.to_string(),
         messages: history.iter().map(SavedMessage::from).collect(),
     };
-    if let Ok(data) = serde_json::to_string_pretty(&saved) {
-        if std::fs::write(&path, data).is_ok() {
-            return Some(path);
-        }
+    let data = serde_json::to_string_pretty(&saved).map_err(|e| format!("cannot encode the session: {e}"))?;
+    // The process id keeps two instances that save the same id at once from
+    // writing into one temporary file.
+    let tmp = base_dir.join(format!(".{session_id}.{}.tmp", std::process::id()));
+    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+        use std::io::Write;
+        f.write_all(data.as_bytes())?;
+        f.sync_all()
+    });
+    if let Err(e) = written.and_then(|_| std::fs::rename(&tmp, &path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("cannot write {}: {e}", path.display()));
     }
-    None
+    Ok(path)
+}
+
+/// The last save, on the way out. Nothing comes after it to retry, so when
+/// the sessions folder cannot be written the conversation goes to the
+/// system's temporary folder instead, and the message names both.
+pub(crate) fn save_on_exit(session_id: &str, model: &str, cwd: &str, history: &[ChatMessage]) -> Result<String, String> {
+    let why = match save_session_file(session_id, model, cwd, history) {
+        Ok(_) => return Ok(session_id.to_string()),
+        Err(why) => why,
+    };
+    let spare = std::env::temp_dir().join("flashagent-unsaved");
+    match save_session_in(&spare, session_id, model, cwd, history) {
+        Ok(path) => Err(format!(
+            "{why}.\nA copy was written to {} — move it into ~/.flashagent/sessions/ to resume it.",
+            path.display()
+        )),
+        Err(also) => Err(format!("{why}; the spare copy failed too: {also}")),
+    }
 }
 
 /// A saved conversation, as the resume picker lists it.
@@ -131,17 +175,21 @@ pub(crate) fn is_session_id(id: &str) -> bool {
 
 /// A fresh id for a conversation that has not been saved before.
 ///
-/// Stamped to the second, and never one already on disk: two launches in the
-/// same second used to share an id, so the second session saved over the
-/// first.
+/// Stamped to the second for a person reading the folder, plus the process
+/// id. Two instances running at the same time never share a process id, so
+/// two launches in the same second get different ids even though neither
+/// has saved anything yet; checking the folder alone could not see that,
+/// and the second session used to save over the first.
 pub(crate) fn new_session_id() -> String {
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    unused_session_id(sessions_dir().as_deref(), ts)
+    unused_session_id(sessions_dir().as_deref(), ts, std::process::id())
 }
 
-fn unused_session_id(dir: Option<&std::path::Path>, ts: u64) -> String {
+/// `session_<ts>_<pid>`, or with a counter after it when a file of that name
+/// is already on disk (a process id reused later in the same second).
+fn unused_session_id(dir: Option<&std::path::Path>, ts: u64, pid: u32) -> String {
     let taken = |id: &str| dir.is_some_and(|d| d.join(format!("{id}.json")).exists());
-    let base = format!("session_{ts}");
+    let base = format!("session_{ts}_{pid}");
     if !taken(&base) {
         return base;
     }
@@ -161,6 +209,17 @@ pub(crate) fn ago(timestamp: u64, now: u64) -> String {
 }
 
 impl App {
+    /// Save after a turn or a rewind. A failure is said on screen, with when
+    /// it will be tried again; the next turn and quitting both retry.
+    pub(crate) fn autosave(&mut self, session_id: &str, cwd_display: &str) {
+        if !self.config.auto_save_sessions {
+            return;
+        }
+        if let Err(why) = save_session_file(session_id, &self.current_model, cwd_display, &self.history) {
+            self.notice(format!("Session not saved: {why}. Retried after the next turn and on exit."));
+        }
+    }
+
     /// Open the list of this folder's saved sessions, leaving out the one
     /// already open.
     pub(crate) fn open_session_picker(&mut self, cwd_display: &str, current_session: &str) {
@@ -359,12 +418,45 @@ mod session_tests {
     #[test]
     fn a_new_session_never_takes_the_id_of_one_already_saved() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(unused_session_id(Some(dir.path()), 500), "session_500");
-        write(dir.path(), "session_500", 500, "~/proj", "first");
-        assert_eq!(unused_session_id(Some(dir.path()), 500), "session_500_2");
-        write(dir.path(), "session_500_2", 500, "~/proj", "second");
-        assert_eq!(unused_session_id(Some(dir.path()), 500), "session_500_3");
-        assert_eq!(unused_session_id(None, 500), "session_500");
+        assert_eq!(unused_session_id(Some(dir.path()), 500, 7), "session_500_7");
+        write(dir.path(), "session_500_7", 500, "~/proj", "first");
+        assert_eq!(unused_session_id(Some(dir.path()), 500, 7), "session_500_7_2");
+        write(dir.path(), "session_500_7_2", 500, "~/proj", "second");
+        assert_eq!(unused_session_id(Some(dir.path()), 500, 7), "session_500_7_3");
+        assert_eq!(unused_session_id(None, 500, 7), "session_500_7");
+    }
+
+    #[test]
+    fn two_instances_started_in_the_same_second_get_different_ids() {
+        // Neither has saved yet, so the folder cannot tell them apart; the
+        // process id does.
+        let dir = tempfile::tempdir().unwrap();
+        assert_ne!(unused_session_id(Some(dir.path()), 500, 7), unused_session_id(Some(dir.path()), 500, 8));
+    }
+
+    #[test]
+    fn saving_replaces_the_file_whole_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = vec![ChatMessage::system("sys"), ChatMessage::user("first"), ChatMessage::assistant("one")];
+        let path = save_session_in(dir.path(), "s", "m", "~/p", &history).unwrap();
+        let mut longer = history.clone();
+        longer.push(ChatMessage::user("second"));
+        save_session_in(dir.path(), "s", "m", "~/p", &longer).unwrap();
+
+        let saved: SavedSession = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.messages.len(), 4);
+        let files: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(files.len(), 1, "a temporary file was left behind: {files:?}");
+    }
+
+    #[test]
+    fn a_save_that_cannot_happen_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file where the folder should be.
+        let blocked = dir.path().join("sessions");
+        std::fs::write(&blocked, "").unwrap();
+        let err = save_session_in(&blocked, "s", "m", "~/p", &[ChatMessage::user("hi")]).unwrap_err();
+        assert!(err.contains("sessions"), "{err}");
     }
 
     #[test]

@@ -444,14 +444,20 @@ async fn main() -> Result<()> {
         LeaveAlternateScreen
     );
     disable_raw_mode()?;
-    if let Ok(Some(ref saved_id)) = result {
-        let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
-        let card = render_session_saved_card(saved_id, term_w as usize);
-        println!();
-        for line in card {
-            println!("{line}");
+    match result {
+        Ok(Some(Ok(ref saved_id))) => {
+            let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
+            let card = render_session_saved_card(saved_id, term_w as usize);
+            println!();
+            for line in card {
+                println!("{line}");
+            }
+            println!();
         }
-        println!();
+        // The terminal is back to normal, so this is the last thing on
+        // screen and stays in the scrollback.
+        Ok(Some(Err(ref why))) => eprintln!("\nThe session was NOT saved: {why}\n"),
+        _ => {}
     }
     if result.is_ok() && UNINSTALL_AFTER_EXIT.load(Ordering::SeqCst) {
         if let Err(e) = flashagent_svc::uninstall::run_interactive(false) {
@@ -709,7 +715,20 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     Ok(result)
 }
 
-async fn run_app(ctx: AppContext) -> Result<Option<String>> {
+/// Where /rewind keeps how files were before each turn changed them: beside
+/// the sessions, under the session's id, so it still works after --resume.
+fn open_snapshots(perm: &PermissionedTools, session_id: &str, cwd: &std::path::Path) {
+    let dir = flashagent_home_dir()
+        .map(|home| home.join("snapshots").join(session_id))
+        .unwrap_or_else(|| std::env::temp_dir().join("flashagent-snapshots").join(session_id));
+    perm.state().set_snapshots(Arc::new(flashagent_core::SnapshotStore::open(dir, cwd.to_path_buf())));
+}
+
+/// What happened to the conversation on the way out: nothing worth
+/// saving (`None`), saved under this id, or not saved and why.
+type SaveOutcome = Option<std::result::Result<String, String>>;
+
+async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     let AppContext {
         config: app_config,
         source,
@@ -824,12 +843,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         }
     };
     let mut session_id = resume_session_id.clone().unwrap_or_else(new_session_id);
-    // How files were before each turn changed them, kept beside the sessions
-    // so /rewind still works after --resume.
-    let snapshot_dir = flashagent_home_dir()
-        .map(|home| home.join("snapshots").join(&session_id))
-        .unwrap_or_else(|| std::env::temp_dir().join("flashagent-snapshots").join(&session_id));
-    perm.state().set_snapshots(Arc::new(flashagent_core::SnapshotStore::open(snapshot_dir, cwd.clone())));
+    open_snapshots(perm, &session_id, &cwd);
 
     let effort_memory = flashagent_core::EffortMemory::load();
     source.set_effort_bias(effort_memory.steps(&model));
@@ -1001,7 +1015,14 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
                 app.notice(format!("Resumed session '{resume_id}' ({restored} messages loaded)."));
             }
-            Err(why) => app.chat.push_line(LineKind::ToolError, why),
+            Err(why) => {
+                // The file that failed to load keeps its name to itself. Saving
+                // this new conversation under it would overwrite whatever is
+                // left of the old one, which may still be recoverable by hand.
+                session_id = new_session_id();
+                open_snapshots(perm, &session_id, &cwd);
+                app.chat.push_line(LineKind::ToolError, why);
+            }
         }
     }
     if let Some(note) = session_note {
@@ -1014,8 +1035,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     macro_rules! finish {
         () => {
             if app.config.auto_save_sessions && worth_saving(&app.history) {
-                save_session_file(&session_id, &app.current_model, &cwd_display, &app.history)
-                    .map(|_| session_id.clone())
+                Some(save_on_exit(&session_id, &app.current_model, &cwd_display, &app.history))
             } else {
                 None
             }
@@ -1028,7 +1048,12 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
         // and in where /rewind keeps its copies.
         if let Some(id) = app.pending_resume.take().filter(|id| *id != session_id) {
             if app.config.auto_save_sessions && worth_saving(&app.history) {
-                save_session_file(&session_id, &app.current_model, &cwd_display, &app.history);
+                if let Err(why) = save_session_file(&session_id, &app.current_model, &cwd_display, &app.history) {
+                    // Switching away would drop the only copy left: the one
+                    // in memory. Stay, and say so.
+                    app.notice(format!("Not switching: this session could not be saved ({why})"));
+                    continue;
+                }
             }
             match sessions_dir()
                 .ok_or_else(|| "No home directory to read sessions from".to_string())
@@ -1044,12 +1069,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                     app.chat.clear();
                     let restored = restore_session(saved, &mut app.chat, &mut app.history);
                     session_id = id;
-                    if let Some(home) = flashagent_home_dir() {
-                        perm.state().set_snapshots(Arc::new(flashagent_core::SnapshotStore::open(
-                            home.join("snapshots").join(&session_id),
-                            cwd.clone(),
-                        )));
-                    }
+                    open_snapshots(perm, &session_id, &cwd);
                     app.latest_suggestion = None;
                     app.renderer.printed_settled = 0;
                     app.renderer.prev_expansion = None;
