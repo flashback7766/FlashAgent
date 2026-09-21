@@ -773,7 +773,10 @@ impl Renderer {
             tail.push((LineKind::System, tip_row));
         } else if let Some(tip_content) = st.tip {
             let avail1 = width.saturating_sub(8);
-            if width >= 30 && tip_content.chars().count() > avail1 {
+            // A second row for the tip is a luxury of a tall window. In a
+            // short one those rows belong to the conversation.
+            let room_for_two = height >= 20;
+            if room_for_two && width >= 30 && tip_content.chars().count() > avail1 {
                 let (l1, l2) = flashagent_tui::tips::split_tip_at_word_boundary(tip_content, avail1);
                 let row1 = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{l1}\x1b[0m");
                 // The split gives two lines; a tip that needs three loses the

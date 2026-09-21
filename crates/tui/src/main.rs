@@ -1095,7 +1095,9 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                 app.animate_welcome(&source, perm.state().mode(), mascot_mood, Some(term_w as usize), None);
             }
         }
-        let tip_lines = app.tip_animator.render_lines(app.tick_n, term_w as usize);
+        // Two rows for a tip only when the window can spare them.
+        let tip_rows = if term_h >= 20 { 2 } else { 1 };
+        let tip_lines = app.tip_animator.render_lines(app.tick_n, term_w as usize, tip_rows);
         // What every handler gets from the loop besides its state. A macro
         // rather than a function: it borrows this frame's own values.
         macro_rules! loop_ctx {
@@ -1439,14 +1441,7 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
                         app.turn_outcome.tool_calls += 1;
                         app.token_tracker.on_delta(name);
                         app.token_tracker.on_delta(args_json);
-                        // The model's own header when it wrote one, since it
-                        // says what the call is for; the tool name otherwise.
-                        let what = flashagent_llm::effective_args(args_json, name)
-                            .and_then(|v| {
-                                v.get("header").and_then(|h| h.as_str()).map(str::trim).filter(|h| !h.is_empty()).map(str::to_string)
-                            })
-                            .unwrap_or_else(|| format!("Running {name}"));
-                        app.turn_phase = TurnPhase::Tool(what);
+                        app.turn_phase = TurnPhase::Tool;
                     }
                     LoopEvent::ToolFinished { is_error, result, .. } => {
                         if *is_error {
@@ -2193,14 +2188,10 @@ mod tests {
         assert_eq!(TurnPhase::AfterTool.label(), "Reading the result");
         assert_eq!(TurnPhase::Stopping.label(), "Stopping");
 
-        // A tool shows what the model said it was for.
-        assert_eq!(
-            TurnPhase::Tool("Add the null check to parser.rs".into()).label(),
-            "Add the null check to parser.rs"
-        );
-        // And a header long enough to break the line is shortened, not wrapped.
-        let long = TurnPhase::Tool("x".repeat(200)).label();
-        assert!(long.chars().count() <= 60, "{}", long.chars().count());
+        // While a tool runs, the line above the composer already says what
+        // the model is doing and why; saying it again inside the composer
+        // read as though the user had typed it there.
+        assert_eq!(TurnPhase::Tool.label(), "Running a tool");
     }
 
     #[test]
