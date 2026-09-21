@@ -2141,6 +2141,64 @@ mod tests {
     }
 
     #[test]
+    fn the_welcome_card_leaves_room_for_the_composer_at_any_size() {
+        // The screen under the card is the composer, the hint line, the tip
+        // and the status line. A card that takes more than what is left
+        // pushes its own top off the screen, which is what a terminal a
+        // quarter of the screen wide used to show.
+        for width in [30usize, 44, 60, 80, 98, 120, 200] {
+            for height in [8usize, 10, 12, 14, 16, 18, 21, 24, 30, 50] {
+                let card = welcome_card(&WelcomeCard {
+                    model: "gemma-4-e2b-it-qat@q4_k_xl",
+                    cwd: "/home/someone/projects/flashagent",
+                    mode: "Accept Edits",
+                    thinking: Some("auto [off, on]"),
+                    context_window: Some("64k ctx"),
+                    width,
+                    height,
+                    ..Default::default()
+                });
+                let room = height.saturating_sub(7);
+                assert!(
+                    card.len() <= room,
+                    "at {width}x{height} the card took {} of the {room} rows it had",
+                    card.len()
+                );
+                for (_, line) in &card {
+                    assert!(
+                        visible_width(line) <= width,
+                        "at {width}x{height} a card line came out {} wide",
+                        visible_width(line)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_taller_window_gets_at_least_as_much_of_the_card() {
+        // Shapes are tried richest first, so growing the window must never
+        // take something away.
+        let card_at = |height: usize| {
+            welcome_card(&WelcomeCard {
+                model: "m",
+                cwd: "~/work",
+                mode: "Manual",
+                width: 100,
+                height,
+                ..Default::default()
+            })
+            .len()
+        };
+        for height in 9..40 {
+            assert!(
+                card_at(height) <= card_at(height + 1),
+                "the card shrank when the window grew, at {height} rows"
+            );
+        }
+    }
+
+    #[test]
     fn the_welcome_card_never_overflows_a_narrow_terminal() {
         for width in [30usize, 36, 46, 56, 80, 120] {
             let card = welcome_card(&WelcomeCard {

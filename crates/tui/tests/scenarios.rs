@@ -433,6 +433,110 @@ fn the_colour_theme_repaints_the_whole_screen() {
     );
 }
 
+/// A terminal the size of a small window in a tiling setup, and a very small
+/// one besides: 98x21 is a quarter-screen terminal, 60x14 an editor panel.
+const SMALL: (u16, u16) = (98, 21);
+const TINY: (u16, u16) = (60, 14);
+
+/// Every screen the app can put up, opened in a small terminal, with what it
+/// takes to get there and a word that proves it is there.
+const SCREENS: &[(&str, &str)] = &[
+    ("/settings", "Settings"),
+    ("/memory", "remembers"),
+    ("/mcp", "MCP"),
+    ("/help", "Commands"),
+];
+
+fn lines_of(term: &Term) -> Vec<String> {
+    term.screen().lines().map(str::to_string).collect()
+}
+
+#[test]
+fn nothing_is_drawn_outside_a_small_terminal() {
+    let server = MockServer::start(vec![Reply::Text("Short answer.".into())]);
+    let home = Home::new();
+    home.set_up(&server.url);
+    let (cols, rows) = SMALL;
+    let term = Term::start(&home, &["-y"], cols, rows);
+    term.wait_for(PROMPT, WAIT);
+
+    let too_wide: Vec<_> = lines_of(&term)
+        .into_iter()
+        .filter(|l| l.chars().count() > cols as usize)
+        .collect();
+    assert!(too_wide.is_empty(), "lines wider than the terminal: {too_wide:#?}");
+
+    // The composer is the last thing on screen: if the welcome card pushed
+    // it off, there is nowhere to type.
+    let screen = term.screen();
+    assert!(screen.contains(PROMPT), "the composer is off screen:\n{screen}");
+}
+
+#[test]
+fn every_screen_fits_a_small_terminal() {
+    for (cols, rows) in [SMALL, TINY] {
+        for (command, marker) in SCREENS {
+            let server = MockServer::start(vec![Reply::Text("ok".into())]);
+            let home = Home::new();
+            home.set_up(&server.url);
+            let term = Term::start(&home, &["-y"], cols, rows);
+            term.wait_for(PROMPT, WAIT);
+
+            term.type_text(command);
+            term.send(ENTER);
+            term.wait_for(marker, WAIT);
+
+            let lines = lines_of(&term);
+            let too_wide: Vec<_> =
+                lines.iter().filter(|l| l.chars().count() > cols as usize).cloned().collect();
+            assert!(
+                too_wide.is_empty(),
+                "{command} at {cols}x{rows} drew past the right edge: {too_wide:#?}"
+            );
+            assert!(
+                lines.len() <= rows as usize,
+                "{command} at {cols}x{rows} drew {} rows",
+                lines.len()
+            );
+            // Whatever it put up must still say how to leave it.
+            let screen = term.screen().to_lowercase();
+            assert!(
+                screen.contains("esc") || screen.contains("close") || screen.contains("back"),
+                "{command} at {cols}x{rows} gives no way out:\n{}",
+                term.screen()
+            );
+            term.send(ESC);
+        }
+    }
+}
+
+#[test]
+fn what_a_running_tool_is_doing_is_said_once() {
+    // It used to be said twice: once on the transcript line, and again
+    // inside the composer, where it read as something the user had typed.
+    let header = "Check the marker file";
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "header": header, "command": "sleep 3" }),
+        },
+        Reply::Text("Done.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "approval_mode_bypass": true }));
+
+    term.type_text("check the marker");
+    term.send(ENTER);
+    term.wait_for(header, WAIT);
+
+    let screen = term.screen();
+    assert_eq!(
+        screen.matches(header).count(),
+        1,
+        "the header is on screen twice:\n{screen}"
+    );
+}
+
 /// Shown under the composer only while a turn runs.
 const RUNNING_HINT: &str = "esc to interrupt";
 
@@ -1583,4 +1687,21 @@ fn the_memory_summary_is_written_by_the_model_and_a_dive_deeper_question_is_sent
     term.send(ENTER);
     term.wait_for("Here is the comparison.", WAIT);
     assert!(sent(server.turns().last().unwrap()).contains("Compare DiLink versions"));
+}
+
+#[test]
+#[ignore = "prints the screen for a person to look at"]
+fn show_small_terminal() {
+    for (cols, rows) in [(98u16, 21u16), (80, 18), (60, 14), (44, 10)] {
+        let server = MockServer::start(vec![Reply::Text("ok".into())]);
+        let home = Home::new();
+        home.set_up(&server.url);
+        let term = Term::start(&home, &["-y"], cols, rows);
+        term.wait_for(PROMPT, WAIT);
+        std::thread::sleep(Duration::from_secs(4));
+        println!("=== {cols}x{rows} ===");
+        for line in term.screen().lines() {
+            println!("|{line}|");
+        }
+    }
 }

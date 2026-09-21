@@ -89,8 +89,9 @@ pub(crate) enum TurnPhase {
     Thinking,
     /// Visible answer tokens are arriving.
     Writing,
-    /// A tool is running; the string is what it is doing.
-    Tool(String),
+    /// A tool is running. What it is doing is on the transcript line right
+    /// above the composer, so the composer does not repeat it.
+    Tool,
     /// A tool finished and the model has the result but has not spoken yet.
     AfterTool,
     /// The user asked to stop and the turn is winding down.
@@ -103,7 +104,7 @@ impl TurnPhase {
             Self::Waiting => "Waiting for the model".to_string(),
             Self::Thinking => "Thinking".to_string(),
             Self::Writing => "Writing the answer".to_string(),
-            Self::Tool(what) => flashagent_tui::truncate_middle(what, 60),
+            Self::Tool => "Running a tool".to_string(),
             Self::AfterTool => "Reading the result".to_string(),
             Self::Stopping => "Stopping".to_string(),
         }

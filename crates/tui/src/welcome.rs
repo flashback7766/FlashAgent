@@ -271,11 +271,71 @@ pub fn fit_parts(parts: &[(String, String)], separator: &str, width: usize) -> S
     out
 }
 
-/// Draw the startup welcome banner, fitted to the terminal it is given.
+/// Rows the screen keeps for itself under the welcome card: the composer's
+/// three, the hint line, the tip and the status line. The card gets what is
+/// left.
+const CHROME_ROWS: usize = 7;
+
+/// How much of itself the card is drawing.
 ///
-/// In a standard 24-row terminal and in smaller ones the card and the mascot
-/// stay whole rather than scrolling off the top.
+/// The shapes are tried richest first and the first one that fits the rows
+/// available is drawn, so a short window gets a smaller card rather than a
+/// card whose top has scrolled off the screen.
+#[derive(Debug, Clone, Copy)]
+struct Shape {
+    /// Side-by-side columns; needs width as well as height.
+    two_column: bool,
+    /// Rows of the mascot: all six, its head, or none.
+    mascot_rows: usize,
+    /// The "Quick Commands" panel, as against a single line of hints.
+    quick_commands: bool,
+}
+
+impl Shape {
+    /// Every shape, richest first.
+    const ALL: [Shape; 5] = [
+        Shape { two_column: true, mascot_rows: 6, quick_commands: true },
+        Shape { two_column: false, mascot_rows: 6, quick_commands: true },
+        Shape { two_column: false, mascot_rows: 3, quick_commands: true },
+        Shape { two_column: false, mascot_rows: 0, quick_commands: true },
+        Shape { two_column: false, mascot_rows: 0, quick_commands: false },
+    ];
+}
+
+/// Draw the startup welcome banner, fitted to the terminal it is given.
 pub fn welcome_card(card: &WelcomeCard<'_>) -> Vec<RenderLine> {
+    let budget = card.height.saturating_sub(CHROME_ROWS);
+    for shape in Shape::ALL {
+        if shape.two_column && card.width < 56 {
+            continue;
+        }
+        let lines = build_card(card, shape);
+        if lines.len() <= budget {
+            return with_gap(lines, budget);
+        }
+    }
+    // Nothing fits: one line saying what this is and where it is running.
+    let single = format!(
+        "{M3_PRI_B}>_ FlashAgent{RESET} {M3_MUT}{}{RESET}",
+        truncate_middle(card.cwd, card.width.saturating_sub(16).max(8))
+    );
+    if budget == 0 {
+        Vec::new()
+    } else {
+        vec![(LineKind::System, single)]
+    }
+}
+
+/// A blank line between the card and the composer, when there is room for
+/// one.
+fn with_gap(mut lines: Vec<RenderLine>, budget: usize) -> Vec<RenderLine> {
+    if lines.len() < budget {
+        lines.push((LineKind::System, String::new()));
+    }
+    lines
+}
+
+fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
     let &WelcomeCard {
         model,
         cwd,
@@ -284,7 +344,7 @@ pub fn welcome_card(card: &WelcomeCard<'_>) -> Vec<RenderLine> {
         thinking,
         context_window,
         width,
-        height,
+        height: _,
         tick: tick_n,
         show_mascot,
         mood,
@@ -330,7 +390,7 @@ pub fn welcome_card(card: &WelcomeCard<'_>) -> Vec<RenderLine> {
         format!("v{cur_ver}")
     };
 
-    if width >= 56 && height >= 18 {
+    if shape.two_column {
         // Two-column modular layout in Material 3 Light Blue
         let card_w = if width >= 76 {
             width.clamp(76, 104)
@@ -448,26 +508,20 @@ pub fn welcome_card(card: &WelcomeCard<'_>) -> Vec<RenderLine> {
         lines.push((LineKind::System, top));
         lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(&format!("{M3_TXT_B}{greeting} {M3_ICE}{username_clean}{M3_TXT_B}!{RESET}"), inner_w))));
 
+        // A short screen shows the top of the same sprite rather than a
+        // different creature: there used to be a hand-drawn "mini" version
+        // here that still had the old round eyes, so the mascot changed
+        // species when the window got short.
         if show_mascot {
-            if height >= 20 {
-                for m in &mascot {
-                    lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(m, inner_w))));
-                }
-            } else {
-                // A short screen shows the top half of the same sprite rather
-                // than a different creature: there used to be a hand-drawn
-                // "mini" version here that still had the old round eyes, so
-                // the mascot changed species when the window got short.
-                for m in mascot.iter().take(3) {
-                    lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(m, inner_w))));
-                }
+            for m in mascot.iter().take(shape.mascot_rows) {
+                lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(m, inner_w))));
             }
         }
 
         lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(&left_meta, inner_w))));
         lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(&cwd_meta, inner_w))));
 
-        if height >= 14 {
+        if shape.quick_commands {
             let div_cmd = format!("{M3_BRD}├─{RESET} {M3_LGT_B}Quick Commands{RESET} {M3_BRD}{}┤{RESET}", "─".repeat(inner_w.saturating_sub(17)));
             lines.push((LineKind::System, div_cmd));
             lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}for autonomy{RESET}"), inner_w))));
@@ -487,9 +541,6 @@ pub fn welcome_card(card: &WelcomeCard<'_>) -> Vec<RenderLine> {
         lines.push((LineKind::System, bot));
     }
 
-    if height >= 14 {
-        lines.push((LineKind::System, String::new()));
-    }
     lines
 }
 

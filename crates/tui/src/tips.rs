@@ -219,11 +219,13 @@ impl TipAnimator {
 
     /// Renders the animated tip lines with typewriter effect.
     /// In compact terminals where the tip exceeds a single line, wraps onto a second line.
-    pub fn render_lines(&self, tick_n: usize, width: usize) -> Vec<String> {
+    /// The tip as at most `max_lines` rows. A second row is a luxury of a
+    /// tall window; in a short one those rows belong to the conversation.
+    pub fn render_lines(&self, tick_n: usize, width: usize, max_lines: usize) -> Vec<String> {
         let avail1 = width.saturating_sub(8); // "  Tip: " is 7 chars + 1 char margin
         let avail2 = width.saturating_sub(8); // "       " is 7 chars indent + 1 char margin
 
-        if width < 30 || self.total_chars <= avail1 {
+        if max_lines <= 1 || width < 30 || self.total_chars <= avail1 {
             let single = self.render_line(tick_n, avail1);
             return vec![format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m {single}")];
         }
@@ -420,25 +422,25 @@ mod tests {
         anim.phase = TipPhase::Typing;
 
         // Wide terminal: fits on 1 line
-        let lines_wide = anim.render_lines(0, 160);
+        let lines_wide = anim.render_lines(0, 160, 2);
         assert_eq!(lines_wide.len(), 1);
         assert!(lines_wide[0].contains("Tip:"));
 
         // Compact terminal (e.g. 70 columns): exceeds 1 line
         // When typing character 0: line 1 only
         anim.char_count = 0;
-        let lines_c0 = anim.render_lines(0, 70);
+        let lines_c0 = anim.render_lines(0, 70, 2);
         assert_eq!(lines_c0.len(), 1);
 
         // When typing line 1: still 1 line
         anim.char_count = 20;
-        let lines_c20 = anim.render_lines(0, 70);
+        let lines_c20 = anim.render_lines(0, 70, 2);
         assert_eq!(lines_c20.len(), 1);
 
         // When all characters are typed (holding phase): spans 2 lines
         anim.char_count = anim.total_chars;
         anim.phase = TipPhase::Holding;
-        let lines_holding = anim.render_lines(0, 70);
+        let lines_holding = anim.render_lines(0, 70, 2);
         assert_eq!(lines_holding.len(), 2);
         assert!(lines_holding[0].contains("Tip:"));
         assert!(lines_holding[1].starts_with("       ")); // 7 space indent
@@ -446,7 +448,7 @@ mod tests {
         // When erasing: line 2 erases first
         anim.phase = TipPhase::Erasing;
         anim.char_count = 20; // erased down into line 1
-        let lines_erasing = anim.render_lines(0, 70);
+        let lines_erasing = anim.render_lines(0, 70, 2);
         assert_eq!(lines_erasing.len(), 1); // the second line has been erased
     }
 }
