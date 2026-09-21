@@ -12,7 +12,15 @@ impl App {
             return;
         }
         self.config.permission_mode = mode;
-        let _ = self.config.save();
+        self.save_config();
+    }
+
+    /// Write the settings to disk, and say so when that fails: a setting
+    /// that silently does not stick is found out only on the next launch.
+    pub(crate) fn save_config(&mut self) {
+        if let Err(e) = self.config.save() {
+            self.notice(format!("Settings not saved: {e}"));
+        }
     }
 
     /// Ctrl+U and /update: show the update that is already under way —

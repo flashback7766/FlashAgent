@@ -1414,7 +1414,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
 
                         if model_changed {
                             app.config.model = app.current_model.clone();
-                            let _ = app.config.save();
+                            app.save_config();
                             // The effort is the user's choice, not the
                             // server's. A model that cannot reason simply
                             // receives no thinking fields — silently turning

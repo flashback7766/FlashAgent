@@ -122,7 +122,7 @@ impl App {
     fn channel_switch_key(&mut self, cx: &LoopCtx<'_>, sw: ChannelSwitch, code: KeyCode) {
         if is_yes(code) {
             self.config.update_channel = sw.to;
-            let _ = self.config.save();
+            self.save_config();
             if cx.channel_watch_tx.receiver_count() > 0 {
                 let _ = cx.channel_watch_tx.send(sw.to);
             }
@@ -258,7 +258,7 @@ impl App {
             SettingsAction::Close => self.close_settings(cx, settings, shown_mode, &shown_effort),
             SettingsAction::DiscoverModels => {
                 self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
-                let _ = self.config.save();
+                self.save_config();
                 // Probe the URL the user just typed, not the one this session
                 // is connected to.
                 let key = settings.config.api_key.clone().or_else(|| std::env::var("FLASHAGENT_API_KEY").ok());
@@ -284,17 +284,17 @@ impl App {
             }
             SettingsAction::OpenModelMenu => {
                 self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
-                let _ = self.config.save();
+                self.save_config();
                 self.open_model_menu(cx.source);
             }
             SettingsAction::OpenEffortMenu => {
                 self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
-                let _ = self.config.save();
+                self.save_config();
                 self.open_effort_menu(cx.source);
             }
             SettingsAction::OpenWizard => {
                 self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
-                let _ = self.config.save();
+                self.save_config();
                 let mut deferred = Vec::new();
                 let completed =
                     flashagent_tui::run_wizard_channel(&mut self.config, cx.rx, &mut deferred).await.unwrap_or(false);
@@ -313,7 +313,7 @@ impl App {
             }
             SettingsAction::OpenSamplingMenu => {
                 self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
-                let _ = self.config.save();
+                self.save_config();
                 self.overlay = Some(Overlay::Sampling(SamplingView::new(&self.config)));
             }
             SettingsAction::CheckUpdatesNow => {
@@ -339,7 +339,7 @@ impl App {
             }
             SettingsAction::OpenMcpMenu => {
                 self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
-                let _ = self.config.save();
+                self.save_config();
                 self.open_mcp(cx, McpViewTab::Overview).await;
             }
             SettingsAction::None => self.overlay = Some(Overlay::Settings(settings)),
@@ -393,7 +393,7 @@ impl App {
         // The mode chosen here is the one to start in next time, also during
         // /goal, where it is the mode the run hands back when it ends.
         self.config.permission_mode = chosen_mode;
-        let _ = self.config.save();
+        self.save_config();
         cx.tools_arc.set_toolset_profile(self.config.toolset_profile);
         cx.tools_arc.set_web_enabled(self.config.web_tools);
         cx.source.0.set_max_retries(self.config.network_retries);
@@ -439,7 +439,7 @@ impl App {
             SamplingAction::Close => {}
             SamplingAction::SaveAndClose => {
                 view.apply_to_config(&mut self.config);
-                let _ = self.config.save();
+                self.save_config();
                 self.notice("Sampling parameters updated");
             }
             SamplingAction::None => self.overlay = Some(Overlay::Sampling(view)),
@@ -543,7 +543,7 @@ impl App {
                 let Some(val) = menu.selected_value().cloned() else { return };
                 self.current_model = val;
                 self.config.model = self.current_model.clone();
-                let _ = self.config.save();
+                self.save_config();
                 cx.source.set_model(&self.current_model);
                 cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
                 cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
