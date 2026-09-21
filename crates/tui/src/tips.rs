@@ -139,7 +139,21 @@ impl TipAnimator {
     }
 
     /// Advance typewriter animation state by one tick (80ms).
+    ///
+    /// With motion off a tip is not typed or erased: it is there whole for
+    /// its time, then the next one is.
     pub fn tick(&mut self) {
+        if !crate::anim::enabled() {
+            match self.phase {
+                TipPhase::Typing => self.char_count = self.total_chars,
+                TipPhase::Erasing => {
+                    self.char_count = 0;
+                    self.phase = TipPhase::Pause;
+                    self.pause_ticks = 0;
+                }
+                _ => {}
+            }
+        }
         match self.phase {
             TipPhase::Typing => {
                 // Type ultra-fast (4x faster): 8 characters per 80ms tick (~100 chars/sec)
@@ -192,7 +206,7 @@ impl TipAnimator {
         let caret = match self.phase {
             TipPhase::Typing | TipPhase::Erasing => true,
             TipPhase::Holding | TipPhase::Pause => (tick_n / 6).is_multiple_of(2),
-        };
+        } && crate::anim::enabled();
         (visible, caret)
     }
 

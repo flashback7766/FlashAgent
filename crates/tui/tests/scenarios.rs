@@ -1934,3 +1934,37 @@ fn show_composer() {
     std::thread::sleep(Duration::from_millis(300));
     println!("{}", term.screen());
 }
+
+/// Two looks at an idle screen `apart`, from the moment the prompt is up.
+fn idle_screens(animations: bool, apart: Duration) -> (String, String) {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "animations": animations }));
+    std::thread::sleep(Duration::from_millis(300));
+    let first = term.screen();
+    std::thread::sleep(apart);
+    (first, term.screen())
+}
+
+#[test]
+fn with_animations_off_an_idle_screen_holds_still() {
+    // The mascot breathes and the tip types itself out when motion is on;
+    // off, nothing on the screen may change while nobody does anything.
+    let (first, later) = idle_screens(false, Duration::from_millis(1500));
+    assert_eq!(first, later, "the screen moved with animations off");
+    let (first, later) = idle_screens(true, Duration::from_millis(1500));
+    assert_ne!(first, later, "this test cannot tell: nothing moves with animations on either");
+}
+
+#[test]
+fn token_counters_switched_off_are_not_shown_as_zeroes() {
+    let server = MockServer::start(vec![Reply::Slow { text: "one two three four".into(), per_word: Duration::from_millis(400) }]);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "show_tokens": false }));
+    term.type_text("count slowly");
+    term.send(ENTER);
+    term.wait_for(RUNNING_HINT, WAIT);
+    let screen = term.screen();
+    assert!(!screen.contains("Tokens -"), "counters that are off were drawn:\n{screen}");
+    term.wait_for("four", WAIT);
+}

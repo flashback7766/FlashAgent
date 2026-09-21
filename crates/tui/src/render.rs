@@ -584,7 +584,7 @@ impl Renderer {
 
             // Line 1: Input line with breathing prompt icon `❯` and placeholder if empty
             input_line_idx = tail.len();
-            let cycle = (st.tick_n % 28) as f32 / 28.0;
+            let cycle = if anim::enabled() { (st.tick_n % 28) as f32 / 28.0 } else { 0.25 };
             let phase = (cycle * std::f32::consts::PI * 2.0).sin() * 0.5 + 0.5;
             let r = (210.0 + phase * 45.0) as u8;
             let g = (150.0 + phase * 55.0) as u8;
@@ -737,13 +737,19 @@ impl Renderer {
             } else {
                 String::new()
             };
-            let live = format!(
-                "  {} \x1b[38;2;168;199;250mTokens - \x1b[1;38;2;235;240;250m{}\x1b[0m \x1b[38;2;194;231;255m({:.1}/s)\x1b[0m{spark}{cache_str}{ttft_str} \x1b[38;2;75;99;130m·\x1b[0m \x1b[38;2;155;165;180m{}s\x1b[0m",
-                anim::spinner(t),
-                st.model_tokens,
-                st.tokens_per_sec,
-                st.elapsed_secs,
-            );
+            // Counters switched off are left out, not shown as zeroes: "0
+            // tokens" reads as a model that has stopped.
+            let live = if st.token_tracker.is_some() {
+                format!(
+                    "  {} \x1b[38;2;168;199;250mTokens - \x1b[1;38;2;235;240;250m{}\x1b[0m \x1b[38;2;194;231;255m({:.1}/s)\x1b[0m{spark}{cache_str}{ttft_str} \x1b[38;2;75;99;130m·\x1b[0m \x1b[38;2;155;165;180m{}s\x1b[0m",
+                    anim::spinner(t),
+                    st.model_tokens,
+                    st.tokens_per_sec,
+                    st.elapsed_secs,
+                )
+            } else {
+                format!("  {} \x1b[38;2;155;165;180m{}s\x1b[0m", anim::spinner(t), st.elapsed_secs)
+            };
             // A turn is running, and something turned up on its own. Both
             // belong on this line: the counters prove the model is alive, the
             // notice is the thing the user did not ask for and must not miss.
@@ -1062,7 +1068,8 @@ impl App {
                 tick_n: self.tick_n,
                 running: self.running,
                 elapsed_secs: turn_clock(1000) as u64,
-                face_phase: turn_clock(80),
+                // The face is company, not the sign of work: the spinner is.
+                face_phase: if config.animations { turn_clock(80) } else { 0 },
                 model_tokens: if config.show_tokens { self.token_tracker.total_model_tokens } else { 0 },
                 tokens_per_sec: if config.show_tokens { tg_speed } else { 0.0 },
                 f_keep: if config.show_tokens { self.token_tracker.last_f_keep } else { None },
