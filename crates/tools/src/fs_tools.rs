@@ -22,8 +22,7 @@ pub struct EditChunk {
 }
 
 fn resolve(cwd: &Path, path: &str) -> PathBuf {
-    let p = Path::new(path);
-    if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) }
+    flashagent_core::resolve_path(cwd, path)
 }
 
 /// Read a text file, returning 1-based numbered lines.
@@ -305,6 +304,10 @@ pub(crate) fn list_dir(cwd: &Path, path: &str) -> Result<String, ToolError> {
 
 /// Glob file search relative to the cwd, capped at 500 results.
 pub(crate) fn glob_files(cwd: &Path, pattern: &str) -> Result<String, ToolError> {
+    // `~/notes/*.md` names the home folder, the same as it would at a shell
+    // prompt; glob itself has no idea what a tilde is.
+    let pattern = flashagent_core::expand_home(pattern);
+    let pattern = pattern.as_ref();
     let absolute = Path::new(pattern).is_absolute();
     let fixed = pattern.split(['*', '?', '[', '{']).next().unwrap_or("");
     let confine = !absolute && flashagent_core::path_is_inside(cwd, if fixed.is_empty() { "." } else { fixed });
@@ -600,6 +603,17 @@ mod tests {
         .is_err());
         // Original text untouched on error (purity).
         assert_eq!(apply_edits("a".repeat(10), &[]).unwrap(), "a".repeat(10));
+    }
+
+    #[test]
+    fn a_path_under_the_home_folder_is_read_from_there_not_from_the_project() {
+        let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+            return;
+        };
+        let home = PathBuf::from(home);
+        // Written at a prompt inside the project, `~/x` means the home
+        // folder, never `<project>/~/x`.
+        assert_eq!(resolve(Path::new("/work/project"), "~/x/main.rs"), home.join("x/main.rs"));
     }
 
     #[test]

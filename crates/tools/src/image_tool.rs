@@ -50,11 +50,7 @@ fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 
 /// Resolve a path against the working directory, refusing to leave it.
 fn resolve(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
-    let joined = if Path::new(raw).is_absolute() {
-        PathBuf::from(raw)
-    } else {
-        cwd.join(raw)
-    };
+    let joined = flashagent_core::resolve_path(cwd, raw);
     let canonical = joined
         .canonicalize()
         .map_err(|_| format!("no such file: {raw}"))?;

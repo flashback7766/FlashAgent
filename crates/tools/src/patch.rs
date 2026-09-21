@@ -221,7 +221,7 @@ fn apply_hunks(orig: &str, hunks: &[Hunk], rel_path: &str) -> Result<String, Too
 
 /// Applies a unified diff patch to a target file.
 pub fn patch_file(cwd: &Path, rel_path: &str, patch_text: &str) -> Result<String, ToolError> {
-    let full = cwd.join(rel_path);
+    let full = flashagent_core::resolve_path(cwd, rel_path);
     if !full.exists() {
         return Err(ToolError::Other(format!("target file not found: {rel_path}")));
     }
@@ -236,7 +236,7 @@ pub fn patch_file(cwd: &Path, rel_path: &str, patch_text: &str) -> Result<String
 
 /// Computes the prospective new content for write preview.
 pub fn preview_patch(cwd: &Path, rel_path: &str, patch_text: &str) -> Option<String> {
-    let orig_content = std::fs::read_to_string(cwd.join(rel_path)).ok()?;
+    let orig_content = std::fs::read_to_string(flashagent_core::resolve_path(cwd, rel_path)).ok()?;
     let hunks = parse_hunks(patch_text).ok()?;
     let new_content = apply_hunks(&orig_content, &hunks, rel_path).ok()?;
     Some(flashagent_core::unified(Some(&orig_content), &new_content, rel_path, 3))

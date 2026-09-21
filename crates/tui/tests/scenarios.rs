@@ -342,6 +342,52 @@ fn a_tool_turn_runs_the_tool_and_hands_its_result_back_to_the_model() {
     assert_eq!(server.replies_left(), 0);
 }
 
+#[test]
+fn a_path_written_with_a_tilde_is_the_file_it_means_at_a_prompt() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "read_file".into(),
+            // No shell runs a tool call, so nothing expands this `~` unless
+            // the app does. It used to look for a folder named `~` inside
+            // the project and report that the file was not there.
+            arguments: serde_json::json!({ "header": "Read the notes file", "path": "~/work/notes.txt" }),
+        },
+        Reply::Text("The notes say the code is 4217.".into()),
+    ]);
+    let home = Home::new();
+    std::fs::write(home.work().join("notes.txt"), "the code is 4217\n").unwrap();
+    let term = ready(&home, &server);
+
+    term.type_text("what do the notes say?");
+    term.send(ENTER);
+    term.wait_for("The notes say the code is 4217.", WAIT);
+
+    let messages = server.turns()[1].body["messages"].as_array().expect("messages").clone();
+    let result = messages.iter().find(|m| m["role"] == "tool").expect("a tool result went back");
+    let text = result["content"].as_str().unwrap_or_default();
+    assert!(text.contains("the code is 4217"), "the home folder was not where the file was looked for: {text}");
+}
+
+#[test]
+fn a_tilde_path_out_of_the_project_is_still_asked_about() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "read_file".into(),
+            arguments: serde_json::json!({ "header": "Read the private file", "path": "~/private.txt" }),
+        },
+        Reply::Text("Read it.".into()),
+    ]);
+    let home = Home::new();
+    std::fs::write(home.path().join("private.txt"), "not the project's business\n").unwrap();
+    let term = ready(&home, &server);
+
+    term.type_text("read my private file");
+    term.send(ENTER);
+    // The file sits next to the project, not in it: expanding the `~` must
+    // not make it look like an ordinary project file that needs no question.
+    term.wait_for("Confirm:", WAIT);
+}
+
 /// Shown under the composer only while a turn runs.
 const RUNNING_HINT: &str = "esc to interrupt";
 

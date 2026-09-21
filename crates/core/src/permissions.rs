@@ -403,14 +403,17 @@ fn named_paths(tool: &str, args_json: &str) -> Vec<String> {
     out
 }
 
-/// Whether `raw` (relative to `root`, or absolute) stays inside `root`.
+/// Whether `raw` (relative to `root`, absolute, or under `~`) stays inside
+/// `root`.
 ///
-/// Resolve symlinks before a following `..`, as the filesystem does. A file
-/// that does not exist yet is judged by the folder it would go in;
-/// unresolved symlinks are never treated as ordinary project files.
+/// Read through the same resolver the tools use, so the path judged here is
+/// the path that will be opened. Resolve symlinks before a following `..`,
+/// as the filesystem does. A file that does not exist yet is judged by the
+/// folder it would go in; unresolved symlinks are never treated as ordinary
+/// project files.
 pub fn path_is_inside(root: &std::path::Path, raw: &str) -> bool {
     use std::path::{Component, PathBuf};
-    let joined = if std::path::Path::new(raw).is_absolute() { PathBuf::from(raw) } else { root.join(raw) };
+    let joined = crate::paths::resolve_path(root, raw);
     let mut normal = PathBuf::new();
     for component in joined.components() {
         match component {
@@ -1156,6 +1159,22 @@ mod tests {
         assert!(!path_is_inside(root, "../outside.txt"));
         assert!(!path_is_inside(root, "src/../../outside.txt"));
         assert!(!path_is_inside(root, "/etc/passwd"));
+    }
+
+    #[test]
+    fn a_home_path_is_judged_where_it_really_points() {
+        let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+            return;
+        };
+        let home = std::path::PathBuf::from(home);
+        // `~/...` used to be taken for a folder named `~` inside the project,
+        // which made every path under the home folder look like a project
+        // file and skip the question.
+        assert!(!path_is_inside(std::path::Path::new("/work/project"), "~/.ssh/id_rsa"));
+        // The same path, spelled the same way, is inside a project that does
+        // live there.
+        let project = home.join("FlashAgent");
+        assert!(path_is_inside(&project, "~/FlashAgent/src/main.rs"));
     }
 
     #[cfg(unix)]

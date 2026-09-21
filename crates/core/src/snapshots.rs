@@ -350,7 +350,7 @@ impl SnapshotStore {
     }
 
     fn resolve(&self, raw: &str) -> PathBuf {
-        let joined = if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { self.cwd.join(raw) };
+        let joined = crate::paths::resolve_path(&self.cwd, raw);
         // Resolve existing links before `..`; keep missing components so a
         // newly created file can still be recorded before the write.
         let mut out = PathBuf::new();

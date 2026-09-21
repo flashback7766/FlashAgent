@@ -324,14 +324,17 @@ impl BuiltinTools {
                     return Err(ToolError::Other("web_search is turned off in Settings (LLM & Reasoning → Web Tools).".into()));
                 }
                 let a: SearchArgs = parse_args(&call.args_json, &call.name)?;
-                if let Some(ref key) = self.brave_key {
-                    if !key.is_empty() {
-                        web::search(&self.http, key, &a.query, a.count.unwrap_or(5)).await
-                    } else {
-                        web::search_free(&self.http, &a.query, a.count.unwrap_or(5)).await
-                    }
-                } else {
-                    web::search_free(&self.http, &a.query, a.count.unwrap_or(5)).await
+                let count = a.count.unwrap_or(5);
+                let key = self.brave_key.as_deref().map(str::trim).filter(|k| !k.is_empty());
+                match key {
+                    // A key that is rejected, expired or out of quota must
+                    // not take search down with it: the free search is still
+                    // there.
+                    Some(key) => match web::search(&self.http, key, &a.query, count).await {
+                        Ok(found) => Ok(found),
+                        Err(_) => web::search_free(&self.http, &a.query, count).await,
+                    },
+                    None => web::search_free(&self.http, &a.query, count).await,
                 }
             }
             other => {
