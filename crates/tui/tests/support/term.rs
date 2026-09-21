@@ -155,7 +155,7 @@ impl Term {
     /// one, and a person never types an Enter and the next key at once.
     pub fn send(&self, keys: &str) {
         self.write(keys);
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(60));
     }
 
     /// Bytes to the terminal as they are, all at once.

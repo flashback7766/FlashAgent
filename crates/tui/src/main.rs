@@ -729,13 +729,18 @@ fn typed_char(k: &crossterm::event::KeyEvent) -> Option<char> {
     }
 }
 
-/// Read the keys already waiting after `first`. With a newline among them
+/// Read the keys that follow `first` at once. With a newline among them
 /// and more than one line's worth of text, they are a paste; otherwise the
 /// keys go on as they came.
 fn gather_burst(first: char) -> Vec<UiEvent> {
     let mut text = String::from(first);
     let mut rest: Vec<UiEvent> = Vec::new();
-    while matches!(crossterm::event::poll(std::time::Duration::ZERO), Ok(true)) {
+    // Waiting briefly, not only for what is already there: a Windows console
+    // hands the keys of a paste over a few at a time. Nobody presses a key
+    // within 30 ms of Enter, so the wait after one costs a person nothing
+    // and is what tells a paste from a prompt being sent.
+    let wait = |text: &str| std::time::Duration::from_millis(if text.ends_with('\n') { 30 } else { 5 });
+    while matches!(crossterm::event::poll(wait(&text)), Ok(true)) {
         match crossterm::event::read() {
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Release => {}
             Ok(Event::Key(k)) => match typed_char(&k) {
