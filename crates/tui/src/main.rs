@@ -1809,7 +1809,7 @@ mod tests {
 
         assert!(pending_steers.is_empty(), "pending steers must be unpinned");
         let (settled, live) = chat.render_split(80, false);
-        let all: Vec<String> = settled.into_iter().chain(live).map(|(_, s)| flashagent_tui::strip_ansi(&s)).collect();
+        let all: Vec<String> = settled.iter().cloned().chain(live).map(|(_, s)| flashagent_tui::strip_ansi(&s)).collect();
         assert!(all.iter().any(|l| l.contains("please use postgres")), "steer must become a regular user line");
     }
 

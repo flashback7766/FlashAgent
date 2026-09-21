@@ -916,12 +916,10 @@ impl Renderer {
 
         // When scroll_offset > 0, render shifted history view
         if self.scroll_offset > 0 {
-            let mut all_lines: Vec<RenderLine> = settled.clone();
-            all_lines.extend(tail.clone());
-            let total_len = all_lines.len();
+            let total_len = settled.len() + tail.len();
             let end = total_len.saturating_sub(self.scroll_offset);
             let start = end.saturating_sub(view_h);
-            let visible_slice = &all_lines[start..end];
+            let visible_slice = settled.iter().chain(tail.iter()).skip(start).take(end - start);
 
             let mut out = String::from(SYNC_BEGIN);
             out.push_str("\x1b[H\x1b[2J");
@@ -994,7 +992,7 @@ impl Renderer {
         };
         let prints_settled = reprint_all || settled.len() > self.printed_settled;
         if reprint_all {
-            for (k, t) in &settled {
+            for (k, t) in settled.iter() {
                 print_line(&mut out, k, t);
             }
             self.printed_settled = settled.len();
