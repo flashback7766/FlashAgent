@@ -19,7 +19,7 @@ pub mod snapshots;
 pub mod subagents;
 pub mod toolcheck;
 
-pub use config::{AppConfig, BackendPreset, SamplingPreset, ToolsetProfile, UpdateChannel};
+pub use config::{AppConfig, BackendPreset, ColorTheme, SamplingPreset, ToolsetProfile, UpdateChannel};
 pub use context_usage::{
     default_compact_threshold, resolved_compact_threshold, should_compact, CompactionInput,
     CompactionVerdict, ContextUsage,
