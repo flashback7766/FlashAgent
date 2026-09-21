@@ -1167,14 +1167,14 @@ mod tests {
             return;
         };
         let home = std::path::PathBuf::from(home);
-        // `~/...` used to be taken for a folder named `~` inside the project,
-        // which made every path under the home folder look like a project
-        // file and skip the question.
-        assert!(!path_is_inside(std::path::Path::new("/work/project"), "~/.ssh/id_rsa"));
-        // The same path, spelled the same way, is inside a project that does
-        // live there.
-        let project = home.join("FlashAgent");
-        assert!(path_is_inside(&project, "~/FlashAgent/src/main.rs"));
+        // `~/...` used to be taken for a folder named `~` inside the
+        // project, which made every path under the home folder look like a
+        // project file and skip the question.
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert!(!path_is_inside(elsewhere.path(), "~/.ssh/id_rsa"));
+        // The same path, spelled the same way, when the project really is
+        // where it points.
+        assert!(path_is_inside(&home, "~/.ssh/id_rsa"));
     }
 
     #[cfg(unix)]
