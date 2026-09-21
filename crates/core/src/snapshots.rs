@@ -392,9 +392,16 @@ mod tests {
     }
 
     /// A path as the store records it: canonical, so a temp folder reached
-    /// through a symlink (`/var` on macOS) compares equal.
+    /// through a symlink (`/var` on macOS) compares equal. A file that is
+    /// gone — the point of half these tests — is named from its folder.
     fn canon(path: &Path) -> PathBuf {
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+        if let Ok(resolved) = path.canonicalize() {
+            return resolved;
+        }
+        match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => canon(parent).join(name),
+            _ => path.to_path_buf(),
+        }
     }
 
     fn args(path: &str) -> String {
@@ -422,7 +429,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "first");
         assert!(!project.path().join("sub/new.txt").exists(), "a file the turn created is gone");
         assert_eq!(report.restored, vec![canon(&a)]);
-        assert_eq!(report.removed, vec![canon(&project.path().join("sub/new.txt"))]);
+        assert_eq!(report.removed, vec![canon(&project.path().join("sub").join("new.txt"))]);
         assert!(report.failed.is_empty());
 
         s.rewind(0);
