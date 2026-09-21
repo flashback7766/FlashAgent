@@ -1187,24 +1187,21 @@ fn sending_only_an_image_submits_the_turn_with_image_part_and_no_text() {
     ]);
     let home = Home::new();
     let image_path = home.work().join("shot.png");
-    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-    bytes.extend_from_slice(&[0, 0, 0, 13]);
-    bytes.extend_from_slice(b"IHDR");
-    bytes.extend_from_slice(&800u32.to_be_bytes());
-    bytes.extend_from_slice(&600u32.to_be_bytes());
-    bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
-    std::fs::write(&image_path, &bytes).unwrap();
+    std::fs::write(&image_path, png_bytes(800, 600)).unwrap();
 
     let term = ready(&home, &server);
 
-    // Simulate drag & drop (bracketed paste) of an image path:
-    term.send(&format!("\x1b[200~{}\x1b[201~", image_path.display()));
+    // Dropping a file on the terminal: a bracketed paste on Unix, and plain
+    // typing on Windows, whose console has no bracketed paste at all.
+    if cfg!(windows) {
+        term.type_text(&image_path.display().to_string());
+    } else {
+        term.send(&format!("\x1b[200~{}\x1b[201~", image_path.display()));
+        // The picture is recognised as it is dropped, before anything is sent.
+        term.wait_for("shot.png 800×600", WAIT);
+        term.wait_for("Enter to send image", WAIT);
+    }
 
-    // Verify attachment banner and image placeholder appear:
-    term.wait_for("shot.png 800×600", WAIT);
-    term.wait_for("Enter to send image", WAIT);
-
-    // Press Enter with empty input:
     term.send(ENTER);
 
     // Assistant answers:
@@ -1228,6 +1225,27 @@ fn sending_only_an_image_submits_the_turn_with_image_part_and_no_text() {
     assert_eq!(parts[0]["type"], "image_url");
 }
 
+
+#[test]
+fn a_picture_sent_with_words_carries_both() {
+    let server = MockServer::start(vec![Reply::Text("Both received.".into())]);
+    let home = Home::new();
+    let image_path = home.work().join("shot.png");
+    std::fs::write(&image_path, png_bytes(800, 600)).unwrap();
+    let term = ready(&home, &server);
+
+    term.type_text(&format!("what is wrong here {}", image_path.display()));
+    term.send(ENTER);
+    term.wait_for("Both received.", WAIT);
+
+    let turns = server.turns();
+    let user_msg = turns[0].body["messages"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap();
+    let parts = user_msg["content"].as_array().expect("content parts array");
+    assert_eq!(parts.len(), 2, "the words and the picture both go: {parts:?}");
+    assert_eq!(parts[0]["type"], "text");
+    assert!(parts[0]["text"].as_str().unwrap().contains("what is wrong here"), "{parts:?}");
+    assert_eq!(parts[1]["type"], "image_url");
+}
 
 #[test]
 fn the_end_of_a_prompt_longer_than_the_terminal_stays_in_view() {
@@ -1282,6 +1300,17 @@ fn an_approval_that_comes_up_over_open_settings_gets_the_answer() {
     term.send(ENTER);
     term.wait_for("The marker is there.", WAIT);
     assert!(home.work().join("marker.txt").exists(), "Enter went to the settings under the card");
+}
+
+/// Just enough PNG for the header the composer reads the size from.
+fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend_from_slice(&[0, 0, 0, 13]);
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+    bytes
 }
 
 const F1: &str = "\x1bOP";

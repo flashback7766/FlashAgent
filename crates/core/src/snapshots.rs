@@ -119,7 +119,13 @@ impl SnapshotStore {
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        Self { dir, cwd: cwd.into(), state: Mutex::new(State { manifest, current: None }) }
+        // Canonical, like the paths `resolve` records: on macOS the same
+        // folder is both `/var/...` and `/private/var/...`, and on Windows
+        // both `C:\RUNNER~1\...` and its long form. Comparing the two
+        // spellings is what `display_path` and the rewind list do.
+        let cwd = cwd.into();
+        let cwd = cwd.canonicalize().unwrap_or(cwd);
+        Self { dir, cwd, state: Mutex::new(State { manifest, current: None }) }
     }
 
     /// A new turn, started by the user message `prompt`.
@@ -332,7 +338,15 @@ impl SnapshotStore {
 
     /// `path` as the user thinks of it: relative to the project when inside it.
     pub fn display_path(&self, path: &Path) -> String {
-        path.strip_prefix(&self.cwd).unwrap_or(path).display().to_string()
+        let shown = path.strip_prefix(&self.cwd).unwrap_or(path);
+        // A path from outside the project keeps its full spelling, but never
+        // Windows' `\\?\` extended-length prefix, which `canonicalize` adds
+        // and no one wants to read.
+        let text = shown.display().to_string();
+        match text.strip_prefix(r"\\?\UNC\") {
+            Some(rest) => format!(r"\\{rest}"),
+            None => text.strip_prefix(r"\\?\").unwrap_or(&text).to_string(),
+        }
     }
 
     fn resolve(&self, raw: &str) -> PathBuf {
@@ -377,6 +391,12 @@ mod tests {
         (project, snaps, s)
     }
 
+    /// A path as the store records it: canonical, so a temp folder reached
+    /// through a symlink (`/var` on macOS) compares equal.
+    fn canon(path: &Path) -> PathBuf {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
+
     fn args(path: &str) -> String {
         serde_json::json!({ "path": path }).to_string()
     }
@@ -401,8 +421,8 @@ mod tests {
         let report = s.rewind(1);
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "first");
         assert!(!project.path().join("sub/new.txt").exists(), "a file the turn created is gone");
-        assert_eq!(report.restored, vec![a.clone()]);
-        assert_eq!(report.removed, vec![project.path().join("sub/new.txt")]);
+        assert_eq!(report.restored, vec![canon(&a)]);
+        assert_eq!(report.removed, vec![canon(&project.path().join("sub/new.txt"))]);
         assert!(report.failed.is_empty());
 
         s.rewind(0);
@@ -542,7 +562,7 @@ mod tests {
 
         let preview = s.preview_rewind(0);
         assert_eq!(preview.len(), 1);
-        assert_eq!(preview[0].path, a);
+        assert_eq!(preview[0].path, canon(&a));
         // Going back removes the line the turn changed and the one it
         // added, and brings back the original wording of the middle line.
         assert_eq!(preview[0].removed, 2, "{preview:?}");
@@ -610,6 +630,38 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn a_recorded_file_is_still_named_relative_to_a_project_reached_another_way() {
+        // The same folder under two spellings — `/var` and `/private/var` on
+        // macOS, the short and long form on Windows — must not turn every
+        // reported path into an absolute one.
+        let outer = tempfile::tempdir().unwrap();
+        let snaps = tempfile::tempdir().unwrap();
+        let real = outer.path().join("project");
+        std::fs::create_dir(&real).unwrap();
+        let through_link = outer.path().join("link");
+        std::os::unix::fs::symlink(&real, &through_link).unwrap();
+        std::fs::write(real.join("a.txt"), "original").unwrap();
+
+        let store = SnapshotStore::open(snaps.path(), &through_link);
+        store.begin_turn("p");
+        store.before_write("write_file", &args("a.txt"));
+        std::fs::write(real.join("a.txt"), "changed").unwrap();
+        let restored = store.rewind(0).restored;
+        assert_eq!(restored.len(), 1);
+        assert_eq!(store.display_path(&restored[0]), "a.txt", "{:?}", restored[0]);
+        assert_eq!(std::fs::read_to_string(real.join("a.txt")).unwrap(), "original");
+    }
+
+    #[test]
+    fn a_windows_extended_length_prefix_is_not_shown_to_the_user() {
+        let (project, _snaps, store) = store();
+        let outside = PathBuf::from(r"\\?\C:\Users\someone\notes.txt");
+        assert_eq!(store.display_path(&outside), r"C:\Users\someone\notes.txt");
+        let _ = project;
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn rewind_restores_the_file_addressed_through_a_symlink_parent() {
         let (project, _snaps, store) = store();
         std::fs::create_dir_all(project.path().join("nested/child")).unwrap();
@@ -641,7 +693,7 @@ mod tests {
         std::fs::remove_file(&b).unwrap();
         std::fs::create_dir(&b).unwrap();
         let report = store.rewind(0);
-        assert_eq!(report.restored, vec![a.clone()]);
+        assert_eq!(report.restored, vec![canon(&a)]);
         assert_eq!(report.failed.len(), 1);
         assert_eq!(store.rewindable(&["change both"])[0].files, 1);
         std::fs::write(&a, "user change after partial rewind").unwrap();
@@ -649,7 +701,7 @@ mod tests {
         let reopened = SnapshotStore::open(snaps.path(), project.path());
         let report = reopened.rewind(0);
         assert!(report.failed.is_empty());
-        assert_eq!(report.restored, vec![b.clone()]);
+        assert_eq!(report.restored, vec![canon(&b)]);
         assert_eq!(std::fs::read_to_string(a).unwrap(), "user change after partial rewind");
         assert_eq!(std::fs::read_to_string(b).unwrap(), "old b");
         assert!(reopened.rewindable(&["change both"]).is_empty());
