@@ -11,8 +11,16 @@ permissions:
   contents: write
 
 jobs:
+  # A tag is a promise that this commit works. The same tests as every push
+  # run on all three systems first; if any fails, nothing is built and
+  # nothing reaches the channel users update from.
+  test:
+    name: Tests
+    uses: ./.github/workflows/ci.yml
+
   build-linux:
     name: Build Linux Packages (Arch, Debian, Void, AppImage, Tarball)
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -50,6 +58,7 @@ jobs:
 
   build-windows:
     name: Build Windows (MSVC x86_64)
+    needs: test
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -89,6 +98,7 @@ jobs:
 
   build-macos:
     name: Build macOS (Apple Silicon ARM64 & Intel x86_64)
+    needs: test
     runs-on: macos-latest
     steps:
       - name: Checkout repository
