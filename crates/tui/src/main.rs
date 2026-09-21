@@ -36,6 +36,7 @@ mod notices;
 mod attachments;
 mod sessions;
 mod prompt_history;
+mod export;
 mod recap;
 mod compact;
 mod cards;

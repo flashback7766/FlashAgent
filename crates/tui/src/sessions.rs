@@ -160,6 +160,8 @@ pub(crate) struct SessionSummary {
     pub(crate) title: String,
     /// Prompts and answers, not tool traffic.
     pub(crate) messages: usize,
+    /// The prompts and answers as text, for typing to search in the picker.
+    pub(crate) text: String,
 }
 
 pub(crate) fn sessions_dir() -> Option<std::path::PathBuf> {
@@ -234,6 +236,7 @@ impl App {
             .map(|s| {
                 let title = if s.title.is_empty() { "(no prompt)".to_string() } else { s.title };
                 SelectItem::with_description(title, format!("{} · {} messages", ago(s.timestamp, now), s.messages), s.id)
+                    .with_search_text(s.text)
             })
             .collect();
         if items.is_empty() {
@@ -273,7 +276,15 @@ pub(crate) fn sessions_in(dir: &std::path::Path, cwd: &str) -> Vec<SessionSummar
                     }
                 })
                 .unwrap_or_default();
+            let text = s
+                .messages
+                .iter()
+                .filter(|m| m.role == "user" || m.role == "assistant")
+                .map(|m| if m.role == "user" { extract_user_prompt(&m.content) } else { m.content.as_str() })
+                .collect::<Vec<_>>()
+                .join("\n");
             SessionSummary {
+                text,
                 messages: s.messages.iter().filter(|m| m.role == "user" || m.role == "assistant").count(),
                 id: s.id,
                 timestamp: s.timestamp,
