@@ -207,7 +207,7 @@ fn last_assistant_text(history: &[ChatMessage]) -> String {
 
 /// A [`ToolExec`] view that runs a subagent and returns its answer as the tool
 /// result. The parent loop calls `spawn` via this; the answer travels back in
-/// [`Role::Tool`], so injected content can never become an instruction.
+/// [`flashagent_llm::Role::Tool`], so injected content can never become an instruction.
 pub struct SubagentTool {
     host: Arc<SubagentHost>,
     /// Whether to forward events to the UI as well (parent visibility).

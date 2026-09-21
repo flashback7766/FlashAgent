@@ -157,7 +157,7 @@ pub enum DoneReason {
     Failed,
 }
 
-/// Loop errors — everything else becomes a [`LoopEvent::Done(DoneReason::Failed)`]
+/// Loop errors — everything else becomes [`LoopEvent::Done`] with [`DoneReason::Failed`]
 /// in the stream, never a silent drop.
 #[derive(Debug, Error)]
 pub enum LoopError {

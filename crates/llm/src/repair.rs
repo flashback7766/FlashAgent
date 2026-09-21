@@ -58,7 +58,7 @@ pub fn repair_json(input: &str) -> Option<String> {
 /// unwrap `{"arguments"|"parameters"|"args": ..}` only when the object holds
 /// nothing but such wrapper/metadata keys; otherwise the object itself. Last,
 /// argument names other agents use are renamed to this tool's own (see
-/// [`canonical_names`]) — here, so the renamed call is what gets judged too.
+/// `canonical_names`) — here, so the renamed call is what gets judged too.
 pub fn effective_args(args_json: &str, tool_name: &str) -> Option<serde_json::Value> {
     unwrapped_args(args_json, tool_name).map(|v| canonical_names(tool_name, v))
 }

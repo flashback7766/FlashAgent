@@ -1,5 +1,5 @@
 //! JSON-RPC 2.0 and Model Context Protocol (MCP) data structures.
-//! Spec reference: https://spec.modelcontextprotocol.io (version 2024-11-05).
+//! Spec reference: <https://spec.modelcontextprotocol.io> (version 2024-11-05).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

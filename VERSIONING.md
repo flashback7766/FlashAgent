@@ -11,10 +11,11 @@ channel-switch card and the what's-new screen use it and nothing else.
 | Beta | `b<N>` | `b287` | Build counter. Only ever grows. |
 | Stable | `v<MAJOR>.<MINOR>.<PATCH>+b<N>` | `v1.0.0+b290` | A SemVer release, cut from beta build `N`. |
 
-- The `+b<N>` part is SemVer build metadata. It records which beta build the
-  stable release is. It never changes how two stable releases compare.
+- The `+b<N>` part uses SemVer build-metadata syntax. FlashAgent deliberately
+  uses it for ordering, including between stable releases: the build counter
+  takes precedence over `MAJOR.MINOR.PATCH`.
 - When reading a version, the leading `v` is optional, `v1.2` means `v1.2.0`,
-  and a stable version without `+b<N>` is accepted (see rule 3 below).
+  and a stable version without `+b<N>` is accepted (see rule 4 below).
 - Rolling release names (`beta`, `stable`, `release`, `latest`) are not
   versions. The real version of a rolling release is read from its title
   ("FlashAgent b287"), then its tag, asset names and notes.
@@ -23,12 +24,15 @@ channel-switch card and the what's-new screen use it and nothing else.
 
 One rule, used everywhere:
 
-1. Two betas compare by `N`: `b238 < b287`.
-2. Two stables compare by `MAJOR.MINOR.PATCH`: `v1.2.9 < v1.2.10`.
-3. A beta and a stable compare by build number. On a tie the stable is
+1. Every version with a build number compares by `N` first, including
+   stable releases: `v2.0.0+b290 < v1.0.0+b291`.
+2. Stables with the same build compare by `MAJOR.MINOR.PATCH`.
+3. On a tied build a stable is
    newer, because it is that build, released: `b290 < v1.0.0+b290 < b291`.
-4. A stable without `+b<N>` is newer than every beta. This only exists so
-   that a hand-made `v1.0.0` still reads as an upgrade.
+4. A legacy stable without `+b<N>` is newer than every numbered build,
+   including numbered stables. Two unnumbered stables compare by
+   `MAJOR.MINOR.PATCH`. This keeps old hand-made releases readable and the
+   ordering transitive; new releases must include the build number.
 
 ## What the app says
 

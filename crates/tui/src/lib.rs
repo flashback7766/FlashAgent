@@ -596,7 +596,7 @@ impl ChatView {
         self.lines.push(ChatLine::new(kind, text.into()));
     }
 
-    /// User typed a message. Stored unwrapped; wrapping happens in [`render`].
+    /// User typed a message. Stored unwrapped; wrapping happens in [`Self::render`].
     pub fn push_user(&mut self, text: &str) {
         self.streaming = None;
         self.lines.push(ChatLine::new(LineKind::User, text.to_string()));
@@ -2983,6 +2983,5 @@ mod tests {
         chat.render_split(80, ReasoningExpansion { all: false, last: true });
     }
 }
-
 
 

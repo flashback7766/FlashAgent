@@ -26,6 +26,12 @@ fn find_ci(hay: &str, needle: &str) -> Option<usize> {
     (0..=hay.len() - n.len()).find(|&i| hay[i..i + n.len()].eq_ignore_ascii_case(n))
 }
 
+fn starts_ci(hay: &str, needle: &str) -> bool {
+    hay.as_bytes()
+        .get(..needle.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
 /// Reduce HTML to visible text: drop script/style blocks, strip tags, decode
 /// the common entities, collapse whitespace.
 pub(crate) fn html_to_text(html: &str) -> String {
@@ -34,9 +40,9 @@ pub(crate) fn html_to_text(html: &str) -> String {
     while i < html.len() {
         if html.as_bytes()[i] == b'<' {
             let rest = &html[i..];
-            let skip = if rest.as_bytes().starts_with(b"<script") {
+            let skip = if starts_ci(rest, "<script") {
                 find_ci(rest, "</script>").map(|p| p + "</script>".len())
-            } else if rest.as_bytes().starts_with(b"<style") {
+            } else if starts_ci(rest, "<style") {
                 find_ci(rest, "</style>").map(|p| p + "</style>".len())
             } else {
                 rest.find('>').map(|p| p + 1)
@@ -87,7 +93,8 @@ const MAX_REDIRECTS: usize = 5;
 /// public address for the check and a local one for the request, and every
 /// redirect is checked the same way before it is followed.
 pub async fn fetch_text(url: &str) -> Result<String, ToolError> {
-    let approved_local = flashagent_core::url_host(url).is_some_and(|h| flashagent_core::is_local_host(&h));
+    let approved_local_host =
+        flashagent_core::url_host(url).filter(|host| flashagent_core::is_local_host(host));
     let mut current =
         reqwest::Url::parse(url).map_err(|e| ToolError::Other(format!("fetch: bad URL {url}: {e}")))?;
     for _ in 0..=MAX_REDIRECTS {
@@ -108,7 +115,8 @@ pub async fn fetch_text(url: &str) -> Result<String, ToolError> {
         let Some(first) = addrs.first().copied() else {
             return Err(ToolError::Other(format!("fetch: {bare} has no address")));
         };
-        if !approved_local && addrs.iter().any(|a| flashagent_core::is_local_ip(a.ip())) {
+        let same_approved_local_host = approved_local_host.as_deref() == Some(bare.as_str());
+        if !same_approved_local_host && addrs.iter().any(|a| flashagent_core::is_local_ip(a.ip())) {
             return Err(ToolError::Other(format!(
                 "fetch: {host} leads to a local address ({}); a local address is fetched only when the URL names it, so it can be approved",
                 first.ip()
@@ -373,6 +381,26 @@ mod tests {
         assert_eq!(body, "hello");
     }
 
+    #[tokio::test]
+    async fn approval_for_one_local_host_does_not_cover_a_redirect_to_another() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            sock.write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.2:9/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        });
+
+        let err = fetch_text(&format!("http://127.0.0.1:{port}/start")).await.unwrap_err().to_string();
+        assert!(err.contains("local address"), "got: {err}");
+    }
+
     #[test]
     fn html_to_text_extracts_visible_text() {
         let html = r#"<html><head><style>.x{color:red}</style></head><body><h1>Heading</h1><p>Hello &amp; goodbye</p><script>evil()</script></body></html>"#;
@@ -381,6 +409,13 @@ mod tests {
         assert!(text.contains("Hello & goodbye"));
         assert!(!text.contains("evil"));
         assert!(!text.contains("color:red"));
+    }
+
+    #[test]
+    fn html_to_text_ignores_script_and_style_tags_case_insensitively() {
+        let html = "<STYLE>.secret { display: block }</STYLE><p>Visible</p><SCRIPT>alert('secret')</SCRIPT>";
+        let text = html_to_text(html);
+        assert_eq!(text, "Visible");
     }
 
     #[test]

@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::ToolError;
 
-/// One surgical replacement inside [`edit_file`].
+/// One surgical replacement inside `edit_file`.
 #[derive(Debug, Deserialize)]
 pub struct EditChunk {
     /// Exact text to find.
@@ -150,19 +150,20 @@ pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<S
     let file = resolve(cwd, path);
     let text = std::fs::read_to_string(&file)
         .map_err(|e| ToolError::Other(format!("read {path}: {e}")))?;
+    let mut checked = text.clone();
     let mut applied = 0usize;
     for edit in edits {
         if edit.old_string.is_empty() {
             return Err(ToolError::Other("edit: old_string must not be empty".into()));
         }
-        let target_string = if text.contains(&edit.old_string) {
+        let target_string = if checked.contains(&edit.old_string) {
             edit.old_string.clone()
-        } else if let Some(actual) = find_actual_string(&text, &edit.old_string) {
+        } else if let Some(actual) = find_actual_string(&checked, &edit.old_string) {
             actual
         } else {
             return Err(ToolError::Other(format!("edit: old_string not found in {path}")));
         };
-        let count = text.matches(&target_string).count();
+        let count = checked.matches(&target_string).count();
         if count == 0 {
             return Err(ToolError::Other(format!("edit: old_string not found in {path}")));
         }
@@ -172,6 +173,11 @@ pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<S
             )));
         }
         applied += if edit.replace_all { count } else { 1 };
+        checked = if edit.replace_all {
+            checked.replace(&target_string, &edit.new_string)
+        } else {
+            checked.replacen(&target_string, &edit.new_string, 1)
+        };
     }
     let text = apply_edits(text, edits)?;
     std::fs::write(&file, &text)?;
@@ -227,11 +233,14 @@ pub(crate) fn edit_files(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Resu
     }
     // (as named, resolved, new text, edits applied)
     let mut changed: Vec<(String, PathBuf, String, usize)> = Vec::new();
+    let mut originals: Vec<String> = Vec::new();
     for (path, edits) in files {
         if edits.is_empty() {
             return Err(ToolError::Other(format!("nothing was changed: {path} has no edits")));
         }
-        let file = resolve(cwd, path);
+        let file = resolve(cwd, path)
+            .canonicalize()
+            .map_err(|e| ToolError::Other(format!("nothing was changed: read {path}: {e}")))?;
         // The same file twice in one batch: the second set of edits applies to
         // the text the first produced.
         let at = changed.iter().position(|(_, f, _, _)| *f == file);
@@ -240,22 +249,32 @@ pub(crate) fn edit_files(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Resu
             None => std::fs::read_to_string(&file)
                 .map_err(|e| ToolError::Other(format!("nothing was changed: read {path}: {e}")))?,
         };
+        let original = at.is_none().then(|| text.clone());
         let new = apply_edits(text, edits).map_err(|e| ToolError::Other(format!("nothing was changed: {path}: {e}")))?;
         match at {
             Some(i) => {
                 changed[i].2 = new;
                 changed[i].3 += edits.len();
             }
-            None => changed.push((path.clone(), file, new, edits.len())),
+            None => {
+                originals.push(original.expect("a new target has its original text"));
+                changed.push((path.clone(), file, new, edits.len()));
+            }
         }
     }
     let mut written: Vec<String> = Vec::new();
     for (path, file, text, _) in &changed {
         if let Err(e) = std::fs::write(file, text) {
-            let done = if written.is_empty() {
-                "no file was written".to_string()
+            let mut rollback_failed = Vec::new();
+            for i in (0..written.len()).rev() {
+                if let Err(rollback_error) = std::fs::write(&changed[i].1, &originals[i]) {
+                    rollback_failed.push(format!("{}: {rollback_error}", changed[i].0));
+                }
+            }
+            let done = if rollback_failed.is_empty() {
+                format!("rolled back {} earlier file(s)", written.len())
             } else {
-                format!("already written: {}", written.join(", "))
+                format!("rollback failed for {}", rollback_failed.join(", "))
             };
             return Err(ToolError::Other(format!("write {path}: {e}; {done}")));
         }
@@ -286,14 +305,21 @@ pub(crate) fn list_dir(cwd: &Path, path: &str) -> Result<String, ToolError> {
 
 /// Glob file search relative to the cwd, capped at 500 results.
 pub(crate) fn glob_files(cwd: &Path, pattern: &str) -> Result<String, ToolError> {
-    let full = if Path::new(pattern).is_absolute() {
+    let absolute = Path::new(pattern).is_absolute();
+    let fixed = pattern.split(['*', '?', '[', '{']).next().unwrap_or("");
+    let confine = !absolute && flashagent_core::path_is_inside(cwd, if fixed.is_empty() { "." } else { fixed });
+    let full = if absolute {
         pattern.to_string()
     } else {
         format!("{}/{pattern}", cwd.display())
     };
     let paths = glob::glob(&full).map_err(|e| ToolError::Other(format!("bad pattern: {e}")))?;
+    let root = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let mut out: Vec<String> = Vec::new();
     for p in paths.flatten() {
+        if confine && !p.canonicalize().is_ok_and(|resolved| resolved.starts_with(&root)) {
+            continue;
+        }
         out.push(p.display().to_string());
         if out.len() >= 500 {
             out.push("...[limit 500 reached]".into());
@@ -311,7 +337,8 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     for entry in rd.flatten() {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-        if path.is_dir() {
+        let Ok(kind) = entry.file_type() else { continue };
+        if kind.is_dir() {
             if matches!(
                 name,
                 ".git" | "target" | "node_modules" | ".venv" | "__pycache__" | ".cache" | "dist" | "build"
@@ -319,7 +346,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
                 continue;
             }
             walk(&path, out, depth + 1);
-        } else {
+        } else if kind.is_file() {
             out.push(path);
         }
     }
@@ -442,6 +469,81 @@ mod tests {
     }
 
     #[test]
+    fn edit_file_applies_edits_in_sequence() {
+        let dir = tempdir();
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+
+        edit_file(
+            &dir,
+            "a.txt",
+            &[
+                EditChunk { old_string: "one".into(), new_string: "two".into(), replace_all: false },
+                EditChunk { old_string: "two".into(), new_string: "three".into(), replace_all: false },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "three\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn batch_edit_rolls_back_files_written_before_a_later_write_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir();
+        let first = dir.join("first.txt");
+        let blocked = dir.join("blocked.txt");
+        std::fs::write(&first, "old first\n").unwrap();
+        std::fs::write(&blocked, "old blocked\n").unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let result = edit_files(
+            &dir,
+            &[
+                (
+                    "first.txt".into(),
+                    vec![EditChunk { old_string: "old first".into(), new_string: "new first".into(), replace_all: false }],
+                ),
+                (
+                    "blocked.txt".into(),
+                    vec![EditChunk { old_string: "old blocked".into(), new_string: "new blocked".into(), replace_all: false }],
+                ),
+            ],
+        );
+
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "old first\n");
+        assert_eq!(std::fs::read_to_string(&blocked).unwrap(), "old blocked\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn batch_edit_treats_symlink_aliases_as_one_file() {
+        let dir = tempdir();
+        std::fs::write(dir.join("actual.txt"), "one\n").unwrap();
+        std::os::unix::fs::symlink(dir.join("actual.txt"), dir.join("alias.txt")).unwrap();
+
+        edit_files(
+            &dir,
+            &[
+                (
+                    "actual.txt".into(),
+                    vec![EditChunk { old_string: "one".into(), new_string: "two".into(), replace_all: false }],
+                ),
+                (
+                    "alias.txt".into(),
+                    vec![EditChunk { old_string: "two".into(), new_string: "three".into(), replace_all: false }],
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(dir.join("actual.txt")).unwrap(), "three\n");
+    }
+
+    #[test]
     fn glob_and_grep_work() {
         let dir = tempdir();
         std::fs::create_dir_all(dir.join("sub")).unwrap();
@@ -456,6 +558,19 @@ mod tests {
 
         let hits = grep(&dir, "NEEDLE", Some("*.txt"), true).unwrap();
         assert!(hits.contains("top.txt:1"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn searches_do_not_follow_a_directory_symlink_outside_the_project() {
+        let dir = tempdir();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "outside-only-marker\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.join("linked-outside")).unwrap();
+
+        assert_eq!(grep(&dir, "outside-only-marker", None, false).unwrap(), "no matches");
+        assert!(!glob_files(&dir, "**/*").unwrap().contains("secret.txt"));
+        assert!(glob_files(&dir, "linked-outside/*.txt").unwrap().contains("secret.txt"));
     }
 
     #[test]

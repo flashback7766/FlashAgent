@@ -405,9 +405,9 @@ fn named_paths(tool: &str, args_json: &str) -> Vec<String> {
 
 /// Whether `raw` (relative to `root`, or absolute) stays inside `root`.
 ///
-/// `..` is resolved first, then symlinks along whatever part of the path
-/// exists — so a link inside the project that points at `~/.ssh` is outside,
-/// and a file that does not exist yet is judged by the folder it would go in.
+/// Resolve symlinks before a following `..`, as the filesystem does. A file
+/// that does not exist yet is judged by the folder it would go in;
+/// unresolved symlinks are never treated as ordinary project files.
 pub fn path_is_inside(root: &std::path::Path, raw: &str) -> bool {
     use std::path::{Component, PathBuf};
     let joined = if std::path::Path::new(raw).is_absolute() { PathBuf::from(raw) } else { root.join(raw) };
@@ -418,22 +418,18 @@ pub fn path_is_inside(root: &std::path::Path, raw: &str) -> bool {
                 normal.pop();
             }
             Component::CurDir => {}
-            other => normal.push(other.as_os_str()),
+            other => {
+                normal.push(other.as_os_str());
+                match normal.canonicalize() {
+                    Ok(path) => normal = path,
+                    Err(_) if std::fs::symlink_metadata(&normal).is_ok_and(|m| m.file_type().is_symlink()) => return false,
+                    Err(_) => {}
+                }
+            }
         }
     }
-    let mut existing = normal.clone();
-    let mut missing = Vec::new();
-    while !existing.exists() {
-        let Some(name) = existing.file_name().map(|n| n.to_os_string()) else { break };
-        missing.push(name);
-        existing.pop();
-    }
-    let mut resolved = existing.canonicalize().unwrap_or(existing);
-    for name in missing.iter().rev() {
-        resolved.push(name);
-    }
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    resolved.starts_with(&root)
+    normal.starts_with(&root)
 }
 
 /// Whether every part of `cmd` only reads: Planning mode runs these without
@@ -1164,6 +1160,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn parent_after_a_symlink_is_resolved_against_the_link_target() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(outside.path().join("child")).unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "outside").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("child"), project.path().join("link")).unwrap();
+        assert!(!path_is_inside(project.path(), "link/../secret.txt"));
+        assert!(!path_is_inside(project.path(), "link/../new.txt"));
+        let read = call("read_file", r#"{"path":"link/../secret.txt"}"#);
+        let permissions = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
+        permissions.set_project_root(project.path().to_path_buf());
+        assert!(matches!(permissions.decide(&read, None), Verdict::Deny(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_cannot_authorize_a_write_outside_the_project() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path().join("new.txt"), project.path().join("link")).unwrap();
+        assert!(!path_is_inside(project.path(), "link"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_symlink_out_of_the_project_is_outside() {
         let dir = project();
         let elsewhere = tempfile::tempdir().unwrap();
@@ -1549,4 +1570,3 @@ mod tests {
     }
 
 }
-

@@ -18,7 +18,7 @@ pub struct AutocompleteItem {
     pub trigger: String,
     /// Short summary shown in the suggestion row.
     pub description: String,
-    /// Category badge ([cmd] vs [skill]).
+    /// Category badge (`[cmd]` vs `[skill]`).
     pub category: AutocompleteCategory,
 }
 

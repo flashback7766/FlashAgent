@@ -227,7 +227,7 @@ impl SnapshotStore {
         if turn >= st.manifest.turns.len() {
             return report;
         }
-        let taken_back: Vec<TurnSnapshot> = st.manifest.turns.drain(turn..).collect();
+        let mut taken_back: Vec<TurnSnapshot> = st.manifest.turns.drain(turn..).collect();
         let mut seen = HashSet::new();
         // Oldest first, so the first record of a path is how it was before
         // any of these turns.
@@ -259,10 +259,24 @@ impl SnapshotStore {
                 )),
             }
         }
+        let failed: HashSet<&PathBuf> = report.failed.iter().map(|(path, _)| path).collect();
+        let mut pending = Vec::new();
+        let mut retained = HashSet::new();
         for file in taken_back.iter().flat_map(|t| &t.files) {
+            // Keep the earliest copy of each failed path, the exact state
+            // this rewind was trying to restore. Successful paths are done.
+            if failed.contains(&file.path) && retained.insert(file.path.clone()) {
+                pending.push(file.clone());
+                continue;
+            }
             if let Before::Blob(name) = &file.before {
                 let _ = std::fs::remove_file(self.dir.join("blobs").join(name));
             }
+        }
+        if !pending.is_empty() {
+            let mut retry = taken_back.remove(0);
+            retry.files = pending;
+            st.manifest.turns.push(retry);
         }
         st.current = None;
         self.save(&st.manifest);
@@ -323,7 +337,8 @@ impl SnapshotStore {
 
     fn resolve(&self, raw: &str) -> PathBuf {
         let joined = if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { self.cwd.join(raw) };
-        // Lexically, so `./a.txt` and `a.txt` are one file even before it exists.
+        // Resolve existing links before `..`; keep missing components so a
+        // newly created file can still be recorded before the write.
         let mut out = PathBuf::new();
         for part in joined.components() {
             match part {
@@ -331,7 +346,12 @@ impl SnapshotStore {
                 Component::ParentDir => {
                     out.pop();
                 }
-                other => out.push(other.as_os_str()),
+                other => {
+                    out.push(other.as_os_str());
+                    if let Ok(resolved) = out.canonicalize() {
+                        out = resolved;
+                    }
+                }
             }
         }
         out
@@ -586,6 +606,53 @@ mod tests {
         assert!(preview[0].too_large);
         assert_eq!(preview[0].added, 0);
         assert_eq!(preview[0].removed, 0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rewind_restores_the_file_addressed_through_a_symlink_parent() {
+        let (project, _snaps, store) = store();
+        std::fs::create_dir_all(project.path().join("nested/child")).unwrap();
+        std::os::unix::fs::symlink(project.path().join("nested/child"), project.path().join("link")).unwrap();
+        let actual = project.path().join("nested/file.txt");
+        let other = project.path().join("file.txt");
+        std::fs::write(&actual, "original").unwrap();
+        std::fs::write(&other, "unrelated").unwrap();
+        store.begin_turn("edit linked file");
+        store.before_write("write_file", &args("link/../file.txt"));
+        std::fs::write(project.path().join("link/../file.txt"), "changed").unwrap();
+        let report = store.rewind(0);
+        assert!(report.failed.is_empty());
+        assert_eq!(std::fs::read_to_string(actual).unwrap(), "original");
+        assert_eq!(std::fs::read_to_string(other).unwrap(), "unrelated");
+    }
+
+    #[test]
+    fn a_partial_rewind_retains_only_failed_files_for_retry_after_restart() {
+        let (project, snaps, store) = store();
+        let a = project.path().join("a.txt");
+        let b = project.path().join("b.txt");
+        std::fs::write(&a, "old a").unwrap();
+        std::fs::write(&b, "old b").unwrap();
+        store.begin_turn("change both");
+        store.before_write("write_file", &args("a.txt"));
+        store.before_write("write_file", &args("b.txt"));
+        std::fs::write(&a, "new a").unwrap();
+        std::fs::remove_file(&b).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let report = store.rewind(0);
+        assert_eq!(report.restored, vec![a.clone()]);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(store.rewindable(&["change both"])[0].files, 1);
+        std::fs::write(&a, "user change after partial rewind").unwrap();
+        std::fs::remove_dir(&b).unwrap();
+        let reopened = SnapshotStore::open(snaps.path(), project.path());
+        let report = reopened.rewind(0);
+        assert!(report.failed.is_empty());
+        assert_eq!(report.restored, vec![b.clone()]);
+        assert_eq!(std::fs::read_to_string(a).unwrap(), "user change after partial rewind");
+        assert_eq!(std::fs::read_to_string(b).unwrap(), "old b");
+        assert!(reopened.rewindable(&["change both"]).is_empty());
     }
 
     #[test]

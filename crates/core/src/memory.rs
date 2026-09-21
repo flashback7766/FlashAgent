@@ -64,6 +64,9 @@ pub fn outline(content: &str) -> Vec<&str> {
 /// without memory is normal).
 fn read_if_present(dir: &Path, name: &str, kind: MemoryKind) -> Option<MemoryDoc> {
     let path = dir.join(name);
+    if !crate::permissions::path_is_inside(dir, &path.to_string_lossy()) {
+        return None;
+    }
     let content = std::fs::read_to_string(&path).ok()?;
     Some(MemoryDoc { path, kind, content })
 }
@@ -81,7 +84,9 @@ pub fn collect(project_dir: &Path, global_dir: &Path) -> Vec<MemoryDoc> {
             let mut paths: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
             paths.sort();
             for p in paths {
-                if p.extension().is_some_and(|ext| ext == "md") {
+                if p.extension().is_some_and(|ext| ext == "md")
+                    && crate::permissions::path_is_inside(project_dir, &p.to_string_lossy())
+                {
                     if let Ok(content) = std::fs::read_to_string(&p) {
                         docs.push(MemoryDoc {
                             path: p,
@@ -108,7 +113,9 @@ pub fn collect(project_dir: &Path, global_dir: &Path) -> Vec<MemoryDoc> {
         let mut paths: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
         paths.sort();
         for p in paths {
-            if p.extension().is_some_and(|ext| ext == "md") {
+            if p.extension().is_some_and(|ext| ext == "md")
+                && crate::permissions::path_is_inside(global_dir, &p.to_string_lossy())
+            {
                 if let Ok(content) = std::fs::read_to_string(&p) {
                     docs.push(MemoryDoc {
                         path: p,
@@ -216,6 +223,21 @@ mod tests {
         // Nothing exists → empty, no error.
         let empty = collect(&tempdir("collect"), &tempdir("collect"));
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn collect_does_not_load_project_rules_through_symlinks_to_outside_files() {
+        let proj = tempdir("symlink-boundary");
+        let global = tempdir("symlink-boundary-global");
+        let outside = tempdir("symlink-boundary-outside");
+        fs::create_dir_all(proj.join(".agents/rules")).unwrap();
+        fs::write(outside.join("secret.md"), "# Outside secret\nnever load this\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.md"), proj.join("AGENTS.md")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.md"), proj.join(".agents/rules/leak.md")).unwrap();
+
+        let docs = collect(&proj, &global);
+        assert!(docs.iter().all(|doc| !doc.content.contains("Outside secret")), "{docs:?}");
     }
 
     #[test]
