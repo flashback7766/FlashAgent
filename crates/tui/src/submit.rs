@@ -50,7 +50,7 @@ impl App {
     async fn run_command(&mut self, cx: &mut LoopCtx<'_>, name: &str, arg: &str) -> Option<Flow> {
         // A command takes the line out of the composer; a typo leaves it there
         // to fix.
-        let typed = std::mem::take(&mut self.input);
+        let typed = self.input.take();
         self.autocomplete_idx = 0;
         match name {
             "help" | "?" => self.chat.push_system(HELP),
@@ -116,7 +116,7 @@ impl App {
             "verbose" | "expand" | "think" | "o" => self.verbose_command(arg),
             "exit" | "quit" | "q" => return Some(Flow::Quit),
             "editor" => match open_in_external_editor("", &self.config.external_editor) {
-                Ok(edited) => self.input = edited,
+                Ok(edited) => self.input.set(edited),
                 Err(err) => self.notice(format!("Failed to launch external editor: {err}")),
             },
             "diff" => self.git_diff_summary(),
@@ -129,10 +129,10 @@ impl App {
                 } else if arg.is_empty() && find_skill_file(name).is_some() {
                     self.run_skill(cx, name);
                 } else if name.is_empty() || name.contains(['/', '\\', '.']) {
-                    self.input = typed;
+                    self.input.set(typed);
                     return None;
                 } else {
-                    self.input = typed;
+                    self.input.set(typed);
                     self.unknown_command(name);
                 }
             }
@@ -162,10 +162,8 @@ impl App {
 
     /// A message for the model: the typed text and any pictures going with it.
     fn send_prompt(&mut self, cx: &LoopCtx<'_>) {
-        let text = std::mem::take(&mut self.input);
-        if !text.is_empty() && self.input_history.last() != Some(&text) {
-            self.input_history.push(text.clone());
-        }
+        let text = self.input.take();
+        self.remember_prompt(&text);
         self.history_index = None;
         self.current_draft.clear();
         // Sending a new prompt collapses the previous turn's expanded thinking.
@@ -765,7 +763,7 @@ impl App {
 
         // The words, not the scaffolding a goal or the first message's
         // memory block wrapped them in.
-        self.input = extract_user_prompt(&prompt).to_string();
+        self.input.set(extract_user_prompt(&prompt).to_string());
         self.autosave(cx.session_id, cx.cwd_display);
         self.renderer.request_reprint();
     }

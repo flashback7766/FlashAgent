@@ -1775,3 +1775,162 @@ fn show_small_terminal() {
         }
     }
 }
+
+const LEFT: &str = "\x1b[D";
+const HOME: &str = "\x1b[H";
+const ALT_ENTER: &str = "\x1b\r";
+const CTRL_F: &str = "\x06";
+const CTRL_W: &str = "\x17";
+
+/// Text as a terminal delivers a paste: between bracketed-paste markers.
+fn paste(term: &Term, text: &str) {
+    term.send(&format!("\x1b[200~{text}\x1b[201~"));
+}
+
+/// The user message of a turn, as the JSON text the model was sent.
+fn prompt_of(request: &support::mock_server::Request) -> String {
+    let messages = request.body["messages"].as_array().cloned().unwrap_or_default();
+    let user = messages.iter().rev().find(|m| m["role"] == "user").cloned().unwrap_or_default();
+    user["content"].to_string()
+}
+
+#[test]
+fn a_typo_is_fixed_where_it_is_not_at_the_end() {
+    let server = MockServer::start(vec![Reply::Text("Fixed.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("helo world");
+    for _ in 0.." world".len() + 1 {
+        term.send(LEFT);
+    }
+    term.type_text("l");
+    term.send(HOME);
+    term.type_text("say ");
+    term.wait_for("say hello world", WAIT);
+    term.send(ENTER);
+    term.wait_for("Fixed.", WAIT);
+    let prompt = prompt_of(server.turns().last().unwrap());
+    assert!(prompt.contains("say hello world"), "{prompt}");
+}
+
+#[test]
+fn a_prompt_can_have_several_lines() {
+    let server = MockServer::start(vec![Reply::Text("Got both lines.".into()), Reply::Text("Got the paste.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    // Alt+Enter and a backslash before Enter both start a new line.
+    term.type_text("first line");
+    term.send(ALT_ENTER);
+    term.type_text("second line\\");
+    term.send(ENTER);
+    term.type_text("third line");
+    term.wait_for("third line", WAIT);
+    let screen = term.screen();
+    let rows = |needle: &str| screen.lines().position(|l| l.contains(needle));
+    assert!(
+        rows("first line") < rows("second line") && rows("second line") < rows("third line"),
+        "the lines are not one under another:\n{screen}"
+    );
+    term.send(ENTER);
+    term.wait_for("Got both lines.", WAIT);
+    term.wait_gone(RUNNING_HINT, WAIT);
+    let prompt = prompt_of(server.turns().last().unwrap());
+    assert!(prompt.contains("first line\\nsecond line\\nthird line"), "{prompt}");
+
+    // A paste keeps its lines instead of running them together.
+    paste(&term, "fn main() {\n    println!(\"hi\");\n}");
+    term.wait_for("println", WAIT);
+    term.send(ENTER);
+    term.wait_for("Got the paste.", WAIT);
+    let prompt = prompt_of(server.turns().last().unwrap());
+    assert!(prompt.contains("fn main() {\\n    println!"), "{prompt}");
+}
+
+#[test]
+fn ctrl_w_deletes_the_last_word() {
+    let server = MockServer::start(vec![Reply::Text("Done.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("keep this mistake");
+    term.send(CTRL_W);
+    term.wait_gone("mistake", WAIT);
+    term.type_text("word");
+    term.send(ENTER);
+    term.wait_for("Done.", WAIT);
+    assert!(prompt_of(server.turns().last().unwrap()).contains("keep this word"));
+}
+
+#[test]
+fn ctrl_f_finds_an_earlier_prompt_to_send_again() {
+    let server = MockServer::start(vec![
+        Reply::Text("One.".into()),
+        Reply::Text("Two.".into()),
+        Reply::Text("Three.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+    ask(&term, "run the database migration", "One.");
+    ask(&term, "list the files", "Two.");
+
+    term.send(CTRL_F);
+    term.wait_for("find in history", WAIT);
+    term.type_text("migr");
+    term.wait_for("run the database migration", WAIT);
+    term.send(ENTER);
+    term.wait_gone("find in history", WAIT);
+    // Taken into the prompt to look at first, not sent behind the user's back.
+    assert_eq!(server.turns().len(), 2);
+    term.send(ENTER);
+    term.wait_for("Three.", WAIT);
+    assert!(prompt_of(server.turns().last().unwrap()).contains("run the database migration"));
+}
+
+#[test]
+fn an_image_path_pasted_into_a_question_is_not_attached_to_a_later_prompt() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "ask_user".into(),
+            arguments: serde_json::json!({ "question": "Which database?", "options": ["Postgres", "SQLite"] }),
+        },
+        Reply::Text("Going with it.".into()),
+    ]);
+    let home = Home::new();
+    let picture = home.work().join("shot.png");
+    // Not a real picture; only the name and that it is not empty matter.
+    std::fs::write(&picture, b"\x89PNG\r\n\x1a\n").unwrap();
+    let term = ready(&home, &server);
+
+    term.type_text("pick a database");
+    term.send(ENTER);
+    term.wait_for("Which database?", WAIT);
+    paste(&term, &picture.display().to_string());
+    std::thread::sleep(Duration::from_millis(300));
+    term.send(DOWN);
+    term.send(ENTER);
+    term.wait_for("Going with it.", WAIT);
+    term.wait_gone(RUNNING_HINT, WAIT);
+    let screen = term.screen();
+    assert!(
+        !screen.contains("ctrl+z removes") && !screen.contains("shot.png attached"),
+        "the pasted path became an attachment:\n{screen}"
+    );
+}
+
+#[test]
+#[ignore = "prints the composer with a long prompt for a person to look at"]
+fn show_composer() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    home.set_up(&server.url);
+    let term = Term::start(&home, &["-y"], 60, 20);
+    term.wait_for("Ask FlashAgent", WAIT);
+    paste(&term, "Refactor this:\nfn main() {\n    let words = [\"a long line that has to wrap inside the box\"];\n}\n\nand explain why.");
+    term.send(LEFT);
+    term.send(LEFT);
+    term.wait_for("explain", WAIT);
+    std::thread::sleep(Duration::from_millis(300));
+    println!("{}", term.screen());
+}

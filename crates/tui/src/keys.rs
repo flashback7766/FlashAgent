@@ -101,9 +101,54 @@ impl App {
         });
     }
 
+    /// After text was taken out of the prompt: the history walk is over, and
+    /// an emptied prompt offers the suggestion again.
+    fn edited(&mut self) {
+        self.history_index = None;
+        self.autocomplete_idx = 0;
+        if self.input.is_empty() && self.latest_suggestion.is_some() {
+            self.suggested_prompt = self.latest_suggestion.clone();
+        }
+    }
+
+    /// Ctrl+F: typing narrows the search, Ctrl+F again goes further back,
+    /// Enter or → takes what was found into the prompt to edit or send, Esc
+    /// puts back what was there before.
+    fn history_search_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        let Some(search) = self.history_search.as_mut() else { return };
+        let ctrl = mods.contains(KeyModifiers::CONTROL);
+        match code {
+            KeyCode::Char(c) if ctrl && matches!(latin(c), 'f' | 'r') => search.older(&self.input_history),
+            KeyCode::Char(c) if ctrl && latin(c) == 'g' => {
+                let draft = std::mem::take(&mut search.draft);
+                self.input.set(draft);
+                self.history_search = None;
+            }
+            KeyCode::Char(c) if !ctrl && !mods.contains(KeyModifiers::ALT) => search.type_char(c),
+            KeyCode::Backspace => search.backspace(),
+            KeyCode::Esc => {
+                let draft = std::mem::take(&mut search.draft);
+                self.input.set(draft);
+                self.history_search = None;
+            }
+            _ => {
+                let found = search.found(&self.input_history).map(str::to_string);
+                let draft = std::mem::take(&mut search.draft);
+                self.input.set(found.unwrap_or(draft));
+                self.history_search = None;
+                self.history_index = None;
+            }
+        }
+        self.renderer.request_reprint();
+    }
+
     /// A key the overlays did not claim: typing, editing the prompt, history,
     /// function keys and shortcuts, and Enter.
     pub(crate) async fn handle_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Flow {
+        if self.history_search.is_some() {
+            self.history_search_key(code, mods);
+            return Flow::Next;
+        }
         match code {
             KeyCode::Esc => {
                 if self.running {
@@ -198,9 +243,8 @@ impl App {
                     }
                     self.renderer.request_reprint();
                 } else if let Some(text) = flashagent_tui::clipboard::get_clipboard_text() {
-                    let sanitized = text.replace("\r\n", " ").replace(['\n', '\r'], " ");
-                    if !sanitized.is_empty() {
-                        self.input.push_str(&sanitized);
+                    if !text.is_empty() {
+                        self.input.insert_str(&text);
                         self.history_index = None;
                         self.autocomplete_idx = 0;
                         self.renderer.request_reprint();
@@ -287,7 +331,7 @@ impl App {
             {
                 match open_in_external_editor(&self.input, &self.config.external_editor) {
                     Ok(edited) => {
-                        self.input = edited;
+                        self.input.set(edited);
                         self.autocomplete_idx = 0;
                     }
                     Err(err) => {
@@ -346,7 +390,7 @@ impl App {
             }
             KeyCode::Tab if self.input.starts_with('/') => {
                 if let Some(ac) = AutocompletePopup::for_input(&self.input, std::path::Path::new("."), self.autocomplete_idx) {
-                    self.input = ac.complete_input(&self.input);
+                    self.input.set(ac.complete_input(&self.input));
                     self.autocomplete_idx = 0;
                 }
             }
@@ -354,6 +398,10 @@ impl App {
             KeyCode::Left => {
                 if cx.gate.pending().is_some() {
                     self.confirm_select.left();
+                } else if word_mods(mods) {
+                    self.input.word_left();
+                } else {
+                    self.input.left();
                 }
             }
             KeyCode::Right => {
@@ -362,15 +410,25 @@ impl App {
                 } else if !self.running && self.input.is_empty() {
                     if let Some(sug) = self.suggested_prompt.take() {
                         self.latest_suggestion = None;
-                        self.input = sug;
+                        self.input.set(sug);
                         self.renderer.request_reprint();
                     }
+                } else if word_mods(mods) {
+                    self.input.word_right();
+                } else {
+                    self.input.right();
                 }
+            }
+            KeyCode::Home if cx.gate.pending().is_none() => self.input.home(),
+            KeyCode::End if cx.gate.pending().is_none() => self.input.end(),
+            KeyCode::Delete if cx.gate.pending().is_none() => {
+                self.input.delete();
+                self.edited();
             }
             KeyCode::Up => {
                 if cx.gate.pending().is_some() {
                     self.confirm_select.toggle();
-                } else if !self.running && self.input.starts_with('/') {
+                } else if !self.running && self.input.starts_with('/') && self.input.line_count() == 1 {
                     if let Some(ac) = AutocompletePopup::for_input(&self.input, std::path::Path::new("."), self.autocomplete_idx) {
                         if self.autocomplete_idx == 0 {
                              self.autocomplete_idx = ac.items.len().saturating_sub(1);
@@ -378,18 +436,20 @@ impl App {
                              self.autocomplete_idx -= 1;
                         }
                     }
+                } else if self.input.up() {
+                    // Moved within a text of several lines.
                 } else if !self.running && !self.input_history.is_empty() {
                     match self.history_index {
                         None => {
-                            self.current_draft = self.input.clone();
+                            self.current_draft = self.input.to_string();
                             let idx = self.input_history.len() - 1;
                             self.history_index = Some(idx);
-                            self.input = self.input_history[idx].clone();
+                            self.input.set(self.input_history[idx].clone());
                         }
                         Some(idx) if idx > 0 => {
                             let new_idx = idx - 1;
                             self.history_index = Some(new_idx);
-                            self.input = self.input_history[new_idx].clone();
+                            self.input.set(self.input_history[new_idx].clone());
                         }
                         _ => {}
                     }
@@ -398,30 +458,48 @@ impl App {
             KeyCode::Down => {
                 if cx.gate.pending().is_some() {
                     self.confirm_select.toggle();
-                } else if !self.running && self.input.starts_with('/') {
+                } else if !self.running && self.input.starts_with('/') && self.input.line_count() == 1 {
                     if let Some(ac) = AutocompletePopup::for_input(&self.input, std::path::Path::new("."), self.autocomplete_idx) {
                         self.autocomplete_idx = (self.autocomplete_idx + 1) % ac.items.len();
                     }
+                } else if self.input.down() {
+                    // Moved within a text of several lines.
                 } else if !self.running {
                     if let Some(idx) = self.history_index {
                         if idx + 1 < self.input_history.len() {
                             let new_idx = idx + 1;
                             self.history_index = Some(new_idx);
-                            self.input = self.input_history[new_idx].clone();
+                            self.input.set(self.input_history[new_idx].clone());
                         } else {
                             self.history_index = None;
-                            self.input = std::mem::take(&mut self.current_draft);
+                            self.input.set(std::mem::take(&mut self.current_draft));
                         }
                     }
                 }
             }
+            // Ctrl+Backspace arrives as Ctrl+H in many terminals, Alt+Backspace
+            // as Backspace with Alt: both take a word, as in a shell.
+            KeyCode::Backspace if cx.gate.pending().is_none() && word_mods(mods) => {
+                self.input.delete_word_before();
+                self.edited();
+            }
             KeyCode::Backspace if cx.gate.pending().is_none() => {
-                self.input.pop();
-                self.history_index = None;
-                self.autocomplete_idx = 0;
-                if self.input.is_empty() && self.latest_suggestion.is_some() {
-                    self.suggested_prompt = self.latest_suggestion.clone();
-                }
+                self.input.backspace();
+                self.edited();
+            }
+            // A new line instead of sending: Alt+Enter, and Shift+Enter in
+            // terminals that report it (most send Shift+Enter as a plain
+            // Enter, and there `\` + Enter or Ctrl+J does the same).
+            KeyCode::Enter
+                if cx.gate.pending().is_none() && (mods.contains(KeyModifiers::ALT) || mods.contains(KeyModifiers::SHIFT)) =>
+            {
+                self.input.insert_char('\n');
+                self.edited();
+            }
+            KeyCode::Enter if cx.gate.pending().is_none() && self.input[..self.input.cursor()].ends_with('\\') => {
+                self.input.backspace();
+                self.input.insert_char('\n');
+                self.edited();
             }
             KeyCode::Enter => {
                 self.custom_placeholder = None;
@@ -431,11 +509,9 @@ impl App {
                     cx.gate.respond(self.confirm_select.decision());
                     self.confirm_select = ConfirmSelect::new();
                 } else if !self.input.is_empty() && self.running {
-                    if let Some(ref steer_tx) = self.active_steer_tx {
-                        let text = std::mem::take(&mut self.input);
-                        if self.input_history.last() != Some(&text) {
-                            self.input_history.push(text.clone());
-                        }
+                    if let Some(steer_tx) = self.active_steer_tx.clone() {
+                        let text = self.input.take();
+                        self.remember_prompt(&text);
                         self.history_index = None;
                         self.current_draft.clear();
                         let _ = steer_tx.send(text.clone());
@@ -455,12 +531,57 @@ impl App {
                     && !mods.contains(KeyModifiers::CONTROL)
                     && !mods.contains(KeyModifiers::ALT) =>
             {
-                self.input.push(c);
+                self.input.insert_char(c);
                 self.history_index = None;
                 self.autocomplete_idx = 0;
             }
+            // Shell editing keys, on either keyboard layout.
+            KeyCode::Char(c) if cx.gate.pending().is_none() && mods.contains(KeyModifiers::CONTROL) => match latin(c) {
+                'a' => self.input.home(),
+                'j' => {
+                    self.input.insert_char('\n');
+                    self.edited();
+                }
+                'w' | 'h' => {
+                    self.input.delete_word_before();
+                    self.edited();
+                }
+                'k' => {
+                    self.input.delete_to_line_end();
+                    self.edited();
+                }
+                'f' if self.input_history.is_empty() => {
+                    self.background = Some(BackgroundNotice::fading("No earlier prompts to search yet", 4));
+                    self.renderer.request_reprint();
+                }
+                'f' => {
+                    self.history_search = Some(flashagent_tui::HistorySearch::start(self.input.to_string()));
+                    self.renderer.request_reprint();
+                }
+                _ => {}
+            },
+            KeyCode::Char(c) if cx.gate.pending().is_none() && mods.contains(KeyModifiers::ALT) => match latin(c) {
+                'b' => self.input.word_left(),
+                'f' => self.input.word_right(),
+                _ => {}
+            },
             _ => {}
         }
         Flow::Next
     }
+}
+
+/// Ctrl or Alt held with an arrow or Backspace: move or delete by words.
+fn word_mods(mods: KeyModifiers) -> bool {
+    mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT)
+}
+
+/// The Latin letter on the same key as `c` in the Russian layout, so
+/// Ctrl+W still deletes a word with the layout switched. Anything else is
+/// returned lower-cased.
+fn latin(c: char) -> char {
+    const RU: &str = "йцукенгшщзфывапролдячсмить";
+    const EN: &str = "qwertyuiopasdfghjklzxcvbnm";
+    let c = c.to_lowercase().next().unwrap_or(c);
+    RU.chars().position(|r| r == c).and_then(|i| EN.chars().nth(i)).unwrap_or(c)
 }

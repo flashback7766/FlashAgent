@@ -51,7 +51,9 @@ pub(crate) struct Renderer {
 }
 
 pub(crate) struct FrameState<'a> {
-    pub(crate) input: &'a str,
+    pub(crate) input: &'a flashagent_tui::Composer,
+    /// Ctrl+F open: what is being looked for, and the prompt it found.
+    pub(crate) history_search: Option<(&'a str, Option<&'a str>)>,
     pub(crate) mode: PermissionMode,
     pub(crate) is_goal_active: bool,
     /// Live `/goal` progress against its budgets, when one is running.
@@ -588,8 +590,17 @@ impl Renderer {
             let g = (150.0 + phase * 55.0) as u8;
             let b = (75.0 + phase * 40.0) as u8;
             let prompt_styled = format!("\x1b[1;38;2;{r};{g};{b}m❯\x1b[0m");
-            let input_row_content = if st.input.is_empty() {
-                if let Some(prefill) = st.prefill_status {
+            let input_rows: Vec<String> = if let Some((query, found)) = st.history_search {
+                // What was found stands in the prompt, the search above it.
+                let found_line = found.map_or_else(
+                    || "\x1b[38;2;200;120;110mno match\x1b[0m".to_string(),
+                    |f| format!("\x1b[38;2;155;160;175m{}\x1b[0m", f.lines().next().unwrap_or_default()),
+                );
+                let label = "\x1b[38;2;135;130;125mfind in history:\x1b[0m";
+                custom_cursor_col = Some((visible_width(query) + 21).min(width.saturating_sub(2)) as u16);
+                vec![format!(" {prompt_styled} {label} \x1b[1;38;2;240;235;225m{query}\x1b[0m"), format!("   {found_line}")]
+            } else if st.input.is_empty() {
+                vec![if let Some(prefill) = st.prefill_status {
                     format!(" {prompt_styled}  {prefill}")
                 } else if st.running {
                     let what = st.turn_phase.map_or_else(|| "Working on task".to_string(), TurnPhase::label);
@@ -618,14 +629,35 @@ impl Renderer {
                         "Ask..."
                     };
                     format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
-                }
+                }]
             } else {
                 // Borders, " ❯ " and a cell for the cursor after the text.
-                let (shown, cells) = flashagent_tui::tail_window(st.input, width.saturating_sub(6));
-                custom_cursor_col = Some((cells + 4).min(width.saturating_sub(2)) as u16);
-                format!(" {prompt_styled} {shown}")
+                // A long prompt grows the box to a third of the screen and
+                // then scrolls inside it, keeping the cursor's row in view.
+                let max_rows = (height as usize / 3).clamp(1, 10);
+                let layout = st.input.layout(width.saturating_sub(6).max(1), max_rows);
+                input_line_idx += layout.cursor_row;
+                custom_cursor_col = Some((layout.cursor_col + 4).min(width.saturating_sub(2)) as u16);
+                let dim = |s: &str| format!("\x1b[38;2;100;95;90m{s}\x1b[0m");
+                let last = layout.rows.len() - 1;
+                layout
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, row)| {
+                        let lead = match i {
+                            0 if layout.hidden_above > 0 => format!(" {} ", dim("↑")),
+                            0 => format!(" {prompt_styled} "),
+                            _ if i == last && layout.hidden_below > 0 => format!(" {} ", dim("↓")),
+                            _ => "   ".to_string(),
+                        };
+                        format!("{lead}{row}")
+                    })
+                    .collect()
             };
-            tail.push((LineKind::User, pad_box_row(&input_row_content, width)));
+            for row in &input_rows {
+                tail.push((LineKind::User, pad_box_row(row, width)));
+            }
 
             // Bottom border of input box
             tail.push((
@@ -666,6 +698,9 @@ impl Renderer {
         // Line 1: Action hint / hotkeys
         let left_hint = if let Some(toast) = st.copy_toast {
             format!("  \x1b[1;38;2;135;215;165m{toast}\x1b[0m")
+        } else if st.history_search.is_some() {
+            let hints = plain_hints(&["ctrl+f — older", "enter — use", "esc — cancel"], width.saturating_sub(2));
+            format!("  \x1b[38;2;135;130;125m{hints}\x1b[0m")
         } else if gate.pending().is_some() {
             "  \x1b[38;2;135;130;125menter — allow · a — always · d / esc — deny\x1b[0m".to_string()
         } else if question_gate.pending().is_some() {
@@ -733,11 +768,18 @@ impl Renderer {
             }
         } else if let Some(text) = st.background {
             format!("  {}", st.background_style.paint(text))
+        } else if !st.input.is_empty() {
+            // Writing: the keys for writing, in the order they are wanted.
+            let hints = plain_hints(
+                &["enter — send", "alt+enter — new line", "ctrl+w — delete word", "ctrl+f — history", "esc — clear"],
+                width.saturating_sub(2),
+            );
+            format!("  \x1b[38;2;135;130;125m{hints}\x1b[0m")
         } else {
             // The longest list of shortcuts that fits: measured, since fixed
             // column thresholds let the longer lists clip mid-word.
             const FOOTERS: [&str; 4] = [
-                "enter — send · tab — settings · f1 — context · f2 — verbose · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · ctrl+c/v · esc esc — quit",
+                "enter — send · tab — settings · f1 — context · f2 — verbose · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · ctrl+f — history · esc esc — quit",
                 "enter — send · tab — settings · f1 — context · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · esc esc — quit",
                 "enter — send · tab — settings · f3 — model · f4 — effort · f5 — sampling · esc esc — quit",
                 "enter — send · tab — settings · f3 — model · esc esc — quit",
@@ -1005,6 +1047,10 @@ impl App {
             &self.context_usage,
             FrameState {
                 input: &self.input,
+                history_search: self
+                    .history_search
+                    .as_ref()
+                    .map(|h| (h.query.as_str(), h.found(&self.input_history))),
                 mode: cx.perm.state().mode(),
                 is_goal_active: self.goal_state.is_some(),
                 goal_progress: goal_progress.as_deref(),
@@ -1079,4 +1125,11 @@ impl App {
             self.speed_history.remove(0);
         }
     }
+}
+
+/// Unstyled hints joined with " · ", dropping from the middle until they fit
+/// and keeping the last one, which is the way out.
+fn plain_hints(parts: &[&str], width: usize) -> String {
+    let pairs: Vec<(String, String)> = parts.iter().map(|p| (p.to_string(), p.to_string())).collect();
+    flashagent_tui::fit_hints(&pairs, " · ", width)
 }
