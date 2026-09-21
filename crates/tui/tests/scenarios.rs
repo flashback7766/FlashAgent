@@ -1389,7 +1389,9 @@ fn two_instances_started_together_keep_their_own_sessions() {
 fn steering_during_turn_pins_message_until_completion_and_pivots() {
     let words: Vec<String> = (1..=6).map(|i| format!("word{i}")).collect();
     let server = MockServer::start(vec![
-        Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(500) },
+        // Slow enough that a loaded CI machine still sees the steer pinned
+        // before the answer ends and the steer is sent.
+        Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(1000) },
         Reply::Text("Pivoted to user steering.".into()),
     ]);
     let home = Home::new();
@@ -1783,9 +1785,16 @@ const ALT_ENTER: &str = "\x1b\r";
 const CTRL_F: &str = "\x06";
 const CTRL_W: &str = "\x17";
 
-/// Text as a terminal delivers a paste: between bracketed-paste markers.
+/// Text as the terminal delivers a paste: between bracketed-paste markers,
+/// or on Windows, whose console has no such markers, as keys arriving
+/// together with each newline an Enter.
 fn paste(term: &Term, text: &str) {
-    term.send(&format!("\x1b[200~{text}\x1b[201~"));
+    if cfg!(windows) {
+        term.write(&text.replace('\n', "\r"));
+        std::thread::sleep(Duration::from_millis(100));
+    } else {
+        term.send(&format!("\x1b[200~{text}\x1b[201~"));
+    }
 }
 
 /// The user message of a turn, as the JSON text the model was sent.
