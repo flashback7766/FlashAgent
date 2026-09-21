@@ -465,18 +465,12 @@ fn nothing_is_drawn_outside_a_small_terminal() {
     home.set_up(&server.url);
     let (cols, rows) = SMALL;
     let term = Term::start(&home, &["-y"], cols, rows);
-    term.wait_for(PROMPT, WAIT);
+    // Waiting for the composer is itself the check that the welcome card did
+    // not push it off: if it had, there would be nowhere to type.
+    let screen = term.wait_for(PROMPT, WAIT);
 
-    let too_wide: Vec<_> = lines_of(&term)
-        .into_iter()
-        .filter(|l| l.chars().count() > cols as usize)
-        .collect();
+    let too_wide: Vec<_> = screen.lines().filter(|l| l.chars().count() > cols as usize).collect();
     assert!(too_wide.is_empty(), "lines wider than the terminal: {too_wide:#?}");
-
-    // The composer is the last thing on screen: if the welcome card pushed
-    // it off, there is nowhere to type.
-    let screen = term.screen();
-    assert!(screen.contains(PROMPT), "the composer is off screen:\n{screen}");
 }
 
 #[test]
@@ -897,10 +891,10 @@ fn a_goal_shows_its_live_plan_and_updates_it_in_place() {
     term.type_text("/goal fix the failing test");
     term.send(ENTER);
     term.wait_for("Done.", WAIT);
-    // A repaint can be caught half-written; wait for the finished frame.
-    term.wait_for("[~] fix it", WAIT);
+    // A repaint can be caught half-written; wait for the finished frame and
+    // check that one.
+    let screen = term.wait_for("[~] fix it", WAIT);
 
-    let screen = term.screen();
     assert!(screen.contains("plan: 1/2"), "{screen}");
     assert!(screen.contains("[x] read the failing test"), "{screen}");
     assert!(screen.contains("[~] fix it"), "{screen}");
