@@ -174,14 +174,17 @@ impl Term {
         }
     }
 
-    /// Wait until `needle` is on the screen. On a timeout the test fails with
-    /// the screen it was looking at.
-    pub fn wait_for(&self, needle: &str, timeout: Duration) {
+    /// Wait until `needle` is on the screen, and hand back that screen. On a
+    /// timeout the test fails with the screen it was looking at.
+    ///
+    /// Check what is returned rather than taking the screen again: a second
+    /// look can land in the middle of a repaint and find it half drawn.
+    pub fn wait_for(&self, needle: &str, timeout: Duration) -> String {
         let start = Instant::now();
         loop {
             let screen = self.screen();
             if screen.contains(needle) {
-                return;
+                return screen;
             }
             if start.elapsed() > timeout {
                 panic!("waited {timeout:?} for {needle:?}; the screen was:\n{}", framed(&screen));
