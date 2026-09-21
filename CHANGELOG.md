@@ -1,5 +1,25 @@
 # Changelog
 
+## b328 — a prompt you can edit, sessions that are never lost, and honest settings
+
+- **Edit the prompt anywhere in it.** ←/→ move the cursor, Home/End go to the line and then the text, Ctrl or Alt with an arrow jumps by words, Delete, Ctrl+W, Ctrl+K and Ctrl+A work as in a shell, and all of them work with the Russian layout too. The cursor steps over what a person sees as one character, so an accented letter, a flag or a family emoji is one press of an arrow and one Backspace.
+- **Prompts of several lines.** Alt+Enter, Ctrl+J or a `\` before Enter start a new line. A paste keeps its lines instead of joining them with spaces, so pasted code arrives as code. The box grows with the text up to a third of the screen, then scrolls around the cursor.
+- **Ctrl+F finds an earlier prompt**, from this session or an earlier one: prompts are now kept in `~/.flashagent/prompt_history.jsonl` while sessions are saved. Enter takes the found prompt into the box to edit, it does not send it. Ctrl+R still regenerates the last answer.
+- **`/resume` searches inside conversations.** Typing narrows the list by everything that was said, not only by the first prompt. When the match is in text the list does not show, the piece around it appears under the session.
+- **`/export md` reads as the conversation.** No system prompt, no memory block wrapped around the first question, and tool results and thinking folded under `<details>`.
+- **A conversation is never saved over another.** A `--resume` of a file that could not be read used to save the new conversation into that file, over what was left of the old one. Two instances started in the same second shared a session id, and the second one saved over the first. Neither can happen now.
+- **Saves cannot be half written, and a failed save is shown.** Sessions and `config.json` are written beside the file and renamed over it. When a save fails, the app says so. On exit the conversation goes to the temporary folder and the message names it.
+- **Pasting on Windows no longer sends the prompt line by line.** The Windows console delivers a paste as key presses, and every newline in it was an Enter. Keys that arrive together with a newline inside them are now read as one paste.
+- **A long error wraps instead of being cut** at the window's edge, where the part that said what went wrong often was.
+- **A paste goes to what has the keyboard.** An image path pasted as the answer to a model's question used to become an attachment for some later prompt.
+- **Animations off means still.** The tips no longer type themselves, and the mascot no longer breathes or blinks. The welcome card no longer draws itself in, and the prompt arrow and the working face no longer move. The spinner still turns, because it is the sign that work is going on.
+- **Token counters off are left out**, instead of reading "Tokens - 0 (0.0/s)" as if the model had stopped.
+- **Narrow windows.** At 44 columns the permission mode was cut to "[Accept Edit". The context gauge now shrinks first, and the status line drops whole parts instead of ending on half a word. The MCP panel no longer lists its keys twice.
+- **Long sessions stay fast.** A frame used to copy the whole transcript. At 10,000 turns a frame while the model streams went from 17.6 ms to 3.4 ms. Figures and the commands behind them: [docs/numbers.md](docs/numbers.md).
+- **Releases are tested first.** A release tag now runs the full test suite on Linux, Windows and macOS before anything is built. `bump.sh` commits the version and then tags that commit, never moves an existing tag, and stops when the changelog has no section for the version.
+- **Documents.** PHILOSOPHY now says what the owner decided: v1 is the terminal app, and the native UI is v2. ARCHITECTURE has diagrams of the crates, of one turn and of how a frame is drawn. New: [docs/numbers.md](docs/numbers.md) and a demo walkthrough, [docs/demo.md](docs/demo.md).
+- **Removed.** Ten functions that nothing ran: five with no callers at all, and five that only their own tests called.
+
 ## b313 — paths with ~, working web search, colour themes and a readable transcript
 
 - **A path written with `~` means the home folder.** A tool call has no shell behind it, so nothing expanded the tilde: `~/FlashAgent/src/main.rs` was looked for inside the project and reported missing. The permission layer made the same mistake in the other direction — because `~/.ssh/id_rsa` looked relative, it looked like an ordinary project file and nothing was asked before opening it. What a `~` means is now decided once and used by every tool and by the check that guards them.

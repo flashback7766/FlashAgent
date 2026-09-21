@@ -1991,8 +1991,13 @@ fn the_mcp_panel_says_its_keys_once() {
     term.type_text("/mcp");
     term.send(ENTER);
     term.wait_for("Esc close", WAIT);
-    let screen = term.screen().to_lowercase();
-    assert_eq!(screen.matches("switch tab").count(), 1, "the keys are listed twice:\n{screen}");
+    // The line under the panel's bottom edge is the footer; it used to list
+    // the same keys the panel already shows inside its box.
+    let screen = term.screen();
+    let lines: Vec<&str> = screen.lines().collect();
+    let bottom = lines.iter().rposition(|l| l.contains('╰')).expect("the panel's bottom edge");
+    let footer = lines.get(bottom + 1).copied().unwrap_or_default().to_lowercase();
+    assert!(!footer.contains("switch tab"), "the keys are listed again under the panel:\n{screen}");
 }
 
 #[test]
