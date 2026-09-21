@@ -2025,3 +2025,54 @@ fn a_saved_session_is_found_by_something_said_inside_it() {
     term.send(ENTER);
     term.wait_for("Resumed session", WAIT);
 }
+
+/// Resident memory of a process, in MB, from /proc (Linux only).
+fn rss_mb(pid: u32) -> Option<f64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let kb: f64 = status.lines().find(|l| l.starts_with("VmRSS:"))?.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024.0)
+}
+
+#[test]
+#[ignore = "a measurement for docs/numbers.md; run with --release"]
+fn measure_startup_and_memory() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    home.set_up(&server.url);
+
+    let mut starts = Vec::new();
+    for _ in 0..5 {
+        let started = std::time::Instant::now();
+        let mut term = Term::start(&home, &["-y"], COLS, ROWS);
+        term.wait_for(PROMPT, WAIT);
+        starts.push(started.elapsed().as_secs_f64() * 1000.0);
+        std::thread::sleep(Duration::from_millis(1500));
+        if let Some(mb) = term.pid().and_then(rss_mb) {
+            println!("idle memory: {mb:.1} MB");
+        }
+        quit_with_double_esc(&mut term);
+    }
+    starts.sort_by(f64::total_cmp);
+    println!("time to the first usable frame: median {:.0} ms (runs: {starts:.0?})", starts[2]);
+
+    // A long saved conversation, resumed.
+    let turns = 2_000;
+    let mut messages = vec![serde_json::json!({ "role": "system", "content": "sys", "reasoning": null, "tool_call_id": null, "tool_calls": [] })];
+    for n in 0..turns {
+        messages.push(serde_json::json!({ "role": "user", "content": format!("Question {n}: what does the parser do with an unclosed block?"), "reasoning": null, "tool_call_id": null, "tool_calls": [] }));
+        messages.push(serde_json::json!({ "role": "assistant", "content": format!("Answer {n}: it keeps the text as it is and **reports the block** at the end.\n\n- one\n- two\n\n```rust\nlet x = {n};\n```"), "reasoning": null, "tool_call_id": null, "tool_calls": [] }));
+    }
+    let dir = home.path().join(".flashagent").join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = serde_json::json!({ "id": "session_1_1", "timestamp": 1, "model": "m", "cwd": "~/work", "messages": messages });
+    std::fs::write(dir.join("session_1_1.json"), session.to_string()).unwrap();
+    let started = std::time::Instant::now();
+    let mut term = Term::start(&home, &["-y", "--resume", "session_1_1"], COLS, ROWS);
+    term.wait_for(&format!("Answer {}", turns - 1), Duration::from_secs(120));
+    println!("resume of {turns} turns to the last answer on screen: {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+    std::thread::sleep(Duration::from_millis(1500));
+    if let Some(mb) = term.pid().and_then(rss_mb) {
+        println!("memory with {turns} turns loaded: {mb:.1} MB");
+    }
+    quit_with_double_esc(&mut term);
+}

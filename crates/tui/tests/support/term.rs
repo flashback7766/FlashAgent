@@ -132,7 +132,12 @@ impl Term {
         Term { parser, writer, child, _master: pty.master }
     }
 
-    /// The screen as a person sees it, one line per row.
+    /// The app's process id, to read what it costs from outside.
+    #[allow(dead_code)]
+    pub fn pid(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
     /// The screen with its colours, as the escape sequences a terminal would
     /// need to redraw it. Used to check what colour something came out.
     #[allow(dead_code)]

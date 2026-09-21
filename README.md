@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-89b4fa.svg)](https://github.com/flashback7766/FlashAgent/releases)
 [![Discussions](https://img.shields.io/badge/discussions-join-a6e3a1.svg)](https://github.com/flashback7766/FlashAgent/discussions)
 
-**~12 MB of RAM idle · single ~16 MB binary · no Node, no Python, no Electron · zero telemetry**
+**~10 MB of RAM idle · single ~16 MB binary · no Node, no Python, no Electron · zero telemetry** ([measured](docs/numbers.md))
 
 <br/>
 

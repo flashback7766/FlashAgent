@@ -61,31 +61,39 @@ newer than the last version the user saw, up to the running one.
 
 ## Making a release
 
-Beta build (the usual case):
+Beta build (the usual case). First write the `CHANGELOG.md` section, headed
+with the exact version:
+
+```markdown
+## b290 — short title
+```
+
+Then:
 
 ```bash
 ./packaging/bump.sh small-feature    # b287 → b290; also: mini +1, medium +5, big +10, major +15
-git push origin b290
+git push origin HEAD b290
 ```
+
+`bump.sh` sets the version in `README.md` and the Arch `PKGBUILD`, commits
+them together with the changelog as "Release b290: short title", and tags
+that commit. It stops instead when the tag already exists (a published tag
+is never moved), when the changelog has no section for the new version, or
+when other changes are uncommitted and would end up in the release commit.
 
 Stable release, cut from the newest beta build:
 
 ```bash
-./packaging/bump.sh stable 1.0.0     # tags v1.0.0+b290
-git push origin 'v1.0.0+b290'
+./packaging/bump.sh stable 1.0.0     # commits README, tags v1.0.0+b290
+git push origin HEAD 'v1.0.0+b290'
 ```
 
-Pushing the tag runs `.github/workflows/release.yml`. It embeds the tag in
+Pushing the tag runs `.github/workflows/release.yml`. It first runs the whole
+test suite on Linux, Windows and macOS (the CI workflow, called from the
+release) and builds nothing if any of it fails. Then it embeds the tag in
 the binary (`FLASHAGENT_VERSION`), publishes the assets to the rolling
 `beta` or `stable` release, and rejects any tag that is neither `bN` nor
 `vX.Y.Z+bN`.
-
-Before tagging, add a `CHANGELOG.md` section headed with the exact version:
-
-```markdown
-## b290 — short title
-## v1.0.0+b290 — short title
-```
 
 ### Choosing MAJOR.MINOR.PATCH for a stable release
 

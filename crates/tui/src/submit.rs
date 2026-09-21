@@ -19,6 +19,9 @@ const HELP: &str = "Commands & Skills (Tab to autocomplete):\n\
      • /diff · /commit <msg>  — git diff --stat / commit staged changes\n\
      • /export [md|html|jsonl] — write the conversation to a file\n\
      • /editor (or Ctrl+E)    — compose the prompt in an external editor\n\
+     • Alt+Enter · Ctrl+J · \\ then Enter — a new line in the prompt\n\
+     • ←/→ · Home/End · Ctrl+W · Ctrl+K — move and delete in the prompt\n\
+     • Ctrl+F                 — search the prompts sent before\n\
      • Ctrl+V                 — paste a screenshot (Ctrl+Z takes it back); dropping an image works too\n\
      • /update (or Ctrl+U) · /channel <stable|beta> — check, download and install an update\n\
      • /skill:<name>          — invoke a skill from .agents/skills/\n\
