@@ -163,16 +163,80 @@ impl SettingsView {
         }
     }
 
-    pub fn total_items(&self) -> usize {
-        match self.active_tab {
-            SettingsTab::General => 6,
-            SettingsTab::Updates => 3,
-            SettingsTab::Aesthetics => 6,
-            SettingsTab::Reasoning => 7,
-            SettingsTab::Goal => 3,
-            SettingsTab::Tools => 3,
-            SettingsTab::Style => 1 + PersonalityTrait::ALL.len(),
+    /// The rows of the open tab, as label and value. Both drawing and
+    /// moving the selection use this list, so a row added to a tab is also
+    /// a row the arrows can reach.
+    fn items(&self) -> Vec<(&'static str, String)> {
+    match self.active_tab {
+        SettingsTab::General => vec![
+            ("Backend URL *", if self.editing_url { format!("{}█", self.url_input) } else { self.config.backend_url.clone() }),
+            ("Active Model", if self.config.model.is_empty() { "(auto-detected)".to_string() } else { self.config.model.clone() }),
+            ("Permission Mode", self.config.permission_mode.label().to_string()),
+            ("Auto-Save Sessions", if self.config.auto_save_sessions { "Enabled (auto-resume)".into() } else { "Disabled".into() }),
+            ("External Editor", self.config.external_editor.clone()),
+            ("Setup Wizard", "Launch initial configuration wizard".into()),
+        ],
+        SettingsTab::Updates => vec![
+            ("Auto-Update *", if self.config.auto_check_updates { "On (installs in the background)".into() } else { "Off (Ctrl+U or /update only)".into() }),
+            ("Release Channel", self.config.update_channel.label().to_string()),
+            ("Check Updates Now", self.update_check_status.clone().unwrap_or_else(|| "Check GitHub Releases API now".into())),
+        ],
+        SettingsTab::Aesthetics => vec![
+            ("Swift Mascot", if self.config.show_mascot { "Enabled (animated)".into() } else { "Disabled".into() }),
+            ("Developer Tips", if self.config.show_tips { "Enabled (rotating deck)".into() } else { "Disabled".into() }),
+            ("TTFT & Prefill Speed", if self.config.show_ttft { "Enabled (lightning badge)".into() } else { "Disabled".into() }),
+            ("Token Counters", if self.config.show_tokens { "Enabled (prompt/gen count)".into() } else { "Disabled".into() }),
+            ("Clipboard Toasts", if self.config.show_toasts { "Enabled".into() } else { "Disabled".into() }),
+            ("Animations", if self.config.animations { "Enabled (sweeps, pulses, unfolding panels)".into() } else { "Reduced (spinners only)".into() }),
+            ("Colour Theme", self.config.color_theme.label().to_string()),
+        ],
+        SettingsTab::Reasoning => vec![
+            ("Thinking Effort", self.config.thinking_effort.clone()),
+            ("Sampling Preset", self.config.sampling_preset.label().into()),
+            ("Temperature", format!("{:.2}", self.config.temperature)),
+            ("Context Alert", if self.config.context_warn_threshold > 0 { format!("Warn at {}%", self.config.context_warn_threshold) } else { "Disabled".into() }),
+            ("Auto-Compact History", if self.config.auto_compact_context {
+                // Zero means the threshold follows the window; saying
+                // "0%" would read as "always".
+                match self.config.context_compact_threshold {
+                    0 => format!("Enabled (auto: {}% for this window)", flashagent_core::default_compact_threshold(self.context_capacity)),
+                    pct => format!("Enabled (at {pct}%)"),
+                }
+            } else { "Disabled".into() }),
+            ("Web Tools", if self.config.web_tools { "Enabled (web_fetch, web_search)".into() } else { "Disabled".into() }),
+            ("Network Retries", format!("{} retries on connection failure", self.config.network_retries)),
+        ],
+        SettingsTab::Goal => vec![
+            ("Step Limit", match self.config.goal_max_steps {
+                None | Some(0) => "Unlimited".to_string(),
+                Some(n) => format!("{n} steps"),
+            }),
+            ("Time Limit", goal_minutes_label(self.config.goal_max_minutes)),
+            ("Token Limit", goal_tokens_label(self.config.goal_max_output_tokens)),
+        ],
+        SettingsTab::Style => {
+            let p = &self.config.personality;
+            let mut rows = vec![("Base style and tone", format!("{} — {}", p.base.label(), p.base.blurb()))];
+            for t in PersonalityTrait::ALL {
+                let level = p.level(t);
+                let blurb = t.blurb(level);
+                rows.push((
+                    t.label(),
+                    if blurb.is_empty() { level.label().to_string() } else { format!("{} — {blurb}", level.label()) },
+                ));
+            }
+            rows
         }
+        SettingsTab::Tools => vec![
+            ("Toolset Profile", self.config.toolset_profile.label().to_string()),
+            ("MCP Manager", "Overview & Server Registry".into()),
+            ("Run Tool Test", self.tool_test_status.clone().unwrap_or_else(|| "Probe function calling".into())),
+        ],
+    }
+    }
+
+    pub fn total_items(&self) -> usize {
+        self.items().len()
     }
 
     pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> SettingsAction {
@@ -592,72 +656,7 @@ impl SettingsView {
 
         // Tab items list
         let max_val_w = inner_text_w.saturating_sub(28);
-        let items: Vec<(&str, String)> = match self.active_tab {
-            SettingsTab::General => vec![
-                ("Backend URL *", if self.editing_url { format!("{}█", self.url_input) } else { self.config.backend_url.clone() }),
-                ("Active Model", if self.config.model.is_empty() { "(auto-detected)".to_string() } else { self.config.model.clone() }),
-                ("Permission Mode", self.config.permission_mode.label().to_string()),
-                ("Auto-Save Sessions", if self.config.auto_save_sessions { "Enabled (auto-resume)".into() } else { "Disabled".into() }),
-                ("External Editor", self.config.external_editor.clone()),
-                ("Setup Wizard", "Launch initial configuration wizard".into()),
-            ],
-            SettingsTab::Updates => vec![
-                ("Auto-Update *", if self.config.auto_check_updates { "On (installs in the background)".into() } else { "Off (Ctrl+U or /update only)".into() }),
-                ("Release Channel", self.config.update_channel.label().to_string()),
-                ("Check Updates Now", self.update_check_status.clone().unwrap_or_else(|| "Check GitHub Releases API now".into())),
-            ],
-            SettingsTab::Aesthetics => vec![
-                ("Swift Mascot", if self.config.show_mascot { "Enabled (animated)".into() } else { "Disabled".into() }),
-                ("Developer Tips", if self.config.show_tips { "Enabled (rotating deck)".into() } else { "Disabled".into() }),
-                ("TTFT & Prefill Speed", if self.config.show_ttft { "Enabled (lightning badge)".into() } else { "Disabled".into() }),
-                ("Token Counters", if self.config.show_tokens { "Enabled (prompt/gen count)".into() } else { "Disabled".into() }),
-                ("Clipboard Toasts", if self.config.show_toasts { "Enabled".into() } else { "Disabled".into() }),
-                ("Animations", if self.config.animations { "Enabled (sweeps, pulses, unfolding panels)".into() } else { "Reduced (spinners only)".into() }),
-                ("Colour Theme", self.config.color_theme.label().to_string()),
-            ],
-            SettingsTab::Reasoning => vec![
-                ("Thinking Effort", self.config.thinking_effort.clone()),
-                ("Sampling Preset", self.config.sampling_preset.label().into()),
-                ("Temperature", format!("{:.2}", self.config.temperature)),
-                ("Context Alert", if self.config.context_warn_threshold > 0 { format!("Warn at {}%", self.config.context_warn_threshold) } else { "Disabled".into() }),
-                ("Auto-Compact History", if self.config.auto_compact_context {
-                    // Zero means the threshold follows the window; saying
-                    // "0%" would read as "always".
-                    match self.config.context_compact_threshold {
-                        0 => format!("Enabled (auto: {}% for this window)", flashagent_core::default_compact_threshold(self.context_capacity)),
-                        pct => format!("Enabled (at {pct}%)"),
-                    }
-                } else { "Disabled".into() }),
-                ("Web Tools", if self.config.web_tools { "Enabled (web_fetch, web_search)".into() } else { "Disabled".into() }),
-                ("Network Retries", format!("{} retries on connection failure", self.config.network_retries)),
-            ],
-            SettingsTab::Goal => vec![
-                ("Step Limit", match self.config.goal_max_steps {
-                    None | Some(0) => "Unlimited".to_string(),
-                    Some(n) => format!("{n} steps"),
-                }),
-                ("Time Limit", goal_minutes_label(self.config.goal_max_minutes)),
-                ("Token Limit", goal_tokens_label(self.config.goal_max_output_tokens)),
-            ],
-            SettingsTab::Style => {
-                let p = &self.config.personality;
-                let mut rows = vec![("Base style and tone", format!("{} — {}", p.base.label(), p.base.blurb()))];
-                for t in PersonalityTrait::ALL {
-                    let level = p.level(t);
-                    let blurb = t.blurb(level);
-                    rows.push((
-                        t.label(),
-                        if blurb.is_empty() { level.label().to_string() } else { format!("{} — {blurb}", level.label()) },
-                    ));
-                }
-                rows
-            }
-            SettingsTab::Tools => vec![
-                ("Toolset Profile", self.config.toolset_profile.label().to_string()),
-                ("MCP Manager", "Overview & Server Registry".into()),
-                ("Run Tool Test", self.tool_test_status.clone().unwrap_or_else(|| "Probe function calling".into())),
-            ],
-        };
+        let items = self.items();
 
         for (idx, (label, val_raw)) in items.iter().enumerate() {
             let is_sel = idx == self.selected_index;
@@ -784,6 +783,34 @@ mod tests {
         // Esc closes and saves
         let act = view.handle_key(KeyCode::Esc, KeyModifiers::empty());
         assert_eq!(act, SettingsAction::Close);
+    }
+
+    #[test]
+    fn the_arrows_reach_every_row_of_every_tab() {
+        // The Colour Theme row was drawn but the count of rows was a number
+        // written separately, so ↓ from Animations wrapped to the top.
+        let mut view = SettingsView::new(AppConfig::default(), Vec::new());
+        for (n, tab) in SettingsTab::all().iter().enumerate() {
+            view.handle_key(KeyCode::Char(char::from(b'1' + n as u8)), KeyModifiers::empty());
+            assert_eq!(view.active_tab, *tab);
+            let rows = view.items();
+            for _ in 1..rows.len() {
+                view.handle_key(KeyCode::Down, KeyModifiers::empty());
+            }
+            assert_eq!(view.selected_index, rows.len() - 1, "{tab:?}: the last row, {:?}, cannot be reached", rows.last());
+        }
+    }
+
+    #[test]
+    fn the_colour_theme_row_changes_the_theme() {
+        let mut view = SettingsView::new(AppConfig::default(), Vec::new());
+        view.handle_key(KeyCode::Char('3'), KeyModifiers::empty());
+        while view.items()[view.selected_index].0 != "Colour Theme" {
+            view.handle_key(KeyCode::Down, KeyModifiers::empty());
+        }
+        let before = view.config.color_theme;
+        view.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert_ne!(view.config.color_theme, before);
     }
 
     #[test]
