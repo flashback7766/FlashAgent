@@ -2,6 +2,8 @@
 
 > Canonical document. All future agents and developers must adhere to it.
 > Highest authority rule: this file defines WHAT and WHY; ARCHITECTURE.md defines HOW; ROADMAP.md defines IN WHAT ORDER.
+>
+> **v1 is the terminal app; the native UI is v2** (owner decision, 2026-09-11, amended here 2026-09-22). Where this file describes the native renderer, its processes and its storage, it describes v2. The terminal app follows the same principles wherever a terminal can: full composer editing, a master motion toggle, the status ribbon, keyboard coverage.
 
 ## 1. Product Essence
 
@@ -10,7 +12,7 @@ A single `/goal` command transforms it into a **fully autonomous agent** bounded
 
 - Default: amplified interactive chat with tools.
 - `/goal`: autonomous — adaptive execution layers built over a unified core (simple task → reactive loop; complex task → plan → milestones → self-verification → structured summary).
-- Eight permission modes available: Manual / Autonomic / Planning / Bypass (+ optional granular permission matrix across action categories).
+- Four permission modes: Planning (read-only) / Manual (ask before anything that is not a read) / Accept Edits (file changes allowed, shell asks) / Accept All.
 
 ## 2. Unacceptable (Anti-Philosophy)
 
@@ -32,16 +34,16 @@ Inference and data stay local by default. The network operations FlashAgent make
 
 | Layer | Decision |
 |---|---|
-| Core | **Rust** (tokio, serde, rusqlite) |
-| UI | **Custom wgpu renderer** — design takes precedence over generic frameworks |
-| Text | **cosmic-text / parley** — font shaping, CJK, RTL, emoji, ligatures |
-| Theme | **Material 3 Expressive, full**: every button can expand into a mini-panel, expressive palette, iconography |
-| Fonts | Bundled: proportional (Roboto Flex/Inter) + monospace (JetBrains Mono) + user TTF/OTF loading. Emoji: embedded Noto Emoji |
-| Icons | **Material Symbols** |
-| Data | **SQLite + FTS5** |
-| Processes | **UI process + core service** via IPC; a UI crash never interrupts the active task |
+| Core | **Rust** (tokio, serde) |
+| UI | v1: **terminal UI** (crossterm), the product itself. v2: **custom wgpu renderer** — design takes precedence over generic frameworks |
+| Text (v2) | **cosmic-text / parley** — font shaping, CJK, RTL, emoji, ligatures |
+| Theme | **Material 3 Expressive**: v1 in the terminal's colours (with themes for 16-colour and monochrome terminals); v2 in full, every button can expand into a mini-panel, expressive palette, iconography |
+| Fonts (v2) | Bundled: proportional (Roboto Flex/Inter) + monospace (JetBrains Mono) + user TTF/OTF loading. Emoji: embedded Noto Emoji |
+| Icons (v2) | **Material Symbols** |
+| Data | v1: **plain files** under `~/.flashagent/` (JSON sessions written atomically, snapshots, config). v2: **SQLite + FTS5**, for the session sidebar's search |
+| Processes | v1: **one process**. v2: **UI process + core service** via IPC; a UI crash never interrupts the active task |
 | Inference | HTTP backends currently (any OpenAI-compatible endpoint: LM Studio, Ollama, vLLM, OpenRouter, Gemini, and any other model without exception); **embedded llama.cpp — separate milestone after core app runs flawlessly**; paired with grammar/constrained generation for tool calling |
-| TUI | Lightweight TUI client connected to the same core (for automated testing and terminal enthusiasts) |
+| TUI | v1 is the terminal app. In v2 it stays: a client of the same core, for terminal users and for automated testing |
 | License | **MIT** |
 | Documentation | Repository-generated site (mdBook on GitHub Pages); concise entrypoint in README |
 | Releases | Stable + Beta channels, SemVer from day one |
@@ -55,7 +57,7 @@ Inference and data stay local by default. The network operations FlashAgent make
 
 ## 6. Permission Model
 
-- Modes: Manual / Autonomic / Planning / Bypass; mode selector in composer, click to cycle; `/goal` activates autonomic mode displaying explicit boundaries.
+- Modes: Planning / Manual / Accept Edits / Accept All; Shift+Tab cycles them; `/goal` runs in Accept All inside explicit boundaries and restores the mode after.
 - Confirmations: Allow / Always / Deny interactive card in stream; Always uses narrow prefix rules (`npm test` ≠ `npm publish`); session-scoped rules; **mandatory diff preview prior to file modifications**.
 - Subagent permissions: strictly inherited from parent, **privilege escalation is architecturally forbidden**.
 
@@ -80,6 +82,9 @@ Adaptive: **auto-selected based on the model's context window** (ultra-minimal ~
 
 ## 10. UI Philosophy
 
+This section describes the v2 native UI in full. The v1 terminal app keeps
+every point a terminal can express and says so in ROADMAP when it cannot.
+
 - Design: **M3 Expressive, implemented literally** — custom wgpu renderer.
 - Animations: **rich visual feedback**, all four classes: spring physics, continuous ambient background loops (subtle, non-distracting), state morphs (Stop ↔ Send, diff expansion), master disable toggle.
 - Fully animated, looped, and parallel rendering.
@@ -101,6 +106,8 @@ Adaptive: **auto-selected based on the model's context window** (ultra-minimal ~
 
 ## 11. Performance Requirements
 
+Measured figures for the terminal app are in [docs/numbers.md](docs/numbers.md). The display requirements (refresh rate, DPI, AccessKit) are for v2.
+
 - Cold start < 1s.
 - FPS = monitor refresh rate (native Hz, full VRR / LTPO / live display hotplug support); zero frames rendered without changes (sleep frames).
 - Fractional DPI scaling (125%, 150%) with subpixel sharpness; live display switching.
@@ -112,9 +119,9 @@ Adaptive: **auto-selected based on the model's context window** (ultra-minimal ~
 
 - Old flashgent (Electron): **frozen**, preserved partially as legacy reference. Source of battle-tested components (parsers, safety guards).
 - New repository: `flashagent`. Product brand: **FlashAgent**.
-- Roadmap strategy: **two parallel tracks** — core engine (validated via TUI) and UI renderer prototype (highest-risk component — initially a one-week prototype: wgpu window, cosmic-text, composer with Cyrillic/IME, one spring morph; evaluate before committing to main repo).
+- Roadmap strategy: originally **two parallel tracks** — core engine (validated via TUI) and UI renderer prototype. The prototype passed its gate (B0); on 2026-09-11 the owner decided v1 ships the terminal app and the native UI resumes after v1.0.
 - Rewrite bottom-up layer by layer.
-- Automatic data migration from `~/.flashgent` (sessions, configuration) on first launch.
+- Data migration from `~/.flashgent`: closed without work (ROADMAP A12), there was no data to import.
 - v1 milestone criteria: (1) author switches to daily production use, (2) public release polished sufficiently to attract active community adoption, (3) thriving ecosystem (GitHub stars, third-party MCPs and themes).
 - Cadence: milestones without rigid calendar deadlines.
 
