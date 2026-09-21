@@ -176,16 +176,33 @@ impl App {
         // me...") is a mention, and the model has view_image for that;
         // silently attaching a megabyte because a word ended in .png would be
         // a surprise.
-        for token in text.split_whitespace().filter(|t| t.contains('/') || t.contains('\\')) {
-            if self.attachments.len() >= 8 {
-                break;
-            }
-            if let Some(att) = Attachment::from_dropped_path(token) {
-                if !self.attachments.iter().any(|a| a.data_url == att.data_url) {
-                    self.attachments.push(att);
+        //
+        // Dropping a file on the terminal is a paste on Unix and plain typing
+        // on Windows, where the terminal has no bracketed paste; both end up
+        // here, so both behave the same.
+        let mut left = String::new();
+        for token in text.split_whitespace() {
+            let attached = (token.contains('/') || token.contains('\\'))
+                && self.attachments.len() < 8
+                && match Attachment::from_dropped_path(token) {
+                    Some(att) => {
+                        if !self.attachments.iter().any(|a| a.data_url == att.data_url) {
+                            self.attachments.push(att);
+                        }
+                        true
+                    }
+                    None => false,
+                };
+            if !attached {
+                if !left.is_empty() {
+                    left.push(' ');
                 }
+                left.push_str(token);
             }
         }
+        // A message that was nothing but the pictures goes as pictures: the
+        // path the user dropped is not something to say to the model.
+        let text = if left.trim().is_empty() && !self.attachments.is_empty() { String::new() } else { text };
         let shown = if self.attachments.is_empty() {
             text.clone()
         } else {
