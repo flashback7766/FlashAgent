@@ -33,11 +33,13 @@ struct Project {
 
 impl Project {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "flashagent-tools-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        // A counter, not the clock: Windows' clock is coarse enough for two
+        // tests started together to read the same time, share a folder, and
+        // lose each other's files when the first one to finish removes it.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("flashagent-tools-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(
             dir.join("src/main.rs"),
