@@ -38,6 +38,8 @@ if [ "${1:-}" = "stable" ]; then
     echo "=========================================="
     if [ -f "${ROOT_DIR}/README.md" ]; then
         sed -i "s/> \*\*Status:\*\* .*/> **Status:** Stable v${SEMVER}/" "${ROOT_DIR}/README.md"
+        git -C "${ROOT_DIR}" add README.md
+        git -C "${ROOT_DIR}" commit -q -m "Release ${NEW_TAG}"
     fi
     git -C "${ROOT_DIR}" tag -a "${NEW_TAG}" -m "FlashAgent ${NEW_TAG}"
     echo "Tag ${NEW_TAG} created. Push it to publish: git push origin '${NEW_TAG}'"
@@ -111,7 +113,25 @@ echo " Increment     : +${TOTAL_INC}"
 echo " New build     : ${NEW_TAG}"
 echo "=========================================="
 
-# Update PKGBUILD and README.md
+# The release commit holds the version and its changelog section, and the
+# tag goes on that commit. Tagging first (as this script once did) put the
+# tag on the commit before, so the built binaries did not say what version
+# they were.
+if git -C "${ROOT_DIR}" rev-parse -q --verify "refs/tags/${NEW_TAG}" >/dev/null; then
+    echo "Tag ${NEW_TAG} already exists. A published tag is never moved; pick the next number." >&2
+    exit 1
+fi
+if ! grep -q "^## ${NEW_TAG} " "${ROOT_DIR}/CHANGELOG.md"; then
+    echo "CHANGELOG.md has no '## ${NEW_TAG} — ...' section. Write it first; the release notes link to it." >&2
+    exit 1
+fi
+OTHER_CHANGES="$(git -C "${ROOT_DIR}" status --porcelain --untracked-files=no | grep -v ' CHANGELOG.md$' || true)"
+if [ -n "${OTHER_CHANGES}" ]; then
+    echo "Uncommitted changes besides CHANGELOG.md; commit them first so the release commit is only the release:" >&2
+    echo "${OTHER_CHANGES}" >&2
+    exit 1
+fi
+
 if [ -f "${ROOT_DIR}/packaging/arch/PKGBUILD" ]; then
     sed -i "s/^pkgver=.*/pkgver=${NEW_TAG}/" "${ROOT_DIR}/packaging/arch/PKGBUILD"
 fi
@@ -119,7 +139,9 @@ if [ -f "${ROOT_DIR}/README.md" ]; then
     sed -i "s/> \*\*Status:\*\* Beta b[0-9]\+/> **Status:** Beta ${NEW_TAG}/" "${ROOT_DIR}/README.md"
 fi
 
-# Create annotated tag
-git -C "${ROOT_DIR}" tag -fa "${NEW_TAG}" -m "FlashAgent ${NEW_TAG} (+${TOTAL_INC})"
-echo "Tag ${NEW_TAG} created successfully."
-echo "To package, run: ./packaging/build-all.sh ${NEW_TAG}"
+SUMMARY="$(grep -m1 "^## ${NEW_TAG} " "${ROOT_DIR}/CHANGELOG.md" | sed "s/^## ${NEW_TAG} — //")"
+git -C "${ROOT_DIR}" add CHANGELOG.md README.md packaging/arch/PKGBUILD
+git -C "${ROOT_DIR}" commit -q -m "Release ${NEW_TAG}: ${SUMMARY}"
+git -C "${ROOT_DIR}" tag -a "${NEW_TAG}" -m "FlashAgent ${NEW_TAG} (+${TOTAL_INC})"
+echo "Committed and tagged ${NEW_TAG}."
+echo "Publish: git push origin HEAD '${NEW_TAG}'   (the release workflow runs the tests before building)"

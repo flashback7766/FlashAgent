@@ -5,6 +5,8 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  # The release workflow runs this first and builds nothing if it fails.
+  workflow_call:
 
 jobs:
   test:
@@ -30,4 +32,4 @@ jobs:
         run: cargo test --workspace --verbose --no-fail-fast
 
       - name: Strict Clippy verification
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
