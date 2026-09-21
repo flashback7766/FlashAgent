@@ -1,0 +1,35 @@
+name: Web tools
+
+# The tools that need the internet cannot run in the ordinary test job: a
+# fetch that fails because a service is briefly down would fail an unrelated
+# pull request, and a suite that cries wolf stops being read. They run here
+# instead — every morning, and on demand — so that a search engine changing
+# its pages underneath us is noticed in a day rather than in a bug report
+# months later.
+
+on:
+  schedule:
+    # 06:00 UTC daily.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  web:
+    name: Tools that need the internet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run the live web tests
+        # Retried once: a single failed request is the network, two in a row
+        # a minute apart is us.
+        run: |
+          cargo test -p flashagent-tools --test web_live -- --ignored --nocapture \
+            || (sleep 60 && cargo test -p flashagent-tools --test web_live -- --ignored --nocapture)

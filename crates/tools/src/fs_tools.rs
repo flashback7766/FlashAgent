@@ -26,12 +26,38 @@ fn resolve(cwd: &Path, path: &str) -> PathBuf {
 }
 
 /// Read a text file, returning 1-based numbered lines.
+///
+/// Read a line at a time: asking for twenty lines of a log should cost
+/// twenty lines of memory, not the whole file. A file that is not text says
+/// so plainly, because "stream did not contain valid UTF-8" tells the model
+/// nothing it can act on — the answer is a different tool, not a retry.
 pub(crate) fn read_file(cwd: &Path, path: &str, offset: usize, limit: usize) -> Result<String, ToolError> {
-    let text = std::fs::read_to_string(resolve(cwd, path))
+    use std::io::{BufRead, BufReader};
+
+    let file = std::fs::File::open(resolve(cwd, path))
         .map_err(|e| ToolError::Other(format!("read {path}: {e}")))?;
+    let mut reader = BufReader::new(file);
     let mut out = String::new();
-    for (i, line) in text.lines().skip(offset).take(limit).enumerate() {
-        let _ = writeln!(out, "{:>6}\t{}", offset + i + 1, line);
+    let mut line = Vec::new();
+    let mut number = 0usize;
+    while number < offset + limit {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => return Err(ToolError::Other(format!("read {path}: {e}"))),
+        }
+        number += 1;
+        if number <= offset {
+            continue;
+        }
+        let text = std::str::from_utf8(&line).map_err(|_| {
+            ToolError::Other(format!(
+                "read {path}: this is not a text file (line {number} is not valid UTF-8). \
+                 Use view_image for a picture, or run_shell with a tool that reads this format."
+            ))
+        })?;
+        let _ = writeln!(out, "{:>6}\t{}", number, text.trim_end_matches(['\n', '\r']));
     }
     Ok(if out.is_empty() { "(empty or past end of file)".into() } else { out })
 }
@@ -603,6 +629,36 @@ mod tests {
         .is_err());
         // Original text untouched on error (purity).
         assert_eq!(apply_edits("a".repeat(10), &[]).unwrap(), "a".repeat(10));
+    }
+
+    #[test]
+    fn a_window_of_a_file_is_read_without_reading_the_rest() {
+        let dir = tempdir();
+        let lines: String = (1..=5000).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(dir.join("big.txt"), &lines).unwrap();
+
+        let window = read_file(&dir, "big.txt", 10, 3).unwrap();
+        assert_eq!(window, "    11\tline 11\n    12\tline 12\n    13\tline 13\n");
+        // Numbering counts from the start of the file, not from the window.
+        assert!(read_file(&dir, "big.txt", 4999, 5).unwrap().contains("  5000\tline 5000"));
+        assert_eq!(read_file(&dir, "big.txt", 9000, 5).unwrap(), "(empty or past end of file)");
+    }
+
+    #[test]
+    fn line_endings_and_a_last_line_without_one_read_the_same() {
+        let dir = tempdir();
+        std::fs::write(dir.join("crlf.txt"), "one\r\ntwo\r\nthree").unwrap();
+        let text = read_file(&dir, "crlf.txt", 0, 10).unwrap();
+        assert_eq!(text, "     1\tone\n     2\ttwo\n     3\tthree\n");
+    }
+
+    #[test]
+    fn a_file_that_is_not_text_says_so_instead_of_talking_about_utf_8() {
+        let dir = tempdir();
+        std::fs::write(dir.join("picture.png"), [0x89, b'P', b'N', b'G', 0xff, 0xfe, 0x00, 0x01]).unwrap();
+        let err = read_file(&dir, "picture.png", 0, 100).unwrap_err().to_string();
+        assert!(err.contains("not a text file"), "{err}");
+        assert!(err.contains("view_image"), "the model should be told what to do instead: {err}");
     }
 
     #[test]
