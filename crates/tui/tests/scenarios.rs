@@ -1344,6 +1344,48 @@ fn a_saved_session_comes_back_with_resume() {
 }
 
 #[test]
+fn a_session_that_fails_to_load_is_left_as_it_was() {
+    let server = MockServer::start(vec![Reply::Text("A fresh answer.".into())]);
+    let home = Home::new();
+    home.set_up(&server.url);
+    let sessions = home.path().join(".flashagent").join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    // Cut off mid-write, the way a crash or a full disk leaves a file.
+    let damaged = sessions.join("session_1_1.json");
+    let bytes = br#"{"id":"session_1_1","timestamp":1,"model":"m","cwd":"~","messages":[{"role":"user","content":"the only copy of"#;
+    std::fs::write(&damaged, bytes).unwrap();
+
+    let mut term = Term::start(&home, &["-y", "--resume", "session_1_1"], COLS, ROWS);
+    term.wait_for("unreadable", WAIT);
+    term.wait_for(PROMPT, WAIT);
+    ask(&term, "start over then", "A fresh answer.");
+    quit_with_double_esc(&mut term);
+
+    assert_eq!(std::fs::read(&damaged).unwrap(), bytes, "the damaged session was written over");
+    assert_eq!(home.sessions().len(), 2, "the new conversation was not saved beside it: {:?}", home.sessions());
+}
+
+#[test]
+fn two_instances_started_together_keep_their_own_sessions() {
+    let server = MockServer::start(vec![Reply::Text("Noted.".into()), Reply::Text("Noted.".into())]);
+    let home = Home::new();
+    home.set_up(&server.url);
+    // Started back to back: well inside one second, before either has saved.
+    let mut first = Term::start(&home, &["-y"], COLS, ROWS);
+    let mut second = Term::start(&home, &["-y"], COLS, ROWS);
+    first.wait_for(PROMPT, WAIT);
+    second.wait_for(PROMPT, WAIT);
+    ask(&first, "the first one", "Noted.");
+    ask(&second, "the second one", "Noted.");
+    quit_with_double_esc(&mut first);
+    quit_with_double_esc(&mut second);
+
+    let saved: Vec<String> = home.sessions().iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
+    assert_eq!(saved.len(), 2, "one session was saved over the other: {:?}", home.sessions());
+    assert!(saved.iter().any(|s| s.contains("the first one")) && saved.iter().any(|s| s.contains("the second one")));
+}
+
+#[test]
 fn steering_during_turn_pins_message_until_completion_and_pivots() {
     let words: Vec<String> = (1..=6).map(|i| format!("word{i}")).collect();
     let server = MockServer::start(vec![

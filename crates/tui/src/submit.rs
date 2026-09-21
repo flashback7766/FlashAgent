@@ -766,9 +766,7 @@ impl App {
         // The words, not the scaffolding a goal or the first message's
         // memory block wrapped them in.
         self.input = extract_user_prompt(&prompt).to_string();
-        if self.config.auto_save_sessions {
-            save_session_file(cx.session_id, &self.current_model, cx.cwd_display, &self.history);
-        }
+        self.autosave(cx.session_id, cx.cwd_display);
         self.renderer.request_reprint();
     }
 }
