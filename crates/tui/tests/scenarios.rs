@@ -2109,3 +2109,25 @@ fn a_paste_that_arrives_as_keystrokes_is_still_one_prompt() {
     let prompt = prompt_of(server.turns().last().unwrap());
     assert!(prompt.contains("fn main() {\\n    run();\\n}"), "{prompt}");
 }
+
+#[test]
+fn a_chosen_voice_reaches_the_model_as_an_example_and_nowhere_else() {
+    let server = MockServer::start(vec![Reply::Text("Sure.".into())]);
+    let home = Home::new();
+    let mut term = ready_with(&home, &server, serde_json::json!({ "personality": { "base": "quirky" } }));
+    ask(&term, "hello there", "Sure.");
+
+    let body = &server.turns()[0].body;
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["role"], "system");
+    let system = messages[0]["content"].to_string();
+    assert!(system.contains("playful streak"), "the voice is not in the system prompt");
+    assert!(!system.contains("user's choice"), "the voice is described as a setting: {system}");
+    assert!(messages[2]["content"].to_string().contains("coat check"), "no example in the chosen voice: {messages:?}");
+    assert!(messages.last().unwrap()["content"].to_string().contains("hello there"));
+
+    assert!(!term.screen().contains("git stash"), "the example was shown:\n{}", term.screen());
+    quit_with_double_esc(&mut term);
+    let saved: String = home.sessions().iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
+    assert!(!saved.contains("git stash"), "the example was saved with the session");
+}

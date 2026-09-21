@@ -1,10 +1,23 @@
 //! How FlashAgent talks: a base style and a few characteristics on top.
 //!
-//! The choice only ever reaches the model as a short section of the system
-//! prompt about tone and presentation. It never changes what the agent does
-//! — tool discipline, honesty about failures and the quality of the code are
-//! the same in every style — and "Default" everywhere adds nothing at all, so
-//! a user who never opens the screen gets exactly the prompt they had before.
+//! A choice reaches the model in two ways, both about tone only:
+//!
+//! - a short description of the voice in the system prompt, written as who
+//!   the assistant is ("you talk like…"), never as a setting someone picked.
+//!   Told "the user chose a friendly tone", a model announces "as you asked,
+//!   I'll be friendly"; told who it is, it just talks that way;
+//! - [`Personality::voice_prelude`], one earlier exchange written in that
+//!   voice, placed after the system prompt in each request and nowhere else.
+//!   Models follow their own previous replies far more closely than any
+//!   description, and they do not quote them back, which is the nearest a
+//!   prompt gets to a fine-tune.
+//!
+//! What the agent does does not change: tool discipline, honesty about
+//! failures and the code are the same in every style. "Default" everywhere
+//! adds nothing, so a user who never opens the screen gets the prompt they
+//! had before.
+
+use flashagent_llm::ChatMessage;
 
 use serde::{Deserialize, Serialize};
 
@@ -58,19 +71,82 @@ impl BaseStyle {
         }
     }
 
-    fn instruction(self) -> Option<&'static str> {
+    /// Who the assistant is in this style, in the second person.
+    fn character(self) -> Option<&'static str> {
         Some(match self {
             Self::Default => return None,
-            Self::Professional => "Sound polished and precise: measured wording, exact terms, no slang or jokes.",
-            Self::Friendly => "Sound warm and chatty, like a friendly colleague pairing with the user.",
-            Self::Candid => "Be direct and encouraging: say plainly what is wrong or risky, and what is good.",
-            Self::Quirky => "Be playful and imaginative: a light touch of humour and vivid comparisons are welcome.",
-            Self::Efficient => "Be concise and plain: the fewest words that carry the answer, no pleasantries.",
+            Self::Professional => {
+                "You write like a senior engineer to a colleague they respect: measured, exact terms, no slang, no jokes."
+            }
+            Self::Friendly => {
+                "You talk like a friendly colleague pairing at the same desk: warm, relaxed, glad to help, and still quick to the point."
+            }
+            Self::Candid => {
+                "You are direct: you say plainly what is wrong or risky and what is good, and you encourage without flattering."
+            }
+            Self::Quirky => {
+                "You have a playful streak: a light joke or a vivid comparison now and then, never at the cost of the answer."
+            }
+            Self::Efficient => "You use the fewest words that carry the answer: no greetings, no pleasantries, no recap.",
             Self::Cynical => {
-                "Be critical and a little sarcastic about bad ideas and fragile code, never about the user; \
-                 the sarcasm must not replace a clear answer."
+                "You are dry and a little sarcastic about bad ideas and fragile code, never about the person, and the sarcasm never replaces a clear answer."
             }
         })
+    }
+
+    /// How this voice would answer "what does `git stash` do?": an opening,
+    /// the points, in the words of this style.
+    fn sample(self) -> (&'static str, [&'static str; 3]) {
+        match self {
+            Self::Default | Self::Professional => (
+                "",
+                [
+                    "`git stash` records your uncommitted changes and restores a clean working tree.",
+                    "`git stash pop` reapplies the most recent entry and removes it from the stash.",
+                    "`git stash list` shows the saved entries.",
+                ],
+            ),
+            Self::Friendly => (
+                "Happy to help!",
+                [
+                    "`git stash` tucks your uncommitted changes away and gives you a clean working tree, handy when you need to switch branches mid-task.",
+                    "When you're ready, `git stash pop` brings them right back.",
+                    "And `git stash list` shows what you've got saved.",
+                ],
+            ),
+            Self::Candid => (
+                "",
+                [
+                    "`git stash` saves your uncommitted changes and cleans the working tree.",
+                    "`git stash pop` restores them, but if the branch has moved on, expect conflicts; a short-lived branch is often the safer choice.",
+                    "`git stash list` shows what is saved.",
+                ],
+            ),
+            Self::Quirky => (
+                "",
+                [
+                    "`git stash` is a coat check for half-finished work: it takes your uncommitted changes and hands you a clean working tree.",
+                    "`git stash pop` is handing in the ticket.",
+                    "`git stash list` shows every coat still on the rack.",
+                ],
+            ),
+            Self::Efficient => (
+                "",
+                [
+                    "Saves uncommitted changes and cleans the working tree.",
+                    "`git stash pop` restores them.",
+                    "`git stash list` lists them.",
+                ],
+            ),
+            Self::Cynical => (
+                "",
+                [
+                    "`git stash` hides your uncommitted changes and gives you a clean working tree: the place half-finished work goes to be forgotten.",
+                    "`git stash pop` brings it back, conflicts included.",
+                    "`git stash list` shows how much you have abandoned so far.",
+                ],
+            ),
+        }
     }
 
     /// The style after (or, with `forward` false, before) this one.
@@ -146,17 +222,18 @@ impl Trait {
         }
     }
 
-    fn instruction(self, level: Level) -> Option<&'static str> {
+    /// The same, as part of who the assistant is.
+    fn character(self, level: Level) -> Option<&'static str> {
         Some(match (self, level) {
             (_, Level::Default) => return None,
-            (Self::Warm, Level::More) => "Be warmer and more personable than usual.",
-            (Self::Warm, Level::Less) => "Keep the warmth down: professional and factual.",
-            (Self::Enthusiastic, Level::More) => "Show more energy and excitement.",
-            (Self::Enthusiastic, Level::Less) => "Stay calm and neutral; no excitement.",
-            (Self::HeadersAndLists, Level::More) => "Structure answers with headers and lists where they help.",
-            (Self::HeadersAndLists, Level::Less) => "Prefer flowing paragraphs over headers and bullet lists.",
-            (Self::Emoji, Level::More) => "Use emoji where they fit naturally.",
-            (Self::Emoji, Level::Less) => "Do not use emoji.",
+            (Self::Warm, Level::More) => "You are warm and personable.",
+            (Self::Warm, Level::Less) => "You keep warmth out of it: professional and factual.",
+            (Self::Enthusiastic, Level::More) => "You bring energy; good news and neat solutions genuinely excite you.",
+            (Self::Enthusiastic, Level::Less) => "You stay calm and even; nothing is exclaimed.",
+            (Self::HeadersAndLists, Level::More) => "You lay answers out with a short header and lists where they help the reader.",
+            (Self::HeadersAndLists, Level::Less) => "You write in flowing paragraphs rather than headers and bullet lists.",
+            (Self::Emoji, Level::More) => "You use an emoji where it fits naturally.",
+            (Self::Emoji, Level::Less) => "You never use emoji.",
         })
     }
 }
@@ -193,24 +270,75 @@ impl Personality {
 
     /// The system-prompt section for this choice; `None` when everything is
     /// at its default, so the prompt stays exactly as it was.
+    ///
+    /// Written as who the assistant is, with no word about a setting, a
+    /// choice or a request: a model that is told it was asked to sound a
+    /// certain way says so in its replies.
     pub fn prompt_section(&self) -> Option<String> {
         let lines: Vec<&str> = self
             .base
-            .instruction()
+            .character()
             .into_iter()
-            .chain(Trait::ALL.iter().filter_map(|t| t.instruction(self.level(*t))))
+            .chain(Trait::ALL.iter().filter_map(|t| t.character(self.level(*t))))
             .collect();
         if lines.is_empty() {
             return None;
         }
         Some(format!(
-            "# Style and tone (the user's choice)\n\
-             Apply this to how you write replies to the user. It changes tone and presentation only: \
-             tool use, correctness, honesty about what failed, and code, commit messages and files you \
-             write are unaffected. It is the user's explicit request, so it overrides the defaults above about \
-             tone and emoji; keep answers as short as those rules ask.\n- {}",
-            lines.join("\n- ")
+            "YOUR VOICE:\n{}\n\
+             This is how you talk in replies, and nothing more: tools, code, commit messages, files and honesty \
+             about what failed are the same whatever your voice. It is simply how you are, so never describe or \
+             mention your own tone.",
+            lines.join(" ")
         ))
+    }
+
+    /// Whether this voice uses emoji, which the prompt otherwise rules out.
+    pub fn uses_emoji(&self) -> bool {
+        self.emoji == Level::More
+    }
+
+    /// One earlier exchange in this voice, for each request to carry right
+    /// after the system prompt. Empty when everything is at its default.
+    ///
+    /// The question is general knowledge with nothing to do with any
+    /// project, so there is nothing in it for the model to refer back to.
+    pub fn voice_prelude(&self) -> Vec<ChatMessage> {
+        if *self == Personality::default() {
+            return Vec::new();
+        }
+        vec![ChatMessage::user("Quick one: what does `git stash` do?"), ChatMessage::assistant(self.sample_answer())]
+    }
+
+    fn sample_answer(&self) -> String {
+        let (opening, points) = self.base.sample();
+        let mut opening = match (self.warm, opening.is_empty()) {
+            (Level::Less, _) => String::new(),
+            (Level::More, true) => "Good question.".to_string(),
+            _ => opening.to_string(),
+        };
+        match self.enthusiastic {
+            Level::More if opening.is_empty() => opening = "Oh, this one is handy!".to_string(),
+            Level::More => opening = opening.replace('.', "!"),
+            Level::Less => opening = opening.replace('!', "."),
+            Level::Default => {}
+        }
+        if self.emoji == Level::More {
+            opening = if opening.is_empty() { "📦".to_string() } else { format!("{opening} 📦") };
+        }
+        // Lists by default only where the style is already terse.
+        let as_list = match self.headers_lists {
+            Level::More => true,
+            Level::Less => false,
+            Level::Default => matches!(self.base, BaseStyle::Default | BaseStyle::Professional | BaseStyle::Efficient),
+        };
+        let body = if as_list {
+            let list = points.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n");
+            if self.headers_lists == Level::More { format!("**git stash**\n\n{list}") } else { list }
+        } else {
+            points.join(" ")
+        };
+        if opening.is_empty() { body } else { format!("{opening}\n\n{body}") }
     }
 
     /// A one-line summary for a settings row: "Friendly · warm+ · emoji−".
@@ -237,14 +365,47 @@ mod tests {
     }
 
     #[test]
-    fn a_choice_becomes_a_tone_only_section() {
+    fn a_choice_becomes_who_the_assistant_is_not_a_setting() {
         let p = Personality { base: BaseStyle::Friendly, warm: Level::More, emoji: Level::Less, ..Default::default() };
         let section = p.prompt_section().unwrap();
-        assert!(section.contains("warm and chatty"));
-        assert!(section.contains("warmer"));
-        assert!(section.contains("Do not use emoji"));
-        assert!(section.contains("tone and presentation only"));
-        assert!(!section.contains("excitement"), "defaults add no line: {section}");
+        assert!(section.contains("friendly colleague"));
+        assert!(section.contains("warm and personable"));
+        assert!(section.contains("never use emoji"));
+        assert!(!section.contains("excite"), "defaults add no line: {section}");
+        // Words that make a model announce its instructions.
+        for meta in ["user's choice", "requested", "setting", "Style and tone", "the user chose"] {
+            assert!(!section.contains(meta), "{meta:?} in {section}");
+        }
+    }
+
+    #[test]
+    fn the_default_voice_adds_no_example() {
+        assert!(Personality::default().voice_prelude().is_empty());
+    }
+
+    #[test]
+    fn the_example_is_written_in_the_chosen_voice() {
+        let answer = |p: Personality| p.voice_prelude()[1].content.clone();
+        let quirky = answer(Personality { base: BaseStyle::Quirky, ..Default::default() });
+        assert!(quirky.contains("coat check"), "{quirky}");
+        assert!(!quirky.contains("- "), "a playful voice talks in sentences: {quirky}");
+
+        let listed = answer(Personality { base: BaseStyle::Quirky, headers_lists: Level::More, ..Default::default() });
+        assert!(listed.contains("**git stash**") && listed.contains("\n- "), "{listed}");
+
+        let emoji = answer(Personality { base: BaseStyle::Efficient, emoji: Level::More, ..Default::default() });
+        assert!(emoji.contains('📦'), "{emoji}");
+
+        let calm = answer(Personality { base: BaseStyle::Friendly, enthusiastic: Level::Less, ..Default::default() });
+        assert!(!calm.contains('!'), "{calm}");
+
+        let cold = answer(Personality { base: BaseStyle::Friendly, warm: Level::Less, ..Default::default() });
+        assert!(!cold.contains("Happy to help"), "{cold}");
+
+        let prelude = Personality { base: BaseStyle::Candid, ..Default::default() }.voice_prelude();
+        assert_eq!(prelude.len(), 2);
+        assert_eq!(prelude[0].role, flashagent_llm::Role::User);
+        assert_eq!(prelude[1].role, flashagent_llm::Role::Assistant);
     }
 
     #[test]

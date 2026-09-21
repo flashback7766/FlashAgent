@@ -1785,6 +1785,7 @@ fn spawn_turn(
     tx: tokio::sync::mpsc::UnboundedSender<UiEvent>,
     steer_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     turn_id: u64,
+    voice_prelude: Vec<ChatMessage>,
 ) -> tokio::task::JoinHandle<()> {
     cancel.store(false, Ordering::Relaxed);
     tokio::spawn(async move {
@@ -1793,6 +1794,7 @@ fn spawn_turn(
             max_output_tokens: budgets.output_tokens,
             time_budget: budgets.time,
             base_turn_options: turn_opts,
+            voice_prelude,
             ..Default::default()
         };
         let loop_ = AgentLoop::with_steering(config, cancel, steer_rx);

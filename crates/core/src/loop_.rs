@@ -96,6 +96,11 @@ pub struct LoopConfig {
     pub time_budget: Option<Duration>,
     /// Base turn options for this session (configured thinking effort, etc.).
     pub base_turn_options: flashagent_llm::TurnOptions,
+    /// An earlier exchange that sets the assistant's voice
+    /// ([`crate::personality::Personality::voice_prelude`]). It is sent
+    /// right after the system prompt in every request and never enters the
+    /// history, so it is not saved, shown, exported or compacted.
+    pub voice_prelude: Vec<ChatMessage>,
 }
 
 /// Events the loop emits — the UI contract.
@@ -284,12 +289,19 @@ impl AgentLoop {
                 continuing = false;
             }
 
-            let with_nudge: Vec<ChatMessage>;
-            let request: &[ChatMessage] = if transient.is_empty() {
+            let assembled: Vec<ChatMessage>;
+            let request: &[ChatMessage] = if transient.is_empty() && self.config.voice_prelude.is_empty() {
                 &history
             } else {
-                with_nudge = [history.as_slice(), transient.as_slice()].concat();
-                &with_nudge
+                let after_system = usize::from(history.first().is_some_and(|m| m.role == flashagent_llm::Role::System));
+                assembled = history[..after_system]
+                    .iter()
+                    .chain(&self.config.voice_prelude)
+                    .chain(&history[after_system..])
+                    .chain(&transient)
+                    .cloned()
+                    .collect();
+                &assembled
             };
             let opened = tokio::select! {
                 res = llm.turn_with_options(request, &specs, &turn_opts) => res,
@@ -1398,6 +1410,26 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].content, "x");
         assert_eq!(history[1].content, "Here is the final direct answer.");
+    }
+
+    #[test]
+    fn the_voice_example_is_sent_after_the_system_prompt_and_never_kept() {
+        let llm = RecordingLlm::new(vec![MockTurn {
+            events: vec![Ok(LlmEvent::TextDelta("Answer.".into())), Ok(LlmEvent::Done(FinishReason::Stop))],
+        }]);
+        let tools = MockTools::new();
+        let prelude = vec![ChatMessage::user("sample question"), ChatMessage::assistant("sample answer")];
+        let config = LoopConfig { voice_prelude: prelude, ..Default::default() };
+        let l = AgentLoop::new(config, Arc::new(AtomicBool::new(false)));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (history, _) = rt
+            .block_on(l.run(&llm, &tools, vec![ChatMessage::system("sys"), ChatMessage::user("real question")], |_| {}))
+            .unwrap();
+
+        let sent: Vec<String> = llm.requests.lock().unwrap()[0].iter().map(|m| m.content.clone()).collect();
+        assert_eq!(sent, ["sys", "sample question", "sample answer", "real question"]);
+        let kept: Vec<&str> = history.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(kept, ["sys", "real question", "Answer."], "the example leaked into the history");
     }
 
     /// Scripted LLM that also records every message list it was sent.
