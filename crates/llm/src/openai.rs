@@ -364,12 +364,6 @@ impl OpenAiCompat {
         None
     }
 
-    /// Query the API to discover model capabilities and presets.
-    pub async fn fetch_profile(&self) -> Option<crate::thinking::ThinkingProfile> {
-        self.discover_server().await;
-        self.profile()
-    }
-
     #[cfg(test)]
     fn body(&self, messages: &[ChatMessage], tools: &[ToolSpec], options: &crate::types::TurnOptions) -> serde_json::Value {
         self.body_at(messages, tools, options, Fields::All)

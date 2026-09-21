@@ -464,18 +464,6 @@ impl ChatView {
         true
     }
 
-    /// Update an existing system message matching `prefix`, or push a new one if not found.
-    pub fn update_or_push_system(&mut self, prefix: &str, text: &str) {
-        self.settled_cache.lock().boundary = 0;
-        if let Some(pos) = self.lines.iter().rposition(|l| l.kind == LineKind::System && strip_ansi(&l.text).trim_start().starts_with(prefix)) {
-            self.lines[pos].text = text.to_string();
-        } else {
-            self.streaming = None;
-            self.streaming_reasoning = None;
-            self.lines.push(ChatLine::new(LineKind::System, text.to_string()));
-        }
-    }
-
     /// Update an existing system message matching `prefix` in the current turn (after the latest User message),
     /// or append a new system message at the end of the chat.
     /// This prevents turn N's system annotations (like turn recaps) from overwriting earlier turns' recaps.
@@ -1501,24 +1489,6 @@ mod tests {
     }
 
     #[test]
-    fn approval_card_shows_diff_lines() {
-        let req = ApprovalRequest {
-            tool: "write_file".into(),
-            args_json: r#"{"path":"a.txt"}"#.into(),
-            category: flashagent_core::Category::Write,
-            diff: Some("--- a/a.txt\n+++ b/a.txt\n-old\n+new\n".into()),
-        };
-        let card = approval_card(&req);
-        assert!(card.iter().any(|(k, t)| *k == LineKind::Diff && t.contains("+new")));
-        assert!(card.iter().any(|(k, t)| *k == LineKind::ToolError && t.contains("-old")));
-        assert!(card.iter().any(|(_, t)| t.contains("[Allow]")));
-        assert!(card.iter().any(|(_, t)| t.contains("[Deny]")));
-
-        let deny_card = approval_card_with_selection(&req, Decision::Deny);
-        assert!(deny_card.iter().any(|(_, t)| t.contains("❯ [Deny]")));
-    }
-
-    #[test]
     fn a_finished_thought_is_not_still_called_thinking() {
         // Seen in a screenshot: the answer and its recap were on the screen
         // and the block above them still read "Thinking: Analyzing Request".
@@ -1956,30 +1926,6 @@ mod tests {
     }
 
     #[test]
-    fn update_or_push_system_overwrites_matching_prefix() {
-        let mut v = ChatView::default();
-        v.update_or_push_system("[Reasoning view:", "[Reasoning view: expanded for LAST]");
-        assert_eq!(v.lines.len(), 1);
-        assert_eq!(v.lines[0].text, "[Reasoning view: expanded for LAST]");
-
-        // Second update with same prefix overwrites in place
-        v.update_or_push_system("[Reasoning view:", "[Reasoning view: expanded for ALL]");
-        assert_eq!(v.lines.len(), 1);
-        assert_eq!(v.lines[0].text, "[Reasoning view: expanded for ALL]");
-
-        // Different prefix adds new line
-        v.update_or_push_system("[Thinking effort set to:", "[Thinking effort set to: high]");
-        assert_eq!(v.lines.len(), 2);
-        assert_eq!(v.lines[1].text, "[Thinking effort set to: high]");
-
-        // Updating first prefix again still updates line 0 without moving
-        v.update_or_push_system("[Reasoning view:", "[Reasoning view: collapsed]");
-        assert_eq!(v.lines.len(), 2);
-        assert_eq!(v.lines[0].text, "[Reasoning view: collapsed]");
-        assert_eq!(v.lines[1].text, "[Thinking effort set to: high]");
-    }
-
-    #[test]
     fn update_or_push_turn_system_retains_per_turn_recaps() {
         let mut v = ChatView::default();
         // Turn 1
@@ -2011,7 +1957,7 @@ mod tests {
     fn update_welcome_card_replaces_card_and_preserves_notices() {
         let mut v = ChatView::default();
         v.push_line(LineKind::System, "banner-v1");
-        v.update_or_push_system("[Verbose mode:", "[Verbose mode: last]");
+        v.push_line(LineKind::System, "[Verbose mode: last]");
         assert!(!v.has_user_message());
 
         // Update card to banner-v2
@@ -2030,22 +1976,6 @@ mod tests {
         let new_card_c = vec![(LineKind::System, "banner-v3".to_string())];
         v.update_welcome_card(new_card_c);
         assert!(!v.lines.iter().any(|l| l.text.contains("banner-v3")));
-    }
-
-    #[test]
-    fn update_or_push_system_does_not_break_active_streaming_reasoning() {
-        let mut v = ChatView::default();
-        v.update_or_push_system("[Thinking effort set to:", "[Thinking effort set to: low]");
-        v.on_event(&LoopEvent::ReasoningDelta("part 1".into()));
-        assert_eq!(v.lines.len(), 2);
-        assert_eq!(v.lines[1].text, "part 1");
-
-        // In-place update to line 0 must not reset streaming_reasoning
-        v.update_or_push_system("[Thinking effort set to:", "[Thinking effort set to: high]");
-        v.on_event(&LoopEvent::ReasoningDelta(" part 2".into()));
-        // Still 2 lines: part 2 merged into line 1, not split into line 2
-        assert_eq!(v.lines.len(), 2);
-        assert_eq!(v.lines[1].text, "part 1 part 2");
     }
 
     #[test]

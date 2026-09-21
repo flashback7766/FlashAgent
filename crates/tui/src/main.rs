@@ -2286,23 +2286,6 @@ mod tests {
         // The stages after the download are named, not silent.
         assert!(update_progress_line("b235", UpdateProgress::Verifying).contains("verifying"));
         assert!(update_progress_line("b235", UpdateProgress::Installing).contains("installing"));
-
-        // Every stage rewrites one line rather than stacking up.
-        let mut chat = ChatView::default();
-        for stage in [
-            UpdateProgress::Downloading { received: 1, total: Some(10) },
-            UpdateProgress::Downloading { received: 9, total: Some(10) },
-            UpdateProgress::Verifying,
-            UpdateProgress::Installing,
-        ] {
-            chat.update_or_push_system(UPDATE_LINE_PREFIX, &update_progress_line("b235", stage));
-        }
-        let lines = chat.render(120);
-        let update_lines = lines
-            .iter()
-            .filter(|(_, t)| flashagent_tui::strip_ansi(t).trim_start().starts_with(UPDATE_LINE_PREFIX))
-            .count();
-        assert_eq!(update_lines, 1, "progress must rewrite its line, not stack: {lines:?}");
     }
 
     #[test]

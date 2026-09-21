@@ -233,25 +233,6 @@ impl PrefillTracker {
             )
         }
     }
-
-    pub fn format_completed_prefill(
-        &self,
-        prompt_tokens: usize,
-        cached_tokens: usize,
-        ttft: Duration,
-    ) -> String {
-        let eval_tokens = prompt_tokens.saturating_sub(cached_tokens).max(1);
-        let secs = ttft.as_secs_f64().max(0.001);
-        let speed = eval_tokens as f64 / secs;
-
-        let speed_str = if speed >= 1000.0 {
-            format!("{:.1}k t/s", speed / 1000.0)
-        } else {
-            format!("{:.0} t/s", speed)
-        };
-
-        format!("\x1b[38;2;120;220;140mTTFT {:.2}s ({speed_str} prefill)\x1b[0m", secs)
-    }
 }
 
 #[cfg(test)]
@@ -293,16 +274,12 @@ mod tests {
     }
 
     #[test]
-    fn test_prefill_tracker_live_and_completed_formatting() {
+    fn the_live_prefill_line_says_time_and_speed() {
         let mut tracker = PrefillTracker::default();
         tracker.record("test-model", 4000, 0, Duration::from_secs_f64(2.0));
 
         let live = tracker.format_live_prefill("test-model", 4000, 0, Duration::from_secs_f64(0.8));
         assert!(live.contains("Prefill"));
         assert!(live.contains("4.0k @"));
-
-        let completed = tracker.format_completed_prefill(4000, 0, Duration::from_secs_f64(1.6));
-        assert!(completed.contains("TTFT 1.60s"));
-        assert!(completed.contains("prefill"));
     }
 }

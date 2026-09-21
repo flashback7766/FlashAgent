@@ -137,11 +137,6 @@ impl BuiltinTools {
         self.is_goal_mode.store(active, Ordering::Relaxed);
     }
 
-    /// Return reference to the goal mode flag.
-    pub fn goal_mode_flag(&self) -> Arc<AtomicBool> {
-        self.is_goal_mode.clone()
-    }
-
     /// Update toolset profile.
     pub fn set_toolset_profile(&self, profile: ToolsetProfile) {
         if let Ok(mut lock) = self.toolset_profile.write() {

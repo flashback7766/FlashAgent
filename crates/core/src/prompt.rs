@@ -14,8 +14,6 @@ pub struct SystemPromptConfig {
     pub model: Option<String>,
     /// Thinking effort setting (e.g. "auto", "low", "medium", "high", "off").
     pub effort: Option<String>,
-    /// List of enabled tool names.
-    pub tools: Vec<String>,
     /// The user's style-and-tone section, when they chose one.
     pub personality: Option<String>,
 }
@@ -50,10 +48,6 @@ impl SystemPromptConfig {
         self
     }
 
-    pub fn with_tools(mut self, tools: &[String]) -> Self {
-        self.tools = tools.to_vec();
-        self
-    }
 }
 
 /// Builds the comprehensive, production-grade system prompt for FlashAgent.

@@ -218,11 +218,6 @@ impl<T> SelectMenu<T> {
         }
     }
 
-    /// Currently selected item reference.
-    pub fn selected_item(&self) -> Option<&SelectItem<T>> {
-        self.items.get(self.selected)
-    }
-
     /// Value of currently selected item.
     pub fn selected_value(&self) -> Option<&T> {
         self.items.get(self.selected).map(|it| &it.value)
