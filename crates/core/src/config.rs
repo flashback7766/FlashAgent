@@ -11,7 +11,6 @@ pub struct BackendPreset {
     pub name: String,
     pub url: String,
     pub description: String,
-    pub default_port: u16,
 }
 
 impl BackendPreset {
@@ -21,31 +20,26 @@ impl BackendPreset {
                 name: "LM Studio".into(),
                 url: "http://localhost:1234/v1".into(),
                 description: "Local LM Studio REST API (port 1234)".into(),
-                default_port: 1234,
             },
             Self {
                 name: "Ollama".into(),
                 url: "http://localhost:11434/v1".into(),
                 description: "Local Ollama server OpenAI-compatible endpoint".into(),
-                default_port: 11434,
             },
             Self {
                 name: "vLLM".into(),
                 url: "http://localhost:8000/v1".into(),
                 description: "High-throughput local vLLM OpenAI-compatible server".into(),
-                default_port: 8000,
             },
             Self {
                 name: "llama.cpp".into(),
                 url: "http://localhost:8080/v1".into(),
                 description: "Local llama.cpp (llama-server) OpenAI-compatible server".into(),
-                default_port: 8080,
             },
             Self {
                 name: "OpenRouter".into(),
                 url: "https://openrouter.ai/api/v1".into(),
                 description: "Unified cloud API for open and proprietary models".into(),
-                default_port: 443,
             },
         ]
     }
@@ -274,15 +268,9 @@ pub struct AppConfig {
     /// keeps spinners but nothing decorative.
     #[serde(default = "default_true")]
     pub animations: bool,
-    /// Whether reasoning/thinking accordion box is shown.
-    #[serde(default = "default_true")]
-    pub show_reasoning_accordion: bool,
-    /// Color theme name ("dark", "midnight", "monokai", "high_contrast", "monochrome", "ansi16").
-    #[serde(default = "default_theme")]
-    pub color_theme: String,
-    /// Approval gate policy: "destructive" (default), "all", "auto".
-    #[serde(default = "default_approval_mode")]
-    pub approval_mode: String,
+    /// How the finished frame is recoloured (Settings -> UI -> Theme).
+    #[serde(default)]
+    pub color_theme: ColorTheme,
     /// Whether automatic context compaction (/compact) is enabled.
     #[serde(default = "default_true")]
     pub auto_compact_context: bool,
@@ -298,12 +286,6 @@ pub struct AppConfig {
     /// Preferred external editor command ($EDITOR, code, cursor, nvim).
     #[serde(default = "default_editor")]
     pub external_editor: String,
-    /// Whether compact git diff preview is shown before edits.
-    #[serde(default = "default_true")]
-    pub git_diff_preview: bool,
-    /// Whether smart commit message generation (/commit) is offered.
-    #[serde(default = "default_true")]
-    pub git_smart_commit: bool,
     /// Number of network retry attempts for LLM requests (default 3).
     #[serde(default = "default_retries")]
     pub network_retries: usize,
@@ -315,14 +297,6 @@ pub struct AppConfig {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_theme() -> String {
-    "dark".to_string()
-}
-
-fn default_approval_mode() -> String {
-    "destructive".to_string()
 }
 
 fn default_warn_threshold() -> usize {
@@ -349,6 +323,58 @@ fn default_update_channel() -> UpdateChannel {
         UpdateChannel::Beta
     } else {
         UpdateChannel::Stable
+    }
+}
+
+/// How the finished frame is recoloured before it reaches the terminal.
+///
+/// Every card in FlashAgent is written in one palette (`Dark`); a theme is a
+/// transformation applied to that palette at the moment of printing, so a
+/// colour added anywhere in the app is themed without being registered
+/// anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorTheme {
+    /// The palette as written: warm greys, gold accents.
+    #[default]
+    Dark,
+    /// The same picture, cooled towards blue.
+    Midnight,
+    /// Pushed away from mid-grey, for bright rooms and weak screens.
+    HighContrast,
+    /// Greys only, by brightness — readable on e-ink and in print.
+    Monochrome,
+    /// The terminal's own 16 colours, for terminals without 24-bit colour
+    /// and for anyone whose palette is their own business.
+    Ansi16,
+}
+
+impl ColorTheme {
+    pub fn all() -> &'static [ColorTheme] {
+        &[
+            ColorTheme::Dark,
+            ColorTheme::Midnight,
+            ColorTheme::HighContrast,
+            ColorTheme::Monochrome,
+            ColorTheme::Ansi16,
+        ]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Midnight => "Midnight",
+            Self::HighContrast => "High contrast",
+            Self::Monochrome => "Monochrome",
+            Self::Ansi16 => "Terminal 16 colours",
+        }
+    }
+
+    /// The next theme, for a settings row that cycles.
+    pub fn next(self) -> Self {
+        let all = Self::all();
+        let i = all.iter().position(|t| *t == self).unwrap_or(0);
+        all[(i + 1) % all.len()]
     }
 }
 
@@ -445,16 +471,12 @@ impl Default for AppConfig {
             animations: true,
             url_override: None,
             personality: Default::default(),
-            show_reasoning_accordion: true,
-            color_theme: "dark".to_string(),
-            approval_mode: "destructive".to_string(),
+            color_theme: ColorTheme::default(),
             auto_compact_context: true,
             context_warn_threshold: 70,
             context_compact_threshold: 0,
             auto_save_sessions: true,
             external_editor: "$EDITOR".to_string(),
-            git_diff_preview: true,
-            git_smart_commit: true,
             network_retries: 3,
             last_seen_version: None,
         }
@@ -811,6 +833,20 @@ lenient_enum!(SamplingPreset, "sampling preset", {
     "precise" => SamplingPreset::Precise,
     "gemma" => SamplingPreset::Gemma,
     "custom" => SamplingPreset::Custom,
+});
+
+lenient_enum!(ColorTheme, "colour theme", {
+    "dark" => ColorTheme::Dark,
+    "default" => ColorTheme::Dark,
+    "midnight" => ColorTheme::Midnight,
+    "highcontrast" => ColorTheme::HighContrast,
+    "contrast" => ColorTheme::HighContrast,
+    "monochrome" => ColorTheme::Monochrome,
+    "mono" => ColorTheme::Monochrome,
+    "ansi16" => ColorTheme::Ansi16,
+    "ansi" => ColorTheme::Ansi16,
+    // Named by an older build that never used them.
+    "monokai" => ColorTheme::Midnight,
 });
 
 lenient_enum!(UpdateChannel, "update channel", {

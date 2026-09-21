@@ -22,7 +22,7 @@ use flashagent_tui::goal::{commit_goal_milestone, format_plan, GoalBudgets, Goal
 use flashagent_tui::MascotMood;
 use flashagent_tui::{
     clip_ansi, pad_box_row, render_session_saved_card, restore_line_color,
-    visible_width, welcome_card_responsive_opts, AutocompletePopup, ChatView, ConfirmSelect,
+    visible_width, welcome_card, WelcomeCard, AutocompletePopup, ChatView, ConfirmSelect,
     ContextModal, LineKind, McpModal, McpModalAction, McpViewTab, PrefillTracker, ReasoningExpansion,
     RenderLine, SamplingAction, SamplingView, SelectItem, SelectMenu, SettingsAction, SettingsView,
     TuiGate, TuiQuestionGate, UiEvent,
@@ -970,19 +970,18 @@ async fn run_app(ctx: AppContext) -> Result<Option<String>> {
     } else {
         app.current_effort.clone()
     };
-    let initial_card = welcome_card_responsive_opts(
-        &app.current_model,
-        &cwd_display,
-        perm.state().mode().label(),
+    let initial_card = welcome_card(&WelcomeCard {
+        model: &app.current_model,
+        cwd: &cwd_display,
+        mode: perm.state().mode().label(),
         memory_docs,
-        Some(&thinking_summary),
-        app.current_context.as_deref(),
-        term_w as usize,
-        term_h as usize,
-        0,
-        app.config.show_mascot,
-        MascotMood::Checking,
-    );
+        thinking: Some(&thinking_summary),
+        context_window: app.current_context.as_deref(),
+        width: term_w as usize,
+        height: term_h as usize,
+        show_mascot: app.config.show_mascot,
+        ..WelcomeCard::default()
+    });
     // The reveal is driven by the tick loop, which stops touching the card as
     // soon as the transcript has a user message in it. A resumed session puts
     // messages up immediately, so its card would stay stuck at whatever row
@@ -2306,10 +2305,14 @@ mod tests {
     fn a_resumed_session_gets_the_whole_card_not_a_stuck_reveal() {
         // The tick loop stops refreshing the card once the transcript has a
         // user message, so a resumed session must never start truncated.
-        let card = flashagent_tui::welcome_card_responsive_opts(
-            "m", "/tmp", "Manual", 0, None, None, 100, 30, 0, true,
-            flashagent_tui::MascotMood::Checking,
-        );
+        let card = flashagent_tui::welcome_card(&flashagent_tui::WelcomeCard {
+            model: "m",
+            cwd: "/tmp",
+            mode: "Manual",
+            width: 100,
+            height: 30,
+            ..Default::default()
+        });
         assert!(card.len() > 1);
         assert_eq!(opening_card(card.clone(), false).len(), card.len(), "resume draws it whole");
         assert_eq!(opening_card(card, true).len(), 1, "a fresh start animates it in");

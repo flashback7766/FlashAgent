@@ -1,4 +1,5 @@
 use super::*;
+use flashagent_tui::WelcomeCard;
 
 impl App {
     /// Redraw the welcome card with the session as it is now — model, mode,
@@ -23,19 +24,19 @@ impl App {
         }
         let (w, h) = crossterm::terminal::size().unwrap_or((100, 24));
         let th_sum = thinking_summary_str(source, &self.current_effort);
-        let card = welcome_card_responsive_opts(
-            &self.current_model,
-            &self.cwd_display,
-            mode.label(),
-            self.memory_docs,
-            Some(&th_sum),
-            self.current_context.as_deref(),
-            width.unwrap_or(w as usize),
-            h as usize,
-            self.tick_n,
-            self.config.show_mascot,
+        let card = welcome_card(&WelcomeCard {
+            model: &self.current_model,
+            cwd: &self.cwd_display,
+            mode: mode.label(),
+            memory_docs: self.memory_docs,
+            thinking: Some(&th_sum),
+            context_window: self.current_context.as_deref(),
+            width: width.unwrap_or(w as usize),
+            height: h as usize,
+            tick: self.tick_n,
+            show_mascot: self.config.show_mascot,
             mood,
-        );
+        });
         let card = match reveal_rows {
             Some(rows) => card.into_iter().take(rows.max(1)).collect(),
             None => card,

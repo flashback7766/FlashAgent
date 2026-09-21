@@ -18,7 +18,7 @@ pub use encoding::base64_encode;
 pub use openai::OpenAiCompat;
 pub use parse::{ChunkParser, SseDecoder, TextToolScanner, ScannerEvent};
 pub use repair::{effective_args, repair_json};
-pub use thinking::{DiscoveredModel, ServerDiscovery, TaskComplexity, ThinkingProfile, ThinkingProtocol, analyze_turn_complexity, is_greeting_text};
+pub use thinking::{DiscoveredModel, ServerDiscovery, TaskComplexity, ThinkingProfile, ThinkingProtocol};
 pub use tokenizer::count_tokens;
 pub use types::{ChatMessage, FinishReason, LlmError, LlmEvent, MtpStats, Role, ThinkingEffort, ToolCall, ToolSpec, TurnOptions, Usage, estimate_tokens};
 

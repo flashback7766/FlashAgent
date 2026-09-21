@@ -350,6 +350,10 @@ impl SettingsView {
                     self.is_dirty = true;
                     SettingsAction::None
                 }
+                6 => {
+                    self.cycle_theme();
+                    SettingsAction::None
+                }
                 _ => SettingsAction::None,
             },
             SettingsTab::Reasoning => match self.selected_index {
@@ -436,6 +440,7 @@ impl SettingsView {
                 3 => self.config.show_tokens = !self.config.show_tokens,
                 4 => self.config.show_toasts = !self.config.show_toasts,
                 5 => self.config.animations = !self.config.animations,
+                6 => self.cycle_theme(),
                 _ => {}
             },
             SettingsTab::Reasoning => match self.selected_index {
@@ -497,6 +502,14 @@ impl SettingsView {
             .map(|i| (i + 1) % presets.len())
             .unwrap_or(0);
         self.config.thinking_effort = presets[next_idx].to_string();
+        self.is_dirty = true;
+    }
+
+    /// Move to the next colour theme and show it at once: a theme picked
+    /// from a list of names is guesswork until you see it.
+    fn cycle_theme(&mut self) {
+        self.config.color_theme = self.config.color_theme.next();
+        crate::theme::set(self.config.color_theme);
         self.is_dirty = true;
     }
 
@@ -600,6 +613,7 @@ impl SettingsView {
                 ("Token Counters", if self.config.show_tokens { "Enabled (prompt/gen count)".into() } else { "Disabled".into() }),
                 ("Clipboard Toasts", if self.config.show_toasts { "Enabled".into() } else { "Disabled".into() }),
                 ("Animations", if self.config.animations { "Enabled (sweeps, pulses, unfolding panels)".into() } else { "Reduced (spinners only)".into() }),
+                ("Colour Theme", self.config.color_theme.label().to_string()),
             ],
             SettingsTab::Reasoning => vec![
                 ("Thinking Effort", self.config.thinking_effort.clone()),

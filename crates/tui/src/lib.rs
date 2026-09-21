@@ -22,6 +22,7 @@ pub mod sampling;
 pub mod select;
 pub mod settings;
 pub mod startup;
+pub mod theme;
 pub mod tips;
 pub mod image_cost;
 pub mod memory_view;
@@ -1674,13 +1675,49 @@ mod tests {
 
     #[test]
     fn welcome_card_and_visible_width() {
-        let card = welcome_card("gpt-4", Some("32k ctx"), "/home/user/repo", "Manual", 2, Some("high"), 80);
+        let card = welcome_card(&WelcomeCard {
+            model: "gpt-4",
+            cwd: "/home/user/repo",
+            mode: "Manual",
+            memory_docs: 2,
+            thinking: Some("high"),
+            context_window: Some("32k ctx"),
+            width: 80,
+            ..Default::default()
+        });
         let cur_ver = flashagent_svc::updater::current_version();
         assert!(card.iter().any(|(_, t)| t.contains(">_ FlashAgent") && (t.contains(cur_ver) || t.contains("v0.1.0"))));
 
-        let card80 = welcome_card("qwen3.6-35b-a3b-mtp", Some("128k ctx"), "/home/user/repo", "Manual", 2, Some("high"), 80);
-        let card100 = welcome_card("qwen3.6-35b-a3b-mtp", Some("128k ctx"), "/home/user/repo", "Manual", 2, Some("high"), 100);
-        let card120 = welcome_card("qwen3.6-35b-a3b-mtp", Some("128k ctx"), "/home/user/repo", "Manual", 2, Some("high"), 120);
+        let card80 = welcome_card(&WelcomeCard {
+            model: "qwen3.6-35b-a3b-mtp",
+            cwd: "/home/user/repo",
+            mode: "Manual",
+            memory_docs: 2,
+            thinking: Some("high"),
+            context_window: Some("128k ctx"),
+            width: 80,
+            ..Default::default()
+        });
+        let card100 = welcome_card(&WelcomeCard {
+            model: "qwen3.6-35b-a3b-mtp",
+            cwd: "/home/user/repo",
+            mode: "Manual",
+            memory_docs: 2,
+            thinking: Some("high"),
+            context_window: Some("128k ctx"),
+            width: 100,
+            ..Default::default()
+        });
+        let card120 = welcome_card(&WelcomeCard {
+            model: "qwen3.6-35b-a3b-mtp",
+            cwd: "/home/user/repo",
+            mode: "Manual",
+            memory_docs: 2,
+            thinking: Some("high"),
+            context_window: Some("128k ctx"),
+            width: 120,
+            ..Default::default()
+        });
         let w80 = visible_width(&card80[0].1);
         let w100 = visible_width(&card100[0].1);
         let w120 = visible_width(&card120[0].1);
@@ -2404,7 +2441,16 @@ mod tests {
 
     #[test]
     fn welcome_card_normalizes_cwd_with_slash() {
-        let card = welcome_card("test-model", Some("128k"), "~FlashAgent", "Manual", 1, Some("high"), 80);
+        let card = welcome_card(&WelcomeCard {
+            model: "test-model",
+            cwd: "~FlashAgent",
+            mode: "Manual",
+            memory_docs: 1,
+            thinking: Some("high"),
+            context_window: Some("128k"),
+            width: 80,
+            ..Default::default()
+        });
         let joined = card.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("~/FlashAgent"), "welcome card must contain '~/FlashAgent', got: {joined}");
     }
@@ -2532,19 +2578,16 @@ mod tests {
     #[test]
     fn the_welcome_card_never_overflows_a_narrow_terminal() {
         for width in [30usize, 36, 46, 56, 80, 120] {
-            let card = welcome_card_responsive_opts(
-                "gemma-4-e2b-it-qat@q4_k_xl",
-                "/home/someone/projects/flashagent",
-                "Accept Edits",
-                0,
-                Some("auto [off, on]"),
-                Some("64k ctx"),
+            let card = welcome_card(&WelcomeCard {
+                model: "gemma-4-e2b-it-qat@q4_k_xl",
+                cwd: "/home/someone/projects/flashagent",
+                mode: "Accept Edits",
+                thinking: Some("auto [off, on]"),
+                context_window: Some("64k ctx"),
                 width,
-                24,
-                0,
-                true,
-                MascotMood::Happy,
-            );
+                mood: MascotMood::Happy,
+                ..Default::default()
+            });
             for (_, line) in &card {
                 assert!(
                     visible_width(line) <= width,
@@ -2890,17 +2933,17 @@ mod tests {
     #[test]
     fn test_welcome_card_responsive_scales_to_terminal_dimensions() {
         // 1. Standard 80x24: 2 columns, height <= 14
-        let card_80x24 = welcome_card_responsive(
-            "test-model",
-            "/home/user/project",
-            "Accept Edits",
-            3,
-            Some("auto"),
-            Some("128k"),
-            80,
-            24,
-            0,
-        );
+        let card_80x24 = welcome_card(&WelcomeCard {
+            model: "test-model",
+            cwd: "/home/user/project",
+            mode: "Accept Edits",
+            memory_docs: 3,
+            thinking: Some("auto"),
+            context_window: Some("128k"),
+            width: 80,
+            height: 24,
+            ..Default::default()
+        });
         assert!(card_80x24.len() <= 14, "Standard card must be at most 14 lines, got {}", card_80x24.len());
         for line in &card_80x24 {
             let width = visible_width(&line.1);
@@ -2908,17 +2951,17 @@ mod tests {
         }
 
         // 2. Compact 50x16: single column, height <= 14
-        let card_50x16 = welcome_card_responsive(
-            "test-model",
-            "/home/user/project",
-            "Accept Edits",
-            3,
-            Some("auto"),
-            Some("128k"),
-            50,
-            16,
-            0,
-        );
+        let card_50x16 = welcome_card(&WelcomeCard {
+            model: "test-model",
+            cwd: "/home/user/project",
+            mode: "Accept Edits",
+            memory_docs: 3,
+            thinking: Some("auto"),
+            context_window: Some("128k"),
+            width: 50,
+            height: 16,
+            ..Default::default()
+        });
         assert!(card_50x16.len() <= 14, "Compact card must be at most 14 lines, got {}", card_50x16.len());
         for line in &card_50x16 {
             let width = visible_width(&line.1);
@@ -2926,17 +2969,17 @@ mod tests {
         }
 
         // 3. Ultra-compact 36x12: single column with minimal companion, height <= 12
-        let card_36x12 = welcome_card_responsive(
-            "test-model",
-            "/home/user/project",
-            "Accept Edits",
-            3,
-            Some("auto"),
-            Some("128k"),
-            36,
-            12,
-            0,
-        );
+        let card_36x12 = welcome_card(&WelcomeCard {
+            model: "test-model",
+            cwd: "/home/user/project",
+            mode: "Accept Edits",
+            memory_docs: 3,
+            thinking: Some("auto"),
+            context_window: Some("128k"),
+            width: 36,
+            height: 12,
+            ..Default::default()
+        });
         assert!(card_36x12.len() <= 12, "Ultra compact card must be at most 12 lines, got {}", card_36x12.len());
         for line in &card_36x12 {
             let width = visible_width(&line.1);

@@ -836,11 +836,6 @@ pub fn is_greeting_text(prompt: &str) -> bool {
     false
 }
 
-/// Analyze the turn messages to classify task complexity for dynamic reasoning.
-pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskComplexity {
-    ThinkingProfile::analyze_turn_complexity(messages)
-}
-
 /// An embedding model turns text into vectors and cannot hold a conversation,
 /// so it is never offered as the model to talk to.
 fn is_embedding(m: &serde_json::Value) -> bool {
@@ -1349,14 +1344,14 @@ mod tests {
         use crate::types::ChatMessage;
         for text in ["Hello!", "thanks, ok", "What's up bro!", "Good morning", "ок", "да"] {
             assert_eq!(
-                analyze_turn_complexity(&[ChatMessage::user(text)]),
+                ThinkingProfile::analyze_turn_complexity(&[ChatMessage::user(text)]),
                 TaskComplexity::Minimal,
                 "{text}"
             );
         }
         // The memory block we inject is ours, not the user's message.
         assert_eq!(
-            analyze_turn_complexity(&[ChatMessage::user(
+            ThinkingProfile::analyze_turn_complexity(&[ChatMessage::user(
                 "# Memory (automatically loaded)\n\n---\n\nHello"
             )]),
             TaskComplexity::Minimal
@@ -1369,10 +1364,10 @@ mod tests {
         // The old version measured length in bytes, so this sentence — 57
         // characters, 94 bytes — counted as "long" and went to maximum
         // reasoning purely for being Cyrillic.
-        let ru = analyze_turn_complexity(&[ChatMessage::user(
+        let ru = ThinkingProfile::analyze_turn_complexity(&[ChatMessage::user(
             "Прочитай src/parser.rs и коротко опиши что делает функция",
         )]);
-        let en = analyze_turn_complexity(&[ChatMessage::user(
+        let en = ThinkingProfile::analyze_turn_complexity(&[ChatMessage::user(
             "Read src/parser.rs and briefly describe what the function does",
         )]);
         assert_eq!(ru, en, "same request, same effort");
@@ -1388,7 +1383,7 @@ mod tests {
             "What is DNS?",
             "Rename the cache field to store",
         ] {
-            let level = analyze_turn_complexity(&[ChatMessage::user(text)]);
+            let level = ThinkingProfile::analyze_turn_complexity(&[ChatMessage::user(text)]);
             assert!(
                 level <= TaskComplexity::Medium,
                 "{text} came out as {level:?}; High is for work that is failing or multi-step"
@@ -1406,7 +1401,7 @@ mod tests {
             "Why does the build fail with a borrow error in src/main.rs?",
         ] {
             assert_eq!(
-                analyze_turn_complexity(&[ChatMessage::user(text)]),
+                ThinkingProfile::analyze_turn_complexity(&[ChatMessage::user(text)]),
                 TaskComplexity::High,
                 "{text}"
             );
@@ -1421,13 +1416,13 @@ mod tests {
             "Кратко: что делает эта функция?",
         ] {
             assert_eq!(
-                analyze_turn_complexity(&[ChatMessage::user(brief)]),
+                ThinkingProfile::analyze_turn_complexity(&[ChatMessage::user(brief)]),
                 TaskComplexity::Minimal,
                 "{brief}"
             );
         }
         assert_eq!(
-            analyze_turn_complexity(&[ChatMessage::user("Подробно разбери архитектуру цикла")]),
+            ThinkingProfile::analyze_turn_complexity(&[ChatMessage::user("Подробно разбери архитектуру цикла")]),
             TaskComplexity::High
         );
     }
@@ -1443,7 +1438,7 @@ mod tests {
             ChatMessage::assistant("Хорошо, начну с разбора зависимостей. Приступать?"),
             ChatMessage::user("делай"),
         ];
-        assert_eq!(analyze_turn_complexity(&stated), TaskComplexity::High);
+        assert_eq!(ThinkingProfile::analyze_turn_complexity(&stated), TaskComplexity::High);
 
         // And the other way round: the assistant proposes the big job, the
         // user only says yes, so the proposal is the task.
@@ -1455,14 +1450,14 @@ mod tests {
             ),
             ChatMessage::user("да"),
         ];
-        assert_eq!(analyze_turn_complexity(&proposed), TaskComplexity::High);
+        assert_eq!(ThinkingProfile::analyze_turn_complexity(&proposed), TaskComplexity::High);
     }
 
     #[test]
     fn scope_counts_even_when_the_sentence_is_short() {
         use crate::types::ChatMessage;
-        let one_file = analyze_turn_complexity(&[ChatMessage::user("Refactor the parser")]);
-        let whole = analyze_turn_complexity(&[ChatMessage::user("Refactor the whole project")]);
+        let one_file = ThinkingProfile::analyze_turn_complexity(&[ChatMessage::user("Refactor the parser")]);
+        let whole = ThinkingProfile::analyze_turn_complexity(&[ChatMessage::user("Refactor the whole project")]);
         assert!(whole > one_file, "{whole:?} vs {one_file:?}");
         assert_eq!(whole, TaskComplexity::High);
     }
@@ -1479,12 +1474,12 @@ mod tests {
             images: Vec::new(),
         };
         let task = ChatMessage::user("Read src/parser.rs and describe it");
-        let base = analyze_turn_complexity(std::slice::from_ref(&task));
+        let base = ThinkingProfile::analyze_turn_complexity(std::slice::from_ref(&task));
 
         // A step that worked keeps the task at its own level: flipping the
         // preset between steps costs the backend its prefix cache.
         assert_eq!(
-            analyze_turn_complexity(&[task.clone(), tool("exit code: 0\noutput:\ndone")]),
+            ThinkingProfile::analyze_turn_complexity(&[task.clone(), tool("exit code: 0\noutput:\ndone")]),
             base
         );
 
@@ -1495,7 +1490,7 @@ mod tests {
             "panicked at src/main.rs:42",
         ] {
             assert!(
-                analyze_turn_complexity(&[task.clone(), tool(failure)]) > base,
+                ThinkingProfile::analyze_turn_complexity(&[task.clone(), tool(failure)]) > base,
                 "{failure}"
             );
         }
@@ -1511,7 +1506,7 @@ mod tests {
             ChatMessage::assistant("Found a type error. Fix it now?"),
             ChatMessage::user("Yes"),
         ];
-        assert_eq!(analyze_turn_complexity(&history), TaskComplexity::High);
+        assert_eq!(ThinkingProfile::analyze_turn_complexity(&history), TaskComplexity::High);
 
         let mut deep = history.clone();
         deep.push(ChatMessage {
@@ -1523,7 +1518,7 @@ mod tests {
             images: Vec::new(),
         });
         assert_eq!(
-            analyze_turn_complexity(&deep),
+            ThinkingProfile::analyze_turn_complexity(&deep),
             TaskComplexity::High,
             "the level must not drop halfway through a task"
         );

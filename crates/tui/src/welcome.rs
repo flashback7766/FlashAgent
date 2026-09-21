@@ -15,19 +15,53 @@ pub fn been_here_before() -> bool {
         .unwrap_or(false)
 }
 
-/// Formats the startup welcome banner with runtime context:
-/// model & context window, current directory, permission mode,
-/// thinking effort/presets, loaded memory documents, and usage tips.
-pub fn welcome_card(
-    model: &str,
-    context_window: Option<&str>,
-    cwd: &str,
-    mode: &str,
-    memory_docs: usize,
-    thinking: Option<&str>,
-    width: usize,
-) -> Vec<RenderLine> {
-    welcome_card_with_thinking(model, cwd, mode, memory_docs, thinking, context_window, width)
+/// Everything the startup welcome banner shows, and the terminal it has to
+/// fit in.
+///
+/// One struct rather than eleven positional arguments: at the call site a
+/// reader can see which fact is which, and a new fact does not ripple
+/// through a chain of wrapper functions.
+#[derive(Debug, Clone)]
+pub struct WelcomeCard<'a> {
+    /// The model that will answer, as the server names it.
+    pub model: &'a str,
+    /// The project directory, already shortened for display.
+    pub cwd: &'a str,
+    /// The permission mode's label.
+    pub mode: &'a str,
+    /// How many memory documents were loaded into the prompt.
+    pub memory_docs: usize,
+    /// The reasoning effort summary, when the server reports one.
+    pub thinking: Option<&'a str>,
+    /// The context window, as text ("64k ctx").
+    pub context_window: Option<&'a str>,
+    /// Terminal size, in cells.
+    pub width: usize,
+    pub height: usize,
+    /// The animation frame: the mascot breathes and blinks by it.
+    pub tick: usize,
+    /// Whether the mascot is drawn at all (Settings -> UI).
+    pub show_mascot: bool,
+    /// What the mascot's face says about the connection.
+    pub mood: MascotMood,
+}
+
+impl Default for WelcomeCard<'_> {
+    fn default() -> Self {
+        Self {
+            model: "",
+            cwd: "",
+            mode: "",
+            memory_docs: 0,
+            thinking: None,
+            context_window: None,
+            width: 80,
+            height: 24,
+            tick: 0,
+            show_mascot: true,
+            mood: MascotMood::Checking,
+        }
+    }
 }
 
 pub(crate) fn pad_cell(s: &str, width: usize) -> String {
@@ -175,16 +209,6 @@ pub fn thinking_face(phase: usize) -> &'static str {
     }
 }
 
-/// Returns the 6 lines of the 8-bit companion mascot «Swift» in Material 3 colors.
-pub fn mascot_swift_lines() -> [String; 6] {
-    mascot_swift_lines_animated(0)
-}
-
-/// Returns the 6 lines of the mascot for `tick_n`, with a neutral mood.
-pub fn mascot_swift_lines_animated(tick_n: usize) -> [String; 6] {
-    mascot_swift_lines_mood(tick_n, MascotMood::Checking)
-}
-
 /// Returns the 6 lines of the mascot: blinking every ~4 seconds, breathing
 /// continuously, and wearing `mood` on its face.
 ///
@@ -220,66 +244,6 @@ pub fn mascot_swift_lines_mood(tick_n: usize, mood: MascotMood) -> [String; 6] {
     out.try_into().expect("12 pixel rows make exactly 6 terminal rows")
 }
 
-/// Formats the startup welcome banner with clean version header and quick instructions.
-pub fn welcome_card_with_thinking(
-    model: &str,
-    cwd: &str,
-    mode: &str,
-    memory_docs: usize,
-    thinking: Option<&str>,
-    context_window: Option<&str>,
-    width: usize,
-) -> Vec<RenderLine> {
-    welcome_card_with_thinking_animated(model, cwd, mode, memory_docs, thinking, context_window, width, 0)
-}
-
-/// Formats the startup welcome banner with animated mascot frame support.
-#[allow(clippy::too_many_arguments)]
-pub fn welcome_card_with_thinking_animated(
-    model: &str,
-    cwd: &str,
-    mode: &str,
-    memory_docs: usize,
-    thinking: Option<&str>,
-    context_window: Option<&str>,
-    width: usize,
-    tick_n: usize,
-) -> Vec<RenderLine> {
-    welcome_card_responsive(model, cwd, mode, memory_docs, thinking, context_window, width, 24, tick_n)
-}
-
-/// Fully responsive startup welcome banner adapting to both terminal width and height.
-/// In standard (24-row) and compact terminals, lines are kept constrained so the card and pet
-/// are 100% visible and never scroll off-screen.
-#[allow(clippy::too_many_arguments)]
-pub fn welcome_card_responsive(
-    model: &str,
-    cwd: &str,
-    mode: &str,
-    memory_docs: usize,
-    thinking: Option<&str>,
-    context_window: Option<&str>,
-    width: usize,
-    height: usize,
-    tick_n: usize,
-) -> Vec<RenderLine> {
-    welcome_card_responsive_opts(
-        model,
-        cwd,
-        mode,
-        memory_docs,
-        thinking,
-        context_window,
-        width,
-        height,
-        tick_n,
-        true,
-        MascotMood::Checking,
-    )
-}
-
-/// Responsive welcome banner with customizable feature options.
-#[allow(clippy::too_many_arguments)]
 /// Join as many of `parts` as fit in `width`, in order, and drop the rest.
 ///
 /// A status line built from four facts and then clipped loses the last one
@@ -307,20 +271,24 @@ pub fn fit_parts(parts: &[(String, String)], separator: &str, width: usize) -> S
     out
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn welcome_card_responsive_opts(
-    model: &str,
-    cwd: &str,
-    mode: &str,
-    memory_docs: usize,
-    thinking: Option<&str>,
-    context_window: Option<&str>,
-    width: usize,
-    height: usize,
-    tick_n: usize,
-    show_mascot: bool,
-    mood: MascotMood,
-) -> Vec<RenderLine> {
+/// Draw the startup welcome banner, fitted to the terminal it is given.
+///
+/// In a standard 24-row terminal and in smaller ones the card and the mascot
+/// stay whole rather than scrolling off the top.
+pub fn welcome_card(card: &WelcomeCard<'_>) -> Vec<RenderLine> {
+    let &WelcomeCard {
+        model,
+        cwd,
+        mode,
+        memory_docs,
+        thinking,
+        context_window,
+        width,
+        height,
+        tick: tick_n,
+        show_mascot,
+        mood,
+    } = card;
     let mut lines = Vec::new();
     let username = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))

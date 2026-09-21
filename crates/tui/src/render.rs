@@ -1,5 +1,6 @@
 use super::*;
 use flashagent_tui::anim::{self, Rgb};
+use flashagent_tui::theme;
 
 pub(crate) fn color(kind: LineKind) -> crossterm::style::Color {
     // Truecolor dark warm aesthetic (M3 Expressive / Charcoal & Amber / Sand).
@@ -882,7 +883,7 @@ impl Renderer {
             crossterm::queue!(
                 std::io::stdout(),
                 crossterm::cursor::MoveToColumn(0),
-                crossterm::style::Print(out),
+                crossterm::style::Print(theme::recolor(&out)),
             )
             .ok();
             std::io::stdout().flush().ok();
@@ -957,7 +958,7 @@ impl Renderer {
         crossterm::queue!(
             std::io::stdout(),
             crossterm::cursor::MoveToColumn(0),
-            crossterm::style::Print(out),
+            crossterm::style::Print(theme::recolor(&out)),
         )
         .ok();
         std::io::stdout().flush().ok();
@@ -968,6 +969,9 @@ impl App {
     /// Paint one frame of the app as it stands.
     pub(crate) fn draw(&mut self, cx: &LoopCtx<'_>, autocomplete: Option<&AutocompletePopup>) {
         anim::set_enabled(self.config.animations);
+        // Taken from the config on every frame, so that leaving the settings
+        // screen without saving puts the old theme back by itself.
+        theme::set(self.config.color_theme);
         let composer_flash = self.composer_flash();
         let channel_prompt: Option<String> = if self.uninstall_confirm {
             Some(

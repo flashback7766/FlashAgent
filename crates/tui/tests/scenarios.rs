@@ -388,6 +388,51 @@ fn a_tilde_path_out_of_the_project_is_still_asked_about() {
     term.wait_for("Confirm:", WAIT);
 }
 
+/// Every 24-bit colour on screen, as `(r, g, b)`.
+fn colours_on_screen(term: &Term) -> Vec<(u8, u8, u8)> {
+    let painted = term.screen_colours();
+    let mut out = Vec::new();
+    for piece in painted.split("38;2;").skip(1) {
+        let head = piece.split('m').next().unwrap_or("");
+        let parts: Vec<_> = head.split(';').take(3).filter_map(|p| p.parse::<u8>().ok()).collect();
+        if let [r, g, b] = parts[..] {
+            out.push((r, g, b));
+        }
+    }
+    out
+}
+
+#[test]
+fn the_colour_theme_repaints_the_whole_screen() {
+    // The app is written in one palette and recoloured on the way out, so a
+    // theme must reach every card without any of them knowing about it.
+    let server = MockServer::start(vec![Reply::Text("Hello.".into())]);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "color_theme": "monochrome" }));
+    term.type_text("say hello");
+    term.send(ENTER);
+    term.wait_for("Hello.", WAIT);
+
+    let colours = colours_on_screen(&term);
+    assert!(colours.len() > 5, "the screen should be painted at all: {colours:?}");
+    let coloured: Vec<_> = colours.iter().filter(|(r, g, b)| r != g || g != b).collect();
+    assert!(coloured.is_empty(), "monochrome left colours on screen: {coloured:?}");
+
+    // And the default theme is the palette as written, so the same screen
+    // does have colour in it.
+    let plain_server = MockServer::start(vec![Reply::Text("Hello.".into())]);
+    let plain_home = Home::new();
+    let plain = ready(&plain_home, &plain_server);
+    plain.type_text("say hello");
+    plain.send(ENTER);
+    plain.wait_for("Hello.", WAIT);
+    let plain_colours = colours_on_screen(&plain);
+    assert!(
+        plain_colours.iter().any(|(r, g, b)| r != g || g != b),
+        "the default theme should not be grey: {plain_colours:?}"
+    );
+}
+
 /// Shown under the composer only while a turn runs.
 const RUNNING_HINT: &str = "esc to interrupt";
 

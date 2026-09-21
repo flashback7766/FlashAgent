@@ -133,6 +133,13 @@ impl Term {
     }
 
     /// The screen as a person sees it, one line per row.
+    /// The screen with its colours, as the escape sequences a terminal would
+    /// need to redraw it. Used to check what colour something came out.
+    #[allow(dead_code)]
+    pub fn screen_colours(&self) -> String {
+        String::from_utf8_lossy(&self.parser.lock().unwrap().screen().contents_formatted()).into_owned()
+    }
+
     pub fn screen(&self) -> String {
         self.parser.lock().unwrap().screen().contents()
     }
