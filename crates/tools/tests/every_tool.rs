@@ -83,8 +83,15 @@ impl Project {
             .await
     }
 
+    /// Read a file back from disk, building the path a component at a time
+    /// so that the test itself never depends on how a separator is spelled.
     fn read(&self, path: &str) -> String {
-        std::fs::read_to_string(self.dir.join(path)).unwrap()
+        let mut full = self.dir.clone();
+        for part in path.split('/') {
+            full.push(part);
+        }
+        std::fs::read_to_string(&full)
+            .unwrap_or_else(|e| panic!("reading back {}: {e}", full.display()))
     }
 }
 
@@ -155,6 +162,10 @@ async fn a_file_is_read_written_and_edited() {
     project
         .call("write_file", serde_json::json!({ "path": "new/deep.txt", "content": "written\n" }))
         .await;
+    // Read back both ways: through the tool, which is where a wrong path
+    // would show up as the model sees it, and from disk.
+    let back = project.call("read_file", serde_json::json!({ "path": "new/deep.txt" })).await;
+    assert!(back.contains("written"), "written and read back through the tools: {back}");
     assert_eq!(project.read("new/deep.txt"), "written\n", "write_file must create the folders too");
 
     project
