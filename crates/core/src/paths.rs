@@ -85,7 +85,9 @@ mod tests {
     fn a_resolved_path_is_relative_to_the_project_unless_it_says_otherwise() {
         let root = Path::new("/work/project");
         assert_eq!(resolve_path(root, "src/main.rs"), Path::new("/work/project/src/main.rs"));
-        assert_eq!(resolve_path(root, "/etc/hosts"), Path::new("/etc/hosts"));
+        // Windows only calls a path absolute once it names a drive.
+        let absolute = if cfg!(windows) { r"C:\Windows\hosts" } else { "/etc/hosts" };
+        assert_eq!(resolve_path(root, absolute), Path::new(absolute));
         if let Some(home) = home() {
             assert_eq!(resolve_path(root, "~/notes.txt"), home.join("notes.txt"));
         }
