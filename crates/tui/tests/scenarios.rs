@@ -1767,7 +1767,8 @@ fn show_small_terminal() {
         let home = Home::new();
         home.set_up(&server.url);
         let term = Term::start(&home, &["-y"], cols, rows);
-        term.wait_for(PROMPT, WAIT);
+        // The placeholder shortens with the width; its first word is always there.
+        term.wait_for("Ask", WAIT);
         std::thread::sleep(Duration::from_secs(4));
         println!("=== {cols}x{rows} ===");
         for line in term.screen().lines() {
@@ -1967,4 +1968,29 @@ fn token_counters_switched_off_are_not_shown_as_zeroes() {
     let screen = term.screen();
     assert!(!screen.contains("Tokens -"), "counters that are off were drawn:\n{screen}");
     term.wait_for("four", WAIT);
+}
+
+#[test]
+fn the_permission_mode_is_never_cut_in_a_narrow_window() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    home.set_up(&server.url);
+    let term = Term::start(&home, &["-y"], 44, 10);
+    term.wait_for("Ask", WAIT);
+    term.wait_for("[Accept Edits]", WAIT);
+    let screen = term.screen();
+    let status = screen.lines().find(|l| l.contains("[Accept Edits]")).unwrap_or_default();
+    assert!(!status.trim_end().ends_with("· R"), "a word was cut in half: {status:?}");
+}
+
+#[test]
+fn the_mcp_panel_says_its_keys_once() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let term = ready(&home, &server);
+    term.type_text("/mcp");
+    term.send(ENTER);
+    term.wait_for("Esc close", WAIT);
+    let screen = term.screen().to_lowercase();
+    assert_eq!(screen.matches("switch tab").count(), 1, "the keys are listed twice:\n{screen}");
 }

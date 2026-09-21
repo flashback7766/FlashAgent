@@ -40,12 +40,6 @@ impl Overlay {
             Overlay::Mcp(modal) => modal.render(width),
         }
     }
-
-    /// Whether the overlay lists its own keys inside its box, so the footer
-    /// does not say them a second time.
-    pub(crate) fn has_own_hints(&self) -> bool {
-        !matches!(self, Overlay::Mcp(_))
-    }
 }
 
 impl App {
