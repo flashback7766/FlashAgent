@@ -1,5 +1,11 @@
 # Changelog
 
+## b330 — a voice the model has, not a style it was told about
+
+- **Styles work like a trait, not an instruction.** The style section used to be headed "the user's choice" and called itself a request, so replies began "as you asked, I'll keep it friendly". It now says who the assistant is, in the second person, with no word about a setting. Next to it goes one earlier exchange written in the chosen voice: a general question, and the answer this style and each characteristic would give. Models follow their own previous replies far more closely than any description, and they do not quote them. The example is sent right after the system prompt with each request and is never shown, saved, exported or compacted. The default style adds nothing.
+- **The system prompt no longer quotes sample sentences.** Phrases such as "Hello! How can I help you with the project today?" and "Checking workspace structure..." were being repeated word for word by small models. The rules are now stated without examples to copy, and the model is told not to talk about its instructions. A voice that uses emoji no longer meets a rule against them.
+- **Colour Theme can be selected in settings.** The UI tab drew seven rows but counted six, so ↓ on Animations jumped back to the top. The count now comes from the rows themselves, and a test walks every tab to its last row.
+
 ## b328 — a prompt you can edit, sessions that are never lost, and honest settings
 
 - **Edit the prompt anywhere in it.** ←/→ move the cursor, Home/End go to the line and then the text, Ctrl or Alt with an arrow jumps by words, Delete, Ctrl+W, Ctrl+K and Ctrl+A work as in a shell, and all of them work with the Russian layout too. The cursor steps over what a person sees as one character, so an accented letter, a flag or a family emoji is one press of an arrow and one Backspace.
