@@ -389,10 +389,24 @@ impl MemoryModal {
                 lines.push((LineKind::System, pad(&format!("{dim}enter — send · esc — cancel{reset}"))));
             }
             None => {
-                lines.push((
-                    LineKind::System,
-                    pad(&format!("{dim}↑/↓ — select · s — summary · e — tell the model what to change · d — forget · esc — close{reset}")),
-                ));
+                // In a narrow window the hints do not all fit. They are
+                // dropped from the middle, so "esc — close" survives: a card
+                // that does not say how to leave it is a trap.
+                let hints = crate::fit_hints(
+                    &[
+                        ("↑/↓ — select".into(), format!("{dim}↑/↓ — select{reset}")),
+                        ("s — summary".into(), format!("{dim}s — summary{reset}")),
+                        (
+                            "e — tell the model what to change".into(),
+                            format!("{dim}e — tell the model what to change{reset}"),
+                        ),
+                        ("d — forget".into(), format!("{dim}d — forget{reset}")),
+                        ("esc — close".into(), format!("{dim}esc — close{reset}")),
+                    ],
+                    &format!("{dim} · {reset}"),
+                    inner_w.saturating_sub(2),
+                );
+                lines.push((LineKind::System, pad(&hints)));
             }
         }
         lines.push((LineKind::System, format!("  {border}└{}┘{reset}", "─".repeat(inner_w))));
@@ -481,7 +495,17 @@ impl MemoryModal {
         lines.push((LineKind::System, pad(&ask)));
         lines.push((
             LineKind::System,
-            pad(&format!("{dim}type — ask · ↑/↓ + enter — dive deeper · ctrl+r — rewrite · tab — list · esc — close{reset}")),
+            pad(&crate::fit_hints(
+                &[
+                    ("type — ask".into(), format!("{dim}type — ask{reset}")),
+                    ("↑/↓ + enter — dive deeper".into(), format!("{dim}↑/↓ + enter — dive deeper{reset}")),
+                    ("ctrl+r — rewrite".into(), format!("{dim}ctrl+r — rewrite{reset}")),
+                    ("tab — list".into(), format!("{dim}tab — list{reset}")),
+                    ("esc — close".into(), format!("{dim}esc — close{reset}")),
+                ],
+                &format!("{dim} · {reset}"),
+                inner_w.saturating_sub(2),
+            )),
         ));
         lines.push((LineKind::System, format!("  {border}└{}┘{reset}", "─".repeat(inner_w))));
         lines

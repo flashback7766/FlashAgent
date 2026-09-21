@@ -438,16 +438,20 @@ fn the_colour_theme_repaints_the_whole_screen() {
 const SMALL: (u16, u16) = (98, 21);
 const TINY: (u16, u16) = (60, 14);
 
-/// Every screen the app can put up, opened in a small terminal, with what it
-/// takes to get there and a word that proves it is there.
-const SCREENS: &[(&str, &str)] = &[
-    ("/settings", "Settings"),
-    ("/memory", "remembers"),
-    ("/mcp", "MCP"),
+/// Every screen the app can put up, opened in a small terminal: what it
+/// takes to get there, a word that proves it is there, and the way out it
+/// prints last of all.
+///
+/// Waiting for that last line matters: a card unfolds over a few frames, and
+/// a screen read while it is still opening is half a card.
+const SCREENS: &[(&str, &str, &str)] = &[
+    ("/settings", "Settings", "Esc save"),
+    ("/memory", "remembers", "esc — close"),
+    ("/mcp", "MCP", "Esc close"),
     // Printed into the transcript rather than put up as a screen, so the
     // marker is its last line: in a short terminal the first has scrolled
     // away by then, which is what a transcript is supposed to do.
-    ("/help", "/uninstall"),
+    ("/help", "/uninstall", "Esc"),
 ];
 
 fn lines_of(term: &Term) -> Vec<String> {
@@ -478,7 +482,7 @@ fn nothing_is_drawn_outside_a_small_terminal() {
 #[test]
 fn every_screen_fits_a_small_terminal() {
     for (cols, rows) in [SMALL, TINY] {
-        for (command, marker) in SCREENS {
+        for (command, marker, way_out) in SCREENS {
             let server = MockServer::start(vec![Reply::Text("ok".into())]);
             let home = Home::new();
             home.set_up(&server.url);
@@ -488,6 +492,9 @@ fn every_screen_fits_a_small_terminal() {
             term.type_text(command);
             term.send(ENTER);
             term.wait_for(marker, WAIT);
+            // The way out is the last line the card draws, so waiting for it
+            // waits for the whole card.
+            term.wait_for(way_out, WAIT);
 
             let lines = lines_of(&term);
             let too_wide: Vec<_> =
@@ -501,13 +508,6 @@ fn every_screen_fits_a_small_terminal() {
                 "{command} at {cols}x{rows} drew {} rows",
                 lines.len()
             );
-            // Whatever it put up must still say how to leave it.
-            let screen = term.screen().to_lowercase();
-            assert!(
-                screen.contains("esc") || screen.contains("close") || screen.contains("back"),
-                "{command} at {cols}x{rows} gives no way out:\n{}",
-                term.screen()
-            );
             term.send(ESC);
         }
     }
@@ -518,15 +518,20 @@ fn what_a_running_tool_is_doing_is_said_once() {
     // It used to be said twice: once on the transcript line, and again
     // inside the composer, where it read as something the user had typed.
     let header = "Check the marker file";
+    // Long enough to still be running when the screen is read, in whichever
+    // shell this platform gives the tool.
+    let slow = if cfg!(windows) { "ping -n 4 127.0.0.1 > nul" } else { "sleep 3" };
     let server = MockServer::start(vec![
         Reply::ToolCall {
             name: "run_shell".into(),
-            arguments: serde_json::json!({ "header": header, "command": "sleep 3" }),
+            arguments: serde_json::json!({ "header": header, "command": slow }),
         },
         Reply::Text("Done.".into()),
     ]);
     let home = Home::new();
-    let term = ready_with(&home, &server, serde_json::json!({ "approval_mode_bypass": true }));
+    // Bypass, so the command runs instead of stopping on an approval card:
+    // what is being checked is the screen while a tool is working.
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
 
     term.type_text("check the marker");
     term.send(ENTER);
@@ -1690,6 +1695,26 @@ fn the_memory_summary_is_written_by_the_model_and_a_dive_deeper_question_is_sent
     term.send(ENTER);
     term.wait_for("Here is the comparison.", WAIT);
     assert!(sent(server.turns().last().unwrap()).contains("Compare DiLink versions"));
+}
+
+#[test]
+#[ignore = "prints the screen for a person to look at"]
+fn show_screens() {
+    for (command, marker, _) in SCREENS {
+        let server = MockServer::start(vec![Reply::Text("ok".into())]);
+        let home = Home::new();
+        home.set_up(&server.url);
+        let term = Term::start(&home, &["-y"], 98, 21);
+        term.wait_for(PROMPT, WAIT);
+        term.type_text(command);
+        term.send(ENTER);
+        term.wait_for(marker, WAIT);
+        std::thread::sleep(Duration::from_secs(2));
+        println!("=== {command} ===");
+        for line in term.screen().lines() {
+            println!("|{line}|");
+        }
+    }
 }
 
 #[test]
