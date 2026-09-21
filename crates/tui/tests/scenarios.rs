@@ -1708,7 +1708,9 @@ fn a_style_chosen_in_settings_reaches_the_next_message() {
     term.type_text("hello");
     term.send(ENTER);
     term.wait_for("Hi there!", WAIT);
-    assert!(sent(&server.turns()[0]).contains("warm and chatty"), "the style did not reach the model");
+    let sent = sent(&server.turns()[0]);
+    assert!(sent.contains("friendly colleague"), "the voice did not reach the model: {sent}");
+    assert!(sent.contains("Happy to help!"), "the example in that voice did not reach the model: {sent}");
     let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
     assert_eq!(config["personality"]["base"], "friendly", "{config}");
 }
