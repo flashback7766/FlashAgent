@@ -711,13 +711,11 @@ impl Renderer {
             "  \x1b[38;2;135;130;125my / enter — close and uninstall · n / esc — keep FlashAgent\x1b[0m".to_string()
         } else if st.channel_prompt.is_some() {
             "  \x1b[38;2;135;130;125my / enter — switch · n / esc — keep the current channel\x1b[0m".to_string()
-        } else if overlay.is_some_and(Overlay::has_own_hints) {
-            // These draw their own keys inside the box; saying them twice
+        } else if overlay.is_some() {
+            // Every panel draws its own keys inside its box; saying them twice
             // only pushes the box up. Something that turned up on its own
             // still gets the line.
             st.background.map(|text| format!("  {}", st.background_style.paint(text))).unwrap_or_default()
-        } else if overlay.is_some() {
-            "  \x1b[38;2;135;130;125mtab/1-3 — switch tab · ↑/↓ — navigate · enter — select · esc — close\x1b[0m".to_string()
         } else if autocomplete.is_some() {
             "  \x1b[38;2;135;130;125mtab — complete · ↑/↓ — select · enter — send · esc — dismiss\x1b[0m".to_string()
         } else if st.running {
@@ -851,7 +849,17 @@ impl Renderer {
         }
 
         // Line 3: Turn telemetry & performance metrics on the left, context gauge on the right
-        let gauge_base = context_usage.format_compact_gauge(10);
+        // The mode is what decides what the agent may do, so it is never cut:
+        // the gauge shrinks first, down to just the percentage.
+        let mode_room = 2 + visible_width(st.mode.label()) + 2 + 1;
+        let gauge_base = [
+            context_usage.format_compact_gauge(10),
+            context_usage.format_compact_gauge(4),
+            format!("\x1b[38;2;135;215;165m{:.0}%\x1b[0m", context_usage.percentage().clamp(0.0, 100.0)),
+        ]
+        .into_iter()
+        .find(|g| mode_room + visible_width(g) + 3 <= width)
+        .unwrap_or_default();
         let gauge_str = if st.context_warn_threshold > 0 && context_usage.percentage() >= st.context_warn_threshold as f32 {
             format!("\x1b[1;38;2;245;140;80m⚠ High Ctx ({:.0}%)\x1b[0m {gauge_base}", context_usage.percentage())
         } else {
@@ -886,8 +894,17 @@ impl Renderer {
             let pad = " ".repeat(width.saturating_sub(left_vis + gauge_vis + 1));
             format!("{left_telemetry}{pad}{gauge_str}")
         } else {
+            // Whole parts go first, from the end ("· Ready"), so what stays
+            // is never half a word; only one part left alone is clipped.
             let clip_budget = width.saturating_sub(gauge_vis + 3);
-            let clipped_left = clip_ansi(&left_telemetry, clip_budget);
+            let mut left = left_telemetry.clone();
+            while visible_width(&left) > clip_budget {
+                match left.rfind(" \x1b[38;2;100;95;90m·") {
+                    Some(cut) => left = format!("{}\x1b[0m", &left[..cut]),
+                    None => break,
+                }
+            }
+            let clipped_left = clip_ansi(&left, clip_budget);
             let pad = " ".repeat(width.saturating_sub(visible_width(&clipped_left) + gauge_vis + 1));
             format!("{clipped_left}{pad}{gauge_str}")
         };
