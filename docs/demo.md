@@ -111,7 +111,7 @@ away.
 cargo test -p flashagent-tui --test scenarios
 ```
 
-About twenty seconds: 71 tests start the real binary in a pseudo-terminal,
+About twenty seconds: 72 tests start the real binary in a pseudo-terminal,
 type into it and read the screen, against a scripted model server. Then
 open [numbers.md](numbers.md) for the figures: start-up, memory, and
 frame time on a 10,000-turn session.
