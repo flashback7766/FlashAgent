@@ -874,6 +874,31 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
     )
 }
 
+/// What part of a turn a line belongs to. A blank line goes wherever the
+/// transcript moves from one to another, so that a question, the work done
+/// for it and the answer read as three things rather than one column of
+/// text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Block {
+    /// What the user asked.
+    Ask,
+    /// Thinking and tool calls.
+    Work,
+    /// What the model said back.
+    Answer,
+    /// Cards, diffs and notices, which bring their own spacing.
+    Other,
+}
+
+fn block_of(kind: LineKind) -> Block {
+    match kind {
+        LineKind::User => Block::Ask,
+        LineKind::Reasoning | LineKind::Tool | LineKind::ToolError => Block::Work,
+        LineKind::Assistant => Block::Answer,
+        LineKind::Diff | LineKind::System => Block::Other,
+    }
+}
+
 impl ChatView {
     /// Render all lines wrapped to `width`. `expansion` determines which reasoning blocks expand.
     pub fn render_split(
@@ -885,6 +910,7 @@ impl ChatView {
         let boundary = self.settled_boundary();
         let mut settled = Vec::new();
         let mut live = Vec::new();
+        let mut previous_block: Option<Block> = None;
         let last_user_idx = self.lines.iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0);
 
         let cached_settled_match = {
@@ -909,12 +935,12 @@ impl ChatView {
                         anim::shimmer(&format!("Thinking: {stage}"), t, 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255)),
                     )
                 } else if let Some(s) = secs {
-                    format!("  \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m \x1b[38;2;140;145;160m({s}s)\x1b[0m {chevron}")
+                    format!("  \x1b[38;2;120;125;140m✻\x1b[0m \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m \x1b[38;2;140;145;160m({s}s)\x1b[0m {chevron}")
                 } else {
                     // Thinking lifted out of the answer text: no duration was
                     // ever measured, but it is plainly over — the answer is
                     // underneath it.
-                    format!("  \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m {chevron}")
+                    format!("  \x1b[38;2;120;125;140m✻\x1b[0m \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m {chevron}")
                 };
                 let budget = width.saturating_sub(4);
                 let clipped_styled = clip_ansi(&text_styled, budget);
@@ -1024,6 +1050,17 @@ impl ChatView {
             }
 
             let target = if i < boundary { &mut settled } else { &mut live };
+            // A blank row wherever the transcript moves between asking,
+            // working and answering.
+            let block = block_of(line.kind);
+            if let Some(previous) = previous_block {
+                let crossing = previous != block && previous != Block::Other && block != Block::Other;
+                let already_blank = target.last().is_some_and(|(_, t)| t.trim().is_empty());
+                if crossing && !already_blank && !target.is_empty() {
+                    target.push((LineKind::System, String::new()));
+                }
+            }
+            previous_block = Some(block);
             let is_last_turn = i >= last_user_idx;
             let is_expanded = expansion.all || (expansion.last && is_last_turn);
 
@@ -1439,8 +1476,13 @@ mod tests {
         // streaming assistant line is live → boundary at its index.
         assert_eq!(v.settled_boundary(), 1);
         v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
-        // Everything settled → boundary == len.
-        assert_eq!(v.settled_boundary(), v.render_split(80, true).0.len() + v.render_split(80, true).1.len());
+        // Everything settled → the boundary is past the last line. It counts
+        // transcript lines, not drawn rows: one line can become several rows,
+        // and the blank rows between blocks belong to no line at all.
+        assert_eq!(v.settled_boundary(), v.lines.len());
+        let (settled, live) = v.render_split(80, true);
+        assert!(live.is_empty(), "nothing is live once the turn is over: {live:?}");
+        assert!(!settled.is_empty());
     }
 
     #[test]
