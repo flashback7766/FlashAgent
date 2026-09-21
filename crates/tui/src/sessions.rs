@@ -305,7 +305,9 @@ pub(crate) fn read_session(dir: &std::path::Path, id: &str) -> Result<SavedSessi
     let path = dir.join(format!("{id}.json"));
     let content = std::fs::read_to_string(&path)
         .map_err(|_| format!("No saved session '{id}' in ~/.flashagent/sessions; starting fresh."))?;
-    serde_json::from_str(&content).map_err(|_| format!("Session file {} is unreadable; starting fresh.", path.display()))
+    serde_json::from_str(&content).map_err(|_| {
+        format!("Session '{id}' is unreadable, so a new session starts; the file is left as it was: {}", path.display())
+    })
 }
 
 /// Put a saved conversation back on screen and into the model's history,

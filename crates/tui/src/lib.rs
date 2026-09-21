@@ -1170,6 +1170,17 @@ impl ChatView {
                     target.push((line.kind, clip_ansi(&row, width)));
                     continue;
                 }
+                // A message longer than the window is wrapped, not cut: the
+                // end of an error is often the part that says what happened.
+                let plain = strip_ansi(&line.text);
+                if line.kind == LineKind::ToolError && visible_width(&plain) > width {
+                    let indent = plain.len() - plain.trim_start().len();
+                    let pad = " ".repeat(indent);
+                    for chunk in wrap(line.text.trim_start(), width.saturating_sub(indent).max(10)) {
+                        target.push((line.kind, format!("{pad}{chunk}")));
+                    }
+                    continue;
+                }
                 target.push((line.kind, line.text.clone()));
                 continue;
             }
@@ -1504,6 +1515,19 @@ mod tests {
         }
         // Continuation lines keep the indent.
         assert!(lines.iter().skip(1).all(|(k, l)| *k == LineKind::User && l.starts_with("  ")));
+    }
+
+    #[test]
+    fn a_long_error_is_wrapped_so_its_end_is_seen() {
+        let mut v = ChatView::default();
+        v.push_line(
+            LineKind::ToolError,
+            "Session 'session_1' is unreadable, so a new session starts; the file is left as it was: /var/folders/36/tjdph2t965j8snz9/T/.tmpUNpSjP/.flashagent/sessions/session_1.json",
+        );
+        let rows = v.render(40);
+        assert!(rows.iter().all(|(_, t)| visible_width(t) <= 40), "{rows:#?}");
+        let all: String = rows.iter().map(|(_, t)| strip_ansi(t)).collect();
+        assert!(all.contains("unreadable") && all.contains("session_1.json"), "{rows:#?}");
     }
 
     #[test]

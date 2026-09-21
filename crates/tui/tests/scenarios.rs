@@ -2076,3 +2076,21 @@ fn measure_startup_and_memory() {
     }
     quit_with_double_esc(&mut term);
 }
+
+#[test]
+fn a_paste_that_arrives_as_keystrokes_is_still_one_prompt() {
+    // A Windows console has no bracketed paste: the text comes as key
+    // presses, each newline an Enter. Sent line by line, the first line
+    // would go to the model on its own.
+    let server = MockServer::start(vec![Reply::Text("One prompt.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+    term.write("fn main() {\r    run();\r}");
+    term.wait_for("run();", WAIT);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(server.turns().is_empty(), "part of the paste was sent on its own");
+    term.send(ENTER);
+    term.wait_for("One prompt.", WAIT);
+    let prompt = prompt_of(server.turns().last().unwrap());
+    assert!(prompt.contains("fn main() {\\n    run();\\n}"), "{prompt}");
+}
