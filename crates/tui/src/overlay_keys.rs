@@ -474,7 +474,7 @@ impl App {
             MemoryAction::Tell { message } => {
                 // Sent through the ordinary path, so it is an ordinary turn:
                 // the model decides what to change and says so in the chat.
-                self.input = message;
+                self.input.set(message);
                 let _ = cx.tx.send(UiEvent::Key(KeyCode::Enter, KeyModifiers::NONE));
             }
         }

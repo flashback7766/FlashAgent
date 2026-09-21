@@ -35,6 +35,7 @@ mod menus;
 mod notices;
 mod attachments;
 mod sessions;
+mod prompt_history;
 mod recap;
 mod compact;
 mod cards;
@@ -534,13 +535,15 @@ struct LoopCtx<'a> {
 struct App {
     question_ui_state: QuestionUiState,
     history: Vec<ChatMessage>,
-    input: String,
+    input: flashagent_tui::Composer,
     custom_placeholder: Option<String>,
     suggested_prompt: Option<String>,
     latest_suggestion: Option<String>,
     tip_animator: flashagent_tui::tips::TipAnimator,
     input_history: Vec<String>,
     history_index: Option<usize>,
+    /// Ctrl+F: a search through the prompt history is open.
+    history_search: Option<flashagent_tui::HistorySearch>,
     current_draft: String,
     confirm_select: ConfirmSelect,
     chat: ChatView,
@@ -906,13 +909,14 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     let mut app = App {
         question_ui_state: QuestionUiState::default(),
         history: vec![ChatMessage::system(system_prompt_text)],
-        input: String::new(),
+        input: flashagent_tui::Composer::new(),
         custom_placeholder: None,
         suggested_prompt: None,
         latest_suggestion: None,
         tip_animator: flashagent_tui::tips::TipAnimator::new(),
-        input_history: Vec::new(),
+        input_history: prompt_history::load(),
         history_index: None,
+        history_search: None,
         current_draft: String::new(),
         confirm_select: ConfirmSelect::new(),
         chat: ChatView::default(),
@@ -1563,34 +1567,33 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 }
             }
             UiEvent::Paste(pasted) => {
-                // Dropping a file on a terminal pastes its path. When that
-                // path is a picture, the user meant the picture.
-                if let Some(att) = Attachment::from_dropped_path(&pasted) {
+                // A paste goes to whatever has the keyboard. A question card
+                // or an open panel is answered first: a path pasted as the
+                // answer to a question must not turn into an attachment for
+                // some later prompt.
+                let one_line = || pasted.replace("\r\n", " ").replace(['\n', '\r'], " ");
+                if question_gate.pending().is_some() {
+                    app.question_ui_state.write_in_text.push_str(&one_line());
+                } else if let Some(Overlay::Sampling(sm)) = app.overlay.as_mut() {
+                    for ch in one_line().chars() {
+                        sm.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);
+                    }
+                } else if app.overlay.is_some() || gate.pending().is_some() {
+                    // Nothing there takes text.
+                } else if let Some(att) = Attachment::from_dropped_path(&pasted) {
+                    // Dropping a file on a terminal pastes its path. When
+                    // that path is a picture, the user meant the picture.
                     let label = att.label();
                     app.attachments.push(att);
                     app.suggested_prompt = None;
-                    app.background = Some(BackgroundNotice::fading(
-                        format!("{label} attached · Ctrl+Z removes it"),
-                        8,
-                    ));
-                    app.renderer.request_reprint();
-                    continue;
+                    app.background = Some(BackgroundNotice::fading(format!("{label} attached · Ctrl+Z removes it"), 8));
+                } else if !pasted.is_empty() {
+                    // Lines stay lines: pasted code or a log keeps its shape.
+                    app.input.insert_str(&pasted);
+                    app.history_index = None;
+                    app.autocomplete_idx = 0;
                 }
-                let sanitized = pasted.replace("\r\n", " ").replace(['\n', '\r'], " ");
-                if !sanitized.is_empty() {
-                    if question_gate.pending().is_some() {
-                        app.question_ui_state.write_in_text.push_str(&sanitized);
-                    } else if let Some(Overlay::Sampling(sm)) = app.overlay.as_mut() {
-                        for ch in sanitized.chars() {
-                            sm.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);
-                        }
-                    } else if app.overlay.is_none() {
-                        app.input.push_str(&sanitized);
-                        app.history_index = None;
-                        app.autocomplete_idx = 0;
-                    }
-                    app.renderer.request_reprint();
-                }
+                app.renderer.request_reprint();
             }
             UiEvent::Key(code, mods) => {
                 let mut cx = loop_ctx!();

@@ -130,7 +130,7 @@ impl App {
         // goes back in the prompt rather than vanishing.
         let unsent = std::mem::take(&mut self.pending_steers);
         if !unsent.is_empty() && self.input.is_empty() {
-            self.input = unsent.join(" ");
+            self.input.set(unsent.join(" "));
             self.background = Some(BackgroundNotice::fading(
                 "The turn ended before your message reached it · Enter sends it now",
                 8,
