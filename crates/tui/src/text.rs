@@ -1,5 +1,70 @@
 use super::*;
 
+/// Remember the colour a line is being written in, so that a wrap can start
+/// the next line in the same colour and close it at the end.
+fn track_style(word: &str, active_style: &mut Option<String>) {
+    let b = word.as_bytes();
+    let mut j = 0;
+    while j < b.len() {
+        if b[j] == 0x1b && j + 1 < b.len() && b[j + 1] == b'[' {
+            let start = j;
+            j += 2;
+            while j < b.len() && !('@'..='~').contains(&(b[j] as char)) {
+                j += 1;
+            }
+            if j < b.len() {
+                let seq = &word[start..=j];
+                if seq == "\x1b[0m" || seq == "\x1b[m" {
+                    *active_style = None;
+                } else {
+                    *active_style = Some(seq.to_string());
+                }
+                j += 1;
+            }
+        } else {
+            j += 1;
+        }
+    }
+}
+
+/// Cut a word that does not fit on a line of its own into pieces that do.
+///
+/// Measured in cells, so a character that takes two of them is never split
+/// down the middle, and escape codes travel with the piece they fall in
+/// without counting towards its width.
+fn break_wide_word(word: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut cur_vis = 0usize;
+    let mut chars = word.char_indices();
+    while let Some((at, c)) = chars.next() {
+        if c == '\x1b' {
+            let rest = &word[at..];
+            let end = rest
+                .find(|c: char| ('@'..='~').contains(&c))
+                .map(|p| p + 1)
+                .unwrap_or(rest.len());
+            cur.push_str(&rest[..end]);
+            // Escape sequences are ASCII, so one byte is one character.
+            for _ in 1..end {
+                chars.next();
+            }
+            continue;
+        }
+        let cells = c.width().unwrap_or(0);
+        if cur_vis > 0 && cur_vis + cells > width {
+            out.push(std::mem::take(&mut cur));
+            cur_vis = 0;
+        }
+        cur.push(c);
+        cur_vis += cells;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 /// Wrap styled text to `width` visible characters, preserving active ANSI escape sequences
 /// across line wraps and appending reset codes at line endings.
 pub fn wrap_styled(text: &str, width: usize) -> Vec<String> {
@@ -22,6 +87,38 @@ pub fn wrap_styled(text: &str, width: usize) -> Vec<String> {
 
         for word in line.split(' ') {
             let w_vis = visible_width(word);
+            // A word wider than the line itself has nowhere to wrap: a long
+            // URL, a path, or writing that puts no spaces between words at
+            // all, such as Chinese. Left whole it would wrap in the terminal
+            // instead, which this renderer cannot see and would then erase
+            // the wrong rows.
+            if w_vis > width {
+                if cur_vis > 0 {
+                    if active_style.is_some() {
+                        cur.push_str("\x1b[0m");
+                    }
+                    out.push(std::mem::take(&mut cur));
+                    if let Some(ref style) = active_style {
+                        cur.push_str(style);
+                    }
+                }
+                let mut pieces = break_wide_word(word, width);
+                let last = pieces.pop().unwrap_or_default();
+                for piece in pieces {
+                    cur.push_str(&piece);
+                    if active_style.is_some() {
+                        cur.push_str("\x1b[0m");
+                    }
+                    out.push(std::mem::take(&mut cur));
+                    if let Some(ref style) = active_style {
+                        cur.push_str(style);
+                    }
+                }
+                cur_vis = visible_width(&last);
+                cur.push_str(&last);
+                track_style(word, &mut active_style);
+                continue;
+            }
             // Decided by what is visible, not by what is in the buffer: a
             // continuation row starts with the style it carries over, and
             // treating that escape code as text put a space before the first
@@ -47,29 +144,7 @@ pub fn wrap_styled(text: &str, width: usize) -> Vec<String> {
             cur.push_str(word);
             cur_vis += w_vis;
 
-            // Track active ANSI style
-            let b = word.as_bytes();
-            let mut j = 0;
-            while j < b.len() {
-                if b[j] == 0x1b && j + 1 < b.len() && b[j + 1] == b'[' {
-                    let start = j;
-                    j += 2;
-                    while j < b.len() && !('@'..='~').contains(&(b[j] as char)) {
-                        j += 1;
-                    }
-                    if j < b.len() {
-                        let seq = &word[start..=j];
-                        if seq == "\x1b[0m" || seq == "\x1b[m" {
-                            active_style = None;
-                        } else {
-                            active_style = Some(seq.to_string());
-                        }
-                        j += 1;
-                    }
-                } else {
-                    j += 1;
-                }
-            }
+            track_style(word, &mut active_style);
         }
 
         if !cur.is_empty() {

@@ -312,13 +312,19 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 if !out.is_empty() && !out.last().map(|s| s.is_empty()).unwrap_or(true) {
                     out.push(String::new());
                 }
-                let styled_heading = match hashes {
-                    1 => format!("\x1b[1;38;2;255;255;255m◆ {}\x1b[0m", md(title)),
-                    2 => format!("\x1b[1;38;2;194;231;255m◈ {}\x1b[0m", md(title)),
-                    3 => format!("\x1b[1;38;2;225;230;240m▸ {}\x1b[0m", md(title)),
-                    _ => format!("\x1b[38;2;180;185;200m▪ {}\x1b[0m", md(title)),
+                let (colour, mark) = match hashes {
+                    1 => ("\x1b[1;38;2;255;255;255m", '◆'),
+                    2 => ("\x1b[1;38;2;194;231;255m", '◈'),
+                    3 => ("\x1b[1;38;2;225;230;240m", '▸'),
+                    _ => ("\x1b[38;2;180;185;200m", '▪'),
                 };
-                out.push(styled_heading);
+                // A heading longer than the terminal used to be printed
+                // whole and wrapped by the terminal itself, which this
+                // renderer cannot see: it would then erase the wrong rows on
+                // the next repaint.
+                for chunk in wrap_styled(&format!("{mark} {}", md(title)), width) {
+                    out.push(format!("{colour}{chunk}\x1b[0m"));
+                }
                 i += 1;
                 continue;
             }
@@ -422,4 +428,160 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a person sees: the text with the colours taken off.
+    fn plain(lines: &[String]) -> Vec<String> {
+        lines.iter().map(|l| strip_ansi(l)).collect()
+    }
+
+    fn render(text: &str, width: usize) -> Vec<String> {
+        render_markdown_text(text, width)
+    }
+
+    #[test]
+    fn inline_markers_are_styled_and_everything_else_is_left_alone() {
+        assert_eq!(md("nothing to do here"), "nothing to do here");
+        let bold = md("a **strong** word");
+        assert!(bold.contains("\x1b["), "bold was not styled: {bold:?}");
+        assert_eq!(strip_ansi(&bold), "a strong word");
+        let code = md("call `main()` now");
+        assert_eq!(strip_ansi(&code), "call main() now");
+        // A marker that is never closed is text, not the start of styling.
+        assert_eq!(md("2 ** 3 is eight"), "2 ** 3 is eight");
+        assert_eq!(md("an unclosed `tick"), "an unclosed `tick");
+    }
+
+    #[test]
+    fn nothing_is_ever_wider_than_the_terminal() {
+        // The renderer's one hard promise: a line wider than the terminal
+        // wraps physically and throws the whole frame out of step.
+        let document = "\
+# A heading that is quite long and keeps going for a while
+Some running text that is certainly longer than a narrow terminal would like to show.
+
+- a bullet whose content also runs on well past the right-hand edge of a small window
+  - and a nested one, equally talkative
+
+| column one | column two with a long header |
+|---|---|
+| a value | another value that is fairly long |
+
+```rust
+fn a_function_with_a_very_long_name(and_a_long_parameter_name: SomeLongTypeName) -> Result<()> {
+```
+https://example.com/a/very/long/url/that/cannot/be/broken/anywhere/at/all/really
+";
+        for width in [20usize, 32, 48, 80, 120] {
+            for line in render(document, width) {
+                assert!(
+                    visible_width(&line) <= width,
+                    "at width {width} a line came out {} wide: {:?}",
+                    visible_width(&line),
+                    strip_ansi(&line)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_code_block_is_framed_and_its_contents_are_left_exactly_as_written() {
+        let out = render("```rust\nlet x = **not bold**;\n# not a heading\n```", 60);
+        let text = plain(&out);
+        assert!(text[0].contains("rust"), "the language belongs in the frame: {:?}", text[0]);
+        let body = text.join("\n");
+        assert!(body.contains("let x = **not bold**;"), "markdown inside code must stay literal: {body}");
+        assert!(body.contains("# not a heading"), "{body}");
+        assert!(text.last().unwrap().contains('╯'), "the frame must close: {:?}", text.last());
+    }
+
+    #[test]
+    fn headings_are_marked_by_level() {
+        let out = plain(&render("# One\n## Two\n### Three\n#### Four", 60));
+        let text = out.join("\n");
+        for title in ["One", "Two", "Three", "Four"] {
+            assert!(text.contains(title), "{title} is missing: {text}");
+        }
+        // Four levels, four different marks.
+        let marks: Vec<char> = out
+            .iter()
+            .filter_map(|l| l.trim().chars().next())
+            .filter(|c| !c.is_alphanumeric())
+            .collect();
+        assert_eq!(marks.len(), 4, "{out:?}");
+        let unique: std::collections::BTreeSet<_> = marks.iter().collect();
+        assert_eq!(unique.len(), 4, "levels should not look the same: {marks:?}");
+
+        // Six hashes are not a heading, and neither is a hash without a space.
+        let not = plain(&render("###### six\n#nospace", 60)).join("\n");
+        assert!(not.contains("###### six") && not.contains("#nospace"), "{not}");
+    }
+
+    #[test]
+    fn a_table_comes_out_aligned() {
+        let out = render("| a | bb |\n|---|----|\n| 1 | 2 |\n| long value | x |", 80);
+        let widths: Vec<usize> = out.iter().map(|l| visible_width(l)).collect();
+        assert!(widths.len() >= 5, "a table has borders, a header and its rows: {:?}", plain(&out));
+        assert!(
+            widths.iter().all(|w| *w == widths[0]),
+            "the rows do not line up: {widths:?}\n{:#?}",
+            plain(&out)
+        );
+        let text = plain(&out).join("\n");
+        assert!(text.contains("long value") && text.contains("bb"), "{text}");
+    }
+
+    #[test]
+    fn lists_keep_their_markers_their_numbers_and_their_nesting() {
+        let out = plain(&render("- one\n- two\n  - nested\n1. first\n2. second\n- [ ] todo\n- [x] done", 60));
+        let text = out.join("\n");
+        assert!(text.contains("one") && text.contains("nested"), "{text}");
+        assert!(text.contains("1.") && text.contains("2."), "numbers are kept: {text}");
+        assert!(text.contains('☐') && text.contains('☑'), "checkboxes: {text}");
+
+        let indent = |needle: &str| {
+            out.iter()
+                .find(|l| l.contains(needle))
+                .map(|l| l.len() - l.trim_start().len())
+                .unwrap_or_else(|| panic!("{needle} not found in {out:?}"))
+        };
+        assert!(indent("nested") > indent("one"), "nesting should show: {out:?}");
+    }
+
+    #[test]
+    fn a_wrapped_list_item_stays_under_its_own_text() {
+        let out = plain(&render("- a bullet with enough words in it to need a second line", 30));
+        assert!(out.len() >= 2, "{out:?}");
+        let first_indent = out[0].len() - out[0].trim_start().len();
+        let second_indent = out[1].len() - out[1].trim_start().len();
+        assert!(
+            second_indent > first_indent,
+            "the continuation should hang under the text, not under the bullet: {out:?}"
+        );
+    }
+
+    #[test]
+    fn writing_that_is_not_english_is_measured_by_what_it_takes_on_screen() {
+        // Cyrillic is one cell per letter; CJK is two. Measuring in bytes
+        // would wrap these lines in the wrong place.
+        for text in ["Проверка переноса русского текста в узком окне терминала", "这是一段中文文本用来测试换行"] {
+            for width in [20usize, 40] {
+                for line in render(text, width) {
+                    assert!(visible_width(&line) <= width, "{text}: {:?}", strip_ansi(&line));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn odd_input_renders_instead_of_panicking() {
+        for text in ["", "\n\n\n", "```", "```\nunclosed code", "|", "|||", "---", "- ", "#", "> quote"] {
+            let _ = render(text, 40);
+            let _ = render(text, 20);
+        }
+    }
 }
