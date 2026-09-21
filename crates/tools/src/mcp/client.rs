@@ -342,12 +342,12 @@ impl McpClient {
 
 
 
-#[cfg(test)]
+// The mock servers are bash scripts, so these run where there is a bash.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    // The mock servers are bash scripts.
-    #[cfg(unix)]
+
     #[tokio::test]
     async fn server_initiated_request_is_answered_and_never_resolves_ours() {
         // The server fires its own request with id 1 (same number as our
@@ -380,7 +380,6 @@ done
     }
 
     // The mock servers are bash scripts.
-    #[cfg(unix)]
     #[tokio::test]
     async fn test_mcp_client_spawn_and_communication() {
         // Spawn a simple bash script that acts as an MCP server responding to initialize and tools/list
