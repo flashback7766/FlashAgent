@@ -698,19 +698,16 @@ impl App {
                 }
                 (format!("session_{stem}.jsonl"), buf)
             }
-            _ => {
-                let mut md = format!(
-                    "# FlashAgent Session Export\n- **Session ID**: `{}`\n- **Model**: `{}`\n\n---\n\n",
-                    cx.session_id, self.current_model
-                );
-                for m in &self.history {
-                    md.push_str(&format!("### {}\n\n{}\n\n", m.role.as_str().to_uppercase(), text_of(m)));
-                }
-                (format!("session_{stem}.md"), md)
-            }
+            _ => (
+                format!("session_{stem}.md"),
+                export::conversation_markdown(&self.history, cx.session_id, &self.current_model, cx.cwd_display),
+            ),
         };
         match std::fs::write(&filename, content) {
-            Ok(_) => self.notice(format!("Exported conversation to: {filename}")),
+            Ok(_) => {
+                let shown = std::fs::canonicalize(&filename).map_or(filename, |p| p.display().to_string());
+                self.notice(format!("Exported conversation to: {shown}"));
+            }
             Err(e) => self.notice(format!("Failed to export conversation: {e}")),
         }
     }

@@ -1994,3 +1994,34 @@ fn the_mcp_panel_says_its_keys_once() {
     let screen = term.screen().to_lowercase();
     assert_eq!(screen.matches("switch tab").count(), 1, "the keys are listed twice:\n{screen}");
 }
+
+#[test]
+fn a_saved_session_is_found_by_something_said_inside_it() {
+    let server = MockServer::start(vec![
+        Reply::Text("The linker needed libssl-dev installed.".into()),
+        Reply::Text("Docs written.".into()),
+    ]);
+    let home = Home::new();
+    {
+        let mut term = ready(&home, &server);
+        ask(&term, "why does the build fail?", "libssl-dev");
+        quit_with_double_esc(&mut term);
+    }
+    {
+        let mut term = Term::start(&home, &["-y"], COLS, ROWS);
+        term.wait_for(PROMPT, WAIT);
+        ask(&term, "write the docs", "Docs written.");
+        quit_with_double_esc(&mut term);
+    }
+
+    let term = Term::start(&home, &["-y", "--resume"], COLS, ROWS);
+    term.wait_for("Resume a Session", WAIT);
+    term.type_text("libssl");
+    term.wait_for("(1/2", WAIT);
+    let screen = term.screen();
+    assert!(screen.contains("why does the build fail?"), "{screen}");
+    assert!(!screen.contains("write the docs"), "a session without the word is still listed:\n{screen}");
+    assert!(screen.contains("linker needed libssl"), "where it matched is not shown:\n{screen}");
+    term.send(ENTER);
+    term.wait_for("Resumed session", WAIT);
+}

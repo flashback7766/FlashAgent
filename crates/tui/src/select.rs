@@ -53,6 +53,9 @@ pub struct SelectItem<T> {
     pub label: String,
     pub description: Option<String>,
     pub value: T,
+    /// More text that typing searches through without showing it, such as
+    /// a whole saved conversation behind its first prompt.
+    pub search_text: Option<String>,
 }
 
 impl<T> SelectItem<T> {
@@ -62,6 +65,7 @@ impl<T> SelectItem<T> {
             label: label.into(),
             description: None,
             value,
+            search_text: None,
         }
     }
 
@@ -71,7 +75,35 @@ impl<T> SelectItem<T> {
             label: label.into(),
             description: Some(desc.into()),
             value,
+            search_text: None,
         }
+    }
+
+    pub fn with_search_text(mut self, text: impl Into<String>) -> Self {
+        self.search_text = Some(text.into());
+        self
+    }
+
+    /// Where `query` (lower-case) turns up in the hidden text when it is not
+    /// in the label or description: a short piece around it, on one line.
+    fn hidden_match(&self, query: &str) -> Option<String> {
+        if query.is_empty()
+            || self.label.to_lowercase().contains(query)
+            || self.description.as_ref().is_some_and(|d| d.to_lowercase().contains(query))
+        {
+            return None;
+        }
+        let text = self.search_text.as_deref()?;
+        let lower = text.to_lowercase();
+        let at = lower.find(query)?;
+        // Lower-casing keeps byte offsets for nearly every script; where it
+        // does not, the piece is shown lower-cased rather than cut wrongly.
+        let source = if lower.len() == text.len() { text } else { lower.as_str() };
+        let chars_before = source[..at].chars().count();
+        let start = chars_before.saturating_sub(25);
+        let piece: String = source.chars().skip(start).take(query.chars().count() + 50).collect();
+        let piece = piece.split_whitespace().collect::<Vec<_>>().join(" ");
+        Some(format!("{}{piece}\u{2026}", if start > 0 { "\u{2026}" } else { "" }))
     }
 }
 
@@ -118,6 +150,7 @@ impl<T> SelectMenu<T> {
             .filter(|(_, it)| {
                 it.label.to_lowercase().contains(&q)
                     || it.description.as_ref().is_some_and(|d| d.to_lowercase().contains(&q))
+                    || it.search_text.as_ref().is_some_and(|t| t.to_lowercase().contains(&q))
             })
             .map(|(idx, _)| idx)
             .collect()
@@ -289,6 +322,11 @@ impl<T> SelectMenu<T> {
                         pad_row(&format!("    \x1b[38;2;135;130;125m{desc}\x1b[0m")),
                     ));
                 }
+                // Found by what is not on screen: show where, or the match
+                // looks like a mistake.
+                if let Some(piece) = item.hidden_match(&self.filter.to_lowercase()) {
+                    lines.push((LineKind::System, pad_row(&format!("    \x1b[38;2;175;170;225m{piece}\x1b[0m"))));
+                }
             }
 
             if end < total_matches {
@@ -304,10 +342,12 @@ impl<T> SelectMenu<T> {
             LineKind::System,
             format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
         ));
-        lines.push((
-            LineKind::System,
-            "  \x1b[38;2;135;130;125m↑/↓ · PgUp/PgDn · type to search · enter select · esc cancel\x1b[0m".to_string(),
-        ));
+        let hints: Vec<(String, String)> = ["↑/↓", "PgUp/PgDn", "type to search", "enter select", "esc cancel"]
+            .iter()
+            .map(|h| (h.to_string(), h.to_string()))
+            .collect();
+        let hints = crate::fit_hints(&hints, " · ", width.saturating_sub(2));
+        lines.push((LineKind::System, format!("  \x1b[38;2;135;130;125m{hints}\x1b[0m")));
 
         lines
     }
@@ -316,6 +356,21 @@ impl<T> SelectMenu<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typing_finds_an_item_by_its_hidden_text_and_shows_where() {
+        let items = vec![
+            SelectItem::with_description("fix the build", "2 min ago", 1).with_search_text("fix the build\nThe linker needed libssl."),
+            SelectItem::with_description("write docs", "1 h ago", 2).with_search_text("write docs\nDone."),
+        ];
+        let mut menu = SelectMenu::new("Resume a Session", items);
+        for c in "LIBSSL".chars() {
+            menu.push_filter_char(c);
+        }
+        assert_eq!(menu.filtered_indices(), [0]);
+        let screen: Vec<String> = menu.render(80).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
+        assert!(screen.iter().any(|l| l.contains("linker needed libssl")), "{screen:#?}");
+    }
 
     #[test]
     fn confirm_select_navigation() {
