@@ -1,24 +1,18 @@
-//! Removing FlashAgent: every copy of the binary the installers put down, the
-//! PATH lines they added, and whichever parts of `~/.flashagent` the user
-//! picks. An install that a package manager owns is removed through that
-//! package manager, so its database never lists files that are gone.
-//!
-//! Everything that decides what to remove works on paths it is given, so it is
-//! tested against temporary folders; only [`run_interactive`] looks at the real
-//! home directory and the running executable.
+//! Uninstall: every binary copy the installers put down, their PATH lines,
+//! and the parts of `~/.flashagent` the user picks. A package-managed install
+//! is removed through its package manager. Only [`run_interactive`] touches
+//! the real home and executable; the rest works on given paths and is tested
+//! on temp folders.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The line the installers write above every PATH entry they add.
 pub const PATH_MARKER: &str = "# FlashAgent";
 
-/// Shell start-up files the Unix installer may have added a PATH line to,
-/// relative to the home directory.
+/// Relative to the home directory.
 const RC_FILES: &[&str] = &[".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile", ".config/fish/config.fish"];
 
-/// A package manager that can own the FlashAgent binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageManager {
     Pacman,
@@ -35,8 +29,7 @@ impl PackageManager {
         }
     }
 
-    /// The command that removes `package`, without `sudo`. The package
-    /// manager asks its own confirmation; nothing here answers it for the user.
+    /// Without `sudo`. The package manager's own confirmation is left to the user.
     pub fn remove_command(self, package: &str) -> Vec<String> {
         let parts: &[&str] = match self {
             Self::Pacman => &["pacman", "-R"],
@@ -47,15 +40,15 @@ impl PackageManager {
     }
 }
 
-/// `pacman -Qqo <path>` prints the package name alone.
+/// Prints the package name alone.
 pub fn parse_pacman_owner(stdout: &str) -> Option<String> {
     stdout.lines().next().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
-/// `dpkg -S <path>` prints `package: /path` (or `pkg1, pkg2: /path`).
+/// Prints `package: /path` (or `pkg1, pkg2: /path`).
 pub fn parse_dpkg_owner(stdout: &str) -> Option<String> {
     let line = stdout.lines().next()?;
-    // "package: /path" — an error message has the same colon, but no path.
+    // An error message has the same colon, but no path.
     let (owners, path) = line.split_once(": ")?;
     if !path.starts_with('/') {
         return None;
@@ -63,7 +56,7 @@ pub fn parse_dpkg_owner(stdout: &str) -> Option<String> {
     owners.split(',').next().map(str::trim).filter(|s| !s.is_empty() && !s.contains(' ')).map(str::to_string)
 }
 
-/// `xbps-query -o <path>` prints `pkgname-version_revision: /path (regular file)`.
+/// Prints `pkgname-version_revision: /path (regular file)`.
 pub fn parse_xbps_owner(stdout: &str) -> Option<String> {
     let line = stdout.lines().next()?;
     let (pkgver, _) = line.split_once(": ")?;
@@ -71,8 +64,6 @@ pub fn parse_xbps_owner(stdout: &str) -> Option<String> {
     (!name.is_empty() && version.chars().next().is_some_and(|c| c.is_ascii_digit())).then(|| name.to_string())
 }
 
-/// The package that owns `binary`, if any of the known package managers says
-/// one does.
 pub fn package_owner(binary: &Path) -> Option<(PackageManager, String)> {
     let path = binary.to_string_lossy().to_string();
     let ask = |program: &str, args: &[&str]| -> Option<String> {
@@ -91,20 +82,18 @@ pub fn package_owner(binary: &Path) -> Option<(PackageManager, String)> {
     None
 }
 
-/// One part of `~/.flashagent`, offered for deletion on its own.
+/// One part of `~/.flashagent`, deletable on its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataPart {
     pub label: &'static str,
     pub paths: Vec<PathBuf>,
     pub bytes: u64,
-    /// Things that can be rebuilt (caches, `/rewind` copies) are ticked;
-    /// anything the user wrote or chose is not.
+    /// Rebuildable things (caches, `/rewind` copies) are ticked; what the user
+    /// wrote or chose is not.
     pub selected_by_default: bool,
 }
 
-/// What is in the data folder `data` (`~/.flashagent`), part by part. A part
-/// with nothing on disk is left out; anything not named below is offered as
-/// "Other files".
+/// Parts with nothing on disk are left out; unknown files are "Other files".
 pub fn data_parts(data: &Path) -> Vec<DataPart> {
     const KNOWN: &[(&str, &[&str], bool)] = &[
         ("Settings", &["config.json"], false),
@@ -141,7 +130,7 @@ pub fn data_parts(data: &Path) -> Vec<DataPart> {
     parts
 }
 
-/// Bytes under `path`, symlinks counted as themselves and never followed.
+/// Symlinks counted as themselves, never followed.
 fn size_of(path: &Path) -> u64 {
     let Ok(meta) = path.symlink_metadata() else { return 0 };
     if meta.is_dir() {
@@ -163,11 +152,9 @@ pub fn human_size(bytes: u64) -> String {
     if unit == 0 { format!("{bytes} B") } else { format!("{value:.1} {}", UNITS[unit]) }
 }
 
-/// `text` without the PATH lines an installer added for `dir`: the marker,
-/// the line after it when that line puts `dir` on the PATH, and the blank
-/// line the installer wrote before the marker. `None` when nothing in it is
-/// ours — a line the user wrote themselves is never touched, even one that
-/// names the same folder.
+/// Removes the marker, the PATH line after it for `dir`, and the blank line
+/// before the marker. `None` when nothing is ours; a line the user wrote is
+/// never touched, even one naming the same folder.
 pub fn strip_path_lines(text: &str, dir: &str) -> Option<String> {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut keep: Vec<&str> = Vec::with_capacity(lines.len());
@@ -193,9 +180,8 @@ pub fn strip_path_lines(text: &str, dir: &str) -> Option<String> {
     changed.then(|| keep.join("\n"))
 }
 
-/// A Windows PATH value (`;`-separated) without `dir`. `None` when `dir` is
-/// not in it. Compared the way Windows does: case-insensitive, a trailing
-/// backslash ignored.
+/// `None` when `dir` is absent. Compared as Windows does: case-insensitive,
+/// trailing backslash ignored.
 pub fn remove_from_path_list(path_var: &str, dir: &str) -> Option<String> {
     let norm = |s: &str| s.trim().trim_end_matches(['\\', '/']).to_lowercase();
     let target = norm(dir);
@@ -204,9 +190,8 @@ pub fn remove_from_path_list(path_var: &str, dir: &str) -> Option<String> {
     (kept.len() != entries.len()).then(|| kept.join(";"))
 }
 
-/// Where FlashAgent may have been put, for this user: the running binary and
-/// every place the installers and the updater write to. Only paths that exist
-/// are returned, each once.
+/// The running binary and every place the installers and updater write to.
+/// Existing paths only, each once.
 pub fn binary_locations(exe: &Path, home: &Path, local_app_data: Option<&Path>) -> Vec<PathBuf> {
     let exe_name = if cfg!(windows) { "flashagent.exe" } else { "flashagent" };
     let mut candidates = vec![exe.to_path_buf(), home.join(".local").join("bin").join(exe_name)];
@@ -228,21 +213,18 @@ pub fn binary_locations(exe: &Path, home: &Path, local_app_data: Option<&Path>) 
     seen
 }
 
-/// Everything an uninstall would do, worked out before anything is touched.
+/// Worked out before anything is touched.
 #[derive(Debug, Clone)]
 pub struct Plan {
-    /// Set when a package manager owns the binary; the binaries below are then
-    /// the package's to remove, not ours.
+    /// When set, the binaries are the package's to remove, not ours.
     pub package: Option<(PackageManager, String)>,
     pub binaries: Vec<PathBuf>,
-    /// Shell start-up files holding a PATH line we added, with the folder it
-    /// adds.
+    /// (file, folder it adds to PATH)
     pub rc_files: Vec<(PathBuf, PathBuf)>,
     pub data_dir: PathBuf,
     pub data: Vec<DataPart>,
 }
 
-/// Work out the plan for `home`, with `exe` the binary being run.
 pub fn plan(exe: &Path, home: &Path, local_app_data: Option<&Path>, package: Option<(PackageManager, String)>) -> Plan {
     let binaries = if package.is_some() { vec![exe.to_path_buf()] } else { binary_locations(exe, home, local_app_data) };
     let mut dirs: Vec<PathBuf> = binaries.iter().filter_map(|b| b.parent().map(Path::to_path_buf)).collect();
@@ -264,7 +246,6 @@ pub fn plan(exe: &Path, home: &Path, local_app_data: Option<&Path>, package: Opt
     Plan { package, binaries, rc_files, data_dir, data }
 }
 
-/// What happened, line by line, for the summary.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Report {
     pub removed: Vec<String>,
@@ -272,9 +253,8 @@ pub struct Report {
     pub failed: Vec<String>,
 }
 
-/// Carry out `plan` except the package removal, which needs a terminal and
-/// `sudo` and is run by [`run_interactive`]. `delete` says, part by part, which
-/// data to delete.
+/// Everything except the package removal, which needs a terminal and `sudo`
+/// and runs in [`run_interactive`]. `delete` selects data parts.
 pub fn execute(plan: &Plan, delete: &[bool]) -> Report {
     let mut report = Report::default();
     if plan.package.is_none() {
@@ -286,8 +266,7 @@ pub fn execute(plan: &Plan, delete: &[bool]) -> Report {
         }
     }
     for (rc, dir) in &plan.rc_files {
-        // A folder that still holds something is still worth having on the
-        // PATH; only a folder FlashAgent was alone in loses its line.
+        // Only a folder FlashAgent was alone in loses its PATH line.
         if dir_has_files(dir) {
             report.kept.push(format!("PATH line in {} ({} still holds other files)", rc.display(), dir.display()));
             continue;
@@ -319,7 +298,7 @@ pub fn execute(plan: &Plan, delete: &[bool]) -> Report {
             report.removed.push(format!("{} ({})", part.label, human_size(part.bytes)));
         }
     }
-    // The folder itself goes only once nothing is left in it.
+    // The folder itself goes only once it is empty.
     if std::fs::read_dir(&plan.data_dir).is_ok_and(|mut d| d.next().is_none()) && std::fs::remove_dir(&plan.data_dir).is_ok() {
         report.removed.push(plan.data_dir.display().to_string());
     }
@@ -336,7 +315,7 @@ fn backup_path(rc: &Path) -> PathBuf {
     rc.with_file_name(name)
 }
 
-/// Remove our PATH lines from one start-up file, keeping a copy of it first.
+/// Keeps a backup copy first.
 fn strip_rc_file(rc: &Path, dir: &Path) -> std::io::Result<bool> {
     let text = std::fs::read_to_string(rc)?;
     let Some(stripped) = strip_path_lines(&text, &dir.to_string_lossy()) else {
@@ -350,8 +329,8 @@ fn strip_rc_file(rc: &Path, dir: &Path) -> std::io::Result<bool> {
 fn remove_binary(binary: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
-        // A running .exe cannot be deleted, but it can be moved. Move it out of
-        // the way now and let a detached shell delete it once this exits.
+        // A running .exe cannot be deleted but can be moved; a detached shell
+        // deletes it after exit.
         if std::env::current_exe().ok().and_then(|e| std::fs::canonicalize(e).ok()) == std::fs::canonicalize(binary).ok() {
             let parked = std::env::temp_dir().join(format!("flashagent-uninstall-{}.exe", std::process::id()));
             std::fs::rename(binary, &parked)?;
@@ -373,8 +352,7 @@ fn remove_binary(binary: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Ask a yes-or-no question. An empty answer takes `default`; anything that
-/// is not recognisably yes or no asks again, at most three times.
+/// Empty answer takes `default`; anything else asks again, at most three times.
 pub fn ask_yes_no(input: &mut impl BufRead, out: &mut impl Write, question: &str, default: bool) -> bool {
     let hint = if default { "[Y/n]" } else { "[y/N]" };
     for _ in 0..3 {
@@ -396,9 +374,8 @@ pub fn ask_yes_no(input: &mut impl BufRead, out: &mut impl Write, question: &str
     default
 }
 
-/// `flashagent --uninstall`: show the plan, ask what to delete, confirm, do
-/// it, and say what happened. `assume_yes` answers every question with its
-/// default and confirms — for scripts.
+/// `flashagent --uninstall`. `assume_yes` takes every default and confirms,
+/// for scripts.
 pub fn run_interactive(assume_yes: bool) -> anyhow::Result<()> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -480,8 +457,7 @@ pub fn run_interactive(assume_yes: bool) -> anyhow::Result<()> {
 
     #[cfg(unix)]
     for dir in plan.binaries.iter().filter_map(|b| b.parent()) {
-        // `fish_add_path -U` keeps the folder in a universal variable, not in
-        // a file; drop it there too once the folder is empty.
+        // `fish_add_path -U` keeps the folder in a universal variable, not a file.
         if !dir_has_files(dir) {
             let script = format!(
                 "if set -l i (contains -i -- '{}' $fish_user_paths); set -Ue fish_user_paths[$i]; end",
@@ -603,7 +579,6 @@ mod tests {
         assert_eq!(plan.binaries, std::slice::from_ref(&exe));
         assert_eq!(plan.rc_files.len(), 1);
 
-        // Delete everything the defaults tick, plus the settings.
         let delete: Vec<bool> = plan.data.iter().map(|p| p.selected_by_default || p.label == "Settings").collect();
         let report = execute(&plan, &delete);
         assert!(report.failed.is_empty(), "{:?}", report.failed);

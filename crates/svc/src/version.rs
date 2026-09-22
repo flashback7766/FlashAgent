@@ -1,37 +1,27 @@
-//! FlashAgent version numbers: what they look like and how they compare.
+//! FlashAgent version numbers (see `VERSIONING.md`):
 //!
-//! There are two kinds, one per release channel (see `VERSIONING.md`):
+//! - beta: `b<N>`, a build counter that only grows;
+//! - stable: `v<MAJOR>.<MINOR>.<PATCH>`, optionally `+b<N>` for the beta it
+//!   was cut from. The `v` is optional when parsing.
 //!
-//! - **Beta builds**: `b<N>`, e.g. `b287`. `N` is a build counter that only
-//!   grows, by a few steps per release depending on its size.
-//! - **Stable releases**: `v<MAJOR>.<MINOR>.<PATCH>`, e.g. `v1.0.0`, compared
-//!   as in SemVer. The leading `v` is optional when parsing. A stable release
-//!   may say which beta build it was cut from as SemVer build metadata:
-//!   `v1.0.0+b290`.
+//! Ordering, used everywhere in the app:
 //!
-//! Ordering, the one rule every part of the app uses:
-//!
-//! 1. All versions with a build number compare by that number first.
-//! 2. On a tied build the stable is newer than the beta; tied stables compare
-//!    by MAJOR.MINOR.PATCH.
-//! 3. Legacy stables without a build number sort after all numbered builds,
-//!    and compare with each other by MAJOR.MINOR.PATCH.
+//! 1. Versions with a build number compare by it first.
+//! 2. On a tied build, stable is newer than beta; stables then compare by
+//!    MAJOR.MINOR.PATCH.
+//! 3. Stables without a build number sort after all numbered builds.
 
 use std::cmp::Ordering;
 use std::fmt;
 
-/// A parsed FlashAgent version.
 #[derive(Debug, Clone, Copy)]
 pub enum Version {
-    /// `b<build>`.
     Beta { build: u64 },
-    /// `v<major>.<minor>.<patch>`, optionally `+b<build>`.
     Stable { major: u64, minor: u64, patch: u64, build: Option<u64> },
 }
 
 impl Version {
-    /// Parse `b287`, `v1.2.3`, `1.2.3`, `v1.2` (patch 0) or `v1.2.3+b290`.
-    /// Surrounding whitespace is ignored; anything else is `None`.
+    /// `b287`, `v1.2.3`, `1.2.3`, `v1.2` (patch 0) or `v1.2.3+b290`.
     pub fn parse(text: &str) -> Option<Self> {
         let text = text.trim();
         if let Some(n) = text.strip_prefix('b').or_else(|| text.strip_prefix('B')) {
@@ -66,10 +56,8 @@ impl Version {
         Some(Version::Stable { major, minor, patch, build })
     }
 
-    /// Find the first version-looking word in free text, such as a release
-    /// title ("FlashAgent b287 — ...") or an asset name
-    /// ("flashagent-b287-linux-x86_64"). Bare numbers ("2", "64") are not
-    /// taken for versions: a stable needs its `v` here.
+    /// First version-looking word in a release title or asset name. Bare numbers
+    /// ("2", "64") are not versions: a stable needs its `v` here.
     pub fn find_in(text: &str) -> Option<Self> {
         text.split(|c: char| c.is_whitespace() || matches!(c, '-' | '_' | '(' | ')' | ',' | ':' | '/'))
             .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
@@ -106,7 +94,6 @@ impl Ord for Version {
     }
 }
 
-/// Equal when build number, release kind and stable version agree.
 impl PartialEq for Version {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
@@ -122,7 +109,6 @@ impl PartialOrd for Version {
 }
 
 impl fmt::Display for Version {
-    /// The canonical spelling: `b287`, `v1.2.3`, `v1.2.3+b290`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Version::Beta { build } => write!(f, "b{build}"),
@@ -162,11 +148,9 @@ mod tests {
         assert!(v("b238") < v("b287"));
         assert!(v("v1.2.10") > v("v1.2.9"));
         assert!(v("v2.0.0") > v("v1.99.99"));
-        // A stable with no build is newer than every beta: b287 → v1.0.0 is
-        // an upgrade.
+        // A stable with no build is newer than every beta.
         assert!(v("v1.0.0") > v("b287"));
         assert!(v("b9999") < v("v0.1.0"));
-        // A stable that names its build sits right after that build.
         assert!(v("v1.0.0+b290") > v("b290"));
         assert!(v("v1.0.0+b290") < v("b291"));
         assert!(v("v1.0.0+b290") > v("b287"));

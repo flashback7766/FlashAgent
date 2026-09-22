@@ -1,13 +1,10 @@
-//! In-app release updater and channel manager.
-//!
-//! Checks GitHub releases, filters by channel (Stable/Beta), downloads platform
-//! binaries, and performs seamless atomic in-place updates.
+//! Self-updater: checks GitHub releases on the chosen channel, downloads the
+//! platform binary, verifies it and replaces the executable in place.
 
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 pub use flashagent_core::config::UpdateChannel;
 
-/// Information about a GitHub release asset.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReleaseAsset {
     pub name: String,
@@ -15,7 +12,6 @@ pub struct ReleaseAsset {
     pub size: u64,
 }
 
-/// GitHub release payload subset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubRelease {
     pub tag_name: String,
@@ -27,7 +23,6 @@ pub struct GitHubRelease {
     pub assets: Vec<ReleaseAsset>,
 }
 
-/// Result of checking for updates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateStatus {
     UpToDate {
@@ -40,35 +35,26 @@ pub enum UpdateStatus {
         is_downgrade: bool,
         asset_name: String,
         download_url: String,
-        /// `SHA256SUMS` asset of the same release, when published.
+        /// `SHA256SUMS` of the same release, when published.
         checksums_url: Option<String>,
     },
 }
 
-/// Name of the checksum manifest attached to every release.
 pub const CHECKSUMS_ASSET: &str = "SHA256SUMS";
 
-/// The official GitHub repository releases API endpoint.
 pub const DEFAULT_RELEASES_API: &str = "https://api.github.com/repos/flashback7766/FlashAgent/releases";
 
-/// Default interval for background update checks (~3-5 minutes).
 pub const BACKGROUND_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(240);
 
-/// Get current application version string (e.g. "b200" or "0.1.0").
+/// E.g. "b200" or "v0.1.0".
 pub fn current_version() -> &'static str {
     option_env!("FLASHAGENT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
-/// Check if the application is running in development mode (from source repository or cargo target build).
-///
-/// In development mode, auto-updating is disabled to prevent overwriting binaries or dropping
-/// unexpected files into ~/.local/bin/flashagent.
-/// Whether `path` sits inside a checkout of this project — identified by
-/// `crates/tui/Cargo.toml` naming the crate, so that any other Rust project
-/// the user keeps a binary in is not mistaken for one.
+/// Recognised by `crates/tui/Cargo.toml` naming the crate, so another Rust
+/// project the user keeps a binary in is not mistaken for this one.
 fn in_source_tree(path: &Path) -> bool {
     let mut dir = path.to_path_buf();
-    // Start at the containing directory when given a file.
     if dir.is_file() {
         dir.pop();
     }
@@ -83,8 +69,9 @@ fn in_source_tree(path: &Path) -> bool {
     }
 }
 
+/// Running from a source checkout or a cargo build: auto-update is off so it
+/// does not overwrite dev binaries.
 pub fn is_dev_mode() -> bool {
-    // 1. Explicit dev environment override
     if std::env::var("FLASHAGENT_DEV")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
@@ -92,12 +79,11 @@ pub fn is_dev_mode() -> bool {
         return true;
     }
 
-    // 2. Cargo execution environment
     if std::env::var_os("CARGO").is_some() || std::env::var_os("CARGO_MANIFEST_DIR").is_some() {
         return true;
     }
 
-    // 3. Binary path check: running out of a cargo target directory
+    // Running out of a cargo target directory.
     if let Ok(exe) = std::env::current_exe() {
         let path_str = exe.to_string_lossy();
         if path_str.contains("/target/debug/")
@@ -111,18 +97,14 @@ pub fn is_dev_mode() -> bool {
         }
     }
 
-    // 4. The binary itself lives inside the FlashAgent source tree. What
-    // decides this is where the executable is, not where the user happens to
-    // stand: an installed `flashagent` must keep updating while you work in
-    // the repository, which is exactly where you are when you notice there is
-    // a new build.
+    // Decided by where the executable is, not the cwd: an installed `flashagent`
+    // must keep updating while the user works in the repository.
     if let Ok(exe) = std::env::current_exe() {
         if in_source_tree(&exe) {
             return true;
         }
     }
 
-    // 5. Debug compilation profile
     #[cfg(debug_assertions)]
     {
         true
@@ -132,12 +114,8 @@ pub fn is_dev_mode() -> bool {
     false
 }
 
-/// Whether `rel` is offered on `channel`.
-///
-/// - Stable: stable releases only (`vX.Y.Z`, or the rolling `stable` /
-///   `release` release).
-/// - Beta: everything. The newest wins, so someone on beta also moves to a
-///   stable release that is newer than their build.
+/// Stable: stable releases only (`vX.Y.Z`, or the rolling `stable`/`release`).
+/// Beta: everything, so the newest wins even when it is a stable.
 fn on_channel(rel: &GitHubRelease, channel: UpdateChannel) -> bool {
     match channel {
         UpdateChannel::Beta => true,
@@ -153,9 +131,8 @@ fn on_channel(rel: &GitHubRelease, channel: UpdateChannel) -> bool {
     }
 }
 
-/// The newest release on `channel`. Chosen by version, not by list position:
-/// GitHub lists by creation date, and a rolling `beta`/`stable` release that
-/// is edited in place keeps its old creation date.
+/// By version, not list position: GitHub lists by creation date, and a
+/// rolling release edited in place keeps its old date.
 pub fn find_target_release(releases: &[GitHubRelease], channel: UpdateChannel) -> Option<&GitHubRelease> {
     let candidates: Vec<&GitHubRelease> = releases.iter().filter(|r| on_channel(r, channel)).collect();
     candidates
@@ -167,11 +144,8 @@ pub fn find_target_release(releases: &[GitHubRelease], channel: UpdateChannel) -
         .or_else(|| candidates.first().copied())
 }
 
-/// The version a release carries, spelled canonically (`b287`, `v1.0.0`).
-///
-/// Rolling releases (`beta`, `stable`) are tagged with the channel, not the
-/// version, so it is looked for in order: the title ("FlashAgent b287"), the
-/// tag, the asset names, the notes. A release that names none gives the
+/// Rolling releases are tagged by channel, so the version is looked for in the
+/// title, tag, asset names and notes, in that order. None found gives the
 /// running version, so it never reads as an update.
 pub fn extract_release_version(rel: &GitHubRelease) -> String {
     use crate::Version;
@@ -185,15 +159,13 @@ pub fn extract_release_version(rel: &GitHubRelease) -> String {
         .unwrap_or_else(|| current_version().to_string())
 }
 
-/// Detect best matching asset for the current OS and architecture.
+/// For the current OS and architecture.
 pub fn find_platform_asset(assets: &[ReleaseAsset]) -> Option<&ReleaseAsset> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        // 1. Direct raw binary if available
         if let Some(a) = assets.iter().find(|a| a.name.contains("flashagent") && a.name.contains("linux-x86_64") && !a.name.ends_with(".tar.gz") && !a.name.ends_with(".zst") && !a.name.ends_with(".deb")) {
             return Some(a);
         }
-        // 2. Generic linux tarball containing binary
         if let Some(a) = assets.iter().find(|a| a.name.contains("linux") && a.name.contains("x86_64") && a.name.ends_with(".tar.gz") && !a.name.contains("void")) {
             return Some(a);
         }
@@ -226,14 +198,12 @@ pub fn find_platform_asset(assets: &[ReleaseAsset]) -> Option<&ReleaseAsset> {
         }
     }
 
-    // No asset for this platform: never fall back to "any archive", which
-    // would install a binary for another OS or architecture.
+    // No fallback to "any archive": it would install a binary for another platform.
     let _ = assets;
     None
 }
 
-/// Whether moving from `current` to `target` goes back in time, by the
-/// ordering in [`crate::version`]. Unparseable versions are never a downgrade.
+/// By [`crate::version`] ordering. Unparseable versions are never a downgrade.
 pub fn is_downgrade(current: &str, target: &str) -> bool {
     match (crate::Version::parse(current), crate::Version::parse(target)) {
         (Some(c), Some(t)) => t < c,
@@ -241,13 +211,8 @@ pub fn is_downgrade(current: &str, target: &str) -> bool {
     }
 }
 
-/// Checks GitHub releases API and returns update status.
-/// The newest version published on `channel`, or `None` when that channel has
-/// nothing on it yet.
-///
-/// [`check_for_updates`] cannot answer this: it reports `UpToDate` both when
-/// you already have the newest build and when the channel is empty. The
-/// difference matters when offering to move someone onto it.
+/// `None` when the channel is empty. [`check_for_updates`] reports `UpToDate`
+/// for both "newest" and "empty", which matters when offering a channel switch.
 pub async fn newest_on_channel(
     channel: UpdateChannel,
     api_url: &str,
@@ -280,8 +245,8 @@ pub async fn check_for_updates(channel: UpdateChannel, api_url: &str) -> anyhow:
 
     if let Some(target_rel) = find_target_release(&releases, channel) {
         let version = extract_release_version(target_rel);
-        // Anything other than the version running now: a newer one, or an
-        // older one on the channel the user moved to (flagged a downgrade).
+        // Anything but the running version: newer, or older on a channel the user
+        // moved to (flagged as a downgrade).
         let differs = match (crate::Version::parse(&version), crate::Version::parse(cur)) {
             (Some(target), Some(running)) => target != running,
             _ => version != cur,
@@ -311,7 +276,7 @@ pub async fn check_for_updates(channel: UpdateChannel, api_url: &str) -> anyhow:
     })
 }
 
-/// Unpack binary bytes from downloaded asset payload (handles tar.gz or direct binary).
+/// Handles tar.gz or a bare binary.
 pub fn extract_binary_bytes(asset_name: &str, payload: &[u8]) -> anyhow::Result<Vec<u8>> {
     if asset_name.ends_with(".tar.gz") {
         use flate2::read::GzDecoder;
@@ -322,8 +287,8 @@ pub fn extract_binary_bytes(asset_name: &str, payload: &[u8]) -> anyhow::Result<
 
         for entry in archive.entries()? {
             let mut entry = entry?;
-            // Only a regular file with the exact binary name: a symlink entry
-            // reads as zero bytes and would install an empty "binary".
+            // Regular files only: a symlink entry reads as zero bytes and would install
+            // an empty binary.
             if !entry.header().entry_type().is_file() {
                 continue;
             }
@@ -341,18 +306,17 @@ pub fn extract_binary_bytes(asset_name: &str, payload: &[u8]) -> anyhow::Result<
         anyhow::bail!("No executable binary found in archive {asset_name}");
     }
 
-    // Anything else that is an archive or a package must never be written in
-    // place of the executable (a .zip saved as flashagent.exe bricks the install).
+    // An archive must never be written in place of the executable (a .zip saved
+    // as flashagent.exe bricks the install).
     const PACKAGES: [&str; 5] = [".zip", ".zst", ".deb", ".AppImage", ".tar.xz"];
     if PACKAGES.iter().any(|ext| asset_name.ends_with(ext)) {
         anyhow::bail!("{asset_name} is a package, not a binary; update with your package manager or the installer");
     }
 
-    // Direct binary payload
     Ok(payload.to_vec())
 }
 
-/// Hex SHA-256 recorded for `asset_name` in a `sha256sum`-format manifest.
+/// In `sha256sum` format.
 pub fn expected_checksum(manifest: &str, asset_name: &str) -> Option<String> {
     manifest.lines().find_map(|line| {
         let (hash, name) = line.split_once(char::is_whitespace)?;
@@ -369,9 +333,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Verify `payload` against the release's checksum manifest. Releases that
-/// predate the manifest have none (`checksums_url` is `None`) and pass; a
-/// manifest that exists but lacks or contradicts the asset is a hard failure.
+/// Releases older than the manifest pass. A manifest that lacks or
+/// contradicts the asset is a hard failure.
 pub async fn verify_checksum(
     client: &reqwest::Client,
     checksums_url: Option<&str>,
@@ -395,13 +358,9 @@ pub async fn verify_checksum(
     Ok(())
 }
 
-/// Whether the current process can replace the file at `path`.
-///
-/// Replacing is a rename into the file's folder, so the folder is what has to
-/// be writable. Opening the file itself would say no for the one file that
-/// matters most: a running executable cannot be opened for writing on Linux
-/// ("text file busy"), which sent every update to `~/.local/bin` instead of
-/// over the binary that was actually run.
+/// Checks the folder, since replacing is a rename into it. A running
+/// executable cannot be opened for writing on Linux ("text file busy"), which
+/// used to send every update to `~/.local/bin`.
 pub fn is_writable(path: &Path) -> bool {
     let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
         return false;
@@ -419,49 +378,38 @@ pub fn is_writable(path: &Path) -> bool {
     }
 }
 
-/// Resolve the best target path for installing the updated binary.
-///
-/// If `current_exe()` is writable (e.g. `/usr/bin/flashagent` with write rights,
-/// or standalone portable/AppImage), replaces it directly for all users.
-///
-/// If `current_exe()` is read-only (e.g. `/usr/bin/flashagent` under standard non-root user),
-/// installs to `~/.local/bin/flashagent` so the current user and session can use it seamlessly.
+/// The running binary when it is replaceable; otherwise
+/// `~/.local/bin/flashagent` for the current user.
 pub fn resolve_install_target() -> anyhow::Result<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
-        // Resolve symlinks to target real binary file
         let real_path = std::fs::canonicalize(&exe).unwrap_or(exe);
         if is_writable(&real_path) {
             return Ok(real_path);
         }
     }
 
-    // Fallback to ~/.local/bin/flashagent (standard XDG path in Linux/macOS $PATH)
     if let Ok(home) = std::env::var("HOME") {
         let local_bin = PathBuf::from(home).join(".local").join("bin");
         std::fs::create_dir_all(&local_bin)?;
         return Ok(local_bin.join("flashagent"));
     }
 
-    // Last resort: current working directory
     Ok(PathBuf::from("flashagent"))
 }
 
-/// Atomically replace the target executable file on disk.
 pub fn atomic_replace_executable(target: &Path, new_binary_bytes: &[u8]) -> anyhow::Result<()> {
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     let temp_file = parent.join(format!(".flashagent-update.{}.tmp", std::process::id()));
 
-    // Write new binary
     std::fs::write(&temp_file, new_binary_bytes)?;
 
-    // Make executable on Unix
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&temp_file, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    // On Windows, running binaries cannot be overwritten in place, but can be renamed
+    // A running .exe cannot be overwritten, but can be renamed.
     #[cfg(windows)]
     let old_backup = parent.join(format!(".flashagent-old.{}.bak", std::process::id()));
     #[cfg(windows)]
@@ -472,14 +420,13 @@ pub fn atomic_replace_executable(target: &Path, new_binary_bytes: &[u8]) -> anyh
         }
     }
 
-    // Atomic rename replaces the target inode on Unix
     if let Err(rename_err) = std::fs::rename(&temp_file, target) {
         // A rename across devices fails where a copy does not.
         let copied = std::fs::copy(&temp_file, target);
         let _ = std::fs::remove_file(&temp_file);
         if let Err(copy_err) = copied {
-            // Something still being at the path is not proof of success: it
-            // is usually the old build. Put a moved-away binary back.
+            // Something at the path is usually the old build, not proof of success.
+            // Put a moved-away binary back.
             #[cfg(windows)]
             {
                 if !target.exists() {
@@ -498,31 +445,25 @@ pub fn atomic_replace_executable(target: &Path, new_binary_bytes: &[u8]) -> anyh
     Ok(())
 }
 
-/// Download asset payload, verify it against the release checksums, and
-/// apply the in-place update.
-/// What an update is doing right now. Both paths report these; the app shows
-/// a background update's progress only once the user asks to watch it
-/// (Ctrl+U), because an update nobody asked about must not take over the
-/// screen.
+/// Shown for a background update only when the user asks to watch it
+/// (Ctrl+U): an update nobody asked about must not take over the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateProgress {
-    /// Bytes pulled so far, and the total when the server declared one.
+    /// `total` when the server declared one.
     Downloading { received: u64, total: Option<u64> },
-    /// Checking the download against `SHA256SUMS`.
     Verifying,
-    /// Unpacking and swapping the executable.
     Installing,
 }
 
-/// Emit progress no more than this often: a 7 MB download arrives in hundreds
-/// of chunks, and a repaint per chunk would cost more than the download.
+/// A 7 MB download arrives in hundreds of chunks; a repaint per chunk costs
+/// more than the download.
 const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
 
+/// Downloads, verifies against the release checksums, and installs.
 pub async fn download_and_apply(download_url: &str, asset_name: &str, checksums_url: Option<&str>) -> anyhow::Result<PathBuf> {
     download_and_apply_with_progress(download_url, asset_name, checksums_url, |_| {}).await
 }
 
-/// As [`download_and_apply`], reporting each stage to `on_progress`.
 pub async fn download_and_apply_with_progress(
     download_url: &str,
     asset_name: &str,
@@ -533,8 +474,7 @@ pub async fn download_and_apply_with_progress(
         anyhow::bail!("In-app updater is disabled in development mode (running from source repository or cargo target build).");
     }
 
-    // Idle timeout rather than a total one: a 15 MB download on a slow link
-    // may take minutes but should never stall silently.
+    // Idle timeout, not total: a slow download may take minutes but must not stall.
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .read_timeout(std::time::Duration::from_secs(60))
@@ -546,8 +486,7 @@ pub async fn download_and_apply_with_progress(
         anyhow::bail!("Failed downloading asset {}: HTTP {}", asset_name, resp.status());
     }
 
-    // Streamed rather than `resp.bytes()`, so the caller can show the download
-    // moving instead of a line that sits there for half a minute.
+    // Streamed, so the caller can show progress.
     let total = resp.content_length();
     let mut payload: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
     let mut last_report = std::time::Instant::now();
@@ -573,15 +512,13 @@ pub async fn download_and_apply_with_progress(
     Ok(target_path)
 }
 
-/// Silent background worker: checks for updates, downloads, replaces executable,
-/// and returns the installed version string (e.g. "b190" or "v0.1.0") upon success.
+/// Returns the installed version on success.
 pub async fn check_and_apply_background(channel: UpdateChannel) -> anyhow::Result<Option<String>> {
     check_and_apply_background_with_progress(channel, |_, _| {}).await
 }
 
-/// As [`check_and_apply_background`], reporting each stage together with the
-/// version being installed, so a download that is already under way can be
-/// watched when the user asks for it.
+/// Reports the version being installed with each stage, so a download already
+/// under way can be watched.
 pub async fn check_and_apply_background_with_progress(
     channel: UpdateChannel,
     mut on_progress: impl FnMut(&str, UpdateProgress),
@@ -592,9 +529,8 @@ pub async fn check_and_apply_background_with_progress(
 
     let status = check_for_updates(channel, DEFAULT_RELEASES_API).await?;
     match status {
-        // Never silently roll a newer beta back to an older published one
-        // (e.g. a locally built b233 while the release feed still says b218).
-        // Channel switches to Stable are explicit and still apply.
+        // Never silently roll back a newer beta (a local b233 while the feed says
+        // b218). Explicit switches to Stable still apply.
         UpdateStatus::UpdateAvailable { is_downgrade: true, channel: UpdateChannel::Beta, .. } => Ok(None),
         UpdateStatus::UpdateAvailable { target, asset_name, download_url, checksums_url, .. } => {
             download_and_apply_with_progress(&download_url, &asset_name, checksums_url.as_deref(), |stage| {
@@ -628,11 +564,9 @@ mod tests {
         std::fs::create_dir_all(&elsewhere).unwrap();
         fake_checkout(&repo);
 
-        // A binary built inside the checkout is a dev build...
         assert!(in_source_tree(&repo.join("target").join("release").join("flashagent")));
         assert!(in_source_tree(&repo.join("crates").join("tui")));
-        // ...while an installed one is not, no matter that the user is
-        // standing in the repository when they press Ctrl+U.
+        // An installed one is not, even when the user stands in the repository.
         assert!(!in_source_tree(&elsewhere.join("flashagent")));
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -640,22 +574,18 @@ mod tests {
 
     #[test]
     fn a_running_binary_in_a_folder_we_can_write_to_is_replaced_in_place() {
-        // This test binary is running right now, exactly like FlashAgent
-        // when it updates itself, and it sits in a folder the build owns.
-        // Replacing it needs only that folder: the rename swaps the file
-        // while the running process keeps the old one.
+        // A running binary in a folder the build owns: the rename swaps the file
+        // while the process keeps the old one.
         let exe = std::env::current_exe().unwrap();
         assert!(is_writable(&exe), "{} is in a writable folder but was judged read-only", exe.display());
     }
 
-    // Unix only: on Windows the updater first moves whatever sits at the path
-    // aside (a running .exe can be renamed, not overwritten), so a directory
-    // there is moved too and the replacement genuinely succeeds.
+    // Unix only: on Windows the updater moves whatever is at the path aside
+    // first, so the replacement genuinely succeeds.
     #[cfg(unix)]
     #[test]
     fn a_replacement_that_did_not_happen_is_not_reported_as_done() {
-        // A directory where the binary should be: the rename and the copy
-        // both fail, and something still exists at the path.
+        // A directory at the path: rename and copy both fail, something still exists.
         let tmp = std::env::temp_dir().join(format!("fa-replace-fails-{}", std::process::id()));
         let target = tmp.join("flashagent");
         std::fs::create_dir_all(&target).unwrap();
@@ -736,8 +666,6 @@ mod tests {
             },
         ];
 
-        // A stable release naming no build is newer than every beta, so the
-        // beta channel moves onto it too.
         let beta = find_target_release(&releases, UpdateChannel::Beta).unwrap();
         assert_eq!(beta.tag_name, "release");
         let rolling_beta = releases.iter().find(|r| r.tag_name == "beta").unwrap();
@@ -758,8 +686,8 @@ mod tests {
             body: None,
             assets: vec![],
         };
-        // GitHub order: newest *created* first. The rolling `beta` release was
-        // created long ago and later edited to b233.
+        // GitHub lists newest-created first; the rolling `beta` release was created
+        // long ago and later edited to b233.
         let releases = vec![rel("b218", "FlashAgent b218", true), rel("b215", "FlashAgent b215", true), rel("beta", "FlashAgent b233", true)];
         assert_eq!(find_target_release(&releases, UpdateChannel::Beta).unwrap().tag_name, "beta");
         let stable = vec![rel("v1.0.0", "FlashAgent v1.0.0", false), rel("stable", "FlashAgent v1.2.0", false), rel("b300", "FlashAgent b300", true)];
@@ -786,9 +714,8 @@ mod tests {
     fn a_downgrade_is_decided_by_the_version_ordering() {
         assert!(is_downgrade("b191", "b190"));
         assert!(!is_downgrade("b190", "b191"));
-        // The first stable release is an upgrade from any beta build...
         assert!(!is_downgrade("b287", "v1.0.0"));
-        // ...but one cut from an older build than the beta running is not.
+        // A stable cut from an older build than the running beta is a downgrade.
         assert!(is_downgrade("b300", "v1.0.0+b290"));
         assert!(!is_downgrade("dev", "b1"), "an unknown version is never called a downgrade");
     }
@@ -851,7 +778,6 @@ mod tests {
 
     #[test]
     fn test_is_dev_mode_detects_cargo_env() {
-        // In `cargo test`, CARGO / CARGO_MANIFEST_DIR or debug profile is active
         assert!(is_dev_mode(), "is_dev_mode must be true during cargo test / dev checkout");
     }
 }
