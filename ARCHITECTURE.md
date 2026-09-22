@@ -102,6 +102,13 @@ llama.cpp, vLLM, OpenRouter. What a model supports (context window, tool
 use, vision, thinking presets) is read from the server; the thinking
 profile is re-read when the model changes.
 
+A local server reuses the part of a request it has already read, so each
+request keeps its opening fixed: system prompt, voice example, history, and
+only then anything temporary. The first message would still start cold, so
+`warm.rs` sends that opening ahead, with a one-token answer, while the user
+types: at start, after `--resume`, after a change of model or voice. It is
+skipped when a turn has just read the same prefix.
+
 ## Memory
 
 - Rule files: `MEMORY.md`, `CLAUDE.md`, `AGENTS.md` and `.agents/rules/` in

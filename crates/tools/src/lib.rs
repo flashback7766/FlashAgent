@@ -428,16 +428,16 @@ impl ToolExec for BuiltinTools {
             },
         ];
 
-        // Only meaningful during an autonomous run: offering it in an
-        // ordinary chat turn would just invite a plan nobody asked for, and
-        // the tool refuses itself there anyway.
-        if self.is_goal_mode.load(Ordering::Relaxed) {
-            specs.push(ToolSpec {
-                name: "update_plan".into(),
-                description: "Record or update your step-by-step plan for this /goal run, so its progress is visible while it runs. Call it with the whole plan again whenever a step finishes or the plan changes, not just the delta.".into(),
-                parameters_json: r#"{"type": "object", "properties": {"steps": {"type": "array", "description": "The whole plan, in order", "items": {"type": "object", "properties": {"text": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["text"]}}}, "required": ["steps"]}"#.into(),
-            });
-        }
+        // Offered always, though it refuses itself outside a /goal run. The
+        // tool list is part of the prompt the server caches: adding the tool
+        // when a goal starts changed that prompt near its top, so the first
+        // goal step read the whole conversation again (8.5 s on 7k tokens
+        // with a laptop model, minutes on a long session).
+        specs.push(ToolSpec {
+            name: "update_plan".into(),
+            description: "Only during a /goal run: record or update your step-by-step plan so its progress is visible while it runs. Call it with the whole plan again whenever a step finishes or the plan changes, not just the delta. Outside a /goal run it does nothing; do not call it there.".into(),
+            parameters_json: r#"{"type": "object", "properties": {"steps": {"type": "array", "description": "The whole plan, in order", "items": {"type": "object", "properties": {"text": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["text"]}}}, "required": ["steps"]}"#.into(),
+        });
 
         // Extended tools: offered unless the context window is too small to afford their schemas.
         let profile = self.toolset_profile.read().map(|p| *p).unwrap_or(ToolsetProfile::Auto);
@@ -879,7 +879,7 @@ mod tests {
         })
         .unwrap();
         let specs_auto = tools_auto.specs();
-        assert_eq!(specs_auto.len(), 19); // 9 core + 8 extended + 2 web, on by default
+        assert_eq!(specs_auto.len(), 20); // 10 core (update_plan included) + 8 extended + 2 web, on by default
         let names_auto: Vec<&str> = specs_auto.iter().map(|s| s.name.as_str()).collect();
         assert!(names_auto.contains(&"ask_user"));
         assert!(names_auto.contains(&"outline_file"));
@@ -904,14 +904,14 @@ mod tests {
         })
         .unwrap();
         let specs_compact = tools_compact.specs();
-        assert_eq!(specs_compact.len(), 9);
+        assert_eq!(specs_compact.len(), 10);
         let names_compact: Vec<&str> = specs_compact.iter().map(|s| s.name.as_str()).collect();
         assert!(names_compact.contains(&"ask_user"));
         assert!(!names_compact.contains(&"patch_file"));
     }
 
     #[tokio::test]
-    async fn update_plan_only_appears_and_only_works_during_a_goal_run() {
+    async fn update_plan_is_always_offered_and_only_works_during_a_goal_run() {
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
             brave_api_key: None,
@@ -923,14 +923,15 @@ mod tests {
             mcp_manager: None,
         })
         .unwrap();
-        assert!(!tools.specs().iter().any(|s| s.name == "update_plan"), "not offered outside /goal");
+        let before = tools.specs();
         let out = tools
             .execute(&ToolCall { id: "t".into(), name: "update_plan".into(), args_json: r#"{"steps":[{"text":"a"}]}"#.into() })
             .await;
         assert!(out.is_error, "must refuse itself outside /goal even if called");
 
         tools.set_goal_mode(true);
-        assert!(tools.specs().iter().any(|s| s.name == "update_plan"), "offered once /goal starts");
+        let names = |specs: Vec<ToolSpec>| specs.into_iter().map(|s| s.name).collect::<Vec<_>>();
+        assert_eq!(names(before), names(tools.specs()), "starting a goal must not change the tool list the server has cached");
         let out = tools
             .execute(&ToolCall { id: "t".into(), name: "update_plan".into(), args_json: r#"{"steps":[{"text":"a"}]}"#.into() })
             .await;
@@ -982,13 +983,13 @@ mod tests {
         })
         .unwrap();
         let specs = tools.specs();
-        assert_eq!(specs.len(), 9); // Compact toolset
+        assert_eq!(specs.len(), 10); // Compact toolset
         assert!(!specs.iter().any(|s| s.name == "patch_file"));
 
         // On larger window (~65k+):
         tools.set_context_window(Some(65_536));
         let specs_large = tools.specs();
-        assert_eq!(specs_large.len(), 17);
+        assert_eq!(specs_large.len(), 18);
         assert!(specs_large.iter().any(|s| s.name == "patch_file"));
     }
 

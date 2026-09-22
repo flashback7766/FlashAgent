@@ -47,6 +47,7 @@ mod keys;
 mod turns;
 mod overlay;
 mod memory_summary;
+mod warm;
 use render::*;
 use overlay::Overlay;
 use tokens::*;
@@ -600,6 +601,10 @@ struct App {
     /// The recap and suggestion being written for the last turn, so a new
     /// turn can stop it.
     recap_task: Option<tokio::task::JoinHandle<()>>,
+    /// The prompt prefix the server has cached, as far as the app knows
+    /// (see `warm.rs`), and the warm-up request sending one.
+    cache_warm_key: Option<u64>,
+    warm_task: Option<(u64, tokio::task::JoinHandle<bool>)>,
     /// A session picked from that list, switched to at the top of the next
     /// loop turn, where the session id and the snapshot store live.
     pending_resume: Option<String>,
@@ -1029,6 +1034,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         last_esc: None,
         uninstall_confirm: false,
         recap_task: None,
+        cache_warm_key: None,
+        warm_task: None,
         pending_resume: None,
         update_progress: None,
         update_watched: false,
@@ -1114,6 +1121,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         app.open_session_picker(&cwd_display, &session_id);
     }
 
+    app.warm_prompt_cache(&source, perm, &memory_block);
+
     macro_rules! finish {
         () => {
             if app.config.auto_save_sessions && worth_saving(&app.history) {
@@ -1157,6 +1166,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                     app.renderer.prev_expansion = None;
                     update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
                     app.notice(format!("Resumed session '{session_id}' ({restored} messages loaded)."));
+                    app.warm_prompt_cache(&source, perm, &memory_block);
                 }
                 Err(why) => app.notice(why),
             }
@@ -1401,6 +1411,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 continue;
             }
             _ = check_interval.tick() => {
+                app.warm_prompt_cache(&source, perm, &memory_block);
                 if should_poll_server(app.running, source.0.requests_in_flight(), is_discovering.load(Ordering::Relaxed)) {
                     is_discovering.store(true, Ordering::Relaxed);
                     let source_bg = source.clone();
@@ -1521,6 +1532,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                         app.renderer.request_reprint();
                     }
                 }
+                app.warm_prompt_cache(&source, perm, &memory_block);
             }
             UiEvent::Loop { turn_id, event: e } => {
                 // Late events of a turn that was aborted or superseded.

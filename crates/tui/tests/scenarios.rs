@@ -899,6 +899,9 @@ fn a_goal_shows_its_live_plan_and_updates_it_in_place() {
     assert!(screen.contains("[x] read the failing test"), "{screen}");
     assert!(screen.contains("[~] fix it"), "{screen}");
     assert_eq!(screen.matches("plan:").count(), 1, "the plan updates in place, it does not pile up:\n{screen}");
+    // Only the text answer carries a usage chunk in the mock: four tokens.
+    let report = term.wait_for("generated tokens", WAIT);
+    assert!(report.contains("· 4 generated tokens"), "{report}");
 }
 
 #[test]
@@ -2126,4 +2129,36 @@ fn a_chosen_voice_reaches_the_model_as_an_example_and_nowhere_else() {
     quit_with_double_esc(&mut term);
     let saved: String = home.sessions().iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
     assert!(!saved.contains("git stash"), "the example was saved with the session");
+}
+
+#[test]
+fn the_opening_of_the_first_request_is_sent_ahead_so_the_server_has_it_cached() {
+    let server = MockServer::start(vec![Reply::Text("Hi there!".into())]);
+    let home = Home::new();
+    let global = home.path().join(".flashagent");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::write(global.join("MEMORY.md"), "Writes Rust.\n").unwrap();
+    let term = ready(&home, &server);
+
+    let deadline = std::time::Instant::now() + WAIT;
+    while !server.requests().iter().any(|r| r.is_warm_up()) {
+        assert!(std::time::Instant::now() < deadline, "no warm-up was sent before the first message");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    term.type_text("hello");
+    term.send(ENTER);
+    term.wait_for("Hi there!", WAIT);
+
+    let warm_ups: Vec<_> = server.requests().into_iter().filter(|r| r.is_warm_up()).collect();
+    let turn = &server.turns()[0];
+    let warm = warm_ups[0].body["messages"].as_array().unwrap();
+    let real = turn.body["messages"].as_array().unwrap();
+    assert_eq!(warm.len(), real.len(), "warm-up {warm:?}\nturn {real:?}");
+    assert_eq!(warm[..warm.len() - 1], real[..real.len() - 1], "the warm-up began differently from the turn");
+    let opening = warm.last().unwrap()["content"].as_str().unwrap();
+    let prompt = real.last().unwrap()["content"].as_str().unwrap();
+    assert!(opening.contains("Writes Rust"), "the memory block was not warmed: {opening}");
+    assert!(prompt.starts_with(opening), "the first prompt does not begin with what was warmed:\n{opening}\n---\n{prompt}");
+    assert_eq!(warm_ups[0].body["tools"], turn.body["tools"], "the warm-up offered other tools");
+    assert_eq!(warm_ups.len(), 1, "the same prefix was warmed twice");
 }
