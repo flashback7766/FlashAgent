@@ -1,4 +1,4 @@
-//! flashagent-svc: the self-updater and the uninstaller.
+//! Self-updater and uninstaller.
 
 pub mod uninstall;
 pub mod updater;

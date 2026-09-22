@@ -22,7 +22,7 @@ fn main() {
         }
     }
 
-    // 1. Check all tags pointing at HEAD for a concrete version tag (e.g. b215, v0.1.0)
+    // 1. A version tag on HEAD (b215, v0.1.0).
     if let Ok(output) = Command::new("git")
         .args(["tag", "--points-at", "HEAD"])
         .output()
@@ -39,7 +39,7 @@ fn main() {
         }
     }
 
-    // 2. Check tags matching build pattern 'b[0-9]*' or 'v*'
+    // 2. The nearest tag matching the build pattern.
     for pattern in &["b[0-9]*", "v[0-9]*"] {
         if let Ok(output) = Command::new("git")
             .args(["describe", "--tags", "--match", pattern])
@@ -56,7 +56,7 @@ fn main() {
         }
     }
 
-    // 3. Fallback: check packaging/arch/PKGBUILD pkgver
+    // 3. pkgver from packaging/arch/PKGBUILD.
     let pkgbuild_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/arch/PKGBUILD");
     if let Ok(content) = std::fs::read_to_string(&pkgbuild_path) {
         for line in content.lines() {
@@ -70,6 +70,5 @@ fn main() {
         }
     }
 
-    // 4. Default fallback: b286
     println!("cargo:rustc-env=FLASHAGENT_VERSION=b286");
 }
