@@ -1,4 +1,4 @@
-//! MCP Client implementation over stdio JSON-RPC 2.0 transport.
+//! MCP client over stdio JSON-RPC 2.0.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
@@ -23,7 +23,6 @@ const STDERR_RING_BUFFER_SIZE: usize = 100;
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, JsonRpcError>>>>>;
 
-/// Native Stdio MCP Client.
 pub struct McpClient {
     name: String,
     command: String,
@@ -36,7 +35,6 @@ pub struct McpClient {
     child: Arc<tokio::sync::Mutex<Option<Child>>>,
 }
 
-/// A request still waiting for its response.
 struct Outstanding<'a> {
     client: &'a McpClient,
     id: u64,
@@ -57,7 +55,6 @@ impl Drop for Outstanding<'_> {
 }
 
 impl McpClient {
-    /// Spawn an MCP server process over stdio.
     pub fn spawn(
         name: impl Into<String>,
         command: impl Into<String>,
@@ -77,7 +74,6 @@ impl McpClient {
         cmd.stderr(Stdio::piped());
         cmd.kill_on_drop(true);
 
-        // Spawn process
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn MCP server '{}' ({cmd_str}): {e}", name_str))?;
@@ -99,7 +95,6 @@ impl McpClient {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let stderr_lines = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_RING_BUFFER_SIZE)));
 
-        // 1. Background task for writing to stdin
         tokio::spawn(async move {
             let mut writer = tokio::io::BufWriter::new(stdin);
             while let Some(line) = stdin_rx.recv().await {
@@ -115,7 +110,6 @@ impl McpClient {
             }
         });
 
-        // 2. Background task for reading from stdout
         let pending_clone = pending.clone();
         let reply_tx = stdin_tx.clone();
         tokio::spawn(async move {
@@ -128,9 +122,8 @@ impl McpClient {
                 let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
                     continue;
                 };
-                // Server-to-client traffic (a request or notification carries
-                // `method`). Its ids live in the server's id space, so it must
-                // never be matched against our pending requests.
+                // Server-to-client traffic carries `method`. Its ids are in the server's id
+                // space and must never match our pending requests.
                 if let Some(method) = msg.get("method").and_then(Value::as_str) {
                     if let Some(id) = msg.get("id").cloned() {
                         let reply = if method == "ping" {
@@ -165,7 +158,6 @@ impl McpClient {
             }
         });
 
-        // 3. Background task for collecting stderr
         let stderr_ring = stderr_lines.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
@@ -191,32 +183,26 @@ impl McpClient {
         }))
     }
 
-    /// Server name identifier.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Server launch command.
     pub fn command(&self) -> &str {
         &self.command
     }
 
-    /// Cached list of discovered tools.
     pub fn tools(&self) -> Vec<McpTool> {
         self.tools.read().clone()
     }
 
-    /// Server metadata returned during initialization.
     pub fn server_info(&self) -> Option<McpServerInfo> {
         self.server_info.read().clone()
     }
 
-    /// Get recent stderr lines for diagnostics.
     pub fn recent_stderr(&self) -> Vec<String> {
         self.stderr_lines.lock().iter().cloned().collect()
     }
 
-    /// Send a JSON-RPC request and await response with timeout.
     async fn request(&self, method: &str, params: Option<Value>, timeout: Duration) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = JsonRpcRequest::new_request(id, method, params);
@@ -224,8 +210,8 @@ impl McpClient {
 
         let (tx, rx) = oneshot::channel();
         self.pending.lock().insert(id, tx);
-        // Until a response arrives, dropping this (timeout, or the turn being
-        // cancelled mid-call) forgets the request and tells the server.
+        // Dropping this before a response (timeout, cancelled turn) forgets the
+        // request and tells the server.
         let mut outstanding = Outstanding { client: self, id, answered: false };
 
         self.stdin_tx
@@ -242,7 +228,6 @@ impl McpClient {
         result
     }
 
-    /// Send a JSON-RPC notification (no response expected).
     fn notify(&self, method: &str, params: Option<Value>) -> Result<(), String> {
         let req = JsonRpcRequest::new_notification(method, params);
         let json_str = serde_json::to_string(&req).map_err(|e| format!("Serialization error: {e}"))?;
@@ -251,7 +236,7 @@ impl McpClient {
             .map_err(|_| format!("MCP server '{}' stdin channel closed", self.name))
     }
 
-    /// Complete MCP handshake: `initialize` + `notifications/initialized` + `tools/list`.
+    /// `initialize`, `notifications/initialized`, then `tools/list`.
     pub async fn initialize(&self, timeout: Duration) -> Result<InitializeResult, String> {
         let params = serde_json::to_value(InitializeParams::default())
             .map_err(|e| format!("Invalid init params: {e}"))?;
@@ -262,16 +247,14 @@ impl McpClient {
 
         *self.server_info.write() = Some(init_result.server_info.clone());
 
-        // Send required initialized notification
         let _ = self.notify("notifications/initialized", None);
 
-        // Populate tools list immediately
         let _ = self.refresh_tools(timeout).await;
 
         Ok(init_result)
     }
 
-    /// Query and update the server's tools list, following pagination.
+    /// Follows pagination.
     pub async fn refresh_tools(&self, timeout: Duration) -> Result<Vec<McpTool>, String> {
         let mut tools = Vec::new();
         let mut cursor: Option<String> = None;
@@ -294,7 +277,6 @@ impl McpClient {
         Ok(tools)
     }
 
-    /// Call an MCP tool on this server.
     pub async fn call_tool(
         &self,
         tool_name: &str,
@@ -314,14 +296,13 @@ impl McpClient {
         Ok(call_res)
     }
 
-    /// Send a ping request to verify server responsiveness and roundtrip latency.
+    /// Also measures round-trip latency.
     pub async fn ping(&self, timeout: Duration) -> Result<Duration, String> {
         let start = std::time::Instant::now();
         self.request("ping", None, timeout).await?;
         Ok(start.elapsed())
     }
 
-    /// Check if the child process is still running.
     pub async fn is_alive(&self) -> bool {
         let mut guard = self.child.lock().await;
         if let Some(child) = guard.as_mut() {
@@ -331,7 +312,6 @@ impl McpClient {
         }
     }
 
-    /// Kill the child process.
     pub async fn kill(&self) {
         let mut guard = self.child.lock().await;
         if let Some(mut child) = guard.take() {
@@ -342,7 +322,7 @@ impl McpClient {
 
 
 
-// The mock servers are bash scripts, so these run where there is a bash.
+// The mock servers are bash scripts.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -350,9 +330,8 @@ mod tests {
 
     #[tokio::test]
     async fn server_initiated_request_is_answered_and_never_resolves_ours() {
-        // The server fires its own request with id 1 (same number as our
-        // `initialize`) before answering. It must get an error reply and our
-        // pending request must wait for the real response.
+        // The server sends its own request with id 1, the same as our `initialize`.
+        // It must get an error reply, and our request must wait for the real response.
         let mock_script = r#"
 read -r line
 echo '{"jsonrpc":"2.0","id":1,"method":"roots/list"}'
@@ -379,10 +358,8 @@ done
         client.kill().await;
     }
 
-    // The mock servers are bash scripts.
     #[tokio::test]
     async fn test_mcp_client_spawn_and_communication() {
-        // Spawn a simple bash script that acts as an MCP server responding to initialize and tools/list
         let mock_script = r#"
 while IFS= read -r line; do
     if [[ "$line" =~ "initialize" ]]; then

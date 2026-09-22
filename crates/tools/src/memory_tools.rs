@@ -1,10 +1,6 @@
-//! Long-term memory tools (`memory_read`, `memory_create`, `memory_update`,
-//! `memory_remove`).
-//!
-//! One fact per file under `memory/`, with `MEMORY.md` as the index that every
-//! prompt carries. Project memory lives in the working directory; global
-//! memory in `~/.flashagent`, so it follows the user across projects and
-//! across models. In autonomous `/goal` mode writes are refused: a long run
+//! Memory tools (`memory_read`, `memory_create`, `memory_update`,
+//! `memory_remove`). Project memory lives in the working directory, global in
+//! `~/.flashagent`. Writes are refused during `/goal`: a long unattended run
 //! must not rewrite what the user knows to be true.
 
 use std::path::Path;
@@ -21,16 +17,14 @@ fn store(cwd: &Path, scope: Scope) -> Result<Store, ToolError> {
         .ok_or_else(|| ToolError::Other("could not determine the home directory for global memory".into()))
 }
 
-/// Arguments for `memory_read`.
 #[derive(Debug, Deserialize)]
 pub struct MemoryReadArgs {
-    /// Memory scope to read: "project", "global", or "all" (default).
+    /// "project", "global", or "all" (default).
     pub scope: Option<String>,
-    /// Name of a single memory to read in full; omitted, the index comes back.
+    /// Omitted: the index is returned.
     pub name: Option<String>,
 }
 
-/// Reads the index, or one memory in full.
 pub fn memory_read(cwd: &Path, args: MemoryReadArgs) -> Result<String, ToolError> {
     let raw_scope = args.scope.as_deref().unwrap_or("all");
     let scopes: Vec<Scope> = if raw_scope.eq_ignore_ascii_case("all") {
@@ -78,14 +72,12 @@ pub fn memory_read(cwd: &Path, args: MemoryReadArgs) -> Result<String, ToolError
     }
 }
 
-/// Arguments for `memory_create` and `memory_update`.
 #[derive(Debug, Deserialize)]
 pub struct MemoryWriteArgs {
-    /// Short title; it becomes the memory's name.
+    /// Becomes the memory's name.
     pub title: String,
-    /// The fact itself, in full sentences.
     pub content: String,
-    /// One line saying what this memory is about, for the index.
+    /// For the index.
     pub description: Option<String>,
     /// "preference", "decision", "reference" or "work".
     #[serde(rename = "type")]
@@ -94,10 +86,9 @@ pub struct MemoryWriteArgs {
     pub scope: Option<String>,
 }
 
-/// Arguments for `memory_remove`.
 #[derive(Debug, Deserialize)]
 pub struct MemoryRemoveArgs {
-    /// Name (or title) of the memory to forget.
+    /// Name or title.
     pub title: String,
     /// "project" (default) or "global".
     pub scope: Option<String>,
@@ -112,12 +103,9 @@ fn check_goal_mutation(is_goal_mode: &Arc<AtomicBool>, op: &str) -> Result<(), T
     Ok(())
 }
 
-/// Where a memory belongs when the model did not say.
-///
-/// How the user likes to work follows them into every project; everything
-/// else is about this codebase. Left to the schema default, a small model
-/// files preferences under the project, where the next project never sees
-/// them.
+/// Preferences follow the user into every project; the rest is about this
+/// codebase. Left to the schema default, small models filed preferences under
+/// the project.
 fn default_scope(args: &MemoryWriteArgs) -> Scope {
     match args.scope.as_deref() {
         Some(explicit) => Scope::parse(Some(explicit)),
@@ -133,8 +121,8 @@ fn entry_from(args: &MemoryWriteArgs, existing: Option<&Entry>) -> Entry {
         .map(str::trim)
         .filter(|d| !d.is_empty())
         .map(str::to_string)
-        // Without a description the index line would say nothing, so the
-        // first sentence of the fact stands in for one.
+        // Without a description the index line says nothing; the first sentence
+        // stands in.
         .unwrap_or_else(|| first_sentence(&args.content));
     Entry {
         name: slugify(&args.title),
@@ -157,7 +145,6 @@ fn first_sentence(text: &str) -> String {
     }
 }
 
-/// Remembers something new.
 pub fn memory_create(
     cwd: &Path,
     is_goal_mode: &Arc<AtomicBool>,
@@ -174,7 +161,7 @@ pub fn memory_create(
             entry.name
         )));
     }
-    // Two memories about the same thing is how a memory file becomes useless.
+    // Duplicates are how a memory store becomes useless.
     if let Some(similar) = store.find_similar(&entry.description) {
         return Err(ToolError::Other(format!(
             "'{}' already covers this ({}). Use memory_update on that name instead of writing a second one.",
@@ -186,7 +173,6 @@ pub fn memory_create(
     Ok(format!("Remembered '{}' in {} memory ({}).", entry.name, scope.label(), path.display()))
 }
 
-/// Corrects something already remembered.
 pub fn memory_update(
     cwd: &Path,
     is_goal_mode: &Arc<AtomicBool>,
@@ -204,7 +190,6 @@ pub fn memory_update(
     })
 }
 
-/// Forgets something.
 pub fn memory_remove(
     cwd: &Path,
     is_goal_mode: &Arc<AtomicBool>,
@@ -286,8 +271,7 @@ mod tests {
 
     #[test]
     fn a_preference_with_no_scope_given_follows_the_user_everywhere() {
-        // Observed: a 2B model recorded "I always run tests with nextest" as
-        // a fact about this project, where the next project never sees it.
+        // Observed: a 2B model filed "I always run tests with nextest" under the project.
         let args = MemoryWriteArgs {
             title: "Test runner".into(),
             content: "The user always runs tests with cargo nextest.".into(),

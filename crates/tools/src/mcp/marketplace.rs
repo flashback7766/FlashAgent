@@ -1,9 +1,8 @@
-//! Curated and verifiable registry of popular, vetted MCP server extensions.
+//! Curated list of vetted MCP servers.
 
 use super::config::McpServerConfig;
 use std::collections::HashMap;
 
-/// Curated MCP Marketplace item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketplaceItem {
     pub id: &'static str,
@@ -130,12 +129,11 @@ pub const MARKETPLACE_ITEMS: &[MarketplaceItem] = &[
     },
 ];
 
-/// Return all marketplace items.
 pub fn get_marketplace() -> &'static [MarketplaceItem] {
     MARKETPLACE_ITEMS
 }
 
-/// Find a marketplace item by id or case-insensitive query.
+/// By id or case-insensitive query.
 pub fn find_marketplace_item(query: &str) -> Option<&'static MarketplaceItem> {
     let lower = query.trim().to_lowercase();
     MARKETPLACE_ITEMS
@@ -143,7 +141,6 @@ pub fn find_marketplace_item(query: &str) -> Option<&'static MarketplaceItem> {
         .find(|item| item.id == lower || item.name.to_lowercase().contains(&lower))
 }
 
-/// Scaffold a default `McpServerConfig` from a marketplace item.
 pub fn scaffold_config(item: &MarketplaceItem) -> McpServerConfig {
     let mut env = HashMap::new();
     for v in item.env_vars {

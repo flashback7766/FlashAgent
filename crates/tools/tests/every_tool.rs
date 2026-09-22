@@ -1,21 +1,8 @@
-//! Every built-in tool, run for real against a real project directory.
-//!
-//! The unit tests in `flashagent-tools` check the functions behind the tools.
-//! This file checks the tools themselves: the name the model calls, the
-//! arguments it sends, the dispatcher in between, and the answer that comes
-//! back. That is the layer where things rot quietly — `web_search` returned
-//! "no results" for every query for months, and a path written `~/notes.txt`
-//! was looked for inside the project, because nothing ever called them the
-//! way the model does.
-//!
-//! [`every_offered_tool_is_checked_here`] compares this file's list against
-//! what the app actually offers, so a new tool cannot arrive unchecked and a
-//! removed one cannot leave a stale check behind.
-//!
-//! Tools that need the network live in `web.rs` and are marked `#[ignore]`:
-//! `cargo test -p flashagent-tools -- --ignored` runs them, and so does CI
-//! on a schedule. A test suite that fails because a train went through a
-//! tunnel teaches people to ignore test failures.
+//! Every built-in tool called the way the model calls it: name, arguments,
+//! dispatcher and answer. Bugs lived at this layer unnoticed (`web_search`
+//! returned nothing for months, `~/notes.txt` was looked up inside the
+//! project). [`every_offered_tool_is_checked_here`] keeps this list in sync
+//! with what the app offers. Network tools are in `web_live.rs`, `#[ignore]`d.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -24,8 +11,7 @@ use flashagent_core::loop_::{ToolExec, ToolOutput};
 use flashagent_llm::ToolCall;
 use flashagent_tools::{BuiltinTools, BuiltinToolsConfig};
 
-/// A project to run the tools against: a few files, a subdirectory, and a
-/// git repository, since some tools look for one.
+/// A few files, a subdirectory, and a git repository.
 struct Project {
     dir: PathBuf,
     tools: BuiltinTools,
@@ -33,9 +19,8 @@ struct Project {
 
 impl Project {
     fn new() -> Self {
-        // A counter, not the clock: Windows' clock is coarse enough for two
-        // tests started together to read the same time, share a folder, and
-        // lose each other's files when the first one to finish removes it.
+        // A counter, not the clock: on Windows two tests could read the same time
+        // and share a folder.
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("flashagent-tools-{}-{n}", std::process::id()));
@@ -60,21 +45,19 @@ impl Project {
             mcp_manager: None,
         })
         .unwrap();
-        // `view_image` is only offered when the model can see; the tests
-        // below want it offered. `/goal` mode is left off, since it takes
-        // away the memory tools.
+        // `view_image` needs vision on. `/goal` stays off: it removes the memory tools.
         tools.set_vision_supported(true);
         Project { dir, tools }
     }
 
-    /// Call a tool the way the model does, and require that it worked.
+    /// Requires success.
     async fn call(&self, name: &str, args: serde_json::Value) -> String {
         let out = self.raw(name, args.clone()).await;
         assert!(!out.is_error, "{name} failed on {args}: {}", out.content);
         out.content
     }
 
-    /// Call a tool and hand back whatever came out, error or not.
+    /// Error or not.
     async fn raw(&self, name: &str, args: serde_json::Value) -> ToolOutput {
         self.tools
             .execute(&ToolCall {
@@ -85,8 +68,7 @@ impl Project {
             .await
     }
 
-    /// Read a file back from disk, building the path a component at a time
-    /// so that the test itself never depends on how a separator is spelled.
+    /// Built a component at a time, independent of the separator.
     fn read(&self, path: &str) -> String {
         let mut full = self.dir.clone();
         for part in path.split('/') {
@@ -103,7 +85,6 @@ impl Drop for Project {
     }
 }
 
-/// The tools checked below, by name.
 const CHECKED: &[&str] = &[
     "read_file",
     "write_file",
@@ -124,9 +105,8 @@ const CHECKED: &[&str] = &[
     "memory_remove",
     "web_fetch",
     "web_search",
-    // Answered by the app, not by this crate: `ask_user` needs someone to
-    // ask and `update_plan` needs a /goal run to report into. Both are
-    // covered by the terminal scenarios in crates/tui/tests.
+    // Need the app: `ask_user` needs someone to ask, `update_plan` a /goal run.
+    // Covered by the terminal scenarios in crates/tui/tests.
     "ask_user",
     "update_plan",
 ];
@@ -134,7 +114,7 @@ const CHECKED: &[&str] = &[
 #[tokio::test]
 async fn every_offered_tool_is_checked_here() {
     let project = Project::new();
-    // `update_plan` is offered during a /goal run and nowhere else.
+    // `update_plan` is offered only during /goal.
     project.tools.set_goal_mode(true);
     let offered: BTreeSet<String> = project.tools.specs().into_iter().map(|s| s.name).collect();
     let checked: BTreeSet<String> = CHECKED.iter().map(|s| s.to_string()).collect();
@@ -164,8 +144,7 @@ async fn a_file_is_read_written_and_edited() {
     project
         .call("write_file", serde_json::json!({ "path": "new/deep.txt", "content": "written\n" }))
         .await;
-    // Read back both ways: through the tool, which is where a wrong path
-    // would show up as the model sees it, and from disk.
+    // Through the tool, as the model sees it, and from disk.
     let back = project.call("read_file", serde_json::json!({ "path": "new/deep.txt" })).await;
     assert!(back.contains("written"), "written and read back through the tools: {back}");
     assert_eq!(project.read("new/deep.txt"), "written\n", "write_file must create the folders too");
@@ -247,7 +226,7 @@ async fn the_project_is_listed_searched_and_outlined() {
     let outline = project.call("outline_file", serde_json::json!({ "path": "src/main.rs" })).await;
     assert!(outline.contains("main") && outline.contains("helper"), "{outline}");
 
-    // A search that matches nothing is an answer, not a failure.
+    // No match is an answer, not a failure.
     let nothing = project.raw("grep", serde_json::json!({ "pattern": "zzzz-not-here" })).await;
     assert!(!nothing.is_error, "{}", nothing.content);
 }
@@ -260,12 +239,11 @@ async fn a_command_runs_and_a_failing_one_reports_its_exit_code() {
     assert!(out.contains("marker"), "{out}");
     assert!(out.contains("exit code: 0"), "{out}");
 
-    // `exit 3` is spelled the same in both shells; the loop below is not.
+    // `exit 3` is spelled the same in both shells.
     let failed = project.raw("run_shell", serde_json::json!({ "command": "exit 3" })).await;
     assert!(failed.is_error, "a non-zero exit must be an error: {}", failed.content);
     assert!(failed.content.contains("exit code: 3"), "{}", failed.content);
 
-    // Output that would swamp the context is cut.
     let many_lines = if cfg!(windows) {
         "for /L %i in (1,1,20000) do @echo line %i"
     } else {
@@ -289,7 +267,6 @@ async fn the_environment_and_the_repository_are_reported() {
         assert!(!out.content.trim().is_empty(), "a git tool said nothing outside a repository");
     }
 
-    // And inside one, a new file shows up as untracked.
     let git = |args: &str| {
         std::process::Command::new("git")
             .args(args.split(' '))
@@ -307,8 +284,7 @@ async fn the_environment_and_the_repository_are_reported() {
 #[tokio::test]
 async fn a_picture_is_opened_and_a_text_file_is_not_mistaken_for_one() {
     let project = Project::new();
-    // The smallest valid PNG: header, an 8x8 IHDR, and nothing else that
-    // matters for deciding it is a picture.
+    // The smallest PNG header that reads as a picture.
     let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
     png.extend_from_slice(&[0, 0, 0, 13]);
     png.extend_from_slice(b"IHDR");
@@ -370,8 +346,7 @@ async fn a_memory_is_written_read_back_and_removed() {
 
 #[tokio::test]
 async fn an_autonomous_run_may_read_memory_but_not_rewrite_it() {
-    // A long unattended run that can edit what it knows about the project
-    // can talk itself into anything; reading is enough.
+    // A long unattended run must not rewrite what the agent knows.
     let project = Project::new();
     project.tools.set_goal_mode(true);
     for name in ["memory_create", "memory_update", "memory_remove"] {

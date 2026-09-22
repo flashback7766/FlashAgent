@@ -1,12 +1,11 @@
-//! JSON-RPC 2.0 and Model Context Protocol (MCP) data structures.
-//! Spec reference: <https://spec.modelcontextprotocol.io> (version 2024-11-05).
+//! JSON-RPC 2.0 and MCP types, spec version 2024-11-05
+//! (<https://spec.modelcontextprotocol.io>).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
-/// Standard JSON-RPC 2.0 Request or Notification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
@@ -18,7 +17,6 @@ pub struct JsonRpcRequest {
 }
 
 impl JsonRpcRequest {
-    /// Create a request with numeric id.
     pub fn new_request(id: u64, method: impl Into<String>, params: Option<Value>) -> Self {
         Self {
             jsonrpc: "2.0".into(),
@@ -28,7 +26,6 @@ impl JsonRpcRequest {
         }
     }
 
-    /// Create a notification (no id).
     pub fn new_notification(method: impl Into<String>, params: Option<Value>) -> Self {
         Self {
             jsonrpc: "2.0".into(),
@@ -39,7 +36,6 @@ impl JsonRpcRequest {
     }
 }
 
-/// Standard JSON-RPC 2.0 Response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
@@ -51,7 +47,6 @@ pub struct JsonRpcResponse {
     pub error: Option<JsonRpcError>,
 }
 
-/// Standard JSON-RPC 2.0 Error object.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JsonRpcError {
     pub code: i64,
@@ -60,7 +55,6 @@ pub struct JsonRpcError {
     pub data: Option<Value>,
 }
 
-/// MCP Client Information passed during handshake.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpClientInfo {
     pub name: String,
@@ -76,7 +70,6 @@ impl Default for McpClientInfo {
     }
 }
 
-/// MCP Server Information returned from `initialize`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct McpServerInfo {
     pub name: String,
@@ -84,7 +77,6 @@ pub struct McpServerInfo {
     pub version: Option<String>,
 }
 
-/// MCP `initialize` request parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeParams {
     #[serde(rename = "protocolVersion")]
@@ -98,16 +90,14 @@ impl Default for InitializeParams {
     fn default() -> Self {
         Self {
             protocol_version: MCP_PROTOCOL_VERSION.into(),
-            // We implement no client-side features (roots, sampling); a
-            // server must not be told otherwise or it will wait on requests
-            // we never answer.
+            // No client-side features (roots, sampling): a server told otherwise waits
+            // on requests that are never answered.
             capabilities: serde_json::json!({}),
             client_info: McpClientInfo::default(),
         }
     }
 }
 
-/// MCP `initialize` response result.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InitializeResult {
     #[serde(rename = "protocolVersion", default)]
@@ -118,16 +108,13 @@ pub struct InitializeResult {
     pub server_info: McpServerInfo,
 }
 
-/// MCP Tool annotation flags (e.g. read-only status).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct McpToolAnnotations {
-    /// MCP spec name is `readOnlyHint`; `readOnly` is accepted for servers
-    /// that shipped the draft spelling.
+    /// The spec name is `readOnlyHint`; `readOnly` is the draft spelling.
     #[serde(rename = "readOnlyHint", alias = "readOnly", default)]
     pub read_only: Option<bool>,
 }
 
-/// A discovered MCP Tool definition from `tools/list`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct McpTool {
     pub name: String,
@@ -140,15 +127,13 @@ pub struct McpTool {
 }
 
 impl McpTool {
-    /// True if tool is annotated as explicitly read-only.
-    /// What the server claims; informational only — never used for
-    /// permissions (see `McpManager::is_tool_read_only`).
+    /// The server's claim, informational only. Permissions never use it (see
+    /// `McpManager::is_tool_read_only`).
     pub fn claims_read_only(&self) -> bool {
         self.annotations.as_ref().and_then(|a| a.read_only).unwrap_or(false)
     }
 }
 
-/// MCP `tools/list` response result.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ToolsListResult {
     #[serde(default)]
@@ -157,7 +142,6 @@ pub struct ToolsListResult {
     pub next_cursor: Option<String>,
 }
 
-/// MCP `tools/call` parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallToolParams {
     pub name: String,
@@ -165,7 +149,6 @@ pub struct CallToolParams {
     pub arguments: Option<Value>,
 }
 
-/// Single content item inside a `tools/call` result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContentItem {
     #[serde(rename = "type")]
@@ -178,7 +161,6 @@ pub struct ContentItem {
     pub mime_type: Option<String>,
 }
 
-/// MCP `tools/call` response result.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CallToolResult {
     #[serde(default)]
@@ -188,7 +170,6 @@ pub struct CallToolResult {
 }
 
 impl CallToolResult {
-    /// Extract combined plain text representation of the content.
     pub fn plain_text(&self) -> String {
         let mut out = String::new();
         for item in &self.content {

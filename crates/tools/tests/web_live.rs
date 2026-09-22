@@ -1,18 +1,11 @@
-//! The two tools that need the internet, run against the real internet.
-//!
-//! Marked `#[ignore]`, so an ordinary `cargo test` does not fail because a
-//! laptop is offline or a train went into a tunnel. They are run on purpose:
+//! `web_search` and `web_fetch` against the real internet. `#[ignore]`d so an
+//! offline `cargo test` does not fail; run on purpose and by scheduled CI:
 //!
 //! ```bash
 //! cargo test -p flashagent-tools --test web_live -- --ignored
 //! ```
 //!
-//! and by CI on a schedule, which is what would have caught DuckDuckGo
-//! changing its markup underneath `web_search` months before a person did.
-//!
-//! These check that a real answer comes back, not what is in it: what any
-//! given page or search says is not this project's business, and asserting
-//! on it would be a test that fails when the web changes its mind.
+//! They check that a real answer comes back, not what it says.
 
 use flashagent_core::loop_::{ToolExec, ToolOutput};
 use flashagent_llm::ToolCall;
@@ -43,7 +36,6 @@ async fn a_search_comes_back_with_results() {
     let out = call("web_search", serde_json::json!({ "query": "rust programming language" })).await;
     assert!(!out.is_error, "{}", out.content);
 
-    // Results are numbered, one per line, each with the page it found.
     assert!(out.content.starts_with("1. "), "no first result: {}", out.content);
     assert!(out.content.contains("http"), "a result without a link: {}", out.content);
     let results = out.content.lines().filter(|l| l.starts_with("http")).count();
@@ -53,9 +45,8 @@ async fn a_search_comes_back_with_results() {
 #[tokio::test]
 #[ignore = "needs the internet"]
 async fn a_search_that_matches_nothing_says_so_instead_of_failing() {
-    // A query no page can match must read as an empty answer; "the search is
-    // broken" and "the web knows nothing about this" are different facts and
-    // the model acts differently on each.
+    // "The search is broken" and "nothing matches" are different facts, and the
+    // model acts differently on each.
     let out = call(
         "web_search",
         serde_json::json!({ "query": "\"qxzjvwpl zzqq nonexistent phrase 8f3a1c\"" }),
@@ -70,7 +61,6 @@ async fn a_page_is_fetched_as_readable_text() {
     let out = call("web_fetch", serde_json::json!({ "url": "https://example.com" })).await;
     assert!(!out.is_error, "{}", out.content);
     assert!(out.content.contains("Example Domain"), "{}", out.content);
-    // HTML is reduced to what a person would read.
     assert!(!out.content.contains("<html"), "the markup was handed over raw: {}", out.content);
 }
 

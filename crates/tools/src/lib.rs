@@ -1,9 +1,5 @@
-//! flashagent-tools: built-in toolset implementing [`flashagent_core::ToolExec`].
-//!
-//! Rich developer toolset over a fixed working directory: file read/write/edit/patch,
-//! dir listing, glob and grep search, outline symbol inspection, git status/diff,
-//! isolated shell execution, host environment detection, interactive user questioning (ask_user),
-//! full project and global memory management, and web fetch/search.
+//! Built-in toolset implementing [`flashagent_core::ToolExec`] over a fixed
+//! working directory.
 
 pub mod ask_user;
 pub mod env_tools;
@@ -34,23 +30,21 @@ use shell::ShellRegistry;
 pub use ask_user::{QuestionGate, GOAL_QUESTION_TIMEOUT};
 pub use subagents::{agent_tools, BuiltinSubagentFactory, CompositeTools, ToolSubset};
 
-/// Hard cap on tool result text fed back to the model.
+/// Hard cap on a tool result fed back to the model.
 const MAX_OUTPUT_CHARS: usize = 32_000;
 
-/// Errors surfaced as tool results (`is_error`), never as panics.
+/// Surfaced as tool results (`is_error`), never as panics.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
-    /// Filesystem failure.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    /// Everything else: bad args, timeouts, HTTP failures.
+    /// Bad args, timeouts, HTTP failures.
     #[error("{0}")]
     Other(String),
 }
 
-/// Deserialize a call's arguments exactly as the permission layer and the
-/// approval card read them (`flashagent_llm::effective_args`): one shape, no
-/// fallback to a different part of the payload when the first read fails.
+/// Read exactly as the permission layer and approval card read them
+/// (`effective_args`), with no fallback to another part of the payload.
 fn parse_args<T: DeserializeOwned>(json: &str, tool: &str) -> Result<T, ToolError> {
     let value = flashagent_llm::effective_args(json, tool)
         .ok_or_else(|| ToolError::Other(format!("bad arguments: not a JSON object: {json}")))?;
@@ -65,27 +59,22 @@ fn truncate_output(mut text: String) -> String {
     text
 }
 
-/// Construction options for [`BuiltinTools`].
 pub struct BuiltinToolsConfig {
-    /// Fixed working directory for all filesystem tools and the shell.
+    /// For all filesystem tools and the shell.
     pub cwd: PathBuf,
-    /// Brave Search API key; without it `web_search` falls back to free DuckDuckGo.
+    /// Without it `web_search` uses DuckDuckGo.
     pub brave_api_key: Option<String>,
-    /// Interactive question gate for `ask_user`.
     pub question_gate: Option<Arc<dyn QuestionGate>>,
-    /// Shared atomic flag signaling autonomous `/goal` mode.
+    /// Set while `/goal` runs.
     pub is_goal_mode: Option<Arc<AtomicBool>>,
-    /// Toolset exposure profile.
     pub toolset_profile: Option<ToolsetProfile>,
-    /// Whether web fetch and search are offered. On unless turned off in Settings.
     pub web_enabled: Option<bool>,
-    /// Discovered model context window size; small windows get fewer tools.
+    /// Small windows get fewer tools.
     pub context_window: Option<usize>,
-    /// Optional MCP manager coordinating external Model Context Protocol servers.
     pub mcp_manager: Option<Arc<mcp::McpManager>>,
 }
 
-/// The built-in toolset. One instance per session, shared across the loop.
+/// One per session.
 pub struct BuiltinTools {
     cwd: PathBuf,
     shells: ShellRegistry,
@@ -96,14 +85,12 @@ pub struct BuiltinTools {
     toolset_profile: std::sync::RwLock<ToolsetProfile>,
     web_enabled: Arc<AtomicBool>,
     context_window: Arc<std::sync::RwLock<Option<usize>>>,
-    /// Whether the model in use can see images. Set by the app from what the
-    /// server said about the model.
+    /// Set from what the server said about the model.
     vision_supported: Arc<std::sync::atomic::AtomicBool>,
     mcp_manager: Arc<mcp::McpManager>,
 }
 
 impl BuiltinTools {
-    /// Create a toolset rooted at `config.cwd`.
     pub fn new(config: BuiltinToolsConfig) -> Result<Self, ToolError> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -127,48 +114,41 @@ impl BuiltinTools {
         })
     }
 
-    /// Return reference to the active MCP manager.
     pub fn mcp_manager(&self) -> Arc<mcp::McpManager> {
         self.mcp_manager.clone()
     }
 
-    /// Set or update the active autonomous goal mode flag.
     pub fn set_goal_mode(&self, active: bool) {
         self.is_goal_mode.store(active, Ordering::Relaxed);
     }
 
-    /// Update toolset profile.
     pub fn set_toolset_profile(&self, profile: ToolsetProfile) {
         if let Ok(mut lock) = self.toolset_profile.write() {
             *lock = profile;
         }
     }
 
-    /// Enable or disable web tools.
     pub fn set_web_enabled(&self, enabled: bool) {
         self.web_enabled.store(enabled, Ordering::Relaxed);
     }
 
-    /// Update the discovered context window size, which decides how many tools are offered.
-    /// Tell the tools whether the model can see images; `view_image` is only
-    /// offered, and only works, when it can.
+    /// `view_image` is only offered, and only works, when the model can see.
     pub fn set_vision_supported(&self, supported: bool) {
         self.vision_supported.store(supported, Ordering::Relaxed);
     }
 
-    /// Whether the model in use can see images.
     pub fn vision_supported(&self) -> bool {
         self.vision_supported.load(Ordering::Relaxed)
     }
 
+    /// Decides how many tools are offered.
     pub fn set_context_window(&self, window: Option<usize>) {
         if let Ok(mut lock) = self.context_window.write() {
             *lock = window;
         }
     }
 
-    /// A path as the user should see it: relative to the project when it is
-    /// inside it, which is where models usually hand back absolute paths.
+    /// Relative to the project when inside it; models often return absolute paths.
     fn shown_path(&self, path: &str) -> String {
         std::path::Path::new(path)
             .strip_prefix(&self.cwd)
@@ -176,8 +156,7 @@ impl BuiltinTools {
             .unwrap_or_else(|_| path.to_string())
     }
 
-    /// Unified diff of what a write/edit call would change, or `None` when the
-    /// call is not a write or the file state cannot be read.
+    /// `None` when the call is not a write or the file cannot be read.
     fn preview_for(&self, call: &ToolCall) -> Option<String> {
         let v = flashagent_llm::effective_args(&call.args_json, &call.name)?;
         match call.name.as_str() {
@@ -189,8 +168,7 @@ impl BuiltinTools {
             }
             "edit_file" => {
                 let args: EditArgs = serde_json::from_value(v.clone()).ok()?;
-                // A batch is shown whole: every file it would change, one diff
-                // after another.
+                // A batch is shown whole, one diff per file.
                 let diffs: Vec<String> = args
                     .targets()
                     .iter()
@@ -230,8 +208,8 @@ impl BuiltinTools {
                     items.push((a.path, a.offset, a.limit));
                 }
                 items.extend(a.files.into_iter().map(|f| (f.path, f.offset, f.limit)));
-                // The usual 2000 lines are shared out, so the last file is not
-                // the one the output limit cuts away.
+                // The usual 2000 lines are shared out, so the output limit does not cut the
+                // last file away.
                 let share = (2000 / items.len().max(1)).max(200);
                 let items: Vec<(String, usize, usize)> =
                     items.into_iter().map(|(p, o, l)| (p, o.unwrap_or(0), l.unwrap_or(share))).collect();
@@ -322,9 +300,7 @@ impl BuiltinTools {
                 let count = a.count.unwrap_or(5);
                 let key = self.brave_key.as_deref().map(str::trim).filter(|k| !k.is_empty());
                 match key {
-                    // A key that is rejected, expired or out of quota must
-                    // not take search down with it: the free search is still
-                    // there.
+                    // A rejected, expired or exhausted key falls back to the free search.
                     Some(key) => match web::search(&self.http, key, &a.query, count).await {
                         Ok(found) => Ok(found),
                         Err(_) => web::search_free(&self.http, &a.query, count).await,
@@ -367,8 +343,7 @@ impl WritePreview for BuiltinTools {
 #[async_trait]
 impl ToolExec for BuiltinTools {
     async fn execute(&self, call: &ToolCall) -> ToolOutput {
-        // The only tool whose result is not text: it hands back the picture
-        // itself, so it does not go through the string dispatcher.
+        // The only tool whose result is a picture, not text.
         if call.name == "view_image" {
             return image_tool::view_image(&self.cwd, &call.args_json, self.vision_supported());
         }
@@ -379,7 +354,6 @@ impl ToolExec for BuiltinTools {
     }
 
     fn specs(&self) -> Vec<ToolSpec> {
-        // Core tools (present in all profiles)
         let mut specs = vec![
             ToolSpec {
                 name: "read_file".into(),
@@ -428,18 +402,16 @@ impl ToolExec for BuiltinTools {
             },
         ];
 
-        // Offered always, though it refuses itself outside a /goal run. The
-        // tool list is part of the prompt the server caches: adding the tool
-        // when a goal starts changed that prompt near its top, so the first
-        // goal step read the whole conversation again (8.5 s on 7k tokens
-        // with a laptop model, minutes on a long session).
+        // Offered always, though it refuses itself outside /goal. The tool list is
+        // part of the cached prompt: adding it when a goal started made the first goal
+        // step re-read the whole conversation (8.5 s on 7k tokens on a laptop model).
         specs.push(ToolSpec {
             name: "update_plan".into(),
             description: "Only during a /goal run: record or update your step-by-step plan so its progress is visible while it runs. Call it with the whole plan again whenever a step finishes or the plan changes, not just the delta. Outside a /goal run it does nothing; do not call it there.".into(),
             parameters_json: r#"{"type": "object", "properties": {"steps": {"type": "array", "description": "The whole plan, in order", "items": {"type": "object", "properties": {"text": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["text"]}}}, "required": ["steps"]}"#.into(),
         });
 
-        // Extended tools: offered unless the context window is too small to afford their schemas.
+        // Offered unless the context window is too small for their schemas.
         let profile = self.toolset_profile.read().map(|p| *p).unwrap_or(ToolsetProfile::Auto);
         let ctx = self.context_window.read().ok().and_then(|c| *c);
         let effective_profile = match profile {
@@ -499,8 +471,7 @@ impl ToolExec for BuiltinTools {
                 description: "Forget a memory that turned out to be wrong or no longer applies. Disabled in autonomous /goal mode".into(),
                 parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "One short line, in the user's language, saying what this call is for — e.g. 'Read the loop that applies the patch'. The user sees it instead of the raw call, so write one for every call, including reads and searches."}, "title": {"type": "string", "description": "Name of the memory to forget."}, "scope": {"type": "string", "enum": ["project", "global"], "description": "Use 'global' for anything about the USER — how they work, what they prefer, corrections they gave you — so it follows them into every project. Use 'project' only for facts about this codebase. A sentence that starts with 'I' or 'the user' is global."}}, "required": ["header", "title"]}"#.into(),
             });
-            // Only offered when the model can actually see: a tool it cannot use
-        // is a tool it will call and then apologise for.
+        // Only when the model can see: otherwise it calls the tool and apologises.
         if self.vision_supported() {
             specs.push(ToolSpec {
                 name: "view_image".into(),
@@ -509,7 +480,6 @@ impl ToolExec for BuiltinTools {
             });
         }
 
-        // Web tools only when the user has turned them on.
             if self.web_enabled.load(Ordering::Relaxed) {
                 specs.push(ToolSpec {
                     name: "web_fetch".into(),
@@ -524,7 +494,6 @@ impl ToolExec for BuiltinTools {
             }
         }
 
-        // MCP tools (dynamically discovered from active MCP servers)
         specs.extend(self.mcp_manager.get_all_tool_specs());
 
         specs
@@ -541,7 +510,6 @@ struct ReadArgs {
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
-    /// Several files in one call.
     #[serde(default)]
     files: Vec<ReadItem>,
 }
@@ -565,7 +533,7 @@ struct EditArgs {
     path: String,
     #[serde(default)]
     edits: Vec<fs_tools::EditChunk>,
-    /// Several files changed as one change.
+    /// Applied as one change.
     #[serde(default)]
     files: Vec<EditItem>,
 }
@@ -578,7 +546,7 @@ struct EditItem {
 }
 
 impl EditArgs {
-    /// Every file this call edits with its edits: `path` first, then `files`.
+    /// `path` first, then `files`.
     fn targets(self) -> Vec<(String, Vec<fs_tools::EditChunk>)> {
         let mut targets = Vec::new();
         if !self.path.trim().is_empty() && !self.edits.is_empty() {
@@ -671,8 +639,7 @@ mod tests {
 
     #[test]
     fn a_write_preview_names_the_file_relative_to_the_project() {
-        // The approval card showed "--- a//tmp/.../project/main.rs": an
-        // absolute path from the model, pasted after "a/".
+        // The approval card showed "--- a//tmp/.../main.rs" for an absolute path.
         let dir = testing::tempdir();
         std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
         let tools = BuiltinTools::new(BuiltinToolsConfig {
@@ -698,8 +665,7 @@ mod tests {
     }
     #[test]
     fn edit_file_approval_card_gets_a_diff() {
-        // The approval card promises a diff before anything is written; if the
-        // preview returns None the user approves blind.
+        // Without a preview the user approves blind.
         let dir = std::env::temp_dir().join(format!("fa-preview-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/parser.rs"), "fn a() {}\npub fn parse_duration() {}\n").unwrap();
@@ -726,7 +692,6 @@ mod tests {
         assert!(diff.contains("+/// A bare number means minutes."), "{diff}");
     }
 
-    /// A toolset in a fresh directory holding `files`, named after `tag`.
     fn batch_tools(tag: &str, files: &[(&str, &str)]) -> (PathBuf, BuiltinTools) {
         let dir = std::env::temp_dir().join(format!("fa-batch-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -961,7 +926,6 @@ mod tests {
         assert!(out.content.contains("turned off in Settings"), "{}", out.content);
         assert!(!tools.specs().iter().any(|s| s.name == "web_fetch"), "a tool that is off must not be offered");
 
-        // Turned back on:
         tools.set_web_enabled(true);
         let specs = tools.specs();
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -986,7 +950,6 @@ mod tests {
         assert_eq!(specs.len(), 10); // Compact toolset
         assert!(!specs.iter().any(|s| s.name == "patch_file"));
 
-        // On larger window (~65k+):
         tools.set_context_window(Some(65_536));
         let specs_large = tools.specs();
         assert_eq!(specs_large.len(), 18);
@@ -1003,19 +966,16 @@ mod tests {
 
     #[test]
     fn parse_args_self_healing_python_dict_and_unwrapping() {
-        // Test Python dict with single quotes
         let py_dict = "{'path': 'src/main.rs', 'offset': 10}";
         let read: ReadArgs = parse_args(py_dict, "read_file").unwrap();
         assert_eq!(read.path, "src/main.rs");
         assert_eq!(read.offset, Some(10));
 
-        // Test wrapped in {"arguments": {...}}
         let wrapped = r#"{"arguments": {"path": "src/lib.rs", "offset": 5}}"#;
         let read2: ReadArgs = parse_args(wrapped, "read_file").unwrap();
         assert_eq!(read2.path, "src/lib.rs");
         assert_eq!(read2.offset, Some(5));
 
-        // Test single-key wrapper {"read_file": {"path": "README.md"}}
         let single_key = r#"{"read_file": {"path": "README.md"}}"#;
         let read3: ReadArgs = parse_args(single_key, "read_file").unwrap();
         assert_eq!(read3.path, "README.md");

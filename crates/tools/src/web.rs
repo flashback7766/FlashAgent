@@ -1,4 +1,4 @@
-//! Web tools: fetch a URL as plain text and search via the Brave Search API.
+//! `web_fetch` (URL as plain text) and `web_search` (Brave API or DuckDuckGo).
 
 use serde_json::Value;
 
@@ -16,7 +16,6 @@ fn truncate_body(body: &str, max: usize) -> &str {
     }
 }
 
-/// Case-insensitive byte search for an ASCII needle.
 fn find_ci(hay: &str, needle: &str) -> Option<usize> {
     let hay = hay.as_bytes();
     let n = needle.as_bytes();
@@ -32,8 +31,7 @@ fn starts_ci(hay: &str, needle: &str) -> bool {
         .is_some_and(|head| head.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
-/// Reduce HTML to visible text: drop script/style blocks, strip tags, decode
-/// the common entities, collapse whitespace.
+/// Drops script/style, strips tags, decodes common entities, collapses whitespace.
 pub(crate) fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
     let mut i = 0;
@@ -73,9 +71,8 @@ pub(crate) fn html_to_text(html: &str) -> String {
     collapsed.trim().to_string()
 }
 
-/// Turn HTML entities into the characters they stand for: the named ones
-/// that appear in running text, and any numbered one (`&#39;`, `&#x27;`),
-/// which pages use for apostrophes and dashes in titles.
+/// Named entities common in running text, and any numeric one (`&#39;`,
+/// `&#x27;`), which pages use in titles.
 fn decode_entities(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -133,19 +130,15 @@ fn decode_entities(text: &str) -> String {
     out
 }
 
-/// Most redirects one fetch follows.
 const MAX_REDIRECTS: usize = 5;
 
-/// Fetch a URL; HTML responses are reduced to plain text.
+/// HTML responses are reduced to plain text.
 ///
-/// A local address — this machine, the local network, a cloud metadata
-/// endpoint — is fetched only when the URL names it outright, because only
-/// then has the permission layer recognised it and asked the user. One that
-/// turns out local some other way (a DNS name pointing at 127.0.0.1, an IP
-/// spelled `127.1`, a redirect from a public page) is refused. The address
-/// that was checked is the one connected to, so a name cannot resolve to a
-/// public address for the check and a local one for the request, and every
-/// redirect is checked the same way before it is followed.
+/// A local address (this machine, the LAN, cloud metadata) is fetched only if
+/// the URL names it outright, since only then did the permission layer ask the
+/// user. A DNS name resolving locally, an odd IP spelling (`127.1`) or a
+/// redirect to a local address is refused. The checked address is the one
+/// connected to, and every redirect is checked before it is followed.
 pub async fn fetch_text(url: &str) -> Result<String, ToolError> {
     let approved_local_host =
         flashagent_core::url_host(url).filter(|host| flashagent_core::is_local_host(host));
@@ -218,7 +211,6 @@ async fn read_fetched(resp: reqwest::Response) -> Result<String, ToolError> {
     Ok(if is_html { html_to_text(&body) } else { body })
 }
 
-/// Search the web via the Brave Search API.
 pub async fn search(
     http: &reqwest::Client,
     api_key: &str,
@@ -256,7 +248,6 @@ pub async fn search(
     Ok(out)
 }
 
-/// Search result item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchResult {
     pub title: String,
@@ -264,19 +255,13 @@ pub struct SearchResult {
     pub snippet: String,
 }
 
-/// The class names DuckDuckGo marks a result with. The full page
-/// (`html.duckduckgo.com`) and the small one (`lite.duckduckgo.com`) wrap
-/// their results in different elements, quote their attributes differently
-/// and shuffle the surrounding markup from time to time; the class on the
-/// link and the class on the snippet are what both have kept.
+/// The full page (`html.duckduckgo.com`) and the lite one differ in markup and
+/// change it from time to time; these class names are what both have kept.
 const LINK_CLASSES: [&str; 2] = ["result__a", "result-link"];
 const SNIPPET_CLASSES: [&str; 2] = ["result__snippet", "result-snippet"];
 
-/// Read the results out of a DuckDuckGo results page.
-///
-/// Anchored on the two class names above rather than on the shape of the
-/// page around them: each result is a link, and the first snippet after it
-/// belongs to it.
+/// Anchored on the class names, not the page structure: each result is a link,
+/// and the first snippet after it belongs to it.
 pub fn parse_duckduckgo_html(html: &str, limit: usize) -> Vec<SearchResult> {
     let lower = html.to_lowercase();
     let mut marks: Vec<(usize, bool)> = tags_with_class(&lower, &LINK_CLASSES)
@@ -307,8 +292,7 @@ pub fn parse_duckduckgo_html(html: &str, limit: usize) -> Vec<SearchResult> {
     results
 }
 
-/// Where every tag carrying one of `classes` starts. The class has to be a
-/// whole name in the attribute, not the beginning of a longer one.
+/// The class must be a whole name in the attribute, not a prefix of a longer one.
 fn tags_with_class(lower: &str, classes: &[&str; 2]) -> Vec<usize> {
     let mut out = Vec::new();
     for class in classes {
@@ -328,15 +312,13 @@ fn tags_with_class(lower: &str, classes: &[&str; 2]) -> Vec<usize> {
     out
 }
 
-/// The text of the `<...>` starting at `tag`.
 fn tag_text(html: &str, tag: usize) -> Option<&str> {
     let rest = html.get(tag..)?;
     let end = rest.find('>')?;
     Some(&rest[..end])
 }
 
-/// The value of an attribute of the tag starting at `tag`, in either kind of
-/// quotes. Entities are left as written; the callers decode what they need.
+/// Either kind of quotes. Entities are left as written.
 fn attribute(html: &str, tag: usize, name: &str) -> Option<String> {
     let text = tag_text(html, tag)?;
     let lower = text.to_lowercase();
@@ -359,7 +341,6 @@ fn attribute(html: &str, tag: usize, name: &str) -> Option<String> {
     None
 }
 
-/// The visible text of the element starting at `tag`, up to its closing tag.
 fn inner_text(html: &str, tag: usize) -> String {
     let Some(text) = tag_text(html, tag) else { return String::new() };
     let name: String = text
@@ -374,8 +355,8 @@ fn inner_text(html: &str, tag: usize) -> String {
     html_to_text(&body[..end])
 }
 
-/// The page a result link leads to. DuckDuckGo wraps it in a redirect of its
-/// own (`/l/?uddg=...`); its ads and its own pages are not results.
+/// DuckDuckGo wraps the target in its own redirect (`/l/?uddg=...`); its ads
+/// and own pages are not results.
 fn result_url(href: &str) -> Option<String> {
     let href = href.replace("&amp;", "&");
     if let Some(target) = href.split("uddg=").nth(1) {
@@ -408,18 +389,14 @@ fn urlencoding_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-/// The pages DuckDuckGo serves without an API key, in the order they are
-/// tried: the full results page first, the small one as a fallback for when
-/// the first answers with something that is not a results page at all.
+/// Tried in order; the lite page is the fallback when the first returns
+/// something that is not a results page.
 const FREE_ENDPOINTS: [&str; 2] =
     ["https://html.duckduckgo.com/html/", "https://lite.duckduckgo.com/lite/"];
 
-/// Free web search via DuckDuckGo, no API key.
-///
-/// A query that genuinely matches nothing says so. A page that is not a
-/// results page — a rate-limit notice, a bot check, a redesign the parser
-/// does not know — is an error, not an empty answer, because the model can
-/// do something about the first and nothing about the second.
+/// No API key. A query that matches nothing says so. A page that is not a
+/// results page (rate limit, bot check, redesign) is an error, not an empty
+/// answer: the model can act on the first, not the second.
 pub async fn search_free(http: &reqwest::Client, query: &str, count: u32) -> Result<String, ToolError> {
     let mut trouble = String::new();
     for endpoint in FREE_ENDPOINTS {
@@ -467,15 +444,12 @@ async fn fetch_results_page(http: &reqwest::Client, endpoint: &str, query: &str)
     Ok(body)
 }
 
-/// Whether the page is a results page reporting that it found nothing.
 fn says_there_is_nothing(body: &str) -> bool {
     let text = html_to_text(body).to_lowercase();
     text.contains("no results") || text.contains("not match any documents")
 }
 
-/// What to say about a page with no results on it that does not claim to
-/// have none: usually a bot check, otherwise a page shaped differently than
-/// the parser expects.
+/// Usually a bot check; otherwise markup the parser does not expect.
 fn describe_unusable_page(body: &str) -> String {
     let text = html_to_text(body).to_lowercase();
     if text.contains("anomaly") || text.contains("unusual traffic") || text.contains("are you a robot") {
@@ -497,8 +471,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_local_address_the_url_does_not_name_outright_is_refused() {
-        // Both are 127.0.0.1 once parsed, but neither looks local as written,
-        // so the permission layer never asked about them.
+        // Both are 127.0.0.1 once parsed, but neither looks local as written, so the
+        // permission layer never asked.
         for url in ["http://127.1:9/", "http://0x7f.0.0.1:9/"] {
             let err = fetch_text(url).await.unwrap_err().to_string();
             assert!(err.contains("local address"), "{url}: {err}");
@@ -507,8 +481,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_local_address_named_outright_is_left_to_the_permission_layer() {
-        // Port 9 has nothing listening: the error is the connection's, not
-        // the guard's.
+        // Nothing listens on port 9: the error is the connection's, not the guard's.
         let err = fetch_text("http://127.0.0.1:9/").await.unwrap_err().to_string();
         assert!(!err.contains("leads to a local address"), "{err}");
     }
@@ -579,9 +552,8 @@ mod tests {
         assert!(truncate_body(&s, 7).is_char_boundary(0));
     }
 
-    /// One result, written the way `html.duckduckgo.com` writes it: the
-    /// class names are not alone in their attributes, and the link is
-    /// DuckDuckGo's own redirect.
+    /// As `html.duckduckgo.com` writes it: extra class names, and the link is
+    /// DuckDuckGo's redirect.
     const FULL_PAGE: &str = r##"
     <div class="result results_links results_links_deep web-result ">
       <div class="links_main links_deep result__body">
@@ -594,8 +566,8 @@ mod tests {
     </div>
     "##;
 
-    /// The same result from `lite.duckduckgo.com`: a table, single-quoted
-    /// attributes, the snippet in a later row.
+    /// As `lite.duckduckgo.com` writes it: a table, single quotes, the snippet in
+    /// a later row.
     const LITE_PAGE: &str = r##"
     <table>
       <tr><td class='result-snippet'>Not this one, it belongs to nothing.</td></tr>
@@ -612,7 +584,6 @@ mod tests {
             let results = parse_duckduckgo_html(page, 5);
             assert_eq!(results.len(), 1, "{name}: {results:?}");
             assert_eq!(results[0].title, "Rust Programming Language", "{name}");
-            // Unwrapped from DuckDuckGo's redirect, and the escapes undone.
             assert_eq!(results[0].url, "https://rust-lang.org/", "{name}");
             assert_eq!(results[0].snippet, "Rust is fast and it's reliable.", "{name}");
         }
@@ -649,7 +620,6 @@ mod tests {
     #[test]
     fn entities_become_the_characters_they_stand_for() {
         assert_eq!(html_to_text("<p>a &amp; b &#39;c&#39; &#x27;d&#x27; &mdash; e&nbsp;f</p>"), "a & b 'c' 'd' — e f");
-        // Something that is not an entity is left alone.
         assert_eq!(html_to_text("<p>Fish &amp chips &#zz; R&D</p>"), "Fish &amp chips &#zz; R&D");
     }
 }

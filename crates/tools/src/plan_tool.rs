@@ -1,9 +1,6 @@
-//! Live plan tool (`update_plan`) for autonomous `/goal` runs.
-//!
-//! Lets the model keep a checklist of what it means to do and how far it has
-//! gotten, shown next to the goal's own progress line. Only available during
-//! `/goal`: an ordinary chat turn has no run long enough to need one, and the
-//! model would otherwise spend tokens narrating a plan nobody asked for.
+//! `update_plan`: a checklist the model keeps during `/goal`, shown next to the
+//! goal's progress. Only in `/goal`; in ordinary chat the model would spend
+//! tokens narrating a plan nobody asked for.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,7 +9,6 @@ use serde::Deserialize;
 
 use crate::ToolError;
 
-/// Where one step of the plan stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanStatus {
     Pending,
@@ -29,7 +25,6 @@ impl PlanStatus {
         }
     }
 
-    /// Marker for a checklist line: `[ ]`, `[~]`, `[x]`.
     pub fn glyph(self) -> char {
         match self {
             Self::Pending => ' ',
@@ -39,7 +34,6 @@ impl PlanStatus {
     }
 }
 
-/// One step of the plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanStep {
     pub text: String,
@@ -60,14 +54,9 @@ struct RawPlanArgs {
     steps: Option<Vec<RawStep>>,
 }
 
-/// The plan out of an `update_plan` call's raw arguments, read the same way
-/// every other tool's arguments are (`effective_args`), so a model's own
-/// naming for the field still works. Steps with no usable text are dropped.
-///
-/// `None` when the call named no `steps` field at all, or the arguments did
-/// not even parse as an object; `Some(vec![])` when it named one and left it
-/// empty (or every step in it was blank) — the caller treats those two
-/// differently: one is a bad call, the other clears the plan.
+/// Read through `effective_args`; blank steps are dropped. `None` when there
+/// is no `steps` field or the arguments do not parse (a bad call);
+/// `Some(vec![])` clears the plan.
 pub fn parse_plan(args_json: &str) -> Option<Vec<PlanStep>> {
     let value = flashagent_llm::effective_args(args_json, "update_plan")?;
     let raw: RawPlanArgs = serde_json::from_value(value).ok()?;
@@ -85,9 +74,7 @@ pub fn parse_plan(args_json: &str) -> Option<Vec<PlanStep>> {
     had_field.then_some(steps)
 }
 
-/// Runs `update_plan`: only inside `/goal`, where a plan actually helps
-/// something. Elsewhere it refuses itself, the same way `ask_user` refuses
-/// itself the other way around inside `/goal`.
+/// Refuses itself outside `/goal`, as `ask_user` does inside it.
 pub fn run_update_plan(is_goal_mode: &Arc<AtomicBool>, args_json: &str) -> Result<String, ToolError> {
     if !is_goal_mode.load(Ordering::Relaxed) {
         return Err(ToolError::Other("update_plan is only available during an autonomous /goal run".into()));

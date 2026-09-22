@@ -1,6 +1,4 @@
-//! Patch tool (`patch_file`).
-//!
-//! Applies standard unified diff patches directly to target files.
+//! `patch_file`: applies a unified diff.
 
 use std::path::Path;
 use crate::ToolError;
@@ -18,7 +16,6 @@ struct Hunk {
     new_no_eol: bool,
 }
 
-/// Which sides of the hunk the previous patch line belonged to.
 #[derive(Clone, Copy, PartialEq)]
 enum Side { None, Old, New, Both }
 
@@ -35,7 +32,7 @@ fn parse_hunks(patch_text: &str) -> Result<Vec<Hunk>, ToolError> {
             }
             last = Side::None;
 
-            // Example: @@ -10,5 +10,6 @@
+            // @@ -10,5 +10,6 @@
             let bad_header = || ToolError::Other(format!("malformed hunk header: {line}"));
             let (header, _) = line.strip_prefix("@@ ").and_then(|s| s.split_once(" @@")).ok_or_else(bad_header)?;
             let mut sections = header.split_whitespace();
@@ -120,8 +117,8 @@ fn parse_hunks(patch_text: &str) -> Result<Vec<Hunk>, ToolError> {
     Ok(hunks)
 }
 
-/// A file line split from its terminator (`"\n"`, `"\r\n"`, or `""` for a
-/// last line without newline), so untouched bytes survive a patch exactly.
+/// Split from its terminator (`"\n"`, `"\r\n"`, or `""`), so untouched bytes
+/// survive exactly.
 struct FileLine<'a> {
     text: &'a str,
     eol: &'a str,
@@ -137,18 +134,15 @@ fn split_file_lines(content: &str) -> Vec<FileLine<'_>> {
     }).collect()
 }
 
-/// Apply parsed hunks to `orig`, locating each hunk by its context/removed
-/// lines (tolerating line drift). Pure: shared by the tool and its preview.
-///
-/// Lines compare without their terminators. Unchanged lines keep their
-/// original endings; lines the patch writes use the file's first line ending.
-/// A missing final newline is preserved unless the patch marks otherwise.
+/// Locates each hunk by its context and removed lines, tolerating drift.
+/// Shared by the tool and its preview. Kept lines keep their endings; new
+/// lines use the file's first line ending. A missing final newline is kept
+/// unless the patch says otherwise.
 fn apply_hunks(orig: &str, hunks: &[Hunk], rel_path: &str) -> Result<String, ToolError> {
     let mut file_lines = split_file_lines(orig);
     let eol = file_lines.iter().map(|l| l.eol).find(|e| !e.is_empty()).unwrap_or("\n");
     let marker_error = |idx: usize| ToolError::Other(format!(
         "hunk #{} marks a missing final newline, but it does not end at the end of '{rel_path}'", idx + 1));
-    // Hunks are applied top to bottom; each one shifts the lines below it.
     let mut drift: isize = 0;
     for (idx, hunk) in hunks.iter().enumerate() {
         let expected_len = hunk.old_lines.len();
@@ -156,8 +150,7 @@ fn apply_hunks(orig: &str, hunks: &[Hunk], rel_path: &str) -> Result<String, Too
             .ok_or_else(|| ToolError::Other(format!("hunk #{} has an invalid line position", idx + 1)))?;
 
         let pos = if expected_len == 0 {
-            // Pure insertion (`@@ -N,0 +M,K @@`): no lines to locate; the
-            // old start names the line the insertion follows.
+            // Pure insertion (`@@ -N,0 +M,K @@`): the old start is the line it follows.
             hunk.old_start.checked_add_signed(drift).filter(|at| *at <= file_lines.len())
                 .ok_or_else(|| ToolError::Other(format!("hunk #{} inserts outside '{rel_path}'", idx + 1)))?
         } else {
@@ -183,8 +176,7 @@ fn apply_hunks(orig: &str, hunks: &[Hunk], rel_path: &str) -> Result<String, Too
         if hunk.new_no_eol && !at_eof {
             return Err(marker_error(idx));
         }
-        // The final ending the region leaves behind: explicit markers win,
-        // otherwise the file keeps whatever it had.
+        // Explicit markers win; otherwise the file keeps its final ending.
         let final_eol = if hunk.new_no_eol {
             ""
         } else if hunk.old_no_eol {
@@ -193,7 +185,6 @@ fn apply_hunks(orig: &str, hunks: &[Hunk], rel_path: &str) -> Result<String, Too
             file_lines.last().map_or(eol, |l| l.eol)
         };
         let replaced: Vec<FileLine<'_>> = hunk.new_lines.iter().map(|text| {
-            // Reuse the original line (and ending) when the patch keeps it.
             let kept = file_lines[pos..pos + expected_len].iter().find(|l| l.text == text && !l.eol.is_empty());
             FileLine { text, eol: kept.map_or(eol, |l| l.eol) }
         }).collect();
@@ -209,8 +200,7 @@ fn apply_hunks(orig: &str, hunks: &[Hunk], rel_path: &str) -> Result<String, Too
         for line in file_lines.iter_mut().take(len.saturating_sub(1)) {
             if line.eol.is_empty() { line.eol = eol; }
         }
-        // The next hunk follows the location actually found, including
-        // pre-existing line drift, as well as this hunk's size change.
+        // The next hunk follows the location actually found, plus this hunk's size change.
         drift = (pos as i128 - hunk.old_start.saturating_sub(1) as i128
             + inserted as i128 - expected_len as i128)
             .try_into().map_err(|_| ToolError::Other("patch line offset overflow".into()))?;
@@ -219,7 +209,6 @@ fn apply_hunks(orig: &str, hunks: &[Hunk], rel_path: &str) -> Result<String, Too
     Ok(file_lines.iter().flat_map(|l| [l.text, l.eol]).collect())
 }
 
-/// Applies a unified diff patch to a target file.
 pub fn patch_file(cwd: &Path, rel_path: &str, patch_text: &str) -> Result<String, ToolError> {
     let full = flashagent_core::resolve_path(cwd, rel_path);
     if !full.exists() {
@@ -234,7 +223,7 @@ pub fn patch_file(cwd: &Path, rel_path: &str, patch_text: &str) -> Result<String
     Ok(format!("Successfully applied {} hunk(s) to '{rel_path}'", hunks.len()))
 }
 
-/// Computes the prospective new content for write preview.
+/// New content for the write preview.
 pub fn preview_patch(cwd: &Path, rel_path: &str, patch_text: &str) -> Option<String> {
     let orig_content = std::fs::read_to_string(flashagent_core::resolve_path(cwd, rel_path)).ok()?;
     let hunks = parse_hunks(patch_text).ok()?;
@@ -264,7 +253,6 @@ mod tests {
     fn pure_insertion_hunks_are_applied_not_skipped() {
         let temp = crate::testing::tempdir();
         std::fs::write(temp.join("a.txt"), "one\ntwo\n").unwrap();
-        // Insert at the top (-0,0) and after line 2 (-2,0).
         let patch = "@@ -0,0 +1,1 @@\n+zero\n@@ -2,0 +4,1 @@\n+three\n";
         patch_file(&temp, "a.txt", patch).unwrap();
         assert_eq!(std::fs::read_to_string(temp.join("a.txt")).unwrap(), "zero\none\ntwo\nthree\n");
@@ -359,15 +347,12 @@ mod tests {
         patch_file(&temp, "a.txt", "@@ -2,1 +2,1 @@\n-b\n+c\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nc");
 
-        // Old side marked: the patch adds the final newline.
         patch_file(&temp, "a.txt", "@@ -2,1 +2,1 @@\n-c\n\\ No newline at end of file\n+d\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nd\n");
 
-        // New side marked: the patch removes it again.
         patch_file(&temp, "a.txt", "@@ -2,1 +2,1 @@\n-d\n+e\n\\ No newline at end of file\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\ne");
 
-        // Appending after a last line without newline keeps both lines apart.
         patch_file(&temp, "a.txt", "@@ -2,0 +3,1 @@\n+f\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\ne\nf");
     }
