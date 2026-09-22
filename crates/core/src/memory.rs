@@ -1,11 +1,7 @@
-//! Memory: project + global MEMORY.md, pickup of foreign rule files
-//! (CLAUDE.md, AGENTS.md), threshold-based context injection.
-//!
-//! Injection policy: a document goes in whole when the
-//! token budget allows; otherwise only its outline (heading lines) goes in,
-//! with a note that the model can read the file point-wise with `read_file`.
-//! Writing memory is a plain `write_file` call and travels through the
-//! permission layer's diff pipeline like any other write.
+//! Memory: project and global MEMORY.md plus foreign rule files (CLAUDE.md,
+//! AGENTS.md). A document is injected whole when the budget allows, otherwise
+//! as its outline with a note to read it with `read_file`. Writing memory is a
+//! plain `write_file` and goes through the permission layer.
 
 use std::path::{Path, PathBuf};
 
@@ -15,26 +11,20 @@ fn token_count(text: &str) -> usize {
     estimate_tokens(text).max(0) as usize
 }
 
-/// File names picked up at the project level, in priority order. `MEMORY.md`
-/// is ours; the rest are foreign formats and project rule conventions.
+/// In priority order. `MEMORY.md` is ours; the rest are foreign conventions.
 pub const PROJECT_FILENAMES: &[&str] = &["MEMORY.md", "CLAUDE.md", "AGENTS.md"];
 
-/// Global file name under the user's config dir.
 pub const GLOBAL_FILENAME: &str = "MEMORY.md";
 
-/// Where a memory document came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryKind {
-    /// Project-level `MEMORY.md` — our own format.
     Project,
-    /// Foreign rule file picked up at project level (`CLAUDE.md`, `AGENTS.md`).
     Foreign,
-    /// User-global `~/.flashagent/MEMORY.md`.
+    /// `~/.flashagent/MEMORY.md`
     Global,
 }
 
 impl MemoryKind {
-    /// Human label used in the injected block.
     pub fn label(self) -> &'static str {
         match self {
             MemoryKind::Project => "project memory",
@@ -44,24 +34,18 @@ impl MemoryKind {
     }
 }
 
-/// One collected memory document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryDoc {
-    /// Absolute path of the file (for point-wise reading by the model).
+    /// Absolute, so the model can read the file point-wise.
     pub path: PathBuf,
-    /// Origin kind.
     pub kind: MemoryKind,
-    /// Raw file content.
     pub content: String,
 }
 
-/// Heading lines of a markdown document — its outline.
 pub fn outline(content: &str) -> Vec<&str> {
     content.lines().filter(|l| l.starts_with('#')).collect()
 }
 
-/// Read one file if present; missing files are silently skipped (a project
-/// without memory is normal).
 fn read_if_present(dir: &Path, name: &str, kind: MemoryKind) -> Option<MemoryDoc> {
     let path = dir.join(name);
     if !crate::permissions::path_is_inside(dir, &path.to_string_lossy()) {
@@ -71,13 +55,12 @@ fn read_if_present(dir: &Path, name: &str, kind: MemoryKind) -> Option<MemoryDoc
     Some(MemoryDoc { path, kind, content })
 }
 
-/// Collect memory docs: project files and rule directories in priority order, then the global one.
-/// Priority hierarchy: .flashagent/rules/ > .agents/rules/ > AGENTS.md / CLAUDE.md / MEMORY.md > ~/.flashagent/rules/ > ~/.flashagent/MEMORY.md
-/// Never fails: unreadable/absent files are skipped.
+/// Priority: .flashagent/rules/ > .agents/rules/ > AGENTS.md / CLAUDE.md /
+/// MEMORY.md > ~/.flashagent/rules/ > ~/.flashagent/MEMORY.md. Unreadable or
+/// absent files are skipped.
 pub fn collect(project_dir: &Path, global_dir: &Path) -> Vec<MemoryDoc> {
     let mut docs = Vec::new();
 
-    // 1. Project rules directory: .flashagent/rules/ and .agents/rules/
     for rules_subdir in &[".flashagent/rules", ".agents/rules"] {
         let rdir = project_dir.join(rules_subdir);
         if let Ok(entries) = std::fs::read_dir(rdir) {
@@ -99,7 +82,6 @@ pub fn collect(project_dir: &Path, global_dir: &Path) -> Vec<MemoryDoc> {
         }
     }
 
-    // 2. Project root memory and rule files
     for name in &["MEMORY.md", "CLAUDE.md", "AGENTS.md", ".cursorrules"] {
         let kind = if *name == "MEMORY.md" { MemoryKind::Project } else { MemoryKind::Foreign };
         if let Some(d) = read_if_present(project_dir, name, kind) {
@@ -107,7 +89,6 @@ pub fn collect(project_dir: &Path, global_dir: &Path) -> Vec<MemoryDoc> {
         }
     }
 
-    // 3. User-global rules directory: ~/.flashagent/rules/
     let global_rules = global_dir.join("rules");
     if let Ok(entries) = std::fs::read_dir(global_rules) {
         let mut paths: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
@@ -127,7 +108,6 @@ pub fn collect(project_dir: &Path, global_dir: &Path) -> Vec<MemoryDoc> {
         }
     }
 
-    // 4. User-global MEMORY.md
     if let Some(d) = read_if_present(global_dir, GLOBAL_FILENAME, MemoryKind::Global) {
         docs.push(d);
     }
@@ -159,12 +139,9 @@ fn doc_block(doc: &MemoryDoc, whole: bool) -> String {
     }
 }
 
-/// Build the memory block for the system context under `max_tokens`.
-///
-/// Policy: documents go in whole, in priority order, while they fit; the first
-/// document that no longer fits — and every one after it — degrades to its
-/// outline. Overhead of the block itself (headers, notes) is accounted for by
-/// reserving 64 tokens per document plus a fixed 32 for the preamble.
+/// Documents go in whole, in priority order, while they fit; from the first
+/// one that does not fit, the rest degrade to outlines. Block overhead is 64
+/// tokens per document plus 32 for the preamble.
 pub fn injection_block(docs: &[MemoryDoc], max_tokens: usize) -> String {
     if docs.is_empty() {
         return String::new();
@@ -209,7 +186,6 @@ mod tests {
         let proj = tempdir("collect");
         fs::write(proj.join("MEMORY.md"), "# Project\nproject goals\n").unwrap();
         fs::write(proj.join("CLAUDE.md"), "# Foreign rules\nbe terse\n").unwrap();
-        // AGENTS.md absent on purpose.
         let glob = tempdir("collect");
         fs::write(glob.join("MEMORY.md"), "# Global\nprefer brevity\n").unwrap();
 
@@ -220,7 +196,6 @@ mod tests {
         assert_eq!(docs[1].kind, MemoryKind::Foreign);
         assert_eq!(docs[2].kind, MemoryKind::Global);
 
-        // Nothing exists → empty, no error.
         let empty = collect(&tempdir("collect"), &tempdir("collect"));
         assert!(empty.is_empty());
     }
@@ -278,9 +253,7 @@ mod tests {
             },
         ];
         let block = injection_block(&docs, 200);
-        // Small one is whole.
         assert!(block.contains("fits in context"));
-        // Big one is outline-only.
         assert!(block.contains("outline only"));
         assert!(block.contains("## Section 1"));
         assert!(!block.contains(big_body.trim()));

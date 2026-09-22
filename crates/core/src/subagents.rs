@@ -1,10 +1,7 @@
-//! Dynamic subagents: the parent loop spawns a child [`AgentLoop`] with its own
-//! role, a constrained tool subset and inherited permissions. Results flow back
-//! as tool results; children can message each other over typed per-id channels.
-//!
-//! Subagents inherit the parent's rights and can never expand
-//! them. `core` stays protocol-free: the host only needs [`LlmSource`] and a
-//! tool factory, so the service/UI layer can plug any backend.
+//! Subagents: the parent loop spawns a child [`AgentLoop`] with its own role,
+//! a tool subset and inherited permissions, which it can never expand. Results
+//! come back as tool results; children can message each other over per-id
+//! channels.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,30 +12,24 @@ use flashagent_llm::{ChatMessage, ToolCall, ToolSpec};
 
 use crate::loop_::{AgentLoop, DoneReason, LlmSource, LoopConfig, ToolExec, ToolOutput};
 
-/// A dynamic role for a subagent: a system prompt plus which of the parent's
-/// tools it may use. Roles are data, not code.
+/// A system prompt plus which of the parent's tools the role may use.
 #[derive(Debug, Clone)]
 pub struct AgentRole {
-    /// Role name (shown in the UI tree).
     pub name: String,
-    /// System prompt describing the role's job.
     pub system_prompt: String,
-    /// Tool names this role may call; empty = the parent's full toolset.
+    /// Empty means the parent's full toolset.
     pub tools: Vec<String>,
 }
 
-/// What the parent asks a subagent to do.
 #[derive(Debug, Clone)]
 pub struct SubagentSpec {
-    /// Role to run under.
     pub role: AgentRole,
-    /// Task description (goes into the child's first user message).
+    /// Goes into the child's first user message.
     pub prompt: String,
-    /// Max loop steps for the child.
     pub max_steps: u32,
-    /// Max wall-clock time for the child (None = no limit).
+    /// `None` means no limit.
     pub timeout: Option<Duration>,
-    /// Max output characters fed back to the parent (defensive cap).
+    /// Cap on output fed back to the parent.
     pub max_output_chars: usize,
 }
 
@@ -54,73 +45,53 @@ impl Default for SubagentSpec {
     }
 }
 
-/// Typed message a subagent sends to another subagent (or the parent).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SubagentMsg {
-    /// Plain text payload addressed by id.
     Text { from: String, to: String, body: String },
-    /// Child finished; the final answer is the body.
     Finished { from: String, body: String, done: DoneReason },
-    /// Parent instructs the child to stop.
     Cancel { to: String },
 }
 
-/// A running subagent: an id, a mpsc receiver for its messages, and a handle
-/// to join it.
 pub struct SubagentHandle {
-    /// Unique id assigned at spawn.
     pub id: String,
-    /// Receiver for messages sent to this child.
     pub rx: tokio::sync::mpsc::UnboundedReceiver<SubagentMsg>,
-    /// Join handle for the child task.
     pub task: tokio::task::JoinHandle<()>,
 }
 
-/// Outcome of one subagent run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubagentResult {
-    /// The subagent id.
     pub id: String,
-    /// Final answer text.
     pub answer: String,
-    /// Whether it ran to completion or was cancelled/timed out.
     pub done: DoneReason,
 }
 
-/// Factory for building a [`ToolExec`] for a subagent. The service layer
-/// supplies this so the child sees the same tools but with inherited rights.
+/// Supplied by the service layer, so the child sees the same tools with the
+/// parent's rights.
 #[async_trait]
 pub trait SubagentToolFactory: Send + Sync {
-    /// Build the executor for `role`; `tools` restricts the visible set.
+    /// `tools` restricts the visible set.
     fn build(&self, role: &AgentRole, tools: &[String]) -> Arc<dyn ToolExec>;
 }
 
-/// Orchestrator for subagents. Owns the LLM source; hands out ids and channels.
-/// Children inherit the parent's permission state (via the tool factory) — they
-/// never expand it.
+/// Children inherit the parent's permission state through the tool factory.
 pub struct SubagentHost {
     llm: Arc<dyn LlmSource>,
     factory: Arc<dyn SubagentToolFactory>,
     next_id: Mutex<u32>,
     live: Arc<AtomicUsize>,
-    /// Default max steps for children spawned with `spec.max_steps == 0`.
+    /// Used when `spec.max_steps == 0`.
     default_max_steps: u32,
 }
 
 impl SubagentHost {
-    /// New host over `llm`. The tool factory applies permissions and tool
-    /// restriction for each child.
     pub fn new(llm: Arc<dyn LlmSource>, factory: Arc<dyn SubagentToolFactory>) -> Self {
         Self { llm, factory, next_id: Mutex::new(1), live: Arc::new(AtomicUsize::new(0)), default_max_steps: 20 }
     }
 
-    /// Number of subagents currently running (for the UI counter).
     pub fn live(&self) -> usize {
         self.live.load(Ordering::Relaxed)
     }
 
-    /// Spawn a subagent. Returns a handle; the child runs on the current
-    /// runtime until it completes, cancels or times out.
     pub fn spawn(&self, spec: SubagentSpec) -> SubagentHandle {
         let id = {
             let mut n = self.next_id.lock().expect("next_id");
@@ -185,8 +156,8 @@ impl Drop for LiveGuard {
     }
 }
 
-/// Aborts the child task when the parent stops waiting for it (the user
-/// cancelled the parent turn), so no orphaned subagent keeps running tools.
+/// Aborts the child when the parent stops waiting (the user cancelled the
+/// parent turn), so no orphaned subagent keeps running tools.
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
@@ -195,7 +166,6 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Extract the last assistant text from a history (the child's final answer).
 fn last_assistant_text(history: &[ChatMessage]) -> String {
     history
         .iter()
@@ -205,17 +175,15 @@ fn last_assistant_text(history: &[ChatMessage]) -> String {
         .unwrap_or_default()
 }
 
-/// A [`ToolExec`] view that runs a subagent and returns its answer as the tool
-/// result. The parent loop calls `spawn` via this; the answer travels back in
-/// [`flashagent_llm::Role::Tool`], so injected content can never become an instruction.
+/// Runs a subagent and returns its answer as a tool result, so injected
+/// content in the answer can never become an instruction.
 pub struct SubagentTool {
     host: Arc<SubagentHost>,
-    /// Whether to forward events to the UI as well (parent visibility).
+    /// Also forward events to the UI.
     pub events: bool,
 }
 
 impl SubagentTool {
-    /// New tool over `host`.
     pub fn new(host: Arc<SubagentHost>) -> Self {
         Self { host, events: true }
     }
@@ -232,7 +200,6 @@ impl ToolExec for SubagentTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolOutput {
-        // Parse role/task/limits from args.
         let v: serde_json::Value = serde_json::from_str(call.args_json.trim()).unwrap_or(serde_json::json!({}));
         let task = v.get("task").and_then(|x| x.as_str()).unwrap_or("").to_string();
         if task.is_empty() {
@@ -271,8 +238,7 @@ impl ToolExec for SubagentTool {
     }
 }
 
-/// Default system prompt for a named role. Role text is data, not code; the
-/// child still inherits the parent's permission constraints at execution.
+/// The child still inherits the parent's permission constraints.
 fn role_prompt(role: &str) -> String {
     match role {
         "researcher" => "You are a research subagent. Gather information, read files, and report findings concisely. You may use read/search tools. Do not modify files unless asked.".to_string(),
@@ -288,8 +254,7 @@ mod tests {
     use super::*;
     use flashagent_llm::{FinishReason, LlmEvent};
 
-    // A scripted LLM: returns a fixed list of events per turn. LlmEvent is
-    // Clone; we wrap each in Ok at emission (LlmError is not Clone).
+    // LlmEvent is Clone but LlmError is not, so events are wrapped in Ok on emit.
     struct Scripted {
         events: Arc<Vec<LlmEvent>>,
     }
@@ -306,8 +271,6 @@ mod tests {
         }
     }
 
-    // A tool factory that records which tools were requested, and wraps the
-    // inner executor. We just need it to build *something* the loop can run.
     #[derive(Clone)]
     struct Factory;
 
@@ -392,9 +355,8 @@ mod tests {
 
     #[tokio::test]
     async fn role_system_prompt_is_used() {
-        // We can't inspect the child's history directly, but we can assert the
-        // spec builds a System message: verify through the factory that tools
-        // restriction is passed and the role name is correct.
+        // The child's history is not inspectable; the factory checks that the tool
+        // restriction and role name are passed.
         let host = SubagentHost::new(llm(), Arc::new(Factory));
         let spec = SubagentSpec {
             role: AgentRole { name: "coder".into(), system_prompt: "code".into(), tools: vec!["write_file".into()] },
@@ -408,9 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_returns_answer_in_tool_role() {
-        // The SubagentTool wraps a host and must surface the answer as a
-        // ToolOutput (so the parent sees it as a tool result, never a system
-        // instruction).
+        // The answer must arrive as a tool result, never a system instruction.
         let host = Arc::new(SubagentHost::new(llm(), Arc::new(Factory)));
         let tool = SubagentTool::new(host);
         let out = tool

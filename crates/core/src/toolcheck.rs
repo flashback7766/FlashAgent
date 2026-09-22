@@ -1,10 +1,6 @@
-//! Does this model actually drive tools?
-//!
-//! Local models vary wildly here, and the failure is quiet: the agent looks
-//! like it is working while the model narrates what it would do. These
-//! scenarios are the smallest set that separates a model you can hand a task
-//! to from one you cannot — each maps to something the agent loop does on
-//! every turn, so a failure here is a failure you will meet within minutes.
+//! Checks whether a model actually drives tools. The failure is quiet: the
+//! model narrates what it would do instead of calling anything. Each scenario
+//! maps to something the agent loop does every turn.
 
 use std::time::{Duration, Instant};
 
@@ -13,18 +9,14 @@ use futures::StreamExt;
 
 use crate::LlmSource;
 
-/// How the model expressed a tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallStyle {
-    /// The backend reported a real `tool_calls` delta.
     Native,
-    /// The call arrived as text (`<tool_call>`, `[TOOL_CALLS]`, bare JSON) and
-    /// FlashAgent's scanner recovered it.
+    /// Arrived as text and was recovered by the scanner.
     Recovered,
 }
 
 impl CallStyle {
-    /// Word for a table cell.
     pub fn label(self) -> &'static str {
         match self {
             Self::Native => "native",
@@ -33,20 +25,15 @@ impl CallStyle {
     }
 }
 
-/// What one scenario did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// The model did exactly the right thing.
     Pass { style: CallStyle, secs: f32 },
-    /// It called the right tool but got the arguments wrong — the loop runs,
-    /// the work is wrong.
+    /// Right tool, wrong arguments: the loop runs, the work is wrong.
     Partial { detail: String, secs: f32 },
-    /// It did not do the thing at all.
     Fail { detail: String, secs: f32 },
 }
 
 impl Outcome {
-    /// Whether this counts towards the score.
     pub fn is_pass(&self) -> bool {
         matches!(self, Self::Pass { .. })
     }
@@ -65,17 +52,13 @@ impl Outcome {
     }
 }
 
-/// One check, and what the model is expected to do.
 pub struct Scenario {
-    /// Stable identifier, used in machine-readable output.
+    /// Stable, for machine-readable output.
     pub key: &'static str,
-    /// One line describing what is being checked.
     pub title: &'static str,
-    /// Why a failure here matters.
     pub matters: &'static str,
 }
 
-/// Every scenario, in the order they are run.
 pub fn scenarios() -> Vec<Scenario> {
     vec![
         Scenario {
@@ -150,8 +133,7 @@ fn opts() -> TurnOptions {
     }
 }
 
-/// What one turn produced. Calls are kept in full: a turn may legitimately
-/// carry several, and whether it does is itself one of the things measured.
+/// Calls are kept in full: whether a turn carries several is itself measured.
 struct Turn {
     calls: Vec<(String, String, CallStyle)>,
     text: String,
@@ -173,8 +155,7 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
             .turn_with_options(messages, &tools, &opts())
             .await
             .map_err(|e| e.to_string())?;
-        // Deltas arrive interleaved by index, the same way the agent loop
-        // assembles them.
+        // Deltas arrive interleaved by index, as in the agent loop.
         let mut parts: Vec<(String, String)> = Vec::new();
         let mut text = String::new();
         while let Some(ev) = stream.next().await {
@@ -219,8 +200,7 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
                 .map(|(name, args)| (name, args, CallStyle::Native))
                 .collect();
             if calls.is_empty() {
-                // The same recovery the agent loop uses, so the score reflects
-                // what a real run would do, not what the backend reported.
+                // The same recovery as the agent loop, so the score reflects a real run.
                 let mut scanner = TextToolScanner::default();
                 let mut events = scanner.feed(&text);
                 events.extend(scanner.finish());
@@ -254,35 +234,30 @@ fn snippet(text: &str) -> String {
     }
 }
 
-/// The result of checking one model.
 #[derive(Debug, Clone)]
 pub struct CheckReport {
-    /// Model id as the server names it.
     pub model: String,
-    /// Outcome per scenario, in [`scenarios`] order.
+    /// In [`scenarios`] order.
     pub results: Vec<(String, Outcome)>,
 }
 
 impl CheckReport {
-    /// Passed scenarios out of the total.
     pub fn score(&self) -> (usize, usize) {
         (self.results.iter().filter(|(_, o)| o.is_pass()).count(), self.results.len())
     }
 
-    /// Whether any call arrived only because the text scanner rescued it —
-    /// worth saying out loud, since it is slower and more fragile.
+    /// Any call that only arrived through the text scanner, which is slower and
+    /// more fragile.
     pub fn needed_recovery(&self) -> bool {
         self.results
             .iter()
             .any(|(_, o)| matches!(o, Outcome::Pass { style: CallStyle::Recovered, .. }))
     }
 
-    /// Total seconds spent waiting on the model.
     pub fn total_secs(&self) -> f32 {
         self.results.iter().map(|(_, o)| o.secs()).sum()
     }
 
-    /// One-line judgement, in plain words.
     pub fn verdict(&self) -> &'static str {
         let (passed, total) = self.score();
         match (passed, total) {
@@ -294,7 +269,6 @@ impl CheckReport {
         }
     }
 
-    /// Human-readable lines for a terminal.
     pub fn lines(&self) -> Vec<String> {
         let mut out = Vec::new();
         let title_width = scenarios().iter().map(|s| s.title.len()).max().unwrap_or(40);
@@ -312,7 +286,6 @@ impl CheckReport {
         out
     }
 
-    /// A row for the README table.
     pub fn markdown_row(&self) -> String {
         let (passed, total) = self.score();
         let style = if self.needed_recovery() { "text, recovered" } else { "native" };
@@ -324,7 +297,7 @@ impl CheckReport {
         )
     }
 
-    /// Machine-readable form, so a published table can be checked.
+    /// So a published table can be checked.
     pub fn to_json(&self) -> serde_json::Value {
         let (passed, total) = self.score();
         serde_json::json!({
@@ -344,18 +317,16 @@ impl CheckReport {
     }
 }
 
-/// Header for the README table these rows go into.
 pub const MARKDOWN_HEADER: &str =
     "| Model | Score | Tool calls | Time | Verdict |\n| :--- | :--- | :--- | :--- | :--- |";
 
-/// Models a chat check makes no sense for: they never answer a chat request,
-/// so scoring them says nothing about the ones that do.
+/// Embedding and similar models never answer a chat request.
 pub fn is_chat_model(id: &str) -> bool {
     let lower = id.to_lowercase();
     !(lower.contains("embed") || lower.contains("rerank") || lower.contains("whisper"))
 }
 
-/// Run every scenario against `llm`. `timeout` caps each turn, not the run.
+/// `timeout` caps each turn, not the run.
 pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) -> CheckReport {
     let mut results = Vec::new();
 
@@ -396,7 +367,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         }
     })));
 
-    // 3. A question with no tool in it. Advertising tools must not turn every
+    // 3. A question with no tool in it: advertised tools must not turn every
     //    reply into a call.
     let turn = run_turn(
         llm,
@@ -422,7 +393,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         },
     ));
 
-    // 4. A tool result is already in the history; the answer is in it.
+    // 4. The answer is already in a tool result in the history.
     let mut asked = ChatMessage::assistant("");
     asked.tool_calls = vec![flashagent_llm::ToolCall {
         id: "call_1".into(),
@@ -485,7 +456,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         }
     })));
 
-    // 6. Content with the characters that break naive JSON encoding.
+    // 6. Content with characters that break naive JSON encoding.
     const EXACT: &str = "line one\n\"quoted\"\nend";
     let turn = run_turn(
         llm,
@@ -509,7 +480,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         }
     })));
 
-    // 7. The first attempt failed. Adapt, do not repeat and do not give up.
+    // 7. The first attempt failed: adapt, do not repeat or give up.
     let mut failed = ChatMessage::assistant("");
     failed.tool_calls = vec![flashagent_llm::ToolCall {
         id: "call_3".into(),
@@ -572,7 +543,6 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     CheckReport { model: model.to_string(), results }
 }
 
-/// Shared judgement for the scenarios that must end in a specific call.
 fn judge_call(
     turn: &Turn,
     expected: &str,
@@ -613,7 +583,6 @@ mod tests {
     use futures::stream::BoxStream;
     use std::sync::Mutex;
 
-    /// A backend that answers each turn from a script.
     struct Scripted {
         turns: Mutex<Vec<Vec<LlmEvent>>>,
     }
@@ -641,7 +610,6 @@ mod tests {
         calls(&[(name, args)])
     }
 
-    /// One turn carrying several calls, the way a model that batches answers.
     fn calls(specs: &[(&str, &str)]) -> Vec<LlmEvent> {
         let mut events: Vec<LlmEvent> = specs
             .iter()
@@ -701,16 +669,14 @@ mod tests {
             text("I will now report the status."),
         ]);
         // Only the two scenarios that ask for prose can pass.
-        // Two of the five ask for prose, and prose is all it produced.
         assert_eq!(report.score(), (2, 8), "{:?}", report.results);
         assert_eq!(report.verdict(), "mostly fails to drive tools");
     }
 
     #[test]
     fn calls_written_as_text_count_but_are_flagged() {
-        // Plenty of small models emit Hermes markup instead of a tool_calls
-        // delta; the loop recovers those, so the score must too — while
-        // saying that is what happened.
+        // Many small models emit Hermes markup instead of a tool_calls delta; the
+        // loop recovers those, so the score must too, and report it.
         let mut turns = perfect();
         turns[0] = text("<tool_call>{\"name\": \"report_status\", \"arguments\": {\"code\": 42}}</tool_call>");
         let report = run(turns);
@@ -757,8 +723,7 @@ mod tests {
 
     #[test]
     fn content_mangled_in_transit_is_not_a_pass() {
-        // Quotes and newlines are where naive JSON encoding breaks, and a
-        // model that loses them corrupts the file it is writing.
+        // A model that loses quotes or newlines corrupts the file it writes.
         let mut turns = perfect();
         turns[5] = call("write_file", r#"{"path":"notes.txt","content":"line one quoted end"}"#);
         let report = run(turns);

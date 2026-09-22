@@ -1,9 +1,7 @@
-//! Minimal line-based unified diff. Used by the permission layer to show the
-//! user what a write/edit call is about to change before approval.
+//! Line-based unified diff for the approval preview of write/edit calls.
 
-/// Produce a unified diff (`---`/`+++` headers, `@@` hunks, `context` lines of
-/// context). `old = None` means the file is new (`--- /dev/null`).
-/// Very large changed regions degrade to a summary line instead of a huge matrix.
+/// `old = None` means a new file. Very large changed regions degrade to a
+/// summary line.
 pub fn unified(old: Option<&str>, new: &str, path: &str, context: usize) -> String {
     let old_text = old.unwrap_or("");
     let old_lines: Vec<&str> = old_text.lines().collect();
@@ -44,8 +42,7 @@ pub fn unified(old: Option<&str>, new: &str, path: &str, context: usize) -> Stri
         return out; // identical
     }
 
-    // Group ops into hunks: contiguous runs of changes plus up to `context`
-    // surrounding same-lines. Record hunk boundaries as op-index ranges.
+    // Hunks are runs of changes plus up to `context` unchanged lines around them.
     let mut hunks: Vec<(usize, usize)> = Vec::new(); // [start, end) over ops
     let mut start = 0usize;
     let mut end = 0usize;
@@ -73,8 +70,6 @@ pub fn unified(old: Option<&str>, new: &str, path: &str, context: usize) -> Stri
         hunks.push((start, end));
     }
 
-    // Materialize hunks. Old/new line numbers come from counting ops before
-    // each hunk start.
     for (hstart, hend) in hunks {
         let mut old_pos = prefix + 1;
         let mut new_pos = prefix + 1;
@@ -128,7 +123,6 @@ enum Op<'a> {
 fn diff_ops<'a>(old: &'a [&'a str], new: &'a [&'a str]) -> Vec<Op<'a>> {
     let n = old.len();
     let m = new.len();
-    // LCS table
     let mut dp = vec![0usize; (n + 1) * (m + 1)];
     let width = m + 1;
     for i in (0..n).rev() {

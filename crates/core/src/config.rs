@@ -1,11 +1,9 @@
-//! Application configuration persistence and preset management.
 //! Stored in `~/.flashagent/config.json`.
 
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use crate::permissions::PermissionMode;
 
-/// Predefined backend endpoints for 1-click selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendPreset {
     pub name: String,
@@ -51,10 +49,9 @@ fn default_repeat_penalty() -> Option<f32> { Some(1.0) }
 fn default_presence_penalty() -> Option<f32> { Some(0.0) }
 fn default_min_p() -> Option<f32> { Some(0.0) }
 
-/// Accept a stored enum value whatever its case or separators — `"Beta"`,
-/// `"beta"`, `"accept_edits"` and `"AcceptEdits"` all mean what they look
-/// like, and a config is written by hand often enough that insisting on one
-/// spelling only costs the user their settings.
+/// Accepts any case or separators (`"Beta"`, `"accept_edits"`,
+/// `"AcceptEdits"`): configs are edited by hand, and a strict spelling would
+/// cost the user their settings.
 macro_rules! lenient_enum {
     ($ty:ty, $name:expr, { $($text:literal => $variant:expr),+ $(,)? }) => {
         impl<'de> serde::Deserialize<'de> for $ty {
@@ -76,7 +73,6 @@ macro_rules! lenient_enum {
     };
 }
 
-/// Predefined sampling presets for model generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub enum SamplingPreset {
     #[default]
@@ -143,7 +139,7 @@ impl SamplingPreset {
         }
     }
 
-    /// Values: (temp, top_p, top_k, repeat_penalty, presence_penalty, min_p)
+    /// (temp, top_p, top_k, repeat_penalty, presence_penalty, min_p)
     pub fn values(self) -> (f32, f32, u32, f32, f32, f32) {
         match self {
             Self::Coding => (0.60, 0.95, 20, 1.00, 0.00, 0.00),
@@ -171,126 +167,96 @@ impl SamplingPreset {
     }
 }
 
-/// Global FlashAgent application configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
-    /// LLM server base URL.
     pub backend_url: String,
-    /// Optional API key for remote providers or authenticated endpoints.
     pub api_key: Option<String>,
-    /// Selected default model ID.
     pub model: String,
-    /// Permission mode to start in: the one the user was in last time
-    /// (Accept Edits on the very first run).
+    /// The mode the user was in last time; Accept Edits on the first run.
     pub permission_mode: PermissionMode,
-    /// Default thinking effort preset ("default", "off", "low", "medium", "high").
+    /// "default", "off", "low", "medium", "high".
     pub thinking_effort: String,
-    /// Active sampling preset.
     #[serde(default)]
     pub sampling_preset: SamplingPreset,
-    /// Generation temperature (default 0.60 for coding preset).
     pub temperature: f32,
-    /// Top P sampling nucleus (default 0.95).
     #[serde(default = "default_top_p")]
     pub top_p: Option<f32>,
-    /// Top K sampling pool size (default 20).
     #[serde(default = "default_top_k")]
     pub top_k: Option<u32>,
-    /// Repeat penalty (default 1.0).
     #[serde(default = "default_repeat_penalty")]
     pub repeat_penalty: Option<f32>,
-    /// Presence penalty (default 0.0).
     #[serde(default = "default_presence_penalty")]
     pub presence_penalty: Option<f32>,
-    /// Min P sampling threshold (default 0.0).
     #[serde(default = "default_min_p")]
     pub min_p: Option<f32>,
-    /// Maximum autonomous loop steps per turn (None = unlimited).
+    /// `None` means unlimited.
     #[serde(default)]
     pub max_steps: Option<u32>,
-    /// Context token budget for memory injection.
+    /// Token budget for memory injection.
     pub token_budget: usize,
-    /// Whether `web_fetch` and `web_search` are offered to the model. On by
-    /// default; stored under a new key so the old opt-in `free_search: false`
-    /// that every earlier config was born with does not keep them off.
+    /// On by default. A new key, so the old `free_search: false` that every
+    /// earlier config was saved with does not keep the web tools off.
     #[serde(default = "default_true")]
     pub web_tools: bool,
-    /// `/goal` step limit; `None` = unlimited.
+    /// `None` means unlimited.
     #[serde(default)]
     pub goal_max_steps: Option<u32>,
-    /// `/goal` wall-clock limit in minutes; `None` = unlimited.
+    /// Minutes; `None` means unlimited.
     #[serde(default)]
     pub goal_max_minutes: Option<u32>,
-    /// `/goal` generated-token limit; `None` = unlimited.
+    /// Generated tokens; `None` means unlimited.
     #[serde(default)]
     pub goal_max_output_tokens: Option<i64>,
-    /// Whether the first start setup wizard has been completed.
     pub setup_completed: bool,
-    /// Toolset exposure profile (Auto / Full / Compact).
     #[serde(default)]
     pub toolset_profile: ToolsetProfile,
-    /// Trusted working directories where trust confirmation is bypassed.
+    /// Trust confirmation is skipped for these.
     #[serde(default)]
     pub trusted_directories: Vec<PathBuf>,
-    /// Update release channel (Beta / Stable).
     #[serde(default = "default_update_channel")]
     pub update_channel: UpdateChannel,
-    /// Whether updates are checked for, downloaded and installed in the
-    /// background.
+    /// Check, download and install in the background.
     #[serde(default = "default_true")]
     pub auto_check_updates: bool,
-    /// Whether animated swift mascot is shown in welcome card.
     #[serde(default = "default_true")]
     pub show_mascot: bool,
-    /// Whether rotating tips animation is enabled.
     #[serde(default = "default_true")]
     pub show_tips: bool,
-    /// Whether TTFT (Time To First Token) and prefill speed metrics are displayed.
     #[serde(default = "default_true")]
     pub show_ttft: bool,
-    /// Whether prompt/generation token counters are shown in status bar.
     #[serde(default = "default_true")]
     pub show_tokens: bool,
-    /// Whether clipboard and notification toasts are shown.
     #[serde(default = "default_true")]
     pub show_toasts: bool,
-    /// `--url` for this run only: the URL given on the command line and the
-    /// one the config file had. Saving writes the file's URL back unless the
-    /// user has since picked another in Settings, so a one-off launch against
-    /// another server does not move every later launch there.
-    /// How replies sound: base style and characteristics (Settings → Style).
+    /// Settings → Style.
     #[serde(default)]
     pub personality: crate::personality::Personality,
+    /// `--url` for this run only: (URL from the command line, URL from the
+    /// file). Saving keeps the file's URL unless the user picked another in
+    /// Settings, so a one-off launch does not move later launches.
     #[serde(skip)]
     pub url_override: Option<(String, String)>,
-    /// Whether the interface moves: sweeps, pulses, panels unfolding. Off
-    /// keeps spinners but nothing decorative.
+    /// Off keeps spinners but nothing decorative.
     #[serde(default = "default_true")]
     pub animations: bool,
-    /// How the finished frame is recoloured (Settings -> UI -> Theme).
     #[serde(default)]
     pub color_theme: ColorTheme,
-    /// Whether automatic context compaction (/compact) is enabled.
     #[serde(default = "default_true")]
     pub auto_compact_context: bool,
-    /// Warning threshold percent for context window usage (default 70).
     #[serde(default = "default_warn_threshold")]
     pub context_warn_threshold: usize,
-    /// Auto-compaction threshold percent, or 0 to choose by window size.
+    /// 0 chooses by window size.
     #[serde(default = "default_compact_threshold")]
     pub context_compact_threshold: usize,
-    /// Whether sessions are automatically saved on exit.
     #[serde(default = "default_true")]
     pub auto_save_sessions: bool,
-    /// Preferred external editor command ($EDITOR, code, cursor, nvim).
+    /// $EDITOR, code, cursor, nvim.
     #[serde(default = "default_editor")]
     pub external_editor: String,
-    /// Number of network retry attempts for LLM requests (default 3).
     #[serde(default = "default_retries")]
     pub network_retries: usize,
-    /// Last version whose changes were shown to the user, so an update can
-    /// tell them what arrived exactly once.
+    /// So an update announces what arrived exactly once.
     #[serde(default)]
     pub last_seen_version: Option<String>,
 }
@@ -304,8 +270,7 @@ fn default_warn_threshold() -> usize {
 }
 
 fn default_compact_threshold() -> usize {
-    // Zero means "choose by the window": 85% of a 128k window, 97% of a
-    // million, 75% of 32k. A single percentage cannot suit both ends.
+    // Zero means "choose by the window": 85% of 128k, 97% of a million, 75% of 32k.
     0
 }
 
@@ -326,26 +291,21 @@ fn default_update_channel() -> UpdateChannel {
     }
 }
 
-/// How the finished frame is recoloured before it reaches the terminal.
-///
-/// Every card in FlashAgent is written in one palette (`Dark`); a theme is a
-/// transformation applied to that palette at the moment of printing, so a
-/// colour added anywhere in the app is themed without being registered
-/// anywhere.
+/// Every card is written in the `Dark` palette; a theme transforms it at
+/// print time, so new colours are themed without registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ColorTheme {
-    /// The palette as written: warm greys, gold accents.
+    /// Warm greys, gold accents.
     #[default]
     Dark,
-    /// The same picture, cooled towards blue.
+    /// Cooled towards blue.
     Midnight,
     /// Pushed away from mid-grey, for bright rooms and weak screens.
     HighContrast,
-    /// Greys only, by brightness — readable on e-ink and in print.
+    /// Greys only, for e-ink and print.
     Monochrome,
-    /// The terminal's own 16 colours, for terminals without 24-bit colour
-    /// and for anyone whose palette is their own business.
+    /// The terminal's own 16 colours, for terminals without 24-bit colour.
     Ansi16,
 }
 
@@ -370,7 +330,6 @@ impl ColorTheme {
         }
     }
 
-    /// The next theme, for a settings row that cycles.
     pub fn next(self) -> Self {
         let all = Self::all();
         let i = all.iter().position(|t| *t == self).unwrap_or(0);
@@ -378,7 +337,6 @@ impl ColorTheme {
     }
 }
 
-/// Release channel for application updates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateChannel {
@@ -410,7 +368,6 @@ impl UpdateChannel {
     }
 }
 
-/// Toolset exposure profile for adjusting advertised tools and schemas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub enum ToolsetProfile {
     #[default]
@@ -484,15 +441,13 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Path to user configuration file `~/.flashagent/config.json`.
     pub fn default_path() -> Option<PathBuf> {
         if let Ok(custom) = std::env::var("FLASHAGENT_CONFIG_PATH") {
             if !custom.trim().is_empty() {
                 return Some(PathBuf::from(custom));
             }
         }
-        // Safety guard: test runner binaries (e.g. target/debug/deps/...) must never
-        // overwrite or read real user configuration in ~/.flashagent/config.json.
+        // Test binaries must never read or overwrite the real config.
         if let Ok(exe) = std::env::current_exe() {
             let exe_str = exe.to_string_lossy();
             if exe_str.contains("/deps/") || exe_str.contains("\\deps\\") {
@@ -505,7 +460,7 @@ impl AppConfig {
             .map(|h| PathBuf::from(h).join(".flashagent").join("config.json"))
     }
 
-    /// Load configuration from disk, or return default if missing/invalid.
+    /// Default when missing or invalid.
     pub fn load() -> Self {
         if let Some(path) = Self::default_path() {
             if path.exists() {
@@ -526,12 +481,9 @@ impl AppConfig {
         Self::default()
     }
 
-    /// Parse a config file, keeping every field that is valid.
-    ///
-    /// A config is a long list of independent settings, so one bad entry must
-    /// not cost the user the other thirty: fields that fail are replaced by
-    /// their default and named in the returned list, and the rest are applied.
-    /// A file that is not a JSON object at all is the only total loss.
+    /// One bad field must not cost the other thirty: failing fields fall back to
+    /// their default and are named in the returned list. Only a file that is not
+    /// a JSON object is a total loss.
     pub fn from_json_str(content: &str) -> (Self, Vec<String>) {
         if let Ok(cfg) = serde_json::from_str::<Self>(content) {
             return (cfg.normalised(), Vec::new());
@@ -542,16 +494,15 @@ impl AppConfig {
             return (Self::default(), vec!["the file (it is not valid JSON)".to_string()]);
         };
 
-        // Start from the defaults and put back one field at a time; whatever
-        // does not survive a round-trip is the field that is broken.
+        // Put fields back one at a time onto the defaults; whatever does not survive
+        // a round-trip is broken.
         let mut base = match serde_json::to_value(Self::default()) {
             Ok(serde_json::Value::Object(map)) => map,
             _ => return (Self::default(), vec!["the file".to_string()]),
         };
         let mut rejected = Vec::new();
         for (key, value) in user {
-            // Unknown keys are ignored by serde anyway; only known ones can
-            // break, and only they are worth reporting.
+            // Unknown keys are dropped by serde; only known ones are worth reporting.
             if !base.contains_key(&key) {
                 continue;
             }
@@ -569,7 +520,6 @@ impl AppConfig {
         (cfg.normalised(), rejected)
     }
 
-    /// Settings that are stored but no longer meaningful on their own.
     fn normalised(mut self) -> Self {
         if self.toolset_profile == ToolsetProfile::Compact {
             self.toolset_profile = ToolsetProfile::Auto;
@@ -577,17 +527,15 @@ impl AppConfig {
         if self.thinking_effort == "default" || self.thinking_effort.is_empty() {
             self.thinking_effort = "auto".to_string();
         }
-        // 90 was what every config shipped with rather than anything anyone
-        // chose, and it is wrong at both ends of the range; it becomes
-        // "choose by the window". A threshold that really was picked by hand
-        // is any other number, and is kept.
+        // 90 was what every config shipped with, not a choice, and it is wrong at
+        // both ends of the window range, so it becomes "choose by the window". Any
+        // other number was picked by hand and is kept.
         if self.context_compact_threshold == 90 {
             self.context_compact_threshold = 0;
         }
         self
     }
 
-    /// Check if a directory is already in the trusted directories list.
     pub fn is_directory_trusted(&self, dir: &Path) -> bool {
         let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         self.trusted_directories.iter().any(|d| {
@@ -596,7 +544,6 @@ impl AppConfig {
         })
     }
 
-    /// Mark a directory as trusted and deduplicate.
     pub fn trust_directory(&mut self, dir: &Path) {
         let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         if !self.is_directory_trusted(&canon) {
@@ -604,7 +551,6 @@ impl AppConfig {
         }
     }
 
-    /// Save configuration to disk.
     pub fn save(&self) -> Result<(), std::io::Error> {
         match Self::default_path() {
             Some(path) => self.save_to(&path),
@@ -612,7 +558,6 @@ impl AppConfig {
         }
     }
 
-    /// Save to explicit file path (useful for testing).
     pub fn save_to(&self, path: &Path) -> Result<(), std::io::Error> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -626,16 +571,14 @@ impl AppConfig {
             _ => serde_json::to_string_pretty(self),
         }
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        // Written beside the file and renamed over it: a crash mid-write
-        // must not leave half a config, which would read as no config at
-        // all and send the user back through the setup wizard.
+        // Written beside the file and renamed over it: a half-written config reads
+        // as no config and sends the user back through the setup wizard.
         let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, path)).inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp);
         })
     }
 
-    /// Load from explicit file path.
     pub fn load_from(path: &Path) -> Result<Self, std::io::Error> {
         let content = std::fs::read_to_string(path)?;
         let cfg = serde_json::from_str(&content)
@@ -676,8 +619,6 @@ mod tests {
 
     #[test]
     fn stored_values_are_read_whatever_their_case() {
-        // A config is edited by hand; "Beta" must not mean something else
-        // than "beta", and the mode may be copied from the label in the app.
         let (cfg, rejected) = AppConfig::from_json_str(
             r#"{"update_channel":"Beta","permission_mode":"Accept Edits","sampling_preset":"MTP_Coding","toolset_profile":"FULL"}"#,
         );
@@ -690,13 +631,11 @@ mod tests {
 
     #[test]
     fn web_tools_are_on_even_for_a_config_that_had_opted_out_by_default() {
-        // Every earlier config was saved with the old opt-in flag set to
-        // false, whether or not its owner ever chose that.
+        // Every earlier config was saved with the old flag set to false.
         let (cfg, rejected) = AppConfig::from_json_str(r#"{"model":"kept","free_search":false}"#);
         assert!(rejected.is_empty(), "{rejected:?}");
         assert!(cfg.web_tools);
         assert!(AppConfig::default().web_tools);
-        // Turning them off under the new key sticks.
         let (off, _) = AppConfig::from_json_str(r#"{"web_tools":false}"#);
         assert!(!off.web_tools);
     }
@@ -714,13 +653,9 @@ mod tests {
 
     #[test]
     fn the_old_shipped_threshold_becomes_the_automatic_one() {
-        // 90 was the number every config was born with, not a decision, and
-        // it is wrong at both ends: too early for a million-token window, too
-        // late for 32k.
         let (cfg, _) = AppConfig::from_json_str(r#"{"context_compact_threshold":90}"#);
         assert_eq!(cfg.context_compact_threshold, 0, "0 means choose by the window");
 
-        // A number someone actually typed is theirs.
         let (chosen, _) = AppConfig::from_json_str(r#"{"context_compact_threshold":60}"#);
         assert_eq!(chosen.context_compact_threshold, 60);
         assert_eq!(AppConfig::default().context_compact_threshold, 0);
@@ -728,8 +663,7 @@ mod tests {
 
     #[test]
     fn one_bad_field_does_not_cost_the_user_the_others() {
-        // The old loader threw the whole file away on any error, so a single
-        // typo silently reset every setting.
+        // The old loader dropped the whole file on any error.
         let (cfg, rejected) = AppConfig::from_json_str(
             r#"{"backend_url":"http://localhost:9999/v1","model":"my-model","temperature":0.2,
                 "update_channel":"purple","context_warn_threshold":55}"#,
@@ -764,8 +698,7 @@ mod tests {
 
     #[test]
     fn unknown_settings_are_ignored_rather_than_reported() {
-        // A key from an older build, or a typo in a key name, is not
-        // something the user can act on — and serde drops it either way.
+        // Unknown keys (older builds, typos) are not reported.
         let (cfg, rejected) = AppConfig::from_json_str(
             r#"{"model":"kept","colour_theme":"dark","update_channel":"nope"}"#,
         );
@@ -797,9 +730,8 @@ mod tests {
 
     #[test]
     fn test_backwards_compatible_deserialization_from_older_schema() {
-        // Minimal older configuration JSON without newly added fields:
-        // missing: sampling_preset, top_p, top_k, max_steps, web_tools, toolset_profile, trusted_directories.
-        // "language" and "silent_update_check" are settings that no longer exist.
+        // Missing fields added later; "language" and "silent_update_check" no longer
+        // exist.
         let old_json = r#"{
             "backend_url": "http://localhost:1234/v1",
             "model": "qwen2.5-coder-32b",
@@ -827,7 +759,6 @@ mod tests {
         cfg.trust_directory(&temp_dir);
         assert!(cfg.is_directory_trusted(&temp_dir));
 
-        // Adding again should not duplicate
         let prev_len = cfg.trusted_directories.len();
         cfg.trust_directory(&temp_dir);
         assert_eq!(cfg.trusted_directories.len(), prev_len);

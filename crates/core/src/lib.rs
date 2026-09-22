@@ -1,8 +1,5 @@
-//! flashagent-core: the agent loop.
-//!
-//! The loop consumes two traits — [`LlmSource`] (streamed model turns) and
-//! [`ToolExec`] (tool execution) — and knows nothing about HTTP, SQL or UI.
-//! Everything the user sees flows out as [`LoopEvent`]s.
+//! The agent loop. It consumes [`LlmSource`] and [`ToolExec`], knows nothing
+//! about HTTP or UI, and reports everything as [`LoopEvent`]s.
 
 pub mod config;
 pub mod context_usage;

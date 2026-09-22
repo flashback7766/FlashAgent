@@ -1,54 +1,34 @@
-//! What this model actually needed, learned from how its turns went.
-//!
-//! Auto effort guesses the difficulty of a task from the request. The guess is
-//! made before the model has said a word, so it cannot know that *this* model
-//! thinks for two minutes about a one-line answer, or that it fumbles tool
-//! calls unless it is given room. That only shows up afterwards, in how the
-//! turn went — so the turns are watched, and the guess is nudged.
-//!
-//! The nudge is deliberately small: one preset step at most, only after a few
-//! consistent observations, and it fades back to neutral as soon as the turns
-//! stop complaining. A learned setting that cannot be walked back is worse
-//! than no learning at all.
+//! Per-model correction of auto effort, learned from how turns went. Auto
+//! guesses difficulty before the model has answered, so it cannot know that a
+//! given model overthinks one-liners or fumbles tools without room. The nudge
+//! is at most one preset step, needs a few consistent turns, and decays back
+//! to neutral when turns stop complaining.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// How much one turn moves the score.
 const LEARNING_RATE: f32 = 0.3;
-/// How far the score must lean before the effort actually moves.
 const TRIGGER: f32 = 0.4;
-/// Turns to watch before trusting the lean at all.
 const MIN_SAMPLES: u32 = 3;
 /// How strongly an unremarkable turn pulls the score back to neutral.
 const DECAY: f32 = 0.75;
 
-/// What happened during one turn, as far as effort is concerned.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TurnOutcome {
-    /// Characters of reasoning the model emitted.
     pub reasoning_chars: usize,
-    /// Characters of actual answer.
     pub answer_chars: usize,
-    /// Tool calls made.
     pub tool_calls: usize,
-    /// Tool calls that came back as errors.
     pub failed_tools: usize,
-    /// The user stopped it while it was still thinking.
     pub interrupted_while_thinking: bool,
     /// The user asked for the answer again.
     pub regenerated: bool,
 }
 
 impl TurnOutcome {
-    /// Which way this turn leans: `+1` wants more thinking, `-1` less, `0`
-    /// nothing to say.
-    ///
-    /// Only unambiguous turns vote. A turn that both failed a tool and ran
-    /// long says two things at once, and the failure is the one that matters:
-    /// a wrong answer costs more than a slow one.
+    /// `+1` wants more thinking, `-1` less. A turn that both failed a tool and
+    /// ran long counts as a failure: a wrong answer costs more than a slow one.
     pub fn signal(&self) -> f32 {
         if self.failed_tools > 0 || self.regenerated {
             return 1.0;
@@ -56,8 +36,7 @@ impl TurnOutcome {
         if self.interrupted_while_thinking {
             return -1.0;
         }
-        // Overthinking has a shape: a mountain of reasoning, a sentence of
-        // answer, and nothing done about it.
+        // Overthinking: a lot of reasoning, a short answer, no tool calls.
         let long_reasoning = self.reasoning_chars > 2_000;
         let tiny_answer = self.answer_chars * 4 < self.reasoning_chars;
         if long_reasoning && tiny_answer && self.tool_calls == 0 {
@@ -67,19 +46,17 @@ impl TurnOutcome {
     }
 }
 
-/// What has been learned about one model.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelBias {
-    /// Running lean, in `[-1, 1]`.
+    /// In `[-1, 1]`.
     #[serde(default)]
     pub score: f32,
-    /// Turns observed.
     #[serde(default)]
     pub samples: u32,
 }
 
 impl ModelBias {
-    /// Preset steps to shift auto effort by: `-1`, `0` or `+1`.
+    /// `-1`, `0` or `+1`.
     pub fn steps(&self) -> i8 {
         if self.samples < MIN_SAMPLES {
             return 0;
@@ -94,7 +71,6 @@ impl ModelBias {
     }
 }
 
-/// Per-model effort corrections, kept on disk between runs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EffortMemory {
     #[serde(default)]
@@ -102,7 +78,6 @@ pub struct EffortMemory {
 }
 
 impl EffortMemory {
-    /// Where the file lives.
     pub fn default_path() -> Option<PathBuf> {
         // Tests must never touch the real file.
         if let Ok(exe) = std::env::current_exe() {
@@ -117,8 +92,7 @@ impl EffortMemory {
             .map(|h| PathBuf::from(h).join(".flashagent").join("effort.json"))
     }
 
-    /// Read what was learned before. A missing or broken file simply means
-    /// nothing has been learned yet — it never costs the user a session.
+    /// A missing or broken file means nothing has been learned yet.
     pub fn load() -> Self {
         Self::default_path()
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -126,7 +100,7 @@ impl EffortMemory {
             .unwrap_or_default()
     }
 
-    /// Write it back, best effort.
+    /// Best effort.
     pub fn save(&self) {
         let Some(path) = Self::default_path() else { return };
         if let Some(parent) = path.parent() {
@@ -137,17 +111,14 @@ impl EffortMemory {
         }
     }
 
-    /// The correction to apply to this model's auto effort right now.
     pub fn steps(&self, model: &str) -> i8 {
         self.models.get(model).map(ModelBias::steps).unwrap_or(0)
     }
 
-    /// What is known about this model, for the user to read.
     pub fn bias(&self, model: &str) -> Option<&ModelBias> {
         self.models.get(model)
     }
 
-    /// Fold one turn into what is known, and report the correction after it.
     pub fn observe(&mut self, model: &str, outcome: &TurnOutcome) -> i8 {
         if model.is_empty() {
             return 0;
@@ -155,8 +126,7 @@ impl EffortMemory {
         let entry = self.models.entry(model.to_string()).or_default();
         let signal = outcome.signal();
         if signal == 0.0 {
-            // Nothing to complain about: drift back towards neutral, so a
-            // correction earned last week does not outlive its reason.
+            // Nothing to complain about: drift back towards neutral.
             entry.score *= DECAY;
         } else {
             entry.score += (signal - entry.score) * LEARNING_RATE;
@@ -166,17 +136,14 @@ impl EffortMemory {
         entry.steps()
     }
 
-    /// One line saying what was learned, or `None` when nothing has been.
     pub fn explain(&self, model: &str) -> Option<String> {
         let bias = self.models.get(model)?;
         if bias.samples == 0 {
             return None;
         }
         let turns = if bias.samples == 1 { "turn" } else { "turns" };
-        // "1 of 3 turn" was the old reading; the count in that sentence is
-        // the threshold, not the sample.
-        // Said in a menu that is already about this model, so the name would
-        // only push the useful half off the edge of the box.
+        // The count is the threshold, not the sample ("1 of 3 turn" was wrong).
+        // The menu is already about this model, so the name is omitted.
         Some(match bias.steps() {
             1 => format!("one step up, after {} {turns}", bias.samples),
             -1 => format!("one step down, after {} {turns}", bias.samples),
@@ -206,8 +173,7 @@ mod tests {
 
     #[test]
     fn one_bad_turn_is_not_enough_to_move_anything() {
-        // A single slow answer is noise; changing the model's behaviour on it
-        // would make the app feel unpredictable.
+        // A single slow answer is noise.
         let mut mem = EffortMemory::default();
         assert_eq!(mem.observe("m", &overthought_turn()), 0);
         assert_eq!(mem.observe("m", &overthought_turn()), 0);
@@ -269,8 +235,7 @@ mod tests {
 
     #[test]
     fn a_failed_tool_outweighs_a_long_think() {
-        // Both are true of the same turn; the wrong answer is the one worth
-        // spending time on.
+        // The wrong answer is the signal that wins.
         let mixed = TurnOutcome {
             reasoning_chars: 9_000,
             answer_chars: 10,

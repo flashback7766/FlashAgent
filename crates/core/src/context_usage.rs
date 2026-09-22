@@ -1,23 +1,12 @@
-//! Context window usage accounting and visual gauge formatting.
-
-/// Component-by-component token breakdown of the context window.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ContextUsage {
-    /// System prompt token count.
     pub system_tokens: usize,
-    /// Injected memory and project context docs tokens.
     pub memory_tokens: usize,
-    /// Tool definitions and JSON schemas tokens.
     pub tools_tokens: usize,
-    /// User conversation prompts tokens.
     pub user_tokens: usize,
-    /// Assistant response text tokens.
     pub assistant_tokens: usize,
-    /// Internal reasoning / thinking tokens.
     pub reasoning_tokens: usize,
-    /// Tool call outputs and results tokens.
     pub tool_output_tokens: usize,
-    /// Total context window capacity of active model (e.g. 131072 for 128k).
     pub total_capacity: usize,
 }
 
@@ -29,7 +18,6 @@ impl ContextUsage {
         }
     }
 
-    /// Sum of all tokens currently used in context.
     pub fn total_used(&self) -> usize {
         self.system_tokens
             + self.memory_tokens
@@ -40,12 +28,10 @@ impl ContextUsage {
             + self.tool_output_tokens
     }
 
-    /// Remaining available token capacity.
     pub fn remaining(&self) -> usize {
         self.total_capacity.saturating_sub(self.total_used())
     }
 
-    /// Used context percentage (0.0 to 100.0).
     pub fn percentage(&self) -> f32 {
         if self.total_capacity == 0 {
             0.0
@@ -54,7 +40,7 @@ impl ContextUsage {
         }
     }
 
-    /// Format used tokens with one-tenth-of-a-thousand precision (e.g. 5.2K instead of 5K).
+    /// E.g. 5.2K instead of 5K.
     pub fn format_used_tokens(tokens: usize) -> String {
         if tokens >= 1_000_000 {
             format!("{:.1}M", tokens as f64 / 1_000_000.0)
@@ -65,7 +51,7 @@ impl ContextUsage {
         }
     }
 
-    /// Format capacity tokens with standard binary/round bounds (e.g. 128K or 200K).
+    /// E.g. 128K or 200K.
     pub fn format_capacity_tokens(tokens: usize) -> String {
         if tokens >= 1_048_576 {
             let m = (tokens as f64) / 1_048_576.0;
@@ -105,18 +91,16 @@ impl ContextUsage {
         }
     }
 
-    /// Format tokens in human readable format (e.g. 128K or 1.2M).
+    /// E.g. 128K or 1.2M.
     pub fn format_tokens(tokens: usize) -> String {
         Self::format_capacity_tokens(tokens)
     }
 
-    /// Format sleek, high-precision gauge string with sub-block resolution:
     /// `❪▌─────────❫ 6% · 4.1K/64K`
     pub fn format_compact_gauge(&self, bar_width: usize) -> String {
         let pct = self.percentage().clamp(0.0, 100.0);
         let bar_width = bar_width.max(4);
 
-        // Color coding for percentage: mint green -> warm amber -> coral warning
         let fill_color = if pct >= 90.0 {
             "\x1b[1;38;2;240;110;110m" // coral red
         } else if pct >= 75.0 {
@@ -129,7 +113,6 @@ impl ContextUsage {
         let bracket_color = "\x1b[38;2;100;105;120m"; // subtle pill bracket
         let reset = "\x1b[0m";
 
-        // Sub-block characters (1/8ths to 8/8ths)
         const SUB_BLOCKS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
 
         let total_eighths = ((pct / 100.0) * (bar_width as f32) * 8.0).round() as usize;
@@ -197,31 +180,22 @@ mod tests {
     }
 }
 
-/// What is known when deciding whether to compact before the next turn.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactionInput {
-    /// Tokens in use right now.
     pub used: usize,
-    /// Window capacity.
     pub capacity: usize,
-    /// Tokens that cannot be compacted away: the system prompt, the injected
-    /// memory index and the tool schemas. Summarising never touches them.
+    /// System prompt, memory index and tool schemas: summarising never shrinks them.
     pub fixed: usize,
-    /// How much the last turn added. The next one is assumed to want about
-    /// as much again.
+    /// The next turn is assumed to need about as much.
     pub last_turn_growth: usize,
-    /// The user's threshold, as a percentage of the window.
+    /// Percentage of the window.
     pub threshold_pct: usize,
 }
 
-/// Whether to compact now, and why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionVerdict {
-    /// Leave it alone.
     No,
-    /// The next turn would not fit.
     NextTurnWouldNotFit,
-    /// Past the threshold the user set.
     PastThreshold,
 }
 
@@ -231,29 +205,23 @@ impl CompactionVerdict {
     }
 }
 
-/// Decide whether the conversation should be summarised before the next turn.
-///
-/// A flat percentage is a poor rule on its own. It fires on a conversation
-/// whose bulk is the system prompt and tool schemas — which summarising cannot
-/// shrink, so the cost is the recent context and the gain is nothing — and it
-/// waits for the line to be crossed even when the next turn is plainly going
-/// to run past the end of the window.
+/// A flat percentage alone fires when the bulk is the system prompt and tool
+/// schemas, which summarising cannot shrink, and waits even when the next turn
+/// will clearly overflow.
 pub fn should_compact(input: CompactionInput) -> CompactionVerdict {
     let CompactionInput { used, capacity, fixed, last_turn_growth, threshold_pct } = input;
     if capacity == 0 {
         return CompactionVerdict::No;
     }
 
-    // What summarising could actually reclaim. Below this there is nothing to
-    // win and a recent turn to lose.
+    // What summarising could reclaim. Below this there is nothing to win.
     let compactable = used.saturating_sub(fixed);
     const MIN_WORTH_COMPACTING: usize = 2_000;
     if compactable < MIN_WORTH_COMPACTING {
         return CompactionVerdict::No;
     }
 
-    // A turn needs room for the prompt and for the answer. Assume the next one
-    // is the size of the last, with a floor for the first few turns.
+    // The next turn is assumed to be the size of the last, with a floor.
     let expected = last_turn_growth.max(1_500);
     let headroom = capacity.saturating_sub(used);
     if headroom < expected {
@@ -294,18 +262,14 @@ mod compaction_tests {
 
     #[test]
     fn a_turn_that_would_not_fit_is_not_made_to_wait_for_the_threshold() {
-        // 80% used, but the last turn took 25k and there are 20k left: the
-        // next one runs off the end, and finding that out mid-turn costs the
-        // turn.
+        // The next turn would run off the end even though 80% is below the threshold.
         let tight = CompactionInput { used: 80_000, last_turn_growth: 25_000, ..input() };
         assert_eq!(should_compact(tight), CompactionVerdict::NextTurnWouldNotFit);
     }
 
     #[test]
     fn nothing_is_compacted_when_the_bulk_cannot_be_compacted() {
-        // A small window filled by the system prompt, memory and tool
-        // schemas: summarising the three remaining messages frees nothing and
-        // throws away what the model was just told.
+        // Summarising frees nothing when the window is mostly fixed content.
         let mostly_fixed = CompactionInput {
             used: 15_000,
             capacity: 16_000,
@@ -337,13 +301,8 @@ mod compaction_tests {
     }
 }
 
-/// The share of the window to fill before summarising, for a window of this
-/// size.
-///
-/// A percentage that suits one window is wrong for another: five percent of a
-/// million-token window is fifty thousand tokens of room, while five percent
-/// of 32k is sixteen hundred — not enough for one answer. So the bigger the
-/// window, the later it compacts.
+/// Bigger windows compact later: 5% of a million tokens is plenty of room,
+/// 5% of 32k is not one answer.
 pub fn default_compact_threshold(capacity: usize) -> usize {
     match capacity {
         c if c >= 1_000_000 => 97,
@@ -355,8 +314,7 @@ pub fn default_compact_threshold(capacity: usize) -> usize {
     }
 }
 
-/// The threshold in force: the user's, when they set one, otherwise the one
-/// this window deserves. Zero means "decide for me".
+/// The user's value, or this window's default when it is 0.
 pub fn resolved_compact_threshold(configured: usize, capacity: usize) -> usize {
     if configured == 0 {
         default_compact_threshold(capacity)
@@ -371,9 +329,6 @@ mod threshold_tests {
 
     #[test]
     fn a_bigger_window_is_filled_further_before_it_is_summarised() {
-        // Ten percent of a million tokens is a hundred thousand: leaving that
-        // empty wastes the window a user paid RAM for. Ten percent of 32k is
-        // barely one answer.
         assert_eq!(default_compact_threshold(1_048_576), 97);
         assert_eq!(default_compact_threshold(524_288), 95);
         assert_eq!(default_compact_threshold(262_144), 90);
@@ -385,8 +340,7 @@ mod threshold_tests {
 
     #[test]
     fn the_bands_are_read_from_the_window_actually_loaded() {
-        // LM Studio reports 200k for a 256k-class model; the band is chosen by
-        // what is loaded, not by what the model could do.
+        // LM Studio reports 200k for a 256k-class model; the band follows what is loaded.
         assert_eq!(default_compact_threshold(204_800), 85);
         assert_eq!(default_compact_threshold(200_000), 85);
     }

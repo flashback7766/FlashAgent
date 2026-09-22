@@ -1,27 +1,14 @@
-//! How FlashAgent talks: a base style and a few characteristics on top.
-//!
-//! A choice reaches the model in two ways, both about tone only:
-//!
-//! - a short description of the voice in the system prompt, written as who
-//!   the assistant is ("you talk like…"), never as a setting someone picked.
-//!   Told "the user chose a friendly tone", a model announces "as you asked,
-//!   I'll be friendly"; told who it is, it just talks that way;
-//! - [`Personality::voice_prelude`], one earlier exchange written in that
-//!   voice, placed after the system prompt in each request and nowhere else.
-//!   Models follow their own previous replies far more closely than any
-//!   description, and they do not quote them back, which is the nearest a
-//!   prompt gets to a fine-tune.
-//!
-//! What the agent does does not change: tool discipline, honesty about
-//! failures and the code are the same in every style. "Default" everywhere
-//! adds nothing, so a user who never opens the screen gets the prompt they
-//! had before.
+//! Voice: a base style plus adjustable traits, tone only. It reaches the model
+//! two ways: a system-prompt section written as who the assistant is (told
+//! "the user chose a friendly tone", a model announces it), and
+//! [`Personality::voice_prelude`], one earlier exchange in that voice, which
+//! models follow more closely than any description. Behaviour is the same in
+//! every style, and all-default adds nothing to the prompt.
 
 use flashagent_llm::ChatMessage;
 
 use serde::{Deserialize, Serialize};
 
-/// The overall voice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BaseStyle {
@@ -58,7 +45,6 @@ impl BaseStyle {
         }
     }
 
-    /// The one-line description shown under the name.
     pub fn blurb(self) -> &'static str {
         match self {
             Self::Default => "Preset style and tone",
@@ -71,7 +57,7 @@ impl BaseStyle {
         }
     }
 
-    /// Who the assistant is in this style, in the second person.
+    /// Second person.
     fn character(self) -> Option<&'static str> {
         Some(match self {
             Self::Default => return None,
@@ -94,8 +80,7 @@ impl BaseStyle {
         })
     }
 
-    /// How this voice would answer "what does `git stash` do?": an opening,
-    /// the points, in the words of this style.
+    /// The answer to "what does `git stash` do?" in this style: opening and points.
     fn sample(self) -> (&'static str, [&'static str; 3]) {
         match self {
             Self::Default | Self::Professional => (
@@ -149,7 +134,6 @@ impl BaseStyle {
         }
     }
 
-    /// The style after (or, with `forward` false, before) this one.
     pub fn cycle(self, forward: bool) -> Self {
         let i = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
         let n = Self::ALL.len();
@@ -157,7 +141,6 @@ impl BaseStyle {
     }
 }
 
-/// More, the default, or less of a characteristic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Level {
@@ -176,7 +159,6 @@ impl Level {
         }
     }
 
-    /// Less → Default → More → Less, or the other way.
     pub fn cycle(self, forward: bool) -> Self {
         match (self, forward) {
             (Self::Less, true) | (Self::More, false) => Self::Default,
@@ -186,7 +168,6 @@ impl Level {
     }
 }
 
-/// A characteristic adjustable on top of the base style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trait {
     Warm,
@@ -207,7 +188,6 @@ impl Trait {
         }
     }
 
-    /// What `level` of this means, as shown to the user.
     pub fn blurb(self, level: Level) -> &'static str {
         match (self, level) {
             (_, Level::Default) => "",
@@ -222,7 +202,6 @@ impl Trait {
         }
     }
 
-    /// The same, as part of who the assistant is.
     fn character(self, level: Level) -> Option<&'static str> {
         Some(match (self, level) {
             (_, Level::Default) => return None,
@@ -238,7 +217,6 @@ impl Trait {
     }
 }
 
-/// The user's choice of voice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Personality {
@@ -268,12 +246,8 @@ impl Personality {
         }
     }
 
-    /// The system-prompt section for this choice; `None` when everything is
-    /// at its default, so the prompt stays exactly as it was.
-    ///
-    /// Written as who the assistant is, with no word about a setting, a
-    /// choice or a request: a model that is told it was asked to sound a
-    /// certain way says so in its replies.
+    /// `None` when everything is default. No mention of a setting or a choice:
+    /// a model told it was asked to sound some way says so in replies.
     pub fn prompt_section(&self) -> Option<String> {
         let lines: Vec<&str> = self
             .base
@@ -293,16 +267,12 @@ impl Personality {
         ))
     }
 
-    /// Whether this voice uses emoji, which the prompt otherwise rules out.
     pub fn uses_emoji(&self) -> bool {
         self.emoji == Level::More
     }
 
-    /// One earlier exchange in this voice, for each request to carry right
-    /// after the system prompt. Empty when everything is at its default.
-    ///
-    /// The question is general knowledge with nothing to do with any
-    /// project, so there is nothing in it for the model to refer back to.
+    /// Carried right after the system prompt. The question is unrelated to any
+    /// project, so the model has nothing in it to refer back to.
     pub fn voice_prelude(&self) -> Vec<ChatMessage> {
         if *self == Personality::default() {
             return Vec::new();
@@ -326,7 +296,6 @@ impl Personality {
         if self.emoji == Level::More {
             opening = if opening.is_empty() { "📦".to_string() } else { format!("{opening} 📦") };
         }
-        // Lists by default only where the style is already terse.
         let as_list = match self.headers_lists {
             Level::More => true,
             Level::Less => false,
@@ -341,7 +310,7 @@ impl Personality {
         if opening.is_empty() { body } else { format!("{opening}\n\n{body}") }
     }
 
-    /// A one-line summary for a settings row: "Friendly · warm+ · emoji−".
+    /// E.g. "Friendly · warm+ · emoji−".
     pub fn summary(&self) -> String {
         let mut parts = vec![self.base.label().to_string()];
         for t in Trait::ALL {
