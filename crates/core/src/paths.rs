@@ -1,20 +1,11 @@
-//! Where a path written in a tool call actually points.
-//!
-//! The model writes paths the way a person does at a shell prompt: relative
-//! to the working directory, absolute, or starting with `~` for the home
-//! folder. A shell expands that `~` before the program ever sees it; a tool
-//! call has no shell, so the expansion happens here — in one place, used both
-//! by the tools that open the file and by the permission layer that decides
-//! whether it may be opened. If the two disagreed, a path could be checked
-//! against one location and read from another.
-//!
-//! `~user` (another person's home) is left alone: there is no portable way to
-//! find it, so it stays a literal name and fails as one.
+//! Tool-call paths: `~` is expanded here because a tool call has no shell.
+//! Both the tools and the permission layer resolve paths through this module,
+//! so a path cannot be checked in one place and opened in another. `~user` is
+//! left as a literal name.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-/// The home folder, or `None` when the environment does not say.
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -22,13 +13,11 @@ fn home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Whether `c` separates path components in a `~`-prefixed path.
 fn is_separator(c: char) -> bool {
     c == '/' || (cfg!(windows) && c == '\\')
 }
 
-/// Replace a leading `~` with the home folder. Anything else is returned
-/// unchanged, including `~user/...` and a bare `~` with no home to point at.
+/// `~user/...` and a bare `~` without a home are returned unchanged.
 pub fn expand_home(raw: &str) -> Cow<'_, str> {
     match home() {
         Some(home) => expand_home_in(raw, &home),
@@ -43,13 +32,10 @@ fn expand_home_in<'a>(raw: &'a str, home: &Path) -> Cow<'a, str> {
     match rest.chars().next() {
         None => Cow::Owned(home.to_string()),
         Some(c) if is_separator(c) => Cow::Owned(format!("{home}{rest}")),
-        // `~user/...`, or a file whose name simply begins with a tilde.
         Some(_) => Cow::Borrowed(raw),
     }
 }
 
-/// The path `raw` names when it is written next to `root`: `~` expanded, an
-/// absolute path taken as it stands, anything else read from `root`.
 pub fn resolve_path(root: &Path, raw: &str) -> PathBuf {
     let raw = expand_home(raw);
     let path = Path::new(raw.as_ref());

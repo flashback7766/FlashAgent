@@ -1,9 +1,6 @@
-//! What files looked like before the agent changed them, turn by turn, so a
-//! turn can be taken back: the files it wrote return to how they were, and
-//! the conversation returns to before it.
-//!
-//! Only the file tools pass through here. A shell command that changes files
-//! does not, and taking a turn back says so rather than pretend otherwise.
+//! Per-turn file snapshots, so a turn can be taken back: files it wrote are
+//! restored and the conversation returns to before it. Only the file tools
+//! are recorded; changes made through the shell are not, and rewind says so.
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -11,72 +8,61 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-/// Files bigger than this are not copied; taking the turn back reports them.
+/// Larger files are not copied; rewind reports them.
 pub const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
 
-/// The tools that write project files. Memory tools write under
-/// `~/.flashagent`, which is not the project, and are left alone.
+/// Memory tools write under `~/.flashagent`, not the project, so they are not here.
 const WRITING_TOOLS: &[&str] = &["write_file", "edit_file", "patch_file"];
 
-/// How a file was before a turn first touched it.
+/// State before the turn first touched the file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Before {
-    /// It did not exist: taking the turn back removes it.
+    /// Rewind removes it.
     Missing,
-    /// Its bytes, in this blob file under the store's directory.
+    /// Blob file name under the store's directory.
     Blob(String),
-    /// Too big to keep a copy of.
     TooLarge,
 }
 
-/// One file a turn changed, and how it was before.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileBefore {
     pub path: PathBuf,
     pub before: Before,
 }
 
-/// Everything one turn changed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnSnapshot {
     pub seq: u64,
-    /// Fingerprint of the user message that started the turn. It is how the
-    /// turn is found again in a history that compaction shortens and
-    /// steering adds messages to.
+    /// Hash of the user message that started the turn: it finds the turn again
+    /// after compaction or steering has changed the history.
     pub prompt_hash: u64,
     pub files: Vec<FileBefore>,
 }
 
-/// A turn that can still be taken back: its user message is in the history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rewindable {
-    /// Position of its user message among the history's user messages.
+    /// Index among the history's user messages.
     pub user_index: usize,
-    /// Position of its snapshot in the store.
     pub turn: usize,
-    /// How many files it changed.
     pub files: usize,
 }
 
-/// What taking turns back did to the files.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RewindReport {
     pub restored: Vec<PathBuf>,
     pub removed: Vec<PathBuf>,
-    /// Files that could not be put back, and why.
     pub failed: Vec<(PathBuf, String)>,
 }
 
-/// What taking a turn back would do to one file, worked out without touching
-/// it, so it can be shown before the user commits to it.
+/// Worked out without touching the file, to show before the user confirms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilePreview {
     pub path: PathBuf,
     pub added: usize,
     pub removed: usize,
-    /// The turn being taken back is the one that created this file.
+    /// The turn being taken back created this file.
     pub will_delete: bool,
-    /// No copy was kept; taking the turn back would leave this file as it is.
+    /// No copy was kept; the file would stay as it is.
     pub too_large: bool,
 }
 
@@ -88,19 +74,18 @@ struct Manifest {
 
 struct State {
     manifest: Manifest,
-    /// The turn writes are recorded against; none until one begins.
+    /// `None` until a turn begins.
     current: Option<usize>,
 }
 
-/// Snapshots for one session, kept in `dir` so they survive `--resume`.
+/// Kept in `dir` so they survive `--resume`.
 pub struct SnapshotStore {
     dir: PathBuf,
     cwd: PathBuf,
     state: Mutex<State>,
 }
 
-/// A fingerprint that stays the same across runs and builds (FNV-1a), so a
-/// resumed session finds its turns again.
+/// FNV-1a: stable across runs and builds, so a resumed session finds its turns.
 pub fn prompt_hash(text: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.as_bytes() {
@@ -111,24 +96,19 @@ pub fn prompt_hash(text: &str) -> u64 {
 }
 
 impl SnapshotStore {
-    /// The store in `dir` for a project in `cwd`, with whatever an earlier run
-    /// of this session left there.
     pub fn open(dir: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
         let manifest = std::fs::read_to_string(dir.join("manifest.json"))
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        // Canonical, like the paths `resolve` records: on macOS the same
-        // folder is both `/var/...` and `/private/var/...`, and on Windows
-        // both `C:\RUNNER~1\...` and its long form. Comparing the two
-        // spellings is what `display_path` and the rewind list do.
+        // Canonical, like the recorded paths: the same folder is `/var` and
+        // `/private/var` on macOS, and short and long forms on Windows.
         let cwd = cwd.into();
         let cwd = cwd.canonicalize().unwrap_or(cwd);
         Self { dir, cwd, state: Mutex::new(State { manifest, current: None }) }
     }
 
-    /// A new turn, started by the user message `prompt`.
     pub fn begin_turn(&self, prompt: &str) {
         let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let seq = st.manifest.turns.last().map_or(1, |t| t.seq + 1);
@@ -137,8 +117,8 @@ impl SnapshotStore {
         self.save(&st.manifest);
     }
 
-    /// The same user message answered again (regenerate): keep recording
-    /// against its turn, so taking it back reaches before the first attempt.
+    /// Regenerate keeps recording against the same turn, so rewinding reaches
+    /// before the first attempt.
     pub fn continue_turn(&self, prompt: &str) {
         let hash = prompt_hash(prompt);
         let found = {
@@ -154,8 +134,7 @@ impl SnapshotStore {
         }
     }
 
-    /// Called before a tool runs: if it writes a file this turn has not
-    /// touched yet, keep how that file is now.
+    /// Called before a tool runs: keeps a file this turn has not touched yet.
     pub fn before_write(&self, tool: &str, args_json: &str) {
         if !WRITING_TOOLS.contains(&tool) {
             return;
@@ -163,7 +142,6 @@ impl SnapshotStore {
         let Some(args) = flashagent_llm::effective_args(args_json, tool) else {
             return;
         };
-        // One file, or each file of a batch.
         let single = args.get("path").and_then(|p| p.as_str());
         let batch = args.get("files").and_then(|f| f.as_array()).into_iter().flatten().filter_map(|f| f.get("path").and_then(|p| p.as_str()));
         let raws: Vec<String> = single.into_iter().chain(batch).filter(|p| !p.trim().is_empty()).map(str::to_string).collect();
@@ -172,7 +150,6 @@ impl SnapshotStore {
         }
     }
 
-    /// Keep how `path` is now, unless the current turn already has it.
     fn keep_before(&self, path: PathBuf) {
         let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let Some(current) = st.current else {
@@ -183,8 +160,7 @@ impl SnapshotStore {
         }
         let before = match std::fs::metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Before::Missing,
-            // A file that cannot even be looked at is not recorded: marking it
-            // missing would delete it on the way back.
+            // Not recorded: marking it missing would delete it on rewind.
             Err(_) => return,
             Ok(meta) if !meta.is_file() => return,
             Ok(meta) if meta.len() > MAX_SNAPSHOT_BYTES => Before::TooLarge,
@@ -205,10 +181,8 @@ impl SnapshotStore {
         self.save(&st.manifest);
     }
 
-    /// The turns that can be taken back, oldest first, given the user
-    /// messages of the history as it is now. A message with no turn (steering
-    /// typed while a turn ran) is skipped, and so is a turn whose message the
-    /// history no longer has (compacted into a summary).
+    /// Oldest first. Messages without a turn (steering) are skipped, and so are
+    /// turns whose message was compacted away.
     pub fn rewindable(&self, user_messages: &[&str]) -> Vec<Rewindable> {
         let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let turns = &st.manifest.turns;
@@ -225,8 +199,8 @@ impl SnapshotStore {
         found
     }
 
-    /// Take back turn `turn` and every turn after it: each file they changed
-    /// returns to how it was before the first of them touched it.
+    /// Also takes back every later turn: each file returns to how it was before
+    /// the first of them touched it.
     pub fn rewind(&self, turn: usize) -> RewindReport {
         let mut report = RewindReport::default();
         let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -235,8 +209,7 @@ impl SnapshotStore {
         }
         let mut taken_back: Vec<TurnSnapshot> = st.manifest.turns.drain(turn..).collect();
         let mut seen = HashSet::new();
-        // Oldest first, so the first record of a path is how it was before
-        // any of these turns.
+        // Oldest first, so the first record of a path is the original state.
         for file in taken_back.iter().flat_map(|t| &t.files) {
             if !seen.insert(file.path.clone()) {
                 continue;
@@ -269,8 +242,7 @@ impl SnapshotStore {
         let mut pending = Vec::new();
         let mut retained = HashSet::new();
         for file in taken_back.iter().flat_map(|t| &t.files) {
-            // Keep the earliest copy of each failed path, the exact state
-            // this rewind was trying to restore. Successful paths are done.
+            // Keep the earliest copy of each failed path: the state being restored.
             if failed.contains(&file.path) && retained.insert(file.path.clone()) {
                 pending.push(file.clone());
                 continue;
@@ -289,10 +261,7 @@ impl SnapshotStore {
         report
     }
 
-    /// What `rewind(turn)` would do to each file it touches, without doing
-    /// it. Follows the same "first record wins" rule `rewind` uses: a file's
-    /// diff is against how it was before the earliest of the turns being
-    /// taken back, since that is the state it would return to.
+    /// Same "first record wins" rule as `rewind`.
     pub fn preview_rewind(&self, turn: usize) -> Vec<FilePreview> {
         let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if turn >= st.manifest.turns.len() {
@@ -323,9 +292,7 @@ impl SnapshotStore {
                     let before = std::fs::read(self.dir.join("blobs").join(name))
                         .map(|b| String::from_utf8_lossy(&b).into_owned())
                         .unwrap_or_default();
-                    // What going back to `before` changes, from where the
-                    // file stands now: `+` is a line the rewind brings back,
-                    // `-` one it takes away.
+                    // From the current file to `before`: `+` is brought back, `-` taken away.
                     let diff = crate::diff::unified(Some(&current), &before, "f", 0);
                     let added = diff.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count();
                     let removed = diff.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count();
@@ -336,12 +303,10 @@ impl SnapshotStore {
         out
     }
 
-    /// `path` as the user thinks of it: relative to the project when inside it.
+    /// Relative to the project when inside it.
     pub fn display_path(&self, path: &Path) -> String {
         let shown = path.strip_prefix(&self.cwd).unwrap_or(path);
-        // A path from outside the project keeps its full spelling, but never
-        // Windows' `\\?\` extended-length prefix, which `canonicalize` adds
-        // and no one wants to read.
+        // Never shows Windows' `\\?\` prefix that `canonicalize` adds.
         let text = shown.display().to_string();
         match text.strip_prefix(r"\\?\UNC\") {
             Some(rest) => format!(r"\\{rest}"),
@@ -351,8 +316,8 @@ impl SnapshotStore {
 
     fn resolve(&self, raw: &str) -> PathBuf {
         let joined = crate::paths::resolve_path(&self.cwd, raw);
-        // Resolve existing links before `..`; keep missing components so a
-        // newly created file can still be recorded before the write.
+        // Resolve existing links before `..`; keep missing components so a new file
+        // can be recorded before the write.
         let mut out = PathBuf::new();
         for part in joined.components() {
             match part {
@@ -391,9 +356,8 @@ mod tests {
         (project, snaps, s)
     }
 
-    /// A path as the store records it: canonical, so a temp folder reached
-    /// through a symlink (`/var` on macOS) compares equal. A file that is
-    /// gone — the point of half these tests — is named from its folder.
+    /// Canonical, so a folder reached through a symlink compares equal; a deleted
+    /// file is named from its folder.
     fn canon(path: &Path) -> PathBuf {
         if let Ok(resolved) = path.canonicalize() {
             return resolved;
@@ -472,7 +436,6 @@ mod tests {
         s.begin_turn("fix it");
         s.before_write("write_file", &args("a.txt"));
         std::fs::write(&a, "attempt 1").unwrap();
-        // A resumed session regenerating the same message.
         let resumed = SnapshotStore::open(snaps.path(), project.path());
         resumed.continue_turn("fix it");
         resumed.before_write("write_file", &args("a.txt"));
@@ -570,15 +533,12 @@ mod tests {
         let preview = s.preview_rewind(0);
         assert_eq!(preview.len(), 1);
         assert_eq!(preview[0].path, canon(&a));
-        // Going back removes the line the turn changed and the one it
-        // added, and brings back the original wording of the middle line.
         assert_eq!(preview[0].removed, 2, "{preview:?}");
         assert_eq!(preview[0].added, 1, "{preview:?}");
         assert!(!preview[0].will_delete);
         assert!(!preview[0].too_large);
 
-        // A preview looks, it does not touch: the file and the store are
-        // exactly as they were.
+        // Preview must not touch the file or the store.
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "one\nTWO\nthree\nfour\n");
         assert_eq!(s.rewindable(&["p"]).len(), 1);
     }
@@ -607,9 +567,7 @@ mod tests {
             s.before_write("write_file", &args("a.txt"));
             std::fs::write(&a, text).unwrap();
         }
-        // Only one FilePreview for the file all three turns touched, and it
-        // diffs against the very first "before" — matching what rewind(0)
-        // actually restores.
+        // One entry, diffed against the first "before", as rewind(0) restores.
         let preview = s.preview_rewind(0);
         assert_eq!(preview.len(), 1);
         assert_eq!(preview[0].added, 1, "brings back \"original\"");
@@ -638,9 +596,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_recorded_file_is_still_named_relative_to_a_project_reached_another_way() {
-        // The same folder under two spellings — `/var` and `/private/var` on
-        // macOS, the short and long form on Windows — must not turn every
-        // reported path into an absolute one.
         let outer = tempfile::tempdir().unwrap();
         let snaps = tempfile::tempdir().unwrap();
         let real = outer.path().join("project");

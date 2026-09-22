@@ -1,5 +1,5 @@
-//! The agent tool loop: stream a turn, execute tool calls, feed results back,
-//! repeat — until the model stops or a guardrail trips.
+//! The agent loop: stream a turn, run tool calls, feed results back, repeat
+//! until the model stops or a guardrail trips.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,18 +12,15 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use thiserror::Error;
 
-/// Provider of model turns. Implemented over `flashagent_llm::LlmBackend`
-/// by the service layer; tests implement it with scripted mocks.
+/// Implemented over `LlmBackend` by the service layer; tests use scripted mocks.
 #[async_trait]
 pub trait LlmSource: Send + Sync {
-    /// Stream one assistant turn for `messages` with `tools` advertised.
     async fn turn(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError>;
 
-    /// Stream one assistant turn with explicit [`flashagent_llm::TurnOptions`] (e.g. reduced thinking on stall recovery).
     async fn turn_with_options(
         &self,
         messages: &[ChatMessage],
@@ -34,152 +31,106 @@ pub trait LlmSource: Send + Sync {
     }
 }
 
-/// Outcome of one tool execution.
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
-    /// Text fed back to the model as the tool result.
     pub content: String,
-    /// True when the tool failed (result describes the failure).
+    /// The content then describes the failure.
     pub is_error: bool,
-    /// Pictures the call produced, as `data:` URLs.
-    ///
-    /// They cannot ride on the tool result itself — a tool message carries
-    /// text and nothing else on every server worth supporting — so the loop
-    /// puts them in a message of their own straight after.
+    /// `data:` URLs. A tool message carries only text on every server worth
+    /// supporting, so the loop sends these in a message of their own right after.
     pub images: Vec<String>,
 }
 
-/// Identity helper that keeps the borrow checker happy while moving images
-/// out of a consumed output.
 fn pending_images_from(images: Vec<String>) -> Vec<String> {
     images
 }
 
-/// Executor of tool calls. Implemented by `flashagent-tools`;
-/// tests stub it.
 #[async_trait]
 pub trait ToolExec: Send + Sync {
-    /// Run one call. Must never panic on hostile args — errors go into
-    /// [`ToolOutput::is_error`].
+    /// Must never panic on hostile args; errors go into [`ToolOutput::is_error`].
     async fn execute(&self, call: &ToolCall) -> ToolOutput;
 
-    /// Specs advertised to the model for this session.
     fn specs(&self) -> Vec<ToolSpec>;
 
-    /// Type-erased access for downcasting (test helpers, adapters).
+    /// For downcasting in tests and adapters.
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
-/// Optional capability of a [`ToolExec`]: predict what a write/edit call would
-/// change, as a unified diff. Used by the permission layer for diff preview.
+/// Unified diff of what a write/edit call would change, for the approval preview.
 pub trait WritePreview: Send + Sync {
-    /// Unified diff for write/edit calls; `None` when not applicable or not
-    /// computable.
     fn write_preview(&self, call: &ToolCall) -> Option<String>;
 }
 
-/// Loop configuration guardrails.
 #[derive(Debug, Clone, Default)]
 pub struct LoopConfig {
-    /// Cap on loop iterations (None = unlimited).
+    /// `None` means unlimited.
     pub max_steps: Option<u32>,
-    /// Soft token budget across the whole run; None = unlimited.
+    /// Soft budget across the whole run; `None` means unlimited.
     pub max_tokens: Option<i64>,
-    /// Budget on *generated* tokens only (completion tokens summed over the
-    /// run). Separate from [`Self::max_tokens`] because with a local prefix
-    /// cache the prompt is re-counted every step, so a total-token budget
-    /// mostly measures how long the conversation is, not how much work the
-    /// model did.
+    /// Completion tokens only. With a prefix cache the prompt is re-counted every
+    /// step, so [`Self::max_tokens`] mostly measures conversation length, not work.
     pub max_output_tokens: Option<i64>,
-    /// Wall-clock budget for the whole run; checked between steps and after
-    /// tool execution, so a single long tool call can overshoot it.
+    /// Checked between steps and after tools, so one long tool call can overshoot.
     pub time_budget: Option<Duration>,
-    /// Base turn options for this session (configured thinking effort, etc.).
     pub base_turn_options: flashagent_llm::TurnOptions,
-    /// An earlier exchange that sets the assistant's voice
-    /// ([`crate::personality::Personality::voice_prelude`]). It is sent
-    /// right after the system prompt in every request and never enters the
-    /// history, so it is not saved, shown, exported or compacted.
+    /// Sent right after the system prompt in every request and never stored in
+    /// the history, so it is not saved, shown, exported or compacted.
     pub voice_prelude: Vec<ChatMessage>,
 }
 
-/// Events the loop emits — the UI contract.
+/// The UI contract.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LoopEvent {
-    /// Visible text piece from the model.
     TurnDelta(String),
-    /// Reasoning piece from the model.
     ReasoningDelta(String),
-    /// A tool call begins.
     ToolStarted {
-        /// Call id.
         id: String,
-        /// Tool name.
         name: String,
-        /// Raw JSON arguments.
         args_json: String,
     },
-    /// A tool call finished.
     ToolFinished {
-        /// Call id.
         id: String,
-        /// Whether it errored.
         is_error: bool,
-        /// Number of characters in the result.
+        /// In characters.
         result_len: usize,
-        /// Captured tool output or error text.
         result: Option<String>,
     },
-    /// Token usage report from model backend.
     Usage(flashagent_llm::Usage),
-    /// A user steering directive was injected into the loop mid-flight.
     SteeringInjected(String),
-    /// A loop iteration is about to request a turn. `step` is 1-based.
     StepStarted {
-        /// 1-based iteration number.
+        /// 1-based.
         step: u32,
-        /// Configured step cap, if any.
         max_steps: Option<u32>,
     },
-    /// The loop stopped and why.
     Done(DoneReason),
 }
 
-/// Why the loop stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DoneReason {
     /// The model ended its turn without tool calls.
     Completed,
-    /// `max_steps` was reached.
     StepLimit,
-    /// `max_tokens` or `max_output_tokens` was reached.
     TokenBudget,
-    /// `time_budget` elapsed.
     TimeLimit,
-    /// The user pressed stop.
     Cancelled,
-    /// The backend broke; the error is reported separately.
+    /// The error is reported separately.
     Failed,
 }
 
-/// Loop errors — everything else becomes [`LoopEvent::Done`] with [`DoneReason::Failed`]
-/// in the stream, never a silent drop.
+/// Everything else is [`LoopEvent::Done`] with [`DoneReason::Failed`].
 #[derive(Debug, Error)]
 pub enum LoopError {
-    /// The model backend failed. `history` is everything the run produced up
-    /// to the failure (tool results included, partial text kept), so callers
-    /// never lose turns whose side effects already happened.
+    /// `history` keeps everything up to the failure (tool results, partial text),
+    /// so turns whose side effects already happened are not lost.
     #[error("llm: {source}")]
     Llm {
-        /// The backend error.
         source: LlmError,
-        /// Conversation as of the failure; protocol-valid.
+        /// Protocol-valid.
         history: Vec<ChatMessage>,
     },
 }
 
 impl LoopError {
-    /// The conversation as of the failure.
     pub fn into_history(self) -> Vec<ChatMessage> {
         match self {
             LoopError::Llm { history, .. } => history,
@@ -187,8 +138,7 @@ impl LoopError {
     }
 }
 
-/// The agent loop itself. One instance per run; `cancel` flips it off
-/// from another task/thread.
+/// One instance per run; `cancel` stops it from another task.
 pub struct AgentLoop {
     config: LoopConfig,
     cancel: Arc<AtomicBool>,
@@ -209,7 +159,6 @@ fn try_recv_steer(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>)
 }
 
 impl AgentLoop {
-    /// Create a loop with `config`; `cancel` is shared with the caller.
     pub fn new(config: LoopConfig, cancel: Arc<AtomicBool>) -> Self {
         Self {
             config,
@@ -218,7 +167,6 @@ impl AgentLoop {
         }
     }
 
-    /// Create a loop with `config`, `cancel`, and an active steering receiver.
     pub fn with_steering(
         config: LoopConfig,
         cancel: Arc<AtomicBool>,
@@ -231,13 +179,11 @@ impl AgentLoop {
         }
     }
 
-    /// The cancel flag this loop watches (so callers can flip it later).
     pub fn cancel(&self) -> Arc<AtomicBool> {
         self.cancel.clone()
     }
 
-    /// Run the loop. Returns every [`LoopEvent`] plus the final message
-    /// history (so the caller can persist it).
+    /// Returns every event plus the final history for the caller to persist.
     pub async fn run(
         &self,
         llm: &dyn LlmSource,
@@ -251,14 +197,14 @@ impl AgentLoop {
         let mut output_tokens: i64 = 0;
         let started = Instant::now();
         let mut stall_nudges: usize = 0;
-        // A stalled scratchpad reply plus the nudge answering it: sent with
-        // the next request only, never stored — loop plumbing, not conversation.
+        // A stalled scratchpad reply and the nudge answering it: sent with the next
+        // request only, never stored.
         let mut transient: Vec<ChatMessage> = Vec::new();
         let mut turn_opts = self.config.base_turn_options.clone();
         let mut steer_rx = self.steer_rx.lock().unwrap_or_else(|p| p.into_inner()).take();
 
-        // A reply the server cut off at its output limit is asked to go on,
-        // and the rest is written into the same message.
+        // A reply cut off at the output limit is asked to go on, and the rest is
+        // appended to the same message.
         let mut continuations: usize = 0;
         let mut continuing = false;
 
@@ -319,15 +265,14 @@ impl AgentLoop {
             let mut assistant_reasoning = String::new();
             let mut calls: Vec<ToolCall> = Vec::new();
             let mut open_args: Vec<String> = Vec::new();
-            // Tool calls the model wrote as text (Hermes tags, [TOOL_CALLS],
-            // bare JSON) because the server did not parse them natively.
+            // Tool calls written as text because the server did not parse them natively.
             let mut scanner = TextToolScanner::default();
             let mut text_calls: Vec<ToolCall> = Vec::new();
-            // The server stopped at max_tokens: any tool call may have been cut
-            // off mid-arguments, and JSON repair would happily "complete" it.
+            // Stopped at max_tokens: any tool call may be cut off mid-arguments, and JSON
+            // repair would happily "complete" it.
             let mut truncated = false;
-            // Asked to go on, a model often starts by repeating its last words,
-            // so the start of a continuation is held back until that is known.
+            // A continuation often starts by repeating the last words, so its start is
+            // held back until that is known.
             let prefix = if continuing { history.last().map(|m| m.content.clone()).unwrap_or_default() } else { String::new() };
             let mut held: Option<String> = continuing.then(String::new);
 
@@ -338,8 +283,7 @@ impl AgentLoop {
                         None => break,
                     },
                     _ = wait_cancel(&self.cancel) => {
-                        // Keep what the user already saw on screen; any
-                        // half-streamed tool calls are dropped (never run).
+                        // Keep what the user already saw; half-streamed tool calls are dropped unrun.
                         keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
                         events(LoopEvent::Done(DoneReason::Cancelled));
                         return Ok((history, DoneReason::Cancelled));
@@ -411,20 +355,16 @@ impl AgentLoop {
                 absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
             }
 
-            // Assemble args.
             for (i, call) in calls.iter_mut().enumerate() {
                 call.args_json = open_args[i].clone();
             }
-            // A call without a name cannot be dispatched and would poison the
-            // history sent back to the server; drop it.
+            // A nameless call cannot be dispatched and would poison the history.
             calls.retain(|c| !c.name.trim().is_empty());
-            // Native calls win: servers that parse tool calls sometimes still
-            // echo the markup in the text channel.
+            // Native calls win: some servers also echo the markup in the text.
             if calls.is_empty() {
                 calls = text_calls;
             }
-            // Tool results are matched to calls by id; servers that omit ids
-            // (or send duplicates) would otherwise break that pairing.
+            // Results are matched to calls by id; missing or duplicate ids would break that.
             let mut seen_ids = HashSet::new();
             for call in calls.iter_mut() {
                 while call.id.trim().is_empty() || !seen_ids.insert(call.id.clone()) {
@@ -470,8 +410,7 @@ impl AgentLoop {
                     continue;
                 }
 
-                // Cut off mid-answer by the server's output limit: ask for the
-                // rest instead of leaving the answer unfinished.
+                // Cut off by the output limit: ask for the rest.
                 let answer_so_far = history.last().filter(|m| m.role == Role::Assistant).map(|m| m.content.clone()).unwrap_or_default();
                 if truncated
                     && continuations < MAX_CONTINUATIONS
@@ -484,8 +423,7 @@ impl AgentLoop {
                     continue;
                 }
                 if merge {
-                    // The nudges for a stalled reply below would take away the
-                    // answer written so far; what a continuation added stands.
+                    // The stall nudges below would discard the answer so far.
                     events(LoopEvent::Done(DoneReason::Completed));
                     return Ok((history, DoneReason::Completed));
                 }
@@ -529,8 +467,7 @@ impl AgentLoop {
                 return Ok((history, DoneReason::Completed));
             }
 
-            // Never run a call whose arguments may be cut short (a truncated
-            // path or command is a different path or command).
+            // Never run a call whose arguments may be cut short.
             if truncated {
                 for call in &calls {
                     events(LoopEvent::ToolStarted { id: call.id.clone(), name: call.name.clone(), args_json: call.args_json.clone() });
@@ -545,9 +482,8 @@ impl AgentLoop {
                 continue;
             }
 
-            // Execute tools, feed results back. Every call recorded in the
-            // assistant message must get a tool result — even on cancel — or
-            // the next request is rejected by strict servers.
+            // Every recorded call must get a tool result, even on cancel, or strict
+            // servers reject the next request.
             for (i, call) in calls.iter().enumerate() {
                 if self.cancel.load(Ordering::Relaxed) {
                     answer_cancelled(&mut history, &calls[i..]);
@@ -579,10 +515,8 @@ impl AgentLoop {
                 let images = std::mem::take(&mut pending_images_from(out.images));
                 history.push(ChatMessage::tool_result(call.id.clone(), out.content));
                 if !images.is_empty() {
-                    // The picture arrives as its own message, because a tool
-                    // result is text on every server that matters. It is
-                    // marked as such so the model does not read it as the
-                    // user speaking.
+                    // A separate message, since a tool result is text only. It is marked so the
+                    // model does not read it as the user speaking.
                     let mut msg = ChatMessage::user(format!(
                         "[Image opened by {} and shown below — it is the result of that call, not a new request.]",
                         call.name
@@ -612,8 +546,8 @@ impl AgentLoop {
     }
 }
 
-/// A fresh tool-call id: 9 alphanumeric characters (the shape Mistral chat
-/// templates insist on), unique for the life of the process.
+/// 9 alphanumeric characters (Mistral chat templates insist on it), unique for
+/// the life of the process.
 fn synth_call_id() -> String {
     use std::sync::atomic::AtomicU64;
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -635,24 +569,19 @@ fn synth_call_id() -> String {
 /// Sent when the model ended its turn on thinking alone.
 const STALL_NUDGE: &str = "Please provide your direct, final answer to my request now. Do not repeat the thinking process; output only your final response.";
 
-/// How many times one reply the server cut off at its output limit is asked
-/// to go on before what there is stands as the answer.
+/// Per reply, before what there is stands as the answer.
 const MAX_CONTINUATIONS: usize = 3;
 
-/// Sent, with the reply so far, after the server cut it off at its output
-/// limit. Like the stall nudge it is never stored.
+/// Never stored, like the stall nudge.
 const CONTINUE_NUDGE: &str = "Your previous reply was cut off by the output length limit. Continue it from exactly where it stopped. Do not repeat anything already written, do not start over, and do not mention the interruption.";
 
-/// Continuation text held back before it is shown: long enough to tell
-/// whether the model began by repeating the end of what it had written.
+/// Long enough to tell whether the model began by repeating its last words.
 const CONTINUATION_HOLDBACK: usize = 80;
 
-/// The shortest repeat that is trimmed. Shorter overlaps ("the ", a newline)
-/// are as likely to be coincidence as repetition.
+/// Shorter overlaps ("the ", a newline) are as likely coincidence as repetition.
 const MIN_OVERLAP: usize = 8;
 
-/// `next` without what it repeats of the end of `prev`: asked to continue, a
-/// model often restates its last words first.
+/// Asked to continue, a model often restates its last words first.
 fn strip_repeated_tail<'a>(prev: &str, next: &'a str) -> &'a str {
     let mut cut = 0;
     let ends = next.char_indices().map(|(i, _)| i).skip(1).chain(std::iter::once(next.len()));
@@ -665,10 +594,8 @@ fn strip_repeated_tail<'a>(prev: &str, next: &'a str) -> &'a str {
     &next[cut..]
 }
 
-/// Tool result recorded for calls the user interrupted.
 const CANCELLED_RESULT: &str = "cancelled by user before completion";
 
-/// Tool result for calls emitted in a turn that hit the output token limit.
 const TRUNCATED_RESULT: &str = "not executed: your output hit the token limit while writing this call, so its arguments may be incomplete. Send the call again, shorter if needed (e.g. split a large write).";
 
 fn answer_cancelled(history: &mut Vec<ChatMessage>, pending: &[ToolCall]) {
@@ -677,9 +604,8 @@ fn answer_cancelled(history: &mut Vec<ChatMessage>, pending: &[ToolCall]) {
     }
 }
 
-/// Keep what was streamed before the stream ended early. A continuation
-/// belongs to the answer it continues, so it is added to that message rather
-/// than stored as a second assistant message in a row.
+/// A continuation is appended to the message it continues rather than stored
+/// as a second assistant message in a row.
 fn keep_partial(history: &mut Vec<ChatMessage>, text: String, reasoning: String, continuing: bool) {
     if continuing {
         if let Some(last) = history.last_mut().filter(|m| m.role == Role::Assistant) {
@@ -710,9 +636,8 @@ fn push_partial_assistant(history: &mut Vec<ChatMessage>, text: String, reasonin
     });
 }
 
-/// Route one scanner event: plain text streams to the UI; a text-embedded tool
-/// call is queued when it names an advertised tool, otherwise its markup goes
-/// back into the text untouched (a JSON example in prose is not a call).
+/// A text-embedded call naming an unknown tool goes back into the text: a JSON
+/// example in prose is not a call.
 fn absorb_scanned(
     ev: ScannerEvent,
     known_tools: &HashSet<String>,
@@ -735,8 +660,7 @@ fn absorb_scanned(
     events(LoopEvent::TurnDelta(shown));
 }
 
-/// Returns true if `text` is empty or consists purely of internal thinking/planning
-/// without any actual final response to the user.
+/// True when `text` is empty or only thinking, with no answer to the user.
 pub fn is_pure_thinking_scratchpad(text: &str) -> bool {
     let t = text.trim();
     if t.is_empty() {
@@ -785,8 +709,7 @@ fn is_reasoning_step_line(line: &str) -> bool {
     })
 }
 
-/// If the scratchpad or reasoning ended on or contains a draft step,
-/// extract that draft as a fallback answer.
+/// A draft step in the scratchpad, used as a fallback answer.
 pub fn extract_draft_from_steps(text: &str) -> Option<String> {
     let prefixes = [
         "Construct the Response:",
@@ -810,17 +733,14 @@ pub fn extract_draft_from_steps(text: &str) -> Option<String> {
     None
 }
 
-/// Detects if the streaming text or reasoning has entered a degenerate repetition loop.
-/// Catches consecutive identical lines (3+ repeats), identical repeating substring windows,
-/// or repeating substantive phrases/clauses (3+ occurrences across lines).
+/// Degenerate repetition: 3+ identical consecutive lines, a repeating window,
+/// or a substantial phrase repeated 3+ times across lines.
 pub fn detect_repetition_loop(text: &str) -> bool {
     let bytes = text.as_bytes();
     if bytes.len() < 24 {
         return false;
     }
 
-    // 1. Line-based repetition check:
-    // If the last non-empty line has repeated 3 or more times consecutively.
     let lines: Vec<&str> = text
         .lines()
         .map(|l| l.trim())
@@ -829,11 +749,11 @@ pub fn detect_repetition_loop(text: &str) -> bool {
 
     if lines.len() >= 3 {
         let last = lines[lines.len() - 1];
-        // Only trigger on lines of meaningful length (>= 6 chars) to avoid false positives on braces or empty markdown markers
+        // Short lines (braces, markdown markers) repeat legitimately.
         if last.len() >= 6 && lines[lines.len() - 2] == last && lines[lines.len() - 3] == last {
             return true;
         }
-        // 2-line alternating pattern: A B A B A B
+        // A B A B A B
         if lines.len() >= 6 {
             let n = lines.len();
             if lines[n - 1] == lines[n - 3]
@@ -847,7 +767,7 @@ pub fn detect_repetition_loop(text: &str) -> bool {
         }
     }
 
-    // 2. Substring window repetition check (for repetitive loops without newlines):
+    // Repetition without newlines.
     let len = bytes.len();
     for w in 8..=80 {
         if len >= w * 3 {
@@ -860,9 +780,7 @@ pub fn detect_repetition_loop(text: &str) -> bool {
         }
     }
 
-    // 3. Non-consecutive substantive sentence / clause repetition check (overthinking loop detector):
-    // If a non-trivial sentence/phrase (>= 25 chars) repeats 3 or more times across the stream,
-    // the model is stuck in an overthinking loop (e.g. repeating the same draft answer or dilemma).
+    // A phrase of 25+ chars repeated 3+ times anywhere: an overthinking loop.
     if lines.len() >= 4 {
         let mut clause_counts = std::collections::HashMap::new();
         for line in &lines {
@@ -889,7 +807,7 @@ pub fn detect_repetition_loop(text: &str) -> bool {
     false
 }
 
-/// Trims degenerate trailing repetitions from the text, keeping only a single instance of the repeated pattern.
+/// Keeps a single instance of the repeated pattern.
 pub fn clean_repetition_loop(text: &mut String) {
     let trimmed = text.trim_end();
     if let Some(last_line) = trimmed.lines().rev().find(|l| !l.trim().is_empty()) {
@@ -1173,10 +1091,8 @@ mod tests {
 
     #[test]
     fn output_budget_counts_generated_tokens_only() {
-        // A long conversation re-sends a huge prompt every step; with a prefix
-        // cache that costs almost nothing, so the prompt must not eat the
-        // budget. Three steps generate 40 tokens each: the 120-token budget
-        // trips on the third, not on the first prompt of 9000.
+        // With a prefix cache a huge re-sent prompt costs almost nothing, so only
+        // generated tokens count: 3 steps × 40 trip the 120 budget, not the 9000 prompt.
         let llm = MockLlm {
             turns: std::sync::Mutex::new(vec![
                 usage_turn(9000, 40, "a"),
@@ -1299,15 +1215,12 @@ mod tests {
         let (history, _done) = run_loop(&l, &llm, &InjectedTools, |_| {});
         assert_eq!(history[2].role, Role::Tool);
         assert!(history[2].content.contains("IGNORE ALL PREVIOUS"));
-        // Injection never becomes a user turn.
         assert!(history.iter().enumerate().all(|(i, m)| i == 0 || m.role != Role::User));
     }
 
     #[test]
     fn a_picture_a_tool_produced_reaches_the_model_as_a_picture() {
-        // A tool result is text on every server worth supporting, so an image
-        // has to travel in a message of its own — and be marked as the result
-        // of that call, not as the user speaking again.
+        // The image travels in its own message, marked as this call's result.
         struct ImageTool;
         #[async_trait]
         impl ToolExec for ImageTool {
@@ -1400,13 +1313,11 @@ mod tests {
         let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
         let (history, done) = run_loop(&l, &llm, &tools, |_| {});
         assert!(matches!(done, DoneReason::Completed));
-        // The model was nudged on the second request...
         let requests = llm.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert!(requests[1].last().unwrap().content.contains("Please provide your direct, final answer"));
-        // ...but the nudge and the stalled scratchpad are plumbing: the kept
-        // history reads as a normal exchange, so regenerate/recap/resume see
-        // the user's real prompt as the last user message.
+        // The nudge and the stalled reply are not kept: the last user message stays
+        // the user's real prompt for regenerate, recap and resume.
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].content, "x");
         assert_eq!(history[1].content, "Here is the final direct answer.");
@@ -1432,7 +1343,6 @@ mod tests {
         assert_eq!(kept, ["sys", "real question", "Answer."], "the example leaked into the history");
     }
 
-    /// Scripted LLM that also records every message list it was sent.
     struct RecordingLlm {
         turns: std::sync::Mutex<Vec<MockTurn>>,
         requests: std::sync::Mutex<Vec<Vec<ChatMessage>>>,
@@ -1457,8 +1367,8 @@ mod tests {
         }
     }
 
-    /// Every assistant tool call must be answered by a tool message before
-    /// the next non-tool message — the invariant strict servers enforce.
+    /// Every tool call must be answered before the next non-tool message, as
+    /// strict servers require.
     fn assert_protocol_valid(history: &[ChatMessage]) {
         let mut i = 0;
         while i < history.len() {
@@ -1568,7 +1478,6 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "shell");
         assert!(calls[0].args_json.contains("ls"));
-        // The markup never reaches the screen or the stored text...
         let shown: String = evs
             .lock()
             .unwrap()
@@ -1580,7 +1489,6 @@ mod tests {
             .collect();
         assert!(!shown.contains("<tool_call>"), "shown: {shown}");
         assert_eq!(history[1].content.trim(), "Checking.");
-        // ...and the call is stored as a native call with a synthesized id.
         assert_eq!(history[1].tool_calls.len(), 1);
         assert!(!history[1].tool_calls[0].id.is_empty());
         assert_protocol_valid(&history);
@@ -1623,7 +1531,7 @@ mod tests {
         let err = rt.block_on(l.run(&llm, &tools, vec![ChatMessage::user("x")], |_| {})).unwrap_err();
         assert!(err.to_string().contains("context length exceeded"));
         let history = err.into_history();
-        // The tool ran (side effects happened), so the model must remember it.
+        // The tool ran, so the model must remember it.
         assert_eq!(history[1].tool_calls.len(), 1);
         assert_eq!(history[2].role, Role::Tool);
         assert_eq!(history.last().unwrap().content, "partial");
@@ -1691,7 +1599,6 @@ mod tests {
         }
     }
 
-    /// Run the loop and return what it showed (text deltas) with its result.
     fn run_showing(llm: &MockLlm) -> (Vec<ChatMessage>, DoneReason, String) {
         let tools = MockTools::new();
         let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
@@ -1819,7 +1726,6 @@ mod tests {
         let steer_tx_clone = steer_tx.clone();
         let sent_steer = Arc::new(AtomicBool::new(false));
 
-        // Turn 1 emits text and completes cleanly (not aborted)
         let turn1 = MockTurn {
             events: vec![
                 Ok(LlmEvent::TextDelta("Starting to write code...".into())),
@@ -1827,7 +1733,6 @@ mod tests {
             ],
         };
 
-        // Turn 2 receives the steering directive and responds
         let pivoted_turn = MockTurn {
             events: vec![
                 Ok(LlmEvent::TextDelta("Understood, switching to postgres.".into())),
@@ -1855,7 +1760,6 @@ mod tests {
                 vec![ChatMessage::user("Write a server")],
                 |e| {
                     if matches!(e, LoopEvent::TurnDelta(_)) && !sent_steer.swap(true, Ordering::Relaxed) {
-                        // Send steering on first text delta
                         let _ = steer_tx_clone.send("Use postgres instead of sqlite".into());
                     }
                     evs.lock().unwrap().push(e);
@@ -1867,14 +1771,8 @@ mod tests {
         let (history, done) = result.unwrap();
         assert!(matches!(done, DoneReason::Completed));
 
-        // Verify steering event was emitted
         assert!(evs.lock().unwrap().iter().any(|e| matches!(e, LoopEvent::SteeringInjected(msg) if msg.contains("postgres"))));
 
-        // Verify history sequence:
-        // [0] User initial prompt
-        // [1] Assistant partial response before steering
-        // [2] User steering directive
-        // [3] Assistant pivoted response
         assert_eq!(history.len(), 4);
         assert_eq!(history[1].role, Role::Assistant);
         assert_eq!(history[1].content, "Starting to write code...");
@@ -1889,9 +1787,7 @@ mod tests {
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
         let steer_tx_clone = steer_tx.clone();
 
-        // Turn 1 executes a tool call
         let tool_turn = tool_turn("shell", "call_1");
-        // Turn 2 responds after tool execution and steering
         let final_turn = text_turn("Action adjusted.");
 
         let llm = MockLlm {
@@ -1912,7 +1808,6 @@ mod tests {
                 vec![ChatMessage::user("Run build")],
                 |e| {
                     if matches!(e, LoopEvent::ToolStarted { .. }) {
-                        // While tool is running, send steering directive
                         let _ = steer_tx_clone.send("Do not run tests after that".into());
                     }
                 },
@@ -1923,12 +1818,8 @@ mod tests {
         let (history, done) = result.unwrap();
         assert!(matches!(done, DoneReason::Completed));
 
-        // Verify history structure:
-        // [0] User: initial prompt
-        // [1] Assistant: tool call (call_1)
-        // [2] Tool: tool result (call_1) -- directly after the assistant's tool call
-        // [3] User: [STEERING DIRECTIVE] -- after the tool result, never between a call and its result
-        // [4] Assistant: final turn
+        // The steering message comes after the tool result, never between a call and
+        // its result.
         assert_eq!(history.len(), 5);
         assert_eq!(history[1].role, Role::Assistant);
         assert_eq!(history[1].tool_calls.len(), 1);
