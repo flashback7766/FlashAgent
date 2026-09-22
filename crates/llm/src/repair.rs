@@ -1,30 +1,22 @@
-//! JSON repair for model-emitted tool arguments.
-//!
-//! Local models routinely produce: single-quoted Python dictionaries,
-//! Python booleans/None (`True`, `False`, `None`), markdown codeblock fences,
-//! unescaped newlines/tabs inside strings, truncated output, and trailing commas.
-//! Repair is a best-effort normalization pipeline — if it cannot be fixed,
-//! the caller sees `None` and the call is reported as a parse error, never silently dropped.
+//! Repair of model-emitted tool arguments: Python dicts and literals, code
+//! fences, raw control characters in strings, truncation, trailing commas.
+//! Unfixable input returns `None` and is reported as a parse error.
 
-/// Attempt to repair a JSON fragment into parseable JSON.
 pub fn repair_json(input: &str) -> Option<String> {
     let raw = input.trim();
     if raw.is_empty() {
         return None;
     }
 
-    // 0. Fast-path: already valid JSON
     if serde_json::from_str::<serde_json::Value>(raw).is_ok() {
         return Some(raw.to_string());
     }
 
-    // 1. Strip markdown fences or tool tags
     let unfenced = strip_fences_and_tags(raw);
     if serde_json::from_str::<serde_json::Value>(unfenced).is_ok() {
         return Some(unfenced.to_string());
     }
 
-    // 2. Normalization pipeline: quotes -> Python dict/literals -> trailing commas -> closing structures
     let mut s = normalize_smart_quotes(unfenced);
     s = normalize_python_dict_and_literals(&s);
     s = strip_trailing_commas(&s);
@@ -34,7 +26,6 @@ pub fn repair_json(input: &str) -> Option<String> {
         }
     }
 
-    // 3. Fallback: extract the outermost JSON object or array if embedded in text
     if let Some(extracted) = extract_embedded_json(&s) {
         let mut sub = normalize_smart_quotes(&extracted);
         sub = normalize_python_dict_and_literals(&sub);
@@ -49,25 +40,16 @@ pub fn repair_json(input: &str) -> Option<String> {
     None
 }
 
-/// The argument object a tool call will actually run with.
-///
-/// Every consumer — the permission check, the approval card, the diff preview
-/// and the tool itself — must read arguments through this one function, so
-/// the command that is judged and shown is exactly the command that runs.
-/// Rules, in order: parse (repairing if needed); unwrap `{"<tool_name>": {..}}`;
-/// unwrap `{"arguments"|"parameters"|"args": ..}` only when the object holds
-/// nothing but such wrapper/metadata keys; otherwise the object itself. Last,
-/// argument names other agents use are renamed to this tool's own (see
-/// `canonical_names`) — here, so the renamed call is what gets judged too.
+/// The arguments a tool call will actually run with. The permission check,
+/// approval card, diff preview and the tool itself all read them through here,
+/// so what is judged and shown is what runs. Wrappers (`{"<tool>": ..}`,
+/// `{"arguments": ..}`) unwrap only when nothing else is in the object.
 pub fn effective_args(args_json: &str, tool_name: &str) -> Option<serde_json::Value> {
     unwrapped_args(args_json, tool_name).map(|v| canonical_names(tool_name, v))
 }
 
-/// Other names for a built-in tool's arguments, as other agents taught models
-/// to write them: Claude Code's `file_path`, OpenCode's `filePath` and
-/// `oldString`, Gemini's `TargetFile` and `ReplacementContent`, `cmd` for
-/// `command`. A model trained on one of those should not fail a call over a
-/// name.
+/// Argument names other agents trained models to use (Claude Code, OpenCode,
+/// Gemini), accepted as aliases.
 const PATH_ALIASES: &[&str] =
     &["file_path", "filePath", "filepath", "file", "filename", "TargetFile", "target_file", "AbsolutePath", "absolute_path"];
 const DIR_ALIASES: &[&str] = &["directory", "dir", "dirPath", "dir_path", "DirectoryPath", "directory_path", "file_path", "filePath"];
@@ -93,8 +75,8 @@ const OLD_ALIASES: &[&str] = &["oldString", "old_str", "old_text", "oldText", "T
 const NEW_ALIASES: &[&str] = &["newString", "new_str", "new_text", "newText", "ReplacementContent", "replace", "replacement", "new"];
 const ALL_ALIASES: &[&str] = &["replaceAll", "AllowMultiple", "allow_multiple", "all"];
 
-/// Rename `aliases` to `canonical` in `obj`, unless `canonical` is already
-/// there: a call that names both is taken at its own word, never merged.
+/// A call that names both the alias and the canonical key keeps the canonical
+/// one; the two are never merged.
 fn rename_first(obj: &mut serde_json::Map<String, serde_json::Value>, canonical: &str, aliases: &[&str]) {
     if obj.contains_key(canonical) {
         return;
@@ -106,8 +88,7 @@ fn rename_first(obj: &mut serde_json::Map<String, serde_json::Value>, canonical:
     }
 }
 
-/// A built-in tool's arguments with other agents' names for them renamed to
-/// its own. External tools keep theirs: their names are the server's.
+/// External tools keep their names: those belong to the server.
 fn canonical_names(tool: &str, mut value: serde_json::Value) -> serde_json::Value {
     let Some(obj) = value.as_object_mut() else {
         return value;
@@ -156,7 +137,6 @@ fn canonical_names(tool: &str, mut value: serde_json::Value) -> serde_json::Valu
         }
     }
     if tool == "read_file" {
-        // A list of paths is several files, each read whole.
         rename_first(obj, "files", &["paths", "file_paths", "filePaths"]);
         if let Some(files) = obj.get_mut("files").and_then(|f| f.as_array_mut()) {
             for item in files.iter_mut() {
@@ -171,8 +151,7 @@ fn canonical_names(tool: &str, mut value: serde_json::Value) -> serde_json::Valu
     value
 }
 
-/// One file's edits in the tool's own words: a single edit given flat becomes
-/// an edit list, and other agents' names inside the list are renamed.
+/// A single flat edit becomes an edit list; aliases inside the list are renamed.
 fn normalize_edit_target(obj: &mut serde_json::Map<String, serde_json::Value>) {
     if !obj.contains_key("edits") {
         let mut single = serde_json::Map::new();
@@ -185,7 +164,6 @@ fn normalize_edit_target(obj: &mut serde_json::Map<String, serde_json::Value>) {
         if single.contains_key("old_string") || single.contains_key("new_string") {
             obj.insert("edits".to_string(), serde_json::Value::Array(vec![serde_json::Value::Object(single)]));
         } else {
-            // Nothing that looks like an edit: put back what was taken.
             obj.extend(single);
         }
     }
@@ -230,18 +208,15 @@ fn unwrapped_args(args_json: &str, tool_name: &str) -> Option<serde_json::Value>
     Some(value)
 }
 
-/// Strip ``` fences (like ```json or ```tool_calls) and <tool_call> tags.
 fn strip_fences_and_tags(s: &str) -> &str {
     let mut trimmed = s.trim();
 
-    // Strip XML-style <tool_call> ... </tool_call>
     if let (Some(start), Some(end)) = (trimmed.find("<tool_call>"), trimmed.rfind("</tool_call>")) {
         if start < end {
             trimmed = trimmed[start + "<tool_call>".len()..end].trim();
         }
     }
 
-    // Strip ``` fences
     if trimmed.starts_with("```") {
         if let Some(first_nl) = trimmed.find('\n') {
             trimmed = &trimmed[first_nl + 1..];
@@ -254,14 +229,11 @@ fn strip_fences_and_tags(s: &str) -> &str {
     trimmed.trim()
 }
 
-/// Convert typographical smart quotes to standard ASCII quotes.
 fn normalize_smart_quotes(s: &str) -> String {
     s.replace(['\u{201C}', '\u{201D}'], "\"")
         .replace(['\u{2018}', '\u{2019}'], "'")
 }
 
-/// Normalize Python-style dicts (`'key': 'val'`), Python literals (`True`, `False`, `None`),
-/// and escape unescaped control characters within strings.
 pub fn normalize_python_dict_and_literals(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 16);
     let chars: Vec<char> = s.chars().collect();
@@ -284,7 +256,7 @@ pub fn normalize_python_dict_and_literals(s: &str) -> String {
         if escape {
             escape = false;
             if in_quote == QuoteStyle::Single {
-                // Inside single-quoted string: \' was an escaped single quote in Python
+                // Python's \' inside a single-quoted string.
                 if c == '\'' {
                     out.push('\'');
                 } else if c == '"' {
@@ -311,7 +283,6 @@ pub fn normalize_python_dict_and_literals(s: &str) -> String {
             QuoteStyle::None => {
                 match c {
                     '\'' => {
-                        // Begin single-quoted string converted to double-quoted JSON string
                         in_quote = QuoteStyle::Single;
                         out.push('"');
                         i += 1;
@@ -348,14 +319,12 @@ pub fn normalize_python_dict_and_literals(s: &str) -> String {
             QuoteStyle::Single => {
                 match c {
                     '\'' => {
-                        // End single-quoted string
                         in_quote = QuoteStyle::None;
                         out.push('"');
                         i += 1;
                         continue;
                     }
                     '"' => {
-                        // Literal double quote inside single-quoted string -> escape for JSON
                         out.push_str("\\\"");
                         i += 1;
                         continue;
@@ -428,14 +397,12 @@ fn matches_word(chars: &[char], start: usize, word: &str) -> bool {
             return false;
         }
     }
-    // Check boundary before
     if start > 0 {
         let prev = chars[start - 1];
         if prev.is_alphanumeric() || prev == '_' {
             return false;
         }
     }
-    // Check boundary after
     let after_idx = start + word_chars.len();
     if after_idx < chars.len() {
         let next = chars[after_idx];
@@ -468,7 +435,6 @@ fn strip_trailing_commas(s: &str) -> String {
     out
 }
 
-/// Close open strings, objects and arrays left from truncation.
 fn close_structures(s: &str) -> Option<String> {
     let mut in_string = false;
     let mut escape = false;
@@ -492,7 +458,6 @@ fn close_structures(s: &str) -> Option<String> {
     }
     let mut out = String::from(s);
     if in_string {
-        // Unterminated string: close it
         if escape {
             while out.ends_with('\\') {
                 out.pop();
@@ -500,7 +465,7 @@ fn close_structures(s: &str) -> Option<String> {
         }
         out.push('"');
     }
-    // Complete truncated literals (tru, fals, nul) left by an interrupted stream
+    // Truncated literals left by an interrupted stream.
     for (frag, full) in [("tru", "true"), ("fals", "false"), ("nul", "null")] {
         if out.ends_with(frag) {
             out.push_str(&full[frag.len()..]);
@@ -513,7 +478,6 @@ fn close_structures(s: &str) -> Option<String> {
     Some(out)
 }
 
-/// Attempts to extract the outermost balanced `{ ... }` or `[ ... ]` substring.
 fn extract_embedded_json(s: &str) -> Option<String> {
     let first_obj = s.find('{');
     let first_arr = s.find('[');
@@ -555,7 +519,6 @@ fn extract_embedded_json(s: &str) -> Option<String> {
         }
     }
 
-    // If unclosed, return from start_idx onwards
     Some(slice.to_string())
 }
 
@@ -565,15 +528,13 @@ mod tests {
 
     #[test]
     fn effective_args_never_diverges_between_readers() {
-        // Top-level fields win whenever the object has any: a stray wrapper
-        // next to them is data, not the "real" arguments.
+        // Top-level fields win: a stray wrapper next to them is data.
         let smuggled = r#"{"command":"echo SAFE","timeout_ms":"soon","arguments":{"command":"echo PWNED"}}"#;
         assert_eq!(effective_args(smuggled, "run_shell").unwrap()["command"], "echo SAFE");
-        // Pure wrappers unwrap, including stringified inner JSON.
         assert_eq!(effective_args(r#"{"arguments":{"command":"ls"}}"#, "run_shell").unwrap()["command"], "ls");
         assert_eq!(effective_args(r#"{"name":"run_shell","arguments":"{\"command\":\"ls\"}"}"#, "run_shell").unwrap()["command"], "ls");
         assert_eq!(effective_args(r#"{"run_shell":{"command":"ls"}}"#, "run_shell").unwrap()["command"], "ls");
-        // A single object-valued field of a different name is a real argument.
+        // A single object-valued field with another name is a real argument.
         assert!(effective_args(r#"{"filter":{"x":1}}"#, "mcp__db__query").unwrap().get("filter").is_some());
         assert_eq!(effective_args("", "list_dir").unwrap(), serde_json::json!({}));
         assert!(effective_args("[1,2]", "x").is_none());
@@ -677,17 +638,14 @@ mod tests {
 
     #[test]
     fn an_edit_in_other_agents_words_becomes_an_edit_list() {
-        // Gemini's single-replace shape.
         assert_eq!(
             args("edit_file", r#"{"TargetFile":"a.rs","TargetContent":"old","ReplacementContent":"new"}"#),
             serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "old", "new_string": "new" } ] })
         );
-        // OpenCode's names inside a list.
         assert_eq!(
             args("edit_file", r#"{"filePath":"a.rs","edits":[{"oldString":"a","newString":"b","replaceAll":true}]}"#),
             serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "a", "new_string": "b", "replace_all": true } ] })
         );
-        // The tool's own names, flat.
         assert_eq!(
             args("edit_file", r#"{"path":"a.rs","old_string":"a","new_string":"b"}"#),
             serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "a", "new_string": "b" } ] })
@@ -696,7 +654,7 @@ mod tests {
 
     #[test]
     fn a_name_the_call_already_uses_correctly_is_never_overwritten() {
-        // Which command runs must never depend on which of two names wins.
+        // Which command runs must not depend on which of two names wins.
         let both = args("run_shell", r#"{"command":"ls","cmd":"rm -rf /"}"#);
         assert_eq!(both["command"], "ls");
         assert_eq!(both["cmd"], "rm -rf /", "the other name is left alone, not merged in");

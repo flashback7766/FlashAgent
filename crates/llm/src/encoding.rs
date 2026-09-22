@@ -1,5 +1,3 @@
-//! Encodings shared by the crates that have to put bytes in JSON.
-
 /// RFC 4648 Base64, without a dependency.
 pub fn base64_encode(data: &[u8]) -> String {
     const CHARSET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

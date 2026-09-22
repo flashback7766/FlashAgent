@@ -1,77 +1,58 @@
-//! Adaptive thinking/reasoning profile discovery and management.
-//!
-//! Different APIs and model backends provide different reasoning effort presets
-//! (e.g. `["off", "on"]`, `["off", "low", "medium", "high"]`, `["low", "medium", "high"]`,
-//! `["low", "high", "xhigh"]`, or token budgets).
-//!
-//! Rather than hardcoding static presets, this module discovers what the target API
-//! actually advertises (from model metadata or error feedback) and adapts on the fly.
+//! Reasoning presets differ per API and model (`[off, on]`, `[low, medium,
+//! high]`, `[low, high, xhigh]`, token budgets). They are discovered from model
+//! metadata or error responses, not hardcoded.
 
 use serde::{Deserialize, Serialize};
 
-/// Wire protocol style used by the API to control thinking/reasoning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThinkingProtocol {
-    /// OpenAI-style `reasoning_effort: "<preset>"`
+    /// `reasoning_effort: "<preset>"`
     ReasoningEffort,
-    /// OpenRouter/LM Studio object `reasoning: { effort: "<preset>" }`
+    /// `reasoning: { effort: "<preset>" }`
     ReasoningObject,
-    /// Anthropic-style `thinking: { type: "enabled"|"disabled", budget_tokens: N }`
+    /// `thinking: { type: "enabled"|"disabled", budget_tokens: N }`
     ThinkingObject,
-    /// Boolean flag `enable_thinking: true|false`
+    /// `enable_thinking: bool`
     BooleanFlag,
-    /// LM Studio native protocol (`reasoning: "<preset>"` and `enable_thinking: bool`)
+    /// `reasoning: "<preset>"` and `enable_thinking: bool`
     LmStudio,
-    /// The server said nothing about reasoning for this model. Nothing is
-    /// sent unless reasoning is turned off, and the model reasons (or not) the
-    /// way it does by default.
+    /// The server said nothing about reasoning. Only "off" is sent.
     Unreported,
 }
 
-/// What kind of server answered, as told by the API that answered rather
-/// than by the address it lives at.
+/// Decided by the API that answered, not by the address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ServerKind {
-    /// Answered LM Studio's own `/api/v1/models` or `/api/v0/models`.
     LmStudio,
-    /// llama.cpp's `llama-server`: its model list says `owned_by: llamacpp`.
+    /// Its model list says `owned_by: llamacpp`.
     LlamaCpp,
-    /// Any other OpenAI-compatible server, or none reached yet.
     #[default]
     Other,
 }
 
 impl ServerKind {
-    /// A server running models on this machine's own terms: it keeps a
-    /// prompt cache and reads the thinking switches in the chat template.
+    /// Keeps a prompt cache and reads the thinking switches in the chat template.
     pub fn runs_local_models(self) -> bool {
         matches!(self, ServerKind::LmStudio | ServerKind::LlamaCpp)
     }
 }
 
-/// Discovered model info from the API server (LM Studio, Ollama, OpenAI, OpenRouter...).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveredModel {
-    /// Identifier used for API calls (e.g. `gemma-4-e2b-it-qat@q4_k_xl`).
+    /// E.g. `gemma-4-e2b-it-qat@q4_k_xl`.
     pub id: String,
-    /// Human-readable display name if available.
     pub display_name: Option<String>,
-    /// Whether this model instance is actively loaded in server memory.
     pub is_loaded: bool,
-    /// Loaded or configured context length in tokens.
     pub context_length: Option<usize>,
-    /// Maximum context length supported by model architecture in tokens.
+    /// Maximum the architecture supports.
     pub max_context_length: Option<usize>,
-    /// Reasoning / thinking profile discovered for this model.
     pub thinking: ThinkingProfile,
-    /// Whether the model was trained for function / tool use.
     pub supports_tools: bool,
-    /// Whether the model supports vision inputs.
     pub supports_vision: bool,
 }
 
 impl DiscoveredModel {
-    /// Format context length as a human-readable string (e.g. `131k ctx` or `8k ctx`).
+    /// E.g. `131k ctx`.
     pub fn context_display(&self) -> Option<String> {
         let len = self.context_length.or(self.max_context_length)?;
         if len == 131_072 || len == 128_000 {
@@ -86,7 +67,7 @@ impl DiscoveredModel {
         }
     }
 
-    /// Format a concise summary of capabilities and settings (e.g. `128k ctx · tools · thinking: on [off,on]`).
+    /// E.g. `128k ctx · tools · thinking: on [off,on]`.
     pub fn capabilities_summary(&self) -> String {
         let mut parts = Vec::new();
 
@@ -103,7 +84,7 @@ impl DiscoveredModel {
         }
 
         if self.thinking.is_unreported() {
-            // Nothing to say: "no reasoning" would claim what the server did not.
+            // "no reasoning" would claim what the server did not say.
         } else if self.thinking.supported {
             if let Some(ref def) = self.thinking.default_preset {
                 if !self.thinking.presets.is_empty() {
@@ -117,7 +98,7 @@ impl DiscoveredModel {
                 parts.push("thinking".to_string());
             }
         } else {
-            // Only said when the server said it: silence is not a "no".
+            // Only when the server said it: silence is not a "no".
             parts.push("no reasoning".to_string());
         }
 
@@ -125,32 +106,20 @@ impl DiscoveredModel {
     }
 }
 
-/// Server discovery result containing all available models and the detected active model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ServerDiscovery {
-    /// Base URL of the API endpoint.
     pub base_url: String,
-    /// List of models reported by the API.
     pub models: Vec<DiscoveredModel>,
-    /// Model currently active or loaded on the server.
     pub active_model: Option<DiscoveredModel>,
-    /// What kind of server this is, from the API that answered.
     #[serde(default)]
     pub kind: ServerKind,
 }
 
-/// Adaptive thinking profile discovered from the API for a model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThinkingProfile {
-    /// Presets supported by this model as reported by the API.
-    /// E.g. `["off", "on"]`, `["low", "medium", "high"]`, `["off", "low", "medium", "high"]`,
-    /// `["low", "high", "xhigh"]`, etc.
     pub presets: Vec<String>,
-    /// Protocol used to send the preset to the API.
     pub protocol: ThinkingProtocol,
-    /// Whether thinking/reasoning is supported by the API/model at all.
     pub supported: bool,
-    /// Default preset advertised by the API server (if known).
     pub default_preset: Option<String>,
 }
 
@@ -170,28 +139,19 @@ impl Default for ThinkingProfile {
     }
 }
 
-/// Estimated complexity of the current turn to dynamically modulate thinking effort.
-///
-/// Ordered: `Minimal < Low < Medium < High`, so callers can compare levels
-/// rather than enumerate them.
+/// Ordered, so callers can compare levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TaskComplexity {
-    /// Trivial greetings, pleasantries, simple confirmations, or minimal queries.
     Minimal,
-    /// Routine questions, simple summaries, or basic status responses.
     Low,
-    /// Moderately complex questions or balanced analysis.
     Medium,
-    /// Code generation, editing files, debugging, analyzing errors/traces, or complex tasks.
+    /// Code, file edits, debugging.
     High,
 }
 
 impl TaskComplexity {
-    /// This level moved `steps` presets up or down, stopping at the ends.
-    ///
-    /// Used by the learned correction, which is why it saturates rather than
-    /// wrapping: a model that keeps overthinking greetings cannot be pushed
-    /// below "no thinking at all".
+    /// Saturates rather than wrapping: a model that overthinks greetings cannot be
+    /// pushed below "no thinking".
     pub fn shifted(self, steps: i8) -> Self {
         let ladder = [Self::Minimal, Self::Low, Self::Medium, Self::High];
         let at = ladder.iter().position(|c| *c == self).unwrap_or(0) as i32;
@@ -201,7 +161,6 @@ impl TaskComplexity {
 }
 
 impl ThinkingProfile {
-    /// Create a profile for an endpoint that does not support thinking parameters.
     pub fn unsupported() -> Self {
         Self {
             presets: Vec::new(),
@@ -211,9 +170,8 @@ impl ThinkingProfile {
         }
     }
 
-    /// A profile for a model the server said nothing about. Unlike
-    /// [`Self::unsupported`], which the server told us, this claims nothing:
-    /// no presets are offered, and turning reasoning off is still honoured.
+    /// Unlike [`Self::unsupported`], this claims nothing: no presets are offered,
+    /// but turning reasoning off is still honoured.
     pub fn unreported() -> Self {
         Self {
             presets: Vec::new(),
@@ -223,37 +181,31 @@ impl ThinkingProfile {
         }
     }
 
-    /// Whether the server said nothing about reasoning for this model.
     pub fn is_unreported(&self) -> bool {
         self.protocol == ThinkingProtocol::Unreported
     }
 
-    /// Select the minimum effort level to reduce or disable reasoning (e.g. for Auto-Nudge).
     pub fn min_effort(&self) -> Option<&str> {
         if !self.supported || self.presets.is_empty() {
             return None;
         }
-        // First check for explicit disable presets
         for disabled in &["off", "none", "disabled", "false", "0"] {
             if let Some(p) = self.presets.iter().find(|p| p.eq_ignore_ascii_case(disabled)) {
                 return Some(p.as_str());
             }
         }
-        // If protocol is BooleanFlag or LmStudio, "off" is always a valid effort even if not explicitly in presets
+        // These protocols always accept "off", listed or not.
         if self.protocol == ThinkingProtocol::BooleanFlag || self.protocol == ThinkingProtocol::LmStudio {
             return Some("off");
         }
-        // Next check for minimal/low presets
         for low in &["low", "minimal", "min", "fast"] {
             if let Some(p) = self.presets.iter().find(|p| p.eq_ignore_ascii_case(low)) {
                 return Some(p.as_str());
             }
         }
-        // Fall back to the first available preset
         self.presets.first().map(String::as_str)
     }
 
-    /// Select the maximum effort level for deep thinking.
     pub fn max_effort(&self) -> Option<&str> {
         if !self.supported || self.presets.is_empty() {
             return None;
@@ -266,11 +218,10 @@ impl ThinkingProfile {
         self.presets.last().map(String::as_str)
     }
 
-    /// Match a requested effort intent against discovered presets.
     pub fn resolve_effort(&self, intent: crate::types::ThinkingEffort) -> Option<&str> {
         match intent {
             crate::types::ThinkingEffort::Auto => {
-                // When Auto is resolved without message context, fall back to default or max
+                // Auto without message context: the default preset, else the max.
                 self.default_preset.as_deref().or_else(|| self.max_effort())
             }
             crate::types::ThinkingEffort::Default => self.default_preset.as_deref(),
@@ -293,13 +244,11 @@ impl ThinkingProfile {
         }
     }
 
-    /// Dynamically resolve the optimal thinking preset for the current turn messages.
     pub fn resolve_dynamic(&self, messages: &[crate::types::ChatMessage]) -> Option<&str> {
         self.resolve_dynamic_biased(messages, 0)
     }
 
-    /// As `resolve_dynamic`, with a correction learned from how this model's
-    /// turns have actually gone: `-1` thinks one preset less, `+1` one more.
+    /// `bias` -1 thinks one preset less, +1 one more.
     pub fn resolve_dynamic_biased(
         &self,
         messages: &[crate::types::ChatMessage],
@@ -312,7 +261,6 @@ impl ThinkingProfile {
         self.resolve_for_complexity(complexity)
     }
 
-    /// Match a task complexity level against discovered model presets.
     pub fn resolve_for_complexity(&self, complexity: TaskComplexity) -> Option<&str> {
         if !self.supported || self.presets.is_empty() {
             return None;
@@ -325,8 +273,8 @@ impl ThinkingProfile {
                     .find(|p| p.eq_ignore_ascii_case("low") || p.eq_ignore_ascii_case("minimal") || p.eq_ignore_ascii_case("min") || p.eq_ignore_ascii_case("fast"))
                     .map(String::as_str)
                     .or_else(|| {
-                        // For models with binary on/off presets (e.g. Qwen/DeepSeek in LM Studio), keep "on"
-                        // rather than flipping enable_thinking to false, which would evict the KV prefix cache.
+                        // Binary on/off models keep "on": flipping enable_thinking evicts the KV
+                        // prefix cache.
                         self.presets.iter().find(|p| p.eq_ignore_ascii_case("on")).map(String::as_str)
                     })
                     .or_else(|| self.min_effort())
@@ -351,11 +299,9 @@ impl ThinkingProfile {
         }
     }
 
-    /// Format payload fields according to the discovered thinking protocol.
     pub fn apply_to_request(&self, body: &mut serde_json::Value, effort: &str) {
         let is_off = effort == "off" || effort == "disabled" || effort == "none" || effort == "false" || effort == "0";
         match self.protocol {
-            // Nothing is known to send; never reached for a supported profile.
             ThinkingProtocol::Unreported => {}
             ThinkingProtocol::ReasoningEffort => {
                 if is_off {
@@ -434,19 +380,12 @@ impl ThinkingProfile {
         }
     }
 
-/// How hard this turn looks, and why.
+/// The level is decided by the user's own message and held for every step of
+/// the task: switching presets between steps costs the backend its prefix
+/// cache. Only a failed tool result raises it.
 ///
-/// The rule that matters: the level is decided by **the user's own message**
-/// and then held for every step of that task. A turn that reads three files
-/// and runs a test is one task, not four decisions — flipping the reasoning
-/// preset between steps costs the backend its prefix cache and tells the
-/// model nothing new. A failed tool result is the one thing that raises it.
-///
-/// Signals are structural rather than lexical. The old version matched a list
-/// of English words, so a Russian prompt matched nothing, and it measured
-/// length in bytes, so any Cyrillic sentence over fifty characters counted as
-/// "long" and went to maximum reasoning. Both of those are how a model ends
-/// up thinking for forty seconds about "read the file" typed in Russian.
+/// Signals are structural, not keyword lists, so Russian prompts are scored
+/// the same as English ones; length is counted in characters, not bytes.
 pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskComplexity {
     use crate::types::Role;
 
@@ -454,13 +393,10 @@ pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskCo
         return TaskComplexity::Medium;
     };
 
-    // Something the model tried has failed: that is worth thinking about,
-    // whatever the task looked like when it started.
+    // A failed step is worth thinking about, whatever the task looked like.
     let last_failed = last.role == Role::Tool && Self::looks_like_failure(&last.content);
 
-    // The task's own message, not whatever the last tool printed — and not
-    // the "yes" that approved a step either: answering a question mid-task
-    // does not make the task trivial.
+    // The task's own message, not tool output and not a "yes" given mid-task.
     let mut base = messages
         .iter()
         .rev()
@@ -469,9 +405,7 @@ pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskCo
         .map(|m| Self::user_message_complexity(&m.content))
         .unwrap_or(TaskComplexity::Minimal);
 
-    // "do it" / "yes, go ahead" approves whatever was just proposed, and the
-    // proposal is the task. Without this, agreeing to a full refactor scores
-    // like the two words "do it".
+    // "do it" approves what was just proposed, and the proposal is the task.
     let last_user_is_ack = messages
         .iter()
         .rev()
@@ -493,7 +427,6 @@ pub fn analyze_turn_complexity(messages: &[crate::types::ChatMessage]) -> TaskCo
     base
 }
 
-/// One step up, never past the top.
 fn raise(level: TaskComplexity) -> TaskComplexity {
     match level {
         TaskComplexity::Minimal => TaskComplexity::Low,
@@ -502,8 +435,7 @@ fn raise(level: TaskComplexity) -> TaskComplexity {
     }
 }
 
-/// Whether a tool result reads as a failure, in any language: the markers are
-/// program output, not prose.
+/// The markers are program output, so this works in any language.
 fn looks_like_failure(content: &str) -> bool {
     let c = content.trim();
     let lower = c.to_lowercase();
@@ -516,12 +448,10 @@ fn looks_like_failure(content: &str) -> bool {
         || lower.contains("compilation failed")
         || lower.contains("permission denied")
         || lower.contains("no such file")
-        // "exit code: 0" is a success; anything else is not.
         || (lower.contains("exit code:") && !lower.contains("exit code: 0"))
 }
 
-/// Explicit instructions about reasoning, in the two languages the app is
-/// used in. These are the user overriding the guess, so they win outright.
+/// The user overriding the guess, in Russian or English. Wins outright.
 fn explicit_override(lower: &str) -> Option<TaskComplexity> {
     const BRIEF: &[&str] = &[
         "no thinking", "don't think", "do not think", "without thinking", "no reasoning",
@@ -542,7 +472,7 @@ fn explicit_override(lower: &str) -> Option<TaskComplexity> {
     None
 }
 
-/// The user's own words, without the memory block we inject ahead of them.
+/// Without the memory block injected ahead of the message.
 fn user_text(raw: &str) -> &str {
     match raw.rsplit_once("\n\n---\n\n") {
         Some((_memory, user_part)) => user_part.trim(),
@@ -550,14 +480,13 @@ fn user_text(raw: &str) -> &str {
     }
 }
 
-/// "yes", "1", "ok", "go on" (in any language) — an answer to the agent, not a task.
+/// "yes", "1", "ok", "go on" in any language: an answer, not a task.
 fn is_bare_acknowledgement(prompt: &str) -> bool {
     prompt.chars().count() <= 12
         && prompt.split_whitespace().count() <= 2
         && !prompt.contains('?')
 }
 
-/// Score one user message by what it is shaped like.
 fn user_message_complexity(raw: &str) -> TaskComplexity {
     let prompt = Self::user_text(raw);
     let lower = prompt.to_lowercase();
@@ -569,8 +498,7 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
         return TaskComplexity::Minimal;
     }
 
-    // Characters, not bytes: a Cyrillic sentence is not twice as hard as the
-    // same sentence in English.
+    // Characters, not bytes: Cyrillic is two bytes per letter.
     let chars = prompt.chars().count();
 
     if Self::is_bare_acknowledgement(prompt) {
@@ -579,7 +507,6 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
 
     let mut score = 0i32;
 
-    // Several things asked for at once, or a sequence to carry out.
     let multi_step = prompt.lines().filter(|l| {
         let t = l.trim_start();
         t.starts_with("- ") || t.starts_with("* ") || t.starts_with(|c: char| c.is_ascii_digit())
@@ -594,7 +521,6 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
         score += 2;
     }
 
-    // Code the user pasted, or symbols they are pointing at.
     if prompt.contains("```") {
         score += 2;
     }
@@ -603,7 +529,6 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
         score += 2;
     }
 
-    // A path or a file: concrete work on something that exists.
     let has_path = prompt.split_whitespace().any(|w| {
         let w = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '_');
         (w.contains('/') && !w.contains("://")) || w.rsplit_once('.').is_some_and(|(stem, ext)| {
@@ -614,7 +539,6 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
         score += 1;
     }
 
-    // Something is broken, in either language.
     const TROUBLE: &[&str] = &[
         "error", "panic", "crash", "fails", "failing", "broken", "bug", "regress", "why does",
         "ошибк", "падает", "ломает", "не работает", "баг", "почему",
@@ -623,11 +547,9 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
         score += 2;
     }
 
-    // Asking for something to be produced or changed is work; asking a
-    // question about it is not. This is the one lexical signal kept, it is
-    // short, and it is written in both languages the app is used in — the
-    // list it replaced had forty English words including "run" and "check",
-    // which fire on nearly every sentence a programmer types.
+    // The one lexical signal kept: a request to produce or change something.
+    // Short and bilingual on purpose; the old forty-word English list fired on
+    // "run" and "check" in nearly every sentence.
     const MAKE: &[&str] = &[
         "write ", "create ", "implement ", "add ", "fix ", "refactor", "rename", "delete ",
         "remove ", "update ", "migrate", "port ", "optimis", "optimiz",
@@ -638,8 +560,7 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
         score += 1;
     }
 
-    // Scope. "Refactor the parser" and "refactor the whole project" are the
-    // same length and the same verb; only one of them is a week of work.
+    // Same verb and length, very different scope.
     const WHOLE: &[&str] = &[
         "whole project", "entire project", "whole codebase", "entire codebase", "all files",
         "everywhere", "across the codebase", "the whole thing", "from scratch", "rewrite everything",
@@ -650,21 +571,18 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
         score += 2;
     }
 
-    // Length, in characters.
     if chars > 240 {
         score += 2;
     } else if chars > 80 {
         score += 1;
     }
 
-    // A question at all.
     if prompt.contains('?') {
         score += 1;
     }
 
     match score {
-        // Nothing in it suggests work at all. Short and empty-handed is small
-        // talk; long and empty-handed is still a question worth answering.
+        // Nothing suggests work: short is small talk, long is still a question.
         0 if chars <= 40 => TaskComplexity::Minimal,
         0 => TaskComplexity::Low,
         1..=2 => TaskComplexity::Medium,
@@ -673,7 +591,7 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
 }
 
 
-    /// Parse model metadata from `/v1/models` or `/v1/models/{model}` response JSON.
+    /// From a `/v1/models` or `/v1/models/{model}` response.
     pub fn parse_model_metadata(data: &serde_json::Value, model_name: &str) -> Option<Self> {
         let models = parse_server_models(data);
         for m in models {
@@ -686,17 +604,15 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
         None
     }
 
-    /// Parse error responses from the API to learn supported presets on the fly.
+    /// Learns supported presets from an API error.
     pub fn parse_api_error(error_body: &str) -> Option<Self> {
         let err = error_body.to_lowercase();
-        // Only an error about the thinking controls can teach presets; any
-        // other 400 ("invalid messages[3].content") must not be mined for
-        // bracketed lists.
+        // Only an error about thinking controls can teach presets; any other 400
+        // ("invalid messages[3].content") must not be mined for bracketed lists.
         if !["reasoning", "thinking", "effort", "supported settings"].iter().any(|k| err.contains(k)) {
             return None;
         }
 
-        // Check if reasoning_effort / thinking is completely rejected by the server
         if err.contains("unrecognized request argument: reasoning_effort")
             || err.contains("unknown parameter: reasoning_effort")
             || (err.contains("extra inputs are not permitted") && err.contains("reasoning"))
@@ -705,7 +621,7 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
             return Some(Self::unsupported());
         }
 
-        // Look for preset list in brackets: e.g. `['low', 'medium', 'high']` or `[off, on]`
+        // `['low', 'medium', 'high']` or `[off, on]`
         if let Some(start_bracket) = err.find('[') {
             if let Some(end_bracket) = err[start_bracket..].find(']') {
                 let inside = &err[start_bracket + 1..start_bracket + end_bracket];
@@ -736,7 +652,6 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
             }
         }
 
-        // Look for comma-separated list following `one of:`, `expected:`, or `supported settings:`
         for prefix in &["one of:", "one of :", "expected:", "supported settings:", "supported values:"] {
             if let Some(idx) = err.find(prefix) {
                 let after = err[idx + prefix.len()..].trim();
@@ -767,8 +682,6 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
     }
 }
 
-/// Returns true if the prompt is a casual greeting, pleasantry, or introductory pleasantry
-/// without code syntax, technical commands, or complex task instructions.
 pub fn is_greeting_text(prompt: &str) -> bool {
     let raw = prompt.trim();
     if raw.is_empty() {
@@ -782,7 +695,6 @@ pub fn is_greeting_text(prompt: &str) -> bool {
         return false;
     }
 
-    // Direct match against known single/multi-word pleasantries
     let is_exact = matches!(
         clean_lower.as_str(),
         "hi" | "hello" | "hey" | "howdy" | "sup" | "yo" | "bye" | "goodbye" | "cya" | "see ya"
@@ -794,7 +706,6 @@ pub fn is_greeting_text(prompt: &str) -> bool {
         return true;
     }
 
-    // Word tokenization (splits on any non-alphanumeric character)
     let words: Vec<&str> = raw
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
@@ -813,11 +724,9 @@ pub fn is_greeting_text(prompt: &str) -> bool {
     let is_greeting_phrase = first == "good";
 
     if is_greeting_head || is_greeting_phrase {
-        // Single word greeting like "Hi!"
         if words.len() == 1 {
             return true;
         }
-        // Conversational greeting if all subsequent words are pleasantry words
         let is_all_pleasantry = words[1..].iter().all(|w| {
             let wl = w.to_lowercase();
             matches!(
@@ -836,20 +745,16 @@ pub fn is_greeting_text(prompt: &str) -> bool {
     false
 }
 
-/// An embedding model turns text into vectors and cannot hold a conversation,
-/// so it is never offered as the model to talk to.
+/// Embedding models cannot chat, so they are never offered.
 fn is_embedding(m: &serde_json::Value) -> bool {
     m.get("type")
         .and_then(|v| v.as_str())
         .is_some_and(|t| t.to_ascii_lowercase().starts_with("embedding"))
 }
 
-/// Fill in what one model listing left out from another.
-///
-/// LM Studio's `/api/v1/models` has the richest capabilities but can leave
-/// models out entirely — on a real server, the one that was loaded — while
-/// `/api/v0/models` lists every model with its load state. What the first
-/// listing says about a model it does have is kept.
+/// LM Studio's `/api/v1/models` has richer capabilities but can omit models
+/// (the loaded one, on a real server); `/api/v0/models` lists every model with
+/// its load state. What the first listing says is kept.
 pub fn merge_server_models(mut primary: Vec<DiscoveredModel>, other: Vec<DiscoveredModel>) -> Vec<DiscoveredModel> {
     for m in other {
         match primary.iter_mut().find(|p| p.id == m.id) {
@@ -870,12 +775,11 @@ pub fn merge_server_models(mut primary: Vec<DiscoveredModel>, other: Vec<Discove
     primary
 }
 
-/// Parse models and capabilities from server JSON (LM Studio `/api/v1/models`,
-/// `/api/v0/models`, or OpenAI-compatible `/v1/models`).
+/// LM Studio `/api/v1/models`, `/api/v0/models`, or OpenAI `/v1/models`.
 pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
     let mut discovered = Vec::new();
 
-    // Check 1: LM Studio native v1 API `{"models": [...]}`
+    // LM Studio v1: `{"models": [...]}`
     if let Some(models) = data.get("models").and_then(|m| m.as_array()) {
         for m in models {
             let id = m.get("key")
@@ -908,9 +812,8 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 .and_then(|v| v.as_str())
                 .map(|t| t.eq_ignore_ascii_case("vlm"))
                 .unwrap_or(false);
-            // LM Studio's v1 listing names the reasoning settings of every
-            // model that has them: a model it describes without any cannot
-            // reason. A model it does not describe at all is unknown.
+            // v1 names the reasoning settings of every model that has them, so a model
+            // described without any cannot reason. An undescribed model is unknown.
             let mut thinking = if m.get("capabilities").is_some() {
                 ThinkingProfile::unsupported()
             } else {
@@ -942,7 +845,6 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 }
             }
 
-            // Fallback for chat_template_config enable_thinking
             if !thinking.supported {
                 if let Some(cfg) = m.get("chat_template_config") {
                     if cfg.get("enable_thinking").is_some() {
@@ -972,7 +874,7 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
         }
     }
 
-    // Check 2: LM Studio v0 or OpenAI list `{"data": [...]}` or bare array `[...]`
+    // LM Studio v0 or OpenAI: `{"data": [...]}` or a bare array.
     let items = if let Some(arr) = data.get("data").and_then(|d| d.as_array()) {
         arr.as_slice()
     } else if let Some(arr) = data.as_array() {
@@ -995,8 +897,7 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
         }
 
         let is_loaded = m.get("state").and_then(|v| v.as_str()).map(|s| s == "loaded").unwrap_or(false);
-        // llama-server puts both in `meta`: the context it runs with, and the
-        // one the model was trained for.
+        // llama-server: `meta` has both the running and the trained context.
         let meta = m.get("meta");
         let context_length = m.get("loaded_context_length")
             .or_else(|| m.get("context_length"))
@@ -1009,22 +910,19 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
             .map(|n| n as usize);
 
         let mut supports_tools = false;
-        // LM Studio marks a vision model by its type ("vlm") and does not
-        // always repeat it in the capability list.
+        // LM Studio marks vision by type "vlm", not always in capabilities.
         let mut supports_vision = m
             .get("type")
             .and_then(|v| v.as_str())
             .map(|t| t.eq_ignore_ascii_case("vlm"))
             .unwrap_or(false);
-        // Neither LM Studio's v0 listing nor a plain OpenAI one says anything
-        // about reasoning, unless a capability object lists effort levels.
+        // v0 and plain OpenAI listings say nothing about reasoning unless a
+        // capability object lists effort levels.
         let mut thinking = ThinkingProfile::unreported();
 
         if let Some(caps) = m.get("capabilities") {
             if let Some(arr) = caps.as_array() {
                 supports_tools = arr.iter().any(|v| v.as_str() == Some("tool_use"));
-                // Or-ed: the type already said "vlm" for some servers, and
-                // the capability list does not always repeat it.
                 supports_vision |= arr.iter().any(|v| matches!(v.as_str(), Some("vision") | Some("image_input")));
             } else if let Some(obj) = caps.as_object() {
                 supports_tools = obj.get("trained_for_tool_use").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1063,9 +961,7 @@ mod tests {
 
     #[test]
     fn a_model_is_not_given_reasoning_settings_because_of_its_name() {
-        // "qwen" or "think" in an id used to be enough to send reasoning
-        // fields the server had never mentioned. What a listing says nothing
-        // about is unknown, not guessed.
+        // A model name alone ("qwen", "think") is not evidence of reasoning support.
         let v0 = serde_json::json!({"data":[{"id":"qwen3.6-35b-a3b-mtp","type":"vlm","arch":"qwen35moe","state":"loaded","capabilities":["tool_use"]}]});
         let m = &parse_server_models(&v0)[0];
         assert!(!m.thinking.supported);
@@ -1095,8 +991,7 @@ mod tests {
 
     #[test]
     fn llama_server_reports_the_context_it_runs_with_and_the_one_it_was_trained_for() {
-        // A real llama-server b10630 listing, trimmed: it has both "models"
-        // (without ids) and "data".
+        // Real llama-server b10630 listing, trimmed: both "models" and "data".
         let listing = serde_json::json!({
             "models": [{"name": "/models/gemma.gguf", "model": "/models/gemma.gguf", "capabilities": ["completion"]}],
             "object": "list",
@@ -1112,7 +1007,6 @@ mod tests {
 
     #[test]
     fn a_vision_model_is_recognised_however_the_server_says_so() {
-        // LM Studio marks it by type; other servers list a capability.
         let by_type = serde_json::json!({"data":[{"id":"qwen3.6-35b","type":"vlm","capabilities":["tool_use"]}]});
         assert!(parse_server_models(&by_type)[0].supports_vision);
 
@@ -1153,7 +1047,6 @@ mod tests {
 
     #[test]
     fn test_min_and_max_effort_selection() {
-        // Preset: off/on
         let p_binary = ThinkingProfile {
             presets: vec!["off".into(), "on".into()],
             protocol: ThinkingProtocol::BooleanFlag,
@@ -1164,7 +1057,6 @@ mod tests {
         assert_eq!(p_binary.max_effort(), Some("on"));
         assert_eq!(p_binary.resolve_effort(crate::types::ThinkingEffort::Default), Some("on"));
 
-        // Preset: off/low/medium/high
         let p_four = ThinkingProfile {
             presets: vec!["off".into(), "low".into(), "medium".into(), "high".into()],
             protocol: ThinkingProtocol::ReasoningEffort,
@@ -1174,7 +1066,6 @@ mod tests {
         assert_eq!(p_four.min_effort(), Some("off"));
         assert_eq!(p_four.max_effort(), Some("high"));
 
-        // Preset: low/medium/high (no off)
         let p_classic = ThinkingProfile {
             presets: vec!["low".into(), "medium".into(), "high".into()],
             protocol: ThinkingProtocol::ReasoningEffort,
@@ -1184,7 +1075,6 @@ mod tests {
         assert_eq!(p_classic.min_effort(), Some("low"));
         assert_eq!(p_classic.max_effort(), Some("high"));
 
-        // Preset: low/high/xhigh
         let p_xhigh = ThinkingProfile {
             presets: vec!["low".into(), "high".into(), "xhigh".into()],
             protocol: ThinkingProtocol::ReasoningEffort,
@@ -1197,31 +1087,26 @@ mod tests {
 
     #[test]
     fn test_parse_api_error_extracts_presets() {
-        // OpenAI / LM Studio format with brackets
         let err1 = "Invalid reasoning_effort 'off'. Supported values are: ['low', 'medium', 'high']";
         let p1 = ThinkingProfile::parse_api_error(err1).expect("parsed p1");
         assert_eq!(p1.presets, vec!["low", "medium", "high"]);
         assert_eq!(p1.min_effort(), Some("low"));
 
-        // Alternative presets: low/high/xhigh
         let err2 = "reasoning_effort must be one of: ['low', 'high', 'xhigh']";
         let p2 = ThinkingProfile::parse_api_error(err2).expect("parsed p2");
         assert_eq!(p2.presets, vec!["low", "high", "xhigh"]);
         assert_eq!(p2.max_effort(), Some("xhigh"));
 
-        // Binary presets: [off, on]
         let err3 = "Invalid value for reasoning. Expected one of: [off, on]";
         let p3 = ThinkingProfile::parse_api_error(err3).expect("parsed p3");
         assert_eq!(p3.presets, vec!["off", "on"]);
         assert_eq!(p3.min_effort(), Some("off"));
 
-        // Unsupported error
         let err4 = "Unrecognized request argument: reasoning_effort";
         let p4 = ThinkingProfile::parse_api_error(err4).expect("parsed p4");
         assert!(!p4.supported);
         assert_eq!(p4.min_effort(), None);
 
-        // LM Studio warning/error format: "Supported settings: 'on', 'off'"
         let err5 = "Reasoning setting 'high' is not supported by model. Supported settings: 'on', 'off'. Falling back to reasoning setting 'on'.";
         let p5 = ThinkingProfile::parse_api_error(err5).expect("parsed p5");
         assert_eq!(p5.presets, vec!["on", "off"]);
@@ -1230,8 +1115,7 @@ mod tests {
 
     #[test]
     fn a_model_the_v1_listing_leaves_out_is_taken_from_v0() {
-        // Shapes as a real LM Studio returned them: v1 without the loaded
-        // qwen, v0 with it and its state.
+        // Real LM Studio shapes: v1 without the loaded qwen, v0 with it.
         let v1 = serde_json::json!({"models": [
             {"type": "llm", "key": "gemma-4-e2b-it-qat@q4_k_xl", "loaded_instances": [], "max_context_length": 131072,
              "capabilities": {"vision": false, "trained_for_tool_use": true,
@@ -1334,7 +1218,6 @@ mod tests {
         assert_eq!(m.thinking.protocol, ThinkingProtocol::LmStudio);
         assert_eq!(m.thinking.default_preset.as_deref(), Some("on"));
 
-        // Verify parse_model_metadata finds it
         let prof = ThinkingProfile::parse_model_metadata(&json, "gemma-4").expect("found profile");
         assert_eq!(prof.presets, vec!["off", "on"]);
     }
@@ -1349,7 +1232,6 @@ mod tests {
                 "{text}"
             );
         }
-        // The memory block we inject is ours, not the user's message.
         assert_eq!(
             ThinkingProfile::analyze_turn_complexity(&[ChatMessage::user(
                 "# Memory (automatically loaded)\n\n---\n\nHello"
@@ -1361,9 +1243,7 @@ mod tests {
     #[test]
     fn a_russian_prompt_is_judged_like_the_same_prompt_in_english() {
         use crate::types::ChatMessage;
-        // The old version measured length in bytes, so this sentence — 57
-        // characters, 94 bytes — counted as "long" and went to maximum
-        // reasoning purely for being Cyrillic.
+        // 57 characters, 94 bytes: counted as "long" when length was in bytes.
         let ru = ThinkingProfile::analyze_turn_complexity(&[ChatMessage::user(
             "Прочитай src/parser.rs и коротко опиши что делает функция",
         )]);
@@ -1431,8 +1311,6 @@ mod tests {
     fn agreeing_to_a_big_job_inherits_the_job() {
         use crate::types::ChatMessage;
 
-        // The user states the job, then approves it a message later. "Do it"
-        // is two words; the task behind it is a week.
         let stated = vec![
             ChatMessage::user("Делаем полный рефактор проекта"),
             ChatMessage::assistant("Хорошо, начну с разбора зависимостей. Приступать?"),
@@ -1440,8 +1318,6 @@ mod tests {
         ];
         assert_eq!(ThinkingProfile::analyze_turn_complexity(&stated), TaskComplexity::High);
 
-        // And the other way round: the assistant proposes the big job, the
-        // user only says yes, so the proposal is the task.
         let proposed = vec![
             ChatMessage::user("Что тут можно улучшить?"),
             ChatMessage::assistant(
@@ -1476,14 +1352,12 @@ mod tests {
         let task = ChatMessage::user("Read src/parser.rs and describe it");
         let base = ThinkingProfile::analyze_turn_complexity(std::slice::from_ref(&task));
 
-        // A step that worked keeps the task at its own level: flipping the
-        // preset between steps costs the backend its prefix cache.
+        // Switching presets between steps costs the prefix cache.
         assert_eq!(
             ThinkingProfile::analyze_turn_complexity(&[task.clone(), tool("exit code: 0\noutput:\ndone")]),
             base
         );
 
-        // A step that failed is worth more thought than the task asked for.
         for failure in [
             "error: no such file: src/confg.rs",
             "exit code: 101\noutput:\ntest failures",
@@ -1499,8 +1373,6 @@ mod tests {
     #[test]
     fn the_level_holds_across_the_steps_of_one_task() {
         use crate::types::{ChatMessage, Role};
-        // Answering "yes" mid-task is not a new, trivial turn: the task is
-        // what is being worked on, and its level is what applies.
         let history = vec![
             ChatMessage::user("Fix the compilation error in src/main.rs, then run the tests"),
             ChatMessage::assistant("Found a type error. Fix it now?"),
@@ -1537,7 +1409,6 @@ mod tests {
         assert!(is_greeting_text("Who are you?"));
         assert!(is_greeting_text("How are you?"));
 
-        // Must not classify coding tasks as pure greetings
         assert!(!is_greeting_text("Hello, write me a web server in Rust"));
         assert!(!is_greeting_text("fn main() { println!(); }"));
         assert!(!is_greeting_text("Fix bug in code"));
@@ -1545,8 +1416,7 @@ mod tests {
 
     #[test]
     fn test_lm_studio_apply_to_request_suppression() {
-        // Binary on/off profile (e.g. Qwen, DeepSeek R1 GGUF on LM Studio)
-        // Must NOT set reasoning_effort at all to avoid LM Studio warnings
+        // Must not set reasoning_effort: LM Studio warns about it.
         let prof_bin = ThinkingProfile {
             presets: vec!["off".to_string(), "on".to_string()],
             protocol: ThinkingProtocol::LmStudio,
@@ -1566,7 +1436,6 @@ mod tests {
         assert_eq!(body["enable_thinking"], true);
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
 
-        // Tiered profile (LM Studio models reporting low/medium/high presets)
         let prof_tiered = ThinkingProfile {
             presets: vec!["off".to_string(), "low".to_string(), "medium".to_string(), "high".to_string()],
             protocol: ThinkingProtocol::LmStudio,
@@ -1589,7 +1458,6 @@ mod tests {
     fn test_resolve_dynamic_binary_and_tiered() {
         use crate::types::ChatMessage;
 
-        // Binary profile (e.g. LM Studio deepseek-r1 / qwen)
         let binary_prof = ThinkingProfile {
             presets: vec!["off".to_string(), "on".to_string()],
             protocol: ThinkingProtocol::LmStudio,
@@ -1603,7 +1471,6 @@ mod tests {
         let code = vec![ChatMessage::user("Fix compilation error in main.rs")];
         assert_eq!(binary_prof.resolve_dynamic(&code), Some("on"));
 
-        // Tiered profile (e.g. low/medium/high)
         let tiered_prof = ThinkingProfile {
             presets: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
             protocol: ThinkingProtocol::ReasoningEffort,

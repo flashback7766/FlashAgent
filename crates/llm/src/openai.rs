@@ -1,5 +1,4 @@
-//! OpenAI-compatible HTTP backend (LM Studio, Ollama's OpenAI shim, vLLM,
-//! OpenRouter...). Thin transport over [`crate::parse`] primitives.
+//! OpenAI-compatible HTTP backend (LM Studio, Ollama, vLLM, OpenRouter...).
 
 use std::time::Duration;
 
@@ -11,7 +10,6 @@ use tokio::sync::mpsc;
 use crate::parse::{ChunkParser, SseDecoder};
 use crate::types::{ChatMessage, FinishReason, LlmError, LlmEvent, Role, ToolSpec};
 
-/// OpenAI-compatible chat-completions backend.
 pub struct OpenAiCompat {
     base_url: String,
     api_key: Option<String>,
@@ -20,22 +18,16 @@ pub struct OpenAiCompat {
     profile: std::sync::Arc<std::sync::RwLock<Option<crate::thinking::ThinkingProfile>>>,
     discovery: std::sync::Arc<std::sync::RwLock<Option<crate::thinking::ServerDiscovery>>>,
     working_models_url: std::sync::Arc<std::sync::RwLock<Option<String>>>,
-    /// Extra attempts after a transport failure (connection refused/reset)
-    /// before any response arrived. HTTP errors and mid-stream drops are not
-    /// retried: the request may already have had effects on the server.
+    /// Retries after a connection failure only. HTTP errors and mid-stream drops
+    /// are not retried: the request may already have had effects.
     max_retries: std::sync::atomic::AtomicUsize,
-    /// Preset steps to shift auto effort by, learned from how this model's
-    /// turns have gone. Shared, because the app sets it from outside the
-    /// request path.
+    /// Auto effort shift in presets, learned from this model's past turns.
     effort_bias: std::sync::Arc<std::sync::atomic::AtomicI8>,
-    /// Requests to the model that have not finished yet, streams included
-    /// until their last byte. Anything that only watches the server (the
-    /// model list) waits for this to be zero rather than compete with the
-    /// work for a local server's attention.
+    /// Model requests not yet finished, streams included. Background polling
+    /// (the model list) waits for zero instead of competing with them.
     in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-/// One request to the model, counted in `in_flight` for as long as it lives.
 struct Busy(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
 impl Busy {
@@ -51,17 +43,13 @@ impl Drop for Busy {
     }
 }
 
-/// How many times a 400 may teach us a new request shape before we give up.
 const MAX_ADAPTIVE_RETRIES: u8 = 2;
 
-/// Which optional request fields a body carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fields {
-    /// Thinking controls and every sampling knob.
     All,
-    /// Thinking controls, but only standard sampling (temperature, max_tokens).
+    /// Thinking controls, but only temperature and max_tokens for sampling.
     NoExtraSampling,
-    /// Only fields every OpenAI-compatible server accepts.
     Standard,
 }
 
@@ -75,15 +63,13 @@ impl Fields {
 }
 
 impl OpenAiCompat {
-    /// Create a backend pointed at e.g. `http://localhost:1234/v1`.
     pub fn new(base_url: impl Into<String>, model: impl Into<String>, api_key: Option<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key,
             model: std::sync::Arc::new(std::sync::RwLock::new(model.into())),
-            // No total timeout: a long generation on a slow local model can
-            // legitimately stream for many minutes. An idle read timeout
-            // catches a server that stopped sending instead.
+            // No total timeout: a slow local model can stream for many minutes. The idle
+            // read timeout catches a server that stopped sending.
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(3))
                 .read_timeout(Duration::from_secs(300))
@@ -98,39 +84,31 @@ impl OpenAiCompat {
         }
     }
 
-    /// Base URL this backend talks to.
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
 
-    /// Requests to the model still running, a stream counting until it ends.
     pub fn requests_in_flight(&self) -> usize {
         self.in_flight.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Retry budget for transport failures (the `network_retries` setting).
     pub fn set_max_retries(&self, retries: usize) {
         self.max_retries.store(retries, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Shift auto effort by `steps` presets for this model, as learned from
-    /// its past turns. Only auto is affected: a preset the user picked by
-    /// hand is theirs, and second-guessing it would be a bug.
+    /// Only auto is affected; a preset the user picked by hand stays as is.
     pub fn set_effort_bias(&self, steps: i8) {
         self.effort_bias.store(steps.clamp(-1, 1), std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// The correction in force right now.
     pub fn effort_bias(&self) -> i8 {
         self.effort_bias.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Return the currently active model ID.
     pub fn model(&self) -> String {
         self.model.read().map(|m| m.clone()).unwrap_or_default()
     }
 
-    /// Switch or set the active model ID.
     pub fn set_model(&self, model: impl Into<String>) {
         let model = model.into();
         let changed = match self.model.write() {
@@ -145,11 +123,8 @@ impl OpenAiCompat {
             return;
         }
 
-        // A thinking profile belongs to a model, not to a connection. Keeping
-        // the old one means asking a model that cannot reason for a reasoning
-        // effort — the server warns, and the request carries fields the model
-        // has no use for. What discovery already knows about the new model is
-        // the answer; when it knows nothing, so do we.
+        // A thinking profile belongs to the model, so the old one is dropped;
+        // otherwise a non-reasoning model gets asked for a reasoning effort.
         let derived = self.discovery.read().ok().and_then(|d| {
             d.as_ref().and_then(|disc| {
                 disc.models
@@ -163,18 +138,12 @@ impl OpenAiCompat {
         }
     }
 
-    /// Access discovered server state if discovery has run.
     pub fn discovery(&self) -> Option<crate::thinking::ServerDiscovery> {
         self.discovery.read().ok().and_then(|d| d.clone())
     }
 
-    /// Take what another backend's look at this server found, so this one
-    /// knows the model's reasoning settings and the kind of server from its
-    /// first request instead of from its own first look.
-    ///
-    /// Checks `active_model` as well as `models`: a server's listing does not
-    /// always repeat the loaded model's entry there, and without this fallback
-    /// adopting discovery for exactly that model silently kept no profile.
+    /// Also checks `active_model`: some servers do not list the loaded model in
+    /// `models`, and without the fallback no profile was adopted.
     pub fn adopt_discovery(&self, disc: &crate::thinking::ServerDiscovery) {
         let model = self.model();
         let thinking = disc
@@ -193,18 +162,15 @@ impl OpenAiCompat {
         }
     }
 
-    /// What kind of server this is, as far as discovery knows.
     fn server_kind(&self) -> crate::thinking::ServerKind {
         self.discovery.read().ok().and_then(|d| d.as_ref().map(|d| d.kind)).unwrap_or_default()
     }
 
-    /// Pre-seed or explicitly set the thinking profile.
     pub fn with_profile(mut self, profile: crate::thinking::ThinkingProfile) -> Self {
         self.profile = std::sync::Arc::new(std::sync::RwLock::new(Some(profile)));
         self
     }
 
-    /// Access the active thinking profile learned for this model.
     pub fn profile(&self) -> Option<crate::thinking::ThinkingProfile> {
         self.profile.read().ok().and_then(|p| p.clone())
     }
@@ -287,14 +253,11 @@ impl OpenAiCompat {
         Some(disc)
     }
 
-    /// Discover available models, loaded instances, context windows, and
-    /// reasoning capabilities across LM Studio `/api/v1/models`, `/api/v0/models`,
-    /// or standard `/v1/models`.
+    /// Tries LM Studio `/api/v1/models`, `/api/v0/models` and standard `/v1/models`.
     pub async fn discover_server(&self) -> Option<crate::thinking::ServerDiscovery> {
         let root = self.base_url.strip_suffix("/v1").unwrap_or(&self.base_url);
         let cached_url = self.working_models_url.read().ok().and_then(|u| u.clone());
 
-        // Fast path: if a previous look already found a working endpoint, try it first
         if let Some(ref url) = cached_url {
             if let Some(val) = Self::probe_candidate(&self.client, url, self.api_key.as_deref()).await {
                 let mut extra_v0 = None;
@@ -313,7 +276,6 @@ impl OpenAiCompat {
             }
         }
 
-        // Candidates to probe concurrently, ordered by priority
         let mut candidate_urls = Vec::with_capacity(4);
         let defaults = [
             format!("{root}/api/v1/models"),
@@ -327,7 +289,6 @@ impl OpenAiCompat {
             }
         }
 
-        // Probe candidate URLs concurrently to prevent sequential timeout stalls
         let probe_futs: Vec<_> = candidate_urls
             .iter()
             .map(|u| {
@@ -372,9 +333,8 @@ impl OpenAiCompat {
     fn body_at(&self, messages: &[ChatMessage], tools: &[ToolSpec], options: &crate::types::TurnOptions, fields: Fields) -> serde_json::Value {
         let current_model = self.model();
 
-        // No discovered profile means the model's abilities are unknown, not
-        // that it has every preset: the default is a guess, and a wrong guess
-        // here puts fields in the request that the server logs warnings about.
+        // Unknown abilities default to nothing: a guessed preset puts fields in the
+        // request that the server warns about.
         let current_profile = self.profile.read().ok().and_then(|p| p.clone()).unwrap_or_default();
         let resolved_effort: Option<String> = if let Some(effort_str) = &options.custom_effort {
             Some(effort_str.clone())
@@ -390,9 +350,8 @@ impl OpenAiCompat {
             current_profile.default_preset.clone()
         };
 
-        // What the server is, not where it is: a llama-server on another
-        // machine keeps a prompt cache, and a hosted API on localhost through
-        // a tunnel does not.
+        // Kind of server, not its address: a remote llama-server still caches
+        // prompts, a hosted API tunnelled to localhost does not.
         let is_local_or_lmstudio = self.server_kind().runs_local_models()
             || current_profile.protocol == crate::thinking::ThinkingProtocol::LmStudio
             || current_profile.protocol == crate::thinking::ThinkingProtocol::BooleanFlag;
@@ -434,22 +393,16 @@ impl OpenAiCompat {
                 }
                 Role::System => {
                     has_system = true;
-                    // Sent exactly as it is, whatever the thinking setting.
-                    // It is the start of every prompt: rewriting it when
-                    // thinking flipped between turns made the server's cache
-                    // miss from the first token and re-read the whole
-                    // conversation (f_keep near 0, tens of seconds on a local
-                    // model). The per-turn instruction goes at the end instead.
+                    // Sent unchanged regardless of thinking: the system prompt is the cache
+                    // prefix, and rewriting it made the server re-read the whole conversation.
+                    // The per-turn instruction goes at the end instead.
                     serde_json::json!({ "role": "system", "content": m.content })
                 }
                 Role::User => {
                     if m.images.is_empty() {
                         serde_json::json!({ "role": "user", "content": m.content })
                     } else {
-                        // A message with pictures is sent the way every
-                        // OpenAI-compatible server expects them: content
-                        // becomes a list of parts, text first so the question
-                        // is read before the image it is about.
+                        // Text first, so the question is read before the image.
                         let mut parts = Vec::new();
                         if !m.content.trim().is_empty() {
                             parts.push(serde_json::json!({ "type": "text", "text": m.content }));
@@ -490,7 +443,7 @@ impl OpenAiCompat {
             return self.with_tools(body, tools);
         }
 
-        // Maximize prefix KV cache reuse (f_keep >= 0.9) on llama.cpp, LM Studio, vLLM and local endpoints
+        // Keeps prefix KV cache reuse high (f_keep >= 0.9).
         if is_local_or_lmstudio {
             body["cache_prompt"] = serde_json::json!(true);
             body["prompt_cache"] = serde_json::json!(true);
@@ -520,8 +473,8 @@ impl OpenAiCompat {
             if current_profile.supported {
                 current_profile.apply_to_request(&mut body, effort_str);
             } else if (is_local_or_lmstudio || current_profile.is_unreported()) && is_off {
-                // For local / LM Studio endpoints without an explicit thinking profile,
-                // proactively suppress thinking so models like Gemma 4 / Qwen don't spend limited token budgets on thinking.
+                // No explicit profile on a local server: turn thinking off so small models
+                // do not spend their token budget on it.
                 body["reasoning"] = serde_json::json!("off");
                 body["reasoning_effort"] = serde_json::json!("none");
                 body["enable_thinking"] = serde_json::json!(false);
@@ -576,11 +529,9 @@ impl crate::LlmBackend for OpenAiCompat {
         tools: &[ToolSpec],
         options: &crate::types::TurnOptions,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        // A 400 often means the server rejected an optional field. Adapt at
-        // most MAX_ADAPTIVE_RETRIES times: learn a thinking preset list when
-        // the error names one, otherwise fall back to fewer fields (all ->
-        // no extra sampling knobs -> standard fields only). A 400 for any
-        // other reason (context overflow, malformed history) then surfaces.
+        // A 400 often means an optional field was rejected. Up to
+        // MAX_ADAPTIVE_RETRIES times: learn the preset list if the error names one,
+        // else drop fields (All -> NoExtraSampling -> Standard).
         let busy = Busy::new(&self.in_flight);
         let mut fields = Fields::All;
         let mut adaptive_retries = 0u8;
@@ -607,8 +558,7 @@ impl crate::LlmBackend for OpenAiCompat {
 
         let (tx, rx) = mpsc::channel::<Result<LlmEvent, LlmError>>(256);
         tokio::spawn(async move {
-            // The request is not over when the headers arrive: the server is
-            // still generating for as long as this task reads.
+            // The server keeps generating while this task reads.
             let _busy = busy;
             let mut sse = SseDecoder::default();
             let mut parser = ChunkParser::default();
@@ -618,19 +568,13 @@ impl crate::LlmBackend for OpenAiCompat {
                 match chunk {
                     Ok(bytes) => {
                         for payload in sse.feed(&bytes) {
-                            // Servers report failures that happen after the
-                            // 200 (context overflow, model crash) as an
-                            // `error` object inside the stream.
+                            // Failures after the 200 (context overflow, crash) arrive in-stream.
                             if let Some(msg) = stream_error(&payload) {
                                 let _ = tx.send(Err(LlmError::Stream(msg))).await;
                                 return;
                             }
                             for ev in parser.feed(&payload) {
-                                // Native tool-call deltas pass through; if the
-                                // model emits tool calls as text instead, the
-                                // scanner catches them when the caller feeds
-                                // text through it (kept out of the wire loop
-                                // here to avoid double-handling).
+                                // Tool calls emitted as text are caught by the caller's scanner, not here.
                                 if matches!(ev, LlmEvent::Done(_)) {
                                     done_sent = true;
                                 }
@@ -657,8 +601,7 @@ impl crate::LlmBackend for OpenAiCompat {
     }
 }
 
-/// A 1×1 PNG and a 64×64 PNG, used to ask the server what a picture costs.
-/// Both are valid files; the small one is the control.
+/// The 1×1 is the control for the 64×64.
 const PROBE_TINY: &[u8] = &[
     0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R', 0, 0, 0, 1,
     0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xDE, 0, 0, 0, 12, b'I', b'D', b'A', b'T', 0x08,
@@ -667,14 +610,9 @@ const PROBE_TINY: &[u8] = &[
 ];
 
 impl OpenAiCompat {
-    /// Ask the server what an image of a known size costs in prompt tokens.
-    ///
-    /// Guessing is not possible: a Qwen-VL charges by area, a Gemma charges a
-    /// flat rate per image whatever its size. Two throwaway requests — one
-    /// with a picture, one without — and the difference is the answer, for
-    /// this model, from the server that will actually be billed for it.
-    ///
-    /// Returns tokens per pixel and the flat cost, as `(per_pixel, fixed)`.
+    /// Measured, not guessed: Qwen-VL charges by area, Gemma a flat rate per
+    /// image. Two requests, with and without a picture, give the difference.
+    /// Returns `(per_pixel, fixed)`.
     pub async fn measure_image_cost(&self, probe_png: &[u8], width: u32, height: u32) -> Option<(f32, f32)> {
         let _busy = Busy::new(&self.in_flight);
         let ask = |images: Vec<String>| {
@@ -716,9 +654,7 @@ impl OpenAiCompat {
         if big <= 0.0 {
             return None;
         }
-        // The 1×1 costs whatever a picture costs before its pixels are
-        // counted; the rest scales with area. A model that charges a flat
-        // rate lands on per_pixel ≈ 0 by itself.
+        // A flat-rate model lands on per_pixel ≈ 0 by itself.
         let pixels = (width as f32) * (height as f32);
         let per_pixel = ((big - tiny) / pixels).max(0.0);
         Some((per_pixel, tiny.max(0.0)))
@@ -734,8 +670,7 @@ impl OpenAiCompat {
             }
             match req.send().await {
                 Ok(resp) => return Ok(resp),
-                // Connection failures only: a timeout after connecting means
-                // the server may already be generating for this request.
+                // Connect errors only: after connecting, the server may already be generating.
                 Err(e) if attempt < retries && e.is_connect() => {
                     attempt += 1;
                     tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
@@ -746,7 +681,6 @@ impl OpenAiCompat {
     }
 }
 
-/// Error message carried by an in-stream `{"error": ...}` payload, if any.
 fn stream_error(payload: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
     let err = v.get("error").filter(|e| !e.is_null())?;
@@ -796,11 +730,7 @@ mod tests {
 
     #[test]
     fn a_message_without_pictures_is_sent_exactly_as_before() {
-        // Every server accepts a plain string; only a message with images
-        // needs the list form.
         let llm = OpenAiCompat::new("http://localhost:1234/v1", "m", None);
-        // Thinking left to the server's default, so no per-turn note is added
-        // to the text; the note has its own test.
         let options = crate::types::TurnOptions { thinking: crate::types::ThinkingEffort::Default, ..Default::default() };
         let body = llm.body(&[ChatMessage::user("hello")], &[], &options);
         let user = body["messages"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap().clone();
@@ -809,9 +739,7 @@ mod tests {
 
     #[test]
     fn switching_models_does_not_keep_the_old_model_s_thinking_profile() {
-        // LM Studio warned: "'minimal' reasoning effort is not directly
-        // supported" — we were still asking with the previous model's
-        // profile after the server switched models under us.
+        // Regression: the previous model's profile was kept after a model switch.
         let llm = OpenAiCompat::new("http://127.0.0.1:1234/v1", "thinker", None).with_profile(
             crate::thinking::ThinkingProfile {
                 presets: vec!["off".into(), "on".into()],
@@ -832,8 +760,7 @@ mod tests {
 
     #[test]
     fn the_learned_effort_correction_is_never_more_than_one_step() {
-        // The correction is a nudge, not a second opinion: a runaway value
-        // would let one bad week silently pin the model at "off".
+        // Clamped, so a bad streak cannot pin the model at "off".
         let llm = OpenAiCompat::new("http://localhost:1234/v1", "m", None);
         assert_eq!(llm.effort_bias(), 0, "nothing learned yet");
         llm.set_effort_bias(-7);
@@ -844,8 +771,6 @@ mod tests {
         assert_eq!(llm.effort_bias(), 0);
     }
 
-    /// One-shot HTTP server answering every request with `status` + `body`;
-    /// returns its base URL and a request counter.
     async fn canned_server(status: &'static str, body: &'static str) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -868,8 +793,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_stream_counts_as_a_request_until_its_last_byte() {
-        // Watching the model list must wait for the model to finish, and
-        // the model is not finished when the headers arrive.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
@@ -903,9 +826,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_look_at_the_server_that_says_nothing_keeps_what_its_errors_taught() {
-        // The server's own 400 is an answer about reasoning; a model listing
-        // that does not mention reasoning is not, and the look repeats every
-        // 15 seconds. Forgetting the lesson would bring the 400 back.
+        // A listing that does not mention reasoning must not erase a preset list
+        // learned from a 400.
         let (url, _) = canned_server("200 OK", r#"{"data":[{"id":"m","state":"loaded"}]}"#).await;
         let learned = crate::thinking::ThinkingProfile {
             presets: vec!["low".into(), "high".into()],
@@ -918,7 +840,6 @@ mod tests {
         assert!(disc.models[0].thinking.is_unreported(), "the listing says nothing about reasoning");
         assert_eq!(b.profile(), Some(learned), "a look that said nothing replaced what the server's error taught");
 
-        // An empty slot is filled, so the request does not fall back to a guess.
         let fresh = OpenAiCompat::new(b.base_url().to_string(), "m", None);
         fresh.discover_server().await.expect("the listing was read");
         assert!(fresh.profile().is_some_and(|p| p.is_unreported()));
@@ -926,8 +847,7 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_400_is_retried_a_bounded_number_of_times() {
-        // "[3]" looks like a preset list to the error parser — the exact shape
-        // that used to recurse forever.
+        // "[3]" looks like a preset list to the parser; this used to recurse forever.
         let (url, hits) = canned_server("400 Bad Request", r#"{"error":"invalid messages[3].content"}"#).await;
         let b = OpenAiCompat::new(url, "m", None);
         let res = b.stream(&[ChatMessage::user("hi")], &[]).await;
@@ -937,8 +857,7 @@ mod tests {
 
     #[tokio::test]
     async fn unrelated_400_never_becomes_a_thinking_profile_and_fallback_drops_extras() {
-        // Rejects any body carrying `top_k` (like strict OpenAI-style APIs),
-        // with an error text that happens to contain a bracketed number.
+        // Rejects any body carrying `top_k`, with a bracketed number in the error.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -1029,7 +948,6 @@ mod tests {
         );
         assert_eq!(body_low["reasoning_effort"], "low");
 
-        // Custom binary profile (off/on)
         let b_binary = OpenAiCompat::new("http://localhost:1234/v1", "binary-model", None)
             .with_profile(crate::thinking::ThinkingProfile {
                 presets: vec!["off".into(), "on".into()],
@@ -1044,7 +962,6 @@ mod tests {
         );
         assert_eq!(body_binary["enable_thinking"], false);
 
-        // Custom LM Studio profile (off/on) with default on
         let b_lm = OpenAiCompat::new("http://localhost:1234/v1", "gemma-4", None)
             .with_profile(crate::thinking::ThinkingProfile {
                 presets: vec!["off".into(), "on".into()],
@@ -1052,7 +969,6 @@ mod tests {
                 supported: true,
                 default_preset: Some("on".into()),
             });
-        // Default effort explicitly requests default preset "on"
         let body_lm_default = b_lm.body(
             &[ChatMessage::user("hi")],
             &[],
@@ -1061,7 +977,6 @@ mod tests {
         assert_eq!(body_lm_default["reasoning"], "on");
         assert_eq!(body_lm_default["enable_thinking"], true);
 
-        // Auto mode (TurnOptions::default()): for "Hello!", dynamically selects "off"
         let sys_template = "You are FlashAgent. REASONING INSTRUCTIONS:\n- break down into bold stages\n\nTASK EXECUTION:\n- write clean code";
         let body_lm_auto_hi = b_lm.body(
             &[
@@ -1079,7 +994,6 @@ mod tests {
         let user_hi = body_lm_auto_hi["messages"][1]["content"].as_str().unwrap();
         assert_eq!(user_hi, "Hello!", "user messages are never rewritten: keeps prefix KV cache valid");
 
-        // Auto mode for coding task: dynamically selects "on"
         let body_lm_auto_code = b_lm.body(
             &[
                 ChatMessage::system(sys_template),
@@ -1095,7 +1009,6 @@ mod tests {
         assert_eq!(sys_code, sys_hi, "thinking on or off, the prompt starts with the same bytes");
         assert_eq!(body_lm_auto_code["messages"][1]["content"], "Write a parser function in Rust");
 
-        // Message contents are preserved verbatim across turns so earlier KV caches are never invalidated.
         let body_later = b_lm.body(
             &[
                 ChatMessage::system(sys_template),
@@ -1118,7 +1031,6 @@ mod tests {
         assert_eq!(body_lm_off["reasoning"], "off");
         assert_eq!(body_lm_off["enable_thinking"], false);
 
-        // Custom xhigh profile (low/high/xhigh)
         let b_xhigh = OpenAiCompat::new("http://localhost:1234/v1", "xhigh-model", None)
             .with_profile(crate::thinking::ThinkingProfile {
                 presets: vec!["low".into(), "high".into(), "xhigh".into()],
@@ -1139,7 +1051,6 @@ mod tests {
         );
         assert_eq!(body_max["reasoning_effort"], "xhigh");
 
-        // Test explicit custom_effort override
         let body_custom = b_xhigh.body(
             &[ChatMessage::user("hi")],
             &[],
