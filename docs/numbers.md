@@ -23,6 +23,24 @@ cargo test --release -p flashagent-tui --test scenarios -- measure_startup_and_m
 against a local mock model server, so the time includes reading the config
 and asking the server which models it has.
 
+## The first answer
+
+A local server keeps what it last read and reuses the part a new request
+begins with. The first message of a session has nothing to reuse unless the
+app sends that part ahead (see `warm.rs`). Measured 2026-09-22 against LM
+Studio with Gemma 4 E2B (Q4_K_M, 64k context) on the laptop above:
+
+| What | Time to first token |
+|---|---:|
+| An 8.3k-token opening read from scratch | 33.8 s |
+| The same opening once cached | 0.23 s |
+| First message of a fresh session in the app, opening sent ahead (12k-token prompt, 99% cached) | 0.53 s |
+| First step of a `/goal`, before the tool list was kept the same in and out of a goal | 8.55 s |
+| The same, after (95% cached) | 1.45 s |
+
+The first two rows come from requests sent to the server directly; the
+third is the figure the app's token line showed.
+
 ## Long sessions
 
 | What | Figure |
@@ -54,8 +72,8 @@ that is a fifth of a 60 Hz frame.
 
 | What | Count |
 |---|---:|
-| Tests in the workspace (`cargo test --workspace`) | 779 |
-| Of those, the real binary in a pseudo-terminal (`crates/tui/tests/scenarios.rs`) | 72 |
+| Tests in the workspace (`cargo test --workspace`) | 791 |
+| Of those, the real binary in a pseudo-terminal (`crates/tui/tests/scenarios.rs`) | 74 |
 | Every built-in tool called for real (`crates/tools/tests/every_tool.rs`) | 14 |
 | Ignored: diagnostics that print screens, measurements, tests that need the internet | 11 |
 

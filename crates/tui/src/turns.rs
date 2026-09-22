@@ -184,6 +184,10 @@ impl App {
             Ok((h, reason)) => {
                 self.history = h;
                 update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                // The turn just read all of it. A change below (an
+                // interrupted turn closed, the context compacted) makes a
+                // new prefix, and that one is warmed.
+                self.note_prompt_cached(cx.perm, cx.memory_block);
                 // Completed turn telemetry and cache hit are displayed on Line 3 of the footer.
                 self.renderer.request_reprint();
 

@@ -655,11 +655,16 @@ impl ChatView {
                     self.lines[i].reasoning_secs = Some(secs);
                 }
                 self.open_tool = None;
-                if *reason != flashagent_core::DoneReason::Cancelled
-                    && *reason != flashagent_core::DoneReason::Completed
-                {
-                    self.lines
-                        .push(ChatLine::new(LineKind::System, format!("— {reason:?} —")));
+                // The enum's own name ("— StepLimit —") reached the chat.
+                let said = match reason {
+                    flashagent_core::DoneReason::StepLimit => Some("stopped: the step limit was reached"),
+                    flashagent_core::DoneReason::TokenBudget => Some("stopped: the token budget was spent"),
+                    flashagent_core::DoneReason::TimeLimit => Some("stopped: the time limit was reached"),
+                    flashagent_core::DoneReason::Failed => Some("stopped: the model server failed"),
+                    flashagent_core::DoneReason::Cancelled | flashagent_core::DoneReason::Completed => None,
+                };
+                if let Some(said) = said {
+                    self.lines.push(ChatLine::new(LineKind::System, format!("— {said} —")));
                 }
             }
         }

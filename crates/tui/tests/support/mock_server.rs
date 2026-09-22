@@ -39,7 +39,13 @@ pub struct Request {
 impl Request {
     /// A turn of the agent, as opposed to a side request.
     pub fn is_turn(&self) -> bool {
-        self.method == "POST" && self.body["tools"].as_array().is_some_and(|t| !t.is_empty())
+        self.method == "POST" && self.body["tools"].as_array().is_some_and(|t| !t.is_empty()) && !self.is_warm_up()
+    }
+
+    /// The app sending the next request's opening ahead of time, so the
+    /// server has it cached (`warm.rs`): it asks for one token.
+    pub fn is_warm_up(&self) -> bool {
+        self.method == "POST" && self.body["max_tokens"] == 1
     }
 }
 
