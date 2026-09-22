@@ -1,9 +1,6 @@
-//! flashagent-llm: backend trait + protocol adapters.
-//!
-//! One internal [`ToolCall`] shape; every wire format (native tool calls,
-//! Hermes-style XML tags, `[TOOL_CALLS]`, bare JSON) is normalized by parsers.
-//! JSON repair runs before parsing so slightly-broken model output still lands.
-//! Reasoning streams are first-class citizens.
+//! Backend trait and protocol adapters. Every tool-call wire format (native,
+//! Hermes XML, `[TOOL_CALLS]`, bare JSON) is normalized into one [`ToolCall`];
+//! JSON repair runs before parsing.
 
 pub mod encoding;
 pub mod repair;
@@ -25,23 +22,17 @@ pub use types::{ChatMessage, FinishReason, LlmError, LlmEvent, MtpStats, Role, T
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 
-/// A chat-completions backend. Streams normalized [`LlmEvent`]s.
 #[async_trait]
 pub trait LlmBackend: Send + Sync {
-    /// Backend display name (used in UI and logs).
     fn name(&self) -> &str;
 
-    /// Run one chat completion and stream its events.
-    ///
-    /// `tools` are advertised to the model; tool *results* travel inside
-    /// `messages` with [`Role::Tool`].
+    /// Tool results travel inside `messages` with [`Role::Tool`].
     async fn stream(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError>;
 
-    /// Run one chat completion with custom [`TurnOptions`] (e.g. reduced thinking budget).
     async fn stream_with_options(
         &self,
         messages: &[ChatMessage],

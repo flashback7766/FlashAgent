@@ -1,20 +1,15 @@
-//! Streaming parsers: SSE byte decoding, OpenAI chunk normalization,
-//! and text-embedded tool-call extraction (Hermes, Mistral, bare JSON).
-
 use serde_json::Value;
 
 use crate::repair::repair_json;
 use crate::types::{FinishReason, LlmEvent};
 
-/// Decodes `data: ...` SSE lines from arbitrary byte chunks.
-/// Yields JSON payload strings; `[DONE]` is reported as `Some("[DONE]")`.
+/// `[DONE]` is returned as the payload `"[DONE]"`.
 #[derive(Default)]
 pub struct SseDecoder {
     buf: Vec<u8>,
 }
 
 impl SseDecoder {
-    /// Feed raw bytes; returns completed data-payloads.
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
         self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
@@ -28,7 +23,6 @@ impl SseDecoder {
     }
 }
 
-/// Find the end of the next SSE record (blank-line terminated).
 fn find_double_newline(buf: &[u8]) -> Option<(usize, usize)> {
     buf.windows(2)
         .position(|w| w == b"\n\n")
@@ -54,7 +48,6 @@ fn extract_data(record: &[u8]) -> Option<String> {
     (!payload.is_empty()).then_some(payload)
 }
 
-/// Normalizes OpenAI-compatible chat chunks into [`LlmEvent`]s.
 #[derive(Default)]
 pub struct ChunkParser {
     tool_ids: Vec<Option<String>>,
@@ -62,7 +55,6 @@ pub struct ChunkParser {
 }
 
 impl ChunkParser {
-    /// Parse one SSE payload (a chunk JSON or `[DONE]`).
     pub fn feed(&mut self, payload: &str) -> Vec<LlmEvent> {
         if payload.trim() == "[DONE]" {
             return vec![LlmEvent::Done(FinishReason::Stop)];
@@ -93,7 +85,6 @@ impl ChunkParser {
             })
         });
 
-        // llama.cpp's own server says what it took from its cache in `timings`.
         let timings = v.get("timings").filter(|t| t.is_object()).and_then(|t| {
             let cache_n = t.get("cache_n").and_then(Value::as_i64)?;
             let prompt_n = t.get("prompt_n").and_then(Value::as_i64).unwrap_or(0);
@@ -103,10 +94,9 @@ impl ChunkParser {
         if let Some(usage) = v.get("usage").filter(|u| u.is_object()) {
             let mut prompt = usage.get("prompt_tokens").and_then(Value::as_i64);
             let completion = usage.get("completion_tokens").and_then(Value::as_i64);
-            // Every provider names it differently: OpenAI, OpenRouter, Gemini,
-            // xAI and vLLM `prompt_tokens_details.cached_tokens`; DeepSeek
-            // `prompt_cache_hit_tokens`; Anthropic-style APIs
-            // `cache_read_input_tokens`; llama.cpp its `timings`.
+            // Cached tokens by provider: OpenAI, OpenRouter, Gemini, xAI, vLLM use
+            // `prompt_tokens_details.cached_tokens`; DeepSeek `prompt_cache_hit_tokens`;
+            // Anthropic-style `cache_read_input_tokens`; llama.cpp `timings`.
             let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_i64);
             let cached = usage
                 .get("prompt_tokens_details")
@@ -116,8 +106,7 @@ impl ChunkParser {
                 .and_then(Value::as_i64)
                 .or(cache_read)
                 .or(timings.map(|(_, cached)| cached));
-            // Anthropic counts cache reads apart from the input tokens: more
-            // read from cache than the whole prompt means the prompt is both.
+            // Anthropic counts cache reads apart from input tokens.
             if let (Some(p), Some(read)) = (prompt, cache_read) {
                 if read > p {
                     prompt = Some(p + read);
@@ -192,8 +181,7 @@ impl ChunkParser {
                         .map(str::to_string)
                         .or_else(|| self.tool_names[index].clone());
                     self.tool_names[index] = name.clone();
-                    // Some shims (Ollama, older vLLM) send the arguments as a
-                    // JSON object instead of the spec's string.
+                    // Ollama and older vLLM send arguments as an object, not a string.
                     let args_delta = match call.get("function").and_then(|f| f.get("arguments")) {
                         Some(Value::String(s)) => s.clone(),
                         Some(Value::Null) | None => String::new(),
@@ -215,38 +203,26 @@ impl ChunkParser {
     }
 }
 
-/// Output of [`TextToolScanner::feed`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScannerEvent {
-    /// Plain text to show (tool-call markup removed).
     Text(String),
-    /// A complete, repaired tool call extracted from text.
     ToolCall {
-        /// Tool name.
         name: String,
-        /// Repaired JSON arguments.
+        /// Repaired JSON.
         args_json: String,
-        /// The markup exactly as the model wrote it, so a caller that rejects
-        /// the call (unknown tool name) can put the text back verbatim.
+        /// The markup as written, so a rejected call can be put back as text.
         raw: String,
     },
 }
 
-/// Extracts tool calls embedded in plain text, for models without native
-/// tool-calling. Recognized formats:
-/// - Hermes/Qwen: `<tool_call>{"name":...,"arguments":{...}}</tool_call>`
-/// - Mistral: `[TOOL_CALLS][{...}, ...]`
-/// - Bare JSON object whose first key is `"name"` (typical degenerate output)
-///
-/// Anything inside a ``` code fence is display text, never a call — the fence
-/// state is tracked across deltas, since the opening fence is usually flushed
-/// long before the JSON after it arrives.
+/// Tool calls embedded in text, for models without native tool calling:
+/// Hermes `<tool_call>`, Mistral `[TOOL_CALLS]`, or bare JSON with a `"name"`.
+/// Anything inside a ``` fence is display text; fence state is kept across
+/// deltas.
 #[derive(Default)]
 pub struct TextToolScanner {
     buf: String,
-    /// A code fence opened in text already flushed and not closed yet.
     fence_open: bool,
-    /// The last flushed character was not a newline.
     mid_line: bool,
 }
 
@@ -255,12 +231,10 @@ const END_HERMES: &str = "</tool_call>";
 const START_MISTRAL: &str = "[TOOL_CALLS]";
 
 impl TextToolScanner {
-    /// Feed a text delta; returns flushed text/tool-call events.
     pub fn feed(&mut self, delta: &str) -> Vec<ScannerEvent> {
         self.buf.push_str(delta);
         let mut out = Vec::new();
         loop {
-            // Flush plain text sitting before the next marker first.
             if let Some(text) = self.take_leading_text() {
                 self.emit_text(text, &mut out);
                 continue;
@@ -278,7 +252,6 @@ impl TextToolScanner {
             }
             break;
         }
-        // Flush everything except bytes held back as a potential partial marker.
         let keep = self.hold_back();
         let flush_len = self.buf.len() - keep;
         if flush_len > 0 {
@@ -288,11 +261,9 @@ impl TextToolScanner {
         out
     }
 
-    /// Flush whatever is still held back once the stream has ended. A block
-    /// missing only its closing tag still counts (models often stop right
-    /// before `</tool_call>`) — but only when its JSON is complete: a body cut
-    /// off mid-arguments would be "completed" by repair into something the
-    /// model never wrote. Everything else comes back as text, never dropped.
+    /// A block missing only `</tool_call>` still counts if its JSON is complete;
+    /// a body cut off mid-arguments would be "completed" by repair into something
+    /// the model never wrote. Everything else is returned as text.
     pub fn finish(&mut self) -> Vec<ScannerEvent> {
         let rest = std::mem::take(&mut self.buf);
         if rest.is_empty() {
@@ -328,8 +299,7 @@ impl TextToolScanner {
         out.push(ScannerEvent::Text(text));
     }
 
-    /// Fence state after `text`, starting from the flushed state. Only a
-    /// fence at the start of a line counts (inline triple backticks do not).
+    /// Only a fence at the start of a line counts.
     fn fence_open_after(&self, text: &str) -> bool {
         let bytes = text.as_bytes();
         let mut open = self.fence_open;
@@ -343,12 +313,10 @@ impl TextToolScanner {
         open
     }
 
-    /// Whether buffer offset `pos` sits inside a code fence.
     fn in_fence_at(&self, pos: usize) -> bool {
         self.fence_open_after(&self.buf[..pos])
     }
 
-    /// First occurrence of `pat` in the buffer that is outside any fence.
     fn find_outside_fence(&self, pat: &str) -> Option<usize> {
         self.buf.match_indices(pat).map(|(p, _)| p).find(|&p| !self.in_fence_at(p))
     }
@@ -359,8 +327,6 @@ impl TextToolScanner {
                 let (name, args_json) = calls.into_iter().next().unwrap_or_default();
                 vec![ScannerEvent::ToolCall { name, args_json, raw }]
             }
-            // Several calls in one block (Mistral arrays): each carries its
-            // own element as raw text, so a rejected one reads back sensibly.
             Some(calls) if !calls.is_empty() => calls
                 .into_iter()
                 .map(|(name, args_json)| {
@@ -372,8 +338,6 @@ impl TextToolScanner {
         }
     }
 
-    /// Emit buffered text that precedes a recognized marker; None when the
-    /// buffer starts with a marker (or no complete marker is present).
     fn take_leading_text(&mut self) -> Option<String> {
         let markers = [START_HERMES, START_MISTRAL];
         let cut = markers
@@ -387,8 +351,6 @@ impl TextToolScanner {
         Some(self.buf.drain(..cut).collect())
     }
 
-    /// Offset of a bare-JSON candidate (`{` or `[` + whitespace + `"name"` or tool
-    /// key) at the start of a line, or fenced with ```json. None when absent.
     fn find_bare_start(&self) -> Option<usize> {
         let line_starts = std::iter::once(0)
             .filter(|_| !self.mid_line)
@@ -421,9 +383,8 @@ impl TextToolScanner {
         None
     }
 
-    /// Bytes we must not flush yet. Entire buffer is held when a tool-call
-    /// block is open (marker seen, close not yet arrived) — its content is
-    /// markup, not display text. Otherwise only a partial-marker suffix.
+    /// While a tool-call block is open the whole buffer is held; otherwise only
+    /// a suffix that may be the start of a marker.
     fn hold_back(&self) -> usize {
         let hermes_open = self.find_outside_fence(START_HERMES).is_some() && self.find_hermes().is_none();
         let mistral_open = self.find_outside_fence(START_MISTRAL).is_some() && self.find_mistral().is_none();
@@ -448,7 +409,6 @@ impl TextToolScanner {
         hold.min(self.buf.len())
     }
 
-    /// Hermes tag pair; returns (body, consumed).
     fn find_hermes(&self) -> Option<(String, usize)> {
         let start = self.find_outside_fence(START_HERMES)?;
         if start != 0 {
@@ -460,7 +420,6 @@ impl TextToolScanner {
         Some((body, end + END_HERMES.len()))
     }
 
-    /// Mistral prefix + the complete JSON array (or object) after it.
     fn find_mistral(&self) -> Option<(String, usize)> {
         let start = self.find_outside_fence(START_MISTRAL)?;
         if start != 0 {
@@ -472,8 +431,6 @@ impl TextToolScanner {
         Some((rest[open..open + len].to_string(), START_MISTRAL.len() + open + len))
     }
 
-    /// Bare JSON object or array starting at a line beginning with `{` or `[` + tool indicator,
-    /// or wrapped in a ```json code fence.
     fn find_bare(&self) -> Option<(String, usize)> {
         let start = self.find_bare_start()?;
         if start != 0 {
@@ -508,8 +465,7 @@ impl TextToolScanner {
     }
 }
 
-/// Byte length of the leading balanced JSON value (`{..}` or `[..]`), string
-/// aware; None while it is still open.
+/// String-aware; None while the value is still open.
 fn balanced_len(text: &str) -> Option<usize> {
     let mut depth = 0i32;
     let mut in_str = false;
@@ -538,15 +494,13 @@ fn balanced_len(text: &str) -> Option<usize> {
     None
 }
 
-/// True when `body` is one complete JSON value (possibly needing only
-/// cosmetic repair such as single quotes or trailing commas).
+/// Cosmetic repair (quotes, trailing commas) is allowed.
 fn is_complete_json(body: &str) -> bool {
     let body = body.trim();
     balanced_len(body).is_some_and(|len| body[len..].trim().is_empty())
 }
 
-/// Parse a block body into calls. An array yields one call per element and
-/// fails as a whole if any element is not a call.
+/// An array fails as a whole if any element is not a call.
 fn parse_calls(body: &str) -> Option<Vec<(String, String)>> {
     let raw = body.trim();
     let unquoted = if let Some(rest) = raw.strip_prefix("```") {
@@ -571,13 +525,11 @@ fn parse_calls(body: &str) -> Option<Vec<(String, String)>> {
     }
 }
 
-/// One call from a JSON object. Handles `name`+`arguments`, `name`+
-/// `parameters`, the OpenAI `function` wrapper, single-key tool wrappers like
-/// `{"ask_user": {...}}`, and flat properties directly on the object.
+/// Accepts `name`+`arguments`/`parameters`, the OpenAI `function` wrapper,
+/// `{"<tool>": {..}}`, and flat properties on the object.
 fn parse_call_object(v: Value) -> Option<(String, String)> {
     let mut obj = v.as_object()?.clone();
 
-    // Format A: OpenAI function wrapper {"function": {"name": ..., "arguments": ...}}
     if let Some(func) = obj.get("function").and_then(Value::as_object) {
         let name = func.get("name").and_then(Value::as_str)?.to_string();
         let args = func.get("arguments").or_else(|| func.get("parameters"));
@@ -590,7 +542,6 @@ fn parse_call_object(v: Value) -> Option<(String, String)> {
         return Some((name, args_json));
     }
 
-    // Format B: Standard {"name": "...", "arguments": ...}
     let name_opt = obj
         .remove("name")
         .or_else(|| obj.remove("tool"))
@@ -606,8 +557,7 @@ fn parse_call_object(v: Value) -> Option<(String, String)> {
             Some(Value::Object(o)) => serde_json::to_string(&o).unwrap_or_default(),
             Some(other) => other.to_string(),
             None => {
-                // Remaining keys (e.g. {"question": "...", "options": [...]})
-                // ARE the tool arguments.
+                // The remaining keys are the arguments.
                 obj.remove("id");
                 obj.remove("type");
                 serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string())
@@ -616,7 +566,6 @@ fn parse_call_object(v: Value) -> Option<(String, String)> {
         return Some((name, args_json));
     }
 
-    // Format C: Single-key object where key is tool name: {"ask_user": {"question": "..."}}
     if obj.len() == 1 {
         let (k, val) = obj.iter().next()?;
         let args_json = match val {
@@ -630,8 +579,6 @@ fn parse_call_object(v: Value) -> Option<(String, String)> {
     None
 }
 
-/// Drop a closing `</tool_call>` (complete or cut off mid-marker) from the end
-/// of an unterminated block body.
 fn strip_partial_close(body: &str) -> &str {
     let body = body.trim_end();
     if let Some(pos) = body.rfind("</") {
@@ -714,21 +661,16 @@ mod tests {
 
     #[test]
     fn the_cache_figure_is_read_whatever_the_provider_calls_it() {
-        // OpenAI, OpenRouter, Gemini, xAI, vLLM.
         let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":900}}}"#);
         assert_eq!((u.prompt, u.cached), (Some(1000), Some(900)));
-        // DeepSeek.
         let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":5,"prompt_cache_hit_tokens":750,"prompt_cache_miss_tokens":250}}"#);
         assert_eq!((u.prompt, u.cached), (Some(1000), Some(750)));
-        // Anthropic-style, cache reads counted apart from the input.
         let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":5,"cache_read_input_tokens":960}}"#);
         assert_eq!((u.prompt, u.cached), (Some(1000), Some(960)));
-        // llama.cpp: timings alone, and timings next to usage without a cache field.
         let u = usage_of(r#"{"choices":[],"timings":{"prompt_n":15,"cache_n":3500}}"#);
         assert_eq!((u.prompt, u.cached), (Some(3515), Some(3500)));
         let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":3515,"completion_tokens":5},"timings":{"prompt_n":15,"cache_n":3500}}"#);
         assert_eq!((u.prompt, u.cached), (Some(3515), Some(3500)));
-        // LM Studio: nothing about the cache.
         let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":2913,"completion_tokens":5}}"#);
         assert_eq!(u.cached, None);
     }
@@ -787,7 +729,6 @@ mod tests {
         assert!(calls.is_empty(), "fenced Hermes example executed: {calls:?}");
         assert!(text.contains(hermes));
 
-        // After the fence closes, real calls work again.
         let (_, calls) = scan(&["```\ncode\n```\n", "<tool_call>{\"name\":\"read_file\",\"arguments\":{}}</tool_call>"]);
         assert_eq!(calls, vec!["read_file".to_string()]);
     }

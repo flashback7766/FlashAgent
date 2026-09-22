@@ -1,5 +1,3 @@
-//! Model-aware token counting using official BPE tokenizers.
-
 use std::sync::OnceLock;
 use tiktoken_rs::CoreBPE;
 
@@ -14,9 +12,7 @@ fn get_o200k() -> &'static CoreBPE {
     O200K.get_or_init(|| tiktoken_rs::o200k_base().expect("failed to load o200k_base"))
 }
 
-/// Tokenize `text` using the tokenizer strictly matching `model_name`.
-/// - `gpt-4o`, `o1`, `o3`: o200k_base tokenizer.
-/// - `qwen`, `llama`, `deepseek`, `mistral`, `claude`, `gpt-4`: cl100k_base tokenizer.
+/// `gpt-4o`, `o1`, `o3` use o200k_base; everything else cl100k_base.
 pub fn count_tokens(model_name: &str, text: &str) -> usize {
     if text.is_empty() {
         return 0;
