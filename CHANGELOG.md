@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **The first message is answered as fast as the rest.** A local server reuses what it has already read, so inside a conversation the next reply starts at once, but the first one had to read the system prompt, the tool schemas and the memory block from scratch. On a laptop with Gemma 4 E2B in LM Studio that was 34 s before the first word. The app now sends that opening to the server while you are still typing, and again after `--resume` or a change of model or voice. The first message of a fresh session then showed a 97% cache hit and 0.48 s to the first token.
+- **Starting a `/goal` no longer throws the cache away.** The plan tool was added to the tool list when a goal began, and the tool list sits near the top of what the server caches, so the first goal step read everything again: 8.5 s instead of 1.5 s on a fresh session, far more on a long one. The tool is now always offered and still refuses to work outside a goal.
+- **A run stopped by a limit says so in words.** The chat showed the internal name, "— StepLimit —"; it now reads "— stopped: the step limit was reached —".
+- **The README recordings were made again** on b330, with a throwaway home so no real session, memory or user name appears in them. `scripts/demo_env.py` holds what the five recording scripts share.
+
 ## b330 — a voice the model has, not a style it was told about
 
 - **Styles work like a trait, not an instruction.** The style section used to be headed "the user's choice" and called itself a request, so replies began "as you asked, I'll keep it friendly". It now says who the assistant is, in the second person, with no word about a setting. Next to it goes one earlier exchange written in the chosen voice: a general question, and the answer this style and each characteristic would give. Models follow their own previous replies far more closely than any description, and they do not quote them. The example is sent right after the system prompt with each request and is never shown, saved, exported or compacted. The default style adds nothing.
