@@ -1,18 +1,13 @@
-//! Interactive Sampling Parameters menu opened via `/sampling`, `F5`, or Settings.
-//! Allows live reconfiguration of sampling preset, temperature, top_p, top_k, repeat_penalty, presence_penalty, and min_p.
+//! Sampling menu (`/sampling`, `F5`, Settings): preset and each parameter, live.
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use flashagent_core::{AppConfig, SamplingPreset};
 use crate::{LineKind, RenderLine};
 
-/// Action returned by the sampling view on key event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SamplingAction {
-    /// Keep sampling menu open.
     None,
-    /// Close menu without applying changes.
     Close,
-    /// Apply changes, save config, and close menu.
     SaveAndClose,
 }
 
@@ -42,7 +37,7 @@ impl SamplingView {
             min_p_buf: format!("{:.2}", config.min_p.unwrap_or(0.00)),
             is_dirty: false,
         };
-        // If preset is not custom, align buffers to standard preset values
+        // A named preset overwrites the buffers with its values.
         if preset != SamplingPreset::Custom {
             view.sync_buffers_to_preset(preset);
         }
@@ -177,9 +172,9 @@ impl SamplingView {
                 if (1..=6).contains(&self.selected_index) && (c.is_ascii_digit() || c == '.' || c == '-') {
                     let buf = self.active_buffer_mut();
                     if c == '.' && buf.contains('.') {
-                        // ignore duplicate dot
+                        // Ignore a second dot.
                     } else if c == '-' && !buf.is_empty() {
-                        // ignore minus not at head
+                        // Ignore a minus not at the start.
                     } else {
                         buf.push(c);
                         self.preset = SamplingPreset::Custom;
@@ -273,7 +268,6 @@ impl SamplingView {
         lines.push((LineKind::System, pad_row("\x1b[38;2;135;130;125mConfigure LLM temperature, top-p/k, penalty, and min-p sampling\x1b[0m")));
         lines.push((LineKind::System, pad_row("")));
 
-        // Row 0: Preset
         let is_preset_sel = self.selected_index == 0;
         let ptr0 = if is_preset_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
         let preset_val = format!("[ {} ]", self.preset.label());
@@ -290,7 +284,6 @@ impl SamplingView {
         };
         lines.push((LineKind::System, pad_row(&format!("{ptr0} {label0} {val0}"))));
 
-        // Rows 1..6: Parameters
         let fields = [
             (1, "Temperature", &self.temp_buf, "0.00..2.00 (coding: 0.60, mtp: 0.30, chat: 0.80, precise: 0.10)"),
             (2, "Top P", &self.top_p_buf, "0.00..1.00 (coding: 0.95, mtp: 0.90, precise: 0.75)"),
@@ -318,7 +311,6 @@ impl SamplingView {
             lines.push((LineKind::System, pad_row(&format!("{ptr} {label_styled} {val_styled}"))));
         }
 
-        // Row 7: Apply & Save
         let is_apply_sel = self.selected_index == 7;
         let ptr7 = if is_apply_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
         let apply_styled = if is_apply_sel {
@@ -355,7 +347,6 @@ mod tests {
         assert_eq!(view.top_k_buf, "20");
         assert_eq!(view.min_p_buf, "0.00");
 
-        // Cycle right on row 0 -> MtpCoding
         view.handle_key(KeyCode::Right, KeyModifiers::empty());
         assert_eq!(view.preset, SamplingPreset::MtpCoding);
         assert_eq!(view.temp_buf, "0.30");
@@ -363,7 +354,6 @@ mod tests {
         assert_eq!(view.top_k_buf, "40");
         assert_eq!(view.min_p_buf, "0.05");
 
-        // Cycle right on row 0 -> Mtp
         view.handle_key(KeyCode::Right, KeyModifiers::empty());
         assert_eq!(view.preset, SamplingPreset::Mtp);
         assert_eq!(view.temp_buf, "0.50");
@@ -371,7 +361,6 @@ mod tests {
         assert_eq!(view.top_k_buf, "30");
         assert_eq!(view.min_p_buf, "0.03");
 
-        // Cycle right on row 0 -> Chatting
         view.handle_key(KeyCode::Right, KeyModifiers::empty());
         assert_eq!(view.preset, SamplingPreset::Chatting);
         assert_eq!(view.temp_buf, "0.80");
@@ -379,21 +368,18 @@ mod tests {
         assert_eq!(view.top_k_buf, "50");
         assert_eq!(view.presence_penalty_buf, "0.10");
 
-        // Cycle right on row 0 -> MtpChatting
         view.handle_key(KeyCode::Right, KeyModifiers::empty());
         assert_eq!(view.preset, SamplingPreset::MtpChatting);
         assert_eq!(view.temp_buf, "0.65");
         assert_eq!(view.top_p_buf, "0.88");
         assert_eq!(view.presence_penalty_buf, "0.05");
 
-        // Cycle right on row 0 -> Precise
         view.handle_key(KeyCode::Right, KeyModifiers::empty());
         assert_eq!(view.preset, SamplingPreset::Precise);
         assert_eq!(view.temp_buf, "0.10");
         assert_eq!(view.top_p_buf, "0.75");
         assert_eq!(view.top_k_buf, "10");
 
-        // Cycle right on row 0 -> Gemma
         view.handle_key(KeyCode::Right, KeyModifiers::empty());
         assert_eq!(view.preset, SamplingPreset::Gemma);
         assert_eq!(view.temp_buf, "1.00");

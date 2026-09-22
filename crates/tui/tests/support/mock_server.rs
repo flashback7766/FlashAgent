@@ -1,9 +1,6 @@
-//! A stand-in for LM Studio: one loaded model, and scripted answers.
-//!
-//! Only the agent's own turns — requests that offer tools — take the next
-//! scripted reply. Everything else the app asks the model on the side (the
-//! recap after a turn, a probe) gets a short plain answer, so a scenario
-//! scripts the conversation and not the app's housekeeping.
+//! A stand-in for LM Studio with one loaded model and scripted answers. Only
+//! agent turns (requests that offer tools) take the next scripted reply; side
+//! requests (recap, probes) get a short plain answer.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -13,21 +10,17 @@ use std::time::{Duration, Instant};
 
 pub const MODEL: &str = "mock-model";
 
-/// What the model says in one turn.
 #[derive(Clone, Debug)]
 pub enum Reply {
-    /// Plain text, streamed a word at a time.
+    /// Streamed a word at a time.
     Text(String),
-    /// A call to one tool with these arguments.
     ToolCall { name: String, arguments: serde_json::Value },
-    /// Text that takes `per_word` per word to arrive, for a turn that is
-    /// still running when the scenario acts.
+    /// For a turn still running when the scenario acts.
     Slow { text: String, per_word: Duration },
-    /// Text the server cuts off at its output limit (`finish_reason: length`).
+    /// Cut off at the output limit (`finish_reason: length`).
     Cut(String),
 }
 
-/// One request the app made.
 #[derive(Clone, Debug)]
 pub struct Request {
     pub method: String,
@@ -37,44 +30,37 @@ pub struct Request {
 }
 
 impl Request {
-    /// A turn of the agent, as opposed to a side request.
+    /// As opposed to a side request.
     pub fn is_turn(&self) -> bool {
         self.method == "POST" && self.body["tools"].as_array().is_some_and(|t| !t.is_empty()) && !self.is_warm_up()
     }
 
-    /// The app sending the next request's opening ahead of time, so the
-    /// server has it cached (`warm.rs`): it asks for one token.
+    /// The cache warm-up (`warm.rs`): it asks for one token.
     pub fn is_warm_up(&self) -> bool {
         self.method == "POST" && self.body["max_tokens"] == 1
     }
 }
 
 pub struct MockServer {
-    /// Base URL as the app is configured with it, ending in `/v1`.
+    /// Ends in `/v1`.
     pub url: String,
     requests: Arc<Mutex<Vec<Request>>>,
     replies: Arc<Mutex<VecDeque<Reply>>>,
-    /// Extra entries appended to `/api/v0/models`'s listing, beyond `MODEL`.
+    /// Beyond `MODEL`.
     v0_extra_models: Arc<Mutex<Vec<serde_json::Value>>>,
-    /// Body for `/api/v1/models`, or `None` to answer it 404 (the default —
-    /// most scenarios have no reason to care about LM Studio's v1 listing,
-    /// only its v0 one).
+    /// `None` answers 404, the default: most scenarios only need the v0 listing.
     v1_models: Arc<Mutex<Option<serde_json::Value>>>,
     side: Arc<SideRequests>,
 }
 
-/// How side requests (the recap, probes) are answered, and what became of
-/// the slow ones.
 #[derive(Default)]
 struct SideRequests {
-    /// Stream side answers a word at a time, this far apart.
     per_word: Mutex<Option<Duration>>,
-    /// Slow side answers the app hung up on before they finished.
+    /// Slow side answers the app hung up on.
     dropped: std::sync::atomic::AtomicUsize,
-    /// Answer to side requests whose system prompt contains the key.
+    /// Keyed by a substring of the system prompt.
     answers: Mutex<Vec<(String, String)>>,
-    /// Held back this long before a turn is answered at all, so a scenario
-    /// can do something while the model is still thinking.
+    /// Lets a scenario act while the model is still thinking.
     turn_delay: Mutex<Option<Duration>>,
 }
 
@@ -95,10 +81,8 @@ impl MockServer {
                 std::thread::spawn(move || {
                     let closer = stream.try_clone();
                     let _ = serve(stream, &req3, &rep3, &v0e3, &v13, &side3);
-                    // Close gracefully: finish our side, then read until the
-                    // app closes its own. Dropping a socket straight away
-                    // lets Windows answer with a reset, which can cut off
-                    // the end of a reply the app is still reading.
+                    // Close gracefully: dropping the socket at once lets Windows send a reset,
+                    // which can cut off the end of a reply the app is still reading.
                     if let Ok(mut socket) = closer {
                         let _ = socket.shutdown(std::net::Shutdown::Write);
                         let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
@@ -111,26 +95,22 @@ impl MockServer {
         MockServer { url, requests, replies, v0_extra_models, v1_models, side }
     }
 
-    /// Answer side requests (the recap after a turn) slowly, a word every
-    /// `per_word`, so a scenario can act while one is still being written.
-    /// Wait `delay` before answering each turn, so the scenario can act
-    /// while the model is still thinking — pressing a key that must land
-    /// before the answer, for instance.
+    /// Lets the scenario press a key that must land before the answer.
     pub fn delay_turns(&self, delay: Duration) {
         *self.side.turn_delay.lock().unwrap() = Some(delay);
     }
 
-    /// Answer side requests whose system prompt mentions `key` with `text`
-    /// instead of "ok".
+    /// Instead of "ok".
     pub fn answer_side_requests(&self, key: &str, text: &str) {
         self.side.answers.lock().unwrap().push((key.to_string(), text.to_string()));
     }
 
+    /// Side answers (the recap) arrive a word every `per_word`, so a scenario
+    /// can act while one is still being written.
     pub fn slow_side_requests(&self, per_word: Duration) {
         *self.side.per_word.lock().unwrap() = Some(per_word);
     }
 
-    /// Slow side answers the app hung up on before they were finished.
     pub fn side_requests_dropped(&self) -> usize {
         self.side.dropped.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -143,16 +123,12 @@ impl MockServer {
         self.requests().into_iter().filter(Request::is_turn).collect()
     }
 
-    /// Scripted replies not yet asked for.
     pub fn replies_left(&self) -> usize {
         self.replies.lock().unwrap().len()
     }
 
-    /// Make `/api/v1/models` answer with `MODEL` reporting these reasoning
-    /// presets, in LM Studio's native `capabilities.reasoning` shape — for
-    /// scenarios about a model whose reasoning settings the server actually
-    /// lists (as opposed to the plain `/api/v0/models` entry `start` already
-    /// serves for it, which names none).
+    /// In LM Studio's native `capabilities.reasoning` shape, for scenarios where
+    /// the server lists the model's reasoning settings.
     pub fn report_reasoning(&self, presets: &[&str], default: &str) {
         *self.v1_models.lock().unwrap() = Some(serde_json::json!({ "models": [ {
             "key": MODEL,
@@ -164,10 +140,8 @@ impl MockServer {
         } ] }));
     }
 
-    /// Add a model to `/api/v0/models`'s listing that carries no capability
-    /// information at all — the server saying nothing about whether it can
-    /// reason, as opposed to saying it cannot. Turns run against it are still
-    /// answered from the same script as `MODEL`'s.
+    /// No capability information at all: the server says nothing about reasoning,
+    /// as opposed to saying the model cannot. Answered from the same script.
     pub fn add_model_the_server_says_nothing_about(&self, id: &str) {
         self.v0_extra_models.lock().unwrap().push(serde_json::json!({
             "id": id, "object": "model", "type": "llm", "state": "loaded",
@@ -231,7 +205,7 @@ fn serve(
 
     let slow_side = *side.per_word.lock().unwrap();
     if let (false, Some(per_word), true) = (request.is_turn(), slow_side, request.body["stream"] == serde_json::Value::Bool(true)) {
-        // A long answer, a word at a time; a failed write means the app hung up.
+        // A failed write means the app hung up.
         let finished = (|| -> std::io::Result<()> {
             out.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n")?;
             for _ in 0..200 {
@@ -281,8 +255,7 @@ fn serve(
                 chunk(&mut out, serde_json::json!({ "choices": [ { "delta": { "content": word } } ] }))?;
             }
             chunk(&mut out, serde_json::json!({ "choices": [ { "delta": {}, "finish_reason": "stop" } ] }))?;
-            // The usage chunk a server sends when asked to (`include_usage`),
-            // with nothing about its cache — the way LM Studio reports.
+            // Usage without cache info, as LM Studio reports it.
             chunk(&mut out, serde_json::json!({ "choices": [], "usage": { "prompt_tokens": 1200, "completion_tokens": 4 } }))?;
         }
         Reply::Slow { text, per_word } => {
@@ -311,7 +284,7 @@ fn serve(
     out.flush()
 }
 
-/// Words with the space that follows each, so the streamed text adds up.
+/// Each with its trailing space, so the streamed text adds up.
 fn words(text: &str) -> Vec<String> {
     text.split_inclusive(' ').map(str::to_string).collect()
 }

@@ -1,45 +1,36 @@
-//! The `/memory` screen: what FlashAgent remembers, and what to do about it.
-//!
-//! Memory written without being asked has to be visible and reversible, or it
-//! is something happening to the user rather than for them. This lists every
-//! fact, shows the one under the cursor in full, forgets one on a keypress,
-//! and — because "this is wrong, fix it" is easier to say than to edit —
-//! hands a note about a memory straight to the model.
+//! The `/memory` screen. Memory written unasked must be visible and
+//! reversible: every fact is listed, forgettable on a key, and a note about
+//! one ("this is wrong") goes straight to the model.
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use flashagent_core::memory_store::{Entry, Scope, Store};
 
 use crate::{LineKind, RenderLine};
 
-/// What the screen wants the app to do.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MemoryAction {
-    /// Nothing; keep the screen open.
     None,
-    /// Close the screen.
     Close,
-    /// Forget this memory, in this scope.
     Forget { name: String, scope: Scope },
-    /// Send this to the model as a turn: the user's note about a memory.
+    /// The user's note about a memory, sent as a turn.
     Tell { message: String },
-    /// Write the summary; `force` rewrites one that is still current.
+    /// `force` rewrites one that is still current.
     Summarize { force: bool },
 }
 
-/// The overview of everything remembered, written by the model.
+/// Written by the model.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MemorySummary {
-    /// Titled paragraphs, the overview first.
+    /// Overview first.
     pub sections: Vec<(String, String)>,
-    /// Follow-up questions the user can send with one key.
+    /// Sendable with one key.
     pub dive_deeper: Vec<String>,
-    /// When it was written, seconds since the epoch.
+    /// Seconds since the epoch.
     pub updated: u64,
-    /// The memories it was written from, so a changed memory marks it stale.
+    /// A changed memory marks the summary stale.
     pub fingerprint: String,
 }
 
-/// Where the summary stands.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SummaryState {
     None,
@@ -48,15 +39,12 @@ pub enum SummaryState {
     Failed(String),
 }
 
-/// Which half of the screen is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryTab {
     List,
     Summary,
 }
 
-/// What the memories are, as one string: a summary written from other
-/// memories is out of date.
 pub fn fingerprint(rows: &[Row]) -> String {
     let mut parts: Vec<String> = rows.iter().map(|r| {
         format!("{:?}", (r.scope.label(), &r.entry.name, &r.entry.recorded, &r.entry.description, &r.entry.body))
@@ -65,8 +53,7 @@ pub fn fingerprint(rows: &[Row]) -> String {
     format!("v2:{:016x}", flashagent_core::snapshots::prompt_hash(&parts.join("|")))
 }
 
-/// The request for a summary of `rows`: a system prompt and the memories.
-/// `language` names the language to write in when it is known.
+/// `language` names the language to write in, when known.
 pub fn summary_request(rows: &[Row], language: Option<&str>) -> (String, String) {
     let lang = match language {
         Some(l) => format!("Write every string in {l}."),
@@ -95,10 +82,8 @@ pub fn summary_request(rows: &[Row], language: Option<&str>) -> (String, String)
     (system, user)
 }
 
-/// Titled paragraphs and dive-deeper questions, as read from the model.
 pub type ParsedSummary = (Vec<(String, String)>, Vec<String>);
 
-/// Read the model's answer to [`summary_request`].
 pub fn parse_summary(raw: &str) -> Option<ParsedSummary> {
     let start = raw.find('{')?;
     let end = raw.rfind('}')?;
@@ -121,7 +106,6 @@ pub fn parse_summary(raw: &str) -> Option<ParsedSummary> {
     (!sections.is_empty()).then_some((sections, dive))
 }
 
-/// "just now", "5 minutes ago", "3 hours ago", "2 days ago".
 pub fn ago(then: u64, now: u64) -> String {
     let secs = now.saturating_sub(then);
     let (n, unit) = match secs {
@@ -133,29 +117,24 @@ pub fn ago(then: u64, now: u64) -> String {
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
-/// One row: a memory and where it lives.
 #[derive(Debug, Clone)]
 pub struct Row {
     pub entry: Entry,
     pub scope: Scope,
 }
 
-/// The `/memory` screen.
 pub struct MemoryModal {
     pub rows: Vec<Row>,
     pub selected: usize,
-    /// Typed note, when the user is writing one.
     pub note: Option<String>,
     pub tab: MemoryTab,
     pub summary: SummaryState,
-    /// What is typed into "Ask or update" on the summary.
+    /// The "Ask or update" field.
     pub ask: String,
-    /// The dive-deeper item under the cursor.
     pub dive_selected: usize,
 }
 
 impl MemoryModal {
-    /// Read both stores and open the screen.
     pub fn new(cwd: &std::path::Path) -> Self {
         let mut rows = Vec::new();
         for scope in [Scope::Project, Scope::Global] {
@@ -166,12 +145,10 @@ impl MemoryModal {
         Self { rows, selected: 0, note: None, tab: MemoryTab::List, summary: SummaryState::None, ask: String::new(), dive_selected: 0 }
     }
 
-    /// The memory under the cursor.
     pub fn current(&self) -> Option<&Row> {
         self.rows.get(self.selected)
     }
 
-    /// Whether the summary needs writing before it can be shown.
     pub fn summary_is_stale(&self) -> bool {
         match &self.summary {
             SummaryState::Ready(s) => s.fingerprint != fingerprint(&self.rows),
@@ -216,7 +193,7 @@ impl MemoryModal {
                 };
                 MemoryAction::Tell { message }
             }
-            // Ctrl+R: write it again even though nothing changed.
+            // Ctrl+R: rewrite even though nothing changed.
             KeyCode::Char('r') if mods.contains(KeyModifiers::CONTROL) => {
                 self.summary = SummaryState::Writing;
                 MemoryAction::Summarize { force: true }
@@ -237,7 +214,7 @@ impl MemoryModal {
         if self.tab == MemoryTab::Summary && self.note.is_none() {
             return self.summary_key(code, mods);
         }
-        // While a note is being typed the keys belong to the note.
+        // While a note is typed, keys belong to it.
         if let Some(note) = self.note.as_mut() {
             return match code {
                 KeyCode::Esc => {
@@ -326,8 +303,7 @@ impl MemoryModal {
         let inner_w = width.saturating_sub(6).clamp(24, 96);
 
         let mut lines: Vec<RenderLine> = Vec::new();
-        // The heading is the first thing that stops fitting; a sheared box is
-        // worse than a shorter name.
+        // The heading shrinks first; a sheared box is worse than a shorter name.
         let title = [" What FlashAgent remembers (/memory) ", " What is remembered ", " Memory "]
             .into_iter()
             .find(|t| crate::visible_width(t) < inner_w)
@@ -389,9 +365,7 @@ impl MemoryModal {
                 lines.push((LineKind::System, pad(&format!("{dim}enter — send · esc — cancel{reset}"))));
             }
             None => {
-                // In a narrow window the hints do not all fit. They are
-                // dropped from the middle, so "esc — close" survives: a card
-                // that does not say how to leave it is a trap.
+                // Dropped from the middle so "esc — close" survives.
                 let hints = crate::fit_hints(
                     &[
                         ("↑/↓ — select".into(), format!("{dim}↑/↓ — select{reset}")),
@@ -556,8 +530,7 @@ mod tests {
 
     #[test]
     fn a_note_reaches_the_model_with_the_memory_it_is_about() {
-        // "This one is wrong" only means something next to the memory it
-        // refers to, and the user should not have to retype its name.
+        // The user should not have to retype the memory's name.
         let mut m = modal_with(vec![("build-uses-just", "the build is driven by just", Scope::Project)]);
         m.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
         for c in "это уже не так, теперь make".chars() {
@@ -572,7 +545,7 @@ mod tests {
 
     #[test]
     fn typing_a_note_does_not_navigate_or_delete() {
-        // 'd' and 'j' are commands on the list and letters in a note.
+        // 'd' and 'j' are list commands and letters in a note.
         let mut m = modal_with(vec![
             ("a-fact", "one", Scope::Project),
             ("b-fact", "two", Scope::Project),
@@ -636,12 +609,11 @@ mod tests {
         // Going back to the list and in again does not ask a second time.
         m.handle_key(KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(m.handle_key(KeyCode::Tab, KeyModifiers::NONE), MemoryAction::None);
-        // Enter on a dive-deeper item sends it.
         assert_eq!(
             m.handle_key(KeyCode::Enter, KeyModifiers::NONE),
             MemoryAction::Tell { message: "Сравните версии DiLink".into() }
         );
-        // Typing asks instead, and a forgotten memory marks the summary stale.
+        // Typing asks instead; forgetting a memory marks the summary stale.
         for c in "а что ещё?".chars() {
             m.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
         }

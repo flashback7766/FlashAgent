@@ -1,6 +1,6 @@
 use super::*;
 
-/// Enter or y (Latin or Cyrillic) on a yes-or-no card.
+/// Latin or Cyrillic.
 fn is_yes(code: KeyCode) -> bool {
     matches!(
         code,
@@ -8,20 +8,15 @@ fn is_yes(code: KeyCode) -> bool {
     )
 }
 
-/// Ctrl+C, Latin or Cyrillic layout.
+/// Latin or Cyrillic layout.
 pub(crate) fn is_ctrl_c(code: KeyCode, mods: KeyModifiers) -> bool {
     matches!(code, KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('\u{0441}') | KeyCode::Char('\u{0421}'))
         && mods.contains(KeyModifiers::CONTROL)
 }
 
 impl App {
-    /// A key pressed while something sits over the composer — an approval
-    /// card, a yes-or-no card, a question, a menu or screen — or while the
-    /// transcript is scrolled back. `Flow::Next` means none of them claimed it.
-    ///
-    /// They are asked in the order they are drawn on top of each other, so the
-    /// key always goes to the card the user is looking at: an approval that
-    /// comes up over open settings takes Enter, not the settings under it.
+    /// Cards are asked in drawing order, so the key goes to the one on top: an
+    /// approval over open settings takes Enter. `Flow::Next` means none claimed it.
     pub(crate) async fn handle_overlay_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Flow {
         if cx.gate.pending().is_some() {
             self.approval_key(cx, code, mods);
@@ -29,8 +24,7 @@ impl App {
             return Flow::Continue;
         }
 
-        // The uninstall card: yes closes the app, and the uninstaller runs in
-        // the restored terminal, where it asks what data to delete.
+        // Yes closes the app; the uninstaller then runs in the restored terminal.
         if self.uninstall_confirm {
             self.uninstall_confirm = false;
             if is_yes(code) {
@@ -41,8 +35,7 @@ impl App {
             return Flow::Continue;
         }
 
-        // The channel card owns the keyboard while it is up: it is a
-        // yes-or-no about replacing the binary, and typing past it would
+        // Owns the keyboard: typing past a yes-or-no about replacing the binary would
         // leave the answer ambiguous.
         if let Some(sw) = self.channel_switch.take() {
             self.channel_switch_key(cx, sw, code);
@@ -56,15 +49,14 @@ impl App {
             return Flow::Continue;
         }
 
-        // The open panel is taken out while its key is handled and put back
-        // unless the key closed it or opened another.
+        // Taken out while its key is handled, put back unless the key closed it or
+        // opened another.
         if let Some(overlay) = self.overlay.take() {
             match overlay {
                 Overlay::Settings(view) => self.settings_key(cx, view, code, mods).await,
                 Overlay::Sampling(view) => self.sampling_key(view, code, mods),
                 Overlay::Memory(modal) => self.memory_key(cx, modal, code, mods),
                 Overlay::Context(modal) => {
-                    // F1, Enter, Esc or q close it; anything else leaves it up.
                     if !matches!(code, KeyCode::F(1) | KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q')) {
                         self.overlay = Some(Overlay::Context(modal));
                     }
@@ -96,8 +88,6 @@ impl App {
             }
             KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('\u{0444}') | KeyCode::Char('\u{0424}') => {
                 if let Some(req) = cx.gate.pending() {
-                    // Narrow rules for shell (`npm test` never covers
-                    // `npm publish`); tool-wide otherwise.
                     let rules = cx.perm.state().allow_always(&req);
                     if rules.is_empty() {
                         self.notice("[Allowed once: this command cannot be saved as a narrow rule]");
@@ -134,8 +124,7 @@ impl App {
                 sw.to.label()
             )));
         } else {
-            // Everything else the user changed stayed applied; only this one
-            // is put back.
+            // Other changes stay applied; only this one is put back.
             if let Some(view) = self.settings_view_mut() {
                 view.config.update_channel = sw.from;
             }
@@ -145,7 +134,6 @@ impl App {
 
     fn question_key(&mut self, cx: &LoopCtx<'_>, req: &flashagent_tui::QuestionRequest, code: KeyCode, mods: KeyModifiers) {
         if is_ctrl_c(code, mods) {
-            // Ctrl+C interrupts the turn, as everywhere else while it runs.
             self.question_ui_state = QuestionUiState::default();
             cx.question_gate.cancel();
             self.interrupt(cx);
@@ -251,7 +239,7 @@ impl App {
     }
 
     async fn settings_key(&mut self, cx: &mut LoopCtx<'_>, mut settings: Box<SettingsView>, code: KeyCode, mods: KeyModifiers) {
-        // What the view was opened with (live session values).
+        // Live session values.
         let shown_mode = self.goal_state.as_ref().map_or(cx.perm.state().mode(), |g| g.mode);
         let shown_effort = self.goal_state.as_ref().map_or(self.current_effort.clone(), |g| g.effort.clone());
         match settings.handle_key(code, mods) {
@@ -259,8 +247,7 @@ impl App {
             SettingsAction::DiscoverModels => {
                 self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
                 self.save_config();
-                // Probe the URL the user just typed, not the one this session
-                // is connected to.
+                // Probe the URL just typed, not the connected one.
                 let key = settings.config.api_key.clone().or_else(|| std::env::var("FLASHAGENT_API_KEY").ok());
                 let probe = flashagent_llm::OpenAiCompat::new(&settings.config.backend_url, "", key);
                 settings.available_models = match probe.discover_server().await {
@@ -346,7 +333,6 @@ impl App {
         }
     }
 
-    /// Esc on the settings screen: apply and save what changed, and say so.
     fn close_settings(&mut self, cx: &LoopCtx<'_>, settings: Box<SettingsView>, shown_mode: PermissionMode, shown_effort: &str) {
         let chosen_mode = settings.config.permission_mode;
         let chosen_effort = settings.config.thinking_effort.clone();
@@ -367,12 +353,10 @@ impl App {
         }
         self.suggested_prompt = None;
 
-        // Every other setting is applied now; the release channel waits for
-        // an answer, so declining costs the user nothing else they changed.
+        // The channel waits for an answer, so declining costs nothing else.
         let wanted_channel = settings.config.update_channel;
         let mut applied = persisted_from_view(&settings.config, &self.config, shown_mode, shown_effort);
-        // Anything else changed (tips, toasts, goal limits...) is still worth
-        // a word, and an older notice must not stay up as if it were the answer.
+        // Other changes still get a word, replacing any older notice.
         let personality_changed = applied.personality != self.config.personality;
         if personality_changed {
             changes.push(format!("style ({})", applied.personality.summary()));
@@ -390,8 +374,7 @@ impl App {
         if personality_changed {
             self.apply_personality();
         }
-        // The mode chosen here is the one to start in next time, also during
-        // /goal, where it is the mode the run hands back when it ends.
+        // Also during /goal, where it is the mode the run hands back.
         self.config.permission_mode = chosen_mode;
         self.save_config();
         cx.tools_arc.set_toolset_profile(self.config.toolset_profile);
@@ -403,8 +386,8 @@ impl App {
             cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
             cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
         }
-        // During /goal the live mode/effort are the goal's; edits apply to
-        // what the goal restores afterwards.
+        // During /goal the live mode/effort are the goal's; edits apply to what the
+        // goal restores afterwards.
         match self.goal_state.as_mut() {
             Some(g) => {
                 g.mode = chosen_mode;
@@ -418,8 +401,7 @@ impl App {
         self.refresh_welcome(cx.source, cx.perm.state().mode(), cx.mascot_mood);
     }
 
-    /// Put up the yes-or-no card for moving to another release channel, and
-    /// look up what that channel would install while it is up.
+    /// Looks up what the channel would install while the card is up.
     pub(crate) fn ask_channel_switch(&mut self, cx: &LoopCtx<'_>, to: flashagent_core::config::UpdateChannel) {
         self.channel_switch = Some(ChannelSwitch { from: self.config.update_channel, to, target: ChannelTarget::Checking });
         let tx_ch = cx.channel_probe_tx.clone();
@@ -446,8 +428,7 @@ impl App {
         }
     }
 
-    /// The memory screen owns every key while it is up: 'd' and 'e' are
-    /// commands on the list and letters inside a note.
+    /// Owns every key: 'd' and 'e' are list commands and letters in a note.
     fn memory_key(
         &mut self,
         cx: &LoopCtx<'_>,
@@ -472,8 +453,7 @@ impl App {
                 self.overlay = Some(Overlay::Memory(modal));
             }
             MemoryAction::Tell { message } => {
-                // Sent through the ordinary path, so it is an ordinary turn:
-                // the model decides what to change and says so in the chat.
+                // An ordinary turn: the model decides what to change and says so.
                 self.input.set(message);
                 let _ = cx.tx.send(UiEvent::Key(KeyCode::Enter, KeyModifiers::NONE));
             }
@@ -523,9 +503,8 @@ impl App {
         self.overlay = Some(Overlay::Mcp(modal));
     }
 
-    /// The list of saved sessions (/resume). Enter only records the pick: the
-    /// switch happens at the top of the next loop turn, which owns the session
-    /// id and the snapshot store.
+    /// Enter only records the pick; the switch happens at the top of the next loop
+    /// turn, which owns the session id and snapshot store.
     fn session_menu_key(&mut self, mut menu: SelectMenu<String>, code: KeyCode, mods: KeyModifiers) {
         match code {
             KeyCode::Enter => self.pending_resume = menu.selected_value().cloned(),
@@ -549,8 +528,8 @@ impl App {
                 cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
                 if let Some(m) = cx.source.discovery().and_then(|d| d.models.into_iter().find(|m| m.id == self.current_model)) {
                     self.current_context = m.context_display();
-                    // The effort the user picked survives the switch; a model
-                    // that cannot reason just receives no thinking fields.
+                    // The picked effort survives the switch; a non-reasoning model just gets no
+                    // thinking fields.
                     if self.current_effort.is_empty() {
                         self.current_effort = "auto".to_string();
                     }
@@ -566,8 +545,7 @@ impl App {
         }
     }
 
-    /// The /rewind confirmation card. Only Enter on "Yes, rewind" ever
-    /// touches a file; everything else just closes the card.
+    /// Only Enter on "Yes, rewind" touches a file.
     fn rewind_key(&mut self, cx: &mut LoopCtx<'_>, mut card: RewindConfirm, code: KeyCode) {
         match code {
             KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
@@ -597,9 +575,7 @@ impl App {
         self.overlay = Some(Overlay::Effort(menu));
     }
 
-    /// PageUp/PageDown, Home/End and modified arrows move through the
-    /// transcript; once scrolled back, plain arrows do too, and typing
-    /// returns to the bottom.
+    /// Once scrolled back, plain arrows scroll too; typing returns to the bottom.
     fn scroll_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Flow {
         let (_, height) = crossterm::terminal::size().unwrap_or((100, 24));
         let page = (height as usize / 2).max(5);
@@ -645,7 +621,6 @@ impl App {
     }
 }
 
-/// Arrows, pages and type-to-filter on a list menu.
 fn navigate_menu(menu: &mut SelectMenu<String>, code: KeyCode, mods: KeyModifiers) {
     match code {
         KeyCode::Up => menu.up(),

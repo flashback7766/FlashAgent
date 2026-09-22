@@ -2,15 +2,13 @@ use super::*;
 use flashagent_tui::WelcomeCard;
 
 impl App {
-    /// Redraw the welcome card with the session as it is now — model, mode,
-    /// effort — while the conversation has not started.
+    /// Only while the conversation has not started.
     pub(crate) fn refresh_welcome(&mut self, source: &BackendSource, mode: PermissionMode, mood: MascotMood) {
         self.animate_welcome(source, mode, mood, None, None);
     }
 
-    /// As `refresh_welcome`, on this tick of the mascot's animation. `width`
-    /// overrides the terminal's; `reveal_rows` draws only that many rows — the
-    /// start-up reveal, where the card draws itself from the top down.
+    /// `width` overrides the terminal's; `reveal_rows` draws only that many rows
+    /// for the start-up reveal.
     pub(crate) fn animate_welcome(
         &mut self,
         source: &BackendSource,
@@ -46,9 +44,8 @@ impl App {
     }
 }
 
-/// The welcome card as first shown. Animated, it starts as its top border and
-/// the tick loop draws in the rest; otherwise it goes up whole, because
-/// nothing will come back to finish it.
+/// Animated, it starts as its top border and the tick loop draws the rest;
+/// otherwise it goes up whole.
 pub(crate) fn opening_card(card: Vec<RenderLine>, animate: bool) -> Vec<RenderLine> {
     if animate {
         card.into_iter().take(1).collect()
@@ -57,8 +54,7 @@ pub(crate) fn opening_card(card: Vec<RenderLine>, animate: bool) -> Vec<RenderLi
     }
 }
 
-/// How many rows of the welcome card to draw, so it appears to draw itself
-/// from the top down over the first half second. `None` once it is whole.
+/// `None` once the card is whole.
 pub(crate) fn welcome_reveal_rows(started_at: std::time::Instant) -> Option<usize> {
     if !flashagent_tui::anim::enabled() {
         return None;
@@ -69,9 +65,8 @@ pub(crate) fn welcome_reveal_rows(started_at: std::time::Instant) -> Option<usiz
     (elapsed < ROW_MS * ROWS).then(|| (elapsed / ROW_MS) as usize + 1)
 }
 
-/// Rows of an approval-card value: wrapped (never silently clipped), with
-/// long whitespace runs made visible — padding must not push the tail of a
-/// command (`... | sh`) out of sight — and an explicit note when rows run out.
+/// Wrapped, never clipped; long whitespace runs are made visible so padding
+/// cannot push `... | sh` out of sight; running out of rows is noted.
 pub(crate) fn card_rows(value: &str, width: usize, max_rows: usize) -> Vec<String> {
     let mut shown = String::new();
     for line in value.lines() {
@@ -105,17 +100,15 @@ pub(crate) fn card_rows(value: &str, width: usize, max_rows: usize) -> Vec<Strin
     rows
 }
 
-/// Model-supplied text made safe to print: control characters (ANSI
-/// escapes included) are shown, not executed.
+/// Control characters, ANSI escapes included, are shown, not executed.
 pub(crate) fn card_safe(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() && c != '\n' { '\u{fffd}' } else { c })
         .collect()
 }
 
-/// Draw the `/goal` ledger as a card. Facts the loop reported, so a run that
-/// stopped at a budget cannot read as a run that finished — whatever the
-/// model's own closing summary claims.
+/// From facts the loop reported, so a run stopped by a budget cannot read as
+/// finished whatever the model's summary claims.
 pub(crate) fn push_goal_report(chat: &mut ChatView, ledger: &GoalLedger, reason: DoneReason) {
     let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
     let card_w = (w as usize).saturating_sub(4).clamp(44, 110);
@@ -145,7 +138,7 @@ pub(crate) fn push_goal_report(chat: &mut ChatView, ledger: &GoalLedger, reason:
     chat.push_line(LineKind::System, format!("{border}╰{}╯{reset}", "─".repeat(inner_w)));
 }
 
-/// Wrap plain text at `width` on word boundaries, keeping a leading indent.
+/// Keeps a leading indent.
 pub(crate) fn wrap_plain(text: &str, width: usize) -> Vec<String> {
     let width = width.max(8);
     if text.chars().count() <= width {

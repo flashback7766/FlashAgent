@@ -1,30 +1,26 @@
-//! Cross-platform clipboard support: OSC 52 terminal sequences, arboard,
-//! and native OS tool fallbacks (wl-clipboard, xclip, pbcopy/pbpaste).
+//! Clipboard via OSC 52, arboard, and OS tools (wl-clipboard, xclip, xsel,
+//! pbcopy/pbpaste).
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 pub use flashagent_core::base64_encode;
 
-/// Set system clipboard text using OSC 52, arboard, and platform CLI tools.
 pub fn set_clipboard_text(text: &str) -> bool {
-    // 1. OSC 52 sequence to stdout (works natively in tmux, Kitty, Alacritty, WezTerm, Windows Terminal)
+    // OSC 52 works in tmux, Kitty, Alacritty, WezTerm, Windows Terminal.
     let b64 = base64_encode(text.as_bytes());
     let _ = write!(std::io::stdout(), "\x1b]52;c;{b64}\x07");
     let _ = std::io::stdout().flush();
     let success = true;
 
-    // 2. Arboard system clipboard
     if let Ok(mut cb) = arboard::Clipboard::new() {
         if cb.set_text(text.to_string()).is_ok() {
             return true;
         }
     }
 
-    // 3. Fallback CLI tools for Linux/Unix/macOS/Windows
     #[cfg(target_os = "linux")]
     {
-        // Try wl-copy (Wayland)
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
             if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).spawn() {
                 if let Some(mut stdin) = child.stdin.take() {
@@ -36,7 +32,6 @@ pub fn set_clipboard_text(text: &str) -> bool {
             }
         }
 
-        // Try xclip (X11)
         if let Ok(mut child) = Command::new("xclip")
             .arg("-selection")
             .arg("clipboard")
@@ -51,7 +46,6 @@ pub fn set_clipboard_text(text: &str) -> bool {
             }
         }
 
-        // Try xsel (X11)
         if let Ok(mut child) = Command::new("xsel")
             .arg("-b")
             .arg("-i")
@@ -94,9 +88,7 @@ pub fn set_clipboard_text(text: &str) -> bool {
     success
 }
 
-/// Read text from the system clipboard using arboard and native OS tool fallbacks.
 pub fn get_clipboard_text() -> Option<String> {
-    // 1. Arboard system clipboard
     if let Ok(mut cb) = arboard::Clipboard::new() {
         if let Ok(s) = cb.get_text() {
             if !s.is_empty() {
@@ -105,10 +97,8 @@ pub fn get_clipboard_text() -> Option<String> {
         }
     }
 
-    // 2. Fallback CLI tools
     #[cfg(target_os = "linux")]
     {
-        // Try wl-paste (Wayland)
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
             if let Ok(output) = Command::new("wl-paste").arg("--no-newline").output() {
                 if output.status.success() {
@@ -121,7 +111,6 @@ pub fn get_clipboard_text() -> Option<String> {
             }
         }
 
-        // Try xclip (X11)
         if let Ok(output) = Command::new("xclip")
             .arg("-selection")
             .arg("clipboard")
@@ -137,7 +126,6 @@ pub fn get_clipboard_text() -> Option<String> {
             }
         }
 
-        // Try xsel (X11)
         if let Ok(output) = Command::new("xsel").arg("-b").arg("-o").output() {
             if output.status.success() {
                 if let Ok(s) = String::from_utf8(output.stdout) {
@@ -196,36 +184,32 @@ mod tests {
     }
 }
 
-/// An image taken off the system clipboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardImage {
-    /// Raw encoded bytes, as the clipboard held them.
+    /// Encoded bytes, as the clipboard held them.
     pub bytes: Vec<u8>,
-    /// MIME type, e.g. `image/png`.
+    /// E.g. `image/png`.
     pub media_type: String,
 }
 
 impl ClipboardImage {
-    /// The `data:` URL an OpenAI-compatible server expects.
     pub fn to_data_url(&self) -> String {
         format!("data:{};base64,{}", self.media_type, base64_encode(&self.bytes))
     }
 
-    /// Pixel size, read out of the file's own header.
+    /// From the file header.
     pub fn dimensions(&self) -> Option<(u32, u32)> {
         image_dimensions(&self.bytes)
     }
 }
 
-/// Width and height of a PNG, JPEG, GIF or BMP, from its header.
-///
-/// Only enough of each format is parsed to find the size: this is for a label
-/// in the composer, not for decoding.
+/// PNG, JPEG, GIF or BMP. Only enough is parsed to find the size, for the
+/// composer label.
 pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     let be32 = |b: &[u8]| u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
     let be16 = |b: &[u8]| u16::from_be_bytes([b[0], b[1]]) as u32;
 
-    // PNG: 8-byte signature, then an IHDR chunk whose data starts at 16.
+    // PNG: 8-byte signature, then IHDR data starting at 16.
     if bytes.len() > 24 && bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
         return Some((be32(&bytes[16..20]), be32(&bytes[20..24])));
     }
@@ -239,7 +223,7 @@ pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         let le32 = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
         return Some((le32(&bytes[18..22]), le32(&bytes[22..26])));
     }
-    // JPEG: walk the segments to a start-of-frame marker, which carries the size.
+    // JPEG: walk the segments to a start-of-frame marker.
     if bytes.len() > 4 && bytes.starts_with(&[0xFF, 0xD8]) {
         let mut i = 2;
         while i + 9 < bytes.len() {
@@ -248,7 +232,7 @@ pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
                 continue;
             }
             let marker = bytes[i + 1];
-            // SOF0..SOF15, skipping the four that are not frame headers.
+            // SOF0..SOF15, minus the four that are not frame headers.
             if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
                 return Some((be16(&bytes[i + 7..i + 9]), be16(&bytes[i + 5..i + 7])));
             }
@@ -262,7 +246,6 @@ pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
-/// The media type a file name implies, for the formats a vision model reads.
 pub fn image_media_type(path: &std::path::Path) -> Option<&'static str> {
     match path.extension()?.to_str()?.to_lowercase().as_str() {
         "png" => Some("image/png"),
@@ -274,11 +257,8 @@ pub fn image_media_type(path: &std::path::Path) -> Option<&'static str> {
     }
 }
 
-/// Read an image out of the system clipboard, if it holds one.
-///
-/// Goes through the platform's own tools rather than a decoding library: they
-/// hand back the file exactly as it was copied, which is what the model wants
-/// and what keeps a screenshot a screenshot.
+/// Through the platform tools rather than a decoder, so the file arrives
+/// exactly as copied.
 pub fn get_clipboard_image() -> Option<ClipboardImage> {
     let attempts: &[(&str, &[&str], &str)] = if cfg!(target_os = "macos") {
         &[("pngpaste", &["-"], "image/png")]
@@ -298,8 +278,8 @@ pub fn get_clipboard_image() -> Option<ClipboardImage> {
         if !out.status.success() || out.stdout.is_empty() {
             continue;
         }
-        // A clipboard holding text answers these commands with the text, so
-        // the bytes have to look like an image before they are believed.
+        // A clipboard holding text answers with the text, so the bytes must look
+        // like an image.
         if image_dimensions(&out.stdout).is_none() {
             continue;
         }
@@ -312,7 +292,7 @@ pub fn get_clipboard_image() -> Option<ClipboardImage> {
 mod image_tests {
     use super::*;
 
-    /// The smallest valid PNG: 1×1, transparent.
+    /// 1×1, transparent.
     fn tiny_png() -> Vec<u8> {
         let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
         v.extend_from_slice(&13u32.to_be_bytes());
@@ -334,8 +314,6 @@ mod image_tests {
 
     #[test]
     fn text_on_the_clipboard_is_not_mistaken_for_a_picture() {
-        // wl-paste answers with the text when the clipboard holds text, so
-        // the bytes are checked before they are believed.
         assert_eq!(image_dimensions(b"just some copied text"), None);
         assert_eq!(image_dimensions(b""), None);
         assert_eq!(image_dimensions(&[0x89, b'P', b'N', b'G']), None, "a truncated header is not a picture");

@@ -1,29 +1,24 @@
-//! What the user sent before, kept between launches so ↑ and Ctrl+F reach
-//! yesterday's prompts too.
-//!
-//! One JSON string per line in `~/.flashagent/prompt_history.jsonl`: a
-//! prompt of several lines stays one entry. Lines are appended, so two
-//! instances writing at once interleave whole entries rather than mixing
-//! their bytes. Kept only when sessions are saved: someone who turned that
-//! off does not want their prompts on disk either.
+//! Sent prompts, kept between launches so ↑ and Ctrl+F reach older ones. One
+//! JSON string per line in `~/.flashagent/prompt_history.jsonl`; appends keep
+//! concurrent writers from mixing bytes. Saved only when sessions are saved.
 
 use super::*;
 
-/// Entries kept; older ones are dropped when the file is read.
+/// Older ones are dropped when the file is read.
 const KEEP: usize = 1000;
 
 fn history_path() -> Option<std::path::PathBuf> {
     flashagent_home_dir().map(|home| home.join("prompt_history.jsonl"))
 }
 
-/// The saved prompts, oldest first.
+/// Oldest first.
 pub(crate) fn load() -> Vec<String> {
     history_path().map(|p| load_from(&p)).unwrap_or_default()
 }
 
 fn load_from(path: &std::path::Path) -> Vec<String> {
     let Ok(content) = std::fs::read_to_string(path) else { return Vec::new() };
-    // A line that does not parse (cut short by a crash) is skipped, not fatal.
+    // A line cut short by a crash is skipped.
     let mut entries: Vec<String> = content.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     if entries.len() > KEEP {
         entries.drain(..entries.len() - KEEP);
@@ -49,8 +44,7 @@ fn append_to(path: &std::path::Path, prompt: &str) {
 }
 
 impl App {
-    /// A prompt that was sent: at the end of the history, once, and on disk
-    /// when sessions are kept.
+    /// Appended once, and saved when sessions are kept.
     pub(crate) fn remember_prompt(&mut self, text: &str) {
         if text.trim().is_empty() || self.input_history.last().is_some_and(|last| last == text) {
             return;

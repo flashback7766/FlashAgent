@@ -1,24 +1,15 @@
-//! Warming the server's prompt cache before the first message.
-//!
-//! A local server keeps the prompt it last read and reuses the part a new
-//! request starts with. Inside a conversation that is nearly all of it. The
-//! first message has nothing to reuse: the system prompt, the tool schemas
-//! and the memory block are read from scratch. On LM Studio with a Gemma 4
-//! E2B that was 34 s before the first word for 8.3k tokens, and 0.9 s for
-//! the next message once they were cached.
-//!
-//! So the app sends that prefix on its own, with a one-token answer, while
-//! the user is still typing: at start, after `--resume` (the whole session),
-//! after a switch of model or voice. The request is assembled the way the
-//! agent loop assembles a turn, so the cached tokens are the ones the first
-//! real request begins with.
+//! Warms the server's prompt cache before the first message. The first request
+//! has nothing cached: system prompt, tool schemas and memory are read from
+//! scratch (34 s for 8.3k tokens on LM Studio with Gemma 4 E2B, 0.9 s once
+//! cached). So the prefix is sent with a one-token answer while the user types:
+//! at start, after `--resume`, after a model or voice switch. It is assembled
+//! the way the agent loop assembles a turn, so the cached tokens match.
 
 use super::*;
 use flashagent_core::ToolExec as _;
 use std::hash::{Hash, Hasher};
 
-/// The request a first turn would begin with: the system prompt, the voice
-/// example, the history, and the opening of the next user message.
+/// System prompt, voice example, history, and the opening of the next user message.
 pub(crate) fn warm_messages(history: &[ChatMessage], prelude: &[ChatMessage], memory_block: &str) -> Vec<ChatMessage> {
     let after_system = usize::from(history.first().is_some_and(|m| m.role == flashagent_llm::Role::System));
     let mut messages: Vec<ChatMessage> = history[..after_system]
@@ -28,8 +19,7 @@ pub(crate) fn warm_messages(history: &[ChatMessage], prelude: &[ChatMessage], me
         .cloned()
         .collect();
     let first = !history.iter().any(|m| m.role == flashagent_llm::Role::User);
-    // The memory block rides in front of the first prompt, so it belongs
-    // to the prefix too. Whatever follows it is the user's and is not known.
+    // The memory block goes in front of the first prompt, so it is part of the prefix.
     let opening = if first && !memory_block.is_empty() {
         format!("{memory_block}\n\n---\n\n")
     } else {
@@ -39,7 +29,7 @@ pub(crate) fn warm_messages(history: &[ChatMessage], prelude: &[ChatMessage], me
     messages
 }
 
-/// Identifies a warmed prefix, so the same one is not sent twice.
+/// So the same prefix is not sent twice.
 fn prefix_key(model: &str, messages: &[ChatMessage], specs: &[flashagent_llm::ToolSpec]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     model.hash(&mut h);
@@ -66,8 +56,7 @@ impl App {
         (prefix_key(&self.current_model, &messages, &specs), messages, specs)
     }
 
-    /// Send the prefix of the next request to the server, unless it was
-    /// already sent or a turn has just read it.
+    /// Skipped when already sent or a turn has just read it.
     pub(crate) fn warm_prompt_cache(&mut self, source: &Arc<BackendSource>, perm: &'static PermissionedTools, memory_block: &str) {
         if self.running || self.current_model.is_empty() {
             return;
@@ -76,7 +65,7 @@ impl App {
             if !task.is_finished() {
                 return;
             }
-            // A failed warm-up (the server was not up yet) is tried again.
+            // A failed warm-up (server not up yet) is retried.
             let failed = !matches!(futures::FutureExt::now_or_never(task), Some(Ok(true)));
             let key = self.warm_task.take().map(|(key, _)| key);
             if failed && self.cache_warm_key == key {
@@ -90,9 +79,8 @@ impl App {
         self.cache_warm_key = Some(key);
         let mut opts = build_turn_options(&self.config, &self.current_effort);
         opts.max_tokens = Some(1);
-        // Under "auto" the thinking switch is chosen from the prompt, which
-        // is not written yet. Some chat templates put that switch in the
-        // system turn, so the warm-up guesses the common case, a task.
+        // Under "auto" the thinking switch depends on the unwritten prompt, and some
+        // templates put it in the system turn; the warm-up assumes a task.
         if opts.thinking == flashagent_llm::ThinkingEffort::Auto {
             opts.thinking = flashagent_llm::ThinkingEffort::Medium;
         }
@@ -113,8 +101,7 @@ impl App {
         ));
     }
 
-    /// A turn read the whole history just now; the prefix of the next
-    /// request is in the cache already.
+    /// The next request's prefix is already cached after a turn.
     pub(crate) fn note_prompt_cached(&mut self, perm: &'static PermissionedTools, memory_block: &str) {
         self.cache_warm_key = Some(self.warm_key(perm, memory_block).0);
     }

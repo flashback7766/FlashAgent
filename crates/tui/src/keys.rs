@@ -1,12 +1,11 @@
 use super::*;
 
-/// How soon a second Esc on an empty prompt has to follow the first to quit.
+/// A second Esc on an empty prompt within this window quits.
 pub(crate) const ESC_QUIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl App {
-    /// The next launch starts in the mode the user is in now — whichever it
-    /// is, Accept All included. A `/goal` run's Accept All is its own and is
-    /// never remembered; the mode it hands back already was.
+    /// The next launch starts in the current mode. A `/goal` run's Accept All is
+    /// never remembered.
     pub(crate) fn remember_mode(&mut self, mode: PermissionMode) {
         if self.goal_state.is_some() || self.config.permission_mode == mode {
             return;
@@ -15,17 +14,16 @@ impl App {
         self.save_config();
     }
 
-    /// Write the settings to disk, and say so when that fails: a setting
-    /// that silently does not stick is found out only on the next launch.
+    /// A failure is shown: a setting that silently does not stick is found out
+    /// only on the next launch.
     pub(crate) fn save_config(&mut self) {
         if let Err(e) = self.config.save() {
             self.notice(format!("Settings not saved: {e}"));
         }
     }
 
-    /// Ctrl+U and /update: show the update that is already under way —
-    /// started in the background before anyone asked — or start one that
-    /// checks, downloads and installs in one go.
+    /// Ctrl+U and /update: watch an update already under way in the background,
+    /// or check, download and install in one go.
     pub(crate) fn start_or_watch_update(&mut self, cx: &LoopCtx<'_>) {
         let action = update_key_action(
             flashagent_svc::updater::is_dev_mode(),
@@ -56,8 +54,7 @@ impl App {
             }
             UpdateKeyAction::InstallPending | UpdateKeyAction::CheckAndInstall => {}
         }
-        // Claimed here, not just read above: the background updater may have
-        // started in between.
+        // Claimed, not just read: the background updater may have started in between.
         if cx.update_busy.swap(true, Ordering::SeqCst) {
             self.update_watched = true;
             self.background = Some(checking(self.config.update_channel));
@@ -109,8 +106,7 @@ impl App {
         });
     }
 
-    /// After text was taken out of the prompt: the history walk is over, and
-    /// an emptied prompt offers the suggestion again.
+    /// Ends the history walk; an emptied prompt offers the suggestion again.
     fn edited(&mut self) {
         self.history_index = None;
         self.autocomplete_idx = 0;
@@ -119,9 +115,8 @@ impl App {
         }
     }
 
-    /// Ctrl+F: typing narrows the search, Ctrl+F again goes further back,
-    /// Enter or → takes what was found into the prompt to edit or send, Esc
-    /// puts back what was there before.
+    /// Typing narrows, Ctrl+F again goes further back, Enter or → takes the match,
+    /// Esc restores the draft.
     fn history_search_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         let Some(search) = self.history_search.as_mut() else { return };
         let ctrl = mods.contains(KeyModifiers::CONTROL);
@@ -150,8 +145,7 @@ impl App {
         self.renderer.request_reprint();
     }
 
-    /// A key the overlays did not claim: typing, editing the prompt, history,
-    /// function keys and shortcuts, and Enter.
+    /// Keys the overlays did not claim.
     pub(crate) async fn handle_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Flow {
         if self.history_search.is_some() {
             self.history_search_key(code, mods);
@@ -174,12 +168,11 @@ impl App {
                     self.background = Some(BackgroundNotice::fading("Attachments cleared".to_string(), 4));
                     self.renderer.request_reprint();
                 } else if self.last_esc.is_some_and(|t| t.elapsed() < ESC_QUIT_WINDOW) {
-                    // The second press of a double Esc. One stray Esc used
-                    // to quit outright; a session is saved either way.
+                    // A single stray Esc used to quit outright.
                     return Flow::Quit;
                 } else {
-                    // The first press also clears a suggestion, so quitting
-                    // right after an answer is still two presses, not three.
+                    // The first press also clears a suggestion, so quitting after an answer is
+                    // still two presses.
                     self.suggested_prompt = None;
                     self.latest_suggestion = None;
                     self.last_esc = Some(std::time::Instant::now());
@@ -187,12 +180,11 @@ impl App {
                     self.renderer.request_reprint();
                 }
             }
-            // F1: toggle context modal
             KeyCode::F(1) => {
                 self.open_overlay(Overlay::Context(ContextModal::new(self.context_usage.clone())));
             }
 
-            // Ctrl+C / Ctrl+Shift+C (handles both Latin and alternate physical keycodes)
+            // Letter keys also match their Russian-layout counterparts.
             KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('\u{0441}') | KeyCode::Char('\u{0421}')
                 if mods.contains(KeyModifiers::CONTROL) =>
             {
@@ -220,13 +212,11 @@ impl App {
                 }
             }
 
-            // Ctrl+V / Ctrl+Shift+V: paste from clipboard (supports alternative keyboard layouts)
             KeyCode::Char('v') | KeyCode::Char('V') | KeyCode::Char('\u{043c}') | KeyCode::Char('\u{041c}')
                 if mods.contains(KeyModifiers::CONTROL) =>
             {
-                // A screenshot on the clipboard is what the user
-                // means by paste far more often than the file path
-                // of one, so it is looked for first.
+                // A screenshot on the clipboard is meant far more often than a path, so it
+                // is looked for first.
                 if let Some(image) = flashagent_tui::clipboard::get_clipboard_image() {
                     maybe_measure_image_cost(
                         &self.image_costs,
@@ -260,7 +250,7 @@ impl App {
                 }
             }
 
-            // Ctrl+Z: take back the last picture attached.
+            // Ctrl+Z: remove the last attached picture.
             KeyCode::Char('z') | KeyCode::Char('Z') | KeyCode::Char('\u{044f}') | KeyCode::Char('\u{042f}')
                 if mods.contains(KeyModifiers::CONTROL) && !self.attachments.is_empty() =>
             {
@@ -273,14 +263,12 @@ impl App {
                 self.renderer.request_reprint();
             }
 
-            // Ctrl+D: exit on empty input when idle
             KeyCode::Char('d') | KeyCode::Char('D')
                 if mods.contains(KeyModifiers::CONTROL) && self.input.is_empty() && !self.running =>
             {
                 return Flow::Quit;
             }
 
-            // Ctrl+R / Ctrl+Shift+R: regenerate last response from scratch (supports alternative keyboard layouts)
             KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('\u{043a}') | KeyCode::Char('\u{041a}')
                 if mods.contains(KeyModifiers::CONTROL) =>
             {
@@ -296,7 +284,7 @@ impl App {
                 }
             }
 
-            // F2: cycle reasoning expansion mode (none -> last -> all -> none)
+            // F2 cycles none -> last -> all.
             KeyCode::F(2) => {
                 if !self.last_expanded && !self.all_expanded {
                     self.last_expanded = true;
@@ -311,7 +299,7 @@ impl App {
                 self.renderer.request_reprint();
             }
 
-            // ALT + O: expand / collapse ALL thinking blocks permanently (supports alternative keyboard layouts)
+            // Alt+O: all thinking blocks.
             KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char('\u{0449}') | KeyCode::Char('\u{0429}')
                 if mods.contains(KeyModifiers::ALT) =>
             {
@@ -322,7 +310,7 @@ impl App {
                 self.renderer.request_reprint();
             }
 
-            // CTRL + O: expand / collapse LAST thinking block temporarily (supports alternative keyboard layouts)
+            // Ctrl+O: the last thinking block.
             KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char('\u{0449}') | KeyCode::Char('\u{0429}')
                 if mods.contains(KeyModifiers::CONTROL) =>
             {
@@ -333,7 +321,6 @@ impl App {
                 self.renderer.request_reprint();
             }
 
-            // CTRL + E: launch external editor on current input buffer
             KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Char('\u{0443}') | KeyCode::Char('\u{0423}')
                 if mods.contains(KeyModifiers::CONTROL) && !self.running =>
             {
@@ -349,14 +336,12 @@ impl App {
                 self.renderer.request_reprint();
             }
 
-            // CTRL + U: download & apply pending update or check for updates
             KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Char('\u{0433}') | KeyCode::Char('\u{0413}')
                 if mods.contains(KeyModifiers::CONTROL) =>
             {
                 self.start_or_watch_update(cx);
             }
 
-            // F4 or CTRL + T or ALT + T: open Thinking Effort menu (supports alternative keyboard layouts)
             KeyCode::F(4)
             | KeyCode::Char('t') | KeyCode::Char('T') | KeyCode::Char('\u{0435}') | KeyCode::Char('\u{0415}')
                 if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) || matches!(code, KeyCode::F(4)) =>
@@ -364,7 +349,6 @@ impl App {
                 self.open_effort_menu(cx.source);
             }
 
-            // F3 or CTRL + M or ALT + M: open Model menu (supports alternative keyboard layouts)
             KeyCode::F(3)
             | KeyCode::Char('m') | KeyCode::Char('M') | KeyCode::Char('\u{044c}') | KeyCode::Char('\u{042c}')
                 if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) || matches!(code, KeyCode::F(3)) =>
@@ -372,12 +356,11 @@ impl App {
                 self.open_model_menu(cx.source);
             }
 
-            // F5: open Sampling Parameters menu
             KeyCode::F(5) => {
                 self.open_overlay(Overlay::Sampling(SamplingView::new(&self.config)));
             }
 
-            // Mode cycling with Shift+Tab (both KeyCode::BackTab and Tab+Shift)
+            // Shift+Tab arrives as BackTab or as Tab with Shift.
             KeyCode::BackTab | KeyCode::Tab if matches!(code, KeyCode::BackTab) || mods.contains(KeyModifiers::SHIFT) => {
                 let next_mode = cx.perm.state().mode().next();
                 cx.perm.state().set_mode(next_mode);
@@ -387,12 +370,10 @@ impl App {
                 self.suggested_prompt = None;
                 self.renderer.request_reprint();
             }
-            // Tab on empty input: toggle settings tab
             KeyCode::Tab if self.input.is_empty() && cx.gate.pending().is_none() => {
                 let view = self.runtime_settings(cx.perm.state().mode());
                 self.open_overlay(Overlay::Settings(Box::new(view)));
             }
-            // Tab: complete autocomplete suggestion if input starts with `/`, or toggle approval choice when pending
             KeyCode::Tab if cx.gate.pending().is_some() => {
                 self.confirm_select.toggle();
             }
@@ -402,7 +383,6 @@ impl App {
                     self.autocomplete_idx = 0;
                 }
             }
-            // Arrow navigation for approval card, autocomplete popup, and prompt history
             KeyCode::Left => {
                 if cx.gate.pending().is_some() {
                     self.confirm_select.left();
@@ -445,7 +425,7 @@ impl App {
                         }
                     }
                 } else if self.input.up() {
-                    // Moved within a text of several lines.
+                    // Moved within a multi-line text.
                 } else if !self.running && !self.input_history.is_empty() {
                     match self.history_index {
                         None => {
@@ -471,7 +451,7 @@ impl App {
                         self.autocomplete_idx = (self.autocomplete_idx + 1) % ac.items.len();
                     }
                 } else if self.input.down() {
-                    // Moved within a text of several lines.
+                    // Moved within a multi-line text.
                 } else if !self.running {
                     if let Some(idx) = self.history_index {
                         if idx + 1 < self.input_history.len() {
@@ -485,8 +465,8 @@ impl App {
                     }
                 }
             }
-            // Ctrl+Backspace arrives as Ctrl+H in many terminals, Alt+Backspace
-            // as Backspace with Alt: both take a word, as in a shell.
+            // Ctrl+Backspace arrives as Ctrl+H in many terminals, Alt+Backspace as
+            // Backspace with Alt: both delete a word.
             KeyCode::Backspace if cx.gate.pending().is_none() && word_mods(mods) => {
                 self.input.delete_word_before();
                 self.edited();
@@ -495,9 +475,8 @@ impl App {
                 self.input.backspace();
                 self.edited();
             }
-            // A new line instead of sending: Alt+Enter, and Shift+Enter in
-            // terminals that report it (most send Shift+Enter as a plain
-            // Enter, and there `\` + Enter or Ctrl+J does the same).
+            // Newline instead of send: Alt+Enter, and Shift+Enter where the terminal
+            // reports it; elsewhere `\` + Enter or Ctrl+J.
             KeyCode::Enter
                 if cx.gate.pending().is_none() && (mods.contains(KeyModifiers::ALT) || mods.contains(KeyModifiers::SHIFT)) =>
             {
@@ -543,7 +522,7 @@ impl App {
                 self.history_index = None;
                 self.autocomplete_idx = 0;
             }
-            // Shell editing keys, on either keyboard layout.
+            // Shell editing keys, on either layout.
             KeyCode::Char(c) if cx.gate.pending().is_none() && mods.contains(KeyModifiers::CONTROL) => match latin(c) {
                 'a' => self.input.home(),
                 'j' => {
@@ -579,14 +558,12 @@ impl App {
     }
 }
 
-/// Ctrl or Alt held with an arrow or Backspace: move or delete by words.
 fn word_mods(mods: KeyModifiers) -> bool {
     mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT)
 }
 
-/// The Latin letter on the same key as `c` in the Russian layout, so
-/// Ctrl+W still deletes a word with the layout switched. Anything else is
-/// returned lower-cased.
+/// The Latin letter on the same key in the Russian layout, so Ctrl+W works
+/// with the layout switched.
 fn latin(c: char) -> char {
     const RU: &str = "йцукенгшщзфывапролдячсмить";
     const EN: &str = "qwertyuiopasdfghjklzxcvbnm";

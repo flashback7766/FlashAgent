@@ -1,47 +1,39 @@
-//! What changed since the build you were running.
-//!
-//! An update that lands silently is an update nobody uses: the features are
-//! there, and the person keeps working the old way. After the binary moves
-//! forward by more than a hair, this shows what arrived — read straight out
-//! of `CHANGELOG.md`, so the screen cannot drift from what actually shipped.
+//! What changed since the previous build, read from `CHANGELOG.md` so the
+//! screen cannot drift from what shipped. An update nobody hears about is one
+//! nobody uses.
 
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 
-/// Marks an entry that is a paragraph of prose rather than a listed change.
+/// A prose paragraph rather than a listed change.
 const PROSE: &str = "\u{b6}";
 
-/// Marks the place where the changelog asks for a new screen.
+/// Where the changelog asks for a new screen.
 const PAGE: &str = "\u{c}";
 
-/// How the changelog asks for one. An HTML comment, so GitHub shows nothing.
+/// An HTML comment, so GitHub shows nothing.
 const PAGE_MARK: &str = "<!-- page -->";
 
-/// Presses it takes to get past a release's note. A note someone took the
-/// time to write is not skipped by a key held down from the last screen.
+/// A written note is not skipped by a key held down from the last screen.
 const NOTE_PRESSES: usize = 3;
 
-/// The changelog as it stood when this binary was built.
+/// As of build time.
 pub const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 
-/// One released version worth showing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Release {
-    /// Version tag, e.g. `b238`.
+    /// E.g. `b238`.
     pub version: String,
-    /// Short title after the em dash, when the entry has one.
+    /// After the em dash, when there is one.
     pub title: String,
-    /// Entries, in the order they were written.
+    /// In the order written.
     pub items: Vec<String>,
 }
 
-/// A changelog heading's version, compared by the one ordering the whole app
-/// uses (`flashagent_svc::version`): the move from `b287` to `v1.0.0` is news,
-/// not a downgrade.
+/// Uses the app-wide ordering, so `b287` → `v1.0.0` is news, not a downgrade.
 fn rank(version: &str) -> Option<flashagent_svc::Version> {
     flashagent_svc::Version::parse(version)
 }
 
-/// Collapse a wrapped changelog bullet back into one paragraph.
 fn flatten(lines: &[String]) -> String {
     lines
         .iter()
@@ -53,11 +45,7 @@ fn flatten(lines: &[String]) -> String {
         .join(" ")
 }
 
-/// Releases in `changelog` that are newer than `from` and no newer than `to`,
-/// newest first.
-///
-/// `Unreleased` is skipped: it describes a build nobody has. An unparseable
-/// version is skipped rather than guessed at.
+/// Newest first. `Unreleased` and unparseable versions are skipped.
 pub fn releases_between(changelog: &str, from: &str, to: &str) -> Vec<Release> {
     let (Some(from_rank), Some(to_rank)) = (rank(from), rank(to)) else {
         return Vec::new();
@@ -69,8 +57,7 @@ pub fn releases_between(changelog: &str, from: &str, to: &str) -> Vec<Release> {
     let mut out: Vec<Release> = Vec::new();
     let mut current: Option<Release> = None;
     let mut item: Vec<String> = Vec::new();
-    // A release can open with prose — a note from the maintainer — before
-    // its list of changes. It is kept whole, as paragraphs.
+    // A release can open with a prose note, kept whole as paragraphs.
     let mut paragraph: Vec<String> = Vec::new();
 
     let finish_item = |item: &mut Vec<String>, current: &mut Option<Release>| {
@@ -123,8 +110,7 @@ pub fn releases_between(changelog: &str, from: &str, to: &str) -> Vec<Release> {
             continue;
         }
         if let Some(sub) = line.strip_prefix("### ") {
-            // Sub-headings become their own entry, so a long release still
-            // reads as a list rather than one wall.
+            // Sub-headings become their own entry, so a long release reads as a list.
             finish_item(&mut item, &mut current);
             finish_paragraph(&mut paragraph, &mut current);
             if let Some(rel) = current.as_mut() {
@@ -152,60 +138,49 @@ pub fn releases_between(changelog: &str, from: &str, to: &str) -> Vec<Release> {
     out
 }
 
-/// Whether there is anything to show, and what.
 pub fn since(from: Option<&str>, to: &str) -> Vec<Release> {
     match from {
-        // A first run has nothing to compare against, and the setup wizard
-        // has just walked the user through the app anyway.
+        // A first run has nothing to compare, and the wizard just showed the app.
         None => Vec::new(),
         Some(from) => releases_between(CHANGELOG, from, to),
     }
 }
 
-// ---------------------------------------------------------------------------
-// The screen
-// ---------------------------------------------------------------------------
+// The screen.
 
 use std::time::{Duration, Instant};
 
-/// How long each entry waits before it appears. Slow enough that the eye
-/// follows one line at a time, fast enough that nobody sits through it.
+/// Slow enough to follow line by line, fast enough not to wait on.
 const REVEAL_STEP: Duration = Duration::from_millis(110);
 
-/// One screenful: a release, or part of one when it does not fit.
+/// A release, or part of one when it does not fit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Page {
-    /// Version heading for this screen.
     pub version: String,
-    /// Title after the em dash, when there is one.
     pub title: String,
-    /// Rendered rows, each tagged with the entry it belongs to so entries
-    /// appear whole rather than line by line.
+    /// Tagged with their entry, so entries appear whole.
     pub rows: Vec<(usize, String)>,
-    /// `(part, of)` when one release needed more than one screen.
+    /// `(part, of)` when a release needed several screens.
     pub part: (usize, usize),
-    /// Index, within the release, of the first entry on this screen.
+    /// Index of the first entry on this screen, within the release.
     pub first_item: usize,
-    /// Whether this screen is all note and no list.
+    /// All note, no list.
     pub note: bool,
 }
 
-/// The paged "what arrived while you were away" screen.
 pub struct WhatsNew {
     releases: Vec<Release>,
     pages: Vec<Page>,
     width: usize,
     height: usize,
-    /// Current screen.
     pub page: usize,
     shown_at: Instant,
-    /// Set once the user has asked to see this page all at once.
+    /// The user asked for the whole page at once.
     all_at_once: bool,
-    /// Whether entries are shown in full rather than just their opening claim.
+    /// Entries in full rather than just their opening claim.
     expanded: bool,
-    /// Version this screen is announcing.
     to: String,
-    /// Continue presses made on the current screen.
+    /// Continue presses on the current screen.
     presses: usize,
 }
 
@@ -217,7 +192,7 @@ const CODE: &str = "\x1b[38;2;175;170;225m";
 const BORDER: &str = "\x1b[38;2;100;95;90m";
 const RESET: &str = "\x1b[0m";
 
-/// Colour `code` spans inside a changelog entry.
+/// Colours `code` spans.
 fn style_inline(text: &str, base: &str) -> String {
     let mut out = String::from(base);
     let mut in_code = false;
@@ -226,9 +201,7 @@ fn style_inline(text: &str, base: &str) -> String {
             out.push_str(CODE);
             out.push_str(part);
         } else {
-            // Outside code spans the file's own emphasis is markup, and
-            // printing "**Pictures.**" on screen shows the marks rather than
-            // the emphasis.
+            // Outside code spans, `**` is markup to render, not to print.
             let mut bold = false;
             for chunk in part.split("**") {
                 let style = if bold { BRIGHT } else { base };
@@ -243,9 +216,8 @@ fn style_inline(text: &str, base: &str) -> String {
     out
 }
 
-/// Render `*emphasis*` as italic and drop the asterisks. An asterisk only
-/// opens emphasis when text follows it directly and only closes it when text
-/// precedes it, so a lone `*` in prose is left alone.
+/// An asterisk opens emphasis only before text and closes only after it, so a
+/// lone `*` is left alone.
 fn italicise(text: &str, style: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
@@ -272,7 +244,6 @@ fn italicise(text: &str, style: &str) -> String {
 }
 
 impl WhatsNew {
-    /// Build the screen for `releases`, laid out for a terminal of this size.
     pub fn new(releases: Vec<Release>, to: &str, width: usize, height: usize) -> Self {
         let mut view = Self {
             releases,
@@ -290,13 +261,11 @@ impl WhatsNew {
         view
     }
 
-    /// Number of screens the user will page through.
     pub fn pages(&self) -> usize {
         self.pages.len()
     }
 
-    /// Re-flow for a new terminal size, keeping the reader roughly where they
-    /// were: a resize must not throw away the place in the list.
+    /// Keeps the reader's place.
     pub fn relayout(&mut self, width: usize, height: usize) {
         if self.width == width && self.height == height {
             return;
@@ -306,12 +275,10 @@ impl WhatsNew {
         self.rebuild();
     }
 
-    /// Re-flow, keeping the reader on the release they were reading: a resize
-    /// or a change of detail must not throw away their place in the list.
+    /// Keeps the reader on the release and entry they were reading.
     fn rebuild(&mut self) {
-        // Where the reader is: the release, and the first entry on screen.
-        // Keeping only the release sent someone who asked for more detail on
-        // the third screen of a long release back to its first.
+        // The release and the first entry on screen: the release alone sent a reader
+        // who expanded on screen three back to screen one.
         let seen = self.pages.get(self.page).map(|p| (p.version.clone(), p.first_item));
         self.pages = layout(&self.releases, self.text_width(), self.body_rows(), self.expanded);
         self.page = seen
@@ -324,11 +291,10 @@ impl WhatsNew {
             .unwrap_or(0)
             .min(self.pages.len().saturating_sub(1));
         self.shown_at = Instant::now();
-        // Detail the reader asked for is not something to watch arrive.
+        // Requested detail is not something to watch arrive.
         self.all_at_once = self.expanded;
     }
 
-    /// Whether the full text is on screen.
     pub fn is_expanded(&self) -> bool {
         self.expanded
     }
@@ -341,13 +307,11 @@ impl WhatsNew {
         self.inner_width().saturating_sub(6).max(16)
     }
 
-    /// Rows available for the entries themselves, after the frame, the
-    /// heading and the footer.
+    /// After the frame, heading and footer.
     fn body_rows(&self) -> usize {
         self.height.saturating_sub(9).clamp(3, 24)
     }
 
-    /// Entries revealed so far on this page.
     fn revealed(&self) -> usize {
         if self.all_at_once {
             return usize::MAX;
@@ -355,7 +319,6 @@ impl WhatsNew {
         1 + (self.shown_at.elapsed().as_millis() / REVEAL_STEP.as_millis()) as usize
     }
 
-    /// Whether the whole page is on screen already.
     pub fn fully_revealed(&self) -> bool {
         let entries = self
             .pages
@@ -365,8 +328,7 @@ impl WhatsNew {
         self.revealed() >= entries
     }
 
-    /// Whether the screen still has something to draw on its own — the caller
-    /// keeps redrawing while this is true.
+    /// The caller keeps redrawing while this is true.
     pub fn animating(&self) -> bool {
         !self.fully_revealed()
     }
@@ -378,8 +340,7 @@ impl WhatsNew {
         self.presses = 0;
     }
 
-    /// Whether moving on from this screen leaves a note behind. A note that
-    /// runs over two screens is only held on the last of them.
+    /// A note over two screens is only held on the last of them.
     fn leaving_note(&self) -> bool {
         let Some(page) = self.pages.get(self.page) else {
             return false;
@@ -391,8 +352,7 @@ impl WhatsNew {
                 .is_some_and(|next| next.note && next.version == page.version)
     }
 
-    /// Presses still needed before the reader is let past this screen,
-    /// counting the one that moves on.
+    /// Counting the one that moves on.
     fn presses_needed(&self) -> usize {
         if self.leaving_note() {
             NOTE_PRESSES.saturating_sub(self.presses).max(1)
@@ -401,8 +361,7 @@ impl WhatsNew {
         }
     }
 
-    /// Count a press that would move past the screen; true while the screen
-    /// still holds the reader.
+    /// Counts a press; true while the screen still holds the reader.
     fn hold(&mut self) -> bool {
         if !self.leaving_note() {
             return false;
@@ -415,19 +374,19 @@ impl WhatsNew {
         false
     }
 
-    /// Handle a key. `Some(())` means the screen is finished with.
+    /// `Some(())` when the screen is done.
     pub fn handle_key(&mut self, code: KeyCode) -> Option<()> {
         match code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                // Skipping counts as a press, not as a way around the note.
+                // Skipping counts as a press, not a way around the note.
                 if self.hold() {
                     return None;
                 }
                 Some(())
             }
             KeyCode::Tab | KeyCode::Char('m') => {
-                // Every entry at full length is a wall; the opening claim
-                // alone is sometimes not enough. Both, on one key.
+                // Full entries are a wall; the claim alone is sometimes not enough. One key
+                // toggles.
                 self.expanded = !self.expanded;
                 self.rebuild();
                 None
@@ -436,8 +395,7 @@ impl WhatsNew {
                 if self.page > 0 {
                     let prev = self.page - 1;
                     self.go(prev);
-                    // Going back is going back to read, not to watch it
-                    // appear again.
+                    // Going back is to read, not to watch it appear again.
                     self.all_at_once = true;
                 }
                 None
@@ -467,20 +425,18 @@ impl WhatsNew {
         }
     }
 
-    /// Draw the screen.
     pub fn render(&self) -> Vec<String> {
         let inner_w = self.inner_width();
         let mut lines = Vec::new();
 
-        // The heading is the first thing that stops fitting in a narrow
-        // window, and a sheared-open box is worse than a shorter name.
+        // The heading shrinks first; a sheared box is worse than a shorter name.
         let title = [
             format!(" What's new in FlashAgent {} ", self.to),
             format!(" What's new · {} ", self.to),
             format!(" {} ", self.to),
         ]
         .into_iter()
-        // One dash of frame always stays to the right of the heading.
+        // One dash of frame always stays right of the heading.
         .find(|t| crate::visible_width(t) < inner_w)
         .unwrap_or_else(|| " new ".to_string());
         let dashes = inner_w.saturating_sub(crate::visible_width(&title) + 1);
@@ -523,8 +479,7 @@ impl WhatsNew {
             lines.push(pad(row));
             body += 1;
         }
-        // Hold the box still while the entries arrive, so the footer does not
-        // crawl down the screen.
+        // Hold the box still while entries arrive, so the footer does not crawl.
         for _ in body..page.rows.len() {
             lines.push(pad(""));
         }
@@ -555,12 +510,8 @@ impl WhatsNew {
     }
 }
 
-/// Break the releases into screens of at most `rows` body rows.
-/// The claim a changelog entry opens with, and the detail after it.
-///
-/// Entries are written to be read in full in the file; on a screen the first
-/// sentence is what someone actually wants — the rest is there for whoever
-/// asks for it.
+/// The first sentence is what a screen reader wants; the rest is for whoever
+/// asks.
 fn split_claim(item: &str) -> (String, String) {
     let bytes = item.as_bytes();
     let mut depth_code = false;
@@ -572,8 +523,7 @@ fn split_claim(item: &str) -> (String, String) {
             continue;
         }
         let next = bytes.get(i + 1).copied();
-        // A sentence ends on punctuation followed by a space, not on the dot
-        // inside `v1.0.0` or `main.rs`.
+        // Punctuation followed by a space, not the dot in `v1.0.0` or `main.rs`.
         if matches!(next, Some(b' ') | None) {
             let head = item[..=i].trim().to_string();
             // A three-word opener is a fragment, not a claim.
@@ -585,17 +535,15 @@ fn split_claim(item: &str) -> (String, String) {
     (item.to_string(), String::new())
 }
 
-/// An entry's rendered rows, with whether it asks for a new screen and whether
-/// it is prose.
+/// (rows, (asks for a new screen, is prose))
 type Entry = (Vec<String>, (bool, bool));
 
+/// Breaks the releases into screens of at most `rows` body rows.
 fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> Vec<Page> {
     let mut pages = Vec::new();
     for rel in releases {
-        // Each entry becomes one or more wrapped rows, indented under its
-        // marker so a wrapped line still reads as part of the same point.
+        // Wrapped rows indented under the marker.
         let mut entries: Vec<Vec<String>> = Vec::new();
-        // Per entry: whether it asks for a new screen, and whether it is prose.
         let mut kinds: Vec<(bool, bool)> = Vec::new();
         for item in &rel.items {
             if item == PAGE {
@@ -605,8 +553,7 @@ fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> V
             }
             kinds.push((false, item.starts_with(PROSE)));
             let rendered = if let Some(head) = item.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-                // A heading after a list needs air above it; after a
-                // paragraph, which already ends in a blank row, it does not.
+                // After a paragraph, which ends blank, a heading needs no extra air.
                 let after_blank = entries.last().is_none_or(|e: &Vec<String>| e.last().is_some_and(|r| r.is_empty()));
                 if after_blank {
                     vec![format!("  {BRIGHT}{head}{RESET}")]
@@ -614,8 +561,7 @@ fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> V
                     vec![String::new(), format!("  {BRIGHT}{head}{RESET}")]
                 }
             } else if let Some(text) = item.strip_prefix(PROSE) {
-                // A letter is not a list: no marker, no folding to the first
-                // sentence, and a blank row after each paragraph.
+                // Prose: no marker, no folding, a blank row after each paragraph.
                 let mut rows: Vec<String> = crate::wrap_styled(&style_inline(text, TEXT), text_w + 2)
                     .into_iter()
                     .map(|row| format!("  {row}"))
@@ -672,16 +618,14 @@ fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> V
             let mut page_rows = Vec::new();
             for (entry_idx, (entry, _)) in chunk.into_iter().enumerate() {
                 for row in entry {
-                    // A screen does not open on the blank row meant to
-                    // separate a heading from what came before it.
+                    // A screen does not open on a separator blank.
                     if page_rows.is_empty() && row.is_empty() {
                         continue;
                     }
                     page_rows.push((entry_idx, row));
                 }
             }
-            // Nor does it end on one: the blank after a closing paragraph is
-            // a row the next screen's content could have used.
+            // Nor end on one.
             while page_rows.last().is_some_and(|(_, row)| row.is_empty()) {
                 page_rows.pop();
             }
@@ -699,8 +643,7 @@ fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> V
     pages
 }
 
-/// Show the screen from inside the running app, where the event reader
-/// already owns stdin and raw mode must stay on.
+/// Inside the running app, where the event reader owns stdin and raw mode stays on.
 pub async fn run_channel(
     releases: Vec<Release>,
     to: &str,
@@ -728,8 +671,7 @@ pub async fn run_channel(
         let _ = stdout.write_all(buf.as_bytes());
         let _ = stdout.flush();
 
-        // While entries are still arriving the screen has to redraw on its
-        // own; once it is whole, waiting on a key costs nothing.
+        // Redraw on a timer while entries arrive; once whole, just wait for a key.
         let next = tokio::time::timeout(Duration::from_millis(40), rx.recv()).await;
         match next {
             Ok(Some(crate::UiEvent::Key(code, _))) => {
@@ -747,8 +689,7 @@ pub async fn run_channel(
     Ok(())
 }
 
-/// Show the screen, then return. Takes over the terminal for as long as it is
-/// up and hands it back exactly as it was found.
+/// Takes over the terminal and hands it back as it was.
 pub async fn run(releases: Vec<Release>, to: &str) -> std::io::Result<()> {
     use crossterm::{
         cursor, execute,
@@ -797,8 +738,7 @@ pub async fn run(releases: Vec<Release>, to: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The newest `n` releases in the bundled changelog, for when the screen is
-/// asked for rather than triggered.
+/// When the screen is asked for rather than triggered.
 pub fn latest(n: usize) -> Vec<Release> {
     let mut all = releases_between(CHANGELOG, "b0", "v9999.0.0");
     all.truncate(n);
@@ -838,8 +778,7 @@ mod tests {
 
     #[test]
     fn a_page_opens_with_the_claims_not_the_whole_text() {
-        // Five paragraphs at once is a wall nobody reads; the first sentence
-        // of each is what the screen is for.
+        // The first sentence of each paragraph is what the screen is for.
         let releases = releases_between(CHANGELOG, "b238", "b245");
         let short = WhatsNew::new(releases.clone(), "b245", 100, 40);
         let long = {
@@ -983,7 +922,6 @@ mod tests {
         assert!(view.fully_revealed(), "the note is on screen in full while it waits");
         view.handle_key(KeyCode::Right);
         assert_eq!(view.page, 1, "any continue key counts, and the third one moves on");
-        // The list after it pages as it always did.
         view.handle_key(KeyCode::Enter);
         view.handle_key(KeyCode::Enter);
         assert_eq!(view.page, 2);
@@ -1018,7 +956,6 @@ mod tests {
         let mut view = WhatsNew::new(releases_between(&log, "b250", "b260"), "b260", 80, 20);
         let notes = view.pages.iter().take_while(|p| p.note).count();
         assert!(notes >= 2, "the note spans screens: {}", view.pages());
-        // Every screen shown whole first, so each press below is a page turn.
         while view.page + 1 < notes {
             let before = view.page;
             view.all_at_once = true;
@@ -1105,8 +1042,7 @@ mod tests {
 
     #[test]
     fn every_row_fits_the_terminal_it_was_drawn_for() {
-        // The screen takes over the whole terminal; a row wider than the
-        // window wraps and shears the box open.
+        // A row wider than the window wraps and shears the box.
         for width in [30usize, 44, 60, 80, 120] {
             let view = WhatsNew::new(sample_releases(), "b238", width, 24);
             for row in view.render() {
@@ -1225,9 +1161,8 @@ mod tests {
 
     #[test]
     fn the_newest_release_stands_in_when_no_version_was_ever_recorded() {
-        // Everyone updating INTO the first build that records a version has
-        // nothing recorded, and they are precisely the people with news to
-        // read. `latest` is what they get instead of silence.
+        // Users updating into the first build that records a version have nothing
+        // recorded; `latest` is what they get instead of silence.
         let newest = latest(1);
         assert_eq!(newest.len(), 1);
         assert!(!newest[0].items.is_empty());
@@ -1245,8 +1180,7 @@ mod tests {
 
     #[test]
     fn the_shipped_changelog_parses() {
-        // The screen is only as good as this file; a format change here must
-        // not quietly empty it.
+        // A changelog format change must not quietly empty the screen.
         let rels = releases_between(CHANGELOG, "b233", "b238");
         assert!(!rels.is_empty(), "the real changelog produced nothing");
         assert!(rels.iter().all(|r| !r.items.is_empty()), "{rels:?}");

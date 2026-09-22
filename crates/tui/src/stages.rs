@@ -1,9 +1,7 @@
 use super::*;
 
-/// Extract the current stage title from streamed reasoning. Models can indicate
-/// their stage using markers like `[Stage: Name]`, `### Name`, or numbered steps
-/// (`1. Analyze the Request:`, `1.  **Analyze the Request:**`, `5.  **Final Output Generation.**`).
-/// The collapsed preview displays the LATEST stage.
+/// Markers: `[Stage: Name]`, `### Name`, or numbered steps (`1. Analyze the
+/// Request:`, `5.  **Final Output Generation.**`). The latest stage wins.
 pub fn reasoning_stage(text: &str) -> Option<String> {
     let mut last: Option<String> = None;
     for l in text.lines() {
@@ -12,7 +10,7 @@ pub fn reasoning_stage(text: &str) -> Option<String> {
             continue;
         }
 
-        // 1. Explicit bracketed stage marker: `[Stage: Name]`, `[Phase: Name]`, `[Step: Name]`, `[Stage Name]`
+        // 1. `[Stage: Name]`, `[Phase: Name]`, `[Step: Name]`, `[Stage Name]`
         if let Some(rest) = t
             .strip_prefix("[Stage:")
             .or_else(|| t.strip_prefix("[stage:"))
@@ -29,7 +27,7 @@ pub fn reasoning_stage(text: &str) -> Option<String> {
             }
         }
 
-        // 2. Markdown heading: `### Name` or `## Name` or `# Name`
+        // 2. Markdown heading.
         if let Some(heading) = t.strip_prefix("### ").or_else(|| t.strip_prefix("## ")).or_else(|| t.strip_prefix("# ")) {
             let name = heading.trim().trim_matches('#').trim().trim_matches('*').trim();
             if !name.is_empty() && name.chars().count() <= 60 {
@@ -38,7 +36,7 @@ pub fn reasoning_stage(text: &str) -> Option<String> {
             }
         }
 
-        // 3. Numbered or bulleted labeled steps: `N. Title:` or `* Title:` or `* **Title:**` or `N.  **Title**`
+        // 3. `N. Title:`, `* Title:`, `* **Title:**`, `N.  **Title**`
         let step = if let Some(body) = t.strip_prefix("* ").or_else(|| t.strip_prefix("- ")) {
             Some(body)
         } else {
@@ -56,7 +54,7 @@ pub fn reasoning_stage(text: &str) -> Option<String> {
                     continue;
                 }
             }
-            // Also handle `N. **Title**` (without trailing colon, e.g. `5.  **Final Output Generation.**`)
+            // `N. **Title**` without a trailing colon.
             if let Some(stripped) = body.strip_prefix("**") {
                 if let Some(end) = stripped.find("**") {
                     let title = stripped[..end].trim().trim_end_matches('.').trim();
@@ -68,7 +66,7 @@ pub fn reasoning_stage(text: &str) -> Option<String> {
             }
         }
 
-        // 4. Standalone bold header or stage title: `**Stage Title**` or `**Step 1: ...**`
+        // 4. `**Stage Title**` or `**Step 1: ...**`
         if let Some(stripped) = t.strip_prefix("**") {
             if let Some(end) = stripped.find("**") {
                 let inner = stripped[..end].trim().trim_end_matches(':').trim();
@@ -79,7 +77,7 @@ pub fn reasoning_stage(text: &str) -> Option<String> {
             }
         }
 
-        // 5. Unbracketed Step or Phase: `Step 1: ...` or `Phase 1: ...`
+        // 5. `Step 1: ...` or `Phase 1: ...`
         if let Some(rest) = t.strip_prefix("Step ").or_else(|| t.strip_prefix("Phase ")) {
             if let Some((_num, title)) = rest.split_once(':') {
                 let clean = title.trim().trim_matches('*').trim();
@@ -92,7 +90,6 @@ pub fn reasoning_stage(text: &str) -> Option<String> {
     }
     if last.is_none() {
         let lower = text.to_lowercase();
-        // 1. Specific verification / builds
         if lower.contains("cargo test") || lower.contains("cargo build") || lower.contains("cargo check") || lower.contains("cargo clippy") {
             return Some("Planning Verification".to_string());
         }
@@ -103,7 +100,6 @@ pub fn reasoning_stage(text: &str) -> Option<String> {
             return Some("Checking project rules".to_string());
         }
 
-        // 2. High-priority tool actions: search, files, edits, shell
         if lower.contains("search result") || lower.contains("grep found") || lower.contains("glob found") || lower.contains("found definition") {
             return Some("Evaluating Search Results".to_string());
         }
@@ -129,7 +125,7 @@ pub fn reasoning_stage(text: &str) -> Option<String> {
             return Some("Formulating English response".to_string());
         }
 
-        // 3. Initial request understanding (placed after specific tool/code actions)
+        // After the specific tool actions above on purpose.
         if lower.contains("user said") || lower.contains("user wants") || lower.contains("user asked") {
             return Some("Understanding user request".to_string());
         }
@@ -137,7 +133,6 @@ pub fn reasoning_stage(text: &str) -> Option<String> {
     last
 }
 
-/// Helper to derive an intuitive stage name from the most recently executed tool.
 pub fn derive_stage_from_tool(last_tool_group: Option<&ToolGroupKind>) -> String {
     match last_tool_group {
         Some(ToolGroupKind::Explore { files, searches, .. }) => {
@@ -157,10 +152,8 @@ pub fn derive_stage_from_tool(last_tool_group: Option<&ToolGroupKind>) -> String
     }
 }
 
-/// Contextual reasoning stage resolver.
-/// Determines a non-repeating, progress-advancing stage label for a reasoning block
-/// based on the text, what tools have already run in the current turn, and what stages
-/// were previously assigned in the same turn.
+/// A non-repeating, progress-advancing label, from the text, the tools already
+/// run this turn and the stages already assigned.
 pub fn resolve_reasoning_stage(
     text: &str,
     prior_stages: &[String],
@@ -215,8 +208,7 @@ pub fn resolve_reasoning_stage(
     }
 }
 
-/// Extracts embedded thinking/scratchpad from assistant text, returning
-/// `(Some(thinking), remaining_answer)` or `(None, original_text)` if no thinking is found.
+/// `(Some(thinking), answer)`, or `(None, original)` when there is none.
 pub fn extract_thinking_from_text(text: &str) -> (Option<String>, String) {
     let t = text.trim_start();
     if let Some(rest) = t.strip_prefix("<think>") {
@@ -264,17 +256,11 @@ pub fn extract_thinking_from_text(text: &str) -> (Option<String>, String) {
         }
     }
 
-    // A model with no native reasoning channel, and none of the lead-ins
-    // above either, can still narrate its thinking exactly the way this
-    // project's own prompt asks for it (see REASONING INSTRUCTIONS in
-    // prompt.rs): paragraphs each opening with a bold stage title drawn from
-    // a small known vocabulary, with no overall marker wrapped around them.
-    // Paragraphs are split on blank lines; thinking runs through every one
-    // that opens with such a title, and stops at the first that does not —
-    // that one is the real, user-facing answer. Matching against the
-    // vocabulary, not just any bold heading, and requiring at least two in a
-    // row, keeps an answer that opens with its own heading (`**Summary**`)
-    // from being swallowed as if it were thinking.
+    // A model without a reasoning channel may narrate thinking as this project's
+    // prompt asks (REASONING INSTRUCTIONS in prompt.rs): paragraphs opening with a
+    // bold stage title. Thinking runs through every such paragraph and stops at
+    // the first that is not one. Requiring the known vocabulary and at least two
+    // in a row keeps an answer's own `**Summary**` heading from being swallowed.
     let blocks: Vec<&str> = text.split("\n\n").map(str::trim).filter(|b| !b.is_empty()).collect();
     let mut split_at = 0;
     for block in &blocks {
@@ -296,12 +282,8 @@ pub fn extract_thinking_from_text(text: &str) -> (Option<String>, String) {
     (None, text.to_string())
 }
 
-/// Words drawn from the stage titles this project's own prompt asks a model
-/// to use (see prompt.rs's REASONING INSTRUCTIONS and this file's own
-/// `reasoning_stage` candidates). A line matches only if it is already
-/// step-shaped (bold, heading, bracketed, or a numbered/bulleted title) *and*
-/// carries one of these words — the vocabulary is what keeps a real answer's
-/// own heading from qualifying by accident.
+/// From the stage titles the prompt asks for. A line needs both a step shape
+/// and one of these words, so a real answer's heading does not qualify.
 const STAGE_KEYWORDS: &[&str] = &[
     "understanding", "analyz", "evaluat", "inspecting", "planning", "formulating", "synthesizing",
     "deepening", "refining", "verifying",

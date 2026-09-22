@@ -1,35 +1,24 @@
-//! How a tool call looks in the transcript.
-//!
-//! One tool call becomes one line, which is rewritten when the call
-//! finishes. Some tools fold into the line above them instead: ten reads in
-//! a row are one "Explored 10 files" rather than ten lines, and those lines
-//! carry a [`ToolGroupKind`] holding the running count.
-//!
-//! Most tools need none of that. Their line says the same three things every
-//! time — running, done, failed — and differs only in the verb and in which
-//! argument it names, so they are a table ([`fixed_labels`]) rather than a
-//! branch each.
+//! Tool calls in the transcript: one line per call, rewritten when it
+//! finishes. Reads, searches and shell commands in a row fold into one line
+//! ("Explored 10 files") via [`ToolGroupKind`]. Other tools differ only in
+//! verbs and the argument named, so they are a table ([`fixed_labels`]).
 
 use super::*;
 
-/// The colours a tool line is written in.
 const MUTED: &str = "\x1b[38;2;160;165;180m";
 const STRONG: &str = "\x1b[38;2;225;230;240m";
 const FAILED: &str = "\x1b[38;2;230;120;120m";
 const FAINT: &str = "\x1b[38;2;120;125;140m";
 const OFF: &str = "\x1b[0m";
 
-/// The mark at the end of a tool line that says the card can be opened.
+/// Says the card can be opened.
 fn chevron() -> String {
     format!("{FAINT}›{OFF}")
 }
 
-/// The mark in the margin that says this line is a tool call and not
-/// something the model said. While the call runs a spinner takes its place.
+/// Marks a tool line in the margin; a spinner replaces it while the call runs.
 pub(crate) const TOOL_MARK: &str = "▸";
 
-/// A tool line: the margin mark, a verb, optionally what it acted on, and
-/// the chevron that says the card can be opened.
 fn card_line(verb: &str, subject: Option<&str>) -> String {
     match subject {
         Some(subject) => {
@@ -39,7 +28,6 @@ fn card_line(verb: &str, subject: Option<&str>) -> String {
     }
 }
 
-/// The same line, in the colour of something that did not work.
 fn failed_line(verb: &str, subject: Option<&str>) -> String {
     match subject {
         Some(subject) => {
@@ -49,7 +37,7 @@ fn failed_line(verb: &str, subject: Option<&str>) -> String {
     }
 }
 
-/// What a tool's line says in each of its three states.
+/// Running, done, failed.
 struct Labels {
     run: String,
     done: String,
@@ -57,8 +45,6 @@ struct Labels {
 }
 
 impl Labels {
-    /// The usual shape: three verbs over one subject, with the failure in
-    /// the colour of a failure.
     fn new(verbs: (&str, &str, &str), subject: Option<&str>) -> Self {
         Self {
             run: card_line(verbs.0, subject),
@@ -68,10 +54,7 @@ impl Labels {
     }
 }
 
-/// The wording for every tool whose line is the same each time it runs.
-///
-/// Adding a tool is adding an arm here; the card, the grouping and the
-/// repaint are the same for all of them.
+/// Adding a tool is adding an arm here.
 fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
     let text = |key: &str| parsed.get(key).and_then(|v| v.as_str());
     match name {
@@ -119,13 +102,12 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
             Labels {
                 run: card_line("Asking user:", Some(&question)),
                 done: card_line("Asked user:", Some(&question)),
-                // The question is gone from the screen by then, and repeating
-                // it would read as though it had been answered.
+                // The question is gone from the screen; repeating it would read as answered.
                 fail: failed_line("Cancelled question", None),
             }
         }
-        // Anything else, including an MCP server's tools: named, with its
-        // main argument if one of the usual names carries it.
+        // Anything else, MCP tools included: the name, plus its main argument if one
+        // of the usual keys carries it.
         _ => {
             let argument = ["path", "file", "target", "pattern", "query", "command", "task", "scope", "url", "name", "key"]
                 .iter()
@@ -136,8 +118,7 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
             };
             Labels {
                 run: card_line("Running", Some(&subject)),
-                // "read_notes [notes.txt] finished" is one statement, so it
-                // is one colour rather than a verb and a subject.
+                // One statement, so one colour.
                 done: card_line(&format!("{subject} finished"), None),
                 fail: failed_line(&format!("{subject} failed"), None),
             }
@@ -146,7 +127,6 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
 }
 
 impl ChatView {
-    /// A tool call has started: open the line that stands for it.
     pub(crate) fn tool_started(&mut self, name: &str, args_json: &str) {
         self.streaming = None;
         if let Some(i) = self.streaming_reasoning.take() {
@@ -154,15 +134,13 @@ impl ChatView {
             self.lines[i].reasoning_secs = Some(secs);
         }
 
-        // Read the way the tool reads it, so other agents' argument names and
-        // batches show what will actually happen.
+        // Read through the tool's own resolver, so aliases and batches show what will
+        // actually happen.
         let parsed: serde_json::Value =
             flashagent_llm::effective_args(args_json, name).unwrap_or_default();
 
-        // The model is asked to say what a call is for. When it did, that
-        // sentence is the line: "Add the missing null check to parser.rs"
-        // tells you more than "Editing parser.rs" could. The expanded card
-        // underneath is unchanged, so the facts stay one keypress away.
+        // When the model said what the call is for, that sentence is the line; the
+        // expanded card underneath still has the facts.
         let header = parsed
             .get("header")
             .and_then(|h| h.as_str())
@@ -196,7 +174,6 @@ impl ChatView {
         }
     }
 
-    /// Open a line whose wording is fixed, and make it the open card.
     fn push_card(&mut self, name: &str, args_json: &str, labels: Labels) {
         let Labels { run, done, fail } = labels;
         let mut line = ChatLine::with_details(LineKind::Tool, run.clone(), args_json.to_string());
@@ -211,11 +188,8 @@ impl ChatView {
         self.open_tool = Some(self.lines.len() - 1);
     }
 
-    /// Fold this call into the line above when that line is a group of the
-    /// same kind, letting `fold` update the running count and the text.
-    ///
-    /// Returns whether it folded; when it did not, the caller opens a new
-    /// line instead.
+    /// When the line above is a group of the same kind, `fold` updates its count
+    /// and text. Returns whether it folded.
     fn fold_into_previous(
         &mut self,
         args_json: &str,
@@ -225,7 +199,7 @@ impl ChatView {
         if !fold(last_line) {
             return false;
         }
-        // The open card shows every call it stands for, one after another.
+        // The open card lists every call it stands for.
         if let Some(ref mut details) = last_line.details {
             details.push_str("\n\n---\n\n");
             details.push_str(args_json);
@@ -235,15 +209,10 @@ impl ChatView {
         true
     }
 
-    /// The model said what the call is for, so the line is that sentence.
     fn header_card(&mut self, name: &str, args_json: &str, parsed: &serde_json::Value, header: &str) {
-        // The header is the model's intent; the suffix is what the call
-        // actually names. "Add the missing null check" reads well, but only
-        // "parser.rs +3 -1" says what happened to the tree.
+        // The header is the intent; the suffix ("parser.rs +3 -1") is what happened.
         let facts = call_facts(name, parsed)
-            // "Read main.rs · main.rs" says it twice. When the header already
-            // names the file, only what it cannot say is worth adding, which
-            // is the size of the change.
+            // When the header already names the file, only the change size is added.
             .and_then(|f| {
                 let said = |part: &str| header.to_lowercase().contains(&part.to_lowercase());
                 match f.split_once(" +") {
@@ -263,7 +232,7 @@ impl ChatView {
         self.push_card(name, args_json, labels);
     }
 
-    /// A shell command. Commands in a row become "Ran 3 commands".
+    /// In a row they become "Ran 3 commands".
     fn shell_card(&mut self, args_json: &str, parsed: &serde_json::Value) {
         let cmd = parsed.get("command").and_then(|s| s.as_str()).unwrap_or("command").to_string();
         let folded = {
@@ -290,12 +259,11 @@ impl ChatView {
         }
     }
 
-    /// Reading and searching: both are looking around, and both fold into
-    /// one "Explored 10 files · 3 searches" line.
+    /// Both fold into one "Explored 10 files · 3 searches" line.
     fn explore_card(&mut self, name: &str, args_json: &str, parsed: &serde_json::Value) {
         let is_file = name == "read_file";
         let read_paths = if is_file { call_paths(parsed) } else { Vec::new() };
-        // A batch read counts every file it reads.
+        // A batch read counts every file.
         let file_count = if is_file { read_paths.len().max(1) } else { 0 };
         let batch_label: String;
         let target = if is_file {
@@ -313,11 +281,9 @@ impl ChatView {
                 .or_else(|| parsed.get("query"))
                 .or_else(|| parsed.get("path"))
                 .and_then(|s| s.as_str())
-                // A listing of the working directory carries no path and no
-                // pattern, and "Searched search" is not a sentence.
+                // A listing of the working directory has no path or pattern.
                 .unwrap_or("the project")
         };
-        // Nor is "Searched .".
         let target = if matches!(target, "." | "./" | "") { "the project" } else { target };
 
         let folded = self.fold_into_previous(args_json, |line| {
@@ -352,8 +318,7 @@ impl ChatView {
         }
     }
 
-    /// A change to a file, counted in lines so the finished line can say
-    /// "+12 -3".
+    /// Counted in lines for the "+12 -3" suffix.
     fn edit_card(&mut self, name: &str, args_json: &str, parsed: &serde_json::Value) {
         let path = paths_label(&call_paths(parsed), false);
         let basename = std::path::Path::new(&path)
@@ -399,7 +364,6 @@ impl ChatView {
         self.open_tool = Some(self.lines.len() - 1);
     }
 
-    /// A subagent sent off with a task of its own.
     fn subagent_card(&mut self, args_json: &str, parsed: &serde_json::Value) {
         let task = parsed.get("task").and_then(|s| s.as_str()).unwrap_or("task").to_string();
         let folded = {
@@ -427,7 +391,7 @@ impl ChatView {
         }
     }
 
-    /// Reading memory, which names the scopes it read rather than a count.
+    /// Names the scopes read rather than a count.
     fn memory_read_card(&mut self, args_json: &str, parsed: &serde_json::Value) {
         let scope = parsed.get("scope").and_then(|s| s.as_str()).unwrap_or("project").to_string();
         let folded = {
@@ -454,7 +418,6 @@ impl ChatView {
         }
     }
 
-    /// A tool call has finished: rewrite its line as what happened.
     pub(crate) fn tool_finished(&mut self, is_error: bool, result_len: usize, result: Option<&str>) {
         self.streaming = None;
         self.streaming_reasoning = None;
@@ -463,7 +426,7 @@ impl ChatView {
         self.lines[i].tool_result_len += result_len;
         if let Some(res) = result {
             match &mut self.lines[i].tool_result {
-                // A folded group keeps every result, in the order they came.
+                // A folded group keeps every result in order.
                 Some(existing) => {
                     existing.push_str("\n\n---\n\n");
                     existing.push_str(res);
@@ -485,7 +448,6 @@ impl ChatView {
     }
 }
 
-/// What a finished line says, and mark the group as no longer running.
 fn finished_text(group: &mut ToolGroupKind, is_error: bool) -> String {
     match group {
         ToolGroupKind::Command { count, last_cmd, is_running } => {
@@ -566,7 +528,7 @@ mod tests {
 
     #[test]
     fn a_tool_nobody_wrote_a_card_for_still_gets_a_readable_line() {
-        // An MCP server's tools arrive with names this build has never seen.
+        // MCP tools arrive with names this build has never seen.
         let chat = started("mcp__sqlite__query", r#"{"query":"select 1"}"#);
         assert_eq!(text_of(&chat), "  ▸ Running mcp__sqlite__query [select 1] ›");
         let chat = started("mcp__clock__now", "{}");

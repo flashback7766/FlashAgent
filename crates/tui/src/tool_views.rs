@@ -1,22 +1,9 @@
-//! Rich visual tool card renderers for FlashAgent TUI.
-//!
-//! Provides expanded views for:
-//! - File Edits/Creation/Patches: Two-column line numbers (`old_line new_line`),
-//!   red deletions, green additions, centered folding pills (`+N more lines`).
-//! - File Reads/Inspection: Two-column line numbers with soft blue highlighting
-//!   (`\x1b[48;2;22;38;60m` / `\x1b[38;2;145;195;255m`) and folding dividers.
-//! - Shell Commands: Boxed card with `~/FlashAgent $ <cmd>`, yellow command,
-//!   white flags, output lines with `- And N More lines...` folding.
-//! - Directory Analysis: `Analyzed <path> ⌵`, indented entries (`<dir>/` keeps its slash),
-//!   capped with `- And 56 More...`.
-//! - Grep / Search: Grouped by file, cyan line numbers, bold yellow query match,
-//!   `- And N More matches...`.
-//! - Subagent: Task quote, role badge, report preview.
-//! - Memory, Git, Web, MCP tools.
+//! Expanded tool cards: diffs with two-column line numbers and folds, file
+//! reads, boxed shell commands, directory listings, grep results grouped by
+//! file, subagents, memory, git, web and MCP tools.
 
 use crate::{clip_ansi, visible_width, LineKind, RenderLine};
 
-// ANSI Colors matching FlashAgent Material 3 Expressive palette
 const RESET: &str = "\x1b[0m";
 const BORDER_DIM: &str = "\x1b[38;2;75;99;130m";
 const TEXT_MUTED: &str = "\x1b[38;2;120;125;140m";
@@ -32,7 +19,7 @@ const BG_ADD: &str = "\x1b[48;2;20;55;30m";
 const BG_READ: &str = "\x1b[48;2;22;38;60m";
 const TEXT_READ: &str = "\x1b[38;2;145;195;255m";
 
-/// Helper to render centered fold line: `──────── +N more lines ────────`
+/// `──────── +N more lines ────────`
 pub fn render_fold_line(text: &str, width: usize) -> String {
     let vis_len = visible_width(text);
     let total_w = width.saturating_sub(4).max(20);
@@ -41,7 +28,6 @@ pub fn render_fold_line(text: &str, width: usize) -> String {
     format!("  {BORDER_DIM}{dash_str}{RESET} {TEXT_MUTED}{text}{RESET} {BORDER_DIM}{dash_str}{RESET}")
 }
 
-/// Helper to render a rounded container header:
 /// `╭─ Ran cargo build ────────────────╮`
 pub fn render_card_top(title: &str, width: usize) -> String {
     let box_w = width.saturating_sub(4).clamp(30, 100);
@@ -52,20 +38,13 @@ pub fn render_card_top(title: &str, width: usize) -> String {
     format!("{BORDER_DIM}╭─ {RESET}{clipped}{RESET} {BORDER_DIM}{}╮{RESET}", "─".repeat(dash_count))
 }
 
-/// Helper to render a rounded container bottom: `╰────────────────────────────────────╯`
 pub fn render_card_bottom(width: usize) -> String {
     let box_w = width.saturating_sub(4).clamp(30, 100);
     let bot_dashes = box_w.saturating_sub(2);
     format!("{BORDER_DIM}╰{}╯{RESET}", "─".repeat(bot_dashes))
 }
 
-/// Render a shell command card.
-///
-/// Features:
-/// - Header: `Ran cargo build --release ⌵`
-/// - Rounded box container
-/// - Prompt: `~/FlashAgent $ cargo build --release`
-/// - Monospace stdout/stderr with `- And N More lines...` folding
+/// `~/FlashAgent $ cmd` in a rounded box, output folded after a limit.
 pub fn render_command_card(
     cwd: &str,
     cmd: &str,
@@ -88,10 +67,8 @@ pub fn render_command_card(
     };
     lines.push((LineKind::Tool, status_header));
 
-    // Top border
     lines.push((LineKind::Tool, render_card_top(cmd, width)));
 
-    // Prompt line inside box: `~/cwd $ cmd args`
     let short_cwd = if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).and_then(|h| h.into_string().ok()) {
         if cwd.starts_with(&home) {
             format!("~{}", &cwd[home.len()..])
@@ -102,7 +79,7 @@ pub fn render_command_card(
         cwd.to_string()
     };
 
-    // Syntax-highlight prompt: binary in yellow, flags in white
+    // Binary in yellow, flags in white.
     let mut parts = cmd.split_whitespace();
     let bin = parts.next().unwrap_or(cmd);
     let args: Vec<&str> = parts.collect();
@@ -121,13 +98,11 @@ pub fn render_command_card(
         format!("{BORDER_DIM}│{RESET}  {prompt_styled}{pad}  {BORDER_DIM}│{RESET}"),
     ));
 
-    // Separator line under prompt
     lines.push((
         LineKind::Tool,
         format!("{BORDER_DIM}│{RESET}  {}{BORDER_DIM}│{RESET}", " ".repeat(inner_w + 2)),
     ));
 
-    // Output lines
     if let Some(out) = output {
         let trimmed = out.trim_end();
         if !trimmed.is_empty() {
@@ -165,17 +140,11 @@ pub fn render_command_card(
         ));
     }
 
-    // Bottom border
     lines.push((LineKind::Tool, render_card_bottom(width)));
     lines
 }
 
-/// Render a directory listing card.
-///
-/// Features:
-/// - Header: `Analyzed .audit ⌵`
-/// - Indented entries: `  filename` / `  dirname/`
-/// - Capped with: `  - And 56 More...`
+/// Capped with `- And N More...`.
 pub fn render_directory_card(
     path: &str,
     listing: Option<&str>,
@@ -213,13 +182,7 @@ pub fn render_directory_card(
     lines
 }
 
-/// Render a file read card.
-///
-/// Features:
-/// - Header: `Read src/main.rs (120 lines) ⌵`
-/// - Two-column line numbers with soft blue background (`\x1b[48;2;22;38;60m`)
-///   and ice-cyan text (`\x1b[38;2;145;195;255m`).
-/// - Folded unread blocks with `──────── +N more lines ────────`.
+/// Unread blocks are folded.
 pub fn render_read_card(
     path: &str,
     content: Option<&str>,
@@ -245,7 +208,7 @@ pub fn render_read_card(
     let preview_count = count.min(MAX_PREVIEW);
 
     for (i, &line_content) in file_lines.iter().take(preview_count).enumerate() {
-        // Strip out leading line number if fs_tools::read_file already injected "   1\t..."
+        // `read_file` output already carries "   1\t..." line numbers.
         let (line_no, text) = if let Some(tab_idx) = line_content.find('\t') {
             let (num_part, rest) = line_content.split_at(tab_idx);
             let parsed_no = num_part.trim().parse::<usize>().unwrap_or(offset + i + 1);
@@ -271,7 +234,6 @@ pub fn render_read_card(
     lines
 }
 
-/// Diff line entry for two-column diff rendering.
 #[derive(Debug, Clone)]
 pub enum DiffRow {
     Same { old_line: usize, new_line: usize, text: String },
@@ -280,7 +242,7 @@ pub enum DiffRow {
     Fold { count: usize },
 }
 
-/// Parse unified diff text or EditChunk into DiffRows.
+/// From a unified diff.
 pub fn parse_diff_to_rows(diff_text: &str) -> Vec<DiffRow> {
     let mut rows = Vec::new();
     let mut old_pos = 1usize;
@@ -292,7 +254,7 @@ pub fn parse_diff_to_rows(diff_text: &str) -> Vec<DiffRow> {
             continue;
         }
         if line.starts_with("@@") {
-            // Parse hunk header: @@ -old_start,old_cnt +new_start,new_cnt @@
+            // @@ -old_start,old_cnt +new_start,new_cnt @@
             if let Some(plus_idx) = line.find('+') {
                 let rest = &line[plus_idx + 1..];
                 let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -331,14 +293,7 @@ pub fn parse_diff_to_rows(diff_text: &str) -> Vec<DiffRow> {
     rows
 }
 
-/// Render a file edit or creation card.
-///
-/// Features:
-/// - Header: `Edited src/lib.rs (+12 -4) ⌵`
-/// - Two-column line numbers: `old_num new_num │ line`
-/// - Deletions: dark red background (`\x1b[48;2;65;20;25m`) + red text (`\x1b[38;2;245;120;120m`).
-/// - Additions: dark green background (`\x1b[48;2;20;55;30m`) + green text (`\x1b[38;2;135;220;145m`).
-/// - Centered fold dividers: `──────── +3045 more lines ────────`.
+/// `old new │ line`, red deletions, green additions, centred fold dividers.
 pub fn render_edit_card(
     path: &str,
     added: usize,
@@ -361,7 +316,7 @@ pub fn render_edit_card(
         let rows = parse_diff_to_rows(text);
 
         if rows.is_empty() {
-            // Fallback for write_file or raw content without @@ hunks: treat as additions
+            // No @@ hunks (write_file): everything is an addition.
             for (i, raw_l) in text.lines().take(25).enumerate() {
                 let clipped = clip_ansi(raw_l, budget);
                 let styled = format!(
@@ -412,13 +367,7 @@ pub fn render_edit_card(
     lines
 }
 
-/// Render pattern search card (`grep`).
-///
-/// Features:
-/// - Grouped by file
-/// - Line numbers in cyan
-/// - Query occurrences highlighted in bold gold
-/// - Capped with `- And N More matches...`
+/// Grouped by file, matches highlighted, capped.
 pub fn render_grep_card(
     pattern: &str,
     output: Option<&str>,
@@ -439,7 +388,6 @@ pub fn render_grep_card(
             let budget = width.saturating_sub(6).max(15);
             let clipped = clip_ansi(raw_l, budget);
 
-            // Highlight matches of pattern with gold
             let highlighted = if !pattern.is_empty() && clipped.contains(pattern) {
                 clipped.replace(pattern, &format!("{TEXT_YELLOW}{pattern}{RESET}"))
             } else {
@@ -458,7 +406,6 @@ pub fn render_grep_card(
     lines
 }
 
-/// Render Subagent task card (`spawn_agent`).
 pub fn render_subagent_card(
     task: &str,
     output: Option<&str>,
@@ -509,7 +456,6 @@ pub fn render_subagent_card(
     lines
 }
 
-/// Render memory tool card (`memory_*`).
 pub fn render_memory_card(
     action: &str,
     scopes: &[String],
@@ -532,7 +478,6 @@ pub fn render_memory_card(
     lines
 }
 
-/// Render git status / diff card.
 pub fn render_git_card(
     is_diff: bool,
     output: Option<&str>,
@@ -570,7 +515,6 @@ pub fn render_git_card(
     lines
 }
 
-/// Render generic / custom / MCP tool card.
 pub fn render_generic_card(
     name: &str,
     args: &str,
@@ -587,7 +531,6 @@ pub fn render_generic_card(
     let box_w = width.saturating_sub(4).clamp(30, 100);
     let inner_w = box_w.saturating_sub(6).max(20);
 
-    // Render formatted args
     let formatted_args = if let Ok(val) = serde_json::from_str::<serde_json::Value>(args.trim()) {
         serde_json::to_string_pretty(&val).unwrap_or_else(|_| args.to_string())
     } else {
@@ -603,7 +546,6 @@ pub fn render_generic_card(
         ));
     }
 
-    // Render output preview
     if let Some(out) = output {
         let trimmed = out.trim();
         if !trimmed.is_empty() {
@@ -630,9 +572,8 @@ pub fn render_generic_card(
 mod tests {
     use super::*;
 
-    /// Emoji in a tool card are decoration on a line that already says what
-    /// happened, and they are two columns wide next to one-column glyphs, so
-    /// the columns in a listing never line up. Keep them out.
+    /// Emoji are two columns wide next to one-column glyphs, so listing columns
+    /// never line up.
     #[test]
     fn tool_cards_carry_no_emoji() {
         let cards = [

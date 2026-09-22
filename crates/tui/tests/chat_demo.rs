@@ -1,10 +1,5 @@
-//! How a turn reads in the transcript.
-//!
-//! The chat is one column of text: a question, the thinking and tool calls
-//! done for it, and the answer. Without anything between them they run
-//! together and the eye has nothing to hold on to. This file builds a
-//! transcript like a real one and checks that the three parts are still
-//! three parts — and, with `--ignored --nocapture`, prints it to look at:
+//! Checks that a question, the work done for it and the answer stay visually
+//! separate. With `--ignored --nocapture` it prints a transcript:
 //!
 //! ```bash
 //! cargo test -p flashagent-tui --test chat_demo -- --ignored --nocapture
@@ -27,7 +22,6 @@ fn tool(chat: &mut ChatView, name: &str, args: serde_json::Value, result: &str) 
     });
 }
 
-/// Two turns, each with thinking, tool calls and an answer.
 fn transcript() -> ChatView {
     let mut chat = ChatView::default();
     chat.push_user("Check out the FlashAgent folder!");
@@ -99,7 +93,6 @@ fn a_question_its_work_and_its_answer_are_three_things_on_screen() {
         );
     }
 
-    // And the blanks are real: the first one follows the question.
     let question = rows.iter().position(|(k, _)| *k == LineKind::User).expect("the question");
     assert!(blank(question + 1), "nothing separates the question from the work under it");
 }
@@ -115,8 +108,7 @@ fn thinking_and_tool_calls_do_not_look_the_same() {
 
 #[test]
 fn the_answer_is_the_only_thing_at_the_left_edge() {
-    // The model's words are what the transcript is for; the work done for
-    // them sits in from the edge, so a glance finds the answers.
+    // The answers sit at the edge and the work is indented, so a glance finds them.
     for (kind, text) in drawn(&transcript(), 100) {
         if text.trim().is_empty() {
             continue;
@@ -150,9 +142,7 @@ fn show_chat() {
 
 #[test]
 fn a_transcript_drawn_frame_by_frame_matches_one_drawn_at_once() {
-    // Frames reuse what has settled and read only the turn still open. That
-    // must never change what is drawn: build the same conversation twice,
-    // draw one of them after every event and the other only at the end.
+    // Incremental frames must draw exactly what one final frame draws.
     fn build(draw_each_step: bool) -> Vec<(LineKind, String)> {
         let mut chat = ChatView::default();
         let draw = |chat: &ChatView| {

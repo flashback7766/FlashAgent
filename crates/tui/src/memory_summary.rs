@@ -2,12 +2,11 @@ use super::*;
 
 use flashagent_tui::memory_view::{fingerprint, parse_summary, summary_request, MemoryModal, MemorySummary, Row, SummaryState};
 
-/// Where the last summary is kept, so opening it again is instant.
+/// The last summary, so reopening is instant.
 fn cache_path() -> Option<std::path::PathBuf> {
     flashagent_home_dir().map(|home| home.join("memory_summary.json"))
 }
 
-/// The memory screen, with the last summary already in it when there is one.
 pub(crate) fn open_memory_modal() -> MemoryModal {
     let mut modal = MemoryModal::new(&std::env::current_dir().unwrap_or_default());
     if let Some(saved) = cache_path()
@@ -28,8 +27,7 @@ pub(crate) fn save_summary(summary: &MemorySummary) {
     }
 }
 
-/// Ask the model for a summary of `rows` in the background; the answer
-/// arrives as `UiEvent::MemorySummary`.
+/// The answer arrives as `UiEvent::MemorySummary`.
 pub(crate) fn spawn_summary(source: Arc<BackendSource>, rows: Vec<Row>, tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
     tokio::spawn(async move {
         let bodies: String = rows.iter().map(|r| format!("{} {} ", r.entry.description, r.entry.body)).collect();

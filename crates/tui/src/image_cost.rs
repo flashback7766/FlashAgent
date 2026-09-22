@@ -1,33 +1,26 @@
-//! What a picture costs this model, measured rather than guessed.
-//!
-//! A Qwen-VL charges by area — a thousand pixels to a token on the machine
-//! this was written on — while a Gemma charges a flat rate per image whatever
-//! its size. No formula covers both, so the number comes from the server:
-//! two throwaway requests, one with a picture and one without, and the
-//! difference is the answer. It is kept per model, because it is a property
-//! of the model.
+//! Image cost per model, measured: Qwen-VL charges by area (about 1 token per
+//! 1000 pixels), Gemma a flat rate per image. Two requests, with and without a
+//! picture, give the difference; it is stored per model.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// What one model charges for an image.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct ImageCost {
-    /// Tokens per pixel; zero for a model that charges a flat rate.
+    /// Zero for a flat-rate model.
     pub per_pixel: f32,
-    /// Tokens charged for a picture before its size is counted.
+    /// Charged regardless of size.
     pub fixed: f32,
 }
 
 impl ImageCost {
-    /// Tokens an image of this size will cost.
     pub fn tokens(&self, width: u32, height: u32) -> u32 {
         (self.fixed + self.per_pixel * width as f32 * height as f32).round().max(0.0) as u32
     }
 
-    /// How that reads next to the attachment: `~1.2k tokens`.
+    /// E.g. `~1.2k tokens`.
     pub fn label(&self, width: u32, height: u32) -> String {
         let t = self.tokens(width, height);
         if t >= 1000 {
@@ -38,7 +31,7 @@ impl ImageCost {
     }
 }
 
-/// Measured costs, per model, kept between runs.
+/// Kept between runs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ImageCosts {
     #[serde(default)]
@@ -76,31 +69,23 @@ impl ImageCosts {
         }
     }
 
-    /// What is known about this model, if anything.
     pub fn get(&self, model: &str) -> Option<ImageCost> {
         self.models.get(model).copied()
     }
 
-    /// Record a measurement.
     pub fn set(&mut self, model: &str, cost: ImageCost) {
         self.models.insert(model.to_string(), cost);
     }
 }
 
-/// The picture used to measure with.
-///
-/// 448×448 rather than something smaller: the cost per pixel is not quite
-/// constant, and extrapolating a screenshot from a thumbnail undershot by a
-/// fifth when this was checked against a real 1280×720. A probe this size
-/// costs a couple of hundred tokens, once per model, and lands within a few
-/// percent at screenshot sizes.
+/// 448×448: cost per pixel is not quite constant, and extrapolating from a
+/// thumbnail undershot a real 1280×720 by a fifth.
 pub const PROBE_WIDTH: u32 = 448;
 pub const PROBE_HEIGHT: u32 = 448;
 
-/// A 224×224 PNG of flat grey. Built rather than embedded so there is no
-/// binary blob to explain.
+/// Flat grey, built rather than embedded.
 pub fn probe_png() -> Vec<u8> {
-    // One scanline: filter byte 0, then RGB triples.
+    // Filter byte 0, then RGB triples.
     let mut row = vec![0u8]; // filter byte: none
     row.extend(std::iter::repeat_n(128u8, (PROBE_WIDTH * 3) as usize));
     let mut raw = Vec::with_capacity(row.len() * PROBE_HEIGHT as usize);
@@ -110,7 +95,6 @@ pub fn probe_png() -> Vec<u8> {
     png_from_rgb(&raw, PROBE_WIDTH, PROBE_HEIGHT)
 }
 
-/// Wrap raw filtered scanlines into a PNG.
 fn png_from_rgb(raw: &[u8], width: u32, height: u32) -> Vec<u8> {
     fn crc32(bytes: &[u8]) -> u32 {
         let mut table = [0u32; 256];
@@ -128,8 +112,7 @@ fn png_from_rgb(raw: &[u8], width: u32, height: u32) -> Vec<u8> {
         c ^ 0xFFFF_FFFF
     }
 
-    // Stored (uncompressed) deflate blocks: no compressor needed, and the
-    // probe is thrown away after one request.
+    // Stored (uncompressed) deflate blocks: no compressor needed.
     fn zlib_stored(data: &[u8]) -> Vec<u8> {
         let mut out = vec![0x78, 0x01];
         for (i, block) in data.chunks(65_535).enumerate() {
@@ -186,7 +169,7 @@ mod tests {
 
     #[test]
     fn a_model_charging_by_area_is_extrapolated_from_the_measurement() {
-        // Measured on qwen3.6-35b: about one token per thousand pixels.
+        // Measured on qwen3.6-35b.
         let cost = ImageCost { per_pixel: 1.0 / 1000.0, fixed: 2.0 };
         assert_eq!(cost.tokens(1280, 720), 924);
         assert_eq!(cost.label(1280, 720), "~924 tokens");
@@ -197,7 +180,6 @@ mod tests {
 
     #[test]
     fn a_model_charging_a_flat_rate_says_the_same_for_every_size() {
-        // Gemma-style: one price per picture, whatever its size.
         let cost = ImageCost { per_pixel: 0.0, fixed: 256.0 };
         assert_eq!(cost.tokens(64, 64), 256);
         assert_eq!(cost.tokens(4000, 3000), 256);

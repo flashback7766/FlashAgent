@@ -14,9 +14,8 @@ pub(crate) struct SavedMessage {
     pub(crate) reasoning: Option<String>,
     pub(crate) tool_call_id: Option<String>,
     pub(crate) tool_calls: Vec<SavedToolCall>,
-    /// Pictures sent with this message, as `data:` URLs. A resumed session
-    /// that dropped them would leave the model answering about something it
-    /// can no longer see.
+    /// `data:` URLs. Without them a resumed model would answer about a picture it
+    /// cannot see.
     #[serde(default)]
     pub(crate) images: Vec<String>,
 }
@@ -85,14 +84,10 @@ pub(crate) fn flashagent_home_dir() -> Option<std::path::PathBuf> {
         .map(|h| std::path::PathBuf::from(h).join(".flashagent"))
 }
 
-/// Write the conversation to `~/.flashagent/sessions/<id>.json`.
-///
-/// The file is written beside its final name and then renamed over it, so a
-/// crash, a full disk or a second instance mid-write leaves either the old
-/// session or the new one on disk, never half of each. The error says what
-/// went wrong in words the user can act on; it is shown, not swallowed —
-/// a conversation the user believes is saved and is not is the worst kind
-/// of loss, because nobody goes looking for it until it is gone.
+/// To `~/.flashagent/sessions/<id>.json`, written beside the final name and
+/// renamed, so a crash or a second instance never leaves half a file. Errors
+/// are shown, not swallowed: a session the user believes is saved but is not
+/// is found missing only when it is needed.
 pub(crate) fn save_session_file(session_id: &str, model: &str, cwd: &str, history: &[ChatMessage]) -> Result<std::path::PathBuf, String> {
     let base_dir = sessions_dir().ok_or("no home directory to save sessions in")?;
     save_session_in(&base_dir, session_id, model, cwd, history)
@@ -118,8 +113,7 @@ pub(crate) fn save_session_in(
         messages: history.iter().map(SavedMessage::from).collect(),
     };
     let data = serde_json::to_string_pretty(&saved).map_err(|e| format!("cannot encode the session: {e}"))?;
-    // The process id keeps two instances that save the same id at once from
-    // writing into one temporary file.
+    // The pid keeps two instances saving the same id from sharing a temp file.
     let tmp = base_dir.join(format!(".{session_id}.{}.tmp", std::process::id()));
     let written = std::fs::File::create(&tmp).and_then(|mut f| {
         use std::io::Write;
@@ -133,9 +127,8 @@ pub(crate) fn save_session_in(
     Ok(path)
 }
 
-/// The last save, on the way out. Nothing comes after it to retry, so when
-/// the sessions folder cannot be written the conversation goes to the
-/// system's temporary folder instead, and the message names both.
+/// Nothing retries after it, so an unwritable sessions folder falls back to
+/// the system temp folder, and the message names both.
 pub(crate) fn save_on_exit(session_id: &str, model: &str, cwd: &str, history: &[ChatMessage]) -> Result<String, String> {
     let why = match save_session_file(session_id, model, cwd, history) {
         Ok(_) => return Ok(session_id.to_string()),
@@ -151,16 +144,16 @@ pub(crate) fn save_on_exit(session_id: &str, model: &str, cwd: &str, history: &[
     }
 }
 
-/// A saved conversation, as the resume picker lists it.
+/// As the resume picker lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionSummary {
     pub(crate) id: String,
     pub(crate) timestamp: u64,
-    /// The first thing the user asked, on one line.
+    /// The first prompt, on one line.
     pub(crate) title: String,
     /// Prompts and answers, not tool traffic.
     pub(crate) messages: usize,
-    /// The prompts and answers as text, for typing to search in the picker.
+    /// For search in the picker.
     pub(crate) text: String,
 }
 
@@ -168,27 +161,20 @@ pub(crate) fn sessions_dir() -> Option<std::path::PathBuf> {
     flashagent_home_dir().map(|home| home.join("sessions"))
 }
 
-/// A session id names one file in the sessions folder, and so does nothing
-/// but that: no separators, no `..`. It is also where the session is saved,
-/// so an id that could climb out would write outside the folder too.
+/// No separators, no `..`: the id is also the save path, so it must not climb
+/// out of the folder.
 pub(crate) fn is_session_id(id: &str) -> bool {
     !id.is_empty() && !id.contains(['/', '\\']) && !id.contains("..")
 }
 
-/// A fresh id for a conversation that has not been saved before.
-///
-/// Stamped to the second for a person reading the folder, plus the process
-/// id. Two instances running at the same time never share a process id, so
-/// two launches in the same second get different ids even though neither
-/// has saved anything yet; checking the folder alone could not see that,
-/// and the second session used to save over the first.
+/// Timestamp to the second, plus the pid: two launches in the same second
+/// used to get the same id, and the second saved over the first.
 pub(crate) fn new_session_id() -> String {
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     unused_session_id(sessions_dir().as_deref(), ts, std::process::id())
 }
 
-/// `session_<ts>_<pid>`, or with a counter after it when a file of that name
-/// is already on disk (a process id reused later in the same second).
+/// With a counter when the file exists (a pid reused in the same second).
 fn unused_session_id(dir: Option<&std::path::Path>, ts: u64, pid: u32) -> String {
     let taken = |id: &str| dir.is_some_and(|d| d.join(format!("{id}.json")).exists());
     let base = format!("session_{ts}_{pid}");
@@ -198,7 +184,7 @@ fn unused_session_id(dir: Option<&std::path::Path>, ts: u64, pid: u32) -> String
     (2..).map(|n| format!("{base}_{n}")).find(|id| !taken(id)).unwrap_or(base)
 }
 
-/// `timestamp` as the picker says it: "just now", "5 min ago", "3 days ago".
+/// "just now", "5 min ago", "3 days ago".
 pub(crate) fn ago(timestamp: u64, now: u64) -> String {
     let secs = now.saturating_sub(timestamp);
     match secs {
@@ -211,8 +197,7 @@ pub(crate) fn ago(timestamp: u64, now: u64) -> String {
 }
 
 impl App {
-    /// Save after a turn or a rewind. A failure is said on screen, with when
-    /// it will be tried again; the next turn and quitting both retry.
+    /// A failure is shown with when it will be retried; the next turn and quitting both retry.
     pub(crate) fn autosave(&mut self, session_id: &str, cwd_display: &str) {
         if !self.config.auto_save_sessions {
             return;
@@ -222,16 +207,14 @@ impl App {
         }
     }
 
-    /// Open the list of this folder's saved sessions, leaving out the one
-    /// already open.
+    /// Leaves out the one already open.
     pub(crate) fn open_session_picker(&mut self, cwd_display: &str, current_session: &str) {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let items: Vec<SelectItem<String>> = sessions_dir()
             .map(|dir| sessions_in(&dir, cwd_display))
             .unwrap_or_default()
             .into_iter()
-            // Only a session with something in it is "the one already open";
-            // a fresh start has nothing to hide an older session behind.
+            // A fresh start has nothing to hide an older session behind.
             .filter(|s| s.id != current_session || !worth_saving(&self.history))
             .map(|s| {
                 let title = if s.title.is_empty() { "(no prompt)".to_string() } else { s.title };
@@ -249,8 +232,7 @@ impl App {
     }
 }
 
-/// Saved sessions that were started in `cwd`, newest first. A file that does
-/// not parse is skipped: one broken file must not hide every other session.
+/// Newest first. A broken file is skipped so it cannot hide the others.
 pub(crate) fn sessions_in(dir: &std::path::Path, cwd: &str) -> Vec<SessionSummary> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -296,8 +278,7 @@ pub(crate) fn sessions_in(dir: &std::path::Path, cwd: &str) -> Vec<SessionSummar
     found
 }
 
-/// Load one saved session by id. The id names a file in `dir` and nothing
-/// else: `--resume ../../somewhere` must not read a file outside it.
+/// `--resume ../../somewhere` must not read outside `dir`.
 pub(crate) fn read_session(dir: &std::path::Path, id: &str) -> Result<SavedSession, String> {
     if !is_session_id(id) {
         return Err(format!("'{id}' is not a session id; starting a new session."));
@@ -310,8 +291,7 @@ pub(crate) fn read_session(dir: &std::path::Path, id: &str) -> Result<SavedSessi
     })
 }
 
-/// Put a saved conversation back on screen and into the model's history,
-/// after the system prompt `history` already starts with. Returns how many
+/// After the system prompt `history` already starts with. Returns how many
 /// messages came back.
 pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history: &mut Vec<ChatMessage>) -> usize {
     let before = history.len();
@@ -333,13 +313,10 @@ pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history:
                 }
                 history.push(msg);
             }
-            // The fresh system prompt (current cwd/model) wins; only a
-            // compaction summary carries over. A second system message
-            // mid-history breaks strict chat templates (Gemma, Qwen).
+            // The fresh system prompt wins; only a compaction summary carries over. A
+            // second system message mid-history breaks strict templates (Gemma, Qwen).
             flashagent_llm::Role::System => {
-                // Current sessions keep the summary inside the system prompt;
-                // older ones stored it as its own system message. Both carry
-                // the marker title.
+                // Older sessions stored the summary as its own system message.
                 let title = COMPACTED_MARK.trim_start();
                 if let (Some(pos), Some(system)) = (msg.content.find(title), history.first_mut()) {
                     system.content.push_str(COMPACTED_MARK);
@@ -352,19 +329,14 @@ pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history:
     history.len() - before
 }
 
-/// Whether this run produced a conversation worth writing to disk.
-///
-/// `history` is never empty — it opens with the system prompt — so anything
-/// that only checks emptiness saves a session for a start-and-quit, and hands
-/// the user a `--resume` id that restores nothing.
+/// `history` always opens with the system prompt, so an emptiness check would
+/// save a start-and-quit and offer a `--resume` that restores nothing.
 pub(crate) fn worth_saving(history: &[ChatMessage]) -> bool {
     history.iter().any(|m| m.role == flashagent_llm::Role::User)
 }
 
 pub(crate) fn extract_user_prompt(content: &str) -> &str {
-    // A resumed goal used to show its whole scaffolding as if the user had
-    // typed it: "[AUTONOMOUS GOAL DIRECTIVE] You are operating in fully...".
-    // What they typed was the goal.
+    // Show the goal the user typed, not the directive scaffolding.
     if content.starts_with("[AUTONOMOUS GOAL DIRECTIVE]") {
         if let Some(rest) = content.split_once("Target goal:") {
             let goal = rest.1.lines().next().unwrap_or("").trim();
@@ -383,9 +355,8 @@ pub(crate) fn extract_user_prompt(content: &str) -> &str {
 
 
 
-/// Strict chat templates (Gemma, Mistral) demand alternating user/assistant
-/// turns; a turn that ended before any reply would leave two user messages
-/// in a row once the next prompt is sent.
+/// Strict templates (Gemma, Mistral) require alternating turns; a turn with no
+/// reply would leave two user messages in a row.
 pub(crate) fn close_dangling_user(history: &mut Vec<ChatMessage>, note: &str) {
     if history.last().is_some_and(|m| m.role == flashagent_llm::Role::User) {
         history.push(ChatMessage::assistant(note));
@@ -441,8 +412,7 @@ mod session_tests {
 
     #[test]
     fn two_instances_started_in_the_same_second_get_different_ids() {
-        // Neither has saved yet, so the folder cannot tell them apart; the
-        // process id does.
+        // Neither has saved yet, so only the pid tells them apart.
         let dir = tempfile::tempdir().unwrap();
         assert_ne!(unused_session_id(Some(dir.path()), 500, 7), unused_session_id(Some(dir.path()), 500, 8));
     }
@@ -488,8 +458,7 @@ mod session_tests {
         let dir = home.path().join("sessions");
         std::fs::create_dir_all(dir.join("inner")).unwrap();
         write(&dir, "session_1", 1, "~/proj", "hi");
-        // Real session files one step outside the folder and one inside a
-        // subfolder: without the id check these would be read.
+        // Real session files outside the folder: without the id check they would be read.
         write(home.path(), "escaped", 1, "~/proj", "outside");
         write(&dir.join("inner"), "nested", 1, "~/proj", "nested");
         assert!(read_session(&dir, "session_1").is_ok());

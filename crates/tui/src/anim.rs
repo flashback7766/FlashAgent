@@ -1,13 +1,7 @@
-//! Motion for the terminal UI.
-//!
-//! Everything here runs on one wall clock, never on how many events arrived:
-//! a model streaming fast must not make a spinner race. The drawing functions
-//! are pure in `t` (milliseconds on that clock), so tests pin a moment and
-//! check the frame; the app reads [`now_ms`].
-//!
-//! Motion can be switched off (Settings → UI → Animations). A spinner still
-//! turns then — it says work is happening — but nothing sweeps, pulses or
-//! unfolds.
+//! Motion for the terminal UI, driven by one wall clock, never by event count:
+//! a fast stream must not make a spinner race. Drawing functions are pure in
+//! `t` (ms), so tests pin a moment. With motion off (Settings → UI →
+//! Animations) spinners still turn but nothing sweeps, pulses or unfolds.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -15,33 +9,29 @@ use std::time::Instant;
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
-/// Turn decorative motion on or off.
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
 }
 
-/// Whether decorative motion is on.
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
-/// Milliseconds since the first call: the clock every animation reads.
+/// Since the first call.
 pub fn now_ms() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
-/// An RGB colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
 impl Rgb {
-    /// The foreground escape for this colour.
     pub fn fg(self) -> String {
         format!("\x1b[38;2;{};{};{}m", self.0, self.1, self.2)
     }
 
-    /// `self` moved `k` (0..=1) of the way to `other`.
+    /// `k` in 0..=1.
     pub fn mix(self, other: Rgb, k: f32) -> Rgb {
         let k = k.clamp(0.0, 1.0);
         let ch = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * k).round() as u8;
@@ -49,22 +39,20 @@ impl Rgb {
     }
 }
 
-/// Braille spinner frames.
 pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// The spinner frame at `t`: one step every 80 ms.
+/// One step every 80 ms.
 pub fn spinner(t: u64) -> &'static str {
     SPINNER[(t / 80) as usize % SPINNER.len()]
 }
 
-/// 0 → 1 → 0 once every `period_ms`, eased like breathing.
+/// 0 → 1 → 0 once every `period_ms`.
 pub fn breathe(t: u64, period_ms: u64) -> f32 {
     let phase = (t % period_ms.max(1)) as f32 / period_ms.max(1) as f32;
     0.5 - 0.5 * (phase * std::f32::consts::TAU).cos()
 }
 
-/// `a` and `b` alternating smoothly every `period_ms`. Holds at `a` when
-/// motion is off.
+/// Holds at `a` when motion is off.
 pub fn pulse(t: u64, period_ms: u64, a: Rgb, b: Rgb) -> Rgb {
     if !enabled() {
         return a;
@@ -72,14 +60,12 @@ pub fn pulse(t: u64, period_ms: u64, a: Rgb, b: Rgb) -> Rgb {
     a.mix(b, breathe(t, period_ms))
 }
 
-/// Ease-out cubic: fast start, gentle landing.
 pub fn ease_out(k: f32) -> f32 {
     let k = k.clamp(0.0, 1.0);
     1.0 - (1.0 - k).powi(3)
 }
 
-/// How far (0..=1) an animation `duration_ms` long that began at `started`
-/// has got by `t`, eased. Always finished when motion is off.
+/// 0..=1, eased. Always finished when motion is off.
 pub fn progress(started: u64, t: u64, duration_ms: u64) -> f32 {
     if !enabled() || duration_ms == 0 {
         return 1.0;
@@ -87,10 +73,8 @@ pub fn progress(started: u64, t: u64, duration_ms: u64) -> f32 {
     ease_out(t.saturating_sub(started) as f32 / duration_ms as f32)
 }
 
-/// `text` (plain, no escapes) with a band of light sweeping across it: each
-/// character is coloured between `base` and `glow` by how close the band is.
-/// The band crosses once every `period_ms`, then rests off the end so the
-/// sweep reads as a gesture, not a strobe.
+/// `text` must be plain. The band crosses once per `period_ms`, then rests off
+/// the end so it reads as a gesture, not a strobe.
 pub fn shimmer(text: &str, t: u64, period_ms: u64, base: Rgb, glow: Rgb) -> String {
     let chars: Vec<char> = text.chars().collect();
     if !enabled() || chars.is_empty() {
@@ -116,8 +100,7 @@ pub fn shimmer(text: &str, t: u64, period_ms: u64, base: Rgb, glow: Rgb) -> Stri
     out
 }
 
-/// A one-row chart of `values` (oldest first) in block heights, scaled to
-/// the largest of them.
+/// Oldest first, scaled to the largest value.
 pub fn sparkline(values: &[f64]) -> String {
     const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let max = values.iter().copied().fold(0.0_f64, f64::max);
@@ -133,8 +116,7 @@ pub fn sparkline(values: &[f64]) -> String {
         .collect()
 }
 
-/// Whether a blinking cursor is lit at `t` (on 530 ms, off 530 ms). Always lit
-/// when motion is off.
+/// 530 ms on, 530 ms off. Always lit when motion is off.
 pub fn blink_on(t: u64) -> bool {
     !enabled() || (t / 530).is_multiple_of(2)
 }
@@ -159,7 +141,6 @@ mod tests {
         let base = Rgb(100, 100, 100);
         let glow = Rgb(255, 255, 255);
         let text = "Thinking about the answer";
-        // Some moment mid-sweep.
         let frame = shimmer(text, 700, 2000, base, glow);
         assert_eq!(plain(&frame), text);
         assert!(frame.contains(&glow.fg()) || frame.contains("38;2;2"), "nothing is lit: {frame:?}");

@@ -1,9 +1,6 @@
-//! Scenario tests: the real `flashagent` binary, in a terminal, against a
-//! stand-in model server, checked by what is on the screen.
-//!
-//! Unit tests check the parts. These check the paths a person takes, which
-//! is where the last betas broke: the wizard offering the wrong models, a
-//! quit dialog on a session with nothing in it, a box drawn one column short.
+//! Scenario tests: the real `flashagent` binary in a terminal against a
+//! stand-in model server, checked by what is on screen. They cover the paths
+//! a person takes, where earlier betas broke.
 
 mod support;
 
@@ -18,8 +15,7 @@ const ROWS: u16 = 40;
 const WAIT: Duration = Duration::from_secs(30);
 const PROMPT: &str = "Ask FlashAgent to do anything";
 
-/// Start an app that is already set up against `server`, past the trust
-/// question, and wait for it to be ready for input.
+/// Set up against `server`, past the trust question, ready for input.
 fn ready(home: &Home, server: &MockServer) -> Term {
     home.set_up(&server.url);
     let term = Term::start(home, &["-y"], COLS, ROWS);
@@ -27,7 +23,7 @@ fn ready(home: &Home, server: &MockServer) -> Term {
     term
 }
 
-/// As `ready`, with extra config fields merged in on top of the baseline.
+/// With extra config fields merged on top.
 fn ready_with(home: &Home, server: &MockServer, extra: serde_json::Value) -> Term {
     home.set_up_with(&server.url, extra);
     let term = Term::start(home, &["-y"], COLS, ROWS);
@@ -60,8 +56,7 @@ fn the_wizard_sets_up_a_custom_server_and_opens_the_app() {
     term.wait_for("Step 5: Sampling Parameters & Launch", WAIT);
     term.send(ENTER);
 
-    // The tool check runs against the chosen model, and its verdict is kept
-    // in the conversation rather than printed and cleared away.
+    // The tool-check verdict stays in the conversation instead of being cleared.
     term.wait_for(PROMPT, WAIT);
     term.wait_for("Tool-calling check:", WAIT);
 
@@ -74,7 +69,7 @@ fn the_wizard_sets_up_a_custom_server_and_opens_the_app() {
     quit_with_double_esc(&mut term);
 }
 
-/// Esc, then Esc again once the app has said that is what it takes.
+/// Esc, then Esc again once the app says that is what it takes.
 fn quit_with_double_esc(term: &mut Term) {
     term.send(ESC);
     term.wait_for(ESC_AGAIN, WAIT);
@@ -110,7 +105,7 @@ fn a_late_second_esc_asks_again_instead_of_quitting() {
 
     term.send(ESC);
     term.wait_for(ESC_AGAIN, WAIT);
-    // Longer than the double-press window: this is a new first press.
+    // Longer than the double-press window: a new first press.
     std::thread::sleep(Duration::from_millis(2500));
     term.send(ESC);
     assert!(term.wait_exit(Duration::from_millis(800)).is_none(), "an Esc long after the first one quit");
@@ -127,7 +122,7 @@ fn a_conversation_is_saved_when_quitting_with_double_esc() {
     term.type_text("say hello");
     term.send(ENTER);
     term.wait_for("Hello from the mock model.", WAIT);
-    // The answer is on screen before the turn has finished settling.
+    // The answer is on screen before the turn has settled.
     term.wait_for(PROMPT, WAIT);
 
     quit_with_double_esc(&mut term);
@@ -182,8 +177,8 @@ fn uninstall_asks_first_and_no_keeps_the_app_running() {
 
 #[test]
 fn yes_on_uninstall_closes_the_app_and_hands_over_to_the_uninstaller() {
-    // The test binary is a build from source, which the uninstaller refuses
-    // to touch — so this runs the whole hand-over without removing anything.
+    // The test binary is a source build, which the uninstaller refuses to touch,
+    // so this runs the whole hand-over without removing anything.
     let server = MockServer::start(Vec::new());
     let home = Home::new();
     let mut term = ready(&home, &server);
@@ -203,8 +198,7 @@ fn the_next_launch_starts_in_the_mode_the_user_left_in() {
     let home = Home::new();
     {
         let mut term = ready(&home, &server);
-        // Accept Edits → Accept All: the one mode people might expect to be
-        // forgotten, and it is remembered too.
+        // Accept All is remembered too.
         term.send("\x1b[Z");
         term.wait_for("Permission mode set to: Accept All", WAIT);
         quit_with_double_esc(&mut term);
@@ -238,11 +232,9 @@ fn planning_mode_runs_a_command_that_only_reads_without_asking() {
 
 #[test]
 fn the_first_turn_after_startup_already_knows_the_server_said_reasoning_is_off() {
-    // Startup discovers the server through one backend and sends turns
-    // through another (so the turn does not wait on its own first look); a
-    // b263 regression let the very first turn go out before that discovery
-    // had been handed over, so it carried no reasoning setting at all even
-    // when the server had reported one and the user had turned it off.
+    // b263 regression: the first turn went out before discovery was handed to
+    // the sending backend, so it carried no reasoning setting even when the user
+    // had turned reasoning off.
     let server = MockServer::start(vec![Reply::Text("Reasoning is off.".into())]);
     server.report_reasoning(&["off", "on"], "on");
     let home = Home::new();
@@ -263,11 +255,8 @@ fn the_first_turn_after_startup_already_knows_the_server_said_reasoning_is_off()
 
 #[test]
 fn a_model_the_server_says_nothing_about_gets_no_reasoning_fields() {
-    // The server can list a model without saying anything about whether it
-    // reasons — unlike a model it explicitly reports cannot. Silence must
-    // not be read as "off": nothing about reasoning belongs on this model's
-    // turns, or a model that never asked for a specific effort would end up
-    // with one invented for it.
+    // Silence about reasoning is not "off": no reasoning fields may be invented
+    // for this model's turns.
     const LOOKALIKE: &str = "qwen3-reasoning-lookalike";
     let server = MockServer::start(vec![Reply::Text("Just answering.".into())]);
     server.add_model_the_server_says_nothing_about(LOOKALIKE);
@@ -288,8 +277,7 @@ fn a_model_the_server_says_nothing_about_gets_no_reasoning_fields() {
 
 #[test]
 fn the_model_list_is_not_asked_for_while_the_model_is_answering() {
-    // Longer than the 15 s between looks at the server, so a look would
-    // have been due at least once during the answer.
+    // Longer than the 15 s poll interval, so a poll was due during the answer.
     let words: Vec<String> = (1..=17).map(|i| format!("word{i}")).collect();
     let server = MockServer::start(vec![Reply::Slow { text: words.join(" "), per_word: Duration::from_secs(1) }]);
     let home = Home::new();
@@ -347,9 +335,8 @@ fn a_path_written_with_a_tilde_is_the_file_it_means_at_a_prompt() {
     let server = MockServer::start(vec![
         Reply::ToolCall {
             name: "read_file".into(),
-            // No shell runs a tool call, so nothing expands this `~` unless
-            // the app does. It used to look for a folder named `~` inside
-            // the project and report that the file was not there.
+            // Nothing expands this `~` unless the app does; it used to be looked for
+            // inside the project.
             arguments: serde_json::json!({ "header": "Read the notes file", "path": "~/work/notes.txt" }),
         },
         Reply::Text("The notes say the code is 4217.".into()),
@@ -383,12 +370,10 @@ fn a_tilde_path_out_of_the_project_is_still_asked_about() {
 
     term.type_text("read my private file");
     term.send(ENTER);
-    // The file sits next to the project, not in it: expanding the `~` must
-    // not make it look like an ordinary project file that needs no question.
+    // The file is outside the project, so it must still be asked about.
     term.wait_for("Confirm:", WAIT);
 }
 
-/// Every 24-bit colour on screen, as `(r, g, b)`.
 fn colours_on_screen(term: &Term) -> Vec<(u8, u8, u8)> {
     let painted = term.screen_colours();
     let mut out = Vec::new();
@@ -404,8 +389,7 @@ fn colours_on_screen(term: &Term) -> Vec<(u8, u8, u8)> {
 
 #[test]
 fn the_colour_theme_repaints_the_whole_screen() {
-    // The app is written in one palette and recoloured on the way out, so a
-    // theme must reach every card without any of them knowing about it.
+    // A theme must reach every card without any of them knowing about it.
     let server = MockServer::start(vec![Reply::Text("Hello.".into())]);
     let home = Home::new();
     let term = ready_with(&home, &server, serde_json::json!({ "color_theme": "monochrome" }));
@@ -418,8 +402,7 @@ fn the_colour_theme_repaints_the_whole_screen() {
     let coloured: Vec<_> = colours.iter().filter(|(r, g, b)| r != g || g != b).collect();
     assert!(coloured.is_empty(), "monochrome left colours on screen: {coloured:?}");
 
-    // And the default theme is the palette as written, so the same screen
-    // does have colour in it.
+    // The default theme is the palette as written.
     let plain_server = MockServer::start(vec![Reply::Text("Hello.".into())]);
     let plain_home = Home::new();
     let plain = ready(&plain_home, &plain_server);
@@ -433,24 +416,18 @@ fn the_colour_theme_repaints_the_whole_screen() {
     );
 }
 
-/// A terminal the size of a small window in a tiling setup, and a very small
-/// one besides: 98x21 is a quarter-screen terminal, 60x14 an editor panel.
+/// 98x21 is a quarter-screen terminal, 60x14 an editor panel.
 const SMALL: (u16, u16) = (98, 21);
 const TINY: (u16, u16) = (60, 14);
 
-/// Every screen the app can put up, opened in a small terminal: what it
-/// takes to get there, a word that proves it is there, and the way out it
-/// prints last of all.
-///
-/// Waiting for that last line matters: a card unfolds over a few frames, and
-/// a screen read while it is still opening is half a card.
+/// (how to open it, a word proving it is there, its last line). Waiting for
+/// the last line waits for the whole card to unfold.
 const SCREENS: &[(&str, &str, &str)] = &[
     ("/settings", "Settings", "Esc save"),
     ("/memory", "remembers", "esc — close"),
     ("/mcp", "MCP", "Esc close"),
-    // Printed into the transcript rather than put up as a screen, so the
-    // marker is its last line: in a short terminal the first has scrolled
-    // away by then, which is what a transcript is supposed to do.
+    // Printed into the transcript, so the marker is its last line; the first has
+    // scrolled away in a short terminal.
     ("/help", "/uninstall", "Esc"),
 ];
 
@@ -465,8 +442,7 @@ fn nothing_is_drawn_outside_a_small_terminal() {
     home.set_up(&server.url);
     let (cols, rows) = SMALL;
     let term = Term::start(&home, &["-y"], cols, rows);
-    // Waiting for the composer is itself the check that the welcome card did
-    // not push it off: if it had, there would be nowhere to type.
+    // The composer being there proves the welcome card did not push it off.
     let screen = term.wait_for(PROMPT, WAIT);
 
     let too_wide: Vec<_> = screen.lines().filter(|l| l.chars().count() > cols as usize).collect();
@@ -485,10 +461,8 @@ fn every_screen_fits_a_small_terminal() {
 
             term.type_text(command);
             term.send(ENTER);
-            // The way out is the last line the card draws, so waiting for it
-            // waits for the whole card. Not the title: in 14 rows a card taller
-            // than the screen has it only while unfolding, which a slow machine
-            // can miss.
+            // The last line, not the title: in 14 rows a tall card shows its title only
+            // while unfolding, which a slow machine can miss.
             term.wait_for(way_out, WAIT);
 
             let lines = lines_of(&term);
@@ -510,11 +484,9 @@ fn every_screen_fits_a_small_terminal() {
 
 #[test]
 fn what_a_running_tool_is_doing_is_said_once() {
-    // It used to be said twice: once on the transcript line, and again
-    // inside the composer, where it read as something the user had typed.
+    // It used to appear twice, once inside the composer as if typed.
     let header = "Check the marker file";
-    // Long enough to still be running when the screen is read, in whichever
-    // shell this platform gives the tool.
+    // Still running when the screen is read, in either platform's shell.
     let slow = if cfg!(windows) { "ping -n 4 127.0.0.1 > nul" } else { "sleep 3" };
     let server = MockServer::start(vec![
         Reply::ToolCall {
@@ -524,8 +496,7 @@ fn what_a_running_tool_is_doing_is_said_once() {
         Reply::Text("Done.".into()),
     ]);
     let home = Home::new();
-    // Bypass, so the command runs instead of stopping on an approval card:
-    // what is being checked is the screen while a tool is working.
+    // Bypass, so no approval card: the check is the screen while a tool works.
     let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
 
     term.type_text("check the marker");
@@ -540,11 +511,10 @@ fn what_a_running_tool_is_doing_is_said_once() {
     );
 }
 
-/// Shown under the composer only while a turn runs.
+/// Shown only while a turn runs.
 const RUNNING_HINT: &str = "esc to interrupt";
 
-/// Send a prompt and wait for the turn to finish: `answer` on screen and the
-/// turn over, so the next Enter starts a new turn instead of steering this one.
+/// Waits until the turn is over, so the next Enter starts a new turn.
 fn ask(term: &Term, prompt: &str, answer: &str) {
     term.type_text(prompt);
     term.send(ENTER);
@@ -552,7 +522,7 @@ fn ask(term: &Term, prompt: &str, answer: &str) {
     term.wait_gone(RUNNING_HINT, WAIT);
 }
 
-/// Everything the model was sent in one request, as text to search.
+/// As text to search.
 fn sent(request: &support::mock_server::Request) -> String {
     request.body["messages"].to_string()
 }
@@ -574,7 +544,7 @@ fn a_command_runs_once_it_is_allowed() {
     term.send(ENTER);
     term.wait_for("Confirm:", WAIT);
     assert!(!home.work().join("marker.txt").exists(), "the command ran before it was allowed");
-    // Allow is the button selected when the card opens.
+    // Allow is selected when the card opens.
     term.send(ENTER);
     term.wait_for("The marker is there.", WAIT);
 
@@ -667,8 +637,7 @@ fn compact_replaces_the_conversation_so_far_with_a_summary() {
     assert!(!sent(&turns[2]).contains("the first question"), "the summarised turns were still sent in full");
 }
 
-/// A Python that can run the MCP stub: `python3` where there is one,
-/// `python` otherwise (Windows runners have only that).
+/// `python3`, or `python` on Windows runners.
 fn python() -> &'static str {
     for candidate in ["python3", "python"] {
         let ok = std::process::Command::new(candidate)
@@ -682,8 +651,7 @@ fn python() -> &'static str {
     panic!("the MCP scenarios need Python 3 on PATH, as python3 or python");
 }
 
-/// Configure the stub MCP server for the project in `home`, with `lookup`
-/// marked read-only, and return the file it logs to.
+/// `lookup` marked read-only. Returns the log file.
 fn with_mcp_stub(home: &Home) -> std::path::PathBuf {
     let log = home.path().join("mcp-stub.log");
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/mcp_stub.py");
@@ -701,8 +669,7 @@ fn stub_log(log: &std::path::Path) -> String {
     std::fs::read_to_string(log).unwrap_or_default()
 }
 
-/// The MCP server starts in the background; a turn sent before it has listed
-/// its tools would be offered none of them.
+/// A turn sent before the server listed its tools would get none.
 fn wait_for_mcp(log: &std::path::Path) {
     let start = std::time::Instant::now();
     while !stub_log(log).contains("listed") {
@@ -722,8 +689,7 @@ fn a_read_only_mcp_tool_runs_without_asking() {
     let term = ready(&home, &server);
     wait_for_mcp(&log);
 
-    // No key is pressed: a confirmation card would hold the turn until the
-    // wait runs out.
+    // No key is pressed: a confirmation card would hold the turn until timeout.
     ask(&term, "look up alpha", "Alpha is known.");
 
     let turns = server.turns();
@@ -764,7 +730,7 @@ fn a_goal_runs_without_asking_reports_what_it_did_and_hands_back_the_gates() {
         },
         shell_call("echo goal> goal-marker.txt"),
         Reply::Text("The greeting is written.".into()),
-        // After the goal: the same kind of command must ask again.
+        // After the goal, the same kind of command must ask again.
         shell_call("echo after> after-marker.txt"),
         Reply::Text("Asked first.".into()),
     ]);
@@ -823,7 +789,7 @@ fn a_goal_stops_at_its_step_budget_and_says_it_is_not_finished() {
     let server = MockServer::start(reads);
     let home = Home::new();
     std::fs::write(home.work().join("notes.txt"), "nothing new\n").unwrap();
-    // The limit is set in Settings → Goal, which saves it to the config.
+    // Settings → Goal saves the limit to the config.
     let term = ready_with(&home, &server, serde_json::json!({ "goal_max_steps": 2 }));
 
     term.type_text("/goal read the notes forever");
@@ -891,8 +857,7 @@ fn a_goal_shows_its_live_plan_and_updates_it_in_place() {
     term.type_text("/goal fix the failing test");
     term.send(ENTER);
     term.wait_for("Done.", WAIT);
-    // A repaint can be caught half-written; wait for the finished frame and
-    // check that one.
+    // A repaint can be caught half-written; check the finished frame.
     let screen = term.wait_for("[~] fix it", WAIT);
 
     assert!(screen.contains("plan: 1/2"), "{screen}");
@@ -921,7 +886,7 @@ fn an_answer_cut_off_by_the_output_limit_is_finished_in_the_same_message() {
         term.screen()
     );
 
-    // The request for the rest carries the answer so far and asks to go on.
+    // The continuation request carries the answer so far.
     let turns = server.turns();
     assert_eq!(turns.len(), 2, "one request for the answer, one for the rest");
     let messages = turns[1].body["messages"].as_array().unwrap();
@@ -931,7 +896,7 @@ fn an_answer_cut_off_by_the_output_limit_is_finished_in_the_same_message() {
     assert_eq!(messages[n - 1]["role"], "user");
     assert!(messages[n - 1]["content"].as_str().unwrap_or_default().contains("cut off"));
 
-    // The next turn sees one whole answer, and not the request to go on.
+    // The next turn sees one whole answer, and not the continuation request.
     ask(&term, "and now?", "Second answer.");
     let later = sent(&server.turns()[2]);
     assert!(later.contains("The first half of the answer, and the second half of it."), "{later}");
@@ -984,8 +949,7 @@ fn several_files_are_read_and_changed_in_one_call_each() {
 
 #[test]
 fn an_edit_written_in_another_agents_argument_names_still_edits_the_file() {
-    // OpenCode's names, one edit given flat: a model trained on another agent
-    // should not fail the call over what it calls the arguments.
+    // OpenCode's argument names, one edit given flat.
     let server = MockServer::start(vec![
         Reply::ToolCall {
             name: "edit_file".into(),
@@ -1050,8 +1014,7 @@ fn rewind_takes_the_files_and_the_conversation_back_to_before_a_turn() {
 
     term.type_text("/rewind 2");
     term.send(ENTER);
-    // The composer morphs into a confirmation card naming what will change,
-    // before anything actually does.
+    // The confirmation card names what will change before anything does.
     term.wait_for("Confirm Rewind", WAIT);
     term.wait_for("notes.txt", WAIT);
     term.wait_for("added.txt", WAIT);
@@ -1059,13 +1022,11 @@ fn rewind_takes_the_files_and_the_conversation_back_to_before_a_turn() {
     assert!(added.exists(), "the card must not touch files before it is answered");
 
     term.send(ENTER); // "Yes, rewind" is selected by default
-    // The rewound turn drops off the screen; no confirmation line is shown.
     term.wait_gone("Changed it twice.", WAIT);
     assert_eq!(std::fs::read_to_string(&notes).unwrap(), "first\n", "the edit of the taken-back turn was not undone");
     assert!(!added.exists(), "a file the taken-back turn created is still there");
 
-    // Its prompt is back in the input: sending it asks again, and the model
-    // is not sent the turn that was taken back.
+    // The prompt is back in the input; the model is not sent the taken-back turn.
     term.send(ENTER);
     term.wait_for("Asked again.", WAIT);
     let turns = server.turns();
@@ -1129,7 +1090,7 @@ fn declining_the_rewind_card_leaves_everything_as_it_is() {
     term.send(ENTER);
     term.wait_for("Confirm Rewind", WAIT);
 
-    // Move off "Yes, rewind" onto "No, cancel", then confirm that.
+    // Onto "No, cancel", then confirm.
     term.send("\x1b[B"); // Down
     term.send(ENTER);
     term.wait_gone("Confirm Rewind", WAIT);
@@ -1213,8 +1174,8 @@ fn a_write_through_a_symlink_parent_asks_before_touching_the_external_file() {
 
 #[test]
 fn every_answer_ends_with_a_status_line_that_names_the_cache() {
-    // The mock server reports prompt tokens but nothing about its cache, like
-    // LM Studio over the network: the line says so instead of inventing a number.
+    // No cache info from the server, like LM Studio over the network: the line
+    // says so instead of inventing a number.
     let server = MockServer::start(vec![Reply::Text("Status please.".into())]);
     let home = Home::new();
     let term = ready(&home, &server);
@@ -1348,7 +1309,7 @@ fn a_session_that_fails_to_load_is_left_as_it_was() {
     home.set_up(&server.url);
     let sessions = home.path().join(".flashagent").join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
-    // Cut off mid-write, the way a crash or a full disk leaves a file.
+    // Cut off mid-write, as a crash or full disk leaves it.
     let damaged = sessions.join("session_1_1.json");
     let bytes = br#"{"id":"session_1_1","timestamp":1,"model":"m","cwd":"~","messages":[{"role":"user","content":"the only copy of"#;
     std::fs::write(&damaged, bytes).unwrap();
@@ -1368,7 +1329,7 @@ fn two_instances_started_together_keep_their_own_sessions() {
     let server = MockServer::start(vec![Reply::Text("Noted.".into()), Reply::Text("Noted.".into())]);
     let home = Home::new();
     home.set_up(&server.url);
-    // Started back to back: well inside one second, before either has saved.
+    // Back to back, within one second, before either has saved.
     let mut first = Term::start(&home, &["-y"], COLS, ROWS);
     let mut second = Term::start(&home, &["-y"], COLS, ROWS);
     first.wait_for(PROMPT, WAIT);
@@ -1387,8 +1348,8 @@ fn two_instances_started_together_keep_their_own_sessions() {
 fn steering_during_turn_pins_message_until_completion_and_pivots() {
     let words: Vec<String> = (1..=6).map(|i| format!("word{i}")).collect();
     let server = MockServer::start(vec![
-        // Slow enough that a loaded CI machine still sees the steer pinned
-        // before the answer ends and the steer is sent.
+        // Slow enough that a loaded CI machine sees the steer queued before the
+        // answer ends.
         Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(1000) },
         Reply::Text("Pivoted to user steering.".into()),
     ]);
@@ -1399,17 +1360,15 @@ fn steering_during_turn_pins_message_until_completion_and_pivots() {
     term.send(ENTER);
     term.wait_for("word2", WAIT);
 
-    // Send steer directive while model is streaming:
     term.type_text("steer: change direction");
     term.send(ENTER);
 
-    // Pinned message appears with steer queued
     term.wait_for("steer queued", WAIT);
 
-    // Stream finishes cleanly (word6 arrives, NOT cut off!)
+    // The stream finishes; it is not cut off.
     term.wait_for("word6", WAIT);
 
-    // The second turn starts automatically answering the steer directive!
+    // The next turn answers the steer.
     term.wait_for("Pivoted to user steering.", WAIT);
     term.wait_gone(RUNNING_HINT, WAIT);
 
@@ -1417,7 +1376,7 @@ fn steering_during_turn_pins_message_until_completion_and_pivots() {
     assert!(!screen.contains("steer queued"), "steer queued indicator should unpin once injected:\n{screen}");
     assert!(screen.contains("steer: change direction"), "steering directive should be in chat:\n{screen}");
 
-    // Verify history sent to server in turn 2 contains BOTH word6 and the steering message:
+    // Turn 2's history holds both word6 and the steer.
     let turns = server.turns();
     assert_eq!(turns.len(), 2);
     let history = sent(&turns[1]);
@@ -1436,27 +1395,24 @@ fn sending_only_an_image_submits_the_turn_with_image_part_and_no_text() {
 
     let term = ready(&home, &server);
 
-    // Dropping a file on the terminal: a bracketed paste on Unix, and plain
-    // typing on Windows, whose console has no bracketed paste at all.
+    // A bracketed paste on Unix, plain typing on Windows.
     if cfg!(windows) {
         term.type_text(&image_path.display().to_string());
     } else {
         term.send(&format!("\x1b[200~{}\x1b[201~", image_path.display()));
-        // The picture is recognised as it is dropped, before anything is sent.
+        // Recognised as it is dropped, before anything is sent.
         term.wait_for("shot.png 800×600", WAIT);
         term.wait_for("Enter to send image", WAIT);
     }
 
     term.send(ENTER);
 
-    // Assistant answers:
     term.wait_for("I see the picture.", WAIT);
 
-    // Verify chat transcript shows [shot.png 800×600]:
     let screen = term.screen();
     assert!(screen.contains("[shot.png 800×600]"), "chat transcript should show image label:\n{screen}");
 
-    // Verify the request body to the model has NO text part and only image_url part:
+    // The request carries only the image part, no text.
     let turns = server.turns();
     assert_eq!(turns.len(), 1);
     let user_msg = turns[0].body["messages"]
@@ -1533,8 +1489,7 @@ fn clear_takes_the_conversation_off_the_screen() {
 #[test]
 fn an_approval_that_comes_up_over_open_settings_gets_the_answer() {
     let server = MockServer::start(vec![shell_call("echo marker> marker.txt"), Reply::Text("The marker is there.".into())]);
-    // The model takes its time, so the settings are certainly open before the
-    // approval card is drawn over them.
+    // The settings are open before the approval card is drawn over them.
     server.delay_turns(Duration::from_secs(2));
     let home = Home::new();
     let term = ready(&home, &server);
@@ -1543,14 +1498,14 @@ fn an_approval_that_comes_up_over_open_settings_gets_the_answer() {
     term.send(ENTER);
     term.send(TAB);
     term.wait_for("FlashAgent Settings", WAIT);
-    // The card comes up over the settings and must be the one Enter answers.
+    // The card over the settings must be the one Enter answers.
     term.wait_for("Confirm:", WAIT);
     term.send(ENTER);
     term.wait_for("The marker is there.", WAIT);
     assert!(home.work().join("marker.txt").exists(), "Enter went to the settings under the card");
 }
 
-/// Just enough PNG for the header the composer reads the size from.
+/// Just enough for the size header.
 fn png_bytes(width: u32, height: u32) -> Vec<u8> {
     let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
     bytes.extend_from_slice(&[0, 0, 0, 13]);
@@ -1785,9 +1740,7 @@ const ALT_ENTER: &str = "\x1b\r";
 const CTRL_F: &str = "\x06";
 const CTRL_W: &str = "\x17";
 
-/// Text as the terminal delivers a paste: between bracketed-paste markers,
-/// or on Windows, whose console has no such markers, as keys arriving
-/// together with each newline an Enter.
+/// Bracketed on Unix; on Windows as keys arriving together, each newline an Enter.
 fn paste(term: &Term, text: &str) {
     if cfg!(windows) {
         term.write(&text.replace('\n', "\r"));
@@ -1797,7 +1750,7 @@ fn paste(term: &Term, text: &str) {
     }
 }
 
-/// The user message of a turn, as the JSON text the model was sent.
+/// As the JSON text the model was sent.
 fn prompt_of(request: &support::mock_server::Request) -> String {
     let messages = request.body["messages"].as_array().cloned().unwrap_or_default();
     let user = messages.iter().rev().find(|m| m["role"] == "user").cloned().unwrap_or_default();
@@ -1849,7 +1802,7 @@ fn a_prompt_can_have_several_lines() {
     let prompt = prompt_of(server.turns().last().unwrap());
     assert!(prompt.contains("first line\\nsecond line\\nthird line"), "{prompt}");
 
-    // A paste keeps its lines instead of running them together.
+    // A paste keeps its lines.
     paste(&term, "fn main() {\n    println!(\"hi\");\n}");
     term.wait_for("println", WAIT);
     term.send(ENTER);
@@ -1891,7 +1844,7 @@ fn ctrl_f_finds_an_earlier_prompt_to_send_again() {
     term.wait_for("run the database migration", WAIT);
     term.send(ENTER);
     term.wait_gone("find in history", WAIT);
-    // Taken into the prompt to look at first, not sent behind the user's back.
+    // Taken into the prompt, not sent behind the user's back.
     assert_eq!(server.turns().len(), 2);
     term.send(ENTER);
     term.wait_for("Three.", WAIT);
@@ -1909,7 +1862,7 @@ fn an_image_path_pasted_into_a_question_is_not_attached_to_a_later_prompt() {
     ]);
     let home = Home::new();
     let picture = home.work().join("shot.png");
-    // Not a real picture; only the name and that it is not empty matter.
+    // Only the name and non-emptiness matter.
     std::fs::write(&picture, b"\x89PNG\r\n\x1a\n").unwrap();
     let term = ready(&home, &server);
 
@@ -1945,7 +1898,7 @@ fn show_composer() {
     println!("{}", term.screen());
 }
 
-/// Two looks at an idle screen `apart`, from the moment the prompt is up.
+/// Two looks at an idle screen `apart`.
 fn idle_screens(animations: bool, apart: Duration) -> (String, String) {
     let server = MockServer::start(Vec::new());
     let home = Home::new();
@@ -1958,8 +1911,7 @@ fn idle_screens(animations: bool, apart: Duration) -> (String, String) {
 
 #[test]
 fn with_animations_off_an_idle_screen_holds_still() {
-    // The mascot breathes and the tip types itself out when motion is on;
-    // off, nothing on the screen may change while nobody does anything.
+    // With motion off, nothing may change while nobody does anything.
     let (first, later) = idle_screens(false, Duration::from_millis(1500));
     assert_eq!(first, later, "the screen moved with animations off");
     let (first, later) = idle_screens(true, Duration::from_millis(1500));
@@ -2000,8 +1952,7 @@ fn the_mcp_panel_says_its_keys_once() {
     term.type_text("/mcp");
     term.send(ENTER);
     term.wait_for("Esc close", WAIT);
-    // The line under the panel's bottom edge is the footer; it used to list
-    // the same keys the panel already shows inside its box.
+    // The footer used to repeat the keys the panel shows inside its box.
     let screen = term.screen();
     let lines: Vec<&str> = screen.lines().collect();
     let bottom = lines.iter().rposition(|l| l.contains('╰')).expect("the panel's bottom edge");
@@ -2040,7 +1991,7 @@ fn a_saved_session_is_found_by_something_said_inside_it() {
     term.wait_for("Resumed session", WAIT);
 }
 
-/// Resident memory of a process, in MB, from /proc (Linux only).
+/// In MB, from /proc (Linux only).
 fn rss_mb(pid: u32) -> Option<f64> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     let kb: f64 = status.lines().find(|l| l.starts_with("VmRSS:"))?.split_whitespace().nth(1)?.parse().ok()?;
@@ -2093,9 +2044,8 @@ fn measure_startup_and_memory() {
 
 #[test]
 fn a_paste_that_arrives_as_keystrokes_is_still_one_prompt() {
-    // A Windows console has no bracketed paste: the text comes as key
-    // presses, each newline an Enter. Sent line by line, the first line
-    // would go to the model on its own.
+    // Without bracketed paste each newline is an Enter; the first line would go
+    // to the model alone.
     let server = MockServer::start(vec![Reply::Text("One prompt.".into())]);
     let home = Home::new();
     let term = ready(&home, &server);

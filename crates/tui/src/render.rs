@@ -3,7 +3,6 @@ use flashagent_tui::anim::{self, Rgb};
 use flashagent_tui::theme;
 
 pub(crate) fn color(kind: LineKind) -> crossterm::style::Color {
-    // Truecolor dark warm aesthetic (M3 Expressive / Charcoal & Amber / Sand).
     match kind {
         LineKind::User => crossterm::style::Color::Rgb { r: 245, g: 240, b: 232 },
         LineKind::Assistant => crossterm::style::Color::Rgb { r: 232, g: 227, b: 218 },
@@ -15,36 +14,29 @@ pub(crate) fn color(kind: LineKind) -> crossterm::style::Color {
     }
 }
 
-/// Synchronized output: a terminal that knows the mode shows the frame only
-/// once all of it has arrived, so a full repaint never flickers through a
-/// cleared screen; one that does not ignores it.
+/// A terminal that knows the mode shows the frame only once complete, so a
+/// full repaint never flickers; others ignore it.
 const SYNC_BEGIN: &str = "\x1b[?2026h";
 const SYNC_END: &str = "\x1b[?2026l";
 
-/// Print-and-forget renderer: settled lines are
-/// printed to the terminal scrollback once and never redrawn; only the live
-/// tail (streaming line, open tool, approval card, input) is repainted each
-/// frame by cursoring up over it. Native scrollback works for free.
+/// Settled lines are printed to the scrollback once and never redrawn; only
+/// the live tail (streaming line, open tool, cards, input) is repainted each
+/// frame by moving the cursor up over it. Native scrollback works for free.
 pub(crate) struct Renderer {
-    /// Lines of the live tail currently on screen (to erase next frame).
+    /// To erase next frame.
     pub(crate) tail_height: u16,
     pub(crate) prev_width: u16,
-    /// How many settled lines have already been printed to the scrollback.
     pub(crate) printed_settled: usize,
-    /// Last rendered thinking mode — a flip needs a full repaint (settled
-    /// reasoning was printed in the other form and must not linger).
+    /// A flip needs a full repaint: settled reasoning was printed in the other form.
     pub(crate) prev_expansion: Option<ReasoningExpansion>,
-    /// Explicit request to clear and repaint all settled lines (e.g. in-place notice update).
+    /// E.g. a notice updated in place.
     pub(crate) needs_reprint: bool,
-    /// Distance in lines from the top of the tail down to the input prompt line.
     pub(crate) prev_cursor_tail_offset: u16,
-    /// Vertical scroll offset (lines scrolled back from the bottom). 0 = anchored to bottom.
+    /// Lines scrolled back from the bottom; 0 is anchored.
     pub(crate) scroll_offset: usize,
-    /// How far back the last frame could be scrolled: all its lines, settled
-    /// and tail, less what fits on screen.
+    /// All lines, settled and tail, less what fits on screen.
     pub(crate) max_scroll: usize,
-    /// What the last frame wrote, so an idle tick that would write the same
-    /// bytes again writes nothing.
+    /// An idle tick that would write the same bytes writes nothing.
     last_frame: String,
     /// The card on screen last frame and when it opened.
     card: (CardKey, u64),
@@ -52,30 +44,26 @@ pub(crate) struct Renderer {
 
 pub(crate) struct FrameState<'a> {
     pub(crate) input: &'a flashagent_tui::Composer,
-    /// Ctrl+F open: what is being looked for, and the prompt it found.
+    /// Ctrl+F: the query and the prompt it found.
     pub(crate) history_search: Option<(&'a str, Option<&'a str>)>,
     pub(crate) mode: PermissionMode,
     pub(crate) is_goal_active: bool,
-    /// Live `/goal` progress against its budgets, when one is running.
     pub(crate) goal_progress: Option<&'a str>,
     pub(crate) tip: Option<&'a str>,
     pub(crate) tip_animated: Option<&'a str>,
     pub(crate) tip_lines: Option<&'a [String]>,
-    /// Token tracker to dynamically compute turn stats fitting into available space without truncating tips.
     pub(crate) token_tracker: Option<&'a TokenTracker>,
     pub(crate) reasoning_expand: ReasoningExpansion,
     pub(crate) tick_n: usize,
     pub(crate) running: bool,
-    /// Seconds since turn start (for the working status line).
+    /// For the working status line.
     pub(crate) elapsed_secs: u64,
-    /// 80 ms steps of wall clock since the turn began — the mascot's face
-    /// animates on this rather than on repaints, which are event-driven.
+    /// 80 ms steps of wall clock since the turn began; repaints are event-driven.
     pub(crate) face_phase: usize,
-    /// Number of tokens generated strictly by the model in this turn.
     pub(crate) model_tokens: usize,
-    /// Speed of token generation over a rolling 3-second window (tg_3s).
+    /// Rolling 3-second window (tg_3s).
     pub(crate) tokens_per_sec: f64,
-    /// Prompt cache reuse ratio (f_keep) from latest turn if reported.
+    /// Prompt cache reuse from the latest turn, if reported.
     pub(crate) f_keep: Option<f64>,
     pub(crate) confirm_selection: Decision,
     pub(crate) question_state: Option<&'a QuestionUiState>,
@@ -86,24 +74,20 @@ pub(crate) struct FrameState<'a> {
     pub(crate) ttft_display: Option<&'a str>,
     pub(crate) background: Option<&'a str>,
     pub(crate) background_style: NoticeStyle,
-    /// What the running turn is doing, for the composer line.
     pub(crate) turn_phase: Option<&'a TurnPhase>,
     pub(crate) attachments: &'a [String],
-    /// A release-channel switch waiting for a yes or no.
     pub(crate) channel_prompt: Option<&'a str>,
-    /// Title of the yes-or-no card `channel_prompt` fills.
+    /// Title of the card `channel_prompt` fills.
     pub(crate) prompt_title: &'a str,
     pub(crate) context_warn_threshold: usize,
     pub(crate) pending_steers: &'a [String],
-    /// Recent generation speeds, oldest first, for the footer sparkline.
+    /// Oldest first, for the footer sparkline.
     pub(crate) speed_history: &'a [f64],
-    /// The composer border lit up by how the last turn ended: the colour,
-    /// and how far (0..=1) it has faded back.
+    /// The colour of how the last turn ended, and how far (0..=1) it has faded.
     pub(crate) composer_flash: Option<(Rgb, f32)>,
 }
 
-/// Which card stands in for the composer, to know when a new one opens and
-/// should unfold.
+/// To know when a new card opens and should unfold.
 #[derive(Clone, Copy, PartialEq)]
 enum CardKey {
     Composer,
@@ -113,9 +97,7 @@ enum CardKey {
     Overlay(std::mem::Discriminant<Overlay>),
 }
 
-/// How long a card takes to unfold.
 const UNFOLD_MS: u64 = 180;
-/// The resting colour of box borders.
 const BORDER: Rgb = Rgb(95, 90, 85);
 const BORDER_ESC: &str = "\x1b[38;2;95;90;85m";
 
@@ -135,8 +117,7 @@ impl Renderer {
         }
     }
 
-    /// Whether a card is still unfolding, so frames should come faster than
-    /// the idle tick.
+    /// While true, frames come faster than the idle tick.
     pub(crate) fn animating(&self) -> bool {
         self.card.0 != CardKey::Composer
             && anim::enabled()
@@ -175,7 +156,6 @@ impl Renderer {
         }
     }
 
-    /// Scroll back to the first line.
     pub(crate) fn scroll_to_top(&mut self) {
         self.scroll_up(self.max_scroll);
     }
@@ -209,8 +189,7 @@ pub(crate) fn format_status_left(
     face_phase: usize,
 ) -> String {
     if running {
-        // The welcome card is long gone by now, so this is where the mascot
-        // keeps the user company while the model works.
+        // The welcome card is gone by now; the mascot keeps the user company here.
         let face = format!(
             "\x1b[38;2;138;180;248m{}\x1b[0m ",
             flashagent_tui::thinking_face(face_phase)
@@ -220,11 +199,9 @@ pub(crate) fn format_status_left(
         } else {
             format!("\x1b[38;2;145;205;140m[{mode_label}]\x1b[0m")
         };
-        // During a goal the budget burn-down is the useful thing to watch;
-        // "Generating response..." says nothing a spinner does not.
+        // During a goal the budget burn-down is more useful than "Generating...".
         let activity = match (awaiting_user, goal_progress) {
-            // A turn stopped at an approval card is not generating anything;
-            // it is waiting for the person who has to answer it.
+            // Stopped at an approval card: waiting for the user, not generating.
             (true, _) => "\x1b[38;2;225;175;95mWaiting for your answer\x1b[0m".to_string(),
             (false, Some(p)) => format!("\x1b[38;2;168;199;250m{p}\x1b[0m"),
             (false, None) => "\x1b[38;2;168;199;250mGenerating response...\x1b[0m".to_string(),
@@ -265,9 +242,9 @@ impl Renderer {
         let toggled = self.prev_expansion != Some(st.reasoning_expand);
         self.prev_expansion = Some(st.reasoning_expand);
 
-        // On resize the scrollback already contains old-width lines; when the
-        // thinking mode flips or an existing notice is updated in place, settled
-        // reasoning was printed in the other form. Both need everything printed afresh.
+        // After a resize the scrollback has old-width lines; after a thinking-mode
+        // flip or an in-place notice update, settled lines are stale. Both reprint
+        // everything.
         let reprint_all = resized || toggled || self.needs_reprint;
         self.needs_reprint = false;
 
@@ -303,8 +280,8 @@ impl Renderer {
         } else {
             CardKey::Composer
         };
-        // A card waiting on the user breathes amber; the composer lights up
-        // for a moment in the colour of how the last turn ended.
+        // A card waiting on the user breathes amber; after a turn the border briefly
+        // takes the colour of how it ended.
         let border_rgb = match card_key {
             CardKey::Approval | CardKey::Question => anim::pulse(t, 1800, BORDER, Rgb(225, 175, 95)),
             CardKey::Composer => st.composer_flash.map_or(BORDER, |(lit, faded)| lit.mix(BORDER, faded)),
@@ -329,9 +306,8 @@ impl Renderer {
                 format!("{border_color}╭─{title}{}╮{reset}", "─".repeat(dash_w)),
             ));
 
-            // The user is approving exactly this: show it whatever the JSON
-            // formatting, and never let model-supplied escape codes restyle
-            // or hide part of it.
+            // Shows exactly what is approved, and never lets model-supplied escape codes
+            // restyle or hide part of it.
             let args = flashagent_llm::effective_args(&req.args_json, &req.tool).unwrap_or_default();
             let field = |k: &str| args.get(k).and_then(|v| v.as_str()).map(card_safe);
             let label_row = |label: &str, value: &str| {
@@ -364,8 +340,7 @@ impl Renderer {
             }
 
             if let Some(ref diff) = req.diff {
-                // The file is already named on the target row; the six rows
-                // of preview are for the change itself.
+                // The file is named on the target row; the preview rows are for the change.
                 for line in diff.lines().filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ")).take(6) {
                     let (color, prefix) = if line.starts_with('+') {
                         ("\x1b[38;2;145;205;140m", "+")
@@ -408,9 +383,7 @@ impl Renderer {
         } else if let Some(prompt) = st.channel_prompt {
             let title = format!(" {} ", st.prompt_title);
             let title = title.as_str();
-            // Same treatment as an approval card: this replaces the binary
-            // under the user, so it is asked in the same place and with the
-            // same weight as anything else that cannot be undone by typing.
+            // Same weight as an approval card: this replaces the binary.
             let border_color = anim::pulse(t, 1800, Rgb(225, 175, 95), Rgb(250, 215, 150)).fg();
             let reset = "\x1b[0m";
             let dash_w = inner_w.saturating_sub(visible_width(title) + 1);
@@ -418,8 +391,7 @@ impl Renderer {
                 LineKind::System,
                 format!("{border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
             ));
-            // Word-aware wrapping: this is a sentence to read and decide on,
-            // not a command to inspect character by character.
+            // Word-wrapped: a sentence to read, not a command to inspect.
             for row in wrap_plain(prompt, inner_w.saturating_sub(3)) {
                 tail.push((
                     LineKind::System,
@@ -456,7 +428,7 @@ impl Renderer {
                 pad_box_row(&format!(" \x1b[1;38;2;240;235;225m{q_clipped}\x1b[0m"), width),
             ));
             if let Some(deadline) = req.deadline {
-                // During /goal the run will not wait forever; say how long.
+                // During /goal the question will not wait forever; say how long.
                 let left = deadline.saturating_duration_since(std::time::Instant::now()).as_secs();
                 tail.push((
                     LineKind::System,
@@ -567,13 +539,12 @@ impl Renderer {
             input_line_idx = tail.len().saturating_sub(1);
             custom_cursor_col = Some(0);
         } else {
-            // Standard input box
             tail.push((
                 LineKind::System,
                 format!("{border_color}╭{}╮{reset}", "─".repeat(inner_w)),
             ));
 
-            // What is going with the message, above the line it goes with.
+            // Attachments go above the line they go with.
             if !st.attachments.is_empty() {
                 let listed = st.attachments.join("  ");
                 let row = format!(
@@ -582,7 +553,6 @@ impl Renderer {
                 tail.push((LineKind::System, pad_box_row(&row, width)));
             }
 
-            // Line 1: Input line with breathing prompt icon `❯` and placeholder if empty
             input_line_idx = tail.len();
             let cycle = if anim::enabled() { (st.tick_n % 28) as f32 / 28.0 } else { 0.25 };
             let phase = (cycle * std::f32::consts::PI * 2.0).sin() * 0.5 + 0.5;
@@ -591,7 +561,7 @@ impl Renderer {
             let b = (75.0 + phase * 40.0) as u8;
             let prompt_styled = format!("\x1b[1;38;2;{r};{g};{b}m❯\x1b[0m");
             let input_rows: Vec<String> = if let Some((query, found)) = st.history_search {
-                // What was found stands in the prompt, the search above it.
+                // The found prompt stands in the input, the search above it.
                 let found_line = found.map_or_else(
                     || "\x1b[38;2;200;120;110mno match\x1b[0m".to_string(),
                     |f| format!("\x1b[38;2;155;160;175m{}\x1b[0m", f.lines().next().unwrap_or_default()),
@@ -620,7 +590,7 @@ impl Renderer {
                     };
                     format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
                 } else {
-                    // The long form is friendlier; the short one is what fits.
+                    // The long form when it fits.
                     let prompt_text = if width >= 60 {
                         "Ask FlashAgent to do anything..."
                     } else if width >= 40 {
@@ -631,9 +601,8 @@ impl Renderer {
                     format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
                 }]
             } else {
-                // Borders, " ❯ " and a cell for the cursor after the text.
-                // A long prompt grows the box to a third of the screen and
-                // then scrolls inside it, keeping the cursor's row in view.
+                // A long prompt grows the box to a third of the screen, then scrolls inside
+                // it keeping the cursor row in view.
                 let max_rows = (height as usize / 3).clamp(1, 10);
                 let layout = st.input.layout(width.saturating_sub(6).max(1), max_rows);
                 input_line_idx += layout.cursor_row;
@@ -659,21 +628,19 @@ impl Renderer {
                 tail.push((LineKind::User, pad_box_row(row, width)));
             }
 
-            // Bottom border of input box
             tail.push((
                 LineKind::System,
                 format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
             ));
         }
 
-        // The sides of a boxed card take the same colour as its top and bottom.
+        // The sides of a boxed card match its top and bottom.
         if border_rgb != BORDER && !matches!(card_key, CardKey::Overlay(_)) {
             for (_, row) in tail[card_start..].iter_mut() {
                 *row = row.replace(BORDER_ESC, &border_color);
             }
         }
-        // A card that just opened unfolds from its title down: its first rows,
-        // then its bottom edge, until all of it is there.
+        // A new card unfolds from its title down.
         if self.card.0 != card_key {
             self.card = (card_key, t);
         }
@@ -689,13 +656,11 @@ impl Renderer {
             }
         }
 
-        // Autocomplete popup under composer
         if let Some(ac) = autocomplete {
             tail.extend(ac.render(width));
         }
 
-        // 3-Line persistent footer under composer
-        // Line 1: Action hint / hotkeys
+        // Three footer lines. Line 1: hints.
         let left_hint = if let Some(toast) = st.copy_toast {
             format!("  \x1b[1;38;2;135;215;165m{toast}\x1b[0m")
         } else if st.history_search.is_some() {
@@ -704,16 +669,14 @@ impl Renderer {
         } else if gate.pending().is_some() {
             "  \x1b[38;2;135;130;125menter — allow · a — always · d / esc — deny\x1b[0m".to_string()
         } else if question_gate.pending().is_some() {
-            // The card lists its own keys, and they differ between a choice
-            // and a written answer.
+            // The card lists its own keys, which differ for a choice and a written answer.
             st.background.map(|text| format!("  {}", st.background_style.paint(text))).unwrap_or_default()
         } else if st.channel_prompt.is_some() && st.prompt_title == UNINSTALL_TITLE {
             "  \x1b[38;2;135;130;125my / enter — close and uninstall · n / esc — keep FlashAgent\x1b[0m".to_string()
         } else if st.channel_prompt.is_some() {
             "  \x1b[38;2;135;130;125my / enter — switch · n / esc — keep the current channel\x1b[0m".to_string()
         } else if overlay.is_some() {
-            // Every panel draws its own keys inside its box; saying them twice
-            // only pushes the box up. Something that turned up on its own
+            // Panels draw their own keys inside their box; only an unprompted notice
             // still gets the line.
             st.background.map(|text| format!("  {}", st.background_style.paint(text))).unwrap_or_default()
         } else if autocomplete.is_some() {
@@ -729,14 +692,12 @@ impl Renderer {
             } else {
                 String::new()
             };
-            // How the speed has moved over the last few seconds.
             let spark = if st.speed_history.len() >= 2 && st.speed_history.iter().any(|v| *v > 0.0) {
                 format!(" \x1b[38;2;138;180;248m{}\x1b[0m", anim::sparkline(st.speed_history))
             } else {
                 String::new()
             };
-            // Counters switched off are left out, not shown as zeroes: "0
-            // tokens" reads as a model that has stopped.
+            // Disabled counters are left out: "0 tokens" reads as a stalled model.
             let live = if st.token_tracker.is_some() {
                 format!(
                     "  {} \x1b[38;2;168;199;250mTokens - \x1b[1;38;2;235;240;250m{}\x1b[0m \x1b[38;2;194;231;255m({:.1}/s)\x1b[0m{spark}{cache_str}{ttft_str} \x1b[38;2;75;99;130m·\x1b[0m \x1b[38;2;155;165;180m{}s\x1b[0m",
@@ -748,10 +709,8 @@ impl Renderer {
             } else {
                 format!("  {} \x1b[38;2;155;165;180m{}s\x1b[0m", anim::spinner(t), st.elapsed_secs)
             };
-            // A turn is running, and something turned up on its own. Both
-            // belong on this line: the counters prove the model is alive, the
-            // notice is the thing the user did not ask for and must not miss.
-            // The keybinding tail is what gives way when they do not both fit.
+            // The counters show the model is alive and the notice must not be missed;
+            // the key hints give way when both do not fit.
             let tail_hint = "\x1b[38;2;135;130;125m· tab/f1-f5 menus · enter to steer · esc to interrupt\x1b[0m";
             match st.background {
                 Some(text) => {
@@ -763,7 +722,7 @@ impl Renderer {
                         format!("{live}{notice}")
                     }
                 }
-                // The longest hint that fits, never one cut mid-word.
+                // The longest hint that fits, never cut mid-word.
                 None => [tail_hint, "\x1b[38;2;135;130;125m· esc to interrupt\x1b[0m", ""]
                     .into_iter()
                     .map(|hint| if hint.is_empty() { live.clone() } else { format!("{live} {hint}") })
@@ -773,15 +732,13 @@ impl Renderer {
         } else if let Some(text) = st.background {
             format!("  {}", st.background_style.paint(text))
         } else if !st.input.is_empty() {
-            // Writing: the keys for writing, in the order they are wanted.
             let hints = plain_hints(
                 &["enter — send", "alt+enter — new line", "ctrl+w — delete word", "ctrl+f — history", "esc — clear"],
                 width.saturating_sub(2),
             );
             format!("  \x1b[38;2;135;130;125m{hints}\x1b[0m")
         } else {
-            // The longest list of shortcuts that fits: measured, since fixed
-            // column thresholds let the longer lists clip mid-word.
+            // Measured, since fixed column thresholds clipped the longer lists mid-word.
             const FOOTERS: [&str; 4] = [
                 "enter — send · tab — settings · f1 — context · f2 — verbose · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · ctrl+f — history · esc esc — quit",
                 "enter — send · tab — settings · f1 — context · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · esc esc — quit",
@@ -791,8 +748,7 @@ impl Renderer {
             if let Some(fits) = FOOTERS.iter().find(|f| visible_width(f) + 2 <= width) {
                 format!("  \x1b[38;2;135;130;125m{fits}\x1b[0m")
             } else {
-                // Below ~68 columns the list is assembled from what fits,
-                // so it ends on a word rather than on half a separator.
+                // Below ~68 columns, assembled from what fits so it ends on a word.
                 let hints = flashagent_tui::fit_parts(
                     &[
                         ("enter — send".into(), "enter — send".into()),
@@ -807,7 +763,7 @@ impl Renderer {
         };
         tail.push((LineKind::System, left_hint));
 
-        // Line 2: Dedicated Developer Tip across full terminal width (wraps to 2 lines in compact terminals)
+        // Line 2: the tip, on two lines in narrow terminals.
         if let Some(lines) = st.tip_lines {
             for line in lines {
                 let tip_row = clip_ansi(line, width.saturating_sub(2));
@@ -819,14 +775,12 @@ impl Renderer {
             tail.push((LineKind::System, tip_row));
         } else if let Some(tip_content) = st.tip {
             let avail1 = width.saturating_sub(8);
-            // A second row for the tip is a luxury of a tall window. In a
-            // short one those rows belong to the conversation.
+            // A second tip row only in a tall window.
             let room_for_two = height >= 20;
             if room_for_two && width >= 30 && tip_content.chars().count() > avail1 {
                 let (l1, l2) = flashagent_tui::tips::split_tip_at_word_boundary(tip_content, avail1);
                 let row1 = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{l1}\x1b[0m");
-                // The split gives two lines; a tip that needs three loses the
-                // rest, so end the second one on a word rather than inside it.
+                // A tip needing three lines ends the second on a word.
                 let room = width.saturating_sub(9);
                 let l2 = if l2.chars().count() > room {
                     let head: String = l2.chars().take(room.saturating_sub(1)).collect();
@@ -848,9 +802,8 @@ impl Renderer {
             }
         }
 
-        // Line 3: Turn telemetry & performance metrics on the left, context gauge on the right
-        // The mode is what decides what the agent may do, so it is never cut:
-        // the gauge shrinks first, down to just the percentage.
+        // Line 3: turn stats on the left, context gauge on the right. The mode is
+        // never cut; the gauge shrinks first, down to the percentage.
         let mode_room = 2 + visible_width(st.mode.label()) + 2 + 1;
         let gauge_base = [
             context_usage.format_compact_gauge(10),
@@ -874,7 +827,7 @@ impl Renderer {
         } else {
             ""
         };
-        // The turn stats give way to the verbose tag rather than clipping it.
+        // The turn stats give way before the verbose tag is clipped.
         let budget = width.saturating_sub(gauge_vis + 4 + visible_width(expand_status));
 
         let left_telemetry = format_status_left(
@@ -894,8 +847,7 @@ impl Renderer {
             let pad = " ".repeat(width.saturating_sub(left_vis + gauge_vis + 1));
             format!("{left_telemetry}{pad}{gauge_str}")
         } else {
-            // Whole parts go first, from the end ("· Ready"), so what stays
-            // is never half a word; only one part left alone is clipped.
+            // Whole parts go first, from the end; only a lone remaining part is clipped.
             let clip_budget = width.saturating_sub(gauge_vis + 3);
             let mut left = left_telemetry.clone();
             while visible_width(&left) > clip_budget {
@@ -914,7 +866,6 @@ impl Renderer {
         self.max_scroll = (settled.len() + tail.len()).saturating_sub(view_h);
         self.scroll_offset = self.scroll_offset.min(self.max_scroll);
 
-        // When scroll_offset > 0, render shifted history view
         if self.scroll_offset > 0 {
             let total_len = settled.len() + tail.len();
             let end = total_len.saturating_sub(self.scroll_offset);
@@ -958,16 +909,15 @@ impl Renderer {
 
         let mut out = String::from(SYNC_BEGIN);
         if reprint_all {
-            // Full repaint: home + clear, then reprint including settled.
-            // When on the initial welcome screen, also purge scrollback (\x1b[3J) so
-            // terminal emulator reflow lines from window resize are wiped completely.
+            // Full repaint. On the welcome screen also purge scrollback (\x1b[3J), so
+            // lines the terminal reflowed on resize are wiped.
             if !chat.has_user_message() {
                 out.push_str("\x1b[3J\x1b[H\x1b[2J");
             } else {
                 out.push_str("\x1b[H\x1b[2J");
             }
         } else {
-            // Move cursor up into the top of the previous tail, erase down.
+            // Cursor up to the top of the previous tail, erase down.
             if self.prev_cursor_tail_offset > 0 {
                 out.push_str(&format!("\x1b[{}F", self.prev_cursor_tail_offset));
             } else {
@@ -982,8 +932,8 @@ impl Renderer {
                 out.push_str("\r\n");
             }
             first = false;
-            // HARD CAP: any tail line longer than the terminal width would
-            // wrap physically and desync tail_height (the duplication bug).
+            // A tail line wider than the terminal wraps physically and desyncs
+            // tail_height (the duplication bug).
             let clipped = clip_ansi(text, width);
             let prefix = crossterm::style::SetForegroundColor(color(*kind)).to_string();
             out.push_str(&prefix);
@@ -997,7 +947,7 @@ impl Renderer {
             }
             self.printed_settled = settled.len();
         } else if settled.len() > self.printed_settled {
-            // Newly frozen lines print once; they never repaint.
+            // Newly frozen lines print once and never repaint.
             for (k, t) in &settled[self.printed_settled..] {
                 print_line(&mut out, k, t);
             }
@@ -1011,7 +961,7 @@ impl Renderer {
 
         let lift_up = (tail.len() - 1 - input_line_idx) as u16;
         let cursor_col = custom_cursor_col.unwrap_or_else(|| ((st.input.chars().count() + 4) as u16).min(width.saturating_sub(2) as u16));
-        // Park the cursor on the input line; the frame ends there.
+        // Park the cursor on the input line.
         if lift_up > 0 {
             out.push_str(&format!("\x1b[{lift_up}A"));
         }
@@ -1032,11 +982,9 @@ impl Renderer {
 }
 
 impl App {
-    /// Paint one frame of the app as it stands.
     pub(crate) fn draw(&mut self, cx: &LoopCtx<'_>, autocomplete: Option<&AutocompletePopup>) {
         anim::set_enabled(self.config.animations);
-        // Taken from the config on every frame, so that leaving the settings
-        // screen without saving puts the old theme back by itself.
+        // Read every frame, so leaving settings without saving restores the theme.
         theme::set(self.config.color_theme);
         let composer_flash = self.composer_flash();
         let channel_prompt: Option<String> = if self.uninstall_confirm {
@@ -1083,7 +1031,7 @@ impl App {
                 tick_n: self.tick_n,
                 running: self.running,
                 elapsed_secs: turn_clock(1000) as u64,
-                // The face is company, not the sign of work: the spinner is.
+                // The face is company; the spinner is the sign of work.
                 face_phase: if config.animations { turn_clock(80) } else { 0 },
                 model_tokens: if config.show_tokens { self.token_tracker.total_model_tokens } else { 0 },
                 tokens_per_sec: if config.show_tokens { tg_speed } else { 0.0 },
@@ -1109,13 +1057,11 @@ impl App {
         );
     }
 
-    /// Whether frames should come faster than the idle tick right now.
     pub(crate) fn animating(&self) -> bool {
         self.renderer.animating() || self.composer_flash().is_some()
     }
 
-    /// The composer border's flash for the turn that just ended, while it
-    /// lasts.
+    /// While it lasts.
     fn composer_flash(&self) -> Option<(Rgb, f32)> {
         const FLASH_MS: u64 = 1400;
         let (colour, started) = self.turn_flash?;
@@ -1123,7 +1069,6 @@ impl App {
         (faded < 1.0).then_some((colour, faded))
     }
 
-    /// Light the composer border in the colour of how a turn ended.
     pub(crate) fn flash_turn_end(&mut self, reason: Option<DoneReason>) {
         let colour = match reason {
             Some(DoneReason::Completed) => Rgb(120, 220, 140),
@@ -1133,7 +1078,7 @@ impl App {
         self.turn_flash = Some((colour, anim::now_ms()));
     }
 
-    /// Take a speed sample for the footer sparkline, a few times a second.
+    /// A few times a second.
     pub(crate) fn sample_speed(&mut self) {
         const EVERY_MS: u64 = 250;
         const KEEP: usize = 24;
@@ -1149,8 +1094,7 @@ impl App {
     }
 }
 
-/// Unstyled hints joined with " · ", dropping from the middle until they fit
-/// and keeping the last one, which is the way out.
+/// Drops from the middle, keeping the last hint, which is the way out.
 fn plain_hints(parts: &[&str], width: usize) -> String {
     let pairs: Vec<(String, String)> = parts.iter().map(|p| (p.to_string(), p.to_string())).collect();
     flashagent_tui::fit_hints(&pairs, " · ", width)

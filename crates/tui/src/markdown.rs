@@ -1,9 +1,7 @@
 use super::*;
 
-/// Inline markdown for terminal: `**bold**` → bold, `` `code` `` → colored.
-/// Line-level, no full parser — good enough for chat output.
+/// `**bold**` and `` `code` `` only; line-level, no full parser.
 pub fn md(line: &str) -> String {
-    // Fast path: no markdown markers.
     if !line.contains("**") && !line.contains('`') {
         return line.to_string();
     }
@@ -85,11 +83,8 @@ pub(crate) fn parse_list_marker(trimmed: &str, level: usize) -> Option<(ListMark
     None
 }
 
-/// Formats an assistant's markdown response for the terminal:
-/// - Headings (`#`, `##`, `###`) rendered as styled section titles without raw hashes
-/// - Tables (`| col1 | col2 |` + delimiter) rendered with unicode box borders and aligned cells
-/// - Lists (`- `, `* `, `1. `, `1) `, checkboxes) rendered with bullets and hanging indentation
-/// - Inline bold (`**bold**`) and inline code (`` `code` ``) styled with ANSI colors
+/// Headings, tables with box borders, lists with hanging indent and
+/// checkboxes, inline bold and code.
 pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
     let width = width.max(20);
     let mut out = Vec::new();
@@ -125,7 +120,6 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
         let line = lines[i];
         let trimmed = line.trim();
 
-        // 1. Code blocks: ```
         if trimmed.starts_with("```") {
             in_code_block = !in_code_block;
             if in_code_block {
@@ -176,7 +170,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
             continue;
         }
 
-        // 2. Table detection: header row followed by delimiter row
+        // A header row followed by a delimiter row.
         if is_table_row(line) && i + 1 < lines.len() && is_table_delimiter(lines[i + 1]) {
             let header_row = parse_cells(line);
             let mut data_rows = Vec::new();
@@ -201,7 +195,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                     }
                 }
 
-                // Constrain table to fit within terminal width if necessary
+                // Shrink the table to the terminal width if needed.
                 let border_chars_count = 3 * num_cols + 1;
                 let total_content_w: usize = col_widths.iter().sum();
                 let total_w = total_content_w + border_chars_count;
@@ -228,7 +222,6 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                     out.push(String::new());
                 }
 
-                // Top border: ╭─...─┬─...─╮
                 let mut top_border = format!("{border_color}╭");
                 for (c, &w) in col_widths.iter().enumerate() {
                     top_border.push_str(&"─".repeat(w + 2));
@@ -241,7 +234,6 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 top_border.push_str(reset);
                 out.push(top_border);
 
-                // Header row: │ col1 │ col2 │
                 let mut header_str = format!("{border_color}│{reset}");
                 for (c, &w) in col_widths.iter().enumerate() {
                     let raw_cell = header_row.get(c).map(|s| s.as_str()).unwrap_or("");
@@ -257,7 +249,6 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 }
                 out.push(header_str);
 
-                // Middle separator: ├─...─┼─...─┤
                 let mut mid_border = format!("{border_color}├");
                 for (c, &w) in col_widths.iter().enumerate() {
                     mid_border.push_str(&"─".repeat(w + 2));
@@ -270,7 +261,6 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 mid_border.push_str(reset);
                 out.push(mid_border);
 
-                // Data rows
                 for row in data_rows {
                     let mut row_str = format!("{border_color}│{reset}");
                     for (c, &w) in col_widths.iter().enumerate() {
@@ -288,7 +278,6 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                     out.push(row_str);
                 }
 
-                // Bottom border: ╰─...─┴─...─╯
                 let mut bot_border = format!("{border_color}╰");
                 for (c, &w) in col_widths.iter().enumerate() {
                     bot_border.push_str(&"─".repeat(w + 2));
@@ -304,7 +293,6 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
             continue;
         }
 
-        // 3. Headings: `# `, `## `, `### `, `#### `
         if trimmed.starts_with('#') {
             let hashes = trimmed.chars().take_while(|&c| c == '#').count();
             if (1..=4).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
@@ -318,10 +306,8 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                     3 => ("\x1b[1;38;2;225;230;240m", '▸'),
                     _ => ("\x1b[38;2;180;185;200m", '▪'),
                 };
-                // A heading longer than the terminal used to be printed
-                // whole and wrapped by the terminal itself, which this
-                // renderer cannot see: it would then erase the wrong rows on
-                // the next repaint.
+                // Wrapped here: a line the terminal wraps itself is invisible to the renderer,
+                // which then erases the wrong rows.
                 for chunk in wrap_styled(&format!("{mark} {}", md(title)), width) {
                     out.push(format!("{colour}{chunk}\x1b[0m"));
                 }
@@ -330,7 +316,6 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
             }
         }
 
-        // 4. List items: bullet lists, task checkboxes, and numbered lists
         let indent_spaces: usize = line
             .chars()
             .take_while(|c| c.is_whitespace())
@@ -341,7 +326,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
         if let Some((marker, offset)) = parse_list_marker(trimmed, level) {
             let mut raw_content = trimmed[offset..].trim().to_string();
 
-            // Collect subsequent continuation lines belonging to this item
+            // Continuation lines belonging to this item.
             let mut next_i = i + 1;
             while next_i < lines.len() {
                 let n_line = lines[next_i];
@@ -371,7 +356,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
             }
             i = next_i - 1; // will be incremented at end of loop
 
-            // Task list checkboxes: `[ ] `, `[x] `, `[X] `
+            // `[ ] `, `[x] `, `[X] `
             let (check_str, content_clean, check_vis) = if let Some(stripped) = raw_content.strip_prefix("[ ] ") {
                 ("\x1b[38;2;140;145;160m☐\x1b[0m ", stripped, 2)
             } else if let Some(stripped) = raw_content.strip_prefix("[x] ").or_else(|| raw_content.strip_prefix("[X] ")) {
@@ -415,7 +400,6 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
             continue;
         }
 
-        // 5. Regular paragraphs
         if trimmed.is_empty() {
             out.push(String::new());
         } else {
@@ -434,7 +418,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// What a person sees: the text with the colours taken off.
+    /// The text without colours.
     fn plain(lines: &[String]) -> Vec<String> {
         lines.iter().map(|l| strip_ansi(l)).collect()
     }
@@ -451,15 +435,14 @@ mod tests {
         assert_eq!(strip_ansi(&bold), "a strong word");
         let code = md("call `main()` now");
         assert_eq!(strip_ansi(&code), "call main() now");
-        // A marker that is never closed is text, not the start of styling.
+        // An unclosed marker is text.
         assert_eq!(md("2 ** 3 is eight"), "2 ** 3 is eight");
         assert_eq!(md("an unclosed `tick"), "an unclosed `tick");
     }
 
     #[test]
     fn nothing_is_ever_wider_than_the_terminal() {
-        // The renderer's one hard promise: a line wider than the terminal
-        // wraps physically and throws the whole frame out of step.
+        // A line wider than the terminal wraps physically and throws the frame out of step.
         let document = "\
 # A heading that is quite long and keeps going for a while
 Some running text that is certainly longer than a narrow terminal would like to show.
@@ -506,7 +489,6 @@ https://example.com/a/very/long/url/that/cannot/be/broken/anywhere/at/all/really
         for title in ["One", "Two", "Three", "Four"] {
             assert!(text.contains(title), "{title} is missing: {text}");
         }
-        // Four levels, four different marks.
         let marks: Vec<char> = out
             .iter()
             .filter_map(|l| l.trim().chars().next())
@@ -566,8 +548,7 @@ https://example.com/a/very/long/url/that/cannot/be/broken/anywhere/at/all/really
 
     #[test]
     fn writing_that_is_not_english_is_measured_by_what_it_takes_on_screen() {
-        // Cyrillic is one cell per letter; CJK is two. Measuring in bytes
-        // would wrap these lines in the wrong place.
+        // Cyrillic is one cell per letter, CJK two; byte widths would wrap wrongly.
         for text in ["Проверка переноса русского текста в узком окне терминала", "这是一段中文文本用来测试换行"] {
             for width in [20usize, 40] {
                 for line in render(text, width) {

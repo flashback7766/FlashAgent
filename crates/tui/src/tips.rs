@@ -1,7 +1,5 @@
-//! Quick tips pool for FlashAgent TUI.
-//! Contains 2,000 concise, practical, non-repeating developer tips randomly displayed in the UI.
+//! Tips shown in the footer with a typewriter animation.
 
-/// Static pool of 2,000 developer tips across shortcuts, workflows, tools, git, Rust, Linux, and architecture.
 pub static TIPS_POOL: &[&str] = &[
     "Tab on an empty prompt opens Settings; Shift+Tab cycles the permission mode.",
     "F1 shows where the context window is going, token by token.",
@@ -57,20 +55,14 @@ fn shuffle_deck(deck: &mut [usize], seed: &mut u64) {
     }
 }
 
-/// Lifecycle phases for the animated tip typewriter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TipPhase {
-    /// Progressively revealing characters with active cursor.
     Typing,
-    /// Holding full tip text with blinking cursor for 10 seconds.
     Holding,
-    /// Progressively deleting characters with active cursor.
     Erasing,
-    /// Brief pause before next tip starts typing.
     Pause,
 }
 
-/// Typewriter animator for rotating developer tips in the footer.
 #[derive(Debug, Clone)]
 pub struct TipAnimator {
     pub tip_text: &'static str,
@@ -119,10 +111,7 @@ impl TipAnimator {
         }
     }
 
-    /// Advance typewriter animation state by one tick (80ms).
-    ///
-    /// With motion off a tip is not typed or erased: it is there whole for
-    /// its time, then the next one is.
+    /// One tick is 80 ms. With motion off a tip appears whole, then the next one.
     pub fn tick(&mut self) {
         if !crate::anim::enabled() {
             match self.phase {
@@ -137,7 +126,7 @@ impl TipAnimator {
         }
         match self.phase {
             TipPhase::Typing => {
-                // Type ultra-fast (4x faster): 8 characters per 80ms tick (~100 chars/sec)
+                // 8 characters per tick, ~100 chars/sec.
                 self.char_count = (self.char_count + 8).min(self.total_chars);
                 if self.char_count >= self.total_chars {
                     self.phase = TipPhase::Holding;
@@ -152,7 +141,7 @@ impl TipAnimator {
                 }
             }
             TipPhase::Erasing => {
-                // Erase ultra-fast (4x faster): 12 characters per 80ms tick (~150 chars/sec)
+                // 12 characters per tick, ~150 chars/sec.
                 self.char_count = self.char_count.saturating_sub(12);
                 if self.char_count == 0 {
                     self.phase = TipPhase::Pause;
@@ -181,7 +170,7 @@ impl TipAnimator {
         }
     }
 
-    /// Returns currently visible substring and cursor visibility.
+    /// Visible text and cursor visibility.
     pub fn render_state(&self, tick_n: usize) -> (String, bool) {
         let visible: String = self.tip_text.chars().take(self.char_count).collect();
         let caret = match self.phase {
@@ -191,7 +180,6 @@ impl TipAnimator {
         (visible, caret)
     }
 
-    /// Renders the animated tip text with blinking cursor for terminal display.
     pub fn render_line(&self, tick_n: usize, max_w: usize) -> String {
         let (visible, caret_on) = self.render_state(tick_n);
         let clipped = if max_w > 1 {
@@ -212,10 +200,8 @@ impl TipAnimator {
         format!("\x1b[38;2;175;170;160m{clipped}\x1b[0m{caret}")
     }
 
-    /// Renders the animated tip lines with typewriter effect.
-    /// In compact terminals where the tip exceeds a single line, wraps onto a second line.
-    /// The tip as at most `max_lines` rows. A second row is a luxury of a
-    /// tall window; in a short one those rows belong to the conversation.
+    /// At most `max_lines` rows: extra rows in a short window belong to the
+    /// conversation.
     pub fn render_lines(&self, tick_n: usize, width: usize, max_lines: usize) -> Vec<String> {
         let avail1 = width.saturating_sub(8); // "  Tip: " is 7 chars + 1 char margin
         let avail2 = width.saturating_sub(8); // "       " is 7 chars indent + 1 char margin
@@ -241,8 +227,7 @@ impl TipAnimator {
             let l2_start_char = self.tip_text.chars().count().saturating_sub(line2_full.chars().count());
             let l2_typed_chars = self.char_count.saturating_sub(l2_start_char);
             let typed2: String = line2_full.chars().take(l2_typed_chars).collect();
-            // A tip longer than two lines used to lose the rest mid-word
-            // ("...to configur"). Cut at a word instead, and say so.
+            // Cut at a word and marked, not mid-word ("...to configur").
             let clipped2 = if typed2.chars().count() > avail2 {
                 let room = avail2.saturating_sub(1);
                 let head: String = typed2.chars().take(room).collect();
@@ -262,7 +247,7 @@ impl TipAnimator {
     }
 }
 
-/// Split tip text at a word boundary so that line 1 has at most `budget1` visible chars.
+/// Line 1 gets at most `budget1` visible chars.
 pub fn split_tip_at_word_boundary(text: &str, budget1: usize) -> (&str, &str) {
     if text.chars().count() <= budget1 {
         return (text, "");
@@ -295,9 +280,7 @@ mod tests {
 
     #[test]
     fn every_tip_is_about_something_that_exists() {
-        // The old pool held two thousand tips, most of them general
-        // programming trivia, and dozens named commands FlashAgent does not
-        // have. A tip that sends someone looking for /quit is worse than no tip.
+        // A tip naming a command FlashAgent does not have (/quit) is worse than none.
         let commands: std::collections::HashSet<String> = crate::autocomplete::builtin_commands()
             .into_iter()
             .map(|c| c.trigger.split_whitespace().next().unwrap_or("").to_string())
@@ -325,7 +308,6 @@ mod tests {
         assert_eq!(anim.phase, TipPhase::Typing);
         assert_eq!(anim.char_count, 0);
 
-        // Advance typing phase
         for _ in 0..anim.total_chars {
             if anim.phase != TipPhase::Typing {
                 break;
@@ -335,13 +317,11 @@ mod tests {
         assert_eq!(anim.phase, TipPhase::Holding);
         assert_eq!(anim.char_count, anim.total_chars);
 
-        // Advance holding phase (125 ticks)
         for _ in 0..126 {
             anim.tick();
         }
         assert_eq!(anim.phase, TipPhase::Erasing);
 
-        // Advance erasing phase
         for _ in 0..anim.total_chars {
             if anim.phase != TipPhase::Erasing {
                 break;
@@ -350,7 +330,6 @@ mod tests {
         }
         assert_eq!(anim.phase, TipPhase::Pause);
 
-        // Advance pause
         for _ in 0..5 {
             anim.tick();
         }
@@ -366,8 +345,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         seen.insert(anim.tip_text);
 
-        // A shuffled deck shows every tip once before any repeats; that is
-        // the property, whatever the size of the pool.
+        // A shuffled deck shows every tip once before any repeats.
         for _ in 1..TIPS_POOL.len() {
             anim.phase = TipPhase::Pause;
             anim.pause_ticks = 0;
@@ -394,13 +372,10 @@ mod tests {
         assert!(l1.chars().count() <= 50);
         assert!(!l1.is_empty());
         assert!(!l2.is_empty());
-        // Verify no space at start of line 2
         assert!(!l2.starts_with(' '));
-        // Verify joined content matches original
         let rejoined = format!("{l1} {l2}");
         assert_eq!(rejoined, long);
 
-        // Test without any spaces
         let no_spaces = "Supercalifragilisticexpialidocious";
         let (l1, l2) = split_tip_at_word_boundary(no_spaces, 10);
         assert_eq!(l1, "Supercalif");
@@ -414,23 +389,19 @@ mod tests {
         anim.total_chars = anim.tip_text.chars().count();
         anim.phase = TipPhase::Typing;
 
-        // Wide terminal: fits on 1 line
         let lines_wide = anim.render_lines(0, 160, 2);
         assert_eq!(lines_wide.len(), 1);
         assert!(lines_wide[0].contains("Tip:"));
 
-        // Compact terminal (e.g. 70 columns): exceeds 1 line
-        // When typing character 0: line 1 only
+        // 70 columns: the tip needs two lines once typed out.
         anim.char_count = 0;
         let lines_c0 = anim.render_lines(0, 70, 2);
         assert_eq!(lines_c0.len(), 1);
 
-        // When typing line 1: still 1 line
         anim.char_count = 20;
         let lines_c20 = anim.render_lines(0, 70, 2);
         assert_eq!(lines_c20.len(), 1);
 
-        // When all characters are typed (holding phase): spans 2 lines
         anim.char_count = anim.total_chars;
         anim.phase = TipPhase::Holding;
         let lines_holding = anim.render_lines(0, 70, 2);
@@ -438,7 +409,7 @@ mod tests {
         assert!(lines_holding[0].contains("Tip:"));
         assert!(lines_holding[1].starts_with("       ")); // 7 space indent
 
-        // When erasing: line 2 erases first
+        // Line 2 erases first.
         anim.phase = TipPhase::Erasing;
         anim.char_count = 20; // erased down into line 1
         let lines_erasing = anim.render_lines(0, 70, 2);

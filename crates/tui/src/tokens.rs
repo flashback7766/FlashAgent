@@ -1,8 +1,7 @@
 use super::*;
 
-/// Tracks tokens generated strictly by the model in the current turn and
-/// calculates generation speeds (tg and tg_3s), prompt tokens, prefill speed / TTFT,
-/// and speculative decoding stats (MTP).
+/// Tokens the model generated this turn, generation speed (tg, tg_3s), prompt
+/// tokens, prefill speed / TTFT and MTP stats.
 pub(crate) struct TokenTracker {
     pub(crate) model: String,
     pub(crate) total_model_tokens: usize,
@@ -19,30 +18,25 @@ pub(crate) struct TokenTracker {
     pub(crate) last_prefill_speed: Option<f64>,
     pub(crate) prefill_tracker: PrefillTracker,
     pub(crate) is_running: bool,
-    /// Prompt tokens over every model call of this turn (a turn with tool
-    /// calls makes several), and how many of them the server said it served
-    /// from its prompt cache.
+    /// Summed over every model call of the turn, with the cached share the server
+    /// reported.
     pub(crate) turn_prompt: i64,
     pub(crate) turn_cached: i64,
     pub(crate) turn_calls: u32,
     pub(crate) cache_reported: bool,
     pub(crate) total_turns: usize,
-    /// The backend is LM Studio on this machine. It reports no cache figure,
-    /// but its own server log says how many tokens each call really processed.
+    /// LM Studio reports no cache figure, but its server log shows what each call
+    /// really processed.
     pub(crate) lm_studio_local: bool,
     lm_studio_log: Option<(std::path::PathBuf, u64)>,
 }
 
-/// Where this turn's cache figure came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CacheSource {
-    /// The API's own usage numbers.
     Reported,
-    /// LM Studio's server log on this machine.
     ServerLog,
 }
 
-/// How much of a turn's prompt was served from the server's cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TurnCache {
     pub(crate) prompt: i64,
@@ -56,8 +50,7 @@ impl TurnCache {
     }
 }
 
-/// Tokens LM Studio (llama.cpp underneath) says it actually processed, summed
-/// over the `prompt eval time = ... / N tokens` lines in `log`.
+/// Summed over `prompt eval time = ... / N tokens` lines.
 pub(crate) fn evaluated_tokens_in_log(log: &str) -> i64 {
     log.lines()
         .filter(|l| l.contains("prompt eval time ="))
@@ -68,7 +61,7 @@ pub(crate) fn evaluated_tokens_in_log(log: &str) -> i64 {
         .sum()
 }
 
-/// The newest LM Studio server log and how long it is right now.
+/// The newest log file and its current length.
 fn lm_studio_log_mark() -> Option<(std::path::PathBuf, u64)> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
     let root = std::path::PathBuf::from(home).join(".lmstudio").join("server-logs");
@@ -126,9 +119,8 @@ impl TokenTracker {
         }
     }
 
-    /// This turn's cache figure, when the server gave one away: in its usage
-    /// numbers, or (LM Studio on this machine) in its log. `None` rather than
-    /// a guess when neither did.
+    /// From usage numbers or, for local LM Studio, its log. `None` rather than a
+    /// guess when neither has it.
     pub(crate) fn turn_cache(&self) -> Option<TurnCache> {
         if self.turn_prompt <= 0 {
             return None;
@@ -140,8 +132,8 @@ impl TokenTracker {
         let bytes = std::fs::read(path).ok()?;
         let fresh = bytes.get(*offset as usize..)?;
         let evaluated = evaluated_tokens_in_log(&String::from_utf8_lossy(fresh));
-        // Nothing logged means the log is not this server's: no figure, not 100%.
-        // More processed than sent means someone else used the server too.
+        // Nothing logged: not this server's log. More processed than sent: another
+        // client used the server too.
         if evaluated <= 0 || evaluated > self.turn_prompt {
             return None;
         }
@@ -339,7 +331,7 @@ impl TokenTracker {
             }
         }
 
-        // Cache hit: On the very first request, if cache hit is 0%, do not show it at all.
+        // A 0% hit on the very first request is not shown.
         let cache_part = match self.turn_cache() {
             Some(cache) => {
                 let pct = cache.hit_percent();
@@ -427,7 +419,7 @@ impl TokenTracker {
             return Some(joined);
         }
 
-        // If joined exceeds budget, try without verbose prefill speed:
+        // Over budget: drop the verbose prefill speed.
         let mut trimmed_parts = Vec::new();
         if prompt_val > 0 && budget >= 35 {
             let p_str = flashagent_core::ContextUsage::format_used_tokens(prompt_val);
@@ -456,7 +448,7 @@ impl TokenTracker {
             return Some(trimmed_joined);
         }
 
-        // Minimal fallback for very narrow viewports
+        // Very narrow terminals.
         let mut fallback_parts = Vec::new();
         if let Some(ttft) = self.last_ttft {
             fallback_parts.push(format!("\x1b[38;2;120;220;140m{:.2}s\x1b[0m", ttft.as_secs_f64()));
@@ -581,7 +573,7 @@ mod turn_cache_tests {
         let cache = t.turn_cache().expect("the log has this turn's figure");
         assert_eq!((cache.cached, cache.source), (5880, CacheSource::ServerLog), "lines from before the turn are not counted");
 
-        // A log that did not grow is not this server's: no figure at all.
+        // A log that did not grow is not this server's.
         let mut quiet = TokenTracker::new("m".into());
         quiet.on_turn_start("m".into(), 0);
         let len = std::fs::metadata(&path).unwrap().len();
@@ -593,7 +585,6 @@ mod turn_cache_tests {
     #[test]
     fn format_stats_width_omits_cache_hit_on_first_turn_zero() {
         let mut t = TokenTracker::new("m".into());
-        // Turn 1: cold request with 0% cache hit
         t.on_turn_start("m".into(), 0);
         t.on_usage(&usage(6000, Some(0)));
         t.on_finished();
@@ -601,7 +592,7 @@ mod turn_cache_tests {
         let stats = plain(&t.format_stats_width(80).unwrap());
         assert!(!stats.contains("cache hit"), "turn 1 with 0% cache hit should omit cache hit completely: {stats}");
 
-        // Turn 2: cache hit is 0% -> must be shown on subsequent turns
+        // After the first turn 0% is shown.
         t.on_turn_start("m".into(), 0);
         t.on_usage(&usage(6000, Some(0)));
         t.on_finished();
@@ -609,7 +600,6 @@ mod turn_cache_tests {
         let stats2 = plain(&t.format_stats_width(80).unwrap());
         assert!(stats2.contains("cache hit 0%"), "turn 2 with 0% cache hit must show cache hit 0%: {stats2}");
 
-        // Turn 3: cache hit is 95% -> must be shown
         t.on_turn_start("m".into(), 0);
         t.on_usage(&usage(6000, Some(5700)));
         t.on_finished();
@@ -620,7 +610,6 @@ mod turn_cache_tests {
     #[test]
     fn format_stats_width_shows_cache_hit_on_first_turn_if_positive() {
         let mut t = TokenTracker::new("m".into());
-        // Turn 1: system prompt hit gives 50%
         t.on_turn_start("m".into(), 0);
         t.on_usage(&usage(6000, Some(3000)));
         t.on_finished();

@@ -1,14 +1,7 @@
-//! The text being written in the prompt box, and where the cursor is in it.
-//!
-//! The cursor moves by what a person sees as one character: "é" written
-//! as `e` plus a combining accent, a flag, or a family emoji joined with
-//! zero-width joiners is one step for the arrow keys and one Backspace, not
-//! two to eleven. Positions are byte offsets that always sit on such a
-//! boundary, so slicing the text at the cursor can never split a character.
-//!
-//! The text may hold newlines (Alt+Enter, Ctrl+J, a `\` before Enter, or a
-//! paste). [`Composer::layout`] folds it into rows for a box of a given
-//! width and says where the cursor lands among them.
+//! The prompt text and cursor. The cursor moves by grapheme: a combining
+//! accent, a flag or a ZWJ emoji family is one step and one Backspace.
+//! Positions are byte offsets on grapheme boundaries. [`Composer::layout`]
+//! folds the text, newlines included, into rows for a given width.
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -16,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Composer {
     text: String,
-    /// Byte offset into `text`, always on a grapheme boundary.
+    /// Always on a grapheme boundary.
     cursor: usize,
 }
 
@@ -58,16 +51,14 @@ impl PartialEq<&str> for Composer {
     }
 }
 
-/// Where the text and the cursor land in a box of some width.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerLayout {
-    /// The rows that are shown, top to bottom, without any styling.
+    /// Unstyled, top to bottom.
     pub rows: Vec<String>,
-    /// Which of `rows` the cursor is on.
     pub cursor_row: usize,
-    /// How many cells into its row the cursor is.
+    /// In cells.
     pub cursor_col: usize,
-    /// Rows of text above the first one shown, and below the last.
+    /// Rows above the first one shown, and below the last.
     pub hidden_above: usize,
     pub hidden_below: usize,
 }
@@ -81,19 +72,17 @@ impl Composer {
         &self.text
     }
 
-    /// Byte offset of the cursor.
     pub fn cursor(&self) -> usize {
         self.cursor
     }
 
-    /// Replace the whole text; the cursor goes to its end, where typing
-    /// would carry on.
+    /// The cursor goes to the end.
     pub fn set(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.cursor = self.text.len();
     }
 
-    /// The text, leaving the composer empty.
+    /// Leaves the composer empty.
     pub fn take(&mut self) -> String {
         self.cursor = 0;
         std::mem::take(&mut self.text)
@@ -114,9 +103,7 @@ impl Composer {
         self.snap();
     }
 
-    /// Insert pasted or typed text at the cursor. Line endings of any
-    /// platform become `\n`; a tab becomes four spaces, since a tab's width
-    /// depends on where it lands and the rows would not line up.
+    /// Line endings become `\n`; a tab becomes four spaces so rows line up.
     pub fn insert_str(&mut self, s: &str) {
         let clean = normalise(s);
         self.text.insert_str(self.cursor, &clean);
@@ -124,7 +111,7 @@ impl Composer {
         self.snap();
     }
 
-    /// Delete the character before the cursor. False when there was none.
+    /// False when there was nothing to delete.
     pub fn backspace(&mut self) -> bool {
         let Some(start) = self.prev_boundary(self.cursor) else { return false };
         self.text.replace_range(start..self.cursor, "");
@@ -132,7 +119,6 @@ impl Composer {
         true
     }
 
-    /// Delete the character under the cursor.
     pub fn delete(&mut self) -> bool {
         let Some(end) = self.next_boundary(self.cursor) else { return false };
         self.text.replace_range(self.cursor..end, "");
@@ -147,26 +133,22 @@ impl Composer {
         self.next_boundary(self.cursor).map(|p| self.cursor = p).is_some()
     }
 
-    /// To the start of the line the cursor is on; on a line's start already,
-    /// to the start of the text.
+    /// At a line's start already: to the start of the text.
     pub fn home(&mut self) {
         let line_start = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
         self.cursor = if self.cursor == line_start { 0 } else { line_start };
     }
 
-    /// To the end of the line the cursor is on; at a line's end already, to
-    /// the end of the text.
+    /// At a line's end already: to the end of the text.
     pub fn end(&mut self) {
         let line_end = self.text[self.cursor..].find('\n').map_or(self.text.len(), |i| self.cursor + i);
         self.cursor = if self.cursor == line_end { self.text.len() } else { line_end };
     }
 
-    /// Back to the start of the word before the cursor.
     pub fn word_left(&mut self) {
         self.cursor = self.word_start_before(self.cursor);
     }
 
-    /// On past the end of the word after the cursor.
     pub fn word_right(&mut self) {
         let rest = &self.text[self.cursor..];
         let mut seen_word = false;
@@ -182,7 +164,7 @@ impl Composer {
         self.cursor += end;
     }
 
-    /// Ctrl+W: delete the word before the cursor and the spaces after it.
+    /// Ctrl+W: the word before the cursor and the spaces after it.
     pub fn delete_word_before(&mut self) -> bool {
         let start = self.word_start_before(self.cursor);
         if start == self.cursor {
@@ -193,8 +175,7 @@ impl Composer {
         true
     }
 
-    /// Ctrl+K: delete from the cursor to the end of its line; at a line's
-    /// end, the newline, joining the next line on.
+    /// Ctrl+K: to the end of the line; at the end, the newline itself.
     pub fn delete_to_line_end(&mut self) -> bool {
         let end = match self.text[self.cursor..].find('\n') {
             Some(0) => self.cursor + 1,
@@ -208,8 +189,7 @@ impl Composer {
         true
     }
 
-    /// Up one line of text. False on the first line: that press is for the
-    /// prompt history instead.
+    /// False on the first line: that press goes to the prompt history.
     pub fn up(&mut self) -> bool {
         let line_start = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
         if line_start == 0 {
@@ -221,7 +201,7 @@ impl Composer {
         true
     }
 
-    /// Down one line of text. False on the last line.
+    /// False on the last line.
     pub fn down(&mut self) -> bool {
         let Some(nl) = self.text[self.cursor..].find('\n').map(|i| self.cursor + i) else { return false };
         let line_start = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
@@ -236,10 +216,8 @@ impl Composer {
         self.text.split('\n').count()
     }
 
-    /// Fold the text into rows at most `width` cells wide, and show at most
-    /// `max_rows` of them: the ones around the cursor, so it is always in
-    /// view. A line breaks between words when it can and inside one only
-    /// when the word alone is wider than the box.
+    /// Shows at most `max_rows` rows around the cursor. Breaks between words, and
+    /// inside a word only when it is wider than the box.
     pub fn layout(&self, width: usize, max_rows: usize) -> ComposerLayout {
         let width = width.max(1);
         let max_rows = max_rows.max(1);
@@ -264,8 +242,7 @@ impl Composer {
             }
             line_start = line_end + 1;
         }
-        // A cursor at the very end of a full row wraps to the next one,
-        // where the next character would go.
+        // A cursor at the end of a full row wraps to the next one.
         if cursor_at.1 >= width {
             cursor_at = (cursor_at.0 + 1, 0);
             if cursor_at.0 == rows.len() {
@@ -300,8 +277,7 @@ impl Composer {
             if seen_word && !is_word {
                 break;
             }
-            // A newline ends the search for spaces: Ctrl+W at a line's
-            // start takes the newline alone, not the line above as well.
+            // Ctrl+W at a line's start takes only the newline.
             if g == "\n" && !seen_word {
                 if start == at {
                     start = i;
@@ -314,7 +290,6 @@ impl Composer {
         start
     }
 
-    /// The offset in `start..end` closest to `col` cells in, on a boundary.
     fn offset_at_col(&self, start: usize, end: usize, col: usize) -> usize {
         let mut cells = 0;
         for (i, g) in self.text[start..end].grapheme_indices(true) {
@@ -327,8 +302,7 @@ impl Composer {
         end
     }
 
-    /// Keep the cursor on a boundary after an insert: a combining accent
-    /// typed after a letter joins it, and the cursor must not sit between.
+    /// A combining accent typed after a letter joins it; the cursor must not sit between.
     fn snap(&mut self) {
         if self.cursor >= self.text.len() {
             self.cursor = self.text.len();
@@ -349,8 +323,7 @@ fn normalise(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\r', "\n").replace('\t', "    ")
 }
 
-/// One line of text as rows of at most `width` cells: (byte offset in the
-/// line, row). Breaks after a space when there is one in the row.
+/// (byte offset in the line, row). Breaks after a space when possible.
 fn wrap_line(line: &str, width: usize) -> Vec<(usize, &str)> {
     let mut rows = Vec::new();
     let mut row_start = 0;
@@ -376,9 +349,7 @@ fn wrap_line(line: &str, width: usize) -> Vec<(usize, &str)> {
     rows
 }
 
-/// The newest entry of `history` that contains `query` (ignoring case),
-/// skipping the first `skip` matches — Ctrl+F again finds the one before.
-/// An index into `history`.
+/// Case-insensitive, skipping the first `skip` matches from the newest.
 pub fn search_history(history: &[String], query: &str, skip: usize) -> Option<usize> {
     let query = query.to_lowercase();
     history
@@ -390,13 +361,12 @@ pub fn search_history(history: &[String], query: &str, skip: usize) -> Option<us
         .map(|(i, _)| i)
 }
 
-/// Ctrl+F in the prompt: looking back through what was sent before.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HistorySearch {
     pub query: String,
-    /// How many newer matches to pass over.
+    /// Newer matches to pass over.
     pub skip: usize,
-    /// What was in the prompt when the search started, put back on Esc.
+    /// Restored on Esc.
     pub draft: String,
 }
 
@@ -419,7 +389,6 @@ impl HistorySearch {
         self.skip = 0;
     }
 
-    /// One match further back, when there is one.
     pub fn older(&mut self, history: &[String]) {
         if search_history(history, &self.query, self.skip + 1).is_some() {
             self.skip += 1;
@@ -435,7 +404,6 @@ mod tests {
         Composer { text: text.to_string(), cursor }
     }
 
-    /// The text with a `|` where the cursor is.
     fn shown(c: &Composer) -> String {
         format!("{}|{}", &c.text[..c.cursor], &c.text[c.cursor..])
     }
