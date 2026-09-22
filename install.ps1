@@ -13,11 +13,11 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "⚡ Installing FlashAgent for Windows..." -ForegroundColor Cyan
 
-# 1. Enable modern TLS protocols (TLS 1.2 / TLS 1.3) for older PowerShell 5.1 hosts
+# 1. TLS 1.2 / 1.3 for PowerShell 5.1
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 } catch {
-    # Fallback if Tls13 is not defined on older .NET Framework versions
+    # Older .NET Framework has no Tls13
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 }
 
@@ -71,7 +71,7 @@ if ($Version) {
         } catch {}
     }
 } elseif ($Channel -ne "beta" -and $Channel -ne "prerelease") {
-    # Strategy 2: Official Stable Release Priority
+    # Strategy 2: the latest stable release
     Write-Host "Checking for latest stable release..." -ForegroundColor Gray
     try {
         $StableRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing -Headers @{ "User-Agent" = "FlashAgent-Installer" }
@@ -141,10 +141,10 @@ if (-not $DownloadUrl) {
             }
         }
     } catch {
-        # API failed / rate-limited -> Fallback to web scraping
+        # Rate-limited: the scrape below takes over
     }
 
-    # Strategy 4b: GitHub web scraping fallback (immune to GitHub API rate limits)
+    # Strategy 4b: scrape the release page when the API is rate-limited
     if (-not $DownloadUrl) {
         try {
             $releasesHtml = (Invoke-WebRequest -Uri "https://github.com/$Repo/releases" -UseBasicParsing).Content
@@ -183,7 +183,6 @@ try {
         [System.IO.Compression.ZipFile]::ExtractToDirectory($TempZip, $ExtractDir)
     }
 
-    # Find flashagent executable in extracted archive
     $ExeFiles = Get-ChildItem -Path $ExtractDir -Recurse -Filter "*.exe"
     $TargetExe = $null
     foreach ($exe in $ExeFiles) {
@@ -202,7 +201,6 @@ try {
         exit 1
     }
 
-    # Create destination install directory
     if (-not (Test-Path $InstallDir)) {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     }
@@ -219,21 +217,21 @@ try {
         }
     }
 
-    # Copy binary to destination (with running process replacement support)
+    # A running .exe can be renamed but not overwritten
     $DestExe = Join-Path $InstallDir "flashagent.exe"
     Safe-InstallExe $TargetExe $DestExe
     # Older installs also placed a flashagent-tui.exe copy; the command is just `flashagent` now.
     $OldTuiExe = Join-Path $InstallDir "flashagent-tui.exe"
     if (Test-Path $OldTuiExe) { Remove-Item -Path $OldTuiExe -Force -ErrorAction SilentlyContinue }
 
-    # Also mirror into ~/.local/bin if directory exists or for cross-environment convenience
+    # Also into ~/.local/bin
     try {
         if (-not (Test-Path $UserLocalBin)) {
             New-Item -ItemType Directory -Path $UserLocalBin -Force | Out-Null
         }
         Safe-InstallExe $TargetExe (Join-Path $UserLocalBin "flashagent.exe")
     } catch {
-        # Optional fallback, ignore error
+        # Optional; a failure here is ignored
     }
 
     Write-Host "✔ Successfully installed FlashAgent to $DestExe" -ForegroundColor Green
@@ -248,7 +246,7 @@ try {
         Write-Host "✔ Automatically added $InstallDir to User PATH." -ForegroundColor Green
     }
 
-    # Update current session environment PATH so flashagent can run immediately
+    # This session too, so flashagent runs right away
     if (($env:Path -split ';') -notcontains $InstallDir) {
         $env:Path = "$InstallDir;$env:Path"
     }
@@ -257,7 +255,6 @@ try {
     Write-Host "Run 'flashagent' to launch!" -ForegroundColor Cyan
 }
 finally {
-    # Clean up temporary files
     if (Test-Path $TempZip) { Remove-Item -Path $TempZip -Force -ErrorAction SilentlyContinue }
     if (Test-Path $ExtractDir) { Remove-Item -Path $ExtractDir -Recurse -Force -ErrorAction SilentlyContinue }
 }

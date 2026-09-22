@@ -94,7 +94,6 @@ if [ "${TOTAL_INC}" -gt 15 ]; then
     TOTAL_INC=15
 fi
 
-# Find current build tag
 CURRENT_TAG="$(git -C "${ROOT_DIR}" describe --tags --match 'b[0-9]*' --exact-match 2>/dev/null || git -C "${ROOT_DIR}" describe --tags --match 'b[0-9]*' 2>/dev/null || echo "b286")"
 CURRENT_NUM="${CURRENT_TAG#b}"
 CURRENT_NUM="${CURRENT_NUM%%-*}"
@@ -113,10 +112,8 @@ echo " Increment     : +${TOTAL_INC}"
 echo " New build     : ${NEW_TAG}"
 echo "=========================================="
 
-# The release commit holds the version and its changelog section, and the
-# tag goes on that commit. Tagging first (as this script once did) put the
-# tag on the commit before, so the built binaries did not say what version
-# they were.
+# The tag goes on the release commit itself; tagging first put it on the
+# commit before, and the binaries did not know their version.
 if git -C "${ROOT_DIR}" rev-parse -q --verify "refs/tags/${NEW_TAG}" >/dev/null; then
     echo "Tag ${NEW_TAG} already exists. A published tag is never moved; pick the next number." >&2
     exit 1
