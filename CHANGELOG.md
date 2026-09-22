@@ -698,7 +698,7 @@ gets it, and fixed what that turned up.
   a sentence. It is asked for on every call now: `Find all .rs files in the
   project · "**/*.rs"`, `Read main.rs contents`.
 - Paths inside the project are shown relative to it. A line reading `Read
-  /tmp/claude-1000/-home-flashback/.../audit_proj/main.rs` was all prefix and
+  /tmp/.../audit_proj/main.rs` was all prefix and
   no information.
 Found by running every surface of the app against a real model and reading
 what the server actually received.
