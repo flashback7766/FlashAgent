@@ -39,3 +39,4 @@ Thumbs.db
 .agents/
 AGENTS.md
 CONTEXT.md
+__pycache__/
