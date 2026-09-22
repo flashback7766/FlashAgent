@@ -1,10 +1,6 @@
 use super::*;
 
-/// Whether this person has used FlashAgent before.
-///
-/// A saved session is the evidence: the config file exists from the moment
-/// the setup wizard finishes, so it cannot answer this, but a session is only
-/// written once a conversation has happened.
+/// A saved session is the evidence; the config exists as soon as setup finishes.
 pub fn been_here_before() -> bool {
     let Some(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok() else {
         return false;
@@ -15,34 +11,26 @@ pub fn been_here_before() -> bool {
         .unwrap_or(false)
 }
 
-/// Everything the startup welcome banner shows, and the terminal it has to
-/// fit in.
-///
-/// One struct rather than eleven positional arguments: at the call site a
-/// reader can see which fact is which, and a new fact does not ripple
-/// through a chain of wrapper functions.
+/// One struct instead of eleven positional arguments.
 #[derive(Debug, Clone)]
 pub struct WelcomeCard<'a> {
-    /// The model that will answer, as the server names it.
     pub model: &'a str,
-    /// The project directory, already shortened for display.
+    /// Already shortened for display.
     pub cwd: &'a str,
-    /// The permission mode's label.
     pub mode: &'a str,
-    /// How many memory documents were loaded into the prompt.
+    /// Loaded into the prompt.
     pub memory_docs: usize,
-    /// The reasoning effort summary, when the server reports one.
     pub thinking: Option<&'a str>,
-    /// The context window, as text ("64k ctx").
+    /// E.g. "64k ctx".
     pub context_window: Option<&'a str>,
-    /// Terminal size, in cells.
+    /// In cells.
     pub width: usize,
     pub height: usize,
-    /// The animation frame: the mascot breathes and blinks by it.
+    /// The mascot breathes and blinks by it.
     pub tick: usize,
-    /// Whether the mascot is drawn at all (Settings -> UI).
+    /// Settings -> UI.
     pub show_mascot: bool,
-    /// What the mascot's face says about the connection.
+    /// Reflects the connection.
     pub mood: MascotMood,
 }
 
@@ -96,35 +84,27 @@ pub(crate) const M3_TXT: &str = "\x1b[38;2;235;240;250m";
 pub(crate) const M3_TXT_B: &str = "\x1b[1;38;2;235;240;250m";
 pub(crate) const RESET: &str = "\x1b[0m";
 
-/// What the mascot's face is reacting to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MascotMood {
-    /// Still waiting for the first answer from the model server.
+    /// Still waiting for the server's first answer.
     Checking,
-    /// The server answered: it is reachable and listing models.
     Happy,
-    /// The server did not answer — nothing will work until it does.
     Offline,
 }
 
-/// The mascot as a pixel grid: 16 wide, 12 tall, two pixels per terminal row.
-///
-/// A terminal cell is about twice as tall as it is wide, so a sprite drawn one
-/// pixel per cell comes out stretched — that is what made the old mascot a
-/// spiky kite. Drawing two pixels per cell with `▀` (foreground = upper pixel,
-/// background = lower) gives square pixels and a shape that reads as intended.
+/// 16×12 pixels, two per terminal row via `▀` (foreground upper, background
+/// lower): a cell is twice as tall as wide, and one pixel per cell stretched
+/// the old mascot into a spiky kite.
 ///
 /// `.` transparent · `#` body · `o` highlight · `w` eye · `k` mouth
 pub(crate) fn mascot_grid(blink: bool, mood: MascotMood) -> [&'static str; 12] {
-    // Blinking closes the upper half of each eye and leaves a lash line.
-    // Offline keeps the eyes shut: nothing to look at until the server answers.
+    // Blinking closes the upper half of each eye. Offline keeps them shut.
     let (eyes_top, eyes_bottom) = if blink || mood == MascotMood::Offline {
         (".##############.", ".###kk####kk###.")
     } else {
         (".###ww####ww###.", ".###ww####ww###.")
     };
-    // The mouth carries the mood: corners up when the server answered, a flat
-    // line when it did not, a small neutral dot while we are still asking.
+    // Smile when the server answered, a flat line when not, a dot while asking.
     let (mouth_top, mouth_bottom) = match mood {
         MascotMood::Happy => ("..###k####k###..", "..####kkkk####.."),
         MascotMood::Checking => ("..############..", "..#####kk#####.."),
@@ -146,8 +126,7 @@ pub(crate) fn mascot_grid(blink: bool, mood: MascotMood) -> [&'static str; 12] {
     ]
 }
 
-/// Breathing: a slow triangle wave, 0 (dimmest) to 5 (brightest), one full
-/// cycle per ~3 seconds at the 80 ms UI tick.
+/// Triangle wave 0..=5, one cycle per ~3 s at the 80 ms tick.
 pub(crate) fn breath_level(tick_n: usize) -> u8 {
     const PERIOD: usize = 38;
     let half = PERIOD / 2;
@@ -156,10 +135,7 @@ pub(crate) fn breath_level(tick_n: usize) -> u8 {
     (up.min(half - 1) * 6 / half) as u8
 }
 
-/// Whether the mascot looks different at `tick_n` than it did one tick ago.
-///
-/// The welcome card is rebuilt only when this says so: breathing must not cost
-/// a full card repaint 12 times a second.
+/// The card is rebuilt only when this says so, not 12 times a second.
 pub fn mascot_needs_repaint(tick_n: usize) -> bool {
     if !crate::anim::enabled() {
         return false;
@@ -169,8 +145,7 @@ pub fn mascot_needs_repaint(tick_n: usize) -> bool {
     blink(tick_n) != blink(prev) || breath_level(tick_n) != breath_level(prev)
 }
 
-/// Colour of one pixel, or `None` when it is transparent. `breath` (0..=5)
-/// lifts the highlight; `offline` drains the body towards grey.
+/// `None` when transparent. `breath` lifts the highlight; `offline` greys the body.
 pub(crate) fn mascot_color(px: u8, breath: u8, offline: bool) -> Option<(u8, u8, u8)> {
     let lift = |lo: u8, hi: u8| -> u8 {
         let span = hi as i32 - lo as i32;
@@ -184,7 +159,7 @@ pub(crate) fn mascot_color(px: u8, breath: u8, offline: bool) -> Option<(u8, u8,
         _ => return None,
     };
     if offline {
-        // Halfway to grey: visibly not the healthy colour, still readable.
+        // Halfway to grey: clearly unhealthy, still readable.
         let (r, g, b) = color;
         let grey = ((r as u16 + g as u16 + b as u16) / 3) as u8;
         let mix = |c: u8| ((c as u16 + grey as u16) / 2) as u8;
@@ -193,17 +168,10 @@ pub(crate) fn mascot_color(px: u8, breath: u8, offline: bool) -> Option<(u8, u8,
     Some(color)
 }
 
-/// The mascot's face for the status line, shown while the model works.
-///
-/// The welcome card (and the full sprite with it) is gone as soon as the
-/// conversation starts, so this is the only place the mascot can react to a
-/// running turn. Five columns wide in every frame — a status line that
-/// changes width jitters.
-///
-/// `phase` is 80 ms of *wall clock*, not UI ticks: the screen repaints when
-/// events arrive, which with a fast model is far more often than the tick and
-/// with a slow one far less. A single-frame blink would be missed either way,
-/// so each expression holds for a few hundred milliseconds.
+/// For the status line during a turn, since the welcome card is gone by then.
+/// Always five columns, so the line does not jitter. `phase` is 80 ms of wall
+/// clock, not UI ticks (repaints follow events), and each expression holds a
+/// few hundred ms so a blink is not missed.
 pub fn thinking_face(phase: usize) -> &'static str {
     match phase % 24 {
         20..=23 => "(-_-)",
@@ -212,11 +180,8 @@ pub fn thinking_face(phase: usize) -> &'static str {
     }
 }
 
-/// Returns the 6 lines of the mascot: blinking every ~4 seconds, breathing
-/// continuously, and wearing `mood` on its face.
-///
-/// Every line is exactly 16 columns wide, transparent pixels included, so the
-/// rows stay aligned with each other when the card centres them.
+/// Blinks every ~4 s, breathes continuously. Every line is exactly 16 columns,
+/// transparent pixels included, so centring keeps rows aligned.
 pub fn mascot_swift_lines_mood(tick_n: usize, mood: MascotMood) -> [String; 6] {
     // Still, eyes open, with motion off.
     let tick_n = if crate::anim::enabled() { tick_n } else { 0 };
@@ -249,21 +214,16 @@ pub fn mascot_swift_lines_mood(tick_n: usize, mood: MascotMood) -> [String; 6] {
     out.try_into().expect("12 pixel rows make exactly 6 terminal rows")
 }
 
-/// Join as many of `parts` as fit in `width`, in order, and drop the rest.
-///
-/// A status line built from four facts and then clipped loses the last one
-/// mid-word and looks broken; dropping whole facts keeps it readable at any
-/// terminal size. Each part is `(plain, styled)`: the plain form is what gets
-/// measured, so colour codes do not count towards the width.
+/// Drops whole parts instead of clipping mid-word. Parts are `(plain,
+/// styled)`; the plain form is measured.
 pub fn fit_parts(parts: &[(String, String)], separator: &str, width: usize) -> String {
     let sep_w = visible_width(separator);
     let mut out = String::new();
     let mut used = 0usize;
     for (plain, styled) in parts {
         let cost = plain.chars().count() + if out.is_empty() { 0 } else { sep_w };
-        // Stop at the first one that does not fit rather than skipping it:
-        // the parts are in priority order, and "64k" on its own, without the
-        // model it belongs to, says nothing.
+        // Stops at the first that does not fit: parts are in priority order, and
+        // "64k" without its model says nothing.
         if used + cost > width {
             break;
         }
@@ -276,10 +236,7 @@ pub fn fit_parts(parts: &[(String, String)], separator: &str, width: usize) -> S
     out
 }
 
-/// Join `parts` to fit `width`, dropping from the middle rather than the end.
-///
-/// The last hint on a card is how to leave it. Dropping in order, as
-/// [`fit_parts`] does, takes that one first, and a card in a narrow window
+/// Drops from the middle: the last hint is how to leave, and a narrow card
 /// that does not say how to close it is a trap.
 pub fn fit_hints(parts: &[(String, String)], separator: &str, width: usize) -> String {
     let Some((last_plain, last_styled)) = parts.last() else { return String::new() };
@@ -308,34 +265,27 @@ pub fn fit_hints(parts: &[(String, String)], separator: &str, width: usize) -> S
     out
 }
 
-/// What the parts would take if all of them were joined.
 fn plain_width(parts: &[(String, String)], sep_w: usize) -> usize {
     let text: usize = parts.iter().map(|(plain, _)| plain.chars().count()).sum();
     text + sep_w * parts.len().saturating_sub(1)
 }
 
-/// Rows the screen keeps for itself under the welcome card: the composer's
-/// three, the hint line, the tip and the status line. The card gets what is
-/// left.
+/// Composer (3), hint line, tip and status line. The card gets the rest.
 const CHROME_ROWS: usize = 7;
 
-/// How much of itself the card is drawing.
-///
-/// The shapes are tried richest first and the first one that fits the rows
-/// available is drawn, so a short window gets a smaller card rather than a
-/// card whose top has scrolled off the screen.
+/// Shapes are tried richest first; a short window gets a smaller card rather
+/// than one whose top scrolled away.
 #[derive(Debug, Clone, Copy)]
 struct Shape {
-    /// Side-by-side columns; needs width as well as height.
+    /// Needs width as well as height.
     two_column: bool,
-    /// Rows of the mascot: all six, its head, or none.
+    /// All six, the head, or none.
     mascot_rows: usize,
-    /// The "Quick Commands" panel, as against a single line of hints.
+    /// Or a single line of hints.
     quick_commands: bool,
 }
 
 impl Shape {
-    /// Every shape, richest first.
     const ALL: [Shape; 5] = [
         Shape { two_column: true, mascot_rows: 6, quick_commands: true },
         Shape { two_column: false, mascot_rows: 6, quick_commands: true },
@@ -345,7 +295,6 @@ impl Shape {
     ];
 }
 
-/// Draw the startup welcome banner, fitted to the terminal it is given.
 pub fn welcome_card(card: &WelcomeCard<'_>) -> Vec<RenderLine> {
     let budget = card.height.saturating_sub(CHROME_ROWS);
     for shape in Shape::ALL {
@@ -357,7 +306,7 @@ pub fn welcome_card(card: &WelcomeCard<'_>) -> Vec<RenderLine> {
             return with_gap(lines, budget);
         }
     }
-    // Nothing fits: one line saying what this is and where it is running.
+    // Nothing fits: one line saying what this is and where it runs.
     let single = format!(
         "{M3_PRI_B}>_ FlashAgent{RESET} {M3_MUT}{}{RESET}",
         truncate_middle(card.cwd, card.width.saturating_sub(16).max(8))
@@ -369,8 +318,7 @@ pub fn welcome_card(card: &WelcomeCard<'_>) -> Vec<RenderLine> {
     }
 }
 
-/// A blank line between the card and the composer, when there is room for
-/// one.
+/// When there is room for it.
 fn with_gap(mut lines: Vec<RenderLine>, budget: usize) -> Vec<RenderLine> {
     if lines.len() < budget {
         lines.push((LineKind::System, String::new()));
@@ -401,8 +349,6 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
     } else {
         username
     };
-    // "Welcome back" to someone who has never been here is the kind of
-    // detail that tells a person the whole thing was assembled carelessly.
     let greeting = if been_here_before() { "Welcome back" } else { "Welcome" };
 
     let th_str = thinking.unwrap_or("High");
@@ -434,7 +380,6 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
     };
 
     if shape.two_column {
-        // Two-column modular layout in Material 3 Light Blue
         let card_w = if width >= 76 {
             width.clamp(76, 104)
         } else {
@@ -525,8 +470,7 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         }
         lines.push((LineKind::System, bot));
     } else {
-        // Compact single-column layout for compact or narrow screens (< 56 cols or < 18 rows)
-        // Scaled to never overflow vertical height or horizontal bounds
+        // Narrow or short screens (< 56 cols or < 18 rows).
         let inner_w = width.saturating_sub(2).min(74);
         let t_left_vis = format!(">_ FlashAgent {ver_disp}");
         let d1 = inner_w.saturating_sub(t_left_vis.chars().count() + 3);
@@ -534,8 +478,7 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         let top = format!("{M3_BRD}╭─{RESET} {t_left_colored} {M3_BRD}{}╮{RESET}", "─".repeat(d1));
         let bot = format!("{M3_BRD}╰{}╯{RESET}", "─".repeat(inner_w));
 
-        // Model first, then effort, then context: whichever no longer fits is
-        // dropped whole instead of being cut in half.
+        // Whatever no longer fits is dropped whole.
         let model_meta = truncate_middle(model, inner_w.saturating_sub(4).min(28));
         let left_meta = fit_parts(
             &[
@@ -551,9 +494,7 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         lines.push((LineKind::System, top));
         lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(&format!("{M3_TXT_B}{greeting} {M3_ICE}{username_clean}{M3_TXT_B}!{RESET}"), inner_w))));
 
-        // A short screen shows the top of the same sprite rather than a
-        // different creature: there used to be a hand-drawn "mini" version
-        // here that still had the old round eyes, so the mascot changed
+        // The top of the same sprite; an old hand-drawn "mini" version changed
         // species when the window got short.
         if show_mascot {
             for m in mascot.iter().take(shape.mascot_rows) {
@@ -587,7 +528,6 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
     lines
 }
 
-/// Renders a closed, beautiful session saved card for display upon application exit.
 pub fn render_session_saved_card(session_id: &str, width: usize) -> Vec<String> {
     let box_w = width.saturating_sub(6).clamp(52, 90);
     let inner_text_w = box_w.saturating_sub(2);
@@ -634,7 +574,6 @@ mod hint_tests {
     #[test]
     fn the_way_out_is_the_last_hint_to_be_dropped() {
         let hints = parts(&["↑/↓ — select", "s — summary", "d — forget", "esc — close"]);
-        // Everything fits: everything is shown, in order.
         let wide = strip_ansi(&fit_hints(&hints, " · ", 80));
         assert_eq!(wide, "↑/↓ — select · s — summary · d — forget · esc — close");
 
@@ -644,7 +583,6 @@ mod hint_tests {
         assert!(narrow.chars().count() <= 30, "{narrow:?}");
         assert!(narrow.starts_with("↑/↓ — select"), "the first hint should survive too: {narrow:?}");
 
-        // Nothing but the way out fits.
         let tiny = strip_ansi(&fit_hints(&hints, " · ", 12));
         assert_eq!(tiny, "esc — close");
     }

@@ -10,9 +10,9 @@ pub(crate) async fn compact_context(
 ) -> Option<usize> {
     use futures::StreamExt;
 
-    // Keep the current turn intact, starting at its user message: cutting
-    // anywhere else can orphan tool results from their tool calls, or leave an
-    // assistant message first — both rejected by strict servers/templates.
+    // Keep the current turn intact from its user message: a cut elsewhere can
+    // orphan tool results or leave an assistant message first, which strict
+    // servers reject.
     let split_idx = history.iter().rposition(|m| m.role == flashagent_llm::Role::User)?;
     if split_idx <= 1 {
         return None;
@@ -20,8 +20,7 @@ pub(crate) async fn compact_context(
 
     let before_tokens: usize = history.iter().map(|m| m.content.len() / 4 + 4).sum();
 
-    // A previous summary lives in the system message; fold it in so repeated
-    // compaction never forgets older turns.
+    // Fold a previous summary in, so repeated compaction never forgets older turns.
     let (base_system, prior_summary) = match history[0].content.find(COMPACTED_MARK) {
         Some(pos) => (history[0].content[..pos].to_string(), Some(history[0].content[pos + COMPACTED_MARK.len()..].to_string())),
         None => (history[0].content.clone(), None),
@@ -52,10 +51,8 @@ pub(crate) async fn compact_context(
         String::new()
     };
 
-    // The summary replaces the conversation, so it is asked for by section:
-    // a free-form précis loses exactly the things the next turn needs — what
-    // the user actually asked for, which files are in play, and what was
-    // about to happen next.
+    // Asked for by section: a free-form précis loses what the next turn needs
+    // (the actual request, the files in play, what was about to happen).
     let summary_prompt = format!(
         "Summarize this conversation so that work can continue from the summary alone.\n\
          Write these sections, in this order, and leave out any that has nothing in it:\n\
@@ -84,11 +81,8 @@ pub(crate) async fn compact_context(
         ..Default::default()
     };
 
-    // The old budget was twelve seconds for the whole summary and five
-    // between chunks. A 35B model on a laptop writes at ten tokens a second,
-    // so every summary it was asked for timed out and the conversation was
-    // replaced by a list of truncated snippets instead. Prefill of a long
-    // history alone can take a minute.
+    // The old 12 s budget made every summary time out on a laptop 35B model at
+    // 10 tokens/s; prefill of a long history alone can take a minute.
     let summary = if let Ok(Ok(mut stream)) = tokio::time::timeout(
         std::time::Duration::from_secs(300),
         source.turn_with_options(&msgs, &[], &opts),

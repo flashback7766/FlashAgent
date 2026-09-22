@@ -1,15 +1,11 @@
-//! Prefill (Prompt Evaluation) speed tracking and exact Time To First Token (TTFT) prediction.
-//!
-//! Tracks evaluation speed (tokens/sec) per model across different context window lengths
-//! (short <2k, medium 2k-8k, long 8k-32k, xl 32k+) with Exponential Moving Average (EMA).
-//! Persists calibration data to `~/.flashagent/prefill_cache.json`.
+//! Prefill speed per model and context-length bucket (EMA), used to predict
+//! time to first token. Stored in `~/.flashagent/prefill_cache.json`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Categorization of context length for attention / KV scaling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ContextBucket {
     /// 0 - 2,048 tokens
@@ -45,7 +41,6 @@ impl ContextBucket {
     }
 }
 
-/// Statistics within a context bucket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BucketStats {
     pub samples: usize,
@@ -63,7 +58,6 @@ impl Default for BucketStats {
     }
 }
 
-/// Historical prefill profile for a specific model ID.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPrefillProfile {
     pub model: String,
@@ -137,7 +131,6 @@ impl ModelPrefillProfile {
     }
 }
 
-/// Global tracker across all known models.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PrefillTracker {
     pub profiles: HashMap<String, ModelPrefillProfile>,
@@ -253,22 +246,20 @@ mod tests {
     #[test]
     fn test_model_prefill_profile_recording_and_prediction() {
         let mut prof = ModelPrefillProfile::new("qwen-35b".to_string());
-        // Initial prediction on clean profile
         let (pred1, speed1) = prof.predict_ttft(2000, 0);
         assert!(pred1.as_secs_f64() > 0.5);
         assert_eq!(speed1, 1800.0);
 
-        // Record a fast sample: 2000 tokens evaluated in 1.0s = 2000 tok/s
+        // 2000 tokens in 1.0 s = 2000 tok/s
         prof.record_sample(2000, 0, Duration::from_secs_f64(1.0));
         assert_eq!(prof.total_samples, 1);
         assert!((prof.overall_speed_tok_s - 2000.0).abs() < 1.0);
 
-        // Subsequent prediction should reflect the learned speed
         let (pred2, speed2) = prof.predict_ttft(2000, 0);
         assert!((speed2 - 2000.0).abs() < 1.0);
         assert!((pred2.as_secs_f64() - 1.15).abs() < 0.2);
 
-        // With cached tokens (e.g. 1500 cached out of 2000, eval = 500)
+        // 1500 of 2000 cached, 500 to evaluate.
         let (pred_cached, _) = prof.predict_ttft(2000, 1500);
         assert!(pred_cached.as_secs_f64() < pred2.as_secs_f64());
     }

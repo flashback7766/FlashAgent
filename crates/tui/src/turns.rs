@@ -1,20 +1,16 @@
 use super::*;
 
 impl App {
-    /// Stop a recap and suggestion still being written for the last turn.
-    /// A new turn is about to start: on a local server the recap request
-    /// would make it wait its turn, and its suggestion would be about a
-    /// conversation that has already moved on. Dropping the request closes
-    /// the connection, which stops the server generating it.
+    /// A new turn is starting: on a local server the recap would make it wait, and
+    /// its suggestion would be stale. Dropping the request stops the generation.
     pub(crate) fn cancel_recap(&mut self) {
         if let Some(task) = self.recap_task.take() {
             task.abort();
         }
     }
 
-    /// Esc or Ctrl+C during a turn. Cooperative: the loop answers pending
-    /// tool calls, keeps partial text and returns its history via Finished,
-    /// so model memory matches the screen; the tick loop aborts it if it
+    /// Cooperative: the loop answers pending tool calls and returns its history,
+    /// so the model's memory matches the screen. The tick loop aborts it if it
     /// does not wind down in time.
     pub(crate) fn interrupt(&mut self, cx: &LoopCtx<'_>) {
         if self.running && self.cancel_requested.is_none() {
@@ -28,8 +24,7 @@ impl App {
         self.renderer.request_reprint();
     }
 
-    /// Rebuild the system prompt for the current style and tone, keeping a
-    /// compacted summary that rides at its end.
+    /// Keeps a compacted summary at the end of the system prompt.
     pub(crate) fn apply_personality(&mut self) {
         let base = build_system_prompt(&self.prompt_config.clone().with_personality(&self.config.personality));
         if let Some(first) = self.history.first_mut().filter(|m| m.role == flashagent_llm::Role::System) {
@@ -38,8 +33,7 @@ impl App {
         }
     }
 
-    /// Start a turn on the history as it stands: the last message in it is
-    /// what the model answers.
+    /// The last message in the history is what the model answers.
     pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
         cx.cancel.store(false, Ordering::Relaxed);
@@ -75,15 +69,13 @@ impl App {
         ));
     }
 
-    /// Ctrl+R and /regenerate: drop the last answer and ask again. Returns
-    /// false when there is no prompt to answer again.
+    /// Ctrl+R and /regenerate. False when there is no prompt to answer again.
     pub(crate) fn regenerate(&mut self, cx: &LoopCtx<'_>) -> bool {
         let Some(user_idx) = self.history.iter().rposition(|m| m.role == flashagent_llm::Role::User) else {
             return false;
         };
-        // Asking for the same answer again is the user saying the last one
-        // was not good enough — the one signal that the model was given too
-        // little room to think.
+        // Asking again says the last answer was not good enough: the one signal the
+        // model had too little room to think.
         let steps = self.effort_memory.observe(
             &self.current_model,
             &flashagent_core::TurnOutcome { regenerated: true, ..Default::default() },
@@ -91,8 +83,8 @@ impl App {
         self.effort_memory.save();
         cx.source.set_effort_bias(steps);
         self.history.truncate(user_idx + 1);
-        // Same message, same turn: taking it back must reach before the first
-        // attempt, even after --resume.
+        // Same message, same turn, so rewind reaches before the first attempt, even
+        // after --resume.
         if let Some(store) = cx.perm.state().snapshots() {
             let prompt_for_snapshot = if self.history[user_idx].content.is_empty() {
                 "[image]"
@@ -111,8 +103,6 @@ impl App {
         true
     }
 
-    /// A turn ended: apply its history, report how it went, compact the
-    /// context if it needs it, and ask for a recap.
     pub(crate) async fn finish_turn(
         &mut self,
         cx: &mut LoopCtx<'_>,
@@ -120,15 +110,15 @@ impl App {
         res: Result<(Vec<ChatMessage>, DoneReason), (String, Vec<ChatMessage>)>,
     ) -> Flow {
         if turn_id != self.turn_counter || self.aborted_turn == Some(turn_id) {
-            // A turn that was hard-aborted (or superseded) reporting late.
+            // A hard-aborted or superseded turn reporting late.
             return Flow::Continue;
         }
         self.running = false;
         self.turn_started = None;
         self.active_turn_handle = None;
         self.active_steer_tx = None;
-        // A steer typed as the turn was ending never reached the model; it
-        // goes back in the prompt rather than vanishing.
+        // A steer typed as the turn ended never reached the model; it goes back into
+        // the prompt.
         let unsent = std::mem::take(&mut self.pending_steers);
         if !unsent.is_empty() && self.input.is_empty() {
             self.input.set(unsent.join(" "));
@@ -142,11 +132,9 @@ impl App {
         self.token_tracker.on_finished();
         self.flash_turn_end(res.as_ref().ok().map(|(_, reason)| *reason));
 
-        // What the turn cost against what it produced is the only
-        // honest evidence about whether auto guessed right for this
-        // model. A goal run is excluded: its effort is the user's.
-        // What this turn cost the window is the best guess at what
-        // the next one will cost.
+        // Cost against output is the evidence for whether auto guessed right. Goal
+        // runs are excluded: their effort is the user's. This turn's growth predicts
+        // the next one's.
         let grown = self.context_usage.total_used().saturating_sub(self.context_before_turn);
         if grown > 0 {
             self.last_turn_growth = grown.max(self.last_turn_growth / 2);
@@ -158,7 +146,6 @@ impl App {
         }
         self.turn_outcome = flashagent_core::TurnOutcome::default();
 
-        // Roll back any temporary goal state
         if let Some(saved) = self.goal_state.take() {
             cx.tools_arc.set_goal_mode(false);
             cx.perm.state().set_goal_active(false);
@@ -184,11 +171,9 @@ impl App {
             Ok((h, reason)) => {
                 self.history = h;
                 update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-                // The turn just read all of it. A change below (an
-                // interrupted turn closed, the context compacted) makes a
-                // new prefix, and that one is warmed.
+                // The turn just read all of it. A later change (interrupted turn closed,
+                // compaction) makes a new prefix, which is warmed.
                 self.note_prompt_cached(cx.perm, cx.memory_block);
-                // Completed turn telemetry and cache hit are displayed on Line 3 of the footer.
                 self.renderer.request_reprint();
 
                 if reason == DoneReason::Cancelled {
@@ -198,10 +183,8 @@ impl App {
                     self.custom_placeholder = Some(interrupt_msg.to_string());
                     self.renderer.request_reprint();
                 } else {
-                    // Summarise the older part of the conversation
-                    // when the next turn would not fit, or the user's
-                    // threshold is passed — and only when there is
-                    // something worth summarising.
+                    // Only when the next turn would not fit or the threshold is passed, and there
+                    // is something worth summarising.
                     let verdict = if self.config.auto_compact_context && self.history.len() > 3 {
                         flashagent_core::should_compact(flashagent_core::CompactionInput {
                             used: self.context_usage.total_used(),
@@ -219,13 +202,10 @@ impl App {
                         flashagent_core::CompactionVerdict::No
                     };
                     if verdict.should() {
-                        // This one belongs in the transcript: it
-                        // changes what the model remembers, which is
-                        // the conversation itself.
+                        // In the transcript: it changes what the model remembers.
                         self.chat.push_system("Compacting context...");
                         self.renderer.request_reprint();
-                        // Shown before the wait: the command that started it
-                        // is gone from the composer, and its suggestions with it.
+                        // Drawn before the wait: the command is already gone from the composer.
                         self.draw(cx, None);
                         let source_compact = cx.source.clone();
                         let before = self.context_usage.total_used();
@@ -247,13 +227,11 @@ impl App {
 
                     self.autosave(cx.session_id, cx.cwd_display);
 
-                    // Clear any existing ghost suggestion.
-                    // No hardcoded or heuristic fallback strings for recap or write-in suggestions:
-                    // they are ONLY shown if and when dynamically generated by the background LLM task.
+                    // Recap and suggestions come only from the background model call, never
+                    // from fallback strings.
                     self.suggested_prompt = None;
                     self.renderer.request_reprint();
 
-                    // Asynchronously ask LLM in background for refined recap & contextual suggestion
                     let source_bg = cx.source.clone();
                     let tx_bg = cx.tx.clone();
                     let history_bg = self.history.clone();
@@ -271,13 +249,12 @@ impl App {
                 }
             }
             Err((e, h)) => {
-                // Keep the steps that already ran (and changed files).
+                // Keep the steps that already ran and changed files.
                 self.history = h;
                 close_dangling_user(&mut self.history, "[no reply: the model backend failed]");
                 update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                 self.chat.on_event(&LoopEvent::Done(DoneReason::Failed));
-                // What broke and what to do about it, with the raw
-                // text kept underneath rather than as the headline.
+                // Plain explanation first, the raw text underneath.
                 let explained = flashagent_tui::backend_error::explain(
                     &e,
                     &self.config.backend_url,
@@ -285,8 +262,7 @@ impl App {
                 );
                 self.chat.push_line(LineKind::ToolError, explained.headline.clone());
                 if let Some(hint) = &explained.hint {
-                    // Its own line: an embedded newline is not wrapped
-                    // by the renderer, it is clipped.
+                    // Its own line: the renderer clips embedded newlines instead of wrapping.
                     self.chat.push_line(
                         LineKind::System,
                         format!("  \x1b[38;2;160;155;145m{hint}\x1b[0m"),

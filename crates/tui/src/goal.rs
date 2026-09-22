@@ -1,35 +1,26 @@
-//! `/goal` limits and the end-of-run report.
-//!
-//! Two jobs, both deliberately dumb and testable: turn the limits the user
-//! set in Settings into budgets, and keep a ledger of what actually happened
-//! during the run — built from [`LoopEvent`]s, never from the model's own
-//! account of its work. The final card states facts (files touched, commands
-//! that failed, why the run stopped) next to the model's summary, so a goal
-//! that stopped at a budget cannot read as a goal that finished.
+//! `/goal` limits and the end-of-run report. The ledger is built from
+//! [`LoopEvent`]s, never from the model's account, so a run stopped by a
+//! budget cannot read as finished.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use flashagent_core::{DoneReason, LoopEvent};
 
-/// How many completed steps pass between milestone commits.
+/// Completed steps between milestone commits.
 pub const MILESTONE_COMMIT_INTERVAL: u32 = 10;
 
-/// Budgets for one `/goal` run. Each one is off unless the user set it in
-/// Settings → Goal.
+/// Each is off unless set in Settings → Goal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GoalBudgets {
-    /// Loop iterations.
     pub steps: Option<u32>,
-    /// Wall clock.
     pub time: Option<Duration>,
-    /// Generated (completion) tokens; `None` = unlimited.
+    /// Completion tokens.
     pub output_tokens: Option<i64>,
 }
 
 impl GoalBudgets {
-    /// The limits from Settings → Goal. A zero is read as "no limit": a run
-    /// that may take no steps at all is not something anyone means.
+    /// Zero means no limit: nobody means a run that may take no steps.
     pub fn from_config(config: &flashagent_core::config::AppConfig) -> Self {
         Self {
             steps: config.goal_max_steps.filter(|n| *n > 0),
@@ -38,18 +29,15 @@ impl GoalBudgets {
         }
     }
 
-    /// Budgets for an ordinary chat turn: the session's step cap and nothing
-    /// else — time and token budgets exist only for `/goal`.
+    /// Time and token budgets exist only for `/goal`.
     pub fn steps_only(steps: Option<u32>) -> Self {
         Self { steps, time: None, output_tokens: None }
     }
 
-    /// Whether nothing but the task itself (or the user) ends the run.
     pub fn is_unlimited(&self) -> bool {
         self.steps.is_none() && self.time.is_none() && self.output_tokens.is_none()
     }
 
-    /// One-line summary for the framing card.
     pub fn summary(&self) -> String {
         if self.is_unlimited() {
             return "no limits".to_string();
@@ -68,11 +56,8 @@ impl GoalBudgets {
     }
 }
 
-/// The task of a `/goal` command, spacing and newlines kept as typed.
-///
-/// Limits used to be flags in front of the task. They live in Settings now,
-/// so a command still written the old way is told where they went instead
-/// of starting a run whose task begins with "--steps 40".
+/// Spacing kept as typed. The old limit flags (`--steps 40`) now live in
+/// Settings; a command written that way is told so.
 pub fn parse_goal_task(rest: &str) -> Result<String, String> {
     let task = rest.trim();
     let first = task.split_whitespace().next().unwrap_or("");
@@ -86,8 +71,7 @@ pub fn parse_goal_task(rest: &str) -> Result<String, String> {
     Ok(task.to_string())
 }
 
-/// `93s` → `1m33s`, `3600s` → `1h0m`. Under a minute keeps one decimal, so a
-/// run that took 800 ms does not report itself as having taken no time.
+/// `93s` → `1m33s`. Under a minute keeps one decimal, so 800 ms is not "0s".
 pub fn human_duration(d: Duration) -> String {
     let secs = d.as_secs();
     if secs >= 3600 {
@@ -110,7 +94,6 @@ pub fn human_count(n: i64) -> String {
     }
 }
 
-/// What a `/goal` run actually did, accumulated from loop events.
 struct OpenToolCall {
     id: String,
     name: String,
@@ -119,10 +102,10 @@ struct OpenToolCall {
     args_json: String,
 }
 
+/// What a `/goal` run actually did, accumulated from loop events.
 pub struct GoalLedger {
-    /// The task as the user phrased it.
+    /// As the user phrased it.
     pub task: String,
-    /// Budgets this run was started with.
     pub budgets: GoalBudgets,
     started: Instant,
     step: u32,
@@ -137,7 +120,6 @@ pub struct GoalLedger {
 }
 
 impl GoalLedger {
-    /// Start a ledger for `task`.
     pub fn new(task: String, budgets: GoalBudgets) -> Self {
         Self {
             task,
@@ -155,38 +137,32 @@ impl GoalLedger {
         }
     }
 
-    /// Current step number (0 before the first turn is requested).
+    /// 0 before the first turn.
     pub fn step(&self) -> u32 {
         self.step
     }
 
-    /// Generated tokens so far.
     pub fn output_tokens(&self) -> i64 {
         self.output_tokens
     }
 
-    /// Time since the goal was launched.
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
     }
 
-    /// Every file written or edited so far, deduplicated — what a milestone
-    /// commit stages. Order is written-then-edited, each in first-touched
-    /// order; nothing here is about *when* within the run it happened.
+    /// Deduplicated, written then edited, in first-touched order: what a milestone
+    /// commit stages.
     pub fn changed_files(&self) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         self.written.iter().chain(self.edited.iter()).filter(|f| seen.insert((*f).clone())).cloned().collect()
     }
 
-    /// The plan as the model last left it — empty until it calls
-    /// `update_plan` at least once.
+    /// Empty until the model calls `update_plan`.
     pub fn plan(&self) -> &[flashagent_tools::plan_tool::PlanStep] {
         &self.plan
     }
 
-    /// Feed one loop event. Returns `true` when this call changed the plan,
-    /// so the caller knows to redraw it — everything else it records is only
-    /// read later, from the report or the live progress line.
+    /// Returns `true` when the plan changed and needs a redraw.
     pub fn on_event(&mut self, ev: &LoopEvent) -> bool {
         match ev {
             LoopEvent::StepStarted { step, .. } => self.step = *step,
@@ -243,7 +219,7 @@ impl GoalLedger {
         false
     }
 
-    /// Live progress for the status line: `step 12/250 · 4.2k tok · 3m05s/1h0m`.
+    /// `step 12/250 · 4.2k tok · 3m05s/1h0m`
     pub fn progress(&self) -> String {
         let mut parts = Vec::new();
         match self.budgets.steps {
@@ -264,8 +240,7 @@ impl GoalLedger {
         parts.join(" · ")
     }
 
-    /// The final report, as plain lines for the caller to draw in a card.
-    /// Every line is a fact the loop reported, not something the model claimed.
+    /// Every line is a fact the loop reported, not a model claim.
     pub fn report(&self, reason: DoneReason) -> Vec<String> {
         let mut out = Vec::new();
         out.push(stop_line(reason, &self.budgets, self.step));
@@ -331,9 +306,8 @@ impl GoalLedger {
     }
 }
 
-/// The plan as a small checklist for the chat, updated in place each time it
-/// changes rather than appended — `update_or_push_turn_system("plan:", ...)`
-/// finds the previous one by this same leading label and replaces it.
+/// Updated in place: `update_or_push_turn_system("plan:", ...)` finds the
+/// previous one by this label.
 pub fn format_plan(steps: &[flashagent_tools::plan_tool::PlanStep]) -> String {
     use flashagent_tools::plan_tool::PlanStatus;
     let done = steps.iter().filter(|s| s.status == PlanStatus::Completed).count();
@@ -349,12 +323,9 @@ pub fn format_plan(steps: &[flashagent_tools::plan_tool::PlanStep]) -> String {
     out
 }
 
-/// Checkpoint whatever the goal has written or edited since it started, as a
-/// git commit next to the file snapshots `/rewind` uses — a long run leaves
-/// something to diff against besides "before the whole thing began". Does
-/// nothing, quietly, outside a git repository or when there is nothing to
-/// commit (including "already committed by the user mid-run": a failed
-/// `git commit` is not treated as an error).
+/// A git commit of what the goal changed so far, next to the `/rewind`
+/// snapshots. Silent outside a repository or when there is nothing to commit
+/// (the user may have committed mid-run).
 pub fn commit_goal_milestone(ledger: &GoalLedger, cwd: &Path, completed_steps: u32) -> Option<String> {
     let files = ledger.changed_files();
     if files.is_empty() {
@@ -416,8 +387,7 @@ fn first_line(text: &str) -> String {
     crate::truncate_middle(line, 80)
 }
 
-/// The thing a call acted on: a path, a command, otherwise the tool's own name.
-/// The files a read or an edit names: its `path`, then each of its `files`.
+/// Its `path`, then each of its `files`.
 fn files_of(name: &str, args_json: &str) -> Vec<String> {
     if !matches!(name, "edit_file" | "read_file") {
         return Vec::new();
@@ -430,6 +400,7 @@ fn files_of(name: &str, args_json: &str) -> Vec<String> {
     single.into_iter().chain(batch).filter(|p| !p.is_empty()).map(str::to_string).collect()
 }
 
+/// What a call acted on: a path, a command, otherwise the tool's name.
 fn subject_of(name: &str, args_json: &str) -> String {
     let args = flashagent_llm::repair::effective_args(args_json, name);
     let pick = |key: &str| -> Option<String> {
@@ -609,7 +580,6 @@ mod tests {
         l.on_event(&ev_finished("1", false, "wrote a.txt"));
         l.on_event(&ev_started("2", "edit_file", r#"{"path":"b.txt","edits":[]}"#));
         l.on_event(&ev_finished("2", false, "applied 1 edit(s) to 1 file(s)"));
-        // Touched twice: still one entry.
         l.on_event(&ev_started("3", "edit_file", r#"{"path":"a.txt","edits":[]}"#));
         l.on_event(&ev_finished("3", false, "applied 1 edit(s) to 1 file(s)"));
         let mut files = l.changed_files();
@@ -631,7 +601,7 @@ mod tests {
             status: flashagent_tools::plan_tool::PlanStatus::Pending,
         }]);
 
-        // A later call replaces the plan outright, it does not merge into it.
+        // A later call replaces the plan; it does not merge.
         l.on_event(&ev_started("2", "update_plan", r#"{"steps":[{"text":"a","status":"completed"},{"text":"b"}]}"#));
         let changed = l.on_event(&ev_finished("2", false, "Plan recorded: 2 step(s) (1 done, 0 in progress)"));
         assert!(changed);
@@ -744,8 +714,7 @@ mod tests {
         let mut l = GoalLedger::new("t".into(), GoalBudgets::default());
         l.on_event(&ev_started("1", "write_file", r#"{"path":"a.txt"}"#));
         l.on_event(&ev_finished("1", false, "wrote a.txt"));
-        // The user (or an earlier checkpoint) already committed this exact
-        // content — nothing left to stage, so the second attempt is silent.
+        // Already committed: the second attempt is silent.
         git(repo.path(), &["add", "a.txt"]);
         git(repo.path(), &["commit", "-q", "-m", "user beat the checkpoint to it"]);
         assert_eq!(commit_goal_milestone(&l, repo.path(), 10), None);

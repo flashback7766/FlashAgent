@@ -1,7 +1,5 @@
-//! The real `flashagent` binary in a pseudo-terminal, and the screen it drew.
-//!
-//! What a scenario checks is what a person would see: text on the screen,
-//! not state inside the app.
+//! The real `flashagent` binary in a pseudo-terminal. Scenarios check what a
+//! person would see on the screen, not state inside the app.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -13,8 +11,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 pub const ENTER: &str = "\r";
 pub const ESC: &str = "\x1b";
 
-/// A home directory of its own, so a scenario never reads or writes the
-/// real `~/.flashagent`, and a config written into it.
+/// Its own home, so a scenario never touches the real `~/.flashagent`.
 pub struct Home {
     pub dir: tempfile::TempDir,
 }
@@ -35,7 +32,6 @@ impl Home {
         self.path().join(".flashagent").join("config.json")
     }
 
-    /// The project directory the app is started in.
     pub fn work(&self) -> PathBuf {
         self.path().join("work")
     }
@@ -44,15 +40,12 @@ impl Home {
         std::fs::write(self.config_path(), serde_json::to_string_pretty(&config).unwrap()).unwrap();
     }
 
-    /// A config for someone who has set up already, pointed at `url`, who
-    /// has read the notes of this version and is not checking for updates.
+    /// Already set up, pointed at `url`, release notes seen, update checks off.
     pub fn set_up(&self, url: &str) {
         self.set_up_with(url, serde_json::json!({}));
     }
 
-    /// As `set_up`, with `extra`'s fields merged in on top — overriding
-    /// `model`, say, or adding `thinking_effort` — for a scenario that needs
-    /// more than the baseline config.
+    /// As `set_up`, with `extra`'s fields merged on top.
     pub fn set_up_with(&self, url: &str, extra: serde_json::Value) {
         let mut config = serde_json::json!({
             "setup_completed": true,
@@ -76,7 +69,7 @@ impl Home {
     }
 }
 
-/// The version the binary reports, as `last_seen_version` wants it.
+/// As `last_seen_version` wants it.
 pub fn version() -> String {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_flashagent")).arg("--version").output().unwrap();
     String::from_utf8_lossy(&out.stdout).trim().trim_start_matches("FlashAgent ").to_string()
@@ -90,7 +83,6 @@ pub struct Term {
 }
 
 impl Term {
-    /// Start `flashagent` with `args` in `home`, on a terminal of this size.
     pub fn start(home: &Home, args: &[&str], cols: u16, rows: u16) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -121,8 +113,8 @@ impl Term {
                 let bytes = &buf[..n];
                 let mut parser = p2.lock().unwrap();
                 parser.process(bytes);
-                // A real terminal answers "where is the cursor?"; this one
-                // must too, or the app waits for an answer that never comes.
+                // A real terminal answers the cursor-position query; without an answer the
+                // app waits forever.
                 if contains(bytes, b"\x1b[6n") {
                     let (row, col) = parser.screen().cursor_position();
                     let _ = w2.lock().unwrap().write_all(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
@@ -132,14 +124,13 @@ impl Term {
         Term { parser, writer, child, _master: pty.master }
     }
 
-    /// The app's process id, to read what it costs from outside.
+    /// To measure the process from outside.
     #[allow(dead_code)]
     pub fn pid(&self) -> Option<u32> {
         self.child.process_id()
     }
 
-    /// The screen with its colours, as the escape sequences a terminal would
-    /// need to redraw it. Used to check what colour something came out.
+    /// As escape sequences, to check what colour something came out.
     #[allow(dead_code)]
     pub fn screen_colours(&self) -> String {
         String::from_utf8_lossy(&self.parser.lock().unwrap().screen().contents_formatted()).into_owned()
@@ -149,24 +140,21 @@ impl Term {
         self.parser.lock().unwrap().screen().contents()
     }
 
-    /// Type keys: text, or the constants above. A short pause follows, as
-    /// after a real key press: the app reads keys that arrive together with
-    /// a newline among them as a paste, the way a Windows console delivers
-    /// one, and a person never types an Enter and the next key at once.
+    /// A short pause follows each call: keys arriving together with a newline are
+    /// read as a paste, as a Windows console delivers one.
     pub fn send(&self, keys: &str) {
         self.write(keys);
         std::thread::sleep(Duration::from_millis(60));
     }
 
-    /// Bytes to the terminal as they are, all at once.
+    /// All at once, as they are.
     pub fn write(&self, bytes: &str) {
         let mut w = self.writer.lock().unwrap();
         w.write_all(bytes.as_bytes()).unwrap();
         w.flush().unwrap();
     }
 
-    /// Type text a character at a time, the way it arrives from a keyboard
-    /// rather than as one paste.
+    /// A character at a time, as from a keyboard rather than a paste.
     pub fn type_text(&self, text: &str) {
         for c in text.chars() {
             self.send(&c.to_string());
@@ -174,11 +162,8 @@ impl Term {
         }
     }
 
-    /// Wait until `needle` is on the screen, and hand back that screen. On a
-    /// timeout the test fails with the screen it was looking at.
-    ///
-    /// Check what is returned rather than taking the screen again: a second
-    /// look can land in the middle of a repaint and find it half drawn.
+    /// Returns the screen it matched; fails with that screen on timeout. Check
+    /// the returned screen: a second look can land mid-repaint.
     pub fn wait_for(&self, needle: &str, timeout: Duration) -> String {
         let start = Instant::now();
         loop {
@@ -193,7 +178,6 @@ impl Term {
         }
     }
 
-    /// Wait until `needle` has left the screen.
     pub fn wait_gone(&self, needle: &str, timeout: Duration) {
         let start = Instant::now();
         while self.screen().contains(needle) {
@@ -204,7 +188,7 @@ impl Term {
         }
     }
 
-    /// Wait for the app to exit; `None` if it is still running at the timeout.
+    /// `None` if still running at the timeout.
     pub fn wait_exit(&mut self, timeout: Duration) -> Option<portable_pty::ExitStatus> {
         let start = Instant::now();
         loop {

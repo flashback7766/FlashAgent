@@ -1,36 +1,26 @@
-//! Interactive Settings Wizard opened via `/settings` or `Tab` on empty input.
-//! Multi-tab layout for configuring backend, models, updates, aesthetics, reasoning, and tools.
+//! Settings screen (`/settings`, or Tab on empty input).
 
 use flashagent_core::{AppConfig, BackendPreset, PersonalityTrait, SamplingPreset};
 use crossterm::event::{KeyCode, KeyModifiers};
 use crate::{LineKind, RenderLine};
 
-/// Action returned by the settings view on key event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsAction {
-    /// Keep settings open.
     None,
-    /// Close settings and return to chat.
     Close,
-    /// Request model list discovery from backend.
     DiscoverModels,
-    /// Trigger tool-calling probe test.
     RunToolTest,
-    /// Open the dedicated F3 model selection menu.
+    /// The F3 model menu.
     OpenModelMenu,
-    /// Open the dedicated F4 thinking effort menu.
+    /// The F4 effort menu.
     OpenEffortMenu,
-    /// Open the setup wizard for full backend configuration.
     OpenWizard,
-    /// Open the dedicated F5 sampling parameters menu.
+    /// The F5 sampling menu.
     OpenSamplingMenu,
-    /// Trigger manual update check.
     CheckUpdatesNow,
-    /// Open MCP overview.
     OpenMcpMenu,
 }
 
-/// Tabs for categorizing settings in the Settings Wizard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
     #[default]
@@ -40,7 +30,6 @@ pub enum SettingsTab {
     Reasoning,
     Goal,
     Tools,
-    /// How replies sound: base style and characteristics.
     Style,
 }
 
@@ -94,16 +83,14 @@ impl SettingsTab {
     }
 }
 
-/// Choices the `/goal` limits cycle through; `None` is "unlimited" and is
-/// both where they start and where they come back round to.
+/// `None` is "unlimited", where the cycle starts and wraps to.
 const GOAL_STEP_CHOICES: &[Option<u32>] = &[None, Some(25), Some(50), Some(100), Some(250), Some(500), Some(1000)];
 const GOAL_MINUTE_CHOICES: &[Option<u32>] = &[None, Some(15), Some(30), Some(60), Some(120), Some(240), Some(480)];
 const GOAL_TOKEN_CHOICES: &[Option<i64>] =
     &[None, Some(50_000), Some(100_000), Some(200_000), Some(500_000), Some(1_000_000), Some(2_000_000)];
 
-/// The choice after (or, with a negative `delta`, before) `current`. A value
-/// typed into the config by hand that is not on the list starts again from
-/// the first choice.
+/// Negative `delta` goes back. A hand-typed value not on the list restarts
+/// from the first choice.
 fn cycle_choice<T: PartialEq + Copy>(choices: &[Option<T>], current: Option<T>, delta: i32) -> Option<T> {
     let n = choices.len();
     let next = match choices.iter().position(|c| *c == current) {
@@ -141,8 +128,7 @@ pub struct SettingsView {
     pub url_input: String,
     pub available_models: Vec<String>,
     pub is_dirty: bool,
-    /// Window of the model in use, so an automatic threshold can say what it
-    /// works out to here.
+    /// So an automatic threshold can show what it works out to.
     pub context_capacity: usize,
 }
 
@@ -163,9 +149,7 @@ impl SettingsView {
         }
     }
 
-    /// The rows of the open tab, as label and value. Both drawing and
-    /// moving the selection use this list, so a row added to a tab is also
-    /// a row the arrows can reach.
+    /// Drawing and selection both use this list, so every drawn row is reachable.
     fn items(&self) -> Vec<(&'static str, String)> {
     match self.active_tab {
         SettingsTab::General => vec![
@@ -196,8 +180,7 @@ impl SettingsView {
             ("Temperature", format!("{:.2}", self.config.temperature)),
             ("Context Alert", if self.config.context_warn_threshold > 0 { format!("Warn at {}%", self.config.context_warn_threshold) } else { "Disabled".into() }),
             ("Auto-Compact History", if self.config.auto_compact_context {
-                // Zero means the threshold follows the window; saying
-                // "0%" would read as "always".
+                // Zero follows the window; "0%" would read as "always".
                 match self.config.context_compact_threshold {
                     0 => format!("Enabled (auto: {}% for this window)", flashagent_core::default_compact_threshold(self.context_capacity)),
                     pct => format!("Enabled (at {pct}%)"),
@@ -269,8 +252,8 @@ impl SettingsView {
         }
 
         match code {
-            // Persisting is the caller's job: this view holds live session
-            // values (mode, effort) that must not become defaults unasked.
+            // Saving is the caller's job: live mode and effort must not become defaults
+            // unasked.
             KeyCode::Esc => SettingsAction::Close,
             KeyCode::Tab | KeyCode::Char(']') => {
                 self.active_tab = self.active_tab.next();
@@ -569,8 +552,7 @@ impl SettingsView {
         self.is_dirty = true;
     }
 
-    /// Move to the next colour theme and show it at once: a theme picked
-    /// from a list of names is guesswork until you see it.
+    /// Applied at once: a theme picked by name is guesswork until seen.
     fn cycle_theme(&mut self) {
         self.config.color_theme = self.config.color_theme.next();
         crate::theme::set(self.config.color_theme);
@@ -628,7 +610,6 @@ impl SettingsView {
             format!("  {border_color}│{reset} {clipped}{pad} {border_color}│{reset}")
         };
 
-        // Header
         let title_styled = " \x1b[1;38;2;225;175;95mFlashAgent Settings Wizard\x1b[0m \x1b[38;2;160;155;145m(Tab 1-7 to switch)\x1b[0m ";
         let title_vis = crate::visible_width(title_styled);
         let dashes = box_w.saturating_sub(title_vis + 1);
@@ -637,7 +618,6 @@ impl SettingsView {
             format!("  {border_color}╭─{title_styled}{}╮{reset}", "─".repeat(dashes)),
         ));
 
-        // Tab navigation bar
         let mut tabs_line = String::from(" ");
         for tab in SettingsTab::all() {
             let is_cur = *tab == self.active_tab;
@@ -654,7 +634,6 @@ impl SettingsView {
             format!("  {border_color}├{}┤{reset}", "─".repeat(box_w)),
         ));
 
-        // Tab items list
         let max_val_w = inner_text_w.saturating_sub(28);
         let items = self.items();
 
@@ -752,27 +731,22 @@ mod tests {
         assert_eq!(view.active_tab, SettingsTab::General);
         assert_eq!(view.selected_index, 0);
 
-        // Tab switches to Updates
         view.handle_key(KeyCode::Tab, KeyModifiers::empty());
         assert_eq!(view.active_tab, SettingsTab::Updates);
         assert_eq!(view.selected_index, 0);
 
-        // Toggle auto-check updates
         assert!(view.config.auto_check_updates);
         view.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert!(!view.config.auto_check_updates);
 
-        // Jump to Aesthetics via '3'
         view.handle_key(KeyCode::Char('3'), KeyModifiers::empty());
         assert_eq!(view.active_tab, SettingsTab::Aesthetics);
         assert_eq!(view.selected_index, 0);
 
-        // Toggle the mascot (first Aesthetics item)
         assert!(view.config.show_mascot);
         view.handle_key(KeyCode::Right, KeyModifiers::empty());
         assert!(!view.config.show_mascot);
 
-        // Jump to Tools via '6'; its items all reach real actions
         view.handle_key(KeyCode::Char('6'), KeyModifiers::empty());
         assert_eq!(view.active_tab, SettingsTab::Tools);
         view.handle_key(KeyCode::Down, KeyModifiers::empty());
@@ -780,15 +754,13 @@ mod tests {
         view.handle_key(KeyCode::Down, KeyModifiers::empty());
         assert_eq!(view.handle_key(KeyCode::Enter, KeyModifiers::empty()), SettingsAction::RunToolTest);
 
-        // Esc closes and saves
         let act = view.handle_key(KeyCode::Esc, KeyModifiers::empty());
         assert_eq!(act, SettingsAction::Close);
     }
 
     #[test]
     fn the_arrows_reach_every_row_of_every_tab() {
-        // The Colour Theme row was drawn but the count of rows was a number
-        // written separately, so ↓ from Animations wrapped to the top.
+        // The row count was a separate number, so ↓ from Animations wrapped to the top.
         let mut view = SettingsView::new(AppConfig::default(), Vec::new());
         for (n, tab) in SettingsTab::all().iter().enumerate() {
             view.handle_key(KeyCode::Char(char::from(b'1' + n as u8)), KeyModifiers::empty());
@@ -858,7 +830,6 @@ mod tests {
                     row_w, expected_w,
                     "Row {idx} width {row_w} does not match expected {expected_w} at terminal width {width}"
                 );
-                // Verify every line terminates with a closed right border
                 let clean = &line.1;
                 assert!(
                     clean.ends_with("╮\x1b[0m")
@@ -879,7 +850,6 @@ mod tests {
         view.handle_key(KeyCode::Right, KeyModifiers::empty());
         view.handle_key(KeyCode::Right, KeyModifiers::empty());
         assert_eq!(view.config.personality.base, flashagent_core::BaseStyle::Friendly);
-        // Down to Emoji, the last row, and one step left: Less.
         for _ in 0..4 {
             view.handle_key(KeyCode::Down, KeyModifiers::empty());
         }

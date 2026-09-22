@@ -29,12 +29,9 @@ pub(crate) fn build_effort_menu(
     model: &str,
 ) -> SelectMenu<String> {
     let mut items = Vec::new();
-    // Auto is the one setting that changes behind the user's back, so it is
-    // the one that has to say what it has decided and why.
-    // The profile is empty both for "cannot reason" and for "not discovered
-    // yet"; discovery is the one that can tell them apart.
-    // A model the server said nothing about may well reason; only the
-    // server saying it cannot counts as "cannot".
+    // Auto changes behind the user's back, so it says what it decided. An empty
+    // profile means "cannot reason" or "not discovered yet"; only discovery can
+    // tell them apart, and only the server saying so counts as "cannot".
     let can_think = match source.profile() {
         Some(p) => p.supported || p.is_unreported(),
         None => source
@@ -43,7 +40,7 @@ pub(crate) fn build_effort_menu(
             .unwrap_or(true),
     };
     let auto_desc = if !can_think {
-        // The setting is kept, but saying it is in force would be a lie.
+        // The setting is kept, but it is not in force.
         "Auto (this model does not reason; kept for the next one)".to_string()
     } else {
         match memory.explain(model) {
@@ -71,8 +68,7 @@ pub(crate) fn build_effort_menu(
                 items.push(SelectItem::with_description(p.clone(), desc, p.clone()));
             }
         } else if prof.is_unreported() {
-            // The server lists no settings for this model: the one thing that
-            // can honestly be offered besides its own default is off.
+            // The server lists no settings: off is the only honest option besides default.
             items.push(SelectItem::with_description("off", "Disable reasoning (the server lists no other settings)", "off".to_string()));
         } else if !prof.supported {
             items.push(SelectItem::with_description("off", "Reasoning unsupported by this endpoint", "off".to_string()));
@@ -101,8 +97,7 @@ pub(crate) fn thinking_summary_str(source: &BackendSource, current_effort: &str)
     }
 }
 
-/// A settings view that shows the live session state (mode, effort, model),
-/// not just the startup defaults stored in the config file.
+/// The live session state (mode, effort, model), not the stored defaults.
 pub(crate) fn settings_for_runtime(
     config: &AppConfig,
     mode: PermissionMode,
@@ -120,10 +115,8 @@ pub(crate) fn settings_for_runtime(
     view
 }
 
-/// The config to persist from a settings view. The view shows the live mode
-/// and effort; they become startup defaults only when the user changed them
-/// there — merely opening Settings mid-session (or during /goal's Accept All)
-/// must not silently make that the default for the next launch.
+/// Live mode and effort become defaults only if changed here: opening Settings
+/// mid-session (or during /goal's Accept All) must not change the next launch.
 pub(crate) fn persisted_from_view(view: &AppConfig, persisted: &AppConfig, shown_mode: PermissionMode, shown_effort: &str) -> AppConfig {
     let mut cfg = view.clone();
     if cfg.permission_mode == shown_mode {
@@ -135,9 +128,7 @@ pub(crate) fn persisted_from_view(view: &AppConfig, persisted: &AppConfig, shown
     cfg
 }
 
-/// One file `/rewind` would touch, already labelled the way the user thinks
-/// of it (relative to the project) — the confirmation card never needs the
-/// store to render itself.
+/// Labelled relative to the project, so the card does not need the store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RewindFileRow {
     pub display: String,
@@ -159,14 +150,12 @@ impl From<(&flashagent_core::SnapshotStore, flashagent_core::FilePreview)> for R
     }
 }
 
-/// The composer, morphed into a yes/no confirmation for `/rewind <n>` before
-/// it does anything — the same treatment the model, effort, and settings
-/// pickers get, so taking turns back never happens on a keystroke alone.
+/// Taking turns back never happens on a keystroke alone.
 pub(crate) struct RewindConfirm {
     pub target: flashagent_core::Rewindable,
     pub prompt_label: String,
     pub files: Vec<RewindFileRow>,
-    /// `true` selects "Yes, rewind"; `false` selects "No, cancel".
+    /// `true` selects "Yes, rewind".
     pub confirm: bool,
 }
 

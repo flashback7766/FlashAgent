@@ -2,13 +2,12 @@ use super::*;
 
 use flashagent_tui::memory_view::MemoryModal;
 
-/// The panel that has taken the composer's place: a menu, a settings screen,
-/// a modal. There is one place for it, so there is at most one of them —
-/// opening another replaces it, and "is anything open" is one question.
+/// The panel in the composer's place: a menu, settings or a modal. At most
+/// one is open; opening another replaces it.
 pub(crate) enum Overlay {
     Effort(SelectMenu<String>),
     Model(SelectMenu<String>),
-    /// Saved sessions of this folder (/resume).
+    /// /resume
     Sessions(SelectMenu<String>),
     Rewind(RewindConfirm),
     /// Boxed: the settings screen carries a whole config.
@@ -20,7 +19,7 @@ pub(crate) enum Overlay {
 }
 
 impl Overlay {
-    /// The menu to scroll with the mouse wheel, for the overlays that are one.
+    /// For mouse-wheel scrolling.
     pub(crate) fn select_menu_mut(&mut self) -> Option<&mut SelectMenu<String>> {
         match self {
             Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Sessions(menu) => Some(menu),
@@ -28,7 +27,6 @@ impl Overlay {
         }
     }
 
-    /// Lines to draw in place of the composer.
     pub(crate) fn render(&self, width: usize) -> Vec<RenderLine> {
         match self {
             Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Sessions(menu) => menu.render(width),
@@ -50,13 +48,12 @@ impl App {
         }
     }
 
-    /// Open `overlay`, replacing any other.
     pub(crate) fn open_overlay(&mut self, overlay: Overlay) {
         self.overlay = Some(overlay);
         self.renderer.request_reprint();
     }
 
-    /// Settings as the session is running now, not as last saved.
+    /// As the session runs now, not as last saved.
     pub(crate) fn runtime_settings(&self, mode: PermissionMode) -> SettingsView {
         let runtime_mode = self.goal_state.as_ref().map_or(mode, |g| g.mode);
         let effort = self.goal_state.as_ref().map_or(self.current_effort.as_str(), |g| g.effort.as_str());

@@ -1,15 +1,9 @@
-//! `/export md`: the conversation as a document a person can read.
-//!
-//! What the model was sent is not what the user saw: the first prompt
-//! carries the memory block, a goal carries its directive, and every tool
-//! call comes back as a raw result. The export shows what was said, with
-//! the work folded away under `<details>`, which GitHub, GitLab and most
-//! Markdown viewers render as a collapsed section.
+//! `/export md`: what was said, not what the model was sent (memory block,
+//! goal directive, raw tool results). Tool work is folded under `<details>`.
 
 use super::*;
 
-/// Results longer than this are cut in the export; the session file keeps
-/// them whole.
+/// The session file keeps them whole.
 const RESULT_CHARS: usize = 2000;
 
 pub(crate) fn conversation_markdown(history: &[ChatMessage], session_id: &str, model: &str, cwd: &str) -> String {
@@ -21,7 +15,7 @@ pub(crate) fn conversation_markdown(history: &[ChatMessage], session_id: &str, m
         .unwrap_or_else(|| "FlashAgent session".to_string());
     let mut md = format!("# {title}\n\n| | |\n|---|---|\n| Session | `{session_id}` |\n| Model | `{model}` |\n| Folder | `{cwd}` |\n\n");
 
-    // Tool results only carry the call's id; the name is on the call.
+    // Tool results carry only the call id; the name is on the call.
     let mut tool_names: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for m in history {
         match m.role {
@@ -68,8 +62,8 @@ fn details(summary: &str, body: &str) -> String {
     format!("<details><summary>{summary}</summary>\n\n{body}\n\n</details>\n\n")
 }
 
-/// `text` in a code fence longer than any run of backticks inside it, so
-/// a result that itself contains ``` cannot end the fence early.
+/// The fence is longer than any backtick run inside, so ``` in a result
+/// cannot end it early.
 fn fenced(text: &str) -> String {
     let longest = text
         .split(|c| c != '`')

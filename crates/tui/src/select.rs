@@ -1,11 +1,10 @@
-//! Generic interactive selection and menu primitives for the TUI:
-//! settings, model picker, interactive questions, and tool confirmation.
+//! Selection and menu primitives: settings, model picker, questions, approvals.
 
 use flashagent_core::Decision;
 
 use crate::{clip_ansi, visible_width, LineKind, RenderLine};
 
-/// Horizontal confirmation selector (e.g. Allow / Deny).
+/// Horizontal Allow / Deny selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfirmSelect {
     pub selected: Decision,
@@ -18,12 +17,11 @@ impl Default for ConfirmSelect {
 }
 
 impl ConfirmSelect {
-    /// Create a new selector defaulted to `Decision::Allow`.
+    /// Defaults to `Decision::Allow`.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Toggle between Allow and Deny.
     pub fn toggle(&mut self) {
         self.selected = match self.selected {
             Decision::Allow => Decision::Deny,
@@ -31,35 +29,29 @@ impl ConfirmSelect {
         };
     }
 
-    /// Move selection to Allow.
     pub fn left(&mut self) {
         self.selected = Decision::Allow;
     }
 
-    /// Move selection to Deny.
     pub fn right(&mut self) {
         self.selected = Decision::Deny;
     }
 
-    /// Get current decision.
     pub fn decision(self) -> Decision {
         self.selected
     }
 }
 
-/// Single item in a select menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectItem<T> {
     pub label: String,
     pub description: Option<String>,
     pub value: T,
-    /// More text that typing searches through without showing it, such as
-    /// a whole saved conversation behind its first prompt.
+    /// Searched by typing but not shown, e.g. a whole saved conversation.
     pub search_text: Option<String>,
 }
 
 impl<T> SelectItem<T> {
-    /// Create a simple item without description.
     pub fn new(label: impl Into<String>, value: T) -> Self {
         Self {
             label: label.into(),
@@ -69,7 +61,6 @@ impl<T> SelectItem<T> {
         }
     }
 
-    /// Create an item with a descriptive subtitle.
     pub fn with_description(label: impl Into<String>, desc: impl Into<String>, value: T) -> Self {
         Self {
             label: label.into(),
@@ -84,8 +75,7 @@ impl<T> SelectItem<T> {
         self
     }
 
-    /// Where `query` (lower-case) turns up in the hidden text when it is not
-    /// in the label or description: a short piece around it, on one line.
+    /// A one-line piece around `query` (lower-case) when it matches only hidden text.
     fn hidden_match(&self, query: &str) -> Option<String> {
         if query.is_empty()
             || self.label.to_lowercase().contains(query)
@@ -96,8 +86,8 @@ impl<T> SelectItem<T> {
         let text = self.search_text.as_deref()?;
         let lower = text.to_lowercase();
         let at = lower.find(query)?;
-        // Lower-casing keeps byte offsets for nearly every script; where it
-        // does not, the piece is shown lower-cased rather than cut wrongly.
+        // Lower-casing keeps byte offsets for nearly every script; where it does not,
+        // the piece is shown lower-cased rather than cut wrongly.
         let source = if lower.len() == text.len() { text } else { lower.as_str() };
         let chars_before = source[..at].chars().count();
         let start = chars_before.saturating_sub(25);
@@ -107,8 +97,7 @@ impl<T> SelectItem<T> {
     }
 }
 
-/// Generic vertical select menu navigated with Up / Down / Enter / Esc,
-/// with support for scrolling window (10 items), paging, and live search filtering.
+/// Up / Down / Enter / Esc, a 10-item scrolling window, paging and live search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectMenu<T> {
     pub title: String,
@@ -120,7 +109,6 @@ pub struct SelectMenu<T> {
 }
 
 impl<T> SelectMenu<T> {
-    /// Create a new selection menu with given title and items.
     pub fn new(title: impl Into<String>, items: Vec<SelectItem<T>>) -> Self {
         Self {
             title: title.into(),
@@ -132,13 +120,12 @@ impl<T> SelectMenu<T> {
         }
     }
 
-    /// Set custom noun for items counter (e.g. "options", "models").
+    /// E.g. "options", "models".
     pub fn with_noun(mut self, noun: impl Into<String>) -> Self {
         self.noun = Some(noun.into());
         self
     }
 
-    /// Return 0-based indices of items matching the current search filter.
     pub fn filtered_indices(&self) -> Vec<usize> {
         if self.filter.is_empty() {
             return (0..self.items.len()).collect();
@@ -156,7 +143,7 @@ impl<T> SelectMenu<T> {
             .collect()
     }
 
-    /// Move selection up within filtered items (wraps around).
+    /// Wraps around.
     pub fn up(&mut self) {
         let matches = self.filtered_indices();
         if matches.is_empty() {
@@ -167,7 +154,7 @@ impl<T> SelectMenu<T> {
         self.selected = matches[new_pos];
     }
 
-    /// Move selection down within filtered items (wraps around).
+    /// Wraps around.
     pub fn down(&mut self) {
         let matches = self.filtered_indices();
         if matches.is_empty() {
@@ -178,7 +165,6 @@ impl<T> SelectMenu<T> {
         self.selected = matches[new_pos];
     }
 
-    /// Jump up by a page (default 10 items).
     pub fn page_up(&mut self) {
         let matches = self.filtered_indices();
         if matches.is_empty() {
@@ -189,7 +175,6 @@ impl<T> SelectMenu<T> {
         self.selected = matches[new_pos];
     }
 
-    /// Jump down by a page (default 10 items).
     pub fn page_down(&mut self) {
         let matches = self.filtered_indices();
         if matches.is_empty() {
@@ -200,7 +185,6 @@ impl<T> SelectMenu<T> {
         self.selected = matches[new_pos];
     }
 
-    /// Append character to live search filter.
     pub fn push_filter_char(&mut self, c: char) {
         self.filter.push(c);
         let matches = self.filtered_indices();
@@ -209,7 +193,6 @@ impl<T> SelectMenu<T> {
         }
     }
 
-    /// Remove last character from live search filter.
     pub fn pop_filter_char(&mut self) {
         self.filter.pop();
         let matches = self.filtered_indices();
@@ -218,12 +201,10 @@ impl<T> SelectMenu<T> {
         }
     }
 
-    /// Value of currently selected item.
     pub fn selected_value(&self) -> Option<&T> {
         self.items.get(self.selected).map(|it| &it.value)
     }
 
-    /// Select an item by value if present.
     pub fn select_by_value(&mut self, val: &T)
     where
         T: PartialEq,
@@ -233,7 +214,6 @@ impl<T> SelectMenu<T> {
         }
     }
 
-    /// Render menu card to lines fitting `width`, constrained to `page_size` visible items.
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
         let card_w = width.clamp(36, 74);
         let inner_w = card_w.saturating_sub(2);
@@ -266,7 +246,6 @@ impl<T> SelectMenu<T> {
             }
         });
 
-        // Top border with title, item counter, and live filter indicator
         let count_str = if self.filter.is_empty() {
             format!("({} {item_noun})", self.items.len())
         } else {
@@ -317,8 +296,7 @@ impl<T> SelectMenu<T> {
                         pad_row(&format!("    \x1b[38;2;135;130;125m{desc}\x1b[0m")),
                     ));
                 }
-                // Found by what is not on screen: show where, or the match
-                // looks like a mistake.
+                // Matched only in hidden text: show where, or the match looks like a mistake.
                 if let Some(piece) = item.hidden_match(&self.filter.to_lowercase()) {
                     lines.push((LineKind::System, pad_row(&format!("    \x1b[38;2;175;170;225m{piece}\x1b[0m"))));
                 }
@@ -332,7 +310,6 @@ impl<T> SelectMenu<T> {
             }
         }
 
-        // Bottom border with key hints
         lines.push((
             LineKind::System,
             format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),

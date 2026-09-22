@@ -1,6 +1,5 @@
 use super::*;
 
-/// [`LlmSource`] over the OpenAI-compatible backend.
 pub(crate) struct BackendSource(pub(crate) flashagent_llm::OpenAiCompat);
 
 impl BackendSource {
@@ -51,14 +50,11 @@ impl LlmSource for BackendSource {
     }
 }
 
-/// How often an idle session looks at the server for a switched model or a
-/// changed context window. Each look is up to two requests to a server that
-/// may be a laptop, and nobody switches models every few seconds.
+/// Each look is up to two requests to a server that may be a laptop.
 pub(crate) const SERVER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Whether to look at the server's model list now. Never while the agent is
-/// working — a turn, or anything else still talking to the model, like the
-/// recap after a turn — and never twice at once.
+/// Never while a turn or any other model request (like the recap) is running,
+/// and never twice at once.
 pub(crate) fn should_poll_server(turn_running: bool, requests_in_flight: usize, already_polling: bool) -> bool {
     !turn_running && requests_in_flight == 0 && !already_polling
 }

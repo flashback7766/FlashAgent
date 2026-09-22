@@ -1,7 +1,6 @@
-//! flashagent-tui: terminal client. The testable core lives here —
-//! [`ChatView`] (event stream → renderable lines), the approval card and
-//! [`TuiGate`] (an [`ApprovalGate`] answered from the keyboard). The binary in
-//! `main.rs` is a thin crossterm shell over this.
+//! Terminal client core: [`ChatView`] turns loop events into lines, and
+//! [`TuiGate`] answers approvals from the keyboard. `main.rs` is a thin
+//! crossterm shell over this.
 
 use std::sync::Arc;
 
@@ -56,28 +55,25 @@ pub use ReasoningExpansion as VerboseMode;
 use crossterm::event::{KeyCode, KeyModifiers, MouseEvent};
 use flashagent_llm::{ChatMessage, ServerDiscovery};
 
-/// Events dispatched to the TUI event loop.
 #[derive(Debug)]
 pub enum UiEvent {
-    /// A loop event, tagged with the turn that produced it.
+    /// Tagged with the turn that produced it.
     Loop { turn_id: u64, event: LoopEvent },
     Key(KeyCode, KeyModifiers),
     Paste(String),
     Mouse(MouseEvent),
     Resize(u16, u16),
-    /// A turn ended. `turn_id` lets the UI drop results of a turn it has
-    /// already given up on (a hard-aborted cancel).
+    /// `turn_id` lets the UI drop results of a turn it already gave up on.
     Finished {
         turn_id: u64,
-        /// On failure: the error text and the history up to the failure.
+        /// On failure: the error text and the history up to it.
         result: Result<(Vec<ChatMessage>, DoneReason), (String, Vec<ChatMessage>)>,
     },
     ServerDiscovered(ServerDiscovery),
-    /// Outcome of the Settings → "Run Tool Test" probe.
+    /// Settings → "Run Tool Test".
     ToolTestResult(String),
-    /// What a picture costs this model, measured against the server.
     ImageCost { model: String, per_pixel: f32, fixed: f32 },
-    /// The /memory summary the model wrote, or why it could not.
+    /// Or why it could not be written.
     MemorySummary(Result<memory_view::MemorySummary, String>),
     BackgroundRecap {
         turn_id: u64,
@@ -86,26 +82,19 @@ pub enum UiEvent {
     },
 }
 
-/// Kind of a rendered chat line — drives terminal colors.
+/// Drives terminal colours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
-    /// What the user typed.
     User,
-    /// Assistant text.
     Assistant,
-    /// Reasoning (rendered dim).
     Reasoning,
-    /// Tool activity.
     Tool,
-    /// Failed tool call.
     ToolError,
-    /// Diff content.
     Diff,
-    /// System/status info.
     System,
 }
 
-/// Category of collapsed tool execution for aggregation.
+/// How consecutive tool calls fold into one line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolGroupKind {
     Command { count: usize, last_cmd: String, is_running: bool },
@@ -119,7 +108,7 @@ pub enum ToolGroupKind {
 
 pub mod tool_views;
 
-/// Single tool execution record tracked within a `ChatLine` (used for multi-tool group expansion).
+/// One call inside a folded group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallRecord {
     pub name: String,
@@ -129,28 +118,22 @@ pub struct ToolCallRecord {
     pub is_running: bool,
 }
 
-/// One rendered line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatLine {
-    /// Line kind (color).
     pub kind: LineKind,
-    /// Text without prefix.
+    /// Without prefix.
     pub text: String,
-    /// Optional raw details (arguments JSON) for verbose expansion.
+    /// Raw arguments JSON, for the expanded view.
     pub details: Option<String>,
-    /// Optional tool group tracking.
     pub tool_group: Option<ToolGroupKind>,
-    /// Elapsed seconds for reasoning blocks.
+    /// For reasoning blocks.
     pub reasoning_secs: Option<u64>,
-    /// Raw output/result length in characters for token accounting.
+    /// In characters, for token accounting.
     pub tool_result_len: usize,
-    /// Captured tool name (e.g. "run_shell", "read_file", "edit_file", etc.).
     pub tool_name: Option<String>,
-    /// Captured tool output/result content.
     pub tool_result: Option<String>,
-    /// Optional per-card expansion override.
+    /// Per-card expansion override.
     pub is_expanded: Option<bool>,
-    /// Per-tool execution records for multi-tool group expansion.
     pub tool_calls: Vec<ToolCallRecord>,
 }
 
@@ -194,28 +177,23 @@ struct SettledRenderCache {
     expansion: ReasoningExpansion,
 }
 
-/// The part of the transcript that no longer changes, rendered. Shared, not
-/// copied: a long session has tens of thousands of these rows, and copying
-/// them on every frame made each frame cost as much as the whole history.
+/// Shared, not copied: a long session has tens of thousands of rows, and
+/// copying them each frame cost as much as the whole history.
 pub type SettledLines = std::sync::Arc<Vec<RenderLine>>;
 
-/// Accumulates the conversation from [`LoopEvent`]s and renders it to lines.
 #[derive(Default)]
 pub struct ChatView {
     lines: Vec<ChatLine>,
-    /// Index of the assistant content line being streamed, if any.
+    /// The assistant line being streamed.
     streaming: Option<usize>,
-    /// Index of the reasoning line being streamed, if any.
     streaming_reasoning: Option<usize>,
-    /// Start time of the active reasoning block.
     reasoning_start: Option<std::time::Instant>,
-    /// Index of a tool line started but not finished (renders with a spinner).
+    /// Started but not finished; drawn with a spinner.
     open_tool: Option<usize>,
-    /// Number of lines in the welcome card banner.
+    /// Lines in the welcome card.
     card_len: usize,
-    /// In-place update flag requesting full reprint of settled lines.
     needs_reprint: bool,
-    /// Cached render of settled lines to avoid expensive markdown & wrap re-parsing every frame.
+    /// Settled lines rendered once, not re-parsed every frame.
     settled_cache: Mutex<SettledRenderCache>,
 }
 
@@ -242,12 +220,7 @@ pub fn format_explore(is_running: bool, files: usize, searches: usize, last_targ
 }
 
 
-/// What a call names, in a few words: the file and the size of the change for
-/// a write, the target for a read, the command for a shell call.
-///
-/// Shown next to the model's own header, because the header says what it
-/// meant to do and this says what it asked for.
-/// The files one read or edit call names: its `path`, then each of its `files`.
+/// Its `path`, then each of its `files`.
 fn call_paths(parsed: &serde_json::Value) -> Vec<String> {
     let single = parsed.get("path").and_then(|p| p.as_str());
     let batch = parsed
@@ -259,7 +232,7 @@ fn call_paths(parsed: &serde_json::Value) -> Vec<String> {
     single.into_iter().chain(batch).filter(|p| !p.is_empty()).map(str::to_string).collect()
 }
 
-/// Every edit of an edit call, across all of its files.
+/// Across all of its files.
 fn call_edits(parsed: &serde_json::Value) -> Vec<&serde_json::Value> {
     let single = parsed.get("edits").and_then(|e| e.as_array()).into_iter().flatten();
     let batch = parsed
@@ -282,6 +255,9 @@ fn paths_label(paths: &[String], list_them: bool) -> String {
     }
 }
 
+/// What a call names: the file and change size for a write, the target for
+/// a read, the command for a shell call. Shown next to the model's header,
+/// which says what it meant to do.
 pub fn call_facts(name: &str, parsed: &serde_json::Value) -> Option<String> {
     let path_of = |key: &str| -> Option<String> {
         let raw = parsed.get(key)?.as_str()?;
@@ -335,12 +311,10 @@ pub fn call_facts(name: &str, parsed: &serde_json::Value) -> Option<String> {
 }
 
 impl ChatView {
-    /// Index of the first live (still-changing) line; `lines.len()` when
-    /// everything is settled. Everything before it can be printed to the
-    /// terminal scrollback once and never touched again (print-and-forget).
+    /// First still-changing line, or `lines.len()`. Everything before it is
+    /// printed to the scrollback once and never touched again.
     pub fn settled_boundary(&self) -> usize {
-        // min(): all live lines stay repaintable; taking the first Some() would
-        // freeze an earlier line that still receives appends.
+        // min(): taking the first Some() would freeze a line that still receives appends.
         self.streaming
             .into_iter()
             .chain(self.streaming_reasoning)
@@ -349,12 +323,12 @@ impl ChatView {
             .unwrap_or(self.lines.len())
     }
 
-    /// Total chars across all lines (crude activity/token gauge).
+    /// Crude activity gauge.
     pub fn total_chars(&self) -> usize {
         self.lines.iter().map(|l| l.text.len()).sum()
     }
 
-    /// Get raw character counts by category: (user, assistant, reasoning, tools).
+    /// (user, assistant, reasoning, tools)
     pub fn raw_content_chars(&self) -> (usize, usize, usize, usize) {
         let mut user = 0;
         let mut assistant = 0;
@@ -378,7 +352,6 @@ impl ChatView {
         (user, assistant, reasoning, tools)
     }
 
-    /// Clear all lines and streaming state.
     pub fn clear(&mut self) {
         self.lines.clear();
         self.streaming = None;
@@ -390,7 +363,6 @@ impl ChatView {
         *self.settled_cache.lock() = SettledRenderCache::default();
     }
 
-    /// Returns the full text of the most recent assistant response, if any.
     pub fn last_assistant_text(&self) -> Option<String> {
         let mut lines = Vec::new();
         for l in self.lines.iter().rev() {
@@ -408,24 +380,21 @@ impl ChatView {
         }
     }
 
-    /// Take and reset the reprint flag.
     pub fn take_needs_reprint(&mut self) -> bool {
         std::mem::take(&mut self.needs_reprint)
     }
 
-    /// Number of user lines (prompts and steering directives) so far.
+    /// Prompts and steering directives.
     pub fn user_turn_count(&self) -> usize {
         self.lines.iter().filter(|l| l.kind == LineKind::User).count()
     }
 
-    /// Check if any user message has been recorded.
     pub fn has_user_message(&self) -> bool {
         self.lines.iter().any(|l| l.kind == LineKind::User)
     }
 
-    /// Truncate lines after the last user message, removing the last assistant response,
-    /// reasoning blocks, tool executions, and recap from the chat view.
-    /// Returns true if a user message was found and truncation occurred.
+    /// Drops the last answer, its reasoning, tools and recap. True when a user
+    /// message was found.
     pub fn truncate_to_last_user(&mut self) -> bool {
         if let Some(pos) = self.lines.iter().rposition(|l| l.kind == LineKind::User) {
             self.lines.truncate(pos + 1);
@@ -441,9 +410,7 @@ impl ChatView {
         }
     }
 
-    /// Remove the `n`th user message from the end and everything after it,
-    /// which is what taking those turns back leaves of the transcript.
-    /// Changes nothing and returns false when there are fewer than `n`.
+    /// What taking the last `n` turns back leaves. False when there are fewer.
     pub fn truncate_before_nth_last_user(&mut self, n: usize) -> bool {
         if n == 0 {
             return false;
@@ -469,9 +436,8 @@ impl ChatView {
         true
     }
 
-    /// Update an existing system message matching `prefix` in the current turn (after the latest User message),
-    /// or append a new system message at the end of the chat.
-    /// This prevents turn N's system annotations (like turn recaps) from overwriting earlier turns' recaps.
+    /// Only within the current turn, so a later recap never overwrites an
+    /// earlier turn's.
     pub fn update_or_push_turn_system(&mut self, prefix: &str, text: &str) {
         self.settled_cache.lock().boundary = 0;
         let last_user_idx = self.lines.iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0);
@@ -485,9 +451,8 @@ impl ChatView {
         }
     }
 
-    /// Attaches or updates a recap for a specific turn ID (1-indexed based on user turns).
-    /// If subsequent turns already exist, the recap is placed at the end of that specific turn,
-    /// right before the next user turn begins.
+    /// `turn_id` counts user turns from 1. When later turns exist, the recap goes
+    /// right before the next user message.
     pub fn attach_turn_recap(&mut self, turn_id: u64, recap_text: &str) {
         self.settled_cache.lock().boundary = 0;
         let user_indices: Vec<usize> = self
@@ -527,9 +492,8 @@ impl ChatView {
         }
     }
 
-    /// Insert a line mid-conversation, keeping the live-line indices pointing
-    /// at the same lines. A recap for an earlier turn can land while the
-    /// current turn is still streaming or running a tool.
+    /// Keeps live-line indices on the same lines: a recap for an earlier turn can
+    /// land while the current one is still streaming.
     fn insert_line(&mut self, at: usize, line: ChatLine) {
         self.lines.insert(at, line);
         for idx in [&mut self.streaming, &mut self.streaming_reasoning, &mut self.open_tool].into_iter().flatten() {
@@ -539,7 +503,7 @@ impl ChatView {
         }
     }
 
-    /// Replaces the initial welcome card lines with fresh lines, keeping any subsequent notices.
+    /// Keeps any notices after it.
     pub fn update_welcome_card(&mut self, new_card: Vec<RenderLine>) {
         if self.has_user_message() {
             return;
@@ -562,18 +526,13 @@ impl ChatView {
         self.lines.extend(remaining_notices);
     }
 
-    /// System/status line (memory loaded, notices).
     pub fn push_system(&mut self, text: &str) {
         self.streaming = None;
         self.streaming_reasoning = None;
         self.lines.push(ChatLine::new(LineKind::System, text.to_string()));
     }
 
-    /// Replace the last system line with its outcome.
-    ///
-    /// Used for the work that announces itself before it starts —
-    /// "Compacting context..." becomes "Context compacted · 12k saved" in
-    /// place, rather than leaving both on the screen.
+    /// "Compacting context..." becomes "Context compacted · 12k saved" in place.
     pub fn replace_last_system(&mut self, text: &str) {
         match self.lines.iter().rposition(|l| l.kind == LineKind::System) {
             Some(i) => {
@@ -586,27 +545,24 @@ impl ChatView {
     }
 
 
-    /// Push a line with explicit kind.
     pub fn push_line(&mut self, kind: LineKind, text: impl Into<String>) {
         self.streaming = None;
         self.streaming_reasoning = None;
         self.lines.push(ChatLine::new(kind, text.into()));
     }
 
-    /// User typed a message. Stored unwrapped; wrapping happens in [`Self::render`].
+    /// Stored unwrapped; [`Self::render`] wraps.
     pub fn push_user(&mut self, text: &str) {
         self.streaming = None;
         self.lines.push(ChatLine::new(LineKind::User, text.to_string()));
     }
 
-    /// Assistant response message.
     pub fn push_assistant(&mut self, text: &str) {
         self.streaming = None;
         self.streaming_reasoning = None;
         self.lines.push(ChatLine::new(LineKind::Assistant, text.to_string()));
     }
 
-    /// Feed one loop event.
     pub fn on_event(&mut self, ev: &LoopEvent) {
         match ev {
             LoopEvent::TurnDelta(d) => {
@@ -645,8 +601,7 @@ impl ChatView {
                 self.lines.push(ChatLine::new(LineKind::User, directive));
                 self.needs_reprint = true;
             }
-            // Progress for the status line only: the transcript stays
-            // readable instead of gaining a line per loop iteration.
+            // Status line only, so the transcript does not gain a line per iteration.
             LoopEvent::StepStarted { .. } => {}
             LoopEvent::Done(reason) => {
                 self.streaming = None;
@@ -655,7 +610,7 @@ impl ChatView {
                     self.lines[i].reasoning_secs = Some(secs);
                 }
                 self.open_tool = None;
-                // The enum's own name ("— StepLimit —") reached the chat.
+                // The enum's own name ("— StepLimit —") used to reach the chat.
                 let said = match reason {
                     flashagent_core::DoneReason::StepLimit => Some("stopped: the step limit was reached"),
                     flashagent_core::DoneReason::TokenBudget => Some("stopped: the token budget was spent"),
@@ -671,15 +626,11 @@ impl ChatView {
     }
 }
 
-/// Expansion mode for model reasoning blocks:
-/// - `none()`: all collapsed
-/// - `all()`: all expanded (Ctrl+Shift+O, permanent across turns)
-/// - `last_only()`: only the latest reasoning block expanded (Ctrl+O, temporary per turn)
+/// `none()`: all collapsed; `all()`: all expanded (Ctrl+Shift+O, persists);
+/// `last_only()`: the latest block (Ctrl+O, this turn).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ReasoningExpansion {
-    /// Expand all reasoning blocks across all history (permanent Ctrl+Shift+O).
     pub all: bool,
-    /// Expand only the latest reasoning block (temporary Ctrl+O).
     pub last: bool,
 }
 
@@ -707,14 +658,12 @@ impl From<bool> for ReasoningExpansion {
     }
 }
 
-/// Helper to render a single tool execution card.
 fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLine> {
     let tool_name = call.name.as_str();
     let details_str = call.args_json.as_str();
     let parsed: serde_json::Value = serde_json::from_str(details_str.trim()).unwrap_or_default();
 
-    // The model's stated intent sits above the facts, never instead of them:
-    // the card underneath still shows the command, the diff, the output.
+    // The stated intent sits above the facts, never instead of them.
     let card = |rows: Vec<RenderLine>| -> Vec<RenderLine> {
         let Some(header) = parsed
             .get("header")
@@ -874,19 +823,15 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
     )
 }
 
-/// What part of a turn a line belongs to. A blank line goes wherever the
-/// transcript moves from one to another, so that a question, the work done
-/// for it and the answer read as three things rather than one column of
-/// text.
+/// A blank line goes between blocks, so the question, the work and the
+/// answer read as three things.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Block {
-    /// What the user asked.
     Ask,
     /// Thinking and tool calls.
     Work,
-    /// What the model said back.
     Answer,
-    /// Cards, diffs and notices, which bring their own spacing.
+    /// Cards, diffs and notices bring their own spacing.
     Other,
 }
 
@@ -900,7 +845,7 @@ fn block_of(kind: LineKind) -> Block {
 }
 
 impl ChatView {
-    /// Render all lines wrapped to `width`. `expansion` determines which reasoning blocks expand.
+    /// `expansion` decides which reasoning blocks expand.
     pub fn render_split(
         &self,
         width: usize,
@@ -926,8 +871,7 @@ impl ChatView {
             if !is_expanded {
                 let chevron = "\x1b[38;2;120;125;140m›\x1b[0m";
                 let text_styled = if is_streaming {
-                    // A sweep of light across the words, and a spinner in
-                    // the margin: still working, without a word saying so.
+                    // A light sweep and a margin spinner: still working, without words.
                     let t = anim::now_ms();
                     format!(
                         " \x1b[38;2;138;180;248m{}\x1b[0m \x1b[1m{}\x1b[0m {chevron}",
@@ -937,9 +881,8 @@ impl ChatView {
                 } else if let Some(s) = secs {
                     format!("  \x1b[38;2;120;125;140m✻\x1b[0m \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m \x1b[38;2;140;145;160m({s}s)\x1b[0m {chevron}")
                 } else {
-                    // Thinking lifted out of the answer text: no duration was
-                    // ever measured, but it is plainly over — the answer is
-                    // underneath it.
+                    // Thinking lifted out of the answer text has no measured duration, but it
+                    // is plainly over.
                     format!("  \x1b[38;2;120;125;140m✻\x1b[0m \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m {chevron}")
                 };
                 let budget = width.saturating_sub(4);
@@ -947,8 +890,7 @@ impl ChatView {
                 target.push((LineKind::Reasoning, clipped_styled));
             } else {
                 let trimmed_text = text.trim();
-                // The expanded box carried "Thinking:" for the whole session,
-                // including under a finished answer.
+                // "Thinking:" used to stay under a finished answer.
                 let verb = if is_streaming { "Thinking" } else { "Thought" };
                 let elapsed = match (is_streaming, secs) {
                     (false, Some(s)) => format!(" ({s}s)"),
@@ -1002,9 +944,8 @@ impl ChatView {
         let mut current_turn_user_idx = 0usize;
 
         let has_cached = cached_settled_match.is_some();
-        // With the settled rows cached, only the turn the boundary falls in
-        // is read again, for the state the live rows continue from; every
-        // turn before it ended at its next question, and that state resets.
+        // With settled rows cached, only the turn the boundary falls in is re-read;
+        // earlier turns ended at their next question, where state resets.
         let scan_from = if has_cached {
             self.lines[..boundary.min(self.lines.len())].iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0)
         } else {
@@ -1038,10 +979,7 @@ impl ChatView {
                             .iter()
                             .any(|l| l.kind == LineKind::Reasoning);
                         if !has_native_reasoning {
-                            // The ledger keeps the English name: it is what
-                            // the "do not repeat a stage" check compares
-                            // against, and translating it would make every
-                            // stage look new.
+                            // The English name is kept: the no-repeat check compares against it.
                             turn_reasoning_stages.push(resolve_reasoning_stage(
                                 &think_text,
                                 &turn_reasoning_stages,
@@ -1055,8 +993,7 @@ impl ChatView {
             }
 
             let target = if i < boundary { &mut settled } else { &mut live };
-            // A blank row wherever the transcript moves between asking,
-            // working and answering.
+            // A blank row between asking, working and answering.
             let block = block_of(line.kind);
             if let Some(previous) = previous_block {
                 let crossing = previous != block && previous != Block::Other && block != Block::Other;
@@ -1162,8 +1099,7 @@ impl ChatView {
                     }
                 }
                 if self.open_tool == Some(i) && line.kind == LineKind::Tool {
-                    // The call in flight: a spinner in the margin and a sweep
-                    // across its words.
+                    // The call in flight: margin spinner and a sweep across its words.
                     let t = anim::now_ms();
                     let words = strip_ansi(&line.text);
                     let words = words.trim_start().trim_end_matches('›').trim_end();
@@ -1175,8 +1111,7 @@ impl ChatView {
                     target.push((line.kind, clip_ansi(&row, width)));
                     continue;
                 }
-                // A message longer than the window is wrapped, not cut: the
-                // end of an error is often the part that says what happened.
+                // Wrapped, not cut: the end of an error often says what happened.
                 let plain = strip_ansi(&line.text);
                 if line.kind == LineKind::ToolError && visible_width(&plain) > width {
                     let indent = plain.len() - plain.trim_start().len();
@@ -1226,7 +1161,7 @@ impl ChatView {
         (settled, live)
     }
 
-    /// Render everything wrapped to `width`, with `❯`-prefix on user lines.
+    /// `❯` prefix on user lines.
     pub fn render(&self, width: usize) -> Vec<(LineKind, String)> {
         let (settled, live) = self.render_split(width, true);
         let mut all = std::sync::Arc::unwrap_or_clone(settled);
@@ -1237,16 +1172,14 @@ impl ChatView {
 
 use crossterm::style::Stylize;
 
-/// One rendered line: kind + text.
+/// Kind and text.
 pub type RenderLine = (LineKind, String);
 
-/// Spinner frames — braille dots.
 pub const SPINNER: &[&str] = anim::SPINNER;
 
-/// Prompt chevron icon for user inputs (clean geometric glyph, no emojis).
 pub const GLYPH_PROMPT: &str = "❯";
 
-/// Status glyphs for tool lines (own set: diamonds, not circles/checks).
+/// Diamonds, not circles or checks.
 pub const GLYPH_RUN: &str = "◈"; // tool call in flight
 pub const GLYPH_OK: &str = "◆"; // tool finished
 pub const GLYPH_ERR: &str = "◇"; // tool failed (hollow = broken)
@@ -1357,7 +1290,6 @@ mod tests {
         let boxed = pad_box_row("test", 20);
         assert_eq!(visible_width(&boxed), 20);
 
-        // Test ANSI-safe wrap
         let colored_line = "\x1b[38;2;95;90;85m│\x1b[0m \x1b[38;2;160;155;145mmodel:\x1b[0m \x1b[38;2;225;175;95mcustom-model-v1\x1b[0m";
         let wrapped = wrap(colored_line, 80);
         assert_eq!(wrapped.len(), 1, "Line with visible_width <= 80 must not be split by ANSI codes");
@@ -1380,7 +1312,6 @@ mod tests {
     #[test]
     fn test_collapsed_tools_formatting() {
         let mut v = ChatView::default();
-        // 1. Single command
         v.on_event(&LoopEvent::ToolStarted {
             id: "c1".into(),
             name: "run_shell".into(),
@@ -1391,7 +1322,6 @@ mod tests {
         let all: Vec<_> = settled.iter().cloned().chain(live).collect();
         assert!(all.iter().any(|(_, t)| t.contains("Ran") && t.contains("cargo test -p flashagent-llm") && (t.contains('›') || t.contains('>'))));
 
-        // 2. Multiple commands consolidation
         let mut v2 = ChatView::default();
         v2.on_event(&LoopEvent::ToolStarted {
             id: "c1".into(),
@@ -1415,7 +1345,6 @@ mod tests {
         let all2: Vec<_> = settled2.iter().cloned().chain(live2).collect();
         assert!(all2.iter().any(|(_, t)| t.contains("Ran 3 commands") && (t.contains('›') || t.contains('>'))));
 
-        // 3. Edit file formatting with crab icon and diff stats
         let mut v3 = ChatView::default();
         v3.on_event(&LoopEvent::ToolStarted {
             id: "e1".into(),
@@ -1427,7 +1356,6 @@ mod tests {
         let all3: Vec<_> = settled3.iter().cloned().chain(live3).collect();
         assert!(all3.iter().any(|(_, t)| t.contains("Edited") && t.contains("lib.rs") && t.contains("+2") && t.contains("-0")));
 
-        // 4. Consecutive exploration consolidation: 4 files, 1 search
         let mut v4 = ChatView::default();
         for i in 1..=4 {
             v4.on_event(&LoopEvent::ToolStarted {
@@ -1447,7 +1375,6 @@ mod tests {
         let all4: Vec<_> = settled4.iter().cloned().chain(live4).collect();
         assert!(all4.iter().any(|(_, t)| t.contains("Explored 4 files, 1 search") && (t.contains('›') || t.contains('>'))));
 
-        // 5. Memory tool formatting
         let mut v5 = ChatView::default();
         v5.on_event(&LoopEvent::ToolStarted {
             id: "m1".into(),
@@ -1460,7 +1387,7 @@ mod tests {
         assert!(all5.iter().any(|(_, t)| t.contains("Read memory") && t.contains("[project]") && (t.contains('›') || t.contains('>'))));
         assert!(!all5.iter().any(|(_, t)| t.contains("{\"scope\":\"project\"}")));
 
-        // 5b. Memory consolidation: consecutive reads merge scopes
+        // Consecutive memory reads merge their scopes.
         let mut v5b = ChatView::default();
         v5b.on_event(&LoopEvent::ToolStarted {
             id: "m1".into(),
@@ -1479,7 +1406,6 @@ mod tests {
         assert_eq!(all5b.len(), 1, "Consecutive memory_read calls must consolidate into a single line");
         assert!(all5b.iter().any(|(_, t)| t.contains("Read memory") && t.contains("[project, global]")));
 
-        // 6. Env info and ask_user formatting
         let mut v6 = ChatView::default();
         v6.on_event(&LoopEvent::ToolStarted {
             id: "u1".into(),
@@ -1497,12 +1423,10 @@ mod tests {
         let mut v = ChatView::default();
         v.push_user("q");
         v.on_event(&LoopEvent::TurnDelta("partial".into()));
-        // streaming assistant line is live → boundary at its index.
+        // A streaming line is live, so the boundary is its index.
         assert_eq!(v.settled_boundary(), 1);
         v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
-        // Everything settled → the boundary is past the last line. It counts
-        // transcript lines, not drawn rows: one line can become several rows,
-        // and the blank rows between blocks belong to no line at all.
+        // Counts transcript lines, not drawn rows.
         assert_eq!(v.settled_boundary(), v.lines.len());
         let (settled, live) = v.render_split(80, true);
         assert!(live.is_empty(), "nothing is live once the turn is over: {live:?}");
@@ -1537,8 +1461,7 @@ mod tests {
 
     #[test]
     fn a_finished_thought_is_not_still_called_thinking() {
-        // Seen in a screenshot: the answer and its recap were on the screen
-        // and the block above them still read "Thinking: Analyzing Request".
+        // Seen: the answer was on screen and the block above still read "Thinking".
         let mut v = ChatView::default();
         v.push_user("Hi!");
         v.on_event(&LoopEvent::ReasoningDelta("The user sent a greeting.".into()));
@@ -1551,8 +1474,7 @@ mod tests {
 
     #[test]
     fn thinking_that_came_out_of_the_answer_is_also_finished() {
-        // A model that writes <think> into its content leaves no duration
-        // behind, which is not a reason to claim it is still going.
+        // <think> in content leaves no duration, but it is not still going.
         let mut v = ChatView::default();
         v.push_user("hi");
         v.on_event(&LoopEvent::TurnDelta("<think>weighing it up</think>Hello!".into()));
@@ -1606,14 +1528,14 @@ mod tests {
         let reasoning: Vec<_> = v.lines.iter().filter(|l| l.kind == LineKind::Reasoning).collect();
         assert_eq!(reasoning.len(), 1, "reasoning deltas merge into one block");
         assert_eq!(reasoning[0].text, "thinking more");
-        // The assistant line is still live (appends continue after reasoning).
+        // Appends continue after reasoning.
         assert_eq!(v.streaming, Some(0));
         assert_eq!(v.settled_boundary(), 0);
     }
 
     #[test]
     fn a_path_inside_the_project_is_shown_relative_to_it() {
-        // "Read /tmp/claude-1000/-home.../audit_proj/main.rs" was all prefix.
+        // The path was all prefix before.
         let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
         assert_eq!(format_cmd(&format!("Read {cwd}/src/main.rs")), "Read src/main.rs");
         assert_eq!(format_cmd(&format!("cat {cwd}")), "cat .");
@@ -1622,8 +1544,7 @@ mod tests {
 
     #[test]
     fn a_headed_edit_card_still_says_what_it_did_to_the_tree() {
-        // The header replaced the card, so "Edited main.rs +1 -1" was lost:
-        // the model's intention survived and the fact did not.
+        // The header used to replace the card, losing "Edited main.rs +1 -1".
         let mut chat = ChatView::default();
         chat.push_user("add a line");
         chat.on_event(&LoopEvent::ToolStarted {
@@ -1684,9 +1605,7 @@ mod tests {
 
     #[test]
     fn listing_the_working_directory_reads_as_a_sentence() {
-        // It showed "Searched search": the fallback was the word "search",
-        // and a listing of the working directory has neither path nor
-        // pattern to name.
+        // It used to show "Searched search".
         let mut chat = ChatView::default();
         chat.push_user("look around");
         chat.on_event(&LoopEvent::ToolStarted { id: "a".into(), name: "list_dir".into(), args_json: "{}".into() });
@@ -1699,8 +1618,7 @@ mod tests {
 
     #[test]
     fn the_interface_stays_english_in_a_russian_chat() {
-        // The interface is English only; the model answers in the user's
-        // language, but the labels FlashAgent writes itself do not follow.
+        // UI labels stay English even when the model answers in another language.
         let mut chat = ChatView::default();
         chat.push_user("Осмотри проект и расскажи что он делает");
         chat.on_event(&LoopEvent::ReasoningDelta("Сначала посмотрю структуру проекта.".into()));
@@ -1717,25 +1635,21 @@ mod tests {
         // Numbered steps: latest wins.
         let t = "Thinking Process:\n1. Analyze the Request: the user said hi\n2. Determine the Goal: be polite";
         assert_eq!(reasoning_stage(t).as_deref(), Some("Determine the Goal"));
-        // Bullet steps too.
         assert_eq!(
             reasoning_stage("* Examine Available Tools: read_file, grep").as_deref(),
             Some("Examine Available Tools")
         );
-        // Bracketed stage markers: [Stage: Name]
         let t_stage = "Some freeform thinking...\n[Stage: Exploring Codebase]\nLooking at files...";
         assert_eq!(reasoning_stage(t_stage).as_deref(), Some("Exploring Codebase"));
-        // Heading stage markers: ### Name
         let t_heading = "Thinking...\n### Planning Architecture\nDetails here";
         assert_eq!(reasoning_stage(t_heading).as_deref(), Some("Planning Architecture"));
-        // Real LM Studio Gemma 4 output:
+        // Real LM Studio Gemma 4 output.
         let t_gemma = "Thinking Process:\n\n\
                        1.  **Analyze the Request:** The user asked to \"Say hello in 2 words.\"\n\
                        2.  **Identify the Goal:** Provide a greeting.\n\
                        5.  **Final Output Generation.**";
         assert_eq!(reasoning_stage(t_gemma).as_deref(), Some("Final Output Generation"));
 
-        // User's bold section heading style:
         let t_user = "**Updating Welcome Card Functions**\n\
                       The existing welcome_card function needs modification...\n\n\
                       **Constructing Welcome Card Display**\n\
@@ -1744,9 +1658,8 @@ mod tests {
                       The current working directory, along with the active execution mode...";
         assert_eq!(reasoning_stage(t_user).as_deref(), Some("Displaying Runtime Context"));
 
-        // Fallback: free-form reasoning has no labels.
         assert_eq!(reasoning_stage("just thinking about task aloud"), None);
-        // A bare `Note: ...` sentence is not a step (no number/bullet).
+        // A bare `Note: ...` sentence is not a step.
         assert_eq!(reasoning_stage("Note: this is just a long sentence with a colon"), None);
     }
 
@@ -1760,12 +1673,11 @@ mod tests {
         assert!(live.iter().any(|(_, t)| t.contains("Determine the Goal") && (t.contains('›') || t.contains('>'))), "live: {live:?}");
         assert!(!live.iter().any(|(_, t)| t.contains("Analyze the Request")));
 
-        // After task completion (Done event), it shows the finished thought summary.
         v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
         let (settled, _) = v.render_split(200, false);
         assert!(settled.iter().any(|(_, t)| t.contains("Determine the Goal") && (t.contains('›') || t.contains('>'))));
 
-        // Fallback: free-form reasoning shows clean status without dumping sentences.
+        // Free-form reasoning shows a clean status, not dumped sentences.
         let mut v2 = ChatView::default();
         v2.on_event(&LoopEvent::ReasoningDelta("freeform thoughts about task".into()));
         let (_, live2) = v2.render_split(100, false);
@@ -1778,20 +1690,19 @@ mod tests {
     #[test]
     fn restore_line_color_reapplies_after_embedded_resets() {
         let prefix = "\x1b[38;2;120;120;120m";
-        // bold span closes with a full reset — color must come back after it.
+        // A bold span ends with a full reset; the colour must come back after it.
         let s = restore_line_color(&format!("{prefix}before\x1b[1mbold\x1b[0mafter"), prefix);
         assert!(s.contains("\x1b[0m\x1b[38;2;120;120;120mafter"));
-        // foreground-only reset (from md code spans) re-applied too.
+        // Foreground-only resets (from code spans) too.
         let s2 = restore_line_color("a\x1b[39mb", prefix);
         assert!(s2.ends_with("\x1b[39m\x1b[38;2;120;120;120mb"));
     }
 
     #[test]
     fn clip_ansi_keeps_sequences_and_width() {
-        // Sequence survives, visible width respected.
         let s = clip_ansi("ab\x1b[39mcd", 3);
         assert_eq!(s, "ab\x1b[39mc");
-        // Cut inside styled text: sequence is NOT literalized.
+        // Cut inside styled text: the sequence is not printed literally.
         assert!(!clip_ansi("\x1b[1mbold text\x1b[0m here", 6).contains("[0m here"));
         assert_eq!(clip_ansi("plain", 10), "plain");
         assert!(clip_ansi("\x1b[1mx\x1b[0m", 0).contains('\x1b'));
@@ -1800,29 +1711,24 @@ mod tests {
     #[test]
     fn reasoning_expansion_modes_last_and_all() {
         let mut v = ChatView::default();
-        // Turn 1
         v.push_user("msg 1");
         v.on_event(&LoopEvent::ReasoningDelta("Thinking Process:\n1. Plan: step 1\ndetails of turn 1".into()));
         v.on_event(&LoopEvent::TurnDelta("answer 1".into()));
         v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
 
-        // Turn 2
         v.push_user("msg 2");
         v.on_event(&LoopEvent::ReasoningDelta("Thinking Process:\n1. Plan: step 2\ndetails of turn 2".into()));
         v.on_event(&LoopEvent::TurnDelta("answer 2".into()));
         v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
 
-        // 1. None: both collapsed (inner details hidden)
         let (all, _) = v.render_split(200, ReasoningExpansion::none());
         assert!(all.iter().all(|(_, t)| !t.contains("details of turn 1")));
         assert!(all.iter().all(|(_, t)| !t.contains("details of turn 2")));
 
-        // 2. Last only: turn 1 collapsed, turn 2 expanded
         let (all_last, _) = v.render_split(200, ReasoningExpansion::last_only());
         assert!(all_last.iter().all(|(_, t)| !t.contains("details of turn 1")));
         assert!(all_last.iter().any(|(_, t)| t.contains("details of turn 2")));
 
-        // 3. All: both expanded
         let (all_exp, _) = v.render_split(200, ReasoningExpansion::all());
         assert!(all_exp.iter().any(|(_, t)| t.contains("details of turn 1")));
         assert!(all_exp.iter().any(|(_, t)| t.contains("details of turn 2")));
@@ -1839,7 +1745,6 @@ mod tests {
             diff: None,
         };
         let handle = tokio::spawn(async move { g2.approve(&req).await });
-        // Wait until pending shows up, then answer.
         for _ in 0..100 {
             if gate.pending().is_some() {
                 break;
@@ -1854,17 +1759,14 @@ mod tests {
 
     #[test]
     fn extract_thinking_from_text_parses_tags_and_steps() {
-        // XML think tags
         let (think, ans) = extract_thinking_from_text("<think>internal plan</think>\nActual response");
         assert_eq!(think.as_deref(), Some("internal plan"));
         assert_eq!(ans, "Actual response");
 
-        // Unclosed think tag
         let (think2, ans2) = extract_thinking_from_text("<think>streaming in progress");
         assert_eq!(think2.as_deref(), Some("streaming in progress"));
         assert_eq!(ans2, "");
 
-        // Thinking Process with steps and answer
         let text_with_steps = "Thinking Process:\n\
                                1. Analyze the Request: foo\n\
                                2. Determine the Goal: bar\n\n\
@@ -1874,7 +1776,6 @@ mod tests {
         assert!(think3.unwrap().contains("Determine the Goal"));
         assert_eq!(ans3, "Hello, user!");
 
-        // Plain text
         let (think4, ans4) = extract_thinking_from_text("Just a normal answer");
         assert!(think4.is_none());
         assert_eq!(ans4, "Just a normal answer");
@@ -1882,11 +1783,9 @@ mod tests {
 
     #[test]
     fn bold_stage_titles_with_no_lead_in_are_still_recognized_as_thinking() {
-        // What this project's own prompt actually asks a model without a
-        // native reasoning channel to write: bold stage titles, each with a
-        // paragraph under it, and no "Thinking Process:"/"Thinking:\n" lead-in
-        // wrapped around the whole thing. Seen live: it used to print in
-        // full as the assistant's answer instead of collapsing.
+        // What this project's prompt asks a model without a reasoning channel to
+        // write: bold stage titles with paragraphs, no lead-in. It used to print in
+        // full as the answer.
         let text = "**Understanding the Request**\n\
                      The user wants me to explore the project structure. I must plan, \
                      execute, and verify without user input.\n\n\
@@ -1920,12 +1819,12 @@ mod tests {
 
     #[test]
     fn a_real_answer_that_opens_with_its_own_heading_is_not_swallowed() {
-        // A single heading is not a stage progression; it must survive.
+        // A single heading is not a stage progression.
         let (think, ans) = extract_thinking_from_text("**Summary**\nHere is what changed.");
         assert!(think.is_none(), "a lone heading must not be read as thinking");
         assert_eq!(ans, "**Summary**\nHere is what changed.");
 
-        // Two headings, but neither is stage vocabulary: still a real answer.
+        // Two headings outside the stage vocabulary: still a real answer.
         let (think2, ans2) = extract_thinking_from_text(
             "**Summary**\nHere is what changed.\n\n**Next Steps**\nRun the tests.",
         );
@@ -1937,21 +1836,17 @@ mod tests {
     fn duplicate_reasoning_in_assistant_text_is_deduplicated() {
         let mut v = ChatView::default();
         v.push_user("do something");
-        // Native reasoning from LLM backend
         v.on_event(&LoopEvent::ReasoningDelta("1. Analyze the Request: goal".into()));
-        // Model also repeats Thinking Process in TurnDelta
+        // The model repeats its thinking in the content too.
         v.on_event(&LoopEvent::TurnDelta(
             "Thinking Process:\n1. Analyze the Request: duplicate\n2. Determine the Goal: duplicate\n\nReal Answer".into(),
         ));
         v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
 
         let (settled, _) = v.render_split(200, ReasoningExpansion::none());
-        // Thinking block appears once (collapsed)
         let thinking_lines: Vec<_> = settled.iter().filter(|(k, _)| *k == LineKind::Reasoning).collect();
         assert_eq!(thinking_lines.len(), 1);
-        // The duplicate text from TurnDelta was not printed as assistant text
         assert!(!settled.iter().any(|(_, t)| t.contains("duplicate")));
-        // Real answer is rendered as Assistant
         assert!(settled.iter().any(|(k, t)| *k == LineKind::Assistant && t.contains("Real Answer")));
     }
 
@@ -1959,23 +1854,20 @@ mod tests {
     fn text_only_thinking_is_rendered_as_collapsible_reasoning() {
         let mut v = ChatView::default();
         v.push_user("question");
-        // Model without native reasoning outputs Thinking Process directly in TurnDelta
+        // No native reasoning: thinking arrives in the content.
         v.on_event(&LoopEvent::TurnDelta(
             "Thinking Process:\n1. Analyze the Request: text model\n\nFinal direct answer".into(),
         ));
         v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
 
         let (settled, _) = v.render_split(200, ReasoningExpansion::none());
-        // Thinking process was converted to LineKind::Reasoning and collapsed
         assert!(settled.iter().any(|(k, t)| *k == LineKind::Reasoning && t.contains("Analyze the Request") && (t.contains('›') || t.contains('>'))));
-        // Final direct answer is rendered as Assistant
         assert!(settled.iter().any(|(k, t)| *k == LineKind::Assistant && t.contains("Final direct answer")));
     }
 
     #[test]
     fn update_or_push_turn_system_retains_per_turn_recaps() {
         let mut v = ChatView::default();
-        // Turn 1
         v.push_user("Turn 1 user query");
         v.push_line(LineKind::Assistant, "Turn 1 assistant answer");
         v.update_or_push_turn_system("recap:", "recap: Turn 1 recap");
@@ -1983,17 +1875,15 @@ mod tests {
         assert_eq!(v.lines.len(), 3);
         assert_eq!(v.lines[2].text, "recap: Turn 1 recap");
 
-        // Turn 2
         v.push_user("Turn 2 user query");
         v.push_line(LineKind::Assistant, "Turn 2 assistant answer");
         v.update_or_push_turn_system("recap:", "recap: Turn 2 recap");
 
-        // 6 lines: turn 1's recap is kept and turn 2's is appended.
+        // Turn 1's recap is kept and turn 2's appended.
         assert_eq!(v.lines.len(), 6);
         assert_eq!(v.lines[2].text, "recap: Turn 1 recap");
         assert_eq!(v.lines[5].text, "recap: Turn 2 recap");
 
-        // Updating Turn 2 recap in-place should only touch Turn 2 recap
         v.update_or_push_turn_system("recap:", "recap: Turn 2 updated recap");
         assert_eq!(v.lines.len(), 6);
         assert_eq!(v.lines[2].text, "recap: Turn 1 recap");
@@ -2007,17 +1897,15 @@ mod tests {
         v.push_line(LineKind::System, "[Verbose mode: last]");
         assert!(!v.has_user_message());
 
-        // Update card to banner-v2
         let new_card = vec![(LineKind::System, "banner-v2".to_string())];
         v.update_welcome_card(new_card);
 
-        // Verify banner-v2 is in the lines
         assert!(v.lines.iter().any(|l| l.text.contains("banner-v2")));
         assert!(!v.lines.iter().any(|l| l.text.contains("banner-v1")));
-        // Verify subsequent notice was preserved at the end
+        // A later notice is preserved.
         assert_eq!(v.lines.last().unwrap().text, "[Verbose mode: last]");
 
-        // After user message is sent, update_welcome_card does nothing
+        // After a user message the card is left alone.
         v.push_user("hello");
         assert!(v.has_user_message());
         let new_card_c = vec![(LineKind::System, "banner-v3".to_string())];
@@ -2068,8 +1956,7 @@ mod tests {
             seen.insert(face);
         }
         assert!(seen.len() > 1, "the face must actually animate");
-        // Each expression must hold long enough to be seen: repaints are
-        // event-driven, so a one-frame blink is invisible in practice.
+        // Repaints are event-driven, so a one-frame blink would be invisible.
         let cycle: Vec<&str> = (0..24).map(thinking_face).collect();
         let shortest = cycle
             .chunk_by(|a, b| a == b)
@@ -2101,15 +1988,13 @@ mod tests {
         assert!(running.contains("Add the missing null check to parser.rs"), "{running}");
         assert!(!running.contains("Editing"), "the header replaces the generated line: {running}");
 
-        // And when the call fails, the same sentence says so.
         v.on_event(&LoopEvent::ToolFinished {
             id: "1".into(),
             is_error: true,
             result_len: 5,
             result: Some("error: no such file".into()),
         });
-        // The expanded diff card renders under the line, so look at the whole
-        // frame rather than assuming a row index.
+        // The expanded diff renders under the line; check the whole frame.
         let failed = collapsed(&v);
         assert!(
             failed.contains("Failed to add the missing null check to parser.rs"),
@@ -2146,27 +2031,23 @@ mod tests {
         ];
         let sep = " · ";
 
-        // Everything fits.
         let wide = strip_ansi(&fit_parts(&parts, sep, 40));
         assert_eq!(wide, "gemma-4-e2b · auto · 64k");
 
-        // Only the first two: the third is dropped whole, not cut in half.
+        // The third part is dropped whole, not cut.
         let narrow = strip_ansi(&fit_parts(&parts, sep, 20));
         assert_eq!(narrow, "gemma-4-e2b · auto");
 
-        // And the colour codes are not counted as width.
+        // Colour codes do not count as width.
         assert!(visible_width(&fit_parts(&parts, sep, 20)) <= 20);
 
-        // Nothing fits: an empty line rather than a broken one.
+        // Nothing fits: empty rather than broken.
         assert_eq!(fit_parts(&parts, sep, 3), "");
     }
 
     #[test]
     fn the_welcome_card_leaves_room_for_the_composer_at_any_size() {
-        // The screen under the card is the composer, the hint line, the tip
-        // and the status line. A card that takes more than what is left
-        // pushes its own top off the screen, which is what a terminal a
-        // quarter of the screen wide used to show.
+        // A card taller than the space left pushes its own top off the screen.
         for width in [30usize, 44, 60, 80, 98, 120, 200] {
             for height in [8usize, 10, 12, 14, 16, 18, 21, 24, 30, 50] {
                 let card = welcome_card(&WelcomeCard {
@@ -2198,8 +2079,7 @@ mod tests {
 
     #[test]
     fn a_taller_window_gets_at_least_as_much_of_the_card() {
-        // Shapes are tried richest first, so growing the window must never
-        // take something away.
+        // Growing the window must never take something away.
         let card_at = |height: usize| {
             welcome_card(&WelcomeCard {
                 model: "m",
@@ -2266,8 +2146,7 @@ mod tests {
         assert!(open[2].contains("255;255;255"), "open eyes are white: {}", open[2]);
         assert!(!blink[2].contains("255;255;255"), "shut eyes show no white: {}", blink[2]);
 
-        // Breathing moves the highlight colour on the top row without
-        // touching the shape.
+        // Breathing changes the top-row highlight, not the shape.
         let dim = mascot_swift_lines_mood(0, MascotMood::Happy);
         let bright = mascot_swift_lines_mood(18, MascotMood::Happy);
         assert_ne!(dim[0], bright[0], "the highlight must change over the breath cycle");
@@ -2280,16 +2159,14 @@ mod tests {
         let offline = mascot_swift_lines_mood(0, MascotMood::Offline);
         let checking = mascot_swift_lines_mood(0, MascotMood::Checking);
         assert!(happy != offline && happy != checking && checking != offline);
-        // Offline shuts the eyes and drains the colour; the body colour of a
-        // reachable server must not appear.
+        // Offline must not use the healthy body colour.
         assert!(!offline.concat().contains("138;180;248"), "offline must not use the healthy blue");
         assert!(happy.concat().contains("138;180;248"));
     }
 
     #[test]
     fn mascot_repaints_only_when_it_changed() {
-        // The card is rebuilt on these ticks; at 12.5 ticks a second, doing it
-        // every tick would repaint the screen for nothing.
+        // At 12.5 ticks a second, rebuilding every tick would repaint for nothing.
         let repaints = (0..100).filter(|t| mascot_needs_repaint(*t)).count();
         assert!(repaints > 4, "the mascot must actually animate: {repaints}");
         assert!(repaints < 40, "too many card rebuilds: {repaints}");
@@ -2309,12 +2186,10 @@ mod tests {
         let rendered = render_markdown_text(md_input, 80);
         let joined = rendered.join("\n");
 
-        // Headings must NOT have raw ##
         assert!(!joined.contains("## Stack"));
         assert!(joined.contains("◈ Stack"));
         assert!(joined.contains("◈ Architecture"));
 
-        // Tables must have unicode box drawing borders and header
         assert!(joined.contains('╭'));
         assert!(joined.contains('├'));
         assert!(joined.contains('╰'));
@@ -2323,7 +2198,6 @@ mod tests {
         assert!(joined.contains("Core"));
         assert!(joined.contains("Rust"));
 
-        // Lists must have bullets
         assert!(joined.contains('•'));
         assert!(joined.contains("First item"));
         assert!(joined.contains("Second item"));
@@ -2387,18 +2261,14 @@ mod tests {
         let rendered = render_markdown_text(md_input, 80);
         let joined = rendered.join("\n");
 
-        // Checkboxes rendered as unicode symbols
         assert!(joined.contains('☑'));
         assert!(joined.contains('☐'));
 
-        // Nested lists have sub-bullet glyph
         assert!(joined.contains('•'));
         assert!(joined.contains('◦'));
 
-        // Continuation lines properly grouped and aligned
         assert!(joined.contains("Full implementation of agent loop"));
 
-        // Numbered list with paren supported
         assert!(joined.contains("1)"));
     }
 
@@ -2406,31 +2276,28 @@ mod tests {
     fn test_resolve_reasoning_stage_deduplication_and_progression() {
         let mut prior = Vec::new();
 
-        // 1. First step before tools: analyzing request
         let s1 = resolve_reasoning_stage("The user wants to make a coding test", &prior, None, 0);
         assert_eq!(s1, "Understanding user request");
         prior.push(s1);
 
-        // 2. Second step after search tool: even if text says "the user wants", it evaluates search results
+        // After a search the text is about results, even if it says "the user wants".
         let explore_searches = ToolGroupKind::Explore { files: 0, searches: 2, last_target: "main.rs".into(), is_running: false };
         let s2 = resolve_reasoning_stage("The user wants me to check X. Found 2 matches.", &prior, Some(&explore_searches), 1);
         assert_eq!(s2, "Evaluating Search Results");
         prior.push(s2);
 
-        // 3. Third step after file reads: analyzes file contents
         let explore_files = ToolGroupKind::Explore { files: 3, searches: 0, last_target: "lib.rs".into(), is_running: false };
         let s3 = resolve_reasoning_stage("The user wants X. Looking at lib.rs...", &prior, Some(&explore_files), 2);
         assert_eq!(s3, "Analyzing File Contents");
         prior.push(s3);
 
-        // 4. Fourth step after more file reads: should NOT duplicate "Analyzing File Contents", must advance
+        // Must advance instead of repeating "Analyzing File Contents".
         let s4 = resolve_reasoning_stage("The user wants X. Reading more files...", &prior, Some(&explore_files), 3);
         assert_ne!(s4, "Analyzing File Contents");
         assert_ne!(s4, "Understanding user request");
         assert_eq!(s4, "Deepening Code Search");
         prior.push(s4);
 
-        // All four headers in this turn are distinct.
         let unique_count = prior.iter().collect::<std::collections::HashSet<_>>().len();
         assert_eq!(unique_count, 4);
     }
@@ -2439,7 +2306,7 @@ mod tests {
     fn test_resolve_reasoning_stage_overrides_initial_marker_after_tools() {
         let prior = vec!["Analyzing Request".to_string()];
         let explore = ToolGroupKind::Explore { files: 0, searches: 2, last_target: "grep".into(), is_running: false };
-        // Model explicitly outputs prompt example "**Understanding the Request**" after tools have run
+        // The prompt's example heading after tools have run.
         let stage = resolve_reasoning_stage("**Understanding the Request**\nI see the search results...", &prior, Some(&explore), 1);
         assert_eq!(stage, "Evaluating Search Results");
     }
@@ -2475,11 +2342,9 @@ mod tests {
         chat.push_system("  recap: Answered turn 2");
 
         assert!(chat.truncate_to_last_user());
-        // After truncation the last line is the last user prompt.
         assert_eq!(chat.lines.last().map(|l| (l.kind, l.text.as_str())), Some((LineKind::User, "Turn 2 Question")));
         assert_eq!(chat.lines.len(), 5); // Welcome, Turn 1 Q, Turn 1 A, Recap 1, Turn 2 Q
 
-        // Truncate again: still truncates to last user
         assert!(chat.truncate_to_last_user());
         assert_eq!(chat.lines.last().map(|l| (l.kind, l.text.as_str())), Some((LineKind::User, "Turn 2 Question")));
     }
@@ -2488,7 +2353,6 @@ mod tests {
     fn test_expanded_tools_render_split() {
         let mut chat = ChatView::default();
         chat.push_user("Run checks");
-        // Command
         chat.on_event(&LoopEvent::ToolStarted {
             id: "t1".into(),
             name: "run_shell".into(),
@@ -2500,7 +2364,6 @@ mod tests {
             result_len: 20,
             result: Some("Finished dev profile".into()),
         });
-        // Read file
         chat.on_event(&LoopEvent::ToolStarted {
             id: "t2".into(),
             name: "read_file".into(),
@@ -2512,7 +2375,6 @@ mod tests {
             result_len: 25,
             result: Some("fn main() {\n    println!(\"hello\");\n}".into()),
         });
-        // Directory analysis
         chat.on_event(&LoopEvent::ToolStarted {
             id: "t3".into(),
             name: "list_dir".into(),
@@ -2525,28 +2387,23 @@ mod tests {
             result: Some("2026-09-07-a0-skeleton.md\n2026-09-08-a1-data.md".into()),
         });
 
-        // 1. In collapsed mode: one line summaries
         let (settled_collapsed, live_collapsed) = chat.render_split(100, false);
         let all_collapsed: Vec<_> = settled_collapsed.iter().cloned().chain(live_collapsed).collect();
         let collapsed_text = all_collapsed.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
         assert!(collapsed_text.contains("Ran") && collapsed_text.contains("cargo check"));
         assert!(collapsed_text.contains("Explored") || collapsed_text.contains("Read"));
 
-        // 2. In expanded mode: rich visual cards
         let (settled_expanded, live_expanded) = chat.render_split(100, true);
         let all_expanded: Vec<_> = settled_expanded.iter().cloned().chain(live_expanded).collect();
         let expanded_text = all_expanded.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
         let plain_expanded = strip_ansi(&expanded_text);
 
-        // Check command card prompt
         assert!(plain_expanded.contains("$ cargo check"));
         assert!(plain_expanded.contains("Finished dev profile"));
 
-        // Check read file blue card
         assert!(plain_expanded.contains("Read") && plain_expanded.contains("src/main.rs"));
         assert!(expanded_text.contains("\x1b[48;2;22;38;60m"), "Read view must have soft blue background");
 
-        // Check directory card
         assert!(plain_expanded.contains("Analyzed .audit"));
         assert!(plain_expanded.contains("2026-09-07-a0-skeleton.md"));
     }
@@ -2561,7 +2418,7 @@ mod tests {
         chat.push_user("Second question");
         chat.on_event(&LoopEvent::TurnDelta("Second answer".into()));
 
-        // Late recap arriving for turn 1
+        // A late recap for turn 1.
         chat.attach_turn_recap(1, "recap: explained first question in detail");
 
         let (settled, live) = chat.render_split(80, false);
@@ -2576,7 +2433,7 @@ mod tests {
 
     #[test]
     fn test_welcome_card_responsive_scales_to_terminal_dimensions() {
-        // 1. Standard 80x24: 2 columns, height <= 14
+        // 80x24: two columns, at most 14 rows.
         let card_80x24 = welcome_card(&WelcomeCard {
             model: "test-model",
             cwd: "/home/user/project",
@@ -2594,7 +2451,7 @@ mod tests {
             assert!(width <= 80, "Line width {} exceeds terminal width 80", width);
         }
 
-        // 2. Compact 50x16: single column, height <= 14
+        // 50x16: one column, at most 14 rows.
         let card_50x16 = welcome_card(&WelcomeCard {
             model: "test-model",
             cwd: "/home/user/project",
@@ -2612,7 +2469,7 @@ mod tests {
             assert!(width <= 50, "Line width {} exceeds terminal width 50", width);
         }
 
-        // 3. Ultra-compact 36x12: single column with minimal companion, height <= 12
+        // 36x12: minimal, at most 12 rows.
         let card_36x12 = welcome_card(&WelcomeCard {
             model: "test-model",
             cwd: "/home/user/project",
@@ -2655,17 +2512,14 @@ mod tests {
     #[test]
     fn multi_turn_chat_with_extracted_thinking_never_panics_on_render() {
         let mut chat = ChatView::default();
-        // Turn 1: user + assistant with embedded thinking tags
         chat.push_user("Hello");
         chat.push_line(LineKind::Assistant, "<think>First turn thoughts</think>First answer");
-        // Turn 2: user + assistant
         chat.push_user("Second question");
         chat.push_line(LineKind::Assistant, "Second answer");
-        // Rendering across settled and live boundaries must never panic from inverted slices
+        // Slices across the settled/live boundary must never be inverted.
         let (settled, live) = chat.render_split(80, false);
         assert!(!settled.is_empty() || !live.is_empty());
 
-        // Also test with expansion.all and expansion.last
         chat.render_split(80, true);
         chat.render_split(80, ReasoningExpansion { all: false, last: true });
     }

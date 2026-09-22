@@ -1,13 +1,11 @@
 use super::*;
 
-/// A picture waiting to be sent with the next message.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Attachment {
-    /// What to call it in the composer: a file name, or "screenshot".
+    /// A file name, or "screenshot".
     pub(crate) name: String,
-    /// The `data:` URL the request carries.
     pub(crate) data_url: String,
-    /// Pixel size, when the header gave one.
+    /// When the header gave one.
     pub(crate) size: Option<(u32, u32)>,
 }
 
@@ -20,7 +18,7 @@ impl Attachment {
         }
     }
 
-    /// A dropped or pasted path, when it points at an image that exists.
+    /// `None` unless it points at an existing image.
     pub(crate) fn from_dropped_path(pasted: &str) -> Option<Self> {
         // Terminals quote a dropped path when it contains spaces.
         let raw = pasted.trim().trim_matches(['\'', '"']).trim();
@@ -43,14 +41,12 @@ impl Attachment {
         })
     }
 
-    /// How it reads in the composer.
     pub(crate) fn label(&self) -> String {
         self.labelled(None)
     }
 
-    /// As above, with what the picture will cost when that has been measured
-    /// for this model. The cost is the number that decides whether to resize,
-    /// and it is model-specific: a Qwen charges by area, a Gemma a flat rate.
+    /// With this model's measured cost: Qwen charges by area, Gemma a flat rate,
+    /// and the cost is what decides whether to resize.
     pub(crate) fn labelled(&self, cost: Option<flashagent_tui::image_cost::ImageCost>) -> String {
         let size = match self.size {
             Some((w, h)) => format!("{} {w}×{h}", self.name),
@@ -64,11 +60,7 @@ impl Attachment {
 }
 
 
-/// Measure what a picture costs this model, once, in the background.
-///
-/// Three throwaway requests that generate a single token each; the answer is
-/// kept for the life of the install. Without it the composer can only say how
-/// many pixels a screenshot has, which is not the number anyone needs.
+/// Three one-token requests, cached for the life of the install.
 pub(crate) fn maybe_measure_image_cost(
     costs: &flashagent_tui::image_cost::ImageCosts,
     in_flight: &mut Option<String>,
@@ -98,16 +90,12 @@ pub(crate) fn maybe_measure_image_cost(
     });
 }
 
-/// Whether the model in use can see pictures at all.
 pub(crate) fn model_sees_images(source: &BackendSource, model: &str) -> bool {
     sees_images(source.discovery().as_ref(), model)
 }
 
-/// As above, over what discovery found.
-///
-/// A model the server never mentioned gets the benefit of the doubt: a
-/// warning that turns out to be wrong is worse than one the server itself
-/// will give if the picture really cannot be read.
+/// A model the server never mentioned is assumed to see: the server's own
+/// error is better than a wrong warning.
 pub(crate) fn sees_images(discovery: Option<&flashagent_llm::ServerDiscovery>, model: &str) -> bool {
     discovery
         .and_then(|d| d.models.iter().find(|m| m.id == model))

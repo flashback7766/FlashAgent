@@ -1,6 +1,5 @@
-//! Terminal client binary: wires backend → loop → tools → permissions and
-//! renders through `flashagent_tui`. Runs the stack in-process (svc IPC is a
-//! later milestone).
+//! Terminal client: wires backend, loop, tools and permissions in-process and
+//! renders through `flashagent_tui`.
 
 use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,7 +81,7 @@ async fn main() -> Result<()> {
         match a.as_str() {
             "--url" => {
                 if let Some(val) = args.next() {
-                    // For this run: saving keeps the URL the config file had.
+                    // For this run only: saving keeps the URL the config file had.
                     config.url_override = Some((val.clone(), config.backend_url.clone()));
                     config.backend_url = val;
                 }
@@ -97,7 +96,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             "--resume" | "-r" => {
-                // Without an id: list this folder's sessions to pick from.
+                // Without an id: pick from this folder's sessions.
                 session_start = match args.next_if(|next| !next.starts_with('-')) {
                     Some(id) => SessionStart::Resume(id),
                     None => SessionStart::Pick,
@@ -105,8 +104,7 @@ async fn main() -> Result<()> {
             }
             "--continue" | "-c" => session_start = SessionStart::Continue,
             "--uninstall" => {
-                // `-y` anywhere on the line answers every question with its
-                // default, for scripts.
+                // `-y` anywhere takes every default, for scripts.
                 let assume_yes = std::env::args().any(|a| a == "-y" || a == "--yes");
                 if let Err(e) = flashagent_svc::uninstall::run_interactive(assume_yes) {
                     eprintln!("Uninstall stopped: {e}");
@@ -170,8 +168,8 @@ async fn main() -> Result<()> {
     }
 
     use std::io::IsTerminal;
-    // Carried into the first conversation, because the screen it was printed
-    // on is about to be cleared.
+    // Carried into the first conversation: the screen it was printed on is about
+    // to be cleared.
     let mut first_run_verdict: Option<String> = None;
     let mut ran_setup = false;
     if (!config.setup_completed || force_setup) && std::io::stdout().is_terminal() {
@@ -179,24 +177,19 @@ async fn main() -> Result<()> {
         if !completed {
             return Ok(());
         }
-        // Nothing arrived while they were away: they have been here for a
-        // minute. Stamp the version so the next update has something to
-        // measure against.
+        // Nothing new to show: stamp the version so the next update has a baseline.
         config.last_seen_version = Some(flashagent_svc::updater::current_version().to_string());
         let _ = config.save();
         ran_setup = true;
     }
 
-    // An update that lands silently is an update nobody uses. Once, after the
-    // binary has moved forward, show what arrived.
+    // Once, after the binary moved forward, show what arrived.
     if std::io::stdout().is_terminal() {
         let now = flashagent_svc::updater::current_version();
         let news = match config.last_seen_version.as_deref() {
             Some(seen) => flashagent_tui::whatsnew::since(Some(seen), now),
-            // Nobody who updated INTO the first build that records a version
-            // has one recorded, and they are exactly the people with news to
-            // read. A set-up config with no version is an existing user, not
-            // a first run — the first run stamps itself before it gets here.
+            // Users who updated into the first build that records a version have none
+            // recorded; a set-up config without one is an existing user, not a first run.
             None if config.setup_completed => flashagent_tui::whatsnew::latest(1),
             None => Vec::new(),
         };
@@ -217,8 +210,8 @@ async fn main() -> Result<()> {
         skip_trust = true;
     }
 
-    // Spawn server discovery in background immediately so it collects
-    // models, context window, and thinking presets concurrently while the user interacts with the startup screen.
+    // Discovery starts now, so models, context window and presets are known by
+    // the time the startup screen is done.
     let backend_initial = flashagent_llm::OpenAiCompat::new(&url, &model, api_key.clone());
     let mut discovery_task = tokio::spawn(async move {
         backend_initial.discover_server().await
@@ -230,7 +223,6 @@ async fn main() -> Result<()> {
         skip_trust = true;
     }
 
-    // Prompt user for directory trust / change working directory / quit
     if !skip_trust && std::io::stdout().is_terminal() {
         let action = flashagent_tui::startup::run_trust_screen(&mut cwd).await?;
         if action == flashagent_tui::StartupAction::Quit {
@@ -242,16 +234,14 @@ async fn main() -> Result<()> {
     }
 
     if ran_setup {
-        // Whether the chosen model can actually drive tools decides whether
-        // anything here works, and finding out by watching it narrate its
-        // intentions for ten minutes is a bad first hour. Asked after the
-        // trust question, which is instant: nobody should wait a minute for
-        // a check and only then be asked where they are.
+        // Whether the model can drive tools decides whether anything works. Asked
+        // after the trust question, which is instant, so nobody waits for a check
+        // before being asked where they are.
         first_run_verdict = first_run_tool_check(&config).await;
     }
 
-    // Process-lifetime objects: leaked once, so the spawned loop task can hold
-    // &'static references (the process is the session).
+    // Leaked once so the spawned loop can hold &'static references; the process
+    // is the session.
     let backend = flashagent_llm::OpenAiCompat::new(&url, &model, api_key);
     backend.set_max_retries(config.network_retries);
 
@@ -265,7 +255,7 @@ async fn main() -> Result<()> {
         Err(_) => (None, Some(discovery_task)),
     };
 
-    // If model was not specified, auto-detect loaded model or first available model
+    // No model given: the loaded one, else the first available.
     if model.is_empty() {
         if let Some(ref disc) = discovery {
             if let Some(ref active) = disc.active_model {
@@ -275,14 +265,14 @@ async fn main() -> Result<()> {
             }
         }
     } else if let Some(ref disc) = discovery {
-        // If user specified substring/fuzzy model name, align with full ID
+        // A partial model name is matched to its full id.
         if let Some(matched) = disc.models.iter().find(|m| m.id == model || m.id.contains(&model) || model.contains(&m.id)) {
             model = matched.id.clone();
         }
     }
     backend.set_model(&model);
-    // Startup asked the server through another backend; this one sends the
-    // turns, and must not wait for its first look to know what was found.
+    // Startup discovered through another backend; this one sends the turns and
+    // must know the result from its first request.
     if let Some(ref disc) = discovery {
         backend.adopt_discovery(disc);
     }
@@ -315,8 +305,8 @@ async fn main() -> Result<()> {
     let initial_effort = if !config.thinking_effort.is_empty() && config.thinking_effort != "default" {
         config.thinking_effort.clone()
     } else if let Some(ref p) = profile {
-        // Only the server saying the model cannot reason means off; saying
-        // nothing leaves the model to its own default.
+        // Only the server saying the model cannot reason means off; silence leaves
+        // the model's default.
         if !p.supported && !p.is_unreported() {
             "off".to_string()
         } else {
@@ -351,17 +341,14 @@ async fn main() -> Result<()> {
     });
 
     let state = Arc::new(PermissionState::new(config.permission_mode, gate.clone()));
-    // Files outside the folder FlashAgent was started in are never read or
-    // written on a mode's say alone.
+    // Files outside this folder are never read or written on a mode's say alone.
     state.set_project_root(cwd.clone());
-    // MCP config `read_only`/`read_only_tools` and server readOnlyHint
-    // annotations decide what counts as a read for external tools.
+    // Only the MCP config (`read_only`, `read_only_tools`) marks external tools as reads.
     let hint_mgr = mcp_manager.clone();
     state.set_read_only_hint(Arc::new(move |tool: &str| hint_mgr.is_tool_read_only(tool)));
     let tools_arc: Arc<BuiltinTools> = Arc::new(BuiltinTools::new(BuiltinToolsConfig {
         cwd: cwd.clone(),
-        // Search goes through DuckDuckGo unless the environment names a
-        // Brave key; nothing has to be configured for it to work.
+        // DuckDuckGo unless the environment names a Brave key.
         brave_api_key: std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.trim().is_empty()),
         question_gate: Some(question_gate.clone()),
         is_goal_mode: None,
@@ -370,12 +357,12 @@ async fn main() -> Result<()> {
         context_window: Some(context_capacity),
         mcp_manager: Some(mcp_manager.clone()),
     })?);
-    // The parent sees the built-in toolset plus `spawn_agent` (subagents).
+    // The built-in toolset plus `spawn_agent`.
     let composite = flashagent_tools::agent_tools(tools_arc.clone(), source.clone(), state.clone());
     let perm: &'static PermissionedTools =
         Box::leak(Box::new(PermissionedTools::new(Arc::new(composite), Some(tools_arc.clone()), state.clone())));
 
-    // Memory injection: project + global docs into the first user message.
+    // Project and global memory docs, injected into the first user message.
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_default();
     let docs = flashagent_core::collect(&cwd, &home.join(".flashagent"));
     let memory_block = flashagent_core::injection_block(&docs, config.token_budget);
@@ -457,8 +444,7 @@ async fn main() -> Result<()> {
             }
             println!();
         }
-        // The terminal is back to normal, so this is the last thing on
-        // screen and stays in the scrollback.
+        // The terminal is restored, so this stays in the scrollback.
         Ok(Some(Err(ref why))) => eprintln!("\nThe session was NOT saved: {why}\n"),
         _ => {}
     }
@@ -471,22 +457,20 @@ async fn main() -> Result<()> {
     result.map(|_| ())
 }
 
-/// Set by "yes" on the /uninstall card: the app closes and the uninstaller
-/// runs once the terminal is back to normal.
+/// Set by "yes" on the /uninstall card: the uninstaller runs once the terminal
+/// is restored.
 pub(crate) static UNINSTALL_AFTER_EXIT: AtomicBool = AtomicBool::new(false);
 
-/// Title of the /uninstall card; also how the hint line knows which card it is.
+/// Also how the hint line recognises the card.
 pub(crate) const UNINSTALL_TITLE: &str = "Uninstall FlashAgent";
 
-/// Which conversation the app opens with.
 enum SessionStart {
-    /// A new one.
     New,
-    /// `--resume <id>`.
+    /// `--resume <id>`
     Resume(String),
     /// `--continue`: the newest session of this folder.
     Continue,
-    /// `--resume` without an id: this folder's sessions, to pick from.
+    /// `--resume` without an id: pick from this folder's sessions.
     Pick,
 }
 
@@ -498,18 +482,15 @@ struct SavedGoalState {
     task: String,
 }
 
-/// What the event loop does after a handler returns.
 enum Flow {
     /// Carry on with the rest of this iteration.
     Next,
     /// Start the next iteration.
     Continue,
-    /// Leave the loop: the user asked to quit.
     Quit,
 }
 
-/// What handlers need from the event loop besides its state: the backend,
-/// the tools, and the channels that belong to the loop itself.
+/// The backend, tools and loop channels handlers need besides the app state.
 struct LoopCtx<'a> {
     source: &'a Arc<BackendSource>,
     perm: &'static PermissionedTools,
@@ -524,16 +505,14 @@ struct LoopCtx<'a> {
     update_tx: &'a tokio::sync::mpsc::UnboundedSender<UpdateNotice>,
     channel_watch_tx: &'a tokio::sync::watch::Sender<flashagent_core::config::UpdateChannel>,
     channel_probe_tx: &'a tokio::sync::mpsc::UnboundedSender<ChannelTarget>,
-    /// Set while an update is being checked for or installed.
+    /// While an update is being checked or installed.
     update_busy: &'a Arc<AtomicBool>,
     session_id: &'a String,
-    /// The mascot's mood this frame.
     mascot_mood: MascotMood,
-    /// This frame's tip, already laid out.
+    /// Already laid out.
     tip_lines: &'a Vec<String>,
 }
 
-/// Everything the event loop changes while it runs.
 struct App {
     question_ui_state: QuestionUiState,
     history: Vec<ChatMessage>,
@@ -544,7 +523,6 @@ struct App {
     tip_animator: flashagent_tui::tips::TipAnimator,
     input_history: Vec<String>,
     history_index: Option<usize>,
-    /// Ctrl+F: a search through the prompt history is open.
     history_search: Option<flashagent_tui::HistorySearch>,
     current_draft: String,
     confirm_select: ConfirmSelect,
@@ -553,8 +531,8 @@ struct App {
     active_turn_handle: Option<tokio::task::JoinHandle<()>>,
     active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     pending_steers: Vec<String>,
-    /// Set when the user interrupts: the loop is asked to stop cooperatively
-    /// so it can hand back a consistent history; a hard abort is the fallback.
+    /// The loop is asked to stop cooperatively so it hands back a consistent
+    /// history; a hard abort is the fallback.
     cancel_requested: Option<std::time::Instant>,
     aborted_turn: Option<u64>,
     turn_counter: u64,
@@ -563,63 +541,52 @@ struct App {
     current_model: String,
     current_context: Option<String>,
     current_effort: String,
-    /// What the system prompt is built from, so it can be rebuilt when the
-    /// user changes how replies should sound.
+    /// Kept so the prompt can be rebuilt when the voice changes.
     prompt_config: SystemPromptConfig,
-    /// The folder as shown to the user (`~/project`).
+    /// E.g. `~/project`.
     cwd_display: String,
-    /// Rule and memory files loaded into the prompt, for the welcome card.
+    /// For the welcome card.
     memory_docs: usize,
-    /// Generation speed sampled a few times a second while a turn runs.
+    /// Sampled a few times a second during a turn.
     speed_history: Vec<f64>,
-    /// When the last speed sample was taken, on the animation clock.
+    /// On the animation clock.
     last_speed_sample: u64,
-    /// How the last turn ended, lit on the composer border: the colour and
-    /// when, on the animation clock.
+    /// Colour and time, on the animation clock.
     turn_flash: Option<(flashagent_tui::anim::Rgb, u64)>,
-    /// The menu or screen standing in for the composer, if one is open.
     overlay: Option<overlay::Overlay>,
     last_tool_name: Option<String>,
-    /// Pictures waiting to go with the next message.
     attachments: Vec<Attachment>,
-    /// What a picture costs, measured once per model and remembered.
+    /// Measured once per model.
     image_costs: flashagent_tui::image_cost::ImageCosts,
     image_cost_probe: Option<String>,
     context_usage: ContextUsage,
     autocomplete_idx: usize,
     tick_n: usize,
     renderer: Renderer,
-    /// Things that turn up on their own — an update installing, the context
-    /// being compacted — go on the line under the input, not in the composer.
+    /// Unprompted things (an update, compaction) go on the line under the input.
     background: Option<BackgroundNotice>,
     channel_switch: Option<ChannelSwitch>,
-    /// When Esc was last pressed on an empty prompt: a second press soon
-    /// after quits.
+    /// A second press soon after quits.
     last_esc: Option<std::time::Instant>,
-    /// The /uninstall card is up.
     uninstall_confirm: bool,
-    /// The recap and suggestion being written for the last turn, so a new
-    /// turn can stop it.
+    /// So a new turn can stop it.
     recap_task: Option<tokio::task::JoinHandle<()>>,
-    /// The prompt prefix the server has cached, as far as the app knows
-    /// (see `warm.rs`), and the warm-up request sending one.
+    /// The cached prefix as far as the app knows (see `warm.rs`), and the warm-up
+    /// request sending one.
     cache_warm_key: Option<u64>,
     warm_task: Option<(u64, tokio::task::JoinHandle<bool>)>,
-    /// A session picked from that list, switched to at the top of the next
-    /// loop turn, where the session id and the snapshot store live.
+    /// Switched at the top of the next loop turn, where the session id and
+    /// snapshot store live.
     pending_resume: Option<String>,
-    /// The latest stage of an update download, background or manual.
+    /// Background or manual.
     update_progress: Option<(String, flashagent_svc::updater::UpdateProgress)>,
-    /// Whether the user asked to see how an update is going (Ctrl+U,
-    /// /update); until then a background update goes unannounced.
+    /// Ctrl+U or /update; until then a background update goes unannounced.
     update_watched: bool,
     turn_phase: TurnPhase,
-    /// How auto effort's guesses turned out per model, nudged one step at a
-    /// time by how its turns actually go.
+    /// Per-model correction of auto effort, learned from how turns went.
     effort_memory: flashagent_core::EffortMemory,
     turn_outcome: flashagent_core::TurnOutcome,
-    /// How much the last turn added to the context, so the next one can be
-    /// sized before it is started rather than after it overflows.
+    /// So the next turn is sized before it starts rather than after it overflows.
     last_turn_growth: usize,
     context_before_turn: usize,
     pending_update: Option<(String, String, String, Option<String>)>,
@@ -628,14 +595,12 @@ struct App {
     token_tracker: TokenTracker,
     max_steps: Option<u32>,
     goal_state: Option<SavedGoalState>,
-    /// Facts about the running /goal, accumulated from loop events for the
-    /// live progress line and the final report.
+    /// From loop events, for the progress line and the final report.
     goal_ledger: Option<GoalLedger>,
     copy_toast: Option<(String, std::time::Instant)>,
     last_ctrl_c: Option<std::time::Instant>,
     last_mascot_mood: MascotMood,
-    /// What the user has already been told about the server, so a mood that
-    /// flickers does not re-announce itself.
+    /// So a flickering mood does not re-announce itself.
     announced_mood: MascotMood,
     config: AppConfig,
     available_models: Vec<String>,
@@ -654,12 +619,12 @@ struct AppContext {
     context_display: Option<String>,
     context_capacity: usize,
     cwd_display: String,
-    /// The project directory, where the file tools write.
+    /// Where the file tools write.
     cwd: std::path::PathBuf,
     initial_effort: String,
     available_models: Vec<String>,
     session_start: SessionStart,
-    /// Verdict of the first-run tool check, to be said in the conversation.
+    /// To be said in the conversation.
     first_run_verdict: Option<String>,
     pending_discovery: Option<tokio::task::JoinHandle<Option<flashagent_llm::ServerDiscovery>>>,
 }
@@ -681,7 +646,7 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     std::fs::write(&temp_file, initial_text)?;
 
     INPUT_PAUSED.store(true, Ordering::SeqCst);
-    // Let a poll already under way in the reader thread run out first.
+    // Let a poll already under way in the reader thread run out.
     std::thread::sleep(std::time::Duration::from_millis(60));
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(
@@ -708,8 +673,7 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     INPUT_PAUSED.store(false, Ordering::SeqCst);
 
     let result = match status {
-        // The composer is one line, as a paste is: line breaks become spaces,
-        // and the newline editors add at the end goes.
+        // The composer is one line: line breaks become spaces, the trailing newline goes.
         Ok(s) if s.success() => std::fs::read_to_string(&temp_file)
             .map(|text| text.trim_end().replace("\r\n", " ").replace(['\n', '\r'], " "))
             .unwrap_or_else(|_| initial_text.to_string()),
@@ -724,7 +688,7 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     Ok(result)
 }
 
-/// The text a key press types: a character, or a newline for Enter.
+/// A character, or a newline for Enter.
 fn typed_char(k: &crossterm::event::KeyEvent) -> Option<char> {
     let plain = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
     match k.code {
@@ -734,16 +698,12 @@ fn typed_char(k: &crossterm::event::KeyEvent) -> Option<char> {
     }
 }
 
-/// Read the keys that follow `first` at once. With a newline among them
-/// and more than one line's worth of text, they are a paste; otherwise the
-/// keys go on as they came.
+/// With a newline and more than a line of text among them, they are a paste.
 fn gather_burst(first: char) -> Vec<UiEvent> {
     let mut text = String::from(first);
     let mut rest: Vec<UiEvent> = Vec::new();
-    // Waiting briefly, not only for what is already there: a Windows console
-    // hands the keys of a paste over a few at a time. Nobody presses a key
-    // within 30 ms of Enter, so the wait after one costs a person nothing
-    // and is what tells a paste from a prompt being sent.
+    // A Windows console hands over a paste a few keys at a time. Nobody presses a
+    // key within 30 ms of Enter, so that wait tells a paste from a send.
     let wait = |text: &str| std::time::Duration::from_millis(if text.ends_with('\n') { 30 } else { 5 });
     while matches!(crossterm::event::poll(wait(&text)), Ok(true)) {
         match crossterm::event::read() {
@@ -767,15 +727,12 @@ fn gather_burst(first: char) -> Vec<UiEvent> {
     out
 }
 
-/// Keys read together as `text`: one paste when a newline is inside it with
-/// text after it, each key by itself otherwise. A newline only at the end
-/// is someone typing a word and pressing Enter in one go.
+/// A newline only at the end is a word typed and Enter pressed together.
 fn burst_events(text: &str) -> Vec<UiEvent> {
     let body = text.trim_end_matches('\n');
     if body.contains('\n') {
         let mut out = vec![UiEvent::Paste(body.to_string())];
-        // The Enters after the text were keys, and one of them may be the
-        // user sending it.
+        // The trailing Enters were keys; one may be the user sending.
         out.extend((body.len()..text.len()).map(|_| UiEvent::Key(KeyCode::Enter, KeyModifiers::NONE)));
         return out;
     }
@@ -787,8 +744,7 @@ fn burst_events(text: &str) -> Vec<UiEvent> {
         .collect()
 }
 
-/// Where /rewind keeps how files were before each turn changed them: beside
-/// the sessions, under the session's id, so it still works after --resume.
+/// Beside the sessions, under the session id, so it works after --resume.
 fn open_snapshots(perm: &PermissionedTools, session_id: &str, cwd: &std::path::Path) {
     let dir = flashagent_home_dir()
         .map(|home| home.join("snapshots").join(session_id))
@@ -796,8 +752,7 @@ fn open_snapshots(perm: &PermissionedTools, session_id: &str, cwd: &std::path::P
     perm.state().set_snapshots(Arc::new(flashagent_core::SnapshotStore::open(dir, cwd.to_path_buf())));
 }
 
-/// What happened to the conversation on the way out: nothing worth
-/// saving (`None`), saved under this id, or not saved and why.
+/// `None`: nothing worth saving; `Ok(id)`: saved; `Err(why)`: not saved.
 type SaveOutcome = Option<std::result::Result<String, String>>;
 
 async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
@@ -833,13 +788,12 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         });
     }
 
-    // Keyboard and mouse reader thread: crossterm is blocking, tokio is async.
+    // Key and mouse reader thread: crossterm blocks, tokio is async.
     {
         let tx = tx.clone();
         std::thread::spawn(move || {
             loop {
-                // While an external editor owns the terminal, its keys are
-                // its own: reading here would steal every other one.
+                // An external editor owns the terminal; reading here would steal its keys.
                 if INPUT_PAUSED.load(Ordering::SeqCst) {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                     continue;
@@ -851,12 +805,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 }
                 match crossterm::event::read() {
                     Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => {
-                        // Terminals without bracketed paste (Windows' console)
-                        // deliver a paste as keystrokes, each newline an Enter
-                        // that would send the prompt line by line. Keys that
-                        // are already waiting when one is read were not typed
-                        // by a person; if they carry a newline, they are one
-                        // paste.
+                        // Without bracketed paste (Windows' console) a paste arrives as keys, each
+                        // newline an Enter. Keys already waiting with a newline among them are a paste.
                         let events = match typed_char(&k) {
                             Some(first) => gather_burst(first),
                             None => vec![UiEvent::Key(k.code, k.modifiers)],
@@ -898,13 +848,12 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         build_system_prompt(&system_prompt_config.clone().with_personality(&app_config.personality));
 
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(80));
-    // The first look is not due yet: startup has just asked the server.
+    // Startup has just asked the server; the first poll is not due yet.
     let mut check_interval =
         tokio::time::interval_at(tokio::time::Instant::now() + SERVER_POLL_INTERVAL, SERVER_POLL_INTERVAL);
     check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let is_discovering = Arc::new(AtomicBool::new(false));
-    // --continue opens the newest session of this folder; --resume without an
-    // id opens the list of them once the app is up.
+    // --continue opens the newest session; --resume without an id opens the list.
     let mut open_session_picker = false;
     let mut session_note: Option<String> = None;
     let resume_session_id = match session_start {
@@ -936,8 +885,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
     let (channel_watch_tx, mut channel_watch_rx) = tokio::sync::watch::channel(app_config.update_channel);
-    // One update at a time: the background updater and Ctrl+U both claim
-    // this before they start, so they never download over each other.
+    // The background updater and Ctrl+U both claim this, so they never download
+    // over each other.
     let update_busy = Arc::new(AtomicBool::new(false));
     if app_config.auto_check_updates && !flashagent_svc::updater::is_dev_mode() {
         let update_tx_clone = update_tx.clone();
@@ -956,7 +905,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                         *channel_watch_rx.borrow()
                     }
                 };
-                // An update the user started is under way; look again later.
+                // A user-started update is under way; look again later.
                 if busy.swap(true, Ordering::SeqCst) {
                     continue;
                 }
@@ -966,8 +915,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 })
                 .await;
                 busy.store(false, Ordering::SeqCst);
-                // Up to date and failed are only said to someone watching;
-                // the app decides that.
+                // Up to date and failed are only said to someone watching.
                 match result {
                     Ok(Some(version)) => {
                         let _ = update_tx_clone.send(UpdateNotice::Ready { version });
@@ -1083,11 +1031,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         show_mascot: app.config.show_mascot,
         ..WelcomeCard::default()
     });
-    // The reveal is driven by the tick loop, which stops touching the card as
-    // soon as the transcript has a user message in it. A resumed session puts
-    // messages up immediately, so its card would stay stuck at whatever row
-    // the reveal had reached — draw it whole instead.
-    // Before anything is drawn: the first frame already follows the setting.
+    // Before anything is drawn. A resumed session's card is drawn whole: the
+    // reveal stops once the transcript has a user message.
     flashagent_tui::anim::set_enabled(app.config.animations);
     app.chat.update_welcome_card(opening_card(initial_card, resume_session_id.is_none() && app.config.animations));
     if let Some(verdict) = first_run_verdict {
@@ -1105,9 +1050,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 app.notice(format!("Resumed session '{resume_id}' ({restored} messages loaded)."));
             }
             Err(why) => {
-                // The file that failed to load keeps its name to itself. Saving
-                // this new conversation under it would overwrite whatever is
-                // left of the old one, which may still be recoverable by hand.
+                // The unreadable file keeps its name: saving over it would destroy what may
+                // still be recoverable by hand.
                 session_id = new_session_id();
                 open_snapshots(perm, &session_id, &cwd);
                 app.chat.push_line(LineKind::ToolError, why);
@@ -1134,14 +1078,12 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     }
 
     'main_loop: loop {
-        // A session picked in /resume: the one open now is saved first, then
-        // the picked one takes its place on screen, in the model's history,
-        // and in where /rewind keeps its copies.
+        // The open session is saved first, then the picked one replaces it on
+        // screen, in the history and in the snapshot store.
         if let Some(id) = app.pending_resume.take().filter(|id| *id != session_id) {
             if app.config.auto_save_sessions && worth_saving(&app.history) {
                 if let Err(why) = save_session_file(&session_id, &app.current_model, &cwd_display, &app.history) {
-                    // Switching away would drop the only copy left: the one
-                    // in memory. Stay, and say so.
+                    // Switching away would drop the only copy, the one in memory.
                     app.notice(format!("Not switching: this session could not be saved ({why})"));
                     continue;
                 }
@@ -1171,17 +1113,15 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 Err(why) => app.notice(why),
             }
         }
-        // The face reports the one thing that decides whether anything works:
-        // did the model server answer. Discovery reruns every few seconds, so
-        // starting the server later turns the face around on its own.
-        // LM Studio on this machine writes what each call really processed to
-        // a log the cache figure can be read from; on another host that log
-        // is not ours to read.
+        // LM Studio on this machine logs what each call really processed; on another
+        // host that log is not ours to read.
         app.token_tracker.lm_studio_local = source
             .discovery()
             .is_some_and(|d| d.kind == flashagent_llm::thinking::ServerKind::LmStudio)
             && flashagent_core::url_host(&app.config.backend_url)
                 .is_some_and(|h| h == "localhost" || h.starts_with("127.") || h == "::1");
+        // The face shows whether the model server answered. Discovery reruns,
+        // so starting the server later turns it around on its own.
         let mascot_mood = if source.discovery().is_some() {
             MascotMood::Happy
         } else if started_at.elapsed() < std::time::Duration::from_secs(5) {
@@ -1207,11 +1147,10 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 app.animate_welcome(&source, perm.state().mode(), mascot_mood, Some(term_w as usize), None);
             }
         }
-        // Two rows for a tip only when the window can spare them.
+        // Two tip rows only when the window can spare them.
         let tip_rows = if term_h >= 20 { 2 } else { 1 };
         let tip_lines = app.tip_animator.render_lines(app.tick_n, term_w as usize, tip_rows);
-        // What every handler gets from the loop besides its state. A macro
-        // rather than a function: it borrows this frame's own values.
+        // A macro, not a function: it borrows this frame's own values.
         macro_rules! loop_ctx {
             () => {
                 LoopCtx {
@@ -1241,10 +1180,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 app.copy_toast = None;
             }
         }
-        // Recomputed every frame: the elapsed part of it moves on its own.
-        // The server being unreachable is not something to discover by typing
-        // a prompt and waiting. Said once when it happens, taken back when it
-        // starts answering.
+        // An unreachable server is announced once, and taken back when it answers.
         if mascot_mood != app.announced_mood {
             let previous = std::mem::replace(&mut app.announced_mood, mascot_mood);
             match mascot_mood {
@@ -1289,8 +1225,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                         }
                     }
                     UpdateNotice::Progress { version, stage } => {
-                        // Kept either way, so Ctrl+U can show a download
-                        // that started before anyone asked about it.
+                        // Kept either way, so Ctrl+U can show a download that started unasked.
                         if app.update_watched {
                             app.background = Some(BackgroundNotice::sticky(update_progress_line(&version, stage)));
                         }
@@ -1335,12 +1270,9 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 app.renderer.request_reprint();
                 continue;
             }
-            // Animations run on the clock alone: counting events too made
-            // every spinner race whenever the model streamed quickly.
+            // Animations run on the clock alone; counting events made spinners race.
             Some(ev) = rx.recv() => ev,
-            // While something is moving (a card unfolding, the welcome card
-            // drawing in, the composer flash), frames come every 16 ms rather
-            // than on the idle tick.
+            // While something moves, frames come every 16 ms instead of the idle tick.
             _ = tokio::time::sleep(std::time::Duration::from_millis(16)),
                 if app.animating() || (welcome_reveal_rows(started_at).is_some() && !app.chat.has_user_message()) =>
             {
@@ -1357,9 +1289,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                     app.background = None;
                     app.renderer.request_reprint();
                 }
-                // The loop did not wind down in time (a tool ignoring
-                // cancellation): abort it. History keeps the prompt but not
-                // the partial turn, and the user is told so.
+                // The loop did not wind down in time (a tool ignoring cancellation). History
+                // keeps the prompt but not the partial turn, and the user is told.
                 if app.running && app.cancel_requested.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(3)) {
                     if let Some(handle) = app.active_turn_handle.take() {
                         handle.abort();
@@ -1390,9 +1321,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 if term_resized {
                     app.last_term_size = current_term_size;
                 }
-                // The mascot breathes and blinks, and the card draws itself
-                // in on start-up; rebuild it only on the ticks where it
-                // actually looks different.
+                // Rebuilt only on ticks where the card actually looks different.
                 let reveal_rows = welcome_reveal_rows(started_at);
                 let mood_changed = mascot_mood != app.last_mascot_mood;
                 app.last_mascot_mood = mascot_mood;
@@ -1431,8 +1360,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         match ev {
             UiEvent::BackgroundRecap { turn_id, recap, suggestion } => {
                 let formatted = format!("  \x1b[38;2;155;165;180mrecap:\x1b[0m \x1b[38;2;225;230;240m{recap}\x1b[0m");
-                // `turn_id` is the ordinal of the user message the recap is
-                // about; regenerate and steering make turn_counter drift.
+                // The ordinal of the user message the recap is about; regenerate and steering
+                // make turn_counter drift.
                 let current_turn = app.chat.user_turn_count() as u64;
                 if turn_id == current_turn {
                     app.chat.update_or_push_turn_system("recap:", &formatted);
@@ -1501,11 +1430,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                         if model_changed {
                             app.config.model = app.current_model.clone();
                             app.save_config();
-                            // The effort is the user's choice, not the
-                            // server's. A model that cannot reason simply
-                            // receives no thinking fields — silently turning
-                            // "auto" into "off" here lost the setting for
-                            // every model afterwards.
+                            // The effort is the user's choice. A non-reasoning model just gets no
+                            // thinking fields; turning "auto" into "off" here lost it for later models.
                             if app.current_effort.is_empty() {
                                 app.current_effort = "auto".to_string();
                             }
@@ -1535,7 +1461,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 app.warm_prompt_cache(&source, perm, &memory_block);
             }
             UiEvent::Loop { turn_id, event: e } => {
-                // Late events of a turn that was aborted or superseded.
+                // Late events of an aborted or superseded turn.
                 if turn_id != app.turn_counter || app.aborted_turn == Some(turn_id) {
                     continue;
                 }
@@ -1561,9 +1487,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                         if *is_error {
                             app.turn_outcome.failed_tools += 1;
                         }
-                        // Memory is written without being asked, so it is
-                        // said out loud. It arrives on its own, which puts it
-                        // on the line under the input rather than in the chat.
+                        // Memory is written unasked, so it is announced, on the line under the input.
                         let wrote_memory = app.last_tool_name
                             .as_deref()
                             .is_some_and(|n| matches!(n, "memory_create" | "memory_update" | "memory_remove"));
@@ -1642,8 +1566,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                     }
                     app.renderer.request_reprint();
                 } else if app.overlay.is_some() {
-                    // A screen that is not a list: the wheel must not scroll
-                    // the transcript hidden behind it.
+                    // A screen that is not a list: the wheel must not scroll the transcript behind it.
                 } else {
                     match m.kind {
                         MouseEventKind::ScrollUp => {
@@ -1657,10 +1580,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 }
             }
             UiEvent::Paste(pasted) => {
-                // A paste goes to whatever has the keyboard. A question card
-                // or an open panel is answered first: a path pasted as the
-                // answer to a question must not turn into an attachment for
-                // some later prompt.
+                // A paste goes to whatever has the keyboard first: a path pasted as a
+                // question's answer must not become an attachment.
                 let one_line = || pasted.replace("\r\n", " ").replace(['\n', '\r'], " ");
                 if question_gate.pending().is_some() {
                     app.question_ui_state.write_in_text.push_str(&one_line());
@@ -1671,14 +1592,13 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 } else if app.overlay.is_some() || gate.pending().is_some() {
                     // Nothing there takes text.
                 } else if let Some(att) = Attachment::from_dropped_path(&pasted) {
-                    // Dropping a file on a terminal pastes its path. When
-                    // that path is a picture, the user meant the picture.
+                    // A dropped picture's path means the picture.
                     let label = att.label();
                     app.attachments.push(att);
                     app.suggested_prompt = None;
                     app.background = Some(BackgroundNotice::fading(format!("{label} attached · Ctrl+Z removes it"), 8));
                 } else if !pasted.is_empty() {
-                    // Lines stay lines: pasted code or a log keeps its shape.
+                    // Pasted code or logs keep their line breaks.
                     app.input.insert_str(&pasted);
                     app.history_index = None;
                     app.autocomplete_idx = 0;
@@ -1718,7 +1638,7 @@ fn update_context_usage(
         .sum();
     usage.system_tokens = (system_chars / 4).max(150);
     usage.memory_tokens = memory_block.len() / 4;
-    // What the model is actually sent: every advertised schema (MCP included).
+    // Every advertised schema, MCP included.
     usage.tools_tokens = tools
         .specs()
         .iter()
@@ -1739,8 +1659,7 @@ fn update_context_usage(
             flashagent_llm::Role::System => {}
         }
     }
-    // The memory block rides inside the first user message; it is already
-    // counted once as memory.
+    // Already counted once as memory.
     if !memory_block.is_empty()
         && history.iter().find(|m| m.role == flashagent_llm::Role::User).is_some_and(|m| m.content.starts_with(memory_block))
     {
@@ -1770,7 +1689,7 @@ fn build_turn_options(
         opts.thinking = flashagent_llm::ThinkingEffort::Auto;
         opts.custom_effort = None;
     } else if effort == "default" {
-        // The server's own advertised default preset.
+        // The server's advertised default preset.
         opts.thinking = flashagent_llm::ThinkingEffort::Default;
         opts.custom_effort = None;
     } else {
@@ -1820,8 +1739,7 @@ fn spawn_turn(
     })
 }
 
-/// Skill file for `name`: the project's `.agents/skills` first, then the
-/// user's `~/.flashagent/skills` (the same places autocomplete lists).
+/// Project `.agents/skills` first, then `~/.flashagent/skills`.
 fn find_skill_file(name: &str) -> Option<std::path::PathBuf> {
     if name.is_empty() || name.contains(['/', '\\']) || name.contains("..") {
         return None;
@@ -1840,7 +1758,7 @@ mod tests {
     fn keys_that_arrive_together_with_a_newline_inside_are_one_paste() {
         let events = burst_events("fn main() {\n    x\n}");
         assert!(matches!(events.as_slice(), [UiEvent::Paste(p)] if p == "fn main() {\n    x\n}"));
-        // Pasted with a trailing newline: the text, then the Enter, as keys.
+        // A trailing newline: the text, then Enter as a key.
         let events = burst_events("a\nb\n");
         assert!(matches!(events.as_slice(), [UiEvent::Paste(p), UiEvent::Key(KeyCode::Enter, _)] if p == "a\nb"));
     }
@@ -1856,8 +1774,7 @@ mod tests {
     }
 
     fn offline_source() -> BackendSource {
-        // Nothing listens on port 9: every request fails fast, so compaction
-        // takes its offline fallback path.
+        // Nothing listens on port 9, so compaction takes its offline fallback.
         BackendSource(flashagent_llm::OpenAiCompat::new("http://127.0.0.1:9/v1", "m", None))
     }
 
@@ -1880,13 +1797,13 @@ mod tests {
         assert_eq!(history.iter().filter(|m| m.role == flashagent_llm::Role::System).count(), 1);
         assert!(history[0].content.starts_with("SYSTEM PROMPT"));
         assert!(history[0].content.contains("first question"));
-        // The kept region is the whole current turn, starting at its prompt.
+        // The kept region is the whole current turn, from its prompt.
         assert_eq!(history[1].role, flashagent_llm::Role::User);
         assert_eq!(history[1].content, "read a file");
         assert_eq!(history[2].tool_calls.len(), 1);
         assert_eq!(history[3].tool_call_id.as_deref(), Some("c1"));
 
-        // A second compaction keeps the earlier summary instead of dropping it.
+        // A second compaction keeps the earlier summary.
         history.push(ChatMessage::user("next"));
         history.push(ChatMessage::assistant("ok"));
         compact_context(&offline_source(), &mut history, None).await;
@@ -1958,11 +1875,9 @@ mod tests {
     fn opening_settings_never_persists_the_live_mode_as_default() {
         let persisted = AppConfig { permission_mode: PermissionMode::AcceptEdits, thinking_effort: "auto".into(), ..AppConfig::default() };
         let view = settings_for_runtime(&persisted, PermissionMode::Bypass, "high", "m", &[], 131_072);
-        // Untouched: defaults stay as they were on disk.
         let saved = persisted_from_view(&view.config, &persisted, PermissionMode::Bypass, "high");
         assert_eq!(saved.permission_mode, PermissionMode::AcceptEdits);
         assert_eq!(saved.thinking_effort, "auto");
-        // Changed in the view: that choice becomes the default.
         let mut edited = view.config.clone();
         edited.permission_mode = PermissionMode::Manual;
         let saved = persisted_from_view(&edited, &persisted, PermissionMode::Bypass, "high");
@@ -2005,8 +1920,7 @@ mod tests {
 
     #[test]
     fn a_dropped_image_path_becomes_an_attachment() {
-        // Terminals paste the path of a dropped file; a path that points at a
-        // picture means the picture.
+        // A dropped picture's path means the picture.
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("shot.png");
         let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
@@ -2023,16 +1937,14 @@ mod tests {
         assert_eq!(att.label(), "shot.png 800×600");
         assert!(att.data_url.starts_with("data:image/png;base64,"));
 
-        // Quoted, the way a terminal writes a path with spaces in it.
+        // Quoted, as terminals write a path with spaces.
         let quoted = format!("'{}'", png.to_str().unwrap());
         assert!(Attachment::from_dropped_path(&quoted).is_some());
     }
 
     #[test]
     fn a_bare_file_name_in_a_sentence_is_a_mention_not_an_attachment() {
-        // Attaching on any word ending in .png would send a megabyte because
-        // the user said "look at diagram.png"; that is what view_image is
-        // for. A written-out path is a different matter.
+        // A file named in a sentence is a mention; only a written-out path attaches.
         let looks_like_a_path = |t: &str| t.contains('/') || t.contains('\\');
         assert!(!looks_like_a_path("diagram.png"));
         assert!(looks_like_a_path("./diagram.png"));
@@ -2058,9 +1970,7 @@ mod tests {
 
     #[test]
     fn a_recap_cut_off_by_the_token_limit_is_still_shown() {
-        // Observed for real: the model spent its whole budget thinking and
-        // the JSON never closed, so no recap ever appeared. The recap is the
-        // first field asked for precisely so it survives this.
+        // Observed: the thinking used the whole budget and the JSON never closed.
         let truncated = "{\"recap\": \"Ассистент осмотрел проект и описал его структуру.\", \"suggestion\": \"Покажи код игро";
         let (recap, suggestion) = parse_recap_and_suggestion_json(truncated).expect("recap salvaged");
         assert_eq!(recap, "Ассистент осмотрел проект и описал его структуру.");
@@ -2089,7 +1999,6 @@ mod tests {
             Some(("Explained Swift concepts".to_string(), Some("Show mascot code".to_string())))
         );
 
-        // Filters out generic filler
         let generic = "{\"recap\": \"Response generated\", \"suggestion\": \"What's next?\"}";
         assert_eq!(parse_recap_and_suggestion_json(generic), None);
     }
@@ -2112,7 +2021,6 @@ mod tests {
             sanitize_user_suggestion("Would you like to know more about memory safety?"),
             Some("Explain more about memory safety".to_string())
         );
-        // Generic fillers are rejected
         assert_eq!(sanitize_user_suggestion("What's next?"), None);
         assert_eq!(sanitize_user_suggestion("Next"), None);
         assert_eq!(sanitize_user_suggestion("Continue"), None);
@@ -2120,8 +2028,7 @@ mod tests {
 
     #[test]
     fn suggestions_the_assistant_aimed_at_the_user_are_dropped() {
-        // Pressing → sends the suggestion to the model, so a question the
-        // assistant is asking *the user* is worse than no suggestion at all.
+        // → sends the suggestion, so the assistant asking the user is worse than nothing.
         for bad in [
             "Расскажи о своём проекте и опиши, в чём нужна помощь",
             "Опиши свою задачу подробнее",
@@ -2145,8 +2052,7 @@ mod tests {
 
     #[test]
     fn an_empty_suggestion_after_small_talk_keeps_the_recap_and_shows_no_suggestion() {
-        // The analyzer is told to leave the suggestion empty when nothing
-        // concrete has come up yet; that must not cost the recap.
+        // An empty suggestion must not cost the recap.
         let (recap, suggestion) = parse_recap_and_suggestion_json(
             r#"{"recap": "The user said hello.", "suggestion": ""}"#,
         )
@@ -2157,8 +2063,7 @@ mod tests {
 
     #[test]
     fn real_follow_up_prompts_still_pass() {
-        // The verb is not the giveaway — the object is. These are things a
-        // user genuinely sends next, and they must survive the filter.
+        // The object gives it away, not the verb; these must survive the filter.
         for (input, expected) in [
             ("Расскажи об архитектуре агентного цикла", "Расскажи об архитектуре агентного цикла"),
             ("Объясни, почему тест падает", "Объясни, почему тест падает"),
@@ -2193,7 +2098,6 @@ mod tests {
         let stats = tracker.format_stats_width(120).expect("should have stats");
         assert!(stats.contains("17 prompt"));
 
-        // Simulate usage with completion and MTP speculative decoding stats
         let usage = flashagent_llm::Usage {
             prompt: Some(17),
             completion: Some(25),
@@ -2249,7 +2153,7 @@ mod tests {
         tracker.last_tg = Some(44.4);
         tracker.last_ttft = Some(std::time::Duration::from_millis(1770));
 
-        // When running is true, Line 3 must show "Generating response..." and NOT duplicate prompt tokens or TTFT
+        // While running: no duplicated prompt tokens or TTFT.
         let status = format_status_left(true, false, false, None, "Normal", Some(&tracker), 80, "", 0);
         assert!(status.contains("Generating response..."));
         assert!(status.contains("[Normal]"));
@@ -2257,7 +2161,6 @@ mod tests {
         assert!(!status.contains("TTFT"));
         assert!(!status.contains("44.4 tg"));
 
-        // When running is false, Line 3 displays the completed turn telemetry
         tracker.on_finished();
         let status_done = format_status_left(false, false, false, None, "Normal", Some(&tracker), 80, "", 0);
         assert!(status_done.contains("4.9K prompt"));
@@ -2296,7 +2199,6 @@ mod tests {
         assert!(status.contains("3m05s/1h0m"), "{status}");
         assert!(!status.contains("Generating response..."), "{status}");
 
-        // A turn parked on an approval card is not generating anything.
         let waiting = format_status_left(true, false, true, None, "Manual", Some(&tracker), 80, "", 0);
         assert!(waiting.contains("Waiting for your answer"), "{waiting}");
         assert!(!waiting.contains("Generating response..."), "{waiting}");
@@ -2314,17 +2216,15 @@ mod tests {
 
     #[test]
     fn the_composer_says_what_the_turn_is_actually_doing() {
-        // Every one of these comes from something the loop reported. There is
-        // deliberately no "almost done": the program does not know that.
+        // Every phase is something the loop reported; there is no "almost done".
         assert_eq!(TurnPhase::Waiting.label(), "Waiting for the model");
         assert_eq!(TurnPhase::Thinking.label(), "Thinking");
         assert_eq!(TurnPhase::Writing.label(), "Writing the answer");
         assert_eq!(TurnPhase::AfterTool.label(), "Reading the result");
         assert_eq!(TurnPhase::Stopping.label(), "Stopping");
 
-        // While a tool runs, the line above the composer already says what
-        // the model is doing and why; saying it again inside the composer
-        // read as though the user had typed it there.
+        // The line above already says what the tool does; repeating it in the
+        // composer read as user input.
         assert_eq!(TurnPhase::Tool.label(), "Running a tool");
     }
 
@@ -2333,15 +2233,11 @@ mod tests {
         use flashagent_core::config::UpdateChannel;
         let version = |v: &str| ChannelTarget::Version(v.into());
 
-        // A stable release newer than the beta running is an update...
         let up = channel_switch_warning(UpdateChannel::Stable, "b287", &version("v1.0.0"));
         assert!(up.starts_with("Update: b287 → v1.0.0"), "{up}");
-        // ...and one cut from an older build is a downgrade.
         let down = channel_switch_warning(UpdateChannel::Stable, "b300", &version("v1.0.0+b290"));
         assert!(down.starts_with("Downgrade: b300 → v1.0.0+b290"), "{down}");
         assert!(down.contains("disappear"), "{down}");
-        // The same rule the other way: a newer beta is an update, with the
-        // beta caveat; an older one a downgrade.
         let beta_up = channel_switch_warning(UpdateChannel::Beta, "v1.0.0+b290", &version("b300"));
         assert!(beta_up.starts_with("Update:") && beta_up.contains("regress"), "{beta_up}");
         let beta_down = channel_switch_warning(UpdateChannel::Beta, "v1.0.0", &version("b300"));
@@ -2361,14 +2257,13 @@ mod tests {
 
     #[test]
     fn the_conversation_language_is_named_not_guessed() {
-        // A Russian conversation that quotes Python still reads as Russian:
-        // the code is Latin either way.
+        // Quoted Python is Latin either way.
         let ru = "Покажи пример кода для функции сортировки. Вот пример функции \
                   сортировки пузырьком: def bubble_sort(arr): return sorted(arr)";
         assert_eq!(script_language(ru), Some("Russian"));
 
         assert_eq!(script_language("Show me a bubble sort in Python, with comments"), None);
-        // Too little to judge: better to say nothing than to guess.
+        // Too little to judge.
         assert_eq!(script_language("ок"), None);
         assert_eq!(script_language(""), None);
     }
@@ -2385,13 +2280,12 @@ mod tests {
         assert!(half.contains("3.3/6.7 MB"), "{half}");
         assert!(half.contains('█') && half.contains('░'), "{half}");
 
-        // A mirror that sends no content-length must not get a fabricated bar.
+        // No content-length: no fabricated bar.
         let unknown =
             update_progress_line("b235", UpdateProgress::Downloading { received: 1_048_576, total: None });
         assert!(unknown.contains("1.0 MB downloaded"), "{unknown}");
         assert!(!unknown.contains('%'), "{unknown}");
 
-        // The stages after the download are named, not silent.
         assert!(update_progress_line("b235", UpdateProgress::Verifying).contains("verifying"));
         assert!(update_progress_line("b235", UpdateProgress::Installing).contains("installing"));
     }
@@ -2403,16 +2297,14 @@ mod tests {
         assert!(working.contains("(•_•)"), "{working}");
         let blinking = format_status_left(true, false, false, None, "Normal", Some(&tracker), 80, "", 46);
         assert!(blinking.contains("(-_-)"), "{blinking}");
-        // Idle the mascot lives on the welcome card; two of them would be one
-        // too many.
+        // Idle, the mascot is on the welcome card; two would be too many.
         let idle = format_status_left(false, false, false, None, "Normal", None, 80, "", 0);
         assert!(!idle.contains("(•_•)"), "{idle}");
     }
 
     #[test]
     fn a_resumed_session_gets_the_whole_card_not_a_stuck_reveal() {
-        // The tick loop stops refreshing the card once the transcript has a
-        // user message, so a resumed session must never start truncated.
+        // A resumed session's card must never start truncated.
         let card = flashagent_tui::welcome_card(&flashagent_tui::WelcomeCard {
             model: "m",
             cwd: "/tmp",

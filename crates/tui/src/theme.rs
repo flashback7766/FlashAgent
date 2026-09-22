@@ -1,45 +1,31 @@
-//! Colour themes.
-//!
-//! Every card, spinner and border in FlashAgent is written in one palette —
-//! 24-bit colours spelled out where they are used. A theme is not a second
-//! palette to keep in step with the first: it is a transformation applied to
-//! the finished frame, one step before it is printed. A colour added
-//! anywhere in the app is themed by that alone, with nothing to register.
-//!
-//! The cost is one pass over the frame's escape sequences, and only when a
-//! theme other than [`ColorTheme::Dark`] is chosen — `Dark` is the palette as
-//! written, so it is returned untouched.
+//! Colour themes. The app is written in one 24-bit palette; a theme transforms
+//! the finished frame just before printing, so new colours are themed without
+//! registration. `Dark` is the palette as written and costs nothing.
 
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 pub use flashagent_core::ColorTheme;
 
-/// The active theme, as its index in [`ColorTheme::all`].
+/// Index in [`ColorTheme::all`].
 static ACTIVE: AtomicU8 = AtomicU8::new(0);
 
-/// Choose the theme every later frame is printed in.
 pub fn set(theme: ColorTheme) {
     let index = ColorTheme::all().iter().position(|t| *t == theme).unwrap_or(0);
     ACTIVE.store(index as u8, Ordering::Relaxed);
 }
 
-/// The theme frames are being printed in.
 pub fn active() -> ColorTheme {
     let all = ColorTheme::all();
     all[(ACTIVE.load(Ordering::Relaxed) as usize).min(all.len() - 1)]
 }
 
-/// Recolour a finished frame for the active theme.
-///
-/// Borrows the frame unchanged under `Dark`, which is the common case, so the
-/// default theme costs a comparison and nothing else.
+/// Borrows the frame unchanged under `Dark`.
 pub fn recolor(frame: &str) -> Cow<'_, str> {
     recolor_for(active(), frame)
 }
 
-/// As [`recolor`], for a named theme. Separate so it can be tested without
-/// touching the global choice.
+/// Testable without touching the global choice.
 pub fn recolor_for(theme: ColorTheme, frame: &str) -> Cow<'_, str> {
     if theme == ColorTheme::Dark || frame.is_empty() {
         return Cow::Borrowed(frame);
@@ -55,8 +41,7 @@ pub fn recolor_for(theme: ColorTheme, frame: &str) -> Cow<'_, str> {
                 rest = &rest[len..];
             }
             None => {
-                // Cursor motion, a clear, a half-written escape at a clip
-                // boundary: copied across as it stands.
+                // Cursor motion, clears, an escape cut at a clip boundary: copied as is.
                 out.push_str("\x1b[");
                 rest = &rest[2..];
             }
@@ -66,11 +51,7 @@ pub fn recolor_for(theme: ColorTheme, frame: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// The parameters of the `\x1b[...m` at the start of `s`, and its length.
-///
-/// Only a finished colour-and-style sequence is claimed: anything else,
-/// including an escape cut in half by clipping the line to the terminal
-/// width, is left for the caller to copy.
+/// Only a complete SGR sequence; an escape cut by clipping is left to the caller.
 fn sgr_sequence(s: &str) -> Option<(&str, usize)> {
     let body = s.strip_prefix("\x1b[")?;
     let end = body.find(|c: char| !(c.is_ascii_digit() || c == ';'))?;
@@ -80,10 +61,8 @@ fn sgr_sequence(s: &str) -> Option<(&str, usize)> {
     Some((&body[..end], 2 + end + 1))
 }
 
-/// Rewrite one `\x1b[...m`, recolouring the colours in it and keeping
-/// everything else — a colour is often written together with bold
-/// (`\x1b[1;38;2;225;175;95m`), and losing the bold would change the picture
-/// as much as losing the colour.
+/// Attributes are kept: a colour is often written with bold, and losing the
+/// bold changes the picture as much as losing the colour.
 fn recolor_sgr(theme: ColorTheme, params: &str) -> String {
     let mut kept: Vec<String> = Vec::new();
     let mut parts = params.split(';').peekable();
@@ -93,8 +72,7 @@ fn recolor_sgr(theme: ColorTheme, params: &str) -> String {
             "48" => Some(Ground::Back),
             _ => None,
         };
-        // 38 and 48 also introduce the 256-colour form (`5;N`), which names a
-        // colour in the terminal's own palette and is already themed by it.
+        // `5;N` is a terminal palette colour, already themed by the terminal.
         let is_truecolor = ground.is_some() && parts.peek() == Some(&"2");
         if !is_truecolor {
             kept.push(token.to_string());
@@ -112,7 +90,6 @@ fn recolor_sgr(theme: ColorTheme, params: &str) -> String {
     format!("\x1b[{}m", kept.join(";"))
 }
 
-/// The parameters that paint `rgb` in `theme`.
 fn painted(theme: ColorTheme, ground: Ground, rgb: (u8, u8, u8)) -> Vec<String> {
     match theme {
         ColorTheme::Ansi16 => {
@@ -135,15 +112,13 @@ fn painted(theme: ColorTheme, ground: Ground, rgb: (u8, u8, u8)) -> Vec<String> 
     }
 }
 
-/// Whether a colour paints the text or what is behind it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ground {
     Fore,
     Back,
 }
 
-/// How bright a colour reads, 0..=255. The weights are the usual ones for
-/// how much each channel contributes to perceived brightness.
+/// 0..=255, with the usual perceived-brightness weights.
 fn luminance((r, g, b): (u8, u8, u8)) -> u8 {
     ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000).min(255) as u8
 }
@@ -152,25 +127,21 @@ fn clamp(v: i32) -> u8 {
     v.clamp(0, 255) as u8
 }
 
-/// Move one colour into `theme`.
 fn transform(theme: ColorTheme, (r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
     match theme {
         ColorTheme::Dark | ColorTheme::Ansi16 => (r, g, b),
-        // Cooled towards blue: the warm greys and golds keep their shape and
-        // their brightness order, but the picture reads as night.
+        // Warm tones keep their shape and brightness order but read as night.
         ColorTheme::Midnight => (
             clamp(r as i32 * 78 / 100),
             clamp(g as i32 * 88 / 100),
             clamp(b as i32 * 115 / 100 + 14),
         ),
-        // Pushed away from mid-grey: dim text gets dimmer, bright text
-        // brighter, so the two never blur together on a washed-out screen.
+        // Dim gets dimmer and bright brighter, so they do not blur on a washed-out screen.
         ColorTheme::HighContrast => {
             let stretch = |c: u8| clamp(128 + (c as i32 - 128) * 165 / 100);
             (stretch(r), stretch(g), stretch(b))
         }
-        // Brightness only. Dim text would vanish once its colour is gone, so
-        // the range is lifted off black first.
+        // The range is lifted off black first, or dim text would vanish.
         ColorTheme::Monochrome => {
             let grey = clamp(40 + luminance((r, g, b)) as i32 * 215 / 255);
             (grey, grey, grey)
@@ -178,11 +149,8 @@ fn transform(theme: ColorTheme, (r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
     }
 }
 
-/// The nearest of the terminal's own sixteen colours: which of the eight, and
-/// whether it is the bright half.
-///
-/// The eight are compared at their usual values; a terminal is free to paint
-/// them differently, which is the point of choosing this theme.
+/// The eight are compared at their usual values; the terminal may paint them
+/// differently, which is the point of this theme.
 fn nearest_ansi(rgb: (u8, u8, u8)) -> (u8, bool) {
     const BASE: [(u8, u8, u8); 8] = [
         (0, 0, 0),       // black
@@ -239,8 +207,7 @@ mod tests {
 
     #[test]
     fn only_the_colours_are_touched() {
-        // Cursor motion, reverse video and reset must survive a theme, or the
-        // frame lands in the wrong place on screen.
+        // Cursor motion, reverse video and reset must survive a theme.
         let frame = format!("\x1b[2J\x1b[H{GOLD}hi\x1b[0m\x1b[7m!\x1b[39m\x1b[12A");
         let themed = recolor_for(ColorTheme::Monochrome, &frame);
         for untouched in ["\x1b[2J", "\x1b[H", "\x1b[0m", "\x1b[7m", "\x1b[39m", "\x1b[12A"] {
@@ -275,11 +242,9 @@ mod tests {
         let themed = recolor_for(ColorTheme::Ansi16, &gold);
         // Gold is a bright yellow: SGR 93.
         assert_eq!(themed, "\x1b[93mx");
-        // A background keeps being a background.
         let back = recolor_for(ColorTheme::Ansi16, "\x1b[48;2;10;10;180mx");
         assert_eq!(back, "\x1b[44mx");
-        // The near-black blue the read card uses is nearer black than blue,
-        // and is meant to land there: it is a background, not a colour.
+        // The read card's near-black blue is a background and should land on black.
         let card = recolor_for(ColorTheme::Ansi16, "\x1b[48;2;22;38;60mx");
         assert_eq!(card, "\x1b[40mx");
         assert!(!themed.contains("38;2"), "no 24-bit colour may survive this theme");
@@ -287,34 +252,28 @@ mod tests {
 
     #[test]
     fn a_colour_written_together_with_bold_keeps_both() {
-        // Most headings in the app are bold and gold in one sequence; an
-        // earlier version of this module read only the bare colour form and
-        // let every bold heading through unthemed.
+        // Headings are bold and gold in one sequence; an earlier version let them
+        // through unthemed.
         let themed = recolor_for(ColorTheme::Monochrome, "\x1b[1;38;2;225;175;95mTitle\x1b[0m");
         assert!(themed.starts_with("\x1b[1;38;2;"), "the bold was lost: {themed:?}");
         assert!(!themed.contains("225;175;95"), "the colour was not themed: {themed:?}");
-        // Foreground and background in one sequence are both themed.
         let both = recolor_for(ColorTheme::Monochrome, "\x1b[38;2;200;100;50;48;2;20;30;40mx");
         assert!(!both.contains("200;100;50") && !both.contains("20;30;40"), "{both:?}");
     }
 
     #[test]
     fn a_colour_from_the_terminals_own_palette_is_left_to_the_terminal() {
-        // `38;5;N` names a slot in the palette the terminal already owns.
         let themed = recolor_for(ColorTheme::Monochrome, "\x1b[38;5;208mx");
         assert_eq!(themed, "\x1b[38;5;208mx");
     }
 
     #[test]
     fn a_half_written_escape_is_left_alone() {
-        // Frames are clipped to the terminal width, and a clip can land
-        // inside an escape; it must not eat the rest of the line.
+        // A clip can land inside an escape; it must not eat the rest of the line.
         for broken in ["\x1b[38;2;1;2", "\x1b[38;2;", "\x1b[", "\x1b[38;2"] {
             let themed = recolor_for(ColorTheme::Monochrome, broken);
             assert_eq!(themed, broken, "{broken:?} was rewritten");
         }
-        // A colour followed by another attribute is finished, though, and is
-        // themed with that attribute kept.
         let finished = recolor_for(ColorTheme::Monochrome, "\x1b[38;2;1;2;3;4m");
         assert!(finished.ends_with(";4m"), "the underline was lost: {finished:?}");
     }

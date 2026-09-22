@@ -1,30 +1,21 @@
-//! Turning backend failures into something a person can act on.
-//!
-//! `llm: http: error sending request for url (http://localhost:1234/v1/…)` is
-//! the truth and it is useless: it does not say what broke or what to do. The
-//! classification here is deliberately shallow — a handful of failures cover
-//! nearly every bad evening with a local model, and anything unrecognised
-//! keeps its original text rather than being smoothed into a guess.
+//! Backend failures in words a person can act on. Deliberately shallow: a few
+//! cases cover nearly every failure with a local model, and anything unknown
+//! keeps its original text.
 
-/// A failure explained: what happened, and what the user can do next.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Explained {
-    /// One line, in plain words.
     pub headline: String,
-    /// What to do about it, when there is something.
     pub hint: Option<String>,
-    /// The original message, kept for the transcript.
+    /// Kept for the transcript.
     pub raw: String,
 }
 
-/// Explain a backend error. `url` and `model` are what the request was aimed
-/// at, so the message can name them instead of describing them.
+/// `url` and `model` are named in the message.
 pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
     let lower = raw.to_lowercase();
     let base = url.trim_end_matches('/');
 
-    // Nothing listening. By far the most common one: the server is not
-    // started, or it is on another port.
+    // The most common: the server is not started, or is on another port.
     if lower.contains("connection refused")
         || lower.contains("error sending request")
         || lower.contains("tcp connect error")
@@ -42,7 +33,6 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         };
     }
 
-    // The server is there; the model is not.
     if lower.contains("model_not_found")
         || (lower.contains("404") && lower.contains("model"))
         || lower.contains("no model loaded")
@@ -55,7 +45,6 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         };
     }
 
-    // Too much conversation for the model.
     if lower.contains("context length")
         || lower.contains("context window")
         || lower.contains("too many tokens")
@@ -69,7 +58,6 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         };
     }
 
-    // Credentials.
     if lower.contains("401") || lower.contains("403") || lower.contains("unauthorized")
         || lower.contains("invalid api key") || lower.contains("incorrect api key")
     {
@@ -80,7 +68,6 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         };
     }
 
-    // Rate limited or out of credit.
     if lower.contains("429") || lower.contains("rate limit") || lower.contains("quota") {
         return Explained {
             headline: format!("{base} is rate-limiting this key"),
@@ -89,7 +76,6 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         };
     }
 
-    // The server took the request and went quiet.
     if lower.contains("timed out") || lower.contains("timeout") || lower.contains("operation timed out") {
         return Explained {
             headline: format!("{base} accepted the request and then sent nothing"),
@@ -102,8 +88,7 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         };
     }
 
-    // Connection dropped mid-answer — typically the server ran out of memory
-    // and killed the model.
+    // Usually the server ran out of memory and killed the model.
     if lower.contains("stream interrupted") || lower.contains("connection reset")
         || lower.contains("incomplete message") || lower.contains("body stream")
     {
@@ -118,7 +103,6 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         };
     }
 
-    // A 5xx with nothing recognisable in it.
     if lower.contains("500") || lower.contains("502") || lower.contains("503") {
         return Explained {
             headline: format!("{base} returned a server error"),
@@ -127,7 +111,7 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         };
     }
 
-    // Unrecognised: say so honestly rather than inventing a cause.
+    // Unrecognised: keep the original text rather than invent a cause.
     Explained { headline: raw.trim().to_string(), hint: None, raw: raw.to_string() }
 }
 

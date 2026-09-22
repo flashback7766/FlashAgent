@@ -1,30 +1,24 @@
-//! Startup directory trust confirmation screen.
-//! Prompts user whether to trust the current working directory,
-//! change working directory, or quit.
+//! Startup trust screen: trust the working directory, change it, or quit.
 
 use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyModifiers};
 
-/// User choice from the startup trust screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupAction {
     Continue,
     Quit,
 }
 
-/// Mode of the trust screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustScreenMode {
-    /// Choosing between: 1. Yes, Continue. 2. Change working directory. 3. No, quit.
+    /// 1. Yes, continue. 2. Change working directory. 3. No, quit.
     Select,
-    /// Typing a new directory path.
     ChangeDir {
         input: String,
         error: Option<String>,
     },
 }
 
-/// State of the startup trust screen.
 pub struct TrustScreen {
     pub cwd: PathBuf,
     pub selected: usize,
@@ -40,17 +34,17 @@ impl TrustScreen {
         }
     }
 
-    /// Move selection up (wraps around 0..=2).
+    /// Wraps around.
     pub fn up(&mut self) {
         self.selected = (self.selected + 2) % 3;
     }
 
-    /// Move selection down (wraps around 0..=2).
+    /// Wraps around.
     pub fn down(&mut self) {
         self.selected = (self.selected + 1) % 3;
     }
 
-    /// Handle key event. Returns `Some(action)` when an action completes the screen.
+    /// `Some(action)` when the screen is done.
     pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<StartupAction> {
         match &mut self.mode {
             TrustScreenMode::Select => match code {
@@ -144,7 +138,6 @@ impl TrustScreen {
         }
     }
 
-    /// Render screen lines matching the requested design and aesthetics.
     pub fn render(&self, width: usize) -> Vec<String> {
         let mut lines = Vec::new();
         let reset = "\x1b[0m";
@@ -213,13 +206,12 @@ impl TrustScreen {
     }
 }
 
-/// Helper to expand `~` and parse paths. What a `~` means is decided in one
-/// place for the whole app, so the folder picker and the tools agree.
+/// `~` is expanded in one place for the whole app, so the folder picker and
+/// the tools agree.
 pub fn resolve_path(input: &str) -> PathBuf {
     PathBuf::from(flashagent_core::expand_home(input).as_ref())
 }
 
-/// Helper to wrap text without breaking words.
 fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -240,7 +232,6 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// Run interactive trust screen in terminal.
 pub async fn run_trust_screen(cwd: &mut PathBuf) -> anyhow::Result<StartupAction> {
     use crossterm::{
         cursor,
@@ -323,16 +314,13 @@ mod tests {
     #[test]
     fn test_startup_actions() {
         let mut screen = TrustScreen::new(PathBuf::from("/tmp"));
-        // Enter on 0 -> Continue
         let act = screen.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(act, Some(StartupAction::Continue));
 
-        // Enter on 2 -> Quit
         screen.selected = 2;
         let act = screen.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(act, Some(StartupAction::Quit));
 
-        // Esc -> Quit
         let act = screen.handle_key(KeyCode::Esc, KeyModifiers::empty());
         assert_eq!(act, Some(StartupAction::Quit));
     }
@@ -345,7 +333,6 @@ mod tests {
         assert_eq!(act, None);
         assert!(matches!(screen.mode, TrustScreenMode::ChangeDir { .. }));
 
-        // Type invalid path
         for c in "nonexistent_dir_12345".chars() {
             screen.handle_key(KeyCode::Char(c), KeyModifiers::empty());
         }
@@ -356,7 +343,7 @@ mod tests {
             panic!("Expected ChangeDir mode");
         }
 
-        // Cancel with Esc returns to Select mode
+        // Esc returns to Select mode.
         screen.handle_key(KeyCode::Esc, KeyModifiers::empty());
         assert_eq!(screen.mode, TrustScreenMode::Select);
     }

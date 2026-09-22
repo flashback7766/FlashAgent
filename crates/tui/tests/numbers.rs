@@ -1,5 +1,5 @@
-//! Measurements behind docs/numbers.md. Ignored: they time things, and a
-//! busy CI machine would make them flaky. Run them on purpose, in release:
+//! Measurements behind docs/numbers.md. Ignored because timing is flaky on a
+//! busy CI machine; run in release:
 //!
 //! ```bash
 //! cargo test --release -p flashagent-tui --test numbers -- --ignored --nocapture --test-threads=1
@@ -9,8 +9,7 @@ use flashagent_core::loop_::LoopEvent;
 use flashagent_tui::{ChatView, ReasoningExpansion};
 use std::time::Instant;
 
-/// A conversation of `turns` turns: a question, a thought, a tool call and
-/// a few lines of answer each — the shape of a real session.
+/// Each turn: a question, a thought, a tool call and a few lines of answer.
 fn session(turns: usize) -> ChatView {
     let mut chat = ChatView::default();
     for n in 0..turns {
@@ -42,8 +41,8 @@ fn time<T>(what: &str, f: impl FnOnce() -> T) -> T {
 fn a_frame_of_a_long_session() {
     for turns in [100, 1_000, 10_000] {
         let chat = session(turns);
-        // The first frame renders everything; later frames reuse what has
-        // settled, which is what a user feels while the model streams.
+        // Later frames reuse what has settled; that is what the user feels while
+        // the model streams.
         time(&format!("{turns} turns, first frame"), || chat.render_split(120, ReasoningExpansion::none()));
         let mut chat = chat;
         chat.push_user("one more");

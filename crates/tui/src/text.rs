@@ -1,7 +1,6 @@
 use super::*;
 
-/// Remember the colour a line is being written in, so that a wrap can start
-/// the next line in the same colour and close it at the end.
+/// So a wrap can reopen the colour on the next line and close it at the end.
 fn track_style(word: &str, active_style: &mut Option<String>) {
     let b = word.as_bytes();
     let mut j = 0;
@@ -27,11 +26,8 @@ fn track_style(word: &str, active_style: &mut Option<String>) {
     }
 }
 
-/// Cut a word that does not fit on a line of its own into pieces that do.
-///
-/// Measured in cells, so a character that takes two of them is never split
-/// down the middle, and escape codes travel with the piece they fall in
-/// without counting towards its width.
+/// Measured in cells: a double-width character is never split, and escape
+/// codes travel with their piece without counting towards its width.
 fn break_wide_word(word: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -65,8 +61,7 @@ fn break_wide_word(word: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// Wrap styled text to `width` visible characters, preserving active ANSI escape sequences
-/// across line wraps and appending reset codes at line endings.
+/// Active ANSI styles carry across wraps; each line ends with a reset.
 pub fn wrap_styled(text: &str, width: usize) -> Vec<String> {
     let width = width.max(10);
     let mut out = Vec::new();
@@ -87,11 +82,9 @@ pub fn wrap_styled(text: &str, width: usize) -> Vec<String> {
 
         for word in line.split(' ') {
             let w_vis = visible_width(word);
-            // A word wider than the line itself has nowhere to wrap: a long
-            // URL, a path, or writing that puts no spaces between words at
-            // all, such as Chinese. Left whole it would wrap in the terminal
-            // instead, which this renderer cannot see and would then erase
-            // the wrong rows.
+            // A word wider than the line (a URL, a path, Chinese text) would otherwise
+            // be wrapped by the terminal, which this renderer cannot see, and it would
+            // then erase the wrong rows.
             if w_vis > width {
                 if cur_vis > 0 {
                     if active_style.is_some() {
@@ -119,10 +112,8 @@ pub fn wrap_styled(text: &str, width: usize) -> Vec<String> {
                 track_style(word, &mut active_style);
                 continue;
             }
-            // Decided by what is visible, not by what is in the buffer: a
-            // continuation row starts with the style it carries over, and
-            // treating that escape code as text put a space before the first
-            // word of every wrapped styled line.
+            // By visible width: counting the carried-over escape as text put a space
+            // before the first word of every wrapped styled line.
             let need_space = cur_vis > 0;
             let space_vis = if need_space { 1 } else { 0 };
 
@@ -162,9 +153,7 @@ pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     wrap_styled(text, width)
 }
 
-/// "Add the null check" → "add the null check", so it can follow "Failed to".
-/// Only the first character, and only when it is not part of an identifier
-/// like `MEMORY.md` that would look wrong in lower case.
+/// So it can follow "Failed to". Identifiers like `MEMORY.md` are left alone.
 pub fn lower_first(text: &str) -> String {
     let mut chars = text.chars();
     let Some(first) = chars.next() else {
@@ -178,9 +167,7 @@ pub fn lower_first(text: &str) -> String {
     first.to_lowercase().collect::<String>() + &rest
 }
 
-/// `text` with the working directory taken out of any path in it. Models hand
-/// back absolute paths, and everything up to the project is where the user
-/// already is.
+/// Models return absolute paths; the part up to the project is noise.
 pub fn relative_to_cwd(text: &str) -> String {
     match std::env::current_dir() {
         Ok(cwd) => {
@@ -207,25 +194,22 @@ pub fn format_cmd(cmd: &str) -> String {
     }
 }
 
-/// Re-emit `prefix` after every color reset inside `text`: styled spans
-/// (from `md()`) close with a full reset that would otherwise blank the
-/// outer line color for the rest of the line (observed: rest of a reasoning
-/// line turned plain white after an embedded `**bold**`).
+/// Styled spans end with a full reset that would blank the outer line colour
+/// for the rest of the line (seen after `**bold**` in reasoning).
 pub fn restore_line_color(text: &str, prefix: &str) -> String {
     text.replace("\x1b[0m", &format!("\x1b[0m{prefix}"))
         .replace("\x1b[39m", &format!("\x1b[39m{prefix}"))
 }
 
-/// Clip `text` to `width` visible cells, keeping ANSI escape sequences whole
-/// (they are zero-width). Cutting inside a CSI sequence would print its tail
-/// literally (`[39m`) and leak style across lines.
+/// Escapes are kept whole: cutting inside one prints its tail (`[39m`) and
+/// leaks style across lines.
 pub fn clip_ansi(text: &str, width: usize) -> String {
     let mut out = String::with_capacity(text.len());
     let mut cells = 0;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            // Copy the whole sequence verbatim: ESC [ ... final-byte (@-~).
+            // ESC [ ... final byte (@-~), copied verbatim.
             out.push(c);
             if chars.peek() == Some(&'[') {
                 if let Some(bracket) = chars.next() {
@@ -251,7 +235,6 @@ pub fn clip_ansi(text: &str, width: usize) -> String {
     out
 }
 
-/// Count visible cells in `text`, ignoring ANSI escape sequences.
 pub fn visible_width(text: &str) -> usize {
     let mut cells = 0;
     let mut chars = text.chars().peekable();
@@ -273,10 +256,8 @@ pub fn visible_width(text: &str) -> usize {
     cells
 }
 
-/// The end of `text` that fits in `width` cells, with an ellipsis in front
-/// when the start had to go, and how many cells it takes. The composer shows
-/// this: what the user is typing is at the end, and a prompt clipped on the
-/// right hides exactly the part being written.
+/// With a leading ellipsis when the start had to go. The composer shows the
+/// end, where the user is typing.
 pub fn tail_window(text: &str, width: usize) -> (String, usize) {
     let total: usize = text.chars().map(|c| c.width().unwrap_or(0)).sum();
     if total <= width {
@@ -298,7 +279,6 @@ pub fn tail_window(text: &str, width: usize) -> (String, usize) {
     (out, cells + 1)
 }
 
-/// Strips all ANSI escape sequences from `text`.
 pub fn strip_ansi(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
@@ -320,7 +300,6 @@ pub fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// Format a single row within an enclosed boxed container with vertical border delimiters `│`.
 pub fn pad_box_row(content: &str, width: usize) -> String {
     let inner_w = width.saturating_sub(2);
     let border_color = "\x1b[38;2;95;90;85m";
@@ -336,7 +315,6 @@ pub fn pad_box_row(content: &str, width: usize) -> String {
     format!("{border_color}│{reset}{clipped}{}{border_color}│{reset}", " ".repeat(pad))
 }
 
-/// Truncates string in the middle if it exceeds `max_len`, keeping prefix and suffix.
 /// E.g. "qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved-i1" -> "qwen3.6-35b...preserved-i1".
 pub fn truncate_middle(s: &str, max_len: usize) -> String {
     let char_count = s.chars().count();
@@ -368,8 +346,7 @@ mod tests {
 
     #[test]
     fn a_wrapped_styled_line_does_not_start_its_continuation_with_a_space() {
-        // The carried-over style code made the row look non-empty, so every
-        // continuation of a coloured line began one column too far right.
+        // The carried-over style made every continuation row start one column right.
         let styled = format!("\x1b[38;2;200;195;185m{}\x1b[0m", "alpha beta gamma delta epsilon zeta eta theta");
         let rows = wrap_styled(&styled, 12);
         assert!(rows.len() > 1, "{rows:?}");

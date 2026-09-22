@@ -1,6 +1,6 @@
 use super::*;
 
-/// Run the tool-calling check once, right after setup, and say what it means.
+/// Once, right after setup.
 pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
     println!("\nChecking whether {} can drive tools...", config.model);
     let source = BackendSource(flashagent_llm::OpenAiCompat::new(
@@ -27,18 +27,16 @@ pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
     }
     println!();
 
-    // Printing it was not enough: the app starts, clears the screen, and the
-    // one thing the user needed to read is gone. The verdict goes into the
-    // conversation instead, where it stays until they scroll past it.
+    // Printed output was cleared by the app starting; the verdict goes into the
+    // conversation instead.
     Some(format!(
         "Tool-calling check: {passed}/{total} — {}. Re-run with `flashagent --tool-test`.",
         report.verdict()
     ))
 }
 
-/// `--tool-test`: run the tool-calling scenarios against the configured model,
-/// or against every model the server lists. Exits non-zero when a model cannot
-/// drive tools, so it can be used as a check rather than only read.
+/// `--tool-test`, for the configured model or every listed one. Exits non-zero
+/// when a model cannot drive tools, so it works as a check.
 pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool) -> i32 {
     let timeout = std::time::Duration::from_secs(120);
     let mut models = vec![config.model.clone()];
@@ -87,20 +85,17 @@ pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool) -> 
     }
     let json: Vec<_> = reports.iter().map(|r| r.to_json()).collect();
     if let Ok(path) = std::env::var("FLASHAGENT_TOOL_TEST_JSON") {
-        // Raw results, so a published table can be checked rather than believed.
+        // Raw results, so a published table can be checked.
         if let Ok(text) = serde_json::to_string_pretty(&json) {
             let _ = std::fs::write(&path, text);
             println!("\nRaw results written to {path}");
         }
     }
 
-    // A model that fails everything is a failure of the check, not of the run.
     i32::from(reports.iter().any(|r| r.score().0 == 0))
 }
 
-/// Settings → "Run Tool Test": ask the active model to call a probe tool and
-/// report whether a well-formed call came back — natively or as text markup
-/// that FlashAgent's scanner recovers.
+/// Settings → "Run Tool Test": a well-formed call, native or recovered from text.
 pub(crate) async fn run_tool_call_probe(source: &BackendSource) -> String {
     use futures::StreamExt;
     let probe = flashagent_llm::ToolSpec {

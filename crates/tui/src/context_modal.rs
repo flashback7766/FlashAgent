@@ -1,4 +1,4 @@
-//! Detailed context window breakdown modal for `/context`.
+//! `/context` breakdown modal.
 
 use flashagent_core::ContextUsage;
 use crate::{LineKind, RenderLine};
@@ -111,8 +111,7 @@ mod tests {
 
     #[test]
     fn every_row_of_the_box_is_as_wide_as_its_top() {
-        // The top border was one column short, so its corner sat left of the
-        // side of every row under it.
+        // The top border used to be one column short.
         let modal = ContextModal::new(ContextUsage::new(128_000));
         for width in [60usize, 80, 110, 140] {
             let widths: std::collections::BTreeSet<usize> =

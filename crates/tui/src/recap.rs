@@ -1,7 +1,6 @@
 use super::*;
 
-/// The language a turn is written in, by script, when it is clearly not
-/// English. Script is a crude signal but a reliable one for the case that
+/// By script, when clearly not English. Crude but reliable for the case that
 /// matters: a model answering a Russian conversation in English.
 pub(crate) fn script_language(text: &str) -> Option<&'static str> {
     let mut cyrillic = 0usize;
@@ -21,8 +20,7 @@ pub(crate) fn script_language(text: &str) -> Option<&'static str> {
         return None;
     }
     let share = |n: usize| n as f32 / total as f32;
-    // Code and identifiers are Latin even in a Russian conversation, so a
-    // minority of Cyrillic is still a Russian conversation.
+    // Code and identifiers are Latin even in a Russian conversation.
     if share(cyrillic) > 0.25 {
         Some("Russian")
     } else if share(cjk) > 0.25 {
@@ -63,8 +61,7 @@ pub(crate) async fn generate_llm_recap_and_suggestion(
         }\n\
         Do NOT generate any internal thinking or explanations. Start immediately with { and return only valid JSON.";
 
-    // "the language of the conversation" is not an instruction a small model
-    // reliably follows; naming the language is.
+    // Small models follow a named language, not "the language of the conversation".
     let language_rule = match script_language(&format!("{user_snip} {asst_snip}")) {
         Some(lang) => format!(
             "\nThe conversation is in {lang}. Write BOTH fields in {lang}, not in English."
@@ -82,10 +79,8 @@ pub(crate) async fn generate_llm_recap_and_suggestion(
         thinking: flashagent_llm::ThinkingEffort::Off,
         custom_effort: Some("none".to_string()),
         temperature: Some(0.2),
-        // Models asked not to think often think anyway: one observed run
-        // spent 361 of its 512 tokens reasoning and was cut off before it
-        // closed the JSON, so no recap ever appeared. The budget has to
-        // cover the thinking the model does regardless.
+        // Models asked not to think often think anyway: one run spent 361 of 512
+        // tokens reasoning and never closed the JSON.
         max_tokens: Some(1500),
         ..Default::default()
     };
@@ -116,7 +111,7 @@ pub(crate) async fn generate_llm_recap_and_suggestion(
         }
     };
 
-    // 90s timeout accommodates larger local models (e.g. 26B Gemma TTFT ~8s + generation ~5s, slow CPU inference, or heavy load)
+    // Room for large local models (26B Gemma: ~8 s TTFT plus generation) and slow CPUs.
     tokio::time::timeout(std::time::Duration::from_secs(90), overall_task).await.ok()?
 }
 
@@ -124,7 +119,7 @@ pub(crate) fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Opti
     let mut storage;
     let mut text = raw.trim();
 
-    // Strip <thought>...</thought> or <think>...</think> if model emitted reasoning in text stream
+    // Reasoning emitted in the text stream.
     if let Some(start_think) = text.find("<thought>") {
         if let Some(end_think) = text.find("</thought>") {
             let after = &text[end_think + "</thought>".len()..];
@@ -142,7 +137,6 @@ pub(crate) fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Opti
         }
     }
 
-    // Extract inside ```json ... ``` or ``` ... ``` if present
     let candidate = if let Some(code_start) = text.find("```") {
         let after_fence = &text[code_start + 3..];
         let content_start = if after_fence.to_lowercase().starts_with("json") {
@@ -159,7 +153,6 @@ pub(crate) fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Opti
         text
     };
 
-    // Extract between outermost '{' and '}'
     let json_str = if let (Some(first_brace), Some(last_brace)) = (candidate.find('{'), candidate.rfind('}')) {
         if first_brace <= last_brace {
             &candidate[first_brace..=last_brace]
@@ -170,11 +163,9 @@ pub(crate) fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Opti
         candidate.trim()
     };
 
-    // A run that hit its token limit leaves the object unclosed. Repairing
-    // such JSON invents the closing quote, and with it the end of a sentence
-    // the model never wrote — so when the text does not parse as it stands,
-    // each field is read literally instead, and a value that never closed is
-    // dropped rather than completed for it.
+    // A cut-off answer leaves the object unclosed, and repair would invent the
+    // end of a sentence. Fields are read literally instead; an unclosed value is
+    // dropped.
     let parsed: serde_json::Value = match serde_json::from_str(json_str) {
         Ok(v) => v,
         Err(_) => flashagent_llm::repair_json(json_str)
@@ -183,9 +174,7 @@ pub(crate) fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Opti
             .unwrap_or(serde_json::Value::Null),
     };
 
-    // The recap is the first field asked for, so it is usually complete even
-    // in a cut-off answer: a finished sentence is worth more than a
-    // well-formed brace.
+    // The recap is asked for first, so it is usually complete even when cut off.
     let recap_raw = match parsed.get("recap").and_then(|s| s.as_str()) {
         Some(found) => found.to_string(),
         None => salvage_json_string_field(json_str, "recap")?,
@@ -205,11 +194,8 @@ pub(crate) fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Opti
     Some((recap, suggestion))
 }
 
-/// Read one string field out of JSON that may have been cut off mid-object.
-///
-/// Deliberately literal: it takes the text between the quotes after
-/// `"field":` and stops at the first unescaped quote, or at the end of what
-/// arrived. A value that never closed is dropped rather than guessed at.
+/// Takes the text between the quotes after `"field":` up to the first
+/// unescaped quote or the end. An unclosed value is dropped, not guessed.
 pub(crate) fn salvage_json_string_field(raw: &str, field: &str) -> Option<String> {
     let key = format!("\"{field}\"");
     let after_key = &raw[raw.find(&key)? + key.len()..];
@@ -235,8 +221,7 @@ pub(crate) fn salvage_json_string_field(raw: &str, field: &str) -> Option<String
         }
     }
     let value = value.trim().to_string();
-    // An unclosed value is a sentence chopped mid-word; only keep it if it
-    // got far enough to say something and ended on a whole word.
+    // Unclosed: keep only if long enough and ending on a sentence end.
     if !closed && (value.len() < 20 || !value.ends_with(['.', '!', '?'])) {
         return None;
     }
@@ -249,7 +234,6 @@ pub(crate) fn sanitize_user_suggestion(s: &str) -> Option<String> {
         return None;
     }
 
-    // Strip Russian and ASCII quotes
     trimmed = trimmed
         .trim_matches('«')
         .trim_matches('»')
@@ -260,7 +244,7 @@ pub(crate) fn sanitize_user_suggestion(s: &str) -> Option<String> {
     let mut text = trimmed.to_string();
     let lower = text.to_lowercase();
 
-    // Convert assistant question or infinitive formulations into direct user imperatives
+    // Assistant-style questions become user imperatives.
     if lower.starts_with("would you like to see examples of ") {
         text = format!("Show code examples of {}", &trimmed["would you like to see examples of ".len()..]);
     } else if lower.starts_with("would you like to see ") {
@@ -293,12 +277,11 @@ pub(crate) fn sanitize_user_suggestion(s: &str) -> Option<String> {
         return None;
     }
 
-    // Capitalize first character
     let mut chars = text.chars();
     let first = chars.next()?;
     let capitalized: String = first.to_uppercase().chain(chars).collect();
 
-    // Clean trailing punctuation (?, ., !) so it is an imperative prompt ready to send
+    // Drop trailing punctuation so it reads as a prompt to send.
     let clean = capitalized
         .trim_end_matches(['?', '.', '!', ' ', '"', '\'', '»', '«'])
         .to_string();
@@ -310,25 +293,19 @@ pub(crate) fn sanitize_user_suggestion(s: &str) -> Option<String> {
     }
 }
 
-/// A suggestion is a message the user is about to send TO the model. Models
-/// often return the opposite: the assistant asking the *user* for information
-/// ("Tell me about your project", "Tell me about your setup"). Pressing → on
-/// one of those sends the user their own question back, so they are dropped.
-///
-/// The giveaway is the object, not the verb: "tell me about the architecture"
-/// is a fine prompt, "tell me about your project" is the assistant talking to
-/// you. The Russian entries below are data: they recognise the same shapes in
-/// a Russian conversation.
+/// A suggestion is sent by the user to the model. Models often suggest the
+/// opposite ("Tell me about your project"), which would send the user their
+/// own question back. The object gives it away, not the verb: "tell me about
+/// the architecture" is fine. Russian entries recognise the same shapes.
 pub(crate) fn is_addressed_to_the_user(text: &str) -> bool {
     let lower = text.to_lowercase();
-    // Russian: reflexive/second-person possessives always point at whoever is
-    // being addressed, and here that is the user.
+    // Second-person possessives point at the user here.
     const RU_POSSESSIVE: &[&str] = &[
         "свой", "своё", "свое", "своего", "своей", "своем", "своём", "своих", "свою", "своими",
         "твой", "твоё", "твое", "твоей", "твоем", "твоём", "твои", "твоих",
         "ваш ", "ваша", "ваше", "вашей", "вашем", "ваши", "вашу",
     ];
-    // Phrases that only make sense coming from the assistant.
+    // Phrases that only make sense from the assistant.
     const HANDOFF: &[&str] = &[
         "нужна помощь", "нужна ли помощь", "чем помочь", "чем могу помочь", "чем я могу помочь",
         "что тебя интересует", "что вас интересует", "дай знать", "дайте знать", "если хочешь",
@@ -336,19 +313,12 @@ pub(crate) fn is_addressed_to_the_user(text: &str) -> bool {
         "your project", "your code", "your task", "your goal", "your setup", "your repo",
         "your codebase", "your use case", "your requirements", "what help", "how can i help",
         "let me know", "feel free to", "if you'd like", "if you would like",
-        // Not a question mailed at the user this time, but the same handoff in
-        // disguise: instead of asking the user for a topic, the model names
-        // the *category* ("a topic", "a question") instead of picking one.
-        // Sending that back to the assistant verbatim is meaningless, so it is
-        // dropped the same way a direct question would be.
+        // The same handoff: naming the category ("a topic") instead of picking one.
         "укажи тему", "задай вопрос", "задай конкретный вопрос", "конкретный вопрос по",
         "сформулируй вопрос", "какой вопрос",
         "specify a topic", "specify the topic", "ask a specific question", "ask a question about",
-        // Inside a message the user sends, "you" is the assistant — and the
-        // assistant's wants never come up. So "you" joined to a verb of
-        // wanting is the user's own wants being asked about, whatever the
-        // surrounding sentence ("Specify the task you would like to work on",
-        // "Tell me what you need help with").
+        // In a user message "you" is the assistant, whose wants never come up; "you"
+        // plus a verb of wanting is asking about the user.
         "you need", "you want", "you would like", "you'd like", "you wish", "you are interested",
         "you're interested", "you prefer",
         "тебе нужн", "вам нужн", "ты хочешь", "вы хотите", "хотел бы", "хотела бы", "хотели бы",

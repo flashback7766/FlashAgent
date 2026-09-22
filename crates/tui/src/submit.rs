@@ -31,8 +31,7 @@ const HELP: &str = "Commands & Skills (Tab to autocomplete):\n\
      • Esc                    — dismiss suggestions / interrupt; twice on an empty prompt quits";
 
 impl App {
-    /// The user pressed Enter on a non-empty prompt while no turn was running:
-    /// a slash command, a skill, or a message to send.
+    /// Enter on a non-empty prompt with no turn running.
     pub(crate) async fn submit_input(&mut self, cx: &mut LoopCtx<'_>) -> Flow {
         let line = self.input.trim().to_string();
         if let Some(rest) = line.strip_prefix('/') {
@@ -48,11 +47,9 @@ impl App {
         Flow::Next
     }
 
-    /// `/name arg`. `None` when it is not a command after all — a path such as
-    /// `/tmp/shot.png` — and the line goes to the model.
+    /// `None` when it is a path like `/tmp/shot.png`, which goes to the model.
     async fn run_command(&mut self, cx: &mut LoopCtx<'_>, name: &str, arg: &str) -> Option<Flow> {
-        // A command takes the line out of the composer; a typo leaves it there
-        // to fix.
+        // A command takes the line; a typo leaves it to fix.
         let typed = self.input.take();
         self.autocomplete_idx = 0;
         match name {
@@ -67,7 +64,6 @@ impl App {
             "whatsnew" | "changelog" => self.show_whatsnew(cx).await,
             "memory" | "memories" => {
                 let mut modal = open_memory_modal();
-                // "/memory summary" opens straight on the overview.
                 if matches!(arg, "summary" | "s") && !modal.rows.is_empty() {
                     modal.tab = flashagent_tui::memory_view::MemoryTab::Summary;
                     if modal.summary_is_stale() {
@@ -91,7 +87,6 @@ impl App {
             "effort" | "thinking" | "t" => self.set_effort(cx, arg),
             "model" | "models" | "m" => {
                 self.open_model_menu(cx.source);
-                // "/model qwen" opens the list already narrowed to it.
                 if let Some(Overlay::Model(menu)) = self.overlay.as_mut() {
                     arg.chars().for_each(|c| menu.push_filter_char(c));
                 }
@@ -108,8 +103,7 @@ impl App {
                 if flashagent_svc::updater::is_dev_mode() {
                     self.chat.push_system("  \x1b[38;2;225;175;95mAuto-updater is disabled in dev mode\x1b[0m (running from source repository / cargo build).\n  To update your dev build, pull latest git commits and run `cargo build --release`.");
                 } else {
-                    // The same as Ctrl+U: check, download and install in one
-                    // go, or show the update already under way.
+                    // Same as Ctrl+U.
                     self.start_or_watch_update(cx);
                 }
             }
@@ -154,8 +148,7 @@ impl App {
             .filter(|t| !t.contains(' '))
             .min_by_key(|t| flashagent_tui::autocomplete::edit_distance(t, &word))
             .filter(|t| flashagent_tui::autocomplete::edit_distance(t, &word) <= 2);
-        // The typo stays in the prompt to fix, and the placeholder only shows
-        // on an empty one.
+        // The typo stays in the prompt; the placeholder only shows on an empty one.
         let said = match guess {
             Some(g) => format!("Unknown command {word} · did you mean {g}?"),
             None => format!("Unknown command {word} · /help lists them"),
@@ -163,24 +156,16 @@ impl App {
         self.background = Some(BackgroundNotice::fading(said, 6));
     }
 
-    /// A message for the model: the typed text and any pictures going with it.
     fn send_prompt(&mut self, cx: &LoopCtx<'_>) {
         let text = self.input.take();
         self.remember_prompt(&text);
         self.history_index = None;
         self.current_draft.clear();
-        // Sending a new prompt collapses the previous turn's expanded thinking.
         self.last_expanded = false;
 
-        // A path typed out is still the user pointing at a picture — but only
-        // a path. Naming a file in a sentence ("open diagram.png and tell
-        // me...") is a mention, and the model has view_image for that;
-        // silently attaching a megabyte because a word ended in .png would be
-        // a surprise.
-        //
-        // Dropping a file on the terminal is a paste on Unix and plain typing
-        // on Windows, where the terminal has no bracketed paste; both end up
-        // here, so both behave the same.
+        // Only a path typed out on its own attaches a picture; a file named in a
+        // sentence is a mention, and the model has view_image for it. A dropped file
+        // arrives as a paste on Unix and as typing on Windows; both land here.
         let mut left = String::new();
         for token in text.split_whitespace() {
             let attached = (token.contains('/') || token.contains('\\'))
@@ -201,14 +186,12 @@ impl App {
                 left.push_str(token);
             }
         }
-        // A message that was nothing but the pictures goes as pictures: the
-        // path the user dropped is not something to say to the model.
+        // A message of only pictures: the dropped path is not text for the model.
         let text = if left.trim().is_empty() && !self.attachments.is_empty() { String::new() } else { text };
         let shown = if self.attachments.is_empty() {
             text.clone()
         } else {
-            // The transcript has to show that a picture went with the
-            // message; otherwise the answer refers to something invisible.
+            // Otherwise the answer refers to something invisible.
             let labels: Vec<String> = self.attachments.iter().map(|a| a.label()).collect();
             if text.trim().is_empty() {
                 format!("[{}]", labels.join(", "))
@@ -228,7 +211,7 @@ impl App {
         self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
     }
 
-    /// The memory block rides in front of the first user message.
+    /// The memory block goes in front of the first user message.
     fn with_memory_if_first(&self, cx: &LoopCtx<'_>, text: String) -> String {
         let first = !self.history.iter().any(|m| m.role == flashagent_llm::Role::User);
         if !first || cx.memory_block.is_empty() {
@@ -240,8 +223,7 @@ impl App {
         }
     }
 
-    /// Mark where /rewind can take the files back to: before the message just
-    /// pushed onto the history.
+    /// Before the message just pushed onto the history.
     fn begin_snapshot_turn(&self, cx: &LoopCtx<'_>) {
         if let (Some(store), Some(msg)) = (cx.perm.state().snapshots(), self.history.last()) {
             store.begin_turn(if msg.content.is_empty() { "[image]" } else { &msg.content });
@@ -272,7 +254,7 @@ impl App {
         };
         let goal_budgets = GoalBudgets::from_config(&self.config);
 
-        // Save previous state to roll back upon goal completion
+        // Restored when the goal ends.
         self.goal_state = Some(SavedGoalState {
             mode: cx.perm.state().mode(),
             effort: self.current_effort.clone(),
@@ -281,7 +263,6 @@ impl App {
         });
         self.goal_ledger = Some(GoalLedger::new(task_desc.clone(), goal_budgets.clone()));
 
-        // Lift restrictions for autonomous execution
         cx.perm.state().set_mode(PermissionMode::Bypass);
         cx.perm.state().set_goal_active(true);
         self.current_effort = "high".to_string();
@@ -379,8 +360,7 @@ impl App {
 
     async fn show_whatsnew(&mut self, cx: &mut LoopCtx<'_>) {
         let now = flashagent_svc::updater::current_version();
-        // Asked for on purpose, so there is no "nothing changed" case worth a
-        // blank screen: fall back to the last few releases.
+        // Asked for on purpose: fall back to the last few releases.
         let mut news = flashagent_tui::whatsnew::since(self.config.last_seen_version.as_deref(), now);
         if news.is_empty() {
             news = flashagent_tui::whatsnew::latest(3);
@@ -397,8 +377,7 @@ impl App {
         self.renderer.printed_settled = 0;
         self.renderer.prev_expansion = None;
         self.renderer.scroll_to_bottom();
-        // Nothing new is printed after a clear, so only a full repaint takes
-        // the old lines off the screen.
+        // Only a full repaint removes the old lines after a clear.
         self.renderer.request_reprint();
     }
 
@@ -460,8 +439,7 @@ impl App {
             self.notice(format!("Already on the {} channel", wanted.label()));
             return;
         }
-        // The same yes-or-no card as Settings: switching can replace the
-        // binary with an older one, so it is never done on the command alone.
+        // Switching can install an older binary, so it always asks.
         self.ask_channel_switch(cx, wanted);
     }
 
@@ -477,7 +455,7 @@ impl App {
             "test" if rest.is_empty() => self.chat.push_system("Usage: /mcp test <server_name>\nExample: /mcp test sqlite"),
             "test" => {
                 self.notice(format!("Testing MCP server '{rest}'..."));
-                // Shown before the wait, which can take a while.
+                // Drawn before the wait, which can take a while.
                 self.draw(cx, None);
                 match cx.tools_arc.mcp_manager().test_server(rest).await {
                     Ok(report) => {
@@ -540,16 +518,14 @@ impl App {
         self.chat.push_system("Compacting context...");
         self.custom_placeholder = None;
         self.suggested_prompt = None;
-        // Shown before the wait: the command that started it is gone from the
-        // composer, and its suggestions with it.
+        // Drawn before the wait: the command is already gone from the composer.
         self.draw(cx, None);
         let before = self.context_usage.total_used();
         let focus = (!focus.is_empty()).then_some(focus);
         if compact_context(cx.source, &mut self.history, focus).await.is_some() {
             update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
             let saved = before.saturating_sub(self.context_usage.total_used());
-            // Said in the transcript, like the automatic one: it is the
-            // conversation that changed.
+            // In the transcript: the conversation itself changed.
             self.chat.replace_last_system(&format!(
                 "Context compacted · {} saved · the conversation so far is now a summary",
                 ContextUsage::format_tokens(saved)
@@ -561,7 +537,7 @@ impl App {
 
     fn verbose_command(&mut self, arg: &str) {
         (self.last_expanded, self.all_expanded) = match arg {
-            // Cycles none -> last -> all -> none, like F2.
+            // none -> last -> all -> none, like F2.
             "" => match (self.last_expanded, self.all_expanded) {
                 (false, false) => (true, false),
                 (true, false) => (false, true),
@@ -585,8 +561,7 @@ impl App {
                     self.chat.push_system(&format!("Git diff summary:\n{}", s.trim_end()));
                     return;
                 }
-                // `git diff` says nothing about files git has never seen, and
-                // "clean" next to three untracked files is a lie.
+                // `git diff` ignores untracked files, and "clean" next to them is a lie.
                 let untracked = std::process::Command::new("git")
                     .args(["ls-files", "--others", "--exclude-standard"])
                     .output()
@@ -671,8 +646,7 @@ impl App {
 
     fn export_conversation(&mut self, cx: &LoopCtx<'_>, format_arg: &str) {
         let format_arg = format_arg.to_lowercase();
-        // The id already starts with "session_"; the old line produced
-        // session_session_1789.md.
+        // The id already starts with "session_" (was session_session_1789.md).
         let stem = cx.session_id.strip_prefix("session_").unwrap_or(cx.session_id);
         let text_of = |m: &ChatMessage| {
             if m.content.trim().is_empty() && !m.images.is_empty() {
@@ -715,10 +689,8 @@ impl App {
         }
     }
 
-    /// Takes turn `target` and everything after it back: the files it
-    /// changed return to how they were, and its prompt goes back in the
-    /// input. Only reached after the confirmation card the user was shown
-    /// answered "yes" — `/rewind <n>` itself only opens that card.
+    /// Files the turns changed are restored and the prompt goes back into the
+    /// input. Only reached after the confirmation card said yes.
     pub(crate) fn commit_rewind(&mut self, cx: &mut LoopCtx<'_>, target: flashagent_core::Rewindable) {
         let Some(store) = cx.perm.state().snapshots() else {
             return;
@@ -761,8 +733,7 @@ impl App {
         self.latest_suggestion = None;
         self.custom_placeholder = None;
 
-        // The words, not the scaffolding a goal or the first message's
-        // memory block wrapped them in.
+        // The words, without goal scaffolding or the memory block.
         self.input.set(extract_user_prompt(&prompt).to_string());
         self.autosave(cx.session_id, cx.cwd_display);
         self.renderer.request_reprint();

@@ -1,24 +1,20 @@
-//! Autocomplete popup for slash commands and skills in the input box.
-//! Triggered whenever the user begins typing `/` in the prompt input.
+//! Popup for slash commands and skills, shown when input starts with `/`.
 
 use std::path::Path;
 use crate::{visible_width, LineKind, RenderLine};
 
-/// Category of suggestion item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutocompleteCategory {
     Command,
     Skill,
 }
 
-/// Single autocomplete suggestion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutocompleteItem {
-    /// Command or skill invocation, e.g. "/help", "/expand", "/skill:rust-core".
+    /// E.g. "/help", "/expand", "/skill:rust-core".
     pub trigger: String,
-    /// Short summary shown in the suggestion row.
     pub description: String,
-    /// Category badge (`[cmd]` vs `[skill]`).
+    /// `[cmd]` or `[skill]`.
     pub category: AutocompleteCategory,
 }
 
@@ -36,8 +32,7 @@ impl AutocompleteItem {
     }
 }
 
-/// Levenshtein distance by characters, for "did you mean" on a mistyped
-/// command.
+/// Levenshtein by characters, for "did you mean".
 pub fn edit_distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let mut prev: Vec<usize> = (0..=b.len()).collect();
@@ -52,7 +47,6 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// Built-in slash commands.
 pub fn builtin_commands() -> Vec<AutocompleteItem> {
     vec![
         AutocompleteItem::new("/help", "Show command reference and keybindings", AutocompleteCategory::Command),
@@ -86,7 +80,6 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
     ]
 }
 
-/// Sub-commands for commands that take specific options.
 pub fn sub_commands(input: &str) -> Option<Vec<AutocompleteItem>> {
     let lower = input.to_lowercase();
     if lower.starts_with("/expand ") || lower == "/expand" || lower.starts_with("/verbose ") || lower == "/verbose" {
@@ -139,7 +132,7 @@ pub fn sub_commands(input: &str) -> Option<Vec<AutocompleteItem>> {
     }
 }
 
-/// Load custom skills from `.agents/skills/*.md` and `~/.flashagent/skills/*.md`.
+/// From `.agents/skills/*.md` and `~/.flashagent/skills/*.md`.
 pub fn load_skills(cwd: &Path) -> Vec<AutocompleteItem> {
     let mut skills = Vec::new();
     let mut scanned_dirs = vec![cwd.join(".agents").join("skills")];
@@ -162,13 +155,10 @@ pub fn load_skills(cwd: &Path) -> Vec<AutocompleteItem> {
                 None => continue,
             };
 
-            // Extract trigger/description from content
             let desc = if let Ok(content) = std::fs::read_to_string(&path) {
                 let mut found_desc = None;
-                // `description:` is what every skill file in the wild carries
-                // — the frontmatter key Claude and Anthropic skills use. Only
-                // reading `Trigger:` meant a perfectly good description was
-                // ignored in favour of "Skill defined in greet.md".
+                // `description:` is the frontmatter key skill files actually use; reading
+                // only `Trigger:` ignored it.
                 for line in content.lines() {
                     let trimmed = line.trim();
                     if let Some(rest) = trimmed
@@ -188,7 +178,7 @@ pub fn load_skills(cwd: &Path) -> Vec<AutocompleteItem> {
                 format!("Skill {stem}")
             };
 
-            // Register both /skill:<name> and /<name>
+            // Both /skill:<name> and /<name>.
             skills.push(AutocompleteItem::new(
                 format!("/skill:{stem}"),
                 desc.clone(),
@@ -205,14 +195,13 @@ pub fn load_skills(cwd: &Path) -> Vec<AutocompleteItem> {
     skills
 }
 
-/// Find all matching items for the given prompt input.
 pub fn find_matches(input: &str, cwd: &Path) -> Vec<AutocompleteItem> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
         return Vec::new();
     }
 
-    // Check for specific sub-command contexts first
+    // Sub-command context first.
     if trimmed.contains(' ') {
         if let Some(subs) = sub_commands(trimmed) {
             let lower = trimmed.to_lowercase();
@@ -251,7 +240,6 @@ pub fn find_matches(input: &str, cwd: &Path) -> Vec<AutocompleteItem> {
     prefix_matches
 }
 
-/// Active autocomplete popup model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutocompletePopup {
     pub items: Vec<AutocompleteItem>,
@@ -259,7 +247,7 @@ pub struct AutocompletePopup {
 }
 
 impl AutocompletePopup {
-    /// Create popup for input if input starts with `/` and has matches.
+    /// `None` unless input starts with `/` and something matches.
     pub fn for_input(input: &str, cwd: &Path, prev_selected: usize) -> Option<Self> {
         let items = find_matches(input, cwd);
         if items.is_empty() {
@@ -274,30 +262,28 @@ impl AutocompletePopup {
         }
     }
 
-    /// Select next suggestion (wraps around).
+    /// Wraps around.
     pub fn next(&mut self) {
         if !self.items.is_empty() {
             self.selected = (self.selected + 1) % self.items.len();
         }
     }
 
-    /// Select previous suggestion (wraps around).
+    /// Wraps around.
     pub fn prev(&mut self) {
         if !self.items.is_empty() {
             self.selected = (self.selected + self.items.len() - 1) % self.items.len();
         }
     }
 
-    /// Current selected item.
     pub fn current(&self) -> Option<&AutocompleteItem> {
         self.items.get(self.selected)
     }
 
-    /// Complete current input with the selected item.
     pub fn complete_input(&self, current: &str) -> String {
         if let Some(item) = self.current() {
             if current == item.trigger || current == format!("{} ", item.trigger) {
-                // If already completed, cycle to next item on Tab
+                // Already completed: Tab cycles to the next item.
                 let next_idx = (self.selected + 1) % self.items.len();
                 format!("{} ", self.items[next_idx].trigger)
             } else {
@@ -308,7 +294,6 @@ impl AutocompletePopup {
         }
     }
 
-    /// Render autocomplete card under the input box.
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
         let mut lines = Vec::new();
         let inner_w = width.saturating_sub(2);
@@ -322,7 +307,6 @@ impl AutocompletePopup {
             format!("{border_color}┌─\x1b[38;2;180;175;165m{title}{border_color}{}┐{reset}", "─".repeat(top_dashes)),
         ));
 
-        // Max 5 items visible at once
         const MAX_VISIBLE: usize = 5;
         let total = self.items.len();
         let start_idx = if total <= MAX_VISIBLE || self.selected < MAX_VISIBLE / 2 {
@@ -355,8 +339,7 @@ impl AutocompletePopup {
                 format!("\x1b[38;2;180;175;165m{:<18}\x1b[0m", item.trigger)
             };
 
-            // Calculate budget for description
-            // 2 (left border + space) + 1 (pointer) + 1 (space) + 18 (trigger) + 1 (space) + badge + 2 (right space + border)
+            // Borders, pointer, 18-column trigger, badge and spaces.
             let badge_w = badge_text.chars().count();
             let fixed_w = 2 + 1 + 1 + 18 + 1 + badge_w + 2;
             let desc_budget = inner_w.saturating_sub(fixed_w);
@@ -377,7 +360,6 @@ impl AutocompletePopup {
             ));
         }
 
-        // Bottom border with indicator of more items if truncated
         let bot_hint = if total > MAX_VISIBLE {
             format!(" ({}/{} items) ", self.selected + 1, total)
         } else {

@@ -1,11 +1,10 @@
-//! First-time launch setup wizard.
-//! Guides user through backend connection, API key configuration, model selection, behavior, and sampling.
+//! First-run setup wizard: backend, API key, model, behaviour, sampling.
 
 use std::io::Write;
 use flashagent_core::{AppConfig, BackendPreset, PermissionMode};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 
-/// Mask API key showing first characters and last 4 characters if long enough.
+/// First characters and the last 4, when long enough.
 pub fn mask_api_key(key: &str) -> String {
     if key.is_empty() {
         return String::new();
@@ -29,7 +28,6 @@ pub fn mask_api_key(key: &str) -> String {
     format!("{prefix}••••••••{suffix}")
 }
 
-/// Interactive First Start Setup Wizard.
 pub struct SetupWizard {
     pub config: AppConfig,
     pub step: usize, // 0: Backend, 1: API Key, 2: Model, 3: Language & Behavior, 4: Sampling & Finish
@@ -44,12 +42,8 @@ pub struct SetupWizard {
     pub discovered_models: Vec<flashagent_llm::DiscoveredModel>,
     pub connection_status: Option<String>,
     pub sampling: crate::sampling::SamplingView,
-    /// What the server said it was, once discovery has actually run.
-    ///
-    /// `None` before that — not "not LM Studio". The URL heuristic in
-    /// `is_lm_studio` is a guess for before we've asked the server anything;
-    /// once discovery answers, its word is ground truth even when it says
-    /// "Other", which a URL guess must not then override.
+    /// `None` until discovery has run, which is not "not LM Studio". Once it
+    /// answers, its word beats the URL guess in `is_lm_studio`, even for "Other".
     discovered_kind: Option<flashagent_llm::thinking::ServerKind>,
 }
 
@@ -95,7 +89,6 @@ impl SetupWizard {
         5 // 0: Backend, 1: API Key, 2: Model, 3: Language & Behavior, 4: Sampling & Finish
     }
 
-    /// Check if the currently chosen backend URL is a cloud/remote endpoint.
     pub fn is_cloud_backend(&self) -> bool {
         let url = self.config.backend_url.to_lowercase();
         if url.contains("openrouter.ai") {
@@ -110,12 +103,8 @@ impl SetupWizard {
         true
     }
 
-    /// Check if the selected backend is LM Studio.
-    ///
-    /// Once discovery has run, this is what the server actually said it is —
-    /// the URL is only a guess for the window before that, when there is
-    /// nothing else to go on (e.g. to choose sane defaults while the user is
-    /// still picking a backend).
+    /// The server's own answer once discovery has run; before that, a guess from
+    /// the URL for choosing defaults.
     pub fn is_lm_studio(&self) -> bool {
         if let Some(kind) = self.discovered_kind {
             return kind == flashagent_llm::thinking::ServerKind::LmStudio;
@@ -124,8 +113,7 @@ impl SetupWizard {
         self.preset_idx == 0 || url.contains("1234") || url.contains("lmstudio")
     }
 
-    /// Store what discovery found — models, and which kind of server this is
-    /// — and filter to loaded models if LM Studio is selected.
+    /// Keeps only loaded models when the server is LM Studio.
     pub fn apply_discovered_models(&mut self, disc: flashagent_llm::ServerDiscovery) {
         self.discovered_kind = Some(disc.kind);
         let models = disc.models;
@@ -153,7 +141,7 @@ impl SetupWizard {
         }
     }
 
-    /// Return filtered list of model indices matching `model_search`.
+    /// Matching `model_search`.
     pub fn filtered_indices(&self) -> Vec<usize> {
         if self.model_search.is_empty() {
             return (0..self.available_models.len()).collect();
@@ -268,7 +256,7 @@ impl SetupWizard {
         }
     }
 
-    /// Handles pasted text into active text fields (Custom backend URL, API key, model search).
+    /// Into the active text field: custom URL, API key or model search.
     pub fn handle_paste(&mut self, text: &str) {
         for c in text.chars() {
             if c == '\r' || c == '\n' {
@@ -300,7 +288,6 @@ impl SetupWizard {
             return Some(false); // cancelled
         }
 
-        // Universal Esc handling across all steps:
         if code == KeyCode::Esc {
             match self.step {
                 0 => {
@@ -351,7 +338,7 @@ impl SetupWizard {
             }
         }
 
-        // On step 0 with Custom selected (preset_idx == 5), typing edits the URL directly.
+        // Step 0 with Custom selected: typing edits the URL.
         if self.step == 0 && self.preset_idx == 5 {
             match code {
                 KeyCode::Enter => {
@@ -414,7 +401,7 @@ impl SetupWizard {
             }
         }
 
-        // Step 1: API Key Configuration
+        // Step 1: API key.
         if self.step == 1 {
             match code {
                 KeyCode::Enter => {
@@ -462,7 +449,6 @@ impl SetupWizard {
                     return None;
                 }
                 KeyCode::Up => {
-                    // Navigate back to backend selection
                     self.step = 0;
                     return None;
                 }
@@ -470,7 +456,7 @@ impl SetupWizard {
             }
         }
 
-        // Step 2: Model Selection (10 items viewport + live search filter)
+        // Step 2: model, a 10-item window with live search.
         if self.step == 2 {
             let filtered = self.filtered_indices();
             match code {
@@ -534,7 +520,6 @@ impl SetupWizard {
                     return None;
                 }
                 KeyCode::Left => {
-                    // Navigate back to API key step
                     self.step = 1;
                     return None;
                 }
@@ -552,7 +537,7 @@ impl SetupWizard {
             }
         }
 
-        // Key handling for Step 4 (Sampling & Launch)
+        // Step 4: sampling and launch.
         if self.step == 4 {
             let act = self.sampling.handle_key(code, mods);
             match act {
@@ -572,7 +557,7 @@ impl SetupWizard {
             }
         }
 
-        // Key handling for Step 0 (presets), Step 3 (Language & Permissions)
+        // Step 0 (presets) and step 3 (behaviour).
         match code {
             KeyCode::Enter => {
                 if self.step + 1 < self.total_steps() {
@@ -634,7 +619,6 @@ impl SetupWizard {
                 }
             }
             3 => {
-                // Cycle permission mode: 1. Planning -> 2. Manual -> 3. AcceptEdits -> 4. Bypass -> 1. Planning
                 self.config.permission_mode = self.config.permission_mode.next();
             }
             _ => {}
@@ -723,7 +707,7 @@ impl SetupWizard {
                     lines.push(pad_row(&row));
                 }
 
-                // 6. Custom backend with keyboard editing & 2x dimmer placeholder
+                // 6. Custom backend, with an editable field and a dim placeholder.
                 let is_custom_sel = self.preset_idx == 5;
                 let ptr = if is_custom_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
                 let placeholder_color = "\x1b[38;2;68;65;62m";
@@ -888,7 +872,6 @@ impl SetupWizard {
                 lines.push(pad_row("\x1b[38;2;160;155;145mConfigure sampling preset and numeric parameters (direct digit input):\x1b[0m"));
                 lines.push(pad_row(""));
 
-                // Preset row
                 let is_preset_sel = self.sampling.selected_index == 0;
                 let ptr0 = if is_preset_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
                 let preset_val = format!("[ {} ]", self.sampling.preset.label());
@@ -905,7 +888,6 @@ impl SetupWizard {
                 };
                 lines.push(pad_row(&format!("{ptr0} {l0} {v0}")));
 
-                // Parameter rows
                 let fields = [
                     (1, "Temperature", &self.sampling.temp_buf, "0.00..2.00 (coding: 0.60, mtp: 0.30, chat: 0.80, precise: 0.10)"),
                     (2, "Top P", &self.sampling.top_p_buf, "0.00..1.00 (coding: 0.95, mtp: 0.90, precise: 0.75)"),
@@ -933,7 +915,6 @@ impl SetupWizard {
                     lines.push(pad_row(&format!("{ptr} {label_styled} {val_styled}")));
                 }
 
-                // Launch button
                 let is_apply_sel = self.sampling.selected_index == 7;
                 let ptr7 = if is_apply_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
                 let apply_styled = if is_apply_sel {
@@ -980,13 +961,10 @@ impl SetupWizard {
     }
 }
 
-/// Run interactive setup wizard in alternate screen using an active event channel.
-/// Eliminates stdin contention with the main event reader thread during in-app execution.
-///
-/// Everything on `rx` that is not for the wizard — a running turn's events,
-/// server discovery, a recap — goes into `deferred`, in order, for the app to
-/// handle once the wizard closes; dropping them left a turn that finished
-/// meanwhile running forever.
+/// Inside the running app: reads keys from the event channel, so it does not
+/// compete with the main reader for stdin. Everything else on `rx` (turn
+/// events, discovery, recap) goes into `deferred` in order; dropping it left a
+/// turn that finished meanwhile running forever.
 pub async fn run_wizard_channel(
     config: &mut AppConfig,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::UiEvent>,
@@ -994,14 +972,13 @@ pub async fn run_wizard_channel(
 ) -> anyhow::Result<bool> {
     use crossterm::{cursor, execute};
 
-    // The app is already on the alternate screen; entering it again and then
-    // leaving would drop the app onto the main screen and into scrollback.
+    // Already on the alternate screen: entering and leaving again would drop the
+    // app onto the main screen.
     let mut stdout = std::io::stdout();
     let _ = execute!(stdout, cursor::Hide);
 
     let mut wizard = SetupWizard::new(config.clone());
 
-    // Try probing default backend for models
     let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
     if let Some(disc) = backend.discover_server().await {
         wizard.apply_discovered_models(disc);
@@ -1027,7 +1004,7 @@ pub async fn run_wizard_channel(
                         if let Some(finished) = wizard.handle_key(code, mods) {
                             break finished;
                         }
-                        // Step transition probe: Step 1 (API Key) to Step 2 (Model selection)
+                        // Leaving the API key step: probe the server with the key.
                         if prev_step == 1 && wizard.step == 2 {
                             let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
                             if let Some(disc) = backend.discover_server().await {
@@ -1055,11 +1032,11 @@ pub async fn run_wizard_channel(
 
     let _ = stdout.write_all(b"\x1b[H\x1b[2J");
     let _ = execute!(stdout, cursor::Show);
-    // Raw mode is intentionally preserved since run_app remains active
+    // Raw mode stays on: run_app is still active.
     Ok(completed)
 }
 
-/// Run interactive setup wizard in alternate screen (for standalone startup flow).
+/// For the standalone startup flow.
 pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
     use crossterm::{
         cursor,
@@ -1073,7 +1050,6 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
 
     let mut wizard = SetupWizard::new(config.clone());
 
-    // Try probing default backend for models
     let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
     if let Some(disc) = backend.discover_server().await {
         wizard.apply_discovered_models(disc);
@@ -1098,7 +1074,7 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
                     if let Some(finished) = wizard.handle_key(key.code, key.modifiers) {
                         break finished;
                     }
-                    // When transitioning from Step 1 (API Key) to Step 2 (Model selection), probe server with key
+                    // Leaving the API key step: probe the server with the key.
                     if prev_step == 1 && wizard.step == 2 {
                         let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
                         if let Some(disc) = backend.discover_server().await {
@@ -1141,15 +1117,13 @@ mod tests {
         wizard.next_option();
         assert_eq!(wizard.preset_idx, 1);
 
-        // Step 0 -> Step 1 (API Key)
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 1);
 
-        // Step 1 -> Step 2 (Model) - local backend allows skipping empty key
+        // A local backend allows an empty key.
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 2);
 
-        // Step 2 -> Step 3 (Agent Behavior)
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 3);
         assert_eq!(wizard.config.permission_mode, PermissionMode::AcceptEdits);
@@ -1158,11 +1132,9 @@ mod tests {
         wizard.set_number(3);
         assert_eq!(wizard.config.permission_mode, PermissionMode::AcceptEdits);
 
-        // Step 3 -> Step 4 (Sampling)
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 4);
 
-        // Test Esc navigation backwards:
         wizard.handle_key(KeyCode::Esc, KeyModifiers::empty());
         assert_eq!(wizard.step, 3);
 
@@ -1175,7 +1147,7 @@ mod tests {
         wizard.handle_key(KeyCode::Esc, KeyModifiers::empty());
         assert_eq!(wizard.step, 0);
 
-        // On Step 0, Esc exits (returns Some(false))
+        // On step 0, Esc exits.
         let res = wizard.handle_key(KeyCode::Esc, KeyModifiers::empty());
         assert_eq!(res, Some(false));
     }
@@ -1188,22 +1160,19 @@ mod tests {
 
         assert!(wizard.is_cloud_backend());
 
-        // Pressing Enter on empty key must fail and stay on step 1
+        // An empty key must not advance.
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 1);
         assert!(wizard.connection_status.as_ref().unwrap().contains("API key is required"));
 
-        // Type key: sk-or-v1-abcdef123456
         for c in "sk-or-v1-abcdef123456".chars() {
             wizard.handle_key(KeyCode::Char(c), KeyModifiers::empty());
         }
         assert_eq!(wizard.api_key_input, "sk-or-v1-abcdef123456");
 
-        // Verify masked render
         let rendered = wizard.render(80).join("\n");
         assert!(rendered.contains("sk-or-••••••••3456"));
 
-        // Now Enter succeeds and moves to step 2
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 2);
         assert_eq!(wizard.config.api_key.as_deref(), Some("sk-or-v1-abcdef123456"));
@@ -1214,17 +1183,14 @@ mod tests {
         let cfg = AppConfig::default();
         let mut wizard = SetupWizard::new(cfg);
         wizard.step = 2;
-        // Populate 430 models
         wizard.available_models = (0..430)
             .map(|i| format!("provider/model-variant-{i:03}"))
         .collect();
 
-        // 10 items shown in window
         let rendered = wizard.render(80).join("\n");
         assert!(rendered.contains("430 on the server"));
         assert!(rendered.contains("▼ ... (420 more below)"));
 
-        // Type live search "variant-04"
         for c in "variant-04".chars() {
             wizard.handle_key(KeyCode::Char(c), KeyModifiers::empty());
         }
@@ -1232,10 +1198,8 @@ mod tests {
         let search_rendered = wizard.render(80).join("\n");
         assert!(search_rendered.contains("filter: \"variant-04\""));
 
-        // Page down
         wizard.handle_key(KeyCode::PageDown, KeyModifiers::empty());
 
-        // Backspace search
         while !wizard.model_search.is_empty() {
             wizard.handle_key(KeyCode::Backspace, KeyModifiers::empty());
         }
@@ -1247,38 +1211,33 @@ mod tests {
         let cfg = AppConfig::default();
         let mut wizard = SetupWizard::new(cfg);
 
-        // Custom field is initially empty and shows placeholder "Enter endpoint here"
         assert_eq!(wizard.custom_url, "");
         let initial_render = wizard.render(80).join("\n");
         assert!(initial_render.contains("Enter endpoint here"));
 
-        // Select '6' for Custom
         wizard.handle_key(KeyCode::Char('6'), KeyModifiers::empty());
         assert_eq!(wizard.preset_idx, 5);
         let selected_render = wizard.render(80).join("\n");
         assert!(selected_render.contains("Enter endpoint here"));
         assert!(selected_render.contains("type URL manually"));
 
-        // Enter on empty input does NOT advance and shows warning
+        // Enter on an empty URL does not advance and shows a warning.
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 0);
         assert!(wizard.connection_status.as_ref().unwrap().contains("Please enter an endpoint URL"));
 
-        // Type first character 'h' -> placeholder disappears
         wizard.handle_key(KeyCode::Char('h'), KeyModifiers::empty());
         assert_eq!(wizard.custom_url, "h");
         let typed_render = wizard.render(80).join("\n");
         assert!(!typed_render.contains("Enter endpoint here"));
         assert!(typed_render.contains("h"));
 
-        // Type the rest of "ttp://192.168.1.50:5000/v1"
         for c in "ttp://192.168.1.50:5000/v1".chars() {
             wizard.handle_key(KeyCode::Char(c), KeyModifiers::empty());
         }
         assert_eq!(wizard.custom_url, "http://192.168.1.50:5000/v1");
         assert_eq!(wizard.config.backend_url, "http://192.168.1.50:5000/v1");
 
-        // Backspace everything -> placeholder reappears
         while !wizard.custom_url.is_empty() {
             wizard.handle_key(KeyCode::Backspace, KeyModifiers::empty());
         }
@@ -1286,7 +1245,6 @@ mod tests {
         let emptied_render = wizard.render(80).join("\n");
         assert!(emptied_render.contains("Enter endpoint here"));
 
-        // Re-type URL and confirm with Enter -> moves to Step 1 (API key)
         for c in "http://192.168.1.50:5000/v1".chars() {
             wizard.handle_key(KeyCode::Char(c), KeyModifiers::empty());
         }
@@ -1300,16 +1258,13 @@ mod tests {
         let cfg = AppConfig::default();
         let mut wizard = SetupWizard::new(cfg);
 
-        // Jump to Custom (index 5)
         wizard.handle_key(KeyCode::Char('6'), KeyModifiers::empty());
         assert_eq!(wizard.preset_idx, 5);
 
-        // Up arrow navigates back to OpenRouter (preset 4)
         wizard.handle_key(KeyCode::Up, KeyModifiers::empty());
         assert_eq!(wizard.preset_idx, 4);
         assert_eq!(wizard.config.backend_url, "https://openrouter.ai/api/v1");
 
-        // Down arrow navigates to Custom (preset 5)
         wizard.handle_key(KeyCode::Down, KeyModifiers::empty());
         assert_eq!(wizard.preset_idx, 5);
     }
@@ -1319,15 +1274,13 @@ mod tests {
         let cfg = AppConfig::default();
         let mut wizard = SetupWizard::new(cfg);
 
-        // Select Custom
         wizard.handle_key(KeyCode::Char('6'), KeyModifiers::empty());
 
-        // Type "localhost:8000/v1" without http://
+        // Without http://
         for c in "localhost:8000/v1".chars() {
             wizard.handle_key(KeyCode::Char(c), KeyModifiers::empty());
         }
 
-        // Press Enter moves to step 1
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 1);
         assert_eq!(wizard.config.backend_url, "http://localhost:8000/v1");
@@ -1398,7 +1351,7 @@ mod tests {
             kind: flashagent_llm::thinking::ServerKind::LmStudio,
         });
 
-        // Only 1 loaded model should be kept
+        // Only the loaded model is kept.
         assert_eq!(wizard.available_models.len(), 1);
         assert_eq!(wizard.available_models[0], "deepseek-r1-distill-qwen-14b");
         assert_eq!(wizard.config.model, "deepseek-r1-distill-qwen-14b");
@@ -1415,18 +1368,15 @@ mod tests {
         let mut wizard = SetupWizard::new(AppConfig::default());
         wizard.preset_idx = 5; // Custom backend
 
-        // Paste custom URL
         wizard.handle_paste("http://192.168.1.50:8000/v1\r\n");
         assert_eq!(wizard.custom_url, "http://192.168.1.50:8000/v1");
         assert_eq!(wizard.config.backend_url, "http://192.168.1.50:8000/v1");
 
-        // Advance to step 1 (API key)
         wizard.step = 1;
         wizard.handle_paste("sk-paste-token-xyz");
         assert_eq!(wizard.api_key_input, "sk-paste-token-xyz");
         assert_eq!(wizard.config.api_key.as_deref(), Some("sk-paste-token-xyz"));
 
-        // Advance to step 2 (Model search)
         wizard.step = 2;
         wizard.available_models = vec![
             "llama-3.1-8b-instruct".to_string(),

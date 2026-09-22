@@ -1,4 +1,4 @@
-//! Visual renderers for MCP (Model Context Protocol) cards and diagnostics in FlashAgent TUI.
+//! MCP cards and the `/mcp` modal.
 
 use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -13,7 +13,6 @@ const TEXT_GREEN: &str = "\x1b[38;2;135;220;145m";
 const TEXT_YELLOW: &str = "\x1b[38;2;240;210;115m";
 const TEXT_CYAN: &str = "\x1b[38;2;110;175;230m";
 
-/// Tabs for the interactive MCP Modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum McpViewTab {
     #[default]
@@ -52,7 +51,6 @@ impl McpViewTab {
     }
 }
 
-/// Action returned by McpModal on key press.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpModalAction {
     None,
@@ -62,7 +60,7 @@ pub enum McpModalAction {
     InstallMarketplace(String),
 }
 
-/// Interactive modal for MCP overview, servers list, and curated marketplace in the TUI composer.
+/// Overview, servers and the curated marketplace.
 pub struct McpModal {
     pub loaded_paths: Vec<PathBuf>,
     pub servers: Vec<ServerStatus>,
@@ -190,7 +188,6 @@ impl McpModal {
             format!("  {border_color}│{reset} {clipped}{pad} {border_color}│{reset}")
         };
 
-        // Header
         let title_styled = " \x1b[1;38;2;225;175;95mModel Context Protocol (MCP)\x1b[0m \x1b[38;2;160;155;145m(Tab 1-3 to switch)\x1b[0m ";
         let title_vis = visible_width(title_styled);
         let dashes = box_w.saturating_sub(title_vis + 1);
@@ -199,7 +196,6 @@ impl McpModal {
             format!("  {border_color}╭─{title_styled}{}╮{reset}", "─".repeat(dashes)),
         ));
 
-        // Tab bar
         let mut tabs_line = String::from(" ");
         for tab in McpViewTab::all() {
             let is_cur = *tab == self.active_tab;
@@ -324,7 +320,6 @@ impl McpModal {
     }
 }
 
-/// Format a single boxed line with padding.
 fn box_line(content: &str, inner_w: usize, border: &str) -> String {
     let clipped = if visible_width(content) > inner_w {
         clip_ansi(content, inner_w)
@@ -336,14 +331,12 @@ fn box_line(content: &str, inner_w: usize, border: &str) -> String {
     format!("{border}│{RESET} {clipped}{RESET}{} {border}│{RESET}", " ".repeat(pad_len))
 }
 
-/// Render the top rounded border of a card.
 fn box_top(title: &str, inner_w: usize, border: &str) -> String {
     let t_vis = visible_width(title);
     let dashes = inner_w.saturating_sub(t_vis + 1);
     format!("{border}╭─ {TEXT_BRIGHT}{title}{RESET}{border} {}╮{RESET}", "─".repeat(dashes))
 }
 
-/// Render the bottom rounded border of a card.
 fn box_bottom(inner_w: usize, border: &str) -> String {
     format!("{border}╰{}╯{RESET}", "─".repeat(inner_w + 2))
 }
@@ -351,7 +344,7 @@ fn box_bottom(inner_w: usize, border: &str) -> String {
 
 
 
-/// Render `/mcp test <server>` test report.
+/// `/mcp test <server>`
 pub fn render_mcp_test_report(report: &McpTestReport, width: usize) -> Vec<String> {
     let box_w = width.saturating_sub(4).clamp(44, 110);
     let inner_w = box_w.saturating_sub(4);
@@ -395,7 +388,7 @@ pub fn render_mcp_test_report(report: &McpTestReport, width: usize) -> Vec<Strin
     lines
 }
 
-/// Render `/mcp add` success card.
+/// `/mcp add`
 pub fn render_mcp_add_success(item: &MarketplaceItem, target_path: &Path, width: usize) -> Vec<String> {
     let box_w = width.saturating_sub(4).clamp(44, 110);
     let inner_w = box_w.saturating_sub(4);
