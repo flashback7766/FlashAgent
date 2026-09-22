@@ -38,7 +38,7 @@ if command -v makepkg >/dev/null 2>&1; then
     mv "${ROOT_DIR}/packaging/arch/"*.pkg.tar.zst "${DIST_DIR}/"
     rm -rf "${ROOT_DIR}/packaging/arch/pkg" "${ROOT_DIR}/packaging/arch/src"
 else
-    # Direct creation of Arch package using tar and zstd (Ubuntu CI runner compatibility)
+    # Built with tar and zstd: the CI runner is Ubuntu, without makepkg
     ARCH_DIR="/tmp/flashagent-arch-build"
     rm -rf "${ARCH_DIR}"
     mkdir -p "${ARCH_DIR}/usr/bin" "${ARCH_DIR}/usr/share/applications" "${ARCH_DIR}/usr/share/icons/hicolor/256x256/apps" "${ARCH_DIR}/usr/share/licenses/flashagent-bin"

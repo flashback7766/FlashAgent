@@ -7,7 +7,7 @@ fi
 # FlashAgent one-line installer
 REPO="flashback7766/FlashAgent"
 
-# Select install directory: respect user overrides (INSTALL_DIR or BIN_DIR), otherwise system-wide for root, user-local for standard users
+# INSTALL_DIR or BIN_DIR if set; system-wide for root, user-local otherwise.
 if [ -z "${INSTALL_DIR:-}" ]; then
   if [ -n "${BIN_DIR:-}" ]; then
     INSTALL_DIR="${BIN_DIR}"
@@ -90,7 +90,6 @@ http_download() {
   fi
 }
 
-# Require downloader: either curl or wget
 if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
   ensure_dependency curl
 fi
@@ -134,7 +133,6 @@ DOWNLOAD_URL=""
 # Strategy 1: Specific version requested
 if [ -n "${TARGET_VERSION}" ]; then
   echo "Target version requested: ${TARGET_VERSION}"
-  # Try API first
   RELEASE_JSON=$(http_fetch "https://api.github.com/repos/${REPO}/releases/tags/${TARGET_VERSION}" 2>/dev/null || true)
   if [ -n "${RELEASE_JSON}" ]; then
     DOWNLOAD_URL=$(echo "${RELEASE_JSON}" | grep -o "https://[^\"]*${ASSET_PATTERN}" | head -n 1 || true)
@@ -148,8 +146,7 @@ if [ -n "${TARGET_VERSION}" ]; then
     fi
   fi
 elif [ "${TARGET_CHANNEL}" != "beta" ] && [ "${TARGET_CHANNEL}" != "prerelease" ]; then
-  # Strategy 2: Official Stable Release Priority
-  # In GitHub, /releases/latest returns ONLY stable releases (never prereleases or drafts).
+  # Strategy 2: the latest stable release (/releases/latest never returns prereleases).
   echo "Checking for latest stable release..."
   LATEST_STABLE_JSON=$(http_fetch "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
   if [ -n "${LATEST_STABLE_JSON}" ] && ! echo "${LATEST_STABLE_JSON}" | grep -q '"message":'; then
@@ -176,7 +173,7 @@ elif [ "${TARGET_CHANNEL}" != "beta" ] && [ "${TARGET_CHANNEL}" != "prerelease" 
     fi
   fi
 
-  # If no stable release exists yet in the repository (e.g. project is still in beta pre-release phase)
+  # No stable release yet.
   if [ -z "${DOWNLOAD_URL}" ]; then
     echo "Notice: No official stable release published yet. Falling back to latest pre-release..."
   fi
@@ -208,7 +205,7 @@ if [ -z "${DOWNLOAD_URL}" ]; then
     fi
   fi
 
-  # GitHub web scraping fallback (immune to GitHub API rate limits)
+  # Scrape the release page when the API is rate-limited.
   if [ -z "${DOWNLOAD_URL}" ]; then
     LATEST_TAG=$(http_fetch "https://github.com/${REPO}/releases" 2>/dev/null | grep -o 'data-item-id="release-[^"]*"' | head -n 1 | sed -e 's/data-item-id="release-//;s/"//g' || true)
     if [ -n "${LATEST_TAG}" ]; then
@@ -275,7 +272,7 @@ fi
 
 echo "✔ Successfully installed FlashAgent to ${INSTALL_DIR}/flashagent"
 
-# Auto-add INSTALL_DIR to PATH across all detected shell environments
+# Add INSTALL_DIR to PATH in every detected shell.
 UPDATED_SHELLS=""
 
 # 1. Fish shell support
