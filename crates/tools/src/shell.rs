@@ -1,7 +1,7 @@
 //! Shell execution: foreground with timeout, background with task ids and a
-//! live output buffer. Every command runs in its own process group so a
-//! timeout, a kill or a cancelled turn takes down the whole pipeline — not
-//! just `sh` while its children keep running and keep our pipes open.
+//! live output buffer. Each command gets its own process group, so a timeout
+//! or cancel kills the whole pipeline, not just `sh` while its children keep
+//! our pipes open.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -15,7 +15,7 @@ use tokio::process::Child;
 
 use crate::ToolError;
 
-/// Keep at most this many bytes of live output per background task.
+/// Per background task.
 const BUFFER_CAP: usize = 200_000;
 
 fn tail_str(s: &str, max: usize) -> &str {
@@ -38,8 +38,8 @@ where
         None => return,
     };
     let mut chunk = [0u8; 8192];
-    // A character split across two reads is held back until its last bytes
-    // arrive; decoding each read on its own turned it into two U+FFFD.
+    // A character split across two reads is held until its last bytes arrive;
+    // decoding each read alone produced two U+FFFD.
     let mut carry: Vec<u8> = Vec::new();
     loop {
         match stream.read(&mut chunk).await {
@@ -66,8 +66,8 @@ where
     }
 }
 
-/// Decode what `bytes` holds up to a character still missing its last
-/// bytes, which stays in `bytes`. Invalid sequences decode as U+FFFD.
+/// An incomplete trailing character stays in `bytes`. Invalid sequences decode
+/// as U+FFFD.
 fn decode_complete(bytes: &mut Vec<u8>) -> String {
     let mut out = String::new();
     let mut rest: &[u8] = bytes;
@@ -86,7 +86,6 @@ fn decode_complete(bytes: &mut Vec<u8>) -> String {
                         out.push('\u{FFFD}');
                         rest = &after[bad..];
                     }
-                    // Incomplete at the end: wait for the next read.
                     None => {
                         rest = after;
                         break;
@@ -119,7 +118,6 @@ fn shell_command(cmd: &str) -> tokio::process::Command {
     c
 }
 
-/// Kill the whole process group led by `pid` (the `sh` we spawned).
 fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
@@ -131,8 +129,8 @@ fn kill_tree(child: &mut Child) {
     let _ = child.start_kill();
 }
 
-/// Kills the process tree if the foreground call is dropped before the
-/// command finished — i.e. the user cancelled the turn.
+/// Kills the tree if the call is dropped before the command finished (the
+/// user cancelled the turn).
 struct TreeGuard(Option<Child>);
 
 impl Drop for TreeGuard {
@@ -143,8 +141,8 @@ impl Drop for TreeGuard {
     }
 }
 
-/// Wait for the output pumps, but not forever: a backgrounded grandchild
-/// (`server &`) inherits the pipes and would hold them open indefinitely.
+/// Bounded: a backgrounded grandchild (`server &`) inherits the pipes and can
+/// hold them open forever.
 async fn drain_pumps(p1: tokio::task::JoinHandle<()>, p2: tokio::task::JoinHandle<()>) -> bool {
     tokio::time::timeout(Duration::from_millis(500), async {
         let _ = tokio::join!(p1, p2);
@@ -153,8 +151,7 @@ async fn drain_pumps(p1: tokio::task::JoinHandle<()>, p2: tokio::task::JoinHandl
     .is_ok()
 }
 
-/// Run a command to completion (or timeout). Non-zero exit is an error whose
-/// text still carries the captured output.
+/// A non-zero exit is an error whose text still carries the output.
 pub async fn run_foreground(cmd: &str, timeout: Duration) -> Result<String, ToolError> {
     let mut child =
         shell_command(cmd).spawn().map_err(|e| ToolError::Other(format!("spawn: {e}")))?;
@@ -211,7 +208,6 @@ struct ShellTask {
     buffer: Arc<Mutex<String>>,
 }
 
-/// Registry of live background shell tasks.
 #[derive(Default)]
 pub struct ShellRegistry {
     next_id: AtomicU32,
@@ -219,12 +215,10 @@ pub struct ShellRegistry {
 }
 
 impl ShellRegistry {
-    /// Create an empty registry.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Spawn a detached background task; returns a message with its id.
     pub fn spawn_background(&self, cmd: &str) -> Result<String, ToolError> {
         let mut child =
             shell_command(cmd).spawn().map_err(|e| ToolError::Other(format!("spawn: {e}")))?;
@@ -238,7 +232,6 @@ impl ShellRegistry {
         Ok(format!("started background task {id}; poll with {{\"task_id\":{id}}}"))
     }
 
-    /// Report state and recent output of a background task.
     pub fn status(&self, id: u32) -> Result<String, ToolError> {
         let mut tasks = self.tasks.lock();
         let task = tasks
@@ -258,7 +251,6 @@ impl ShellRegistry {
         ))
     }
 
-    /// Kill a background task and remove it from the registry.
     pub fn kill(&self, id: u32) -> Result<String, ToolError> {
         let mut tasks = self.tasks.lock();
         let mut task = tasks
@@ -321,8 +313,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_kills_the_whole_pipeline_promptly() {
-        // `sh` forks `sleep`; killing only `sh` would leave `sleep` holding
-        // the pipe and the call would block for the full 30s.
+        // Killing only `sh` would leave `sleep` holding the pipe for the full 30s.
         let started = std::time::Instant::now();
         let err = run_foreground("sleep 30; echo never", Duration::from_millis(200)).await.unwrap_err();
         assert!(err.to_string().contains("timeout"));
@@ -332,8 +323,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_leaves_no_descendant_running() {
-        // The bounded pipe drain alone would also return fast; this checks
-        // the process-group kill: the pipeline's next step must never run.
+        // Checks the process-group kill: the pipeline's next step must never run.
         let marker = std::env::temp_dir().join(format!("fa-shell-timeout-{}", std::process::id()));
         let _ = std::fs::remove_file(&marker);
         let cmd = format!("sleep 1; touch {}", marker.display());

@@ -1,6 +1,5 @@
-//! Native Model Context Protocol (MCP) subsystem for FlashAgent.
-//! Supports stdio JSON-RPC 2.0 servers, project & global configuration,
-//! curated marketplace, dynamic tool discovery, and security approval gates.
+//! MCP support: stdio JSON-RPC 2.0 servers, project and global config, a
+//! curated marketplace and tool discovery.
 
 pub mod client;
 pub mod config;

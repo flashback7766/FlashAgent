@@ -1,6 +1,4 @@
-//! Environment inspection tool (`env_info`).
-//!
-//! Provides system platform, architecture, working directory, and installed toolchain versions.
+//! `env_info`: platform, architecture, working directory, toolchain versions.
 
 use std::path::Path;
 use std::process::Command;
@@ -18,7 +16,6 @@ fn check_tool_version(cmd: &str, arg: &str) -> Option<String> {
     None
 }
 
-/// Gathers comprehensive environment and toolchain information.
 pub fn env_info(cwd: &Path) -> Result<String, ToolError> {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;

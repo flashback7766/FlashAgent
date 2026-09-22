@@ -1,10 +1,5 @@
-//! Subagent tool factory for the built-in toolset.
-//!
-//! The parent agent loop is wrapped in [`PermissionedTools`]; subagents get the
-//! same underlying `BuiltinTools` but a restricted tool subset and the same
-//! permission state — so they inherit parent rights, never expand them
-//! The factory lives here because it needs the concrete
-//! `BuiltinTools` to construct executors.
+//! Subagent tool factory. Children get the same `BuiltinTools`, a restricted
+//! tool subset and the parent's permission state, so they never gain rights.
 
 use std::sync::Arc;
 
@@ -17,16 +12,13 @@ use flashagent_llm::{ToolCall, ToolSpec};
 
 use crate::BuiltinTools;
 
-/// Combine several [`ToolExec`]s into one: the parent sees the built-in toolset
-/// plus the `spawn_agent` subagent tool. `execute` dispatches by name to the
-/// executor that owns it; specs are concatenated.
+/// The built-in toolset plus `spawn_agent`. `execute` dispatches by name.
 pub struct CompositeTools {
     executors: Vec<Arc<dyn ToolExec>>,
 }
 
 impl CompositeTools {
-    /// Combine `executors`; order matters only for specs (first wins on a
-    /// duplicate name).
+    /// Order matters only for specs: the first wins on a duplicate name.
     pub fn new(executors: Vec<Arc<dyn ToolExec>>) -> Self {
         Self { executors }
     }
@@ -62,8 +54,6 @@ impl ToolExec for CompositeTools {
     }
 }
 
-/// Build a `CompositeTools` that wraps the built-in toolset and a `spawn_agent`
-/// subagent tool sharing `llm` and `state`.
 pub fn agent_tools(
     builtin: Arc<BuiltinTools>,
     llm: Arc<dyn flashagent_core::LlmSource>,
@@ -76,16 +66,13 @@ pub fn agent_tools(
     CompositeTools::new(vec![builtin, Arc::new(SubagentTool::new(host))])
 }
 
-/// Restrict a [`ToolExec`] to a subset of tool names. Unknown names are
-/// filtered from specs and refused at execute (they never reach the inner
-/// executor).
+/// Other names are hidden from specs and refused before reaching `inner`.
 pub struct ToolSubset {
     inner: Arc<dyn ToolExec>,
     allowed: Vec<String>,
 }
 
 impl ToolSubset {
-    /// Wrap `inner` so only `allowed` tools are visible and runnable.
     pub fn new(inner: Arc<dyn ToolExec>, allowed: &[String]) -> Self {
         Self { inner, allowed: allowed.to_vec() }
     }
@@ -121,15 +108,13 @@ impl ToolExec for ToolSubset {
     }
 }
 
-/// Factory that builds subagent executors over `BuiltinTools`, inheriting the
-/// parent's permission state and restricted to the role's tool subset.
 pub struct BuiltinSubagentFactory {
     tools: Arc<BuiltinTools>,
     state: Arc<PermissionState>,
 }
 
 impl BuiltinSubagentFactory {
-    /// New factory over `tools`; children share `state` (the parent's rights).
+    /// Children share `state`, the parent's rights.
     pub fn new(tools: Arc<BuiltinTools>, state: Arc<PermissionState>) -> Self {
         Self { tools, state }
     }
@@ -139,8 +124,7 @@ impl BuiltinSubagentFactory {
 impl SubagentToolFactory for BuiltinSubagentFactory {
     fn build(&self, _role: &AgentRole, tools: &[String]) -> Arc<dyn ToolExec> {
         let subset = ToolSubset::new(self.tools.clone(), tools);
-        // Wrap the restricted executor with the shared permission layer: the
-        // child asks through the same gate, never expands rights.
+        // The child asks through the same gate.
         Arc::new(PermissionedTools::new(
             Arc::new(subset),
             Some(self.tools.clone()),
@@ -155,7 +139,6 @@ mod tests {
     use flashagent_core::{ToolExec, ToolOutput};
     use flashagent_llm::{ToolCall, ToolSpec};
 
-    // An inner executor recording every call it receives.
     struct Recorder;
 
     #[async_trait]
@@ -179,19 +162,17 @@ mod tests {
         let inner: Arc<dyn ToolExec> = Arc::new(Recorder);
         let subset = ToolSubset::new(inner, &["read_file".to_string()]);
 
-        // Only the allowed tool is advertised.
         let specs = subset.specs();
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["read_file"]);
 
-        // Allowed tool runs.
         let out = subset
             .execute(&ToolCall { id: "t".into(), name: "read_file".into(), args_json: "{}".into() })
             .await;
         assert!(!out.is_error);
         assert_eq!(out.content, "ran read_file");
 
-        // Disallowed tool is refused without reaching the inner executor.
+        // Refused without reaching the inner executor.
         let out = subset
             .execute(&ToolCall { id: "t".into(), name: "write_file".into(), args_json: "{}".into() })
             .await;

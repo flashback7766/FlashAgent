@@ -1,9 +1,5 @@
-//! `view_image` — let the model look at a picture in the project.
-//!
-//! Reading a PNG as text tells the model nothing. A vision model can read the
-//! diagram in `docs/`, the screenshot attached to a bug report, or the mockup
-//! it is being asked to build — but only if the file reaches it as an image,
-//! so the result of this call is the picture itself.
+//! `view_image`: the result is the picture itself, so a vision model can read
+//! a diagram, screenshot or mockup in the project.
 
 use std::path::{Path, PathBuf};
 
@@ -11,18 +7,15 @@ use flashagent_core::base64_encode;
 use flashagent_core::ToolOutput;
 use serde::Deserialize;
 
-/// Bigger than this and the request becomes the problem: base64 adds a third
-/// again, and a model's image budget is measured in hundreds of tokens.
+/// Base64 adds a third, and a model's image budget is hundreds of tokens.
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 
-/// Arguments for `view_image`.
 #[derive(Debug, Deserialize)]
 pub struct ViewImageArgs {
-    /// Path to the image, relative to the working directory or absolute.
+    /// Relative to the working directory, or absolute.
     pub path: String,
 }
 
-/// Media type for the formats a vision model reads.
 fn media_type(path: &Path) -> Option<&'static str> {
     match path.extension()?.to_str()?.to_lowercase().as_str() {
         "png" => Some("image/png"),
@@ -34,8 +27,7 @@ fn media_type(path: &Path) -> Option<&'static str> {
     }
 }
 
-/// Width and height from the file's own header, when it is a format whose
-/// size is easy to read. Only used for the line the user sees.
+/// From the file header, for the line the user sees.
 fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     let be32 = |b: &[u8]| u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
     if bytes.len() > 24 && bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
@@ -48,7 +40,7 @@ fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
-/// Resolve a path against the working directory, refusing to leave it.
+/// Refuses to leave the working directory.
 fn resolve(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
     let joined = flashagent_core::resolve_path(cwd, raw);
     let canonical = joined
@@ -63,7 +55,6 @@ fn resolve(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-/// Open an image so the model can see it.
 pub fn view_image(cwd: &Path, args_json: &str, vision_supported: bool) -> ToolOutput {
     let fail = |msg: String| ToolOutput { content: msg, is_error: true, images: Vec::new() };
 
@@ -72,8 +63,7 @@ pub fn view_image(cwd: &Path, args_json: &str, vision_supported: bool) -> ToolOu
         Err(e) => return fail(format!("view_image: bad arguments: {e}")),
     };
 
-    // Saying this plainly beats sending a picture into a model that will
-    // describe its own confusion.
+    // Said plainly instead of sending a picture to a model that cannot see it.
     if !vision_supported {
         return fail(
             "view_image: the current model cannot see images. Tell the user which file you \
@@ -167,14 +157,12 @@ mod tests {
 
     #[test]
     fn nothing_outside_the_project_is_opened() {
-        // The same boundary every other file tool keeps: a tool call is not a
-        // way to read /home/user/.ssh or a screenshot from someone's desktop.
+        // The same boundary as every other file tool.
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.png"), png(1, 1)).unwrap();
         let path = outside.path().join("secret.png");
-        // Built with serde, not format!: a Windows path is full of backslashes,
-        // which are escapes inside a JSON string.
+        // serde, not format!: Windows backslashes are escapes in JSON strings.
         let args = serde_json::json!({ "path": path.to_string_lossy() }).to_string();
         let out = view_image(dir.path(), &args, true);
         assert!(out.is_error);

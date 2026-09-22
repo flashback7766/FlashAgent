@@ -1,13 +1,10 @@
-//! Native Git inspection tools (`git_status`, `git_diff`).
-//!
-//! Executes git commands directly via `std::process::Command` without shell interpretation,
-//! enabling fast and safe inspection without prompting in AcceptEdits mode.
+//! `git_status` and `git_diff`, run without a shell so they need no approval
+//! in AcceptEdits mode.
 
 use std::path::Path;
 use std::process::Command;
 use crate::ToolError;
 
-/// Returns current Git branch status, staged, unstaged, and untracked files.
 pub fn git_status(cwd: &Path, path_filter: Option<&str>) -> Result<String, ToolError> {
     let mut cmd = Command::new("git");
     cmd.arg("status")
@@ -85,7 +82,6 @@ pub fn git_status(cwd: &Path, path_filter: Option<&str>) -> Result<String, ToolE
     Ok(report.join("\n"))
 }
 
-/// Returns unified diff of working tree or staged changes.
 pub fn git_diff(cwd: &Path, staged: bool, path_filter: Option<&str>) -> Result<String, ToolError> {
     let mut cmd = Command::new("git");
     cmd.arg("diff").current_dir(cwd);

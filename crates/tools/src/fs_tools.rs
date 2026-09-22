@@ -1,6 +1,5 @@
-//! Filesystem tools over a fixed working directory. Paths may be relative
-//! (resolved against the cwd) or absolute; sandboxing by permission rules is
-//! the permission layer's job, not this module's.
+//! Filesystem tools over a fixed working directory. Sandboxing is the
+//! permission layer's job, not this module's.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -9,14 +8,11 @@ use serde::Deserialize;
 
 use crate::ToolError;
 
-/// One surgical replacement inside `edit_file`.
 #[derive(Debug, Deserialize)]
 pub struct EditChunk {
-    /// Exact text to find.
     pub old_string: String,
-    /// Replacement text.
     pub new_string: String,
-    /// Replace every occurrence instead of exactly one.
+    /// Every occurrence instead of exactly one.
     #[serde(default)]
     pub replace_all: bool,
 }
@@ -25,12 +21,9 @@ fn resolve(cwd: &Path, path: &str) -> PathBuf {
     flashagent_core::resolve_path(cwd, path)
 }
 
-/// Read a text file, returning 1-based numbered lines.
-///
-/// Read a line at a time: asking for twenty lines of a log should cost
-/// twenty lines of memory, not the whole file. A file that is not text says
-/// so plainly, because "stream did not contain valid UTF-8" tells the model
-/// nothing it can act on — the answer is a different tool, not a retry.
+/// Returns 1-based numbered lines, reading one line at a time so a small
+/// window of a big log stays cheap. A non-text file says so plainly: "stream
+/// did not contain valid UTF-8" does not tell the model to use another tool.
 pub(crate) fn read_file(cwd: &Path, path: &str, offset: usize, limit: usize) -> Result<String, ToolError> {
     use std::io::{BufRead, BufReader};
 
@@ -62,7 +55,7 @@ pub(crate) fn read_file(cwd: &Path, path: &str, offset: usize, limit: usize) -> 
     Ok(if out.is_empty() { "(empty or past end of file)".into() } else { out })
 }
 
-/// Create or overwrite a file, creating parent directories as needed.
+/// Creates parent directories as needed.
 pub(crate) fn write_file(cwd: &Path, path: &str, content: &str) -> Result<String, ToolError> {
     let file = resolve(cwd, path);
     if let Some(parent) = file.parent() {
@@ -72,7 +65,7 @@ pub(crate) fn write_file(cwd: &Path, path: &str, content: &str) -> Result<String
     Ok(format!("wrote {} bytes to {path}", content.len()))
 }
 
-/// Read a file as raw text (no line numbers); used for diff previews.
+/// No line numbers; used for diff previews.
 pub(crate) fn read_raw(cwd: &Path, path: &str) -> Option<String> {
     std::fs::read_to_string(resolve(cwd, path)).ok()
 }
@@ -83,8 +76,7 @@ fn normalize_line(s: &str) -> String {
         .replace(['“', '”'], "\"")
 }
 
-/// Finds the exact substring in `text` that corresponds to `needle`, with resilient
-/// fallback for CRLF/LF line endings, curly quotes, and trailing whitespace differences.
+/// Tolerates CRLF/LF, curly quotes and trailing whitespace differences.
 pub(crate) fn find_actual_string(text: &str, needle: &str) -> Option<String> {
     if text.contains(needle) {
         return Some(needle.to_string());
@@ -137,8 +129,7 @@ pub(crate) fn find_actual_string(text: &str, needle: &str) -> Option<String> {
     }
 }
 
-/// Apply string replacements to text in memory. Ambiguity is an error, not a
-/// guess. Shared by [`edit_file`] and the permission diff preview.
+/// Ambiguity is an error, not a guess. Shared by [`edit_file`] and the diff preview.
 pub(crate) fn apply_edits(mut text: String, edits: &[EditChunk]) -> Result<String, ToolError> {
     for edit in edits {
         if edit.old_string.is_empty() {
@@ -170,7 +161,6 @@ pub(crate) fn apply_edits(mut text: String, edits: &[EditChunk]) -> Result<Strin
     Ok(text)
 }
 
-/// Apply string replacements sequentially; ambiguity is an error, not a guess.
 pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<String, ToolError> {
     let file = resolve(cwd, path);
     let text = std::fs::read_to_string(&file)
@@ -209,13 +199,11 @@ pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<S
     Ok(format!("applied {applied} edit(s) to {path}"))
 }
 
-/// Most files one call may read or edit: a batch is for a handful of related
-/// files, not for the whole project at once.
+/// A batch is for a handful of related files, not the whole project.
 pub(crate) const MAX_BATCH_FILES: usize = 20;
 
-/// Read several files in one call, each under its own header. A file that
-/// cannot be read says so in its place and does not stop the others; only a
-/// call where none could be read is an error.
+/// An unreadable file is reported in its place; only a call where none could
+/// be read is an error.
 pub(crate) fn read_files(cwd: &Path, files: &[(String, usize, usize)]) -> Result<String, ToolError> {
     if files.is_empty() {
         return Err(ToolError::Other("read_file: files is empty".into()));
@@ -246,9 +234,8 @@ pub(crate) fn read_files(cwd: &Path, files: &[(String, usize, usize)]) -> Result
     Ok(out)
 }
 
-/// Apply edits to several files as one change. Every edit is applied in
-/// memory first; if any of them does not fit, no file is written, because a
-/// change half made across files is worse than one not made at all.
+/// All edits are applied in memory first; if any does not fit, no file is
+/// written. A half-made change across files is worse than none.
 pub(crate) fn edit_files(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Result<String, ToolError> {
     if files.is_empty() {
         return Err(ToolError::Other("edit_file: files is empty".into()));
@@ -266,8 +253,7 @@ pub(crate) fn edit_files(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Resu
         let file = resolve(cwd, path)
             .canonicalize()
             .map_err(|e| ToolError::Other(format!("nothing was changed: read {path}: {e}")))?;
-        // The same file twice in one batch: the second set of edits applies to
-        // the text the first produced.
+        // The same file twice: the second edits apply to the first's result.
         let at = changed.iter().position(|(_, f, _, _)| *f == file);
         let text = match at {
             Some(i) => changed[i].2.clone(),
@@ -310,7 +296,7 @@ pub(crate) fn edit_files(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Resu
     Ok(format!("applied {total} edit(s) to {} file(s): {list}", changed.len()))
 }
 
-/// List a directory; directories are suffixed with `/`.
+/// Directories are suffixed with `/`.
 pub(crate) fn list_dir(cwd: &Path, path: &str) -> Result<String, ToolError> {
     let dir = resolve(cwd, path);
     let mut entries: Vec<String> = Vec::new();
@@ -328,10 +314,9 @@ pub(crate) fn list_dir(cwd: &Path, path: &str) -> Result<String, ToolError> {
     Ok(if entries.is_empty() { "(empty)".into() } else { entries.join("\n") })
 }
 
-/// Glob file search relative to the cwd, capped at 500 results.
+/// Relative to the cwd, capped at 500 results.
 pub(crate) fn glob_files(cwd: &Path, pattern: &str) -> Result<String, ToolError> {
-    // `~/notes/*.md` names the home folder, the same as it would at a shell
-    // prompt; glob itself has no idea what a tilde is.
+    // glob does not expand `~` itself.
     let pattern = flashagent_core::expand_home(pattern);
     let pattern = pattern.as_ref();
     let absolute = Path::new(pattern).is_absolute();
@@ -383,8 +368,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
 
 use rayon::prelude::*;
 
-/// Regex search over text files; returns `path:line:text` up to 200 matches.
-/// Parallelized across all CPU cores with Rayon for lightning-fast multi-core throughput.
+/// Returns `path:line:text`, up to 200 matches. Parallel with Rayon.
 pub(crate) fn grep(
     cwd: &Path,
     pattern: &str,
@@ -402,7 +386,6 @@ pub(crate) fn grep(
     let mut all_files = Vec::new();
     walk(cwd, &mut all_files, 0);
 
-    // Pre-filter files by glob matcher and file size (< 10MB)
     let candidate_files: Vec<PathBuf> = all_files
         .into_iter()
         .filter(|file| {
@@ -425,12 +408,10 @@ pub(crate) fn grep(
         })
         .collect();
 
-    // Multi-core parallel file processing across all available CPU threads
     let hits: Vec<String> = candidate_files
         .par_iter()
         .flat_map(|file| {
             let Ok(bytes) = std::fs::read(file) else { return Vec::new() };
-            // Fast binary check on first 1024 bytes
             let check_len = bytes.len().min(1024);
             if bytes[..check_len].contains(&0) {
                 return Vec::new();
@@ -627,7 +608,6 @@ mod tests {
             replace_all: false,
         }])
         .is_err());
-        // Original text untouched on error (purity).
         assert_eq!(apply_edits("a".repeat(10), &[]).unwrap(), "a".repeat(10));
     }
 
@@ -667,8 +647,7 @@ mod tests {
             return;
         };
         let home = PathBuf::from(home);
-        // Written at a prompt inside the project, `~/x` means the home
-        // folder, never `<project>/~/x`.
+        // `~/x` means the home folder, never `<project>/~/x`.
         assert_eq!(resolve(Path::new("/work/project"), "~/x/main.rs"), home.join("x/main.rs"));
     }
 
@@ -709,7 +688,6 @@ mod tests {
             .unwrap();
         assert!(d.contains("-one") && d.contains("+ONE"), "got: {d}");
 
-        // New file → /dev/null header.
         let d = tools
             .preview_for(&ToolCall {
                 id: "t".into(),
@@ -719,11 +697,10 @@ mod tests {
             .unwrap();
         assert!(d.contains("/dev/null"));
 
-        // Non-write tools → None.
         assert!(tools
             .preview_for(&ToolCall { id: "t".into(), name: "grep".into(), args_json: "{}".into() })
             .is_none());
-        // Broken args → None (falls back to approval without preview).
+        // Broken args: approval falls back to no preview.
         assert!(tools
             .preview_for(&ToolCall {
                 id: "t".into(),
@@ -736,7 +713,6 @@ mod tests {
     #[test]
     fn resilient_edits_crlf_and_trailing_whitespace() {
         let text = "fn hello() {\r\n    println!(\"world\");  \r\n}\r\n";
-        // Needle has unix LF and lacks trailing whitespace
         let edit = EditChunk {
             old_string: "fn hello() {\n    println!(\"world\");\n}".into(),
             new_string: "fn hello() {\n    println!(\"FlashAgent\");\n}".into(),

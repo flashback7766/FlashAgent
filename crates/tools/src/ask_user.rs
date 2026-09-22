@@ -1,9 +1,6 @@
-//! Interactive user questioning tool (`ask_user`).
-//!
-//! Enables the model to request guidance, clarification, or choices from the user.
-//! During an autonomous `/goal` run nobody may be at the keyboard, so a
-//! question waits [`GOAL_QUESTION_TIMEOUT`] for an answer and then tells the
-//! model to carry on with its own best choice.
+//! `ask_user`. During `/goal` nobody may be at the keyboard, so a question
+//! waits [`GOAL_QUESTION_TIMEOUT`] and then tells the model to carry on with
+//! its own best choice.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -13,16 +10,13 @@ use serde::Deserialize;
 
 use crate::ToolError;
 
-/// How long a question asked during `/goal` waits before the run carries on
-/// without an answer.
 pub const GOAL_QUESTION_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Async gate implemented by the UI/TUI to present interactive questions.
+/// Implemented by the TUI.
 #[async_trait]
 pub trait QuestionGate: Send + Sync {
-    /// Prompt the user with a question and optional choices. `deadline` is
-    /// when an unanswered question stops waiting, so the card can say so.
-    /// Returns `(answer_string, is_write_in_flag)`.
+    /// `deadline` is when an unanswered question stops waiting, so the card can
+    /// show it. Returns `(answer, is_write_in)`.
     async fn ask(
         &self,
         question: &str,
@@ -32,7 +26,7 @@ pub trait QuestionGate: Send + Sync {
     ) -> Result<(String, bool), String>;
 }
 
-/// Flexible helper to deserialize either a list of strings or a comma-separated string.
+/// Accepts a list of strings or a comma-separated string.
 fn deserialize_flexible_options<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -66,21 +60,17 @@ where
     }
 }
 
-/// A single question entry for multi-question mode or unified handling.
 #[derive(Debug, Clone, Deserialize)]
 pub struct QuestionItem {
-    /// The question text.
     #[serde(alias = "prompt", alias = "title", alias = "text", alias = "header")]
     pub question: String,
-    /// Optional selectable options (up to 10 choices).
+    /// Up to 10.
     #[serde(default, deserialize_with = "deserialize_flexible_options", alias = "choices", alias = "items")]
     pub options: Option<Vec<String>>,
-    /// Optional flag whether multiple options can be chosen simultaneously with checkboxes.
     #[serde(default, alias = "is_multi_select", alias = "multiple")]
     pub multi_select: Option<bool>,
 }
 
-/// Either a full `QuestionItem` object or a plain question string.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum QuestionItemOrString {
@@ -88,24 +78,19 @@ pub enum QuestionItemOrString {
     Simple(String),
 }
 
-/// Arguments for `ask_user`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AskUserArgs {
-    /// The question to present to the user (single question mode).
+    /// Single-question mode.
     #[serde(default, alias = "prompt", alias = "title", alias = "text")]
     pub question: Option<String>,
-    /// Optional selectable options for single question mode.
     #[serde(default, deserialize_with = "deserialize_flexible_options", alias = "choices")]
     pub options: Option<Vec<String>>,
-    /// Optional flag whether multiple options can be chosen simultaneously with checkboxes.
     #[serde(default, alias = "is_multi_select", alias = "multiple")]
     pub multi_select: Option<bool>,
-    /// Sequential list of multiple questions to ask.
     #[serde(default, alias = "items")]
     pub questions: Option<Vec<QuestionItemOrString>>,
 }
 
-/// Executes the `ask_user` tool call.
 pub async fn run_ask_user(
     gate: Option<&Arc<dyn QuestionGate>>,
     is_goal_mode: &Arc<AtomicBool>,
@@ -114,23 +99,20 @@ pub async fn run_ask_user(
     run_ask_user_within(gate, is_goal_mode, args, GOAL_QUESTION_TIMEOUT).await
 }
 
-/// [`run_ask_user`] with the `/goal` wait as a parameter, so it can be tested
-/// without waiting two minutes.
+/// With the `/goal` wait as a parameter, so tests need not wait two minutes.
 async fn run_ask_user_within(
     gate: Option<&Arc<dyn QuestionGate>>,
     is_goal_mode: &Arc<AtomicBool>,
     args: AskUserArgs,
     goal_timeout: Duration,
 ) -> Result<String, ToolError> {
-    // One deadline for the whole call: several questions in a row must not
-    // each get the full wait while the run stands still.
+    // One deadline for the whole call, not one per question.
     let deadline = is_goal_mode.load(Ordering::Relaxed).then(|| tokio::time::Instant::now() + goal_timeout);
 
     let gate = gate.ok_or_else(|| {
         ToolError::Other("interactive question gate is not available in this environment".into())
     })?;
 
-    // Extract questions list
     let mut items: Vec<QuestionItem> = Vec::new();
     if let Some(qs) = args.questions {
         for q in qs {
@@ -168,7 +150,7 @@ async fn run_ask_user_within(
         return Err(ToolError::Other("`question` or `questions` cannot be empty".into()));
     }
 
-    // Sanitize options per question (relaxed bounds: 1..10, truncate if > 10)
+    // 1..10 options; extra ones are cut.
     for item in &mut items {
         if let Some(ref mut opts) = item.options {
             if opts.is_empty() {
@@ -205,7 +187,6 @@ async fn run_ask_user_within(
     Ok(answered.join("\n"))
 }
 
-/// What the model is told when a `/goal` question went unanswered.
 fn no_answer(answered: &[String], waited: Duration) -> String {
     let secs = waited.as_secs();
     let waited = if secs >= 60 && secs.is_multiple_of(60) { format!("{} minutes", secs / 60) } else { format!("{secs} seconds") };
@@ -260,8 +241,8 @@ mod tests {
         }
     }
 
-    /// Answers the first `answers` questions, then never answers again — the
-    /// user who walked away mid-run. Records the deadline it was given.
+    /// Answers the first `answers` questions, then never again: the user who
+    /// walked away mid-run. Records the deadline it was given.
     struct WalksAwayGate {
         answers: parking_lot::Mutex<usize>,
         deadline_seen: parking_lot::Mutex<Option<std::time::Instant>>,
@@ -402,7 +383,6 @@ mod tests {
         let gate: Arc<dyn QuestionGate> = Arc::new(MockGate::single(("Answer".into(), false)));
         let goal_flag = Arc::new(AtomicBool::new(false));
 
-        // Single option is allowed (1 option + write in)
         let res_single = run_ask_user(
             Some(&gate),
             &goal_flag,
@@ -416,7 +396,6 @@ mod tests {
         .await;
         assert!(res_single.is_ok());
 
-        // More than 5 options (e.g. 7 options) are smoothly accepted and clamped
         let res_many = run_ask_user(
             Some(&gate),
             &goal_flag,

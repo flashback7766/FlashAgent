@@ -1,12 +1,9 @@
-//! File symbol and structural outline extractor (`outline_file`).
-//!
-//! Provides a concise, token-efficient summary of functions, structs, classes,
-//! traits, and headings across Rust, Python, TS/JS, Go, C/C++, and Markdown files.
+//! `outline_file`: functions, types and headings with line numbers, for Rust,
+//! Python, TS/JS, Go, C/C++ and Markdown.
 
 use std::path::Path;
 use crate::ToolError;
 
-/// Outlines structural symbols from the target file with 1-based line numbers.
 pub fn outline_file(cwd: &Path, rel_path: &str) -> Result<String, ToolError> {
     let full = flashagent_core::resolve_path(cwd, rel_path);
     if !full.exists() {
@@ -88,7 +85,6 @@ pub fn outline_file(cwd: &Path, rel_path: &str) -> Result<String, ToolError> {
         };
 
         if is_symbol {
-            // Cut trailing block openers or semicolons for brevity
             let clean = trimmed
                 .trim_end_matches('{')
                 .trim_end_matches(';')

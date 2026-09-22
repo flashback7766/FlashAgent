@@ -1,10 +1,9 @@
-//! MCP Configuration parser and discovery for project and global server configs.
+//! MCP config discovery for project and global servers.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
-/// Per-server configuration entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpServerConfig {
     pub command: String,
@@ -12,22 +11,19 @@ pub struct McpServerConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
-    /// When true, all tools from this server are treated as read-only (no approval required).
+    /// All tools of this server run without approval.
     #[serde(default, rename = "read_only")]
     pub read_only: bool,
-    /// List of specific tools from this server that are explicitly read-only.
     #[serde(default, rename = "read_only_tools")]
     pub read_only_tools: Vec<String>,
-    /// When true, FlashAgent does not spawn this server automatically.
+    /// Not spawned automatically.
     #[serde(default)]
     pub disabled: bool,
-    /// Human-friendly description or vendor note.
     #[serde(default)]
     pub description: Option<String>,
 }
 
 impl McpServerConfig {
-    /// Create a new server config.
     pub fn new(command: impl Into<String>, args: Vec<String>) -> Self {
         Self {
             command: command.into(),
@@ -40,17 +36,16 @@ impl McpServerConfig {
         }
     }
 
-    /// Check if a tool from this server is considered read-only.
     pub fn is_tool_read_only(&self, tool_name: &str) -> bool {
         self.read_only || self.read_only_tools.iter().any(|t| t == tool_name)
     }
 
-    /// Return expanded command arguments with `${VAR}` and `$VAR` replaced from environment.
+    /// `${VAR}` and `$VAR` replaced from the environment.
     pub fn expanded_args(&self) -> Vec<String> {
         self.args.iter().map(|arg| expand_env_vars(arg)).collect()
     }
 
-    /// Return expanded environment variables with `${VAR}` and `$VAR` replaced from environment.
+    /// `${VAR}` and `$VAR` replaced from the environment.
     pub fn expanded_env(&self) -> HashMap<String, String> {
         let mut out = HashMap::new();
         for (k, v) in &self.env {
@@ -60,14 +55,13 @@ impl McpServerConfig {
     }
 }
 
-/// Root MCP configuration file schema (`.mcp.json`).
+/// `.mcp.json`
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct McpConfigFile {
     #[serde(default, rename = "mcpServers", alias = "servers")]
     pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
-/// Helper to expand `$VAR` and `${VAR}` using host environment.
 pub fn expand_env_vars(raw: &str) -> String {
     let mut result = String::new();
     let mut chars = raw.chars().peekable();
@@ -112,13 +106,12 @@ pub fn expand_env_vars(raw: &str) -> String {
     result
 }
 
-/// Discover and merge MCP configurations from project and global paths.
-/// Project configurations take precedence over global configurations.
+/// Project config overrides global.
 pub fn load_mcp_configs(cwd: &Path) -> (HashMap<String, McpServerConfig>, Vec<PathBuf>) {
     let mut servers = HashMap::new();
     let mut loaded_paths = Vec::new();
 
-    // 1. Global config: ~/.flashagent/mcp.json
+    // ~/.flashagent/mcp.json
     if let Some(home) = dirs_next().or_else(|| std::env::var("HOME").ok().map(PathBuf::from)) {
         let global_path = home.join(".flashagent").join("mcp.json");
         if global_path.is_file() {
@@ -133,14 +126,13 @@ pub fn load_mcp_configs(cwd: &Path) -> (HashMap<String, McpServerConfig>, Vec<Pa
         }
     }
 
-    // 2. Project config: .mcp.json or mcp.json
+    // .mcp.json or mcp.json
     let project_candidates = [cwd.join(".mcp.json"), cwd.join("mcp.json")];
     for p in &project_candidates {
         if p.is_file() {
             if let Ok(content) = std::fs::read_to_string(p) {
                 if let Ok(parsed) = serde_json::from_str::<McpConfigFile>(&content) {
                     for (name, cfg) in parsed.mcp_servers {
-                        // Project overrides global
                         servers.insert(name, cfg);
                     }
                     loaded_paths.push(p.clone());
@@ -153,7 +145,6 @@ pub fn load_mcp_configs(cwd: &Path) -> (HashMap<String, McpServerConfig>, Vec<Pa
     (servers, loaded_paths)
 }
 
-/// Helper to get user home directory without external dependencies.
 fn dirs_next() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -165,7 +156,7 @@ fn dirs_next() -> Option<PathBuf> {
     }
 }
 
-/// Save or update a server config inside project `.mcp.json`.
+/// Writes to the project `.mcp.json`.
 pub fn save_server_to_project(cwd: &Path, name: &str, config: McpServerConfig) -> Result<PathBuf, String> {
     let target = cwd.join(".mcp.json");
     let mut file_cfg = if target.is_file() {
