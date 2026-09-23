@@ -231,8 +231,15 @@ impl Renderer {
             // restyle or hide part of it.
             let args = flashagent_llm::effective_args(&req.args_json, &req.tool).unwrap_or_default();
             let several_files = args.get("files").and_then(|f| f.as_array()).is_some_and(|f| f.len() > 1);
+            // A diff with nothing removed and nothing kept is a file that does not exist yet.
+            let new_file = req.diff.as_deref().is_some_and(|d| {
+                d.lines()
+                    .filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ") && !l.starts_with("@@"))
+                    .all(|l| l.starts_with('+'))
+            });
             let question = match req.tool.as_str() {
                 "run_shell" => "Run this command?".to_string(),
+                "write_file" if new_file => "Create this file?".to_string(),
                 "edit_file" | "patch_file" | "write_file" if several_files => "Change these files?".to_string(),
                 "edit_file" | "patch_file" | "write_file" => "Change this file?".to_string(),
                 tool => format!("Allow {tool}?"),
@@ -288,8 +295,10 @@ impl Renderer {
                     } else {
                         ("\x1b[38;2;135;130;125m", " ")
                     };
-                    let line_clean = line.trim_start_matches('+').trim_start_matches('-').trim_start_matches(' ');
-                    let line_clipped = clip_ansi(line_clean, inner_w.saturating_sub(6));
+                    // Only the diff's own marker goes: the indentation is part of the change.
+                    // Shown, never executed: an escape in the new text must not hide part of it.
+                    let line_clean = card_safe(&line.get(1..).unwrap_or_default().replace('\t', "    "));
+                    let line_clipped = clip_ansi(&line_clean, inner_w.saturating_sub(6));
                     tail.push((
                         LineKind::System,
                         pad_box_row(&format!("  {color}{prefix} {line_clipped}\x1b[0m"), width),
