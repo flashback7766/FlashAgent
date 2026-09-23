@@ -752,10 +752,15 @@ fn compact_replaces_the_conversation_so_far_with_a_summary() {
         Reply::Text("Second answer.".into()),
         Reply::Text("Third answer, after the summary.".into()),
     ]);
+    server.answer_side_requests("technical context compaction engine", "Summary:\n1. Primary Request and Intent: answer the user's questions.\n7. Pending Tasks: None.\n8. Current Work: continue with the next question.");
     let home = Home::new();
     let term = ready(&home, &server);
 
-    ask(&term, "the first question", "First answer.");
+    let first_question = format!("the first question {}", "details ".repeat(150));
+    paste(&term, &first_question);
+    term.send(ENTER);
+    term.wait_for("First answer.", WAIT);
+    term.wait_gone(RUNNING_HINT, WAIT);
     ask(&term, "the second question", "Second answer.");
     term.type_text("/compact");
     term.send(ENTER);
@@ -775,6 +780,11 @@ fn compact_replaces_the_conversation_so_far_with_a_summary() {
         after[0]
     );
     assert!(!sent(&turns[2]).contains("the first question"), "the summarised turns were still sent in full");
+    let archives = home.path().join(".flashagent").join("sessions").join("compactions");
+    let archive = std::fs::read_dir(archives).unwrap().next().unwrap().unwrap().path();
+    let saved = std::fs::read_to_string(archive).unwrap();
+    assert!(saved.contains("the first question"));
+    assert!(saved.contains("First answer."));
 }
 
 /// `python3`, or `python` on Windows runners.
