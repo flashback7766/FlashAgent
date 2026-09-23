@@ -339,23 +339,30 @@ impl WritePreview for BuiltinTools {
         self.preview_for(call)
     }
 
-    /// Only inside the project: the error quotes a line of the file, which
-    /// for a file outside it would be a read nobody approved.
+    /// Only when every file is inside the project, by the same rule the
+    /// permissions use (`~`, `..` and symlinks resolved): the error quotes a
+    /// line of the file, which for one outside would be a read nobody approved.
     fn doomed(&self, call: &ToolCall) -> Option<String> {
         if call.name != "edit_file" {
             return None;
         }
         let v = flashagent_llm::effective_args(&call.args_json, &call.name)?;
         let args: EditArgs = serde_json::from_value(v).ok()?;
-        for (path, edits) in args.targets() {
-            let file = std::path::Path::new(&self.cwd).join(&path);
-            if !file.starts_with(&self.cwd) || path.contains("..") {
-                continue;
-            }
-            let text = fs_tools::read_raw(&self.cwd, &path)?;
+        let targets = args.targets();
+        if targets.iter().any(|(path, _)| !flashagent_core::path_is_inside(&self.cwd, path)) {
+            return None;
+        }
+        // A file named twice in a batch gets its second edits on the result of the first.
+        let mut texts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (path, edits) in targets {
+            let text = match texts.remove(&path) {
+                Some(text) => text,
+                None => fs_tools::read_raw(&self.cwd, &path)?,
+            };
             if let Err(e) = fs_tools::check_edits(&path, &text, &edits) {
                 return Some(format!("error: {e}"));
             }
+            texts.insert(path, fs_tools::apply_edits(text, &edits).ok()?);
         }
         None
     }
@@ -745,12 +752,19 @@ mod tests {
         let missing = batch_call("edit_file", serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "fn two() {}", "new_string": "x" } ] }));
         let fine = batch_call("edit_file", serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "fn one() {}", "new_string": "x" } ] }));
         let outside = batch_call("edit_file", serde_json::json!({ "path": "../a.rs", "edits": [ { "old_string": "nope", "new_string": "x" } ] }));
+        let home = batch_call("edit_file", serde_json::json!({ "path": "~/.gitconfig", "edits": [ { "old_string": "nope", "new_string": "x" } ] }));
+        let twice = batch_call("edit_file", serde_json::json!({ "files": [
+            { "path": "a.rs", "edits": [ { "old_string": "fn one() {}", "new_string": "fn two() {}" } ] },
+            { "path": "a.rs", "edits": [ { "old_string": "fn two() {}", "new_string": "fn three() {}" } ] }
+        ] }));
         let doomed = tools.doomed(&missing);
-        let (fine, outside) = (tools.doomed(&fine), tools.doomed(&outside));
+        let (fine, outside, home, twice) = (tools.doomed(&fine), tools.doomed(&outside), tools.doomed(&home), tools.doomed(&twice));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(doomed.as_deref().is_some_and(|e| e.contains("closest line is 1")), "{doomed:?}");
         assert_eq!(fine, None);
         assert_eq!(outside, None, "a file outside the project is not read to say so");
+        assert_eq!(home, None, "a file under ~ is not read to say so");
+        assert_eq!(twice, None, "a second edit of the same file applies to the first one's result");
     }
 
     #[tokio::test]
