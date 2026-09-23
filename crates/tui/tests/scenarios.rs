@@ -1271,7 +1271,8 @@ fn a_write_through_a_symlink_parent_asks_before_touching_the_external_file() {
 fn after_an_answer_the_status_line_is_the_mode_not_a_report() {
     let server = MockServer::start(vec![Reply::Text("Status please.".into())]);
     let home = Home::new();
-    let term = ready(&home, &server);
+    // Tips are picked at random, and one says "prompt".
+    let term = ready_with(&home, &server, serde_json::json!({ "show_tips": false }));
     ask(&term, "how did that go?", "Status please.");
     // Idle once the key hints are back in place of the spinner.
     let screen = term.wait_for("ctrl+k — commands", WAIT);
