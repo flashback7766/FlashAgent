@@ -703,6 +703,28 @@ fn esc_during_a_turn_stops_it_and_keeps_what_was_already_said() {
 }
 
 #[test]
+fn a_new_file_card_keeps_indentation_and_shows_escapes_as_text() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "write_file".into(),
+            arguments: serde_json::json!({ "path": "new.rs", "content": "fn a() {\n    let x = 1;\n    // \u{1b}[8mhidden\u{1b}[0m\n}\n" }),
+        },
+        Reply::Text("Written.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Manual" }));
+    term.type_text("make new.rs");
+    term.send(ENTER);
+    term.wait_for(APPROVAL, WAIT);
+    // The card unfolds; its last rows are the buttons.
+    let screen = term.wait_for("Always allow", WAIT);
+    assert!(screen.contains("Create this file?"), "{screen}");
+    assert!(screen.contains("+     let x = 1;"), "indentation lost:\n{screen}");
+    assert!(screen.contains("^[[8mhidden"), "an escape was executed instead of shown:\n{screen}");
+    term.send(ESC);
+}
+
+#[test]
 fn esc_clears_a_steering_draft_before_it_stops_the_turn() {
     let words: Vec<String> = (1..=60).map(|i| format!("word{i}")).collect();
     let server = MockServer::start(vec![Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(300) }]);
