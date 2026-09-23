@@ -1199,7 +1199,10 @@ impl ChatView {
                 continue;
             }
 
-            let wrapped = wrap(&line.text, if line.kind == LineKind::User { width.saturating_sub(2) } else { width });
+            // Tabs as spaces before measuring, or the row came out wider than
+            // counted and its end was clipped.
+            let safe: Vec<String> = line.text.split('\n').map(terminal_safe).collect();
+            let wrapped = wrap(&safe.join("\n"), if line.kind == LineKind::User { width.saturating_sub(2) } else { width });
             for (j, chunk) in wrapped.into_iter().enumerate() {
                 let text = match line.kind {
                     LineKind::User => {

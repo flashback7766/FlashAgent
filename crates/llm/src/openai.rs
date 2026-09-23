@@ -38,7 +38,7 @@ const OPTIONAL_FIELDS: [&str; 10] = [
     "stream_options", "cache_prompt", "prompt_cache",
 ];
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct Learned {
     fields: Option<Fields>,
     dropped: Vec<&'static str>,
@@ -619,6 +619,7 @@ impl crate::LlmBackend for OpenAiCompat {
         // else drop fields (All -> NoExtraSampling -> Standard).
         let busy = Busy::new(&self.in_flight);
         let mut learned = self.learned.read().map(|l| l.clone()).unwrap_or_default();
+        let known = learned.clone();
         let mut fields = learned.fields.unwrap_or(Fields::All);
         let mut adaptive_retries = 0u8;
         let resp = loop {
@@ -626,8 +627,20 @@ impl crate::LlmBackend for OpenAiCompat {
             if resp.status().is_success() {
                 // Kept only once a request without those fields went through: a
                 // context overflow names no field and must not strip every request.
-                if let Ok(mut lock) = self.learned.write() {
-                    *lock = learned;
+                // Merged, not replaced: a request running alongside (a subagent)
+                // may have learned something else meanwhile.
+                if learned != known {
+                    if let Ok(mut lock) = self.learned.write() {
+                        for field in learned.dropped {
+                            if !lock.dropped.contains(&field) {
+                                lock.dropped.push(field);
+                            }
+                        }
+                        lock.completion_tokens |= learned.completion_tokens;
+                        if learned.fields.is_some() {
+                            lock.fields = learned.fields;
+                        }
+                    }
                 }
                 break resp;
             }
