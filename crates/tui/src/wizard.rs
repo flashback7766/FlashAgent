@@ -672,9 +672,9 @@ impl SetupWizard {
         let reset = "\x1b[0m";
         let inner_w = width.saturating_sub(6).clamp(20, 110);
 
-        let title = format!(" FlashAgent First Start Setup ({}/5) ", self.step + 1);
+        let title = format!(" FlashAgent setup \u{b7} step {} of 5 ", self.step + 1);
         let dash_count = inner_w.saturating_sub(title.chars().count() + 1);
-        lines.push(format!("  {border_color}┌─\x1b[1;38;2;225;175;95m{title}{border_color}{}┐{reset}", "─".repeat(dash_count)));
+        lines.push(format!("  {border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)));
 
         let pad_row = |content: &str| -> String {
             let max_w = inner_w.saturating_sub(2);
@@ -691,8 +691,8 @@ impl SetupWizard {
 
         match self.step {
             0 => {
-                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 1: Choose LLM Backend\x1b[0m"));
-                lines.push(pad_row("\x1b[38;2;160;155;145mSelect your local or remote inference engine in 1 click:\x1b[0m"));
+                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 1: Choose your model server\x1b[0m"));
+                lines.push(pad_row("\x1b[38;2;160;155;145mWhere does your model run? A local server needs no key.\x1b[0m"));
                 lines.push(pad_row(""));
 
                 let presets = BackendPreset::all();
@@ -711,7 +711,7 @@ impl SetupWizard {
                 let is_custom_sel = self.preset_idx == 5;
                 let ptr = if is_custom_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
                 let placeholder_color = "\x1b[38;2;68;65;62m";
-                let placeholder_text = "Enter endpoint here";
+                let placeholder_text = "type its URL";
                 let custom_row = if self.custom_url.is_empty() {
                     if is_custom_sel {
                         format!("{ptr} \x1b[1;38;2;240;235;225m6. {:<12}\x1b[0m \x1b[7m \x1b[27m{placeholder_color}{placeholder_text}\x1b[0m", "Custom")
@@ -734,7 +734,7 @@ impl SetupWizard {
                 };
                 lines.push(pad_row(&custom_row));
                 if is_custom_sel {
-                    lines.push(pad_row("    \x1b[38;2;175;170;225m(type URL manually · Enter to confirm · ↑/↓ to choose preset)\x1b[0m"));
+                    lines.push(pad_row("    \x1b[38;2;135;130;125man OpenAI-compatible URL, e.g. http://localhost:8080/v1\x1b[0m"));
                 }
 
                 if let Some(ref st) = self.connection_status {
@@ -743,9 +743,9 @@ impl SetupWizard {
                 }
             }
             1 => {
-                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 2: API Key Configuration\x1b[0m"));
+                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 2: API key\x1b[0m"));
                 if self.is_cloud_backend() {
-                    lines.push(pad_row("\x1b[38;2;225;175;95mCloud / remote inference provider requires an API key.\x1b[0m"));
+                    lines.push(pad_row("\x1b[38;2;225;175;95mThis provider needs an API key.\x1b[0m"));
                     lines.push(pad_row(""));
                     lines.push(pad_row("  \x1b[38;2;160;155;145mHow to get your API key:\x1b[0m"));
                     if self.config.backend_url.contains("openrouter.ai") {
@@ -789,7 +789,7 @@ impl SetupWizard {
                 let total_models = self.available_models.len();
                 let total_matches = filtered.len();
 
-                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 3: Select Default Model\x1b[0m"));
+                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 3: Choose the model\x1b[0m"));
                 let count_info = if self.is_lm_studio() && self.discovered_models.iter().any(|m| m.is_loaded) {
                     format!("({total_models} loaded in LM Studio)")
                 } else if self.model_search.is_empty() {
@@ -801,8 +801,23 @@ impl SetupWizard {
                 lines.push(pad_row(""));
 
                 if self.available_models.is_empty() {
-                    lines.push(pad_row(&format!("  \x1b[38;2;225;175;95mAuto-detected model on backend: {}\x1b[0m", if self.config.model.is_empty() { "default" } else { &self.config.model })));
-                    lines.push(pad_row("  \x1b[38;2;135;130;125m(Models will be dynamically loaded from server)\x1b[0m"));
+                    // Said plainly: a missing server is the usual first-run problem.
+                    let url = self.config.backend_url.trim_end_matches('/');
+                    let (said, next) = match self.connection_status.as_deref() {
+                        Some(status) if status.starts_with("Connecting") => (status.to_string(), String::new()),
+                        Some(status) if !status.starts_with("Connected") => (
+                            format!("No server answered at {url}."),
+                            "Start it and press Esc to try again, or Enter to go on and pick a model later with F3.".to_string(),
+                        ),
+                        _ => (
+                            format!("{url} lists no models."),
+                            "Load one in your server and press Esc to look again, or Enter to go on.".to_string(),
+                        ),
+                    };
+                    lines.push(pad_row(&format!("  \x1b[38;2;225;175;95m{said}\x1b[0m")));
+                    for row in crate::wrap_styled(&next, inner_w.saturating_sub(6)) {
+                        lines.push(pad_row(&format!("  \x1b[38;2;160;155;145m{row}\x1b[0m")));
+                    }
                 } else if filtered.is_empty() {
                     lines.push(pad_row("  \x1b[38;2;135;130;125m(No models matching search filter)\x1b[0m"));
                 } else {
@@ -813,7 +828,7 @@ impl SetupWizard {
                     let end = (start + page_size).min(total_matches);
 
                     if start > 0 {
-                        lines.push(pad_row(&format!("  \x1b[38;2;135;130;125m▲ ... ({} more above) ...\x1b[0m", start)));
+                        lines.push(pad_row(&format!("  \x1b[38;2;135;130;125m▲ {start} more above\x1b[0m")));
                     }
 
                     for &orig_idx in &filtered[start..end] {
@@ -842,19 +857,19 @@ impl SetupWizard {
                     }
 
                     if end < total_matches {
-                        lines.push(pad_row(&format!("  \x1b[38;2;135;130;125m▼ ... ({} more below) ...\x1b[0m", total_matches - end)));
+                        lines.push(pad_row(&format!("  \x1b[38;2;135;130;125m▼ {} more below\x1b[0m", total_matches - end)));
                     }
                 }
             }
             3 => {
-                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 4: Agent Behavior & Permissions\x1b[0m"));
-                lines.push(pad_row("\x1b[38;2;160;155;145mChoose how the agent executes tools and modifies files:\x1b[0m"));
+                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 4: Permissions\x1b[0m"));
+                lines.push(pad_row("\x1b[38;2;160;155;145mWhat may the agent do without asking? Shift+Tab changes it any time.\x1b[0m"));
                 lines.push(pad_row(""));
                 let modes = [
-                    (PermissionMode::Planning, "1. Planning", "Require plan review; read-only research"),
-                    (PermissionMode::Manual, "2. Manual", "Prompt for confirmation before every file edit or command"),
-                    (PermissionMode::AcceptEdits, "3. Accept Edits", "Auto-approve file edits; prompt for commands (Default)"),
-                    (PermissionMode::Bypass, "4. Accept All", "Auto-approve all file edits and shell commands"),
+                    (PermissionMode::Planning, "1. Planning", "only reads and plans; changes nothing"),
+                    (PermissionMode::Manual, "2. Manual", "asks before every edit and command"),
+                    (PermissionMode::AcceptEdits, "3. Accept Edits", "edits files, asks before commands (default)"),
+                    (PermissionMode::Bypass, "4. Accept All", "edits and runs commands without asking"),
                 ];
                 for (m, label, desc) in modes {
                     let is_sel = self.config.permission_mode == m;
@@ -868,8 +883,8 @@ impl SetupWizard {
                 }
             }
             4 => {
-                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 5: Sampling Preset & Launch\x1b[0m"));
-                lines.push(pad_row("\x1b[38;2;160;155;145mHow the model samples. The preset suits most models; its numbers are in Settings \u{2192} Reasoning.\x1b[0m"));
+                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 5: Sampling and launch\x1b[0m"));
+                lines.push(pad_row("\x1b[38;2;160;155;145mHow the model samples. The preset suits most models; its numbers are in /sampling.\x1b[0m"));
                 lines.push(pad_row(""));
 
                 let preset_val = format!("[ {} ]", self.sampling.preset.label());
@@ -879,40 +894,28 @@ impl SetupWizard {
                 )));
 
                 lines.push(pad_row(""));
-                lines.push(pad_row("  \x1b[1;38;2;145;205;140m[ Save & Launch FlashAgent (Enter) ]\x1b[0m"));
+                lines.push(pad_row(" \x1b[1;38;2;25;30;22;48;2;145;205;140m Save and launch \x1b[0m"));
             }
             _ => {}
         }
 
         lines.push(pad_row(""));
-        match self.step {
-            0 => {
-                if self.preset_idx == 5 {
-                    lines.push(pad_row("\x1b[38;2;135;130;125mtype URL · enter — next · ↑/↓ — presets · esc — clear/quit\x1b[0m"));
-                } else {
-                    lines.push(pad_row("\x1b[38;2;135;130;125m↑/↓ / 1-6 — select · enter — next · esc — quit\x1b[0m"));
-                }
-            }
-            1 => {
-                if self.is_cloud_backend() {
-                    lines.push(pad_row("\x1b[38;2;135;130;125mpaste API key · enter — confirm & fetch · esc — clear/back\x1b[0m"));
-                } else {
-                    lines.push(pad_row("\x1b[38;2;135;130;125mtype key or enter to skip · esc — clear/back\x1b[0m"));
-                }
-            }
-            2 => {
-                lines.push(pad_row("\x1b[38;2;135;130;125m↑/↓ · PgUp/PgDn · type to search · enter — select · esc — clear/back\x1b[0m"));
-            }
-            3 => {
-                lines.push(pad_row("\x1b[38;2;135;130;125m↑/↓ / 1-4 — select mode · enter — next · esc — back\x1b[0m"));
-            }
-            4 => {
-                lines.push(pad_row("\x1b[38;2;135;130;125m←/→ preset · enter — launch · esc — back\x1b[0m"));
-            }
-            _ => {}
+        let hint_w = inner_w.saturating_sub(2);
+        let hints: &[(&str, &str)] = match self.step {
+            0 if self.preset_idx == 5 => &[("type", "the URL"), ("\u{2191}/\u{2193}", "presets"), ("Enter", "next"), ("Esc", "clear or quit")],
+            0 => &[("\u{2191}/\u{2193}", "move"), ("1-6", "pick"), ("Enter", "next"), ("Esc", "quit")],
+            1 if self.is_cloud_backend() => &[("paste", "the key"), ("Enter", "check it"), ("Esc", "clear or back")],
+            1 => &[("Enter", "skip"), ("Esc", "back")],
+            2 => &[("\u{2191}/\u{2193}", "move"), ("type", "to filter"), ("Enter", "choose"), ("Esc", "clear or back")],
+            3 => &[("\u{2191}/\u{2193}", "move"), ("1-4", "pick"), ("Enter", "next"), ("Esc", "back")],
+            4 => &[("\u{2190}/\u{2192}", "preset"), ("Enter", "launch"), ("Esc", "back")],
+            _ => &[],
+        };
+        if !hints.is_empty() {
+            lines.push(pad_row(&crate::key_hints(hints, hint_w)));
         }
 
-        lines.push(format!("  {border_color}└{}┘{reset}", "─".repeat(inner_w)));
+        lines.push(format!("  {border_color}╰{}╯{reset}", "─".repeat(inner_w)));
         lines
     }
 }
@@ -955,13 +958,17 @@ pub async fn run_wizard_channel(
                         }
                         // Leaving the API key step: probe the server with the key.
                         if prev_step == 1 && wizard.step == 2 {
+                            wizard.available_models.clear();
+                            wizard.connection_status = Some(format!("Connecting to {}\u{2026}", wizard.config.backend_url.trim_end_matches('/')));
+                            let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
+                            crate::screen::paint_page(&mut painter, &wizard.render(term_w as usize), true);
                             let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
                             if let Some(disc) = backend.discover_server().await {
                                 wizard.apply_discovered_models(disc);
                             } else {
                                 wizard.available_models.clear();
                                 wizard.discovered_models.clear();
-                                wizard.connection_status = Some("Could not reach backend (will use default)".to_string());
+                                wizard.connection_status = Some("No server answered".to_string());
                             }
                         }
                     }
@@ -1018,13 +1025,17 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
                     }
                     // Leaving the API key step: probe the server with the key.
                     if prev_step == 1 && wizard.step == 2 {
+                        wizard.available_models.clear();
+                        wizard.connection_status = Some(format!("Connecting to {}\u{2026}", wizard.config.backend_url.trim_end_matches('/')));
+                        let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
+                        crate::screen::paint_page(&mut painter, &wizard.render(term_w as usize), true);
                         let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
                         if let Some(disc) = backend.discover_server().await {
                             wizard.apply_discovered_models(disc);
                         } else {
                             wizard.available_models.clear();
                             wizard.discovered_models.clear();
-                            wizard.connection_status = Some("Could not reach backend (will use default)".to_string());
+                            wizard.connection_status = Some("No server answered".to_string());
                         }
                     }
                 }
@@ -1131,7 +1142,7 @@ mod tests {
 
         let rendered = wizard.render(80).join("\n");
         assert!(rendered.contains("430 on the server"));
-        assert!(rendered.contains("▼ ... (420 more below)"));
+        assert!(rendered.contains("▼ 420 more below"));
 
         for c in "variant-04".chars() {
             wizard.handle_key(KeyCode::Char(c), KeyModifiers::empty());
@@ -1155,13 +1166,13 @@ mod tests {
 
         assert_eq!(wizard.custom_url, "");
         let initial_render = wizard.render(80).join("\n");
-        assert!(initial_render.contains("Enter endpoint here"));
+        assert!(initial_render.contains("type its URL"));
 
         wizard.handle_key(KeyCode::Char('6'), KeyModifiers::empty());
         assert_eq!(wizard.preset_idx, 5);
         let selected_render = wizard.render(80).join("\n");
-        assert!(selected_render.contains("Enter endpoint here"));
-        assert!(selected_render.contains("type URL manually"));
+        assert!(selected_render.contains("type its URL"));
+        assert!(selected_render.contains("OpenAI-compatible URL"));
 
         // Enter on an empty URL does not advance and shows a warning.
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
@@ -1171,7 +1182,7 @@ mod tests {
         wizard.handle_key(KeyCode::Char('h'), KeyModifiers::empty());
         assert_eq!(wizard.custom_url, "h");
         let typed_render = wizard.render(80).join("\n");
-        assert!(!typed_render.contains("Enter endpoint here"));
+        assert!(!typed_render.contains("type its URL"));
         assert!(typed_render.contains("h"));
 
         for c in "ttp://192.168.1.50:5000/v1".chars() {
@@ -1185,7 +1196,7 @@ mod tests {
         }
         assert_eq!(wizard.custom_url, "");
         let emptied_render = wizard.render(80).join("\n");
-        assert!(emptied_render.contains("Enter endpoint here"));
+        assert!(emptied_render.contains("type its URL"));
 
         for c in "http://192.168.1.50:5000/v1".chars() {
             wizard.handle_key(KeyCode::Char(c), KeyModifiers::empty());
@@ -1238,7 +1249,7 @@ mod tests {
         assert_eq!(wizard.custom_cursor, "http://10.0.0.5:1234/v1".len());
         let rendered = wizard.render(80).join("\n");
         assert!(rendered.contains("http://10.0.0.5:1234/v1"));
-        assert!(!rendered.contains("Enter endpoint here"));
+        assert!(!rendered.contains("type its URL"));
     }
 
     #[test]

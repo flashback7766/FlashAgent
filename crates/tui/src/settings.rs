@@ -154,48 +154,48 @@ impl SettingsView {
     match self.active_tab {
         SettingsTab::General => vec![
             ("Backend URL *", if self.editing_url { format!("{}█", self.url_input) } else { self.config.backend_url.clone() }),
-            ("Active Model", if self.config.model.is_empty() { "(auto-detected)".to_string() } else { self.config.model.clone() }),
-            ("Permission Mode", self.config.permission_mode.label().to_string()),
-            ("Auto-Save Sessions", if self.config.auto_save_sessions { "Enabled (auto-resume)".into() } else { "Disabled".into() }),
-            ("External Editor", self.config.external_editor.clone()),
-            ("Setup Wizard", "Launch initial configuration wizard".into()),
+            ("Active model", if self.config.model.is_empty() { "(auto-detected)".to_string() } else { self.config.model.clone() }),
+            ("Permission mode", self.config.permission_mode.label().to_string()),
+            ("Auto-save sessions", if self.config.auto_save_sessions { "Enabled (auto-resume)".into() } else { "Disabled".into() }),
+            ("External editor", self.config.external_editor.clone()),
+            ("Setup wizard", "Run the first-start setup again".into()),
         ],
         SettingsTab::Updates => vec![
-            ("Auto-Update *", if self.config.auto_check_updates { "On (installs in the background)".into() } else { "Off (Ctrl+U or /update only)".into() }),
-            ("Release Channel", self.config.update_channel.label().to_string()),
-            ("Check Updates Now", self.update_check_status.clone().unwrap_or_else(|| "Check GitHub Releases API now".into())),
+            ("Auto-update *", if self.config.auto_check_updates { "On (installs in the background)".into() } else { "Off (Ctrl+U or /update only)".into() }),
+            ("Release channel", self.config.update_channel.label().to_string()),
+            ("Check for updates", self.update_check_status.clone().unwrap_or_else(|| "Ask GitHub for the newest release".into())),
         ],
         SettingsTab::Aesthetics => vec![
-            ("Swift Mascot", if self.config.show_mascot { "Enabled (animated)".into() } else { "Disabled".into() }),
-            ("Developer Tips", if self.config.show_tips { "Enabled (rotating deck)".into() } else { "Disabled".into() }),
-            ("Prefill Speed", if self.config.show_ttft { "Enabled (TTFT and t/s after a turn starts)".into() } else { "Disabled".into() }),
-            ("Generation Speed", if self.config.show_tokens { "Enabled (t/s while the model writes)".into() } else { "Disabled".into() }),
-            ("Clipboard Toasts", if self.config.show_toasts { "Enabled".into() } else { "Disabled".into() }),
+            ("Swift mascot", if self.config.show_mascot { "Enabled (animated)".into() } else { "Disabled".into() }),
+            ("Developer tips", if self.config.show_tips { "Enabled (rotating deck)".into() } else { "Disabled".into() }),
+            ("Prefill speed", if self.config.show_ttft { "Enabled (TTFT and t/s after a turn starts)".into() } else { "Disabled".into() }),
+            ("Generation speed", if self.config.show_tokens { "Enabled (t/s while the model writes)".into() } else { "Disabled".into() }),
+            ("Clipboard toasts", if self.config.show_toasts { "Enabled".into() } else { "Disabled".into() }),
             ("Animations", if self.config.animations { "Enabled (sweeps, pulses, unfolding panels)".into() } else { "Reduced (spinners only)".into() }),
-            ("Colour Theme", self.config.color_theme.label().to_string()),
+            ("Color theme", self.config.color_theme.label().to_string()),
         ],
         SettingsTab::Reasoning => vec![
-            ("Thinking Effort", self.config.thinking_effort.clone()),
-            ("Context Alert", if self.config.context_warn_threshold > 0 { format!("Warn at {}%", self.config.context_warn_threshold) } else { "Disabled".into() }),
-            ("Auto-Compact History", if self.config.auto_compact_context {
+            ("Thinking effort", self.config.thinking_effort.clone()),
+            ("Context alert", if self.config.context_warn_threshold > 0 { format!("Warn at {}%", self.config.context_warn_threshold) } else { "Disabled".into() }),
+            ("Auto-compact history", if self.config.auto_compact_context {
                 // Zero follows the window; "0%" would read as "always".
                 match self.config.context_compact_threshold {
                     0 => format!("Enabled (auto: {}% for this window)", flashagent_core::default_compact_threshold(self.context_capacity)),
                     pct => format!("Enabled (at {pct}%)"),
                 }
             } else { "Disabled".into() }),
-            ("Web Tools", if self.config.web_tools { "Enabled (web_fetch, web_search)".into() } else { "Disabled".into() }),
-            ("Network Retries", format!("{} retries on connection failure", self.config.network_retries)),
+            ("Web tools", if self.config.web_tools { "Enabled (web_fetch, web_search)".into() } else { "Disabled".into() }),
+            ("Network retries", format!("{} on connection failure", crate::plural(self.config.network_retries, "retry", "retries"))),
             // Last, and for those who know what the numbers do.
             ("Sampling (advanced)", format!("{} · temperature {:.2}", self.config.sampling_preset.label(), self.config.temperature)),
         ],
         SettingsTab::Goal => vec![
-            ("Step Limit", match self.config.goal_max_steps {
+            ("Step limit", match self.config.goal_max_steps {
                 None | Some(0) => "Unlimited".to_string(),
-                Some(n) => format!("{n} steps"),
+                Some(n) => crate::plural(n as usize, "step", "steps"),
             }),
-            ("Time Limit", goal_minutes_label(self.config.goal_max_minutes)),
-            ("Token Limit", goal_tokens_label(self.config.goal_max_output_tokens)),
+            ("Time limit", goal_minutes_label(self.config.goal_max_minutes)),
+            ("Token limit", goal_tokens_label(self.config.goal_max_output_tokens)),
         ],
         SettingsTab::Style => {
             let p = &self.config.personality;
@@ -211,9 +211,9 @@ impl SettingsView {
             rows
         }
         SettingsTab::Tools => vec![
-            ("Toolset Profile", self.config.toolset_profile.label().to_string()),
-            ("MCP Manager", "Overview & Server Registry".into()),
-            ("Run Tool Test", self.tool_test_status.clone().unwrap_or_else(|| "Probe function calling".into())),
+            ("Toolset profile", self.config.toolset_profile.label().to_string()),
+            ("MCP servers", "Configured servers and the marketplace".into()),
+            ("Run tool test", self.tool_test_status.clone().unwrap_or_else(|| "Probe function calling".into())),
         ],
     }
     }
@@ -581,23 +581,19 @@ impl SettingsView {
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
         let mut lines = Vec::new();
-        let box_w = width.saturating_sub(6).clamp(52, 100);
+        let box_w = width.saturating_sub(6).min(100);
         let inner_text_w = box_w.saturating_sub(2);
         let border_color = "\x1b[38;2;160;155;145m";
         let reset = "\x1b[0m";
 
         let pad_row = |content: &str| -> String {
-            let clipped = if crate::visible_width(content) > inner_text_w {
-                crate::clip_ansi(content, inner_text_w)
-            } else {
-                content.to_string()
-            };
+            let clipped = crate::tool_views::clip_ellipsis(content, inner_text_w);
             let clipped_vis = crate::visible_width(&clipped);
             let pad = " ".repeat(inner_text_w.saturating_sub(clipped_vis));
             format!("  {border_color}│{reset} {clipped}{pad} {border_color}│{reset}")
         };
 
-        let title_styled = " \x1b[1;38;2;225;175;95mFlashAgent Settings Wizard\x1b[0m \x1b[38;2;160;155;145m(Tab 1-7 to switch)\x1b[0m ";
+        let title_styled = " \x1b[1;38;2;225;175;95mSettings\x1b[0m ";
         let title_vis = crate::visible_width(title_styled);
         let dashes = box_w.saturating_sub(title_vis + 1);
         lines.push((
@@ -605,24 +601,38 @@ impl SettingsView {
             format!("  {border_color}╭─{title_styled}{}╮{reset}", "─".repeat(dashes)),
         ));
 
-        let mut tabs_line = String::from(" ");
-        for tab in SettingsTab::all() {
-            let is_cur = *tab == self.active_tab;
-            let tab_lbl = tab.label();
-            if is_cur {
-                tabs_line.push_str(&format!("\x1b[1;38;2;225;175;95m[{tab_lbl}]\x1b[0m  "));
-            } else {
-                tabs_line.push_str(&format!("\x1b[38;2;135;130;125m {tab_lbl} \x1b[0m  "));
-            }
-        }
-        lines.push((LineKind::System, pad_row(&tabs_line)));
+        // Tighter as the window narrows; at the narrowest the other tabs are their numbers.
+        let tabs_line = |gap: usize, numbers_only: bool| -> String {
+            let tabs: Vec<String> = SettingsTab::all()
+                .iter()
+                .map(|tab| {
+                    let tab_lbl = tab.label();
+                    if *tab == self.active_tab {
+                        format!("\x1b[1;38;2;225;175;95m[{tab_lbl}]\x1b[0m")
+                    } else {
+                        let shown = if numbers_only { tab_lbl.split(' ').next().unwrap_or(tab_lbl) } else { tab_lbl };
+                        format!("\x1b[38;2;135;130;125m {shown} \x1b[0m")
+                    }
+                })
+                .collect();
+            format!(" {}", tabs.join(&" ".repeat(gap)))
+        };
+        let tabs = [(2, false), (1, false), (0, false)]
+            .into_iter()
+            .map(|(gap, numbers_only)| tabs_line(gap, numbers_only))
+            .find(|line| crate::visible_width(line) <= inner_text_w)
+            .unwrap_or_else(|| tabs_line(0, true));
+        lines.push((LineKind::System, pad_row(&tabs)));
         lines.push((
             LineKind::System,
             format!("  {border_color}├{}┤{reset}", "─".repeat(box_w)),
         ));
 
-        let max_val_w = inner_text_w.saturating_sub(28);
         let items = self.items();
+        // Values get the room a narrow window leaves once labels are as long as they need.
+        let longest = items.iter().map(|(label, _)| label.chars().count()).max().unwrap_or(0);
+        let label_w = if inner_text_w < 60 { (longest + 1).min(24) } else { 24 };
+        let max_val_w = inner_text_w.saturating_sub(label_w + 4);
 
         for (idx, (label, val_raw)) in items.iter().enumerate() {
             let is_sel = idx == self.selected_index;
@@ -630,46 +640,38 @@ impl SettingsView {
             let val = crate::truncate_middle(val_raw, max_val_w);
             let (label_styled, val_styled) = if is_sel {
                 (
-                    format!("\x1b[1;38;2;240;235;225m{:<24}\x1b[0m", label),
+                    format!("\x1b[1;38;2;240;235;225m{:<label_w$}\x1b[0m", label),
                     format!("\x1b[1;38;2;225;175;95m{val}\x1b[0m"),
                 )
             } else {
                 (
-                    format!("\x1b[38;2;160;155;145m{:<24}\x1b[0m", label),
+                    format!("\x1b[38;2;160;155;145m{:<label_w$}\x1b[0m", label),
                     format!("\x1b[38;2;200;195;185m{val}\x1b[0m"),
                 )
             };
             lines.push((LineKind::System, pad_row(&format!("{ptr} {label_styled} {val_styled}"))));
         }
 
-        let has_restart_items = matches!(self.active_tab, SettingsTab::General | SettingsTab::Updates);
-        if has_restart_items {
-            lines.push((
-                LineKind::System,
-                pad_row("\x1b[38;2;225;175;95m* Marked options require app restart to take effect\x1b[0m"),
-            ));
-        } else if self.active_tab == SettingsTab::Style {
-            lines.push((
-                LineKind::System,
-                pad_row("\x1b[38;2;135;130;125mTone only — tools and code are unaffected. Applies from your next message.\x1b[0m"),
-            ));
-        } else {
+        let note = match self.active_tab {
+            SettingsTab::General | SettingsTab::Updates => "\x1b[38;2;225;175;95m* Takes effect after a restart\x1b[0m",
+            SettingsTab::Style => {
+                "\x1b[38;2;135;130;125mTone only — tools and code are unaffected. Applies from your next message.\x1b[0m"
+            }
+            _ => "",
+        };
+        for row in crate::wrap_styled(note, inner_text_w.max(1)) {
+            lines.push((LineKind::System, pad_row(&row)));
+        }
+        if note.is_empty() {
             lines.push((LineKind::System, pad_row("")));
         }
 
-        // Dropped from the middle in a narrow window, so the way out stays.
-        let dim = "\x1b[38;2;135;130;125m";
-        let hints = crate::fit_hints(
-            &[
-                ("Tab/1-7 switch tab".into(), format!("{dim}Tab/1-7 switch tab\x1b[0m")),
-                ("↑/↓ navigate".into(), format!("{dim}↑/↓ navigate\x1b[0m")),
-                ("Enter/←/→ toggle value".into(), format!("{dim}Enter/←/→ toggle value\x1b[0m")),
-                ("Esc save & return".into(), format!("{dim}Esc save & return\x1b[0m")),
-            ],
-            &format!("{dim} · \x1b[0m"),
-            inner_text_w.saturating_sub(1),
-        );
-        lines.push((LineKind::System, pad_row(&hints)));
+        let hints: &[(&str, &str)] = if self.editing_url {
+            &[("Enter", "save"), ("Esc", "cancel")]
+        } else {
+            &[("Tab/1-7", "switch tab"), ("↑/↓", "move"), ("Enter/←/→", "change"), ("Esc", "save and close")]
+        };
+        lines.push((LineKind::System, pad_row(&crate::key_hints(hints, inner_text_w.saturating_sub(1)))));
 
         lines.push((
             LineKind::System,
@@ -761,10 +763,10 @@ mod tests {
     }
 
     #[test]
-    fn the_colour_theme_row_changes_the_theme() {
+    fn the_color_theme_row_changes_the_theme() {
         let mut view = SettingsView::new(AppConfig::default(), Vec::new());
         view.handle_key(KeyCode::Char('3'), KeyModifiers::empty());
-        while view.items()[view.selected_index].0 != "Colour Theme" {
+        while view.items()[view.selected_index].0 != "Color theme" {
             view.handle_key(KeyCode::Down, KeyModifiers::empty());
         }
         let before = view.config.color_theme;
@@ -805,8 +807,10 @@ mod tests {
         let cfg = AppConfig::default();
         let view = SettingsView::new(cfg, vec!["model-a".into()]);
 
-        for width in [60, 80, 100, 120] {
+        for width in [44, 50, 60, 80, 100, 120] {
             let rendered = view.render(width);
+            let tabs = crate::strip_ansi(&rendered[1].1);
+            assert!(tabs.contains("[1 General]") && tabs.contains(" 7") && !tabs.contains('…'), "{width}: {tabs:?}");
             assert!(!rendered.is_empty());
             let expected_w = crate::visible_width(&rendered[0].1);
             assert!(expected_w <= width, "Row width {expected_w} exceeds terminal width {width}");
@@ -827,6 +831,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_hints_end_with_the_way_out() {
+        let mut view = SettingsView::new(AppConfig::default(), Vec::new());
+        let last_hint = |v: &SettingsView| {
+            let rows = v.render(100);
+            crate::strip_ansi(&rows[rows.len() - 2].1)
+        };
+        assert!(last_hint(&view).contains("Tab/1-7 switch tab"), "{}", last_hint(&view));
+        assert!(last_hint(&view).trim_end_matches(['│', ' ']).ends_with("Esc save and close"), "{}", last_hint(&view));
+        view.editing_url = true;
+        assert!(last_hint(&view).trim_end_matches(['│', ' ']).ends_with("Enter save · Esc cancel"), "{}", last_hint(&view));
     }
 
     #[test]

@@ -11,7 +11,7 @@ pub enum StartupAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustScreenMode {
-    /// 1. Yes, continue. 2. Change working directory. 3. No, quit.
+    /// 1. Yes, continue. 2. Change folder. 3. No, quit.
     Select,
     ChangeDir {
         input: String,
@@ -144,48 +144,40 @@ impl TrustScreen {
         let prompt_style = "\x1b[1;38;2;225;175;95m"; // amber accent
         let text_dim = "\x1b[38;2;160;155;145m";
         let text_bright = "\x1b[1;38;2;240;235;225m";
-        let text_footer = "\x1b[38;2;135;130;125m";
         let text_error = "\x1b[1;38;2;235;105;105m";
 
         match &self.mode {
             TrustScreenMode::Select => {
-                lines.push(format!(
-                    "{prompt_style}> {text_dim}You are in {text_bright}{}{reset}",
-                    self.cwd.display()
-                ));
+                lines.push(format!("{prompt_style}FlashAgent{reset} {text_dim}\u{b7} trust this folder?{reset}"));
+                lines.push(String::new());
+                lines.push(format!("  {text_bright}{}{reset}", self.cwd.display()));
                 lines.push(String::new());
 
-                let desc = "Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec policies to load.";
-                let wrapped = wrap_words(desc, width.saturating_sub(4).max(20));
-                for l in wrapped {
+                let desc = "FlashAgent will read, edit and run commands here. Continue only if you trust \
+                            its files: they can carry instructions aimed at the model.";
+                for l in wrap_words(desc, width.saturating_sub(4).max(20)) {
                     lines.push(format!("  {text_dim}{l}{reset}"));
                 }
                 lines.push(String::new());
 
-                let options = [
-                    "1. Yes, Continue.",
-                    "2. Change working directory.",
-                    "3. No, quit.",
-                ];
-
+                let options = ["1. Yes, continue", "2. Change folder", "3. No, quit"];
                 for (idx, opt) in options.iter().enumerate() {
                     if idx == self.selected {
-                        lines.push(format!("{prompt_style}> {text_bright}{opt}{reset}"));
+                        lines.push(format!("{prompt_style}\u{25b8} {text_bright}{opt}{reset}"));
                     } else {
                         lines.push(format!("  {text_dim}{opt}{reset}"));
                     }
                 }
 
                 lines.push(String::new());
-                lines.push(format!("  {text_footer}Press enter to continue{reset}"));
+                let hints = [("\u{2191}/\u{2193}", "select"), ("Enter", "confirm"), ("Esc", "quit")];
+                lines.push(format!("  {}", crate::key_hints(&hints, width.saturating_sub(2))));
             }
             TrustScreenMode::ChangeDir { input, error } => {
-                lines.push(format!(
-                    "{prompt_style}> {text_bright}Change working directory{reset}"
-                ));
+                lines.push(format!("{prompt_style}FlashAgent{reset} {text_dim}\u{b7} change folder{reset}"));
                 lines.push(String::new());
                 lines.push(format!(
-                    "  {text_dim}Enter directory path (relative or absolute, ~ for home):{reset}"
+                    "  {text_dim}Folder to work in (relative, absolute, or starting with ~):{reset}"
                 ));
                 lines.push(format!(
                     "  {prompt_style}› {text_bright}{input}\x1b[7m {reset}"
@@ -196,9 +188,8 @@ impl TrustScreen {
                     lines.push(String::new());
                 }
                 lines.push(String::new());
-                lines.push(format!(
-                    "  {text_footer}enter — confirm · esc — cancel and go back{reset}"
-                ));
+                let hints = [("Enter", "open"), ("Esc", "back")];
+                lines.push(format!("  {}", crate::key_hints(&hints, width.saturating_sub(2))));
             }
         }
 
@@ -345,12 +336,12 @@ mod tests {
         let screen = TrustScreen::new(PathBuf::from("/test/path"));
         let rendered = screen.render(80);
         let joined = rendered.join("\n");
-        assert!(joined.contains("You are in"));
+        assert!(joined.contains("trust this folder?"));
         assert!(joined.contains("/test/path"));
-        assert!(joined.contains("Do you trust the contents of this directory?"));
-        assert!(joined.contains("1. Yes, Continue."));
-        assert!(joined.contains("2. Change working directory."));
-        assert!(joined.contains("3. No, quit."));
-        assert!(joined.contains("Press enter to continue"));
+        assert!(joined.contains("read, edit and run commands"));
+        assert!(joined.contains("1. Yes, continue"));
+        assert!(joined.contains("2. Change folder"));
+        assert!(joined.contains("3. No, quit"));
+        assert!(joined.contains("Esc"));
     }
 }

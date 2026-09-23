@@ -357,16 +357,18 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
     };
     let greeting = if been_here_before() { "Welcome back" } else { "Welcome" };
 
-    let th_str = thinking.unwrap_or("High");
-    let ctx_short = context_window.unwrap_or("128k");
+    let th_str = thinking.unwrap_or("auto");
+    // Nothing is made up while the server has not said.
+    let model = if model.trim().is_empty() { "none yet (F3)" } else { model };
+    let ctx_short = context_window.unwrap_or("");
     let mascot = if show_mascot {
         mascot_swift_lines_mood(tick_n, mood)
     } else {
         [
             "".to_string(),
-            format!("{M3_PRI_B}FlashAgent Engine{RESET}"),
-            format!("{M3_MUT}Local-first AI Pair Programmer{RESET}"),
-            format!("{M3_MUT}Ultra-low latency inference{RESET}"),
+            format!("{M3_PRI_B}FlashAgent{RESET}"),
+            format!("{M3_MUT}the coding agent for local models{RESET}"),
+            "".to_string(),
             "".to_string(),
             "".to_string(),
         ]
@@ -437,7 +439,7 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         ];
 
         let model_val = truncate_middle(model, w2.saturating_sub(13));
-        let ctx_val = truncate_middle(context_window.unwrap_or("128k capacity (local)"), w2.saturating_sub(13));
+        let ctx_val = truncate_middle(context_window.unwrap_or("not known yet"), w2.saturating_sub(13));
         let memory_val = match memory_docs {
             0 => format!("{M3_MUT}no rule files yet{RESET}"),
             1 => format!("{M3_TXT}1{RESET} {M3_MUT}rule file{RESET}"),
@@ -492,12 +494,16 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
 
         // Whatever no longer fits is dropped whole.
         let model_meta = truncate_middle(model, inner_w.saturating_sub(4).min(28));
+        let parts: Vec<(String, String)> = [
+            (model_meta.clone(), format!("{M3_PRI}{model_meta}{RESET}")),
+            (th_str.to_string(), format!("{M3_LGT}{th_str}{RESET}")),
+            (ctx_short.to_string(), format!("{M3_ICE}{ctx_short}{RESET}")),
+        ]
+        .into_iter()
+        .filter(|(plain, _)| !plain.is_empty())
+        .collect();
         let left_meta = fit_parts(
-            &[
-                (model_meta.clone(), format!("{M3_PRI}{model_meta}{RESET}")),
-                (th_str.to_string(), format!("{M3_LGT}{th_str}{RESET}")),
-                (ctx_short.to_string(), format!("{M3_ICE}{ctx_short}{RESET}")),
-            ],
+            &parts,
             &format!(" {M3_MUT}\u{b7}{RESET} "),
             inner_w.saturating_sub(2),
         );
@@ -541,22 +547,29 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
 }
 
 pub fn render_session_saved_card(session_id: &str, width: usize) -> Vec<String> {
-    let box_w = width.saturating_sub(6).clamp(52, 90);
+    let box_w = width.saturating_sub(6).min(90);
     let inner_text_w = box_w.saturating_sub(2);
     let border_color = "\x1b[38;2;225;175;95m";
     let reset = "\x1b[0m";
+    let resume_cmd = format!("flashagent --resume {session_id}");
+    // A command cut to fit a box no longer works: too narrow, it goes unboxed.
+    if inner_text_w < resume_cmd.chars().count() + 8 {
+        return vec![
+            format!("  \x1b[1;38;2;225;175;95mSession saved.\x1b[0m \x1b[38;2;160;155;145mTo resume:{reset}"),
+            format!("  \x1b[1;38;2;240;235;225m{resume_cmd}{reset}"),
+        ];
+    }
 
-    let title_styled = " \x1b[1;38;2;225;175;95mSession Saved\x1b[0m ";
+    let title_styled = " \x1b[1;38;2;225;175;95mSession saved\x1b[0m ";
     let title_vis = visible_width(title_styled);
     let dashes = box_w.saturating_sub(title_vis + 1);
     let top = format!("  {border_color}╭─{title_styled}{}╮{reset}", "─".repeat(dashes));
 
-    let resume_cmd = format!("flashagent --resume {session_id}");
     let msg = if inner_text_w >= 86 {
         format!(
             "To resume: \x1b[1;38;2;240;235;225mflashagent --continue\x1b[0m here, or \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m"
         )
-    } else if inner_text_w >= 66 {
+    } else if inner_text_w >= resume_cmd.chars().count() + 21 {
         format!("To resume next time: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m")
     } else {
         format!("Resume: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m")

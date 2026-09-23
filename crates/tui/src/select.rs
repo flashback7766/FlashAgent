@@ -2,43 +2,61 @@
 
 use flashagent_core::Decision;
 
-use crate::{clip_ansi, visible_width, LineKind, RenderLine};
+use crate::{visible_width, LineKind, RenderLine};
 
-/// Horizontal Allow / Deny selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConfirmSelect {
-    pub selected: Decision,
+/// The approval card's buttons, left to right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfirmChoice {
+    #[default]
+    Allow,
+    /// Allow, and the same kind of call from now on.
+    Always,
+    Deny,
 }
 
-impl Default for ConfirmSelect {
-    fn default() -> Self {
-        Self { selected: Decision::Allow }
-    }
+/// Horizontal Allow / Always / Deny selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ConfirmSelect {
+    pub selected: ConfirmChoice,
 }
 
 impl ConfirmSelect {
-    /// Defaults to `Decision::Allow`.
+    /// Starts on Allow.
     pub fn new() -> Self {
         Self::default()
     }
 
     pub fn toggle(&mut self) {
         self.selected = match self.selected {
-            Decision::Allow => Decision::Deny,
-            Decision::Deny => Decision::Allow,
+            ConfirmChoice::Allow => ConfirmChoice::Always,
+            ConfirmChoice::Always => ConfirmChoice::Deny,
+            ConfirmChoice::Deny => ConfirmChoice::Allow,
         };
     }
 
     pub fn left(&mut self) {
-        self.selected = Decision::Allow;
+        self.selected = match self.selected {
+            ConfirmChoice::Deny => ConfirmChoice::Always,
+            _ => ConfirmChoice::Allow,
+        };
     }
 
     pub fn right(&mut self) {
-        self.selected = Decision::Deny;
+        self.selected = match self.selected {
+            ConfirmChoice::Allow => ConfirmChoice::Always,
+            _ => ConfirmChoice::Deny,
+        };
+    }
+
+    pub fn choice(self) -> ConfirmChoice {
+        self.selected
     }
 
     pub fn decision(self) -> Decision {
-        self.selected
+        match self.selected {
+            ConfirmChoice::Allow | ConfirmChoice::Always => Decision::Allow,
+            ConfirmChoice::Deny => Decision::Deny,
+        }
     }
 }
 
@@ -215,18 +233,13 @@ impl<T> SelectMenu<T> {
     }
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
-        let card_w = width.clamp(36, 74);
+        let card_w = width.clamp(24, 74);
         let inner_w = card_w.saturating_sub(2);
         let border_color = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
 
         let pad_row = |content: &str| -> String {
-            let vis = visible_width(content);
-            let clipped = if vis > inner_w {
-                clip_ansi(content, inner_w)
-            } else {
-                content.to_string()
-            };
+            let clipped = crate::tool_views::clip_ellipsis(content, inner_w);
             let clipped_vis = visible_width(&clipped);
             let pad = inner_w.saturating_sub(clipped_vis);
             format!("{border_color}│{reset}{clipped}{}{border_color}│{reset}", " ".repeat(pad))
@@ -253,7 +266,10 @@ impl<T> SelectMenu<T> {
         } else {
             format!("({total_matches}/{} · \"{}\")", self.items.len(), self.filter)
         };
-        let title_styled = format!(" \x1b[1;38;2;225;175;95m{}\x1b[0m \x1b[38;2;160;155;145m{count_str}\x1b[0m ", self.title);
+        let title_styled = crate::tool_views::clip_ellipsis(
+            &format!(" \x1b[1;38;2;225;175;95m{}\x1b[0m \x1b[38;2;160;155;145m{count_str}\x1b[0m ", self.title),
+            inner_w.saturating_sub(1),
+        );
         let title_vis = visible_width(&title_styled);
         let border_dashes = inner_w.saturating_sub(title_vis);
         lines.push((
@@ -279,7 +295,7 @@ impl<T> SelectMenu<T> {
             if start > 0 {
                 lines.push((
                     LineKind::System,
-                    pad_row(&format!("  \x1b[38;2;135;130;125m▲ ... ({} more above) ...\x1b[0m", start)),
+                    pad_row(&format!("  \x1b[38;2;135;130;125m▲ {start} more above\x1b[0m")),
                 ));
             }
 
@@ -307,7 +323,7 @@ impl<T> SelectMenu<T> {
             if end < total_matches {
                 lines.push((
                     LineKind::System,
-                    pad_row(&format!("  \x1b[38;2;135;130;125m▼ ... ({} more below) ...\x1b[0m", total_matches - end)),
+                    pad_row(&format!("  \x1b[38;2;135;130;125m▼ {} more below\x1b[0m", total_matches - end)),
                 ));
             }
         }
@@ -316,12 +332,12 @@ impl<T> SelectMenu<T> {
             LineKind::System,
             format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
         ));
-        let hints: Vec<(String, String)> = ["↑/↓", "PgUp/PgDn", "type to search", "enter select", "esc cancel"]
-            .iter()
-            .map(|h| (h.to_string(), h.to_string()))
-            .collect();
-        let hints = crate::fit_hints(&hints, " · ", width.saturating_sub(2));
-        lines.push((LineKind::System, format!("  \x1b[38;2;135;130;125m{hints}\x1b[0m")));
+        let mut hints = vec![("↑/↓", "move"), ("Enter", "select"), ("type", "to filter")];
+        if total_matches > self.page_size {
+            hints.push(("PgUp/PgDn", "page"));
+        }
+        hints.push(("Esc", "cancel"));
+        lines.push((LineKind::System, format!("  {}", crate::key_hints(&hints, width.saturating_sub(2)))));
 
         lines
     }
@@ -349,19 +365,27 @@ mod tests {
     #[test]
     fn confirm_select_navigation() {
         let mut cs = ConfirmSelect::new();
-        assert_eq!(cs.decision(), Decision::Allow);
+        assert_eq!(cs.choice(), ConfirmChoice::Allow);
 
+        // Every button can be reached, Always included.
+        cs.right();
+        assert_eq!(cs.choice(), ConfirmChoice::Always);
+        assert_eq!(cs.decision(), Decision::Allow);
+        cs.right();
+        assert_eq!(cs.decision(), Decision::Deny);
         cs.right();
         assert_eq!(cs.decision(), Decision::Deny);
 
         cs.left();
-        assert_eq!(cs.decision(), Decision::Allow);
+        assert_eq!(cs.choice(), ConfirmChoice::Always);
+        cs.left();
+        assert_eq!(cs.choice(), ConfirmChoice::Allow);
 
         cs.toggle();
-        assert_eq!(cs.decision(), Decision::Deny);
-
         cs.toggle();
-        assert_eq!(cs.decision(), Decision::Allow);
+        assert_eq!(cs.choice(), ConfirmChoice::Deny);
+        cs.toggle();
+        assert_eq!(cs.choice(), ConfirmChoice::Allow);
     }
 
     #[test]
@@ -405,7 +429,12 @@ mod tests {
         assert_eq!(menu.page_size, 10);
 
         let lines = menu.render(80);
-        assert!(lines.iter().any(|(_, t)| t.contains("▼ ... (40 more below)")));
+        assert!(lines.iter().any(|(_, t)| t.contains("▼ 40 more below")));
+        let hint = crate::strip_ansi(&lines.last().unwrap().1);
+        assert!(hint.contains("PgUp/PgDn page") && hint.trim_end().ends_with("Esc cancel"), "{hint:?}");
+        menu.selected = 49;
+        assert!(menu.render(80).iter().any(|(_, t)| t.contains("▲ 40 more above")));
+        menu.selected = 0;
 
         menu.push_filter_char('4');
         let filtered = menu.filtered_indices();

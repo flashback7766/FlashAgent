@@ -49,7 +49,7 @@ pub(crate) struct FrameState<'a> {
     pub(crate) running: bool,
     /// Generation speed over the last 3 seconds; `None` when counters are off.
     pub(crate) tokens_per_sec: Option<f64>,
-    pub(crate) confirm_selection: Decision,
+    pub(crate) confirm_selection: ConfirmChoice,
     pub(crate) question_state: Option<&'a QuestionUiState>,
     pub(crate) custom_placeholder: Option<&'a str>,
     pub(crate) suggested_prompt: Option<&'a str>,
@@ -214,6 +214,11 @@ impl Renderer {
         };
         let border_color = border_rgb.fg();
         let reset = "\x1b[0m";
+        // A blank row between the conversation and the composer or card under it.
+        let last_row = tail.last().or_else(|| settled.last()).map(|(_, text)| text.as_str());
+        if last_row.is_some_and(|text| !flashagent_tui::strip_ansi(text).trim().is_empty()) {
+            tail.push((LineKind::System, String::new()));
+        }
         let card_start = tail.len();
 
         let mut input_line_idx;
@@ -222,19 +227,23 @@ impl Renderer {
 
         if let Some(req) = gate.pending() {
             // The composer becomes the approval card.
-            let tool_styled = format!("\x1b[1;38;2;225;175;95m{}\x1b[0m", req.tool);
-            let title = format!(" Confirm: {tool_styled} ");
-            let vis_title_len = visible_width(&title);
-            let dash_w = inner_w.saturating_sub(vis_title_len + 1);
-
-            tail.push((
-                LineKind::System,
-                format!("{border_color}╭─{title}{}╮{reset}", "─".repeat(dash_w)),
-            ));
-
             // Shows exactly what is approved, and never lets model-supplied escape codes
             // restyle or hide part of it.
             let args = flashagent_llm::effective_args(&req.args_json, &req.tool).unwrap_or_default();
+            let several_files = args.get("files").and_then(|f| f.as_array()).is_some_and(|f| f.len() > 1);
+            let question = match req.tool.as_str() {
+                "run_shell" => "Run this command?".to_string(),
+                "edit_file" | "patch_file" | "write_file" if several_files => "Change these files?".to_string(),
+                "edit_file" | "patch_file" | "write_file" => "Change this file?".to_string(),
+                tool => format!("Allow {tool}?"),
+            };
+            let title = format!(" \x1b[1;38;2;225;175;95m{question}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m ", req.tool);
+            let dash_w = inner_w.saturating_sub(visible_width(&title) + 1);
+            tail.push((
+                LineKind::System,
+                format!("{border_color}╭─{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
+            ));
+
             let field = |k: &str| args.get(k).and_then(|v| v.as_str()).map(card_safe);
             let label_row = |label: &str, value: &str| {
                 pad_box_row(
@@ -267,7 +276,11 @@ impl Renderer {
 
             if let Some(ref diff) = req.diff {
                 // The file is named on the target row; the preview rows are for the change.
-                for line in diff.lines().filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ")).take(6) {
+                let changed: Vec<&str> = diff
+                    .lines()
+                    .filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ") && !l.starts_with("@@"))
+                    .collect();
+                for line in changed.iter().take(6) {
                     let (color, prefix) = if line.starts_with('+') {
                         ("\x1b[38;2;145;205;140m", "+")
                     } else if line.starts_with('-') {
@@ -282,22 +295,33 @@ impl Renderer {
                         pad_box_row(&format!("  {color}{prefix} {line_clipped}\x1b[0m"), width),
                     ));
                 }
+                if changed.len() > 6 {
+                    let more = flashagent_tui::plural(changed.len() - 6, "more line", "more lines");
+                    tail.push((LineKind::System, pad_box_row(&format!("    \x1b[38;2;100;95;90m+{more}\x1b[0m"), width)));
+                }
             }
 
-            let allow_btn = if st.confirm_selection == Decision::Allow {
-                "\x1b[1;38;2;225;175;95m[► Allow (Enter)]\x1b[0m"
-            } else {
-                "\x1b[38;2;160;155;145m[ Allow (Enter) ]\x1b[0m"
+            // The keys are on the hint line under the card.
+            let button = |label: &str, choice: ConfirmChoice| {
+                if st.confirm_selection == choice {
+                    let bg = if choice == ConfirmChoice::Deny { "225;115;105" } else { "225;175;95" };
+                    format!("\x1b[1;38;2;30;26;22;48;2;{bg}m {label} \x1b[0m")
+                } else {
+                    format!("\x1b[38;2;190;185;175m {label} \x1b[0m")
+                }
             };
-            let always_btn = "\x1b[38;2;160;155;145m[ Always (a) ]\x1b[0m";
-            let deny_btn = if st.confirm_selection == Decision::Deny {
-                "\x1b[1;38;2;225;115;105m[► Deny (d / Esc)]\x1b[0m"
-            } else {
-                "\x1b[38;2;160;155;145m[ Deny (d / Esc) ]\x1b[0m"
-            };
+            tail.push((LineKind::System, pad_box_row(" ", width)));
             tail.push((
                 LineKind::System,
-                pad_box_row(&format!(" {allow_btn}   {always_btn}   {deny_btn}"), width),
+                pad_box_row(
+                    &format!(
+                        " {}  {}  {}",
+                        button("Allow", ConfirmChoice::Allow),
+                        button("Always allow", ConfirmChoice::Always),
+                        button("Deny", ConfirmChoice::Deny)
+                    ),
+                    width,
+                ),
             ));
 
             input_line_idx = tail.len();
@@ -325,10 +349,7 @@ impl Renderer {
             }
             tail.push((
                 LineKind::System,
-                pad_box_row(
-                    " \x1b[1;38;2;225;175;95m[► Yes (y)]\x1b[0m   \x1b[38;2;160;155;145m[ No (n / Esc) ]\x1b[0m",
-                    width,
-                ),
+                pad_box_row(" \x1b[1;38;2;30;26;22;48;2;225;175;95m Yes \x1b[0m  \x1b[38;2;190;185;175m No \x1b[0m", width),
             ));
             input_line_idx = tail.len();
             tail.push((
@@ -346,11 +367,10 @@ impl Renderer {
                 format!("{border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
             ));
 
-            let q_clipped = clip_ansi(&req.question, inner_w.saturating_sub(4));
-            tail.push((
-                LineKind::System,
-                pad_box_row(&format!(" \x1b[1;38;2;240;235;225m{q_clipped}\x1b[0m"), width),
-            ));
+            // Wrapped: the question is what the user answers, so none of it is cut.
+            for row in wrap_plain(&card_safe(&req.question), inner_w.saturating_sub(3)) {
+                tail.push((LineKind::System, pad_box_row(&format!(" \x1b[1;38;2;240;235;225m{row}\x1b[0m"), width)));
+            }
             if let Some(deadline) = req.deadline {
                 // During /goal the question will not wait forever; say how long.
                 let left = deadline.saturating_duration_since(std::time::Instant::now()).as_secs();
@@ -379,27 +399,26 @@ impl Renderer {
                     let num = i + 1;
                     let is_sel = !is_writing && sel_idx == i;
                     let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
-                    let opt_clipped = clip_ansi(opt, inner_w.saturating_sub(14));
-                    let opt_styled = if req.multi_select {
-                        let checked = q_state.map(|s| s.selected_indices.contains(&i)).unwrap_or(false);
-                        let check_box = if checked {
-                            "\x1b[1;38;2;145;205;140m[x]\x1b[0m"
-                        } else {
-                            "\x1b[38;2;135;130;125m[ ]\x1b[0m"
-                        };
-                        if is_sel {
-                            format!("{check_box} \x1b[1;38;2;225;175;95m{num}. {opt_clipped}\x1b[0m")
-                        } else {
-                            format!("{check_box} \x1b[38;2;200;195;185m{num}. {opt_clipped}\x1b[0m")
-                        }
+                    let colour = if is_sel { "\x1b[1;38;2;225;175;95m" } else { "\x1b[38;2;200;195;185m" };
+                    let check_box = if !req.multi_select {
+                        ""
+                    } else if q_state.is_some_and(|s| s.selected_indices.contains(&i)) {
+                        "\x1b[1;38;2;145;205;140m[x]\x1b[0m "
                     } else {
-                        if is_sel {
-                            format!("\x1b[1;38;2;225;175;95m{num}. {opt_clipped}\x1b[0m")
-                        } else {
-                            format!("\x1b[38;2;200;195;185m{num}. {opt_clipped}\x1b[0m")
-                        }
+                        "\x1b[38;2;135;130;125m[ ]\x1b[0m "
                     };
-                    tail.push((LineKind::System, pad_box_row(&format!("  {ptr} {opt_styled}"), width)));
+                    // A long option wraps under its own text, not under its number.
+                    let lead = format!("{num}. ");
+                    let indent = 4 + if req.multi_select { 4 } else { 0 } + lead.len();
+                    let rows = wrap_plain(&card_safe(opt), inner_w.saturating_sub(indent + 1).max(10));
+                    for (j, row) in rows.iter().enumerate() {
+                        let line = if j == 0 {
+                            format!("  {ptr} {check_box}{colour}{lead}{row}\x1b[0m")
+                        } else {
+                            format!("{}{colour}{row}\x1b[0m", " ".repeat(indent))
+                        };
+                        tail.push((LineKind::System, pad_box_row(&line, width)));
+                    }
                 }
 
                 let write_num = total_choices + 1;
@@ -409,30 +428,24 @@ impl Renderer {
                     typing_line_idx = Some(tail.len());
                     tail.push((
                         LineKind::User,
-                        pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. Custom (write-in):\x1b[0m \x1b[1;38;2;240;235;225m{write_text}█\x1b[0m"), width),
+                        pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. Your answer:\x1b[0m \x1b[1;38;2;240;235;225m{write_text}█\x1b[0m"), width),
                     ));
+                    let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "back to the choices")], inner_w.saturating_sub(4));
+                    tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
+                } else {
+                    let colour = if is_write_sel { "\x1b[1;38;2;225;175;95m" } else { "\x1b[38;2;160;155;145m" };
                     tail.push((
                         LineKind::System,
-                        pad_box_row("   \x1b[38;2;135;130;125m[Enter] Submit write-in · [Esc] Back to choices\x1b[0m", width),
+                        pad_box_row(&format!("  {write_ptr} {colour}{write_num}. Something else: just type it\x1b[0m"), width),
                     ));
-                } else {
-                    let write_styled = if is_write_sel {
-                        format!("\x1b[1;38;2;225;175;95m{write_num}. Other (Type custom answer)\x1b[0m")
+                    let numbers = format!("1-{write_num}");
+                    let hints: Vec<(&str, &str)> = if req.multi_select {
+                        vec![("Space", "tick"), ("↑/↓", "move"), (numbers.as_str(), "pick"), ("Enter", "confirm"), ("Esc", "cancel")]
                     } else {
-                        format!("\x1b[38;2;160;155;145m{write_num}. Other (Type custom answer)\x1b[0m")
+                        vec![("↑/↓", "move"), (numbers.as_str(), "pick"), ("Enter", "confirm"), ("Esc", "cancel")]
                     };
-                    tail.push((LineKind::System, pad_box_row(&format!("  {write_ptr} {write_styled}"), width)));
-                    if req.multi_select {
-                        tail.push((
-                            LineKind::System,
-                            pad_box_row("   \x1b[38;2;135;130;125m[Space] Toggle [x] · [1-N / ↑↓] Select · [Enter] Confirm · type your own · [Esc] Cancel\x1b[0m", width),
-                        ));
-                    } else {
-                        tail.push((
-                            LineKind::System,
-                            pad_box_row("   \x1b[38;2;135;130;125m[1-N / ↑↓] Select · [Enter] Confirm · or type your own · [Esc] Cancel\x1b[0m", width),
-                        ));
-                    }
+                    let hints = flashagent_tui::key_hints(&hints, inner_w.saturating_sub(4));
+                    tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
                 }
             } else {
                 typing_line_idx = Some(tail.len());
@@ -440,10 +453,8 @@ impl Renderer {
                     LineKind::User,
                     pad_box_row(&format!("  \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{write_text}█\x1b[0m"), width),
                 ));
-                tail.push((
-                    LineKind::System,
-                    pad_box_row("   \x1b[38;2;135;130;125m[Enter] Submit answer · [Esc] Cancel\x1b[0m", width),
-                ));
+                let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "cancel")], inner_w.saturating_sub(4));
+                tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
             }
 
             // The answer being written shows its own block cursor.
@@ -489,6 +500,17 @@ impl Renderer {
                 let label = "\x1b[38;2;135;130;125mfind in history:\x1b[0m";
                 text_cursor = Some((visible_width(query) + 21).min(width.saturating_sub(2)) as u16);
                 vec![format!(" {prompt_styled} {label} \x1b[1;38;2;240;235;225m{query}\x1b[0m"), format!("   {found_line}")]
+            } else if let (true, Some(custom)) = (st.input.is_empty() && st.prefill_status.is_none() && !st.running && st.suggested_prompt.is_none(), st.custom_placeholder) {
+                // Up to three rows: a notice cut at the edge loses its advice.
+                wrap_plain(custom, width.saturating_sub(8).max(10))
+                    .into_iter()
+                    .take(3)
+                    .enumerate()
+                    .map(|(i, row)| {
+                        let lead = if i == 0 { format!(" {prompt_styled}  ") } else { "    ".to_string() };
+                        format!("{lead}\x1b[38;2;135;140;155m{row}\x1b[0m")
+                    })
+                    .collect()
             } else if st.input.is_empty() {
                 vec![if let Some(prefill) = st.prefill_status {
                     format!(" {prompt_styled}  {prefill}")
@@ -497,26 +519,24 @@ impl Renderer {
                     let glow = if matches!(st.turn_phase, Some(TurnPhase::Stopping)) { Rgb(235, 150, 120) } else { Rgb(235, 225, 205) };
                     format!(" {prompt_styled} {}", anim::shimmer(&format!("{what}…"), t, 2000, Rgb(135, 130, 125), glow))
                 } else if let Some(sug) = st.suggested_prompt {
-                    format!(" {prompt_styled}  \x1b[38;2;155;160;175m{sug}\x1b[0m \x1b[38;2;100;105;120m(→ to use)\x1b[0m")
-                } else if let Some(custom) = st.custom_placeholder {
-                    format!(" {prompt_styled}  \x1b[38;2;135;140;155m{custom}\x1b[0m")
+                    format!(" {prompt_styled}  \x1b[38;2;155;160;175m{sug}\x1b[0m  {}", key_hints(&[("→", "use")], width))
                 } else if !st.attachments.is_empty() {
                     let prompt_text = if width >= 60 {
-                        "Press Enter to send image, or type a message..."
+                        "Press Enter to send the image, or type a message\u{2026}"
                     } else if width >= 40 {
-                        "Enter to send image..."
+                        "Enter sends the image\u{2026}"
                     } else {
-                        "Enter to send..."
+                        "Enter to send\u{2026}"
                     };
                     format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
                 } else {
                     // The long form when it fits.
                     let prompt_text = if width >= 60 {
-                        "Ask FlashAgent to do anything..."
+                        "Ask FlashAgent to do anything\u{2026}"
                     } else if width >= 40 {
-                        "Ask FlashAgent..."
+                        "Ask FlashAgent\u{2026}"
                     } else {
-                        "Ask..."
+                        "Ask\u{2026}"
                     };
                     format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
                 }]
@@ -583,23 +603,24 @@ impl Renderer {
         let left_hint = if let Some(toast) = st.copy_toast {
             format!("  \x1b[1;38;2;135;215;165m{toast}\x1b[0m")
         } else if st.history_search.is_some() {
-            let hints = plain_hints(&["ctrl+f — older", "enter — use", "esc — cancel"], width.saturating_sub(2));
-            format!("  \x1b[38;2;135;130;125m{hints}\x1b[0m")
+            format!("  {}", key_hints(&[("Ctrl+F", "older"), ("Enter", "use"), ("Esc", "cancel")], width.saturating_sub(2)))
         } else if gate.pending().is_some() {
-            "  \x1b[38;2;135;130;125menter — allow · a — always · d / esc — deny\x1b[0m".to_string()
+            let hints = [("Enter", "confirm"), ("←/→", "choose"), ("a", "always"), ("Esc", "deny")];
+            format!("  {}", flashagent_tui::key_hints(&hints, width.saturating_sub(2)))
         } else if question_gate.pending().is_some() {
             // The card lists its own keys, which differ for a choice and a written answer.
             st.background.map(|text| format!("  {}", st.background_style.paint(text))).unwrap_or_default()
         } else if st.channel_prompt.is_some() && st.prompt_title == UNINSTALL_TITLE {
-            "  \x1b[38;2;135;130;125my / enter — close and uninstall · n / esc — keep FlashAgent\x1b[0m".to_string()
+            format!("  {}", key_hints(&[("y/Enter", "close and uninstall"), ("n/Esc", "keep FlashAgent")], width.saturating_sub(2)))
         } else if st.channel_prompt.is_some() {
-            "  \x1b[38;2;135;130;125my / enter — switch · n / esc — keep the current channel\x1b[0m".to_string()
+            format!("  {}", key_hints(&[("y/Enter", "switch"), ("n/Esc", "keep the current channel")], width.saturating_sub(2)))
         } else if overlay.is_some() {
             // Panels draw their own keys inside their box; only an unprompted notice
             // still gets the line.
             st.background.map(|text| format!("  {}", st.background_style.paint(text))).unwrap_or_default()
         } else if autocomplete.is_some() {
-            "  \x1b[38;2;135;130;125mtab — complete · ↑/↓ — select · enter — send · esc — dismiss\x1b[0m".to_string()
+            let hints = [("Tab", "complete"), ("↑/↓", "select"), ("Enter", "run"), ("Esc", "close")];
+            format!("  {}", key_hints(&hints, width.saturating_sub(2)))
         } else if st.running {
             // The spinner says it is alive; then only how fast it writes and how fast it
             // read the prompt. A speed of 0 before the first token reads as a stall, so
@@ -614,37 +635,28 @@ impl Renderer {
             }
             // The counters show the model is alive and the notice must not be missed;
             // the key hints give way when both do not fit.
-            let tail_hint = "\x1b[38;2;135;130;125m· enter to steer · esc to interrupt\x1b[0m";
-            match st.background {
-                Some(text) => {
-                    let notice = format!(" \x1b[38;2;75;99;130m·\x1b[0m {}", st.background_style.paint(text));
-                    let with_hint = format!("{live}{notice} \x1b[38;2;135;130;125m· esc to interrupt\x1b[0m");
-                    if visible_width(&with_hint) <= width {
-                        with_hint
-                    } else {
-                        format!("{live}{notice}")
-                    }
-                }
-                // The longest hint that fits, never cut mid-word.
-                None => [tail_hint, "\x1b[38;2;135;130;125m· esc to interrupt\x1b[0m", ""]
-                    .into_iter()
-                    .map(|hint| if hint.is_empty() { live.clone() } else { format!("{live} {hint}") })
-                    .find(|line| visible_width(line) <= width)
-                    .unwrap_or_else(|| live.clone()),
-            }
+            let esc = key_hints(&[("Esc", "interrupt")], width);
+            let steer = key_hints(&[("Enter", "steer"), ("Esc", "interrupt")], width);
+            let head = match st.background {
+                Some(text) => format!("{live}{dot}{}", st.background_style.paint(text)),
+                None => live.clone(),
+            };
+            let hints: Vec<&str> = if st.background.is_some() { vec![&esc, ""] } else { vec![&steer, &esc, ""] };
+            // The longest hint that fits, never cut mid-word.
+            hints
+                .into_iter()
+                .map(|hint| if hint.is_empty() { head.clone() } else { format!("{head}{dot}{hint}") })
+                .find(|line| visible_width(line) <= width)
+                .unwrap_or(head)
         } else if let Some(text) = st.background {
             format!("  {}", st.background_style.paint(text))
         } else if !st.input.is_empty() {
-            let hints = plain_hints(
-                &["enter — send", "alt+enter — new line", "ctrl+w — delete word", "ctrl+f — history", "esc — clear"],
-                width.saturating_sub(2),
-            );
-            format!("  \x1b[38;2;135;130;125m{hints}\x1b[0m")
+            let hints = [("Enter", "send"), ("Alt+Enter", "new line"), ("Ctrl+W", "delete word"), ("Ctrl+F", "history"), ("Esc", "clear")];
+            format!("  {}", key_hints(&hints, width.saturating_sub(2)))
         } else if chat.has_user_message() {
             // The welcome card lists the keys; once it has scrolled away, the one key
             // that finds every other.
-            let hints = plain_hints(&["ctrl+k — commands", "/help", "ctrl+d — quit"], width.saturating_sub(2));
-            format!("  \x1b[38;2;135;130;125m{hints}\x1b[0m")
+            format!("  {}", key_hints(&[("Ctrl+K", "commands"), ("/help", ""), ("Ctrl+D", "quit")], width.saturating_sub(2)))
         } else {
             String::new()
         };
@@ -692,19 +704,23 @@ impl Renderer {
         // Line 3: turn stats on the left, context gauge on the right. The mode is
         // never cut; the gauge shrinks first, down to the percentage.
         let mode_room = 2 + visible_width(st.mode.label()) + 2 + 1;
-        let gauge_base = [
-            context_usage.format_compact_gauge(10),
-            context_usage.format_compact_gauge(4),
-            format!("\x1b[38;2;135;215;165m{:.0}%\x1b[0m", context_usage.percentage().clamp(0.0, 100.0)),
-        ]
-        .into_iter()
-        .find(|g| mode_room + visible_width(g) + 3 <= width)
-        .unwrap_or_default();
-        let gauge_str = if st.context_warn_threshold > 0 && context_usage.percentage() >= st.context_warn_threshold as f32 {
-            format!("\x1b[1;38;2;245;140;80m! High Ctx ({:.0}%)\x1b[0m {gauge_base}", context_usage.percentage())
+        let percent = context_usage.percentage().clamp(0.0, 100.0);
+        // Nearly full, it says what to do about it instead of drawing the bar.
+        let gauges = if st.context_warn_threshold > 0 && percent >= st.context_warn_threshold as f32 {
+            let amber = |s: String| format!("\x1b[1;38;2;245;160;80m{s}\x1b[0m");
+            [
+                amber(format!("context {percent:.0}% full \u{b7} /compact frees it")),
+                amber(format!("{percent:.0}% full \u{b7} /compact")),
+                amber(format!("{percent:.0}%")),
+            ]
         } else {
-            gauge_base
+            [
+                context_usage.format_compact_gauge(10),
+                context_usage.format_compact_gauge(4),
+                format!("\x1b[38;2;135;215;165m{percent:.0}%\x1b[0m"),
+            ]
         };
+        let gauge_str = gauges.into_iter().find(|g| mode_room + visible_width(g) + 3 <= width).unwrap_or_default();
         let gauge_vis = visible_width(&gauge_str);
 
         let expand_status = if st.reasoning_expand.all {
@@ -773,8 +789,8 @@ impl Renderer {
             first_chat_row = start;
             let mut rows: Vec<String> = chat().skip(start).take(end - start).map(styled).collect();
             let marker = format!(
-                " \x1b[38;2;100;95;90m── \x1b[38;2;225;175;95m↓ {} more lines below\x1b[38;2;100;95;90m · End or Esc to return ──\x1b[0m",
-                self.scroll_offset
+                " \x1b[38;2;100;95;90m── \x1b[38;2;225;175;95m↓ {} below\x1b[38;2;100;95;90m · End or Esc to return ──\x1b[0m",
+                flashagent_tui::plural(self.scroll_offset, "more line", "more lines")
             );
             rows.push(marker);
             rows
@@ -821,7 +837,9 @@ impl App {
         let cost_now = self.image_costs.get(&self.current_model);
         let attachment_labels: Vec<String> = self.attachments.iter().map(|a| a.labelled(cost_now)).collect();
         let goal_progress: Option<String> = self.goal_ledger.as_ref().filter(|_| self.running).map(|l| l.progress());
-        let live_prefill = self.token_tracker.live_prefill_status();
+        // An estimate of reading the prompt means nothing while no server answers.
+        let live_prefill =
+            self.token_tracker.live_prefill_status().filter(|_| self.announced_mood != MascotMood::Offline);
         let ttft_display = self.token_tracker.ttft_display();
         let tg_speed = self.token_tracker.tg_3s();
         let config = &self.config;
@@ -849,7 +867,7 @@ impl App {
                 tick_n: self.tick_n,
                 running: self.running,
                 tokens_per_sec: config.show_tokens.then_some(tg_speed),
-                confirm_selection: self.confirm_select.decision(),
+                confirm_selection: self.confirm_select.choice(),
                 question_state: Some(&self.question_ui_state),
                 custom_placeholder: self.custom_placeholder.as_deref(),
                 suggested_prompt: self.suggested_prompt.as_deref(),
@@ -915,7 +933,6 @@ impl App {
 }
 
 /// Drops from the middle, keeping the last hint, which is the way out.
-fn plain_hints(parts: &[&str], width: usize) -> String {
-    let pairs: Vec<(String, String)> = parts.iter().map(|p| (p.to_string(), p.to_string())).collect();
-    flashagent_tui::fit_hints(&pairs, " · ", width)
+fn key_hints(pairs: &[(&str, &str)], width: usize) -> String {
+    flashagent_tui::key_hints(pairs, width)
 }

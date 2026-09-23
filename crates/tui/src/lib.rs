@@ -34,6 +34,7 @@ mod text;
 mod stages;
 mod welcome;
 mod markdown;
+mod highlight;
 mod gates;
 pub use text::*;
 pub use stages::*;
@@ -46,7 +47,7 @@ pub use context_modal::ContextModal;
 pub use mcp_view::{McpModal, McpModalAction, McpViewTab};
 pub use prefill::{BucketStats, ContextBucket, ModelPrefillProfile, PrefillTracker};
 pub use sampling::{SamplingAction, SamplingView};
-pub use select::{ConfirmSelect, SelectItem, SelectMenu};
+pub use select::{ConfirmChoice, ConfirmSelect, SelectItem, SelectMenu};
 pub use settings::{SettingsAction, SettingsView};
 pub use startup::{StartupAction, TrustScreen, TrustScreenMode};
 pub use tips::{split_tip_at_word_boundary, TipAnimator};
@@ -212,22 +213,24 @@ pub struct ChatView {
 pub fn format_explore(is_running: bool, files: usize, searches: usize, last_target: &str) -> String {
     let verb = if is_running { "Exploring" } else { "Explored" };
     let chevron = "\x1b[38;2;120;125;140m›\x1b[0m";
+    // In the same column as every other tool line's mark.
+    let mark = format!("\x1b[38;2;120;125;140m{}\x1b[0m", tool_cards::TOOL_MARK);
     if files > 0 && searches > 0 {
         let f_str = if files == 1 { "1 file".to_string() } else { format!("{files} files") };
         let s_str = if searches == 1 { "1 search".to_string() } else { format!("{searches} searches") };
-        format!("  \x1b[38;2;160;165;180m{verb} {f_str}, {s_str}\x1b[0m {chevron}")
+        format!("  {mark} \x1b[38;2;160;165;180m{verb} {f_str}, {s_str}\x1b[0m {chevron}")
     } else if files > 1 {
-        format!("  \x1b[38;2;160;165;180m{verb} {files} files\x1b[0m {chevron}")
+        format!("  {mark} \x1b[38;2;160;165;180m{verb} {files} files\x1b[0m {chevron}")
     } else if searches > 1 {
-        format!("  \x1b[38;2;160;165;180m{verb} {searches} searches\x1b[0m {chevron}")
+        format!("  {mark} \x1b[38;2;160;165;180m{verb} {searches} searches\x1b[0m {chevron}")
     } else if files == 1 {
         let v = if is_running { "Reading" } else { "Read" };
-        format!("  \x1b[38;2;160;165;180m{v}\x1b[0m \x1b[38;2;225;230;240m{last_target}\x1b[0m {chevron}")
+        format!("  {mark} \x1b[38;2;160;165;180m{v}\x1b[0m \x1b[38;2;225;230;240m{last_target}\x1b[0m {chevron}")
     } else if searches == 1 {
         let v = if is_running { "Searching" } else { "Searched" };
-        format!("  \x1b[38;2;160;165;180m{v}\x1b[0m \x1b[38;2;225;230;240m{last_target}\x1b[0m {chevron}")
+        format!("  {mark} \x1b[38;2;160;165;180m{v}\x1b[0m \x1b[38;2;225;230;240m{last_target}\x1b[0m {chevron}")
     } else {
-        format!("  \x1b[38;2;160;165;180m{verb} {last_target}\x1b[0m {chevron}")
+        format!("  {mark} \x1b[38;2;160;165;180m{verb} {last_target}\x1b[0m {chevron}")
     }
 }
 
@@ -544,7 +547,7 @@ impl ChatView {
         self.lines.push(ChatLine::new(LineKind::System, text.to_string()));
     }
 
-    /// "Compacting context..." becomes "Context compacted · 12k saved" in place.
+    /// "Compacting context…" becomes "Context compacted · 12k saved" in place.
     pub fn replace_last_system(&mut self, text: &str) {
         match self.lines.iter().rposition(|l| l.kind == LineKind::System) {
             Some(i) => {
@@ -627,8 +630,10 @@ impl ChatView {
                     flashagent_core::DoneReason::StepLimit => Some("stopped: the step limit was reached"),
                     flashagent_core::DoneReason::TokenBudget => Some("stopped: the token budget was spent"),
                     flashagent_core::DoneReason::TimeLimit => Some("stopped: the time limit was reached"),
-                    flashagent_core::DoneReason::Failed => Some("stopped: the model server failed"),
-                    flashagent_core::DoneReason::Cancelled | flashagent_core::DoneReason::Completed => None,
+                    // The explanation of what failed follows; a line announcing it said it twice.
+                    flashagent_core::DoneReason::Failed
+                    | flashagent_core::DoneReason::Cancelled
+                    | flashagent_core::DoneReason::Completed => None,
                 };
                 if let Some(said) = said {
                     self.lines.push(ChatLine::new(LineKind::System, format!("— {said} —")));
@@ -1131,9 +1136,12 @@ impl ChatView {
                     // The call in flight: margin spinner and a sweep across its words.
                     let t = anim::now_ms();
                     let words = strip_ansi(&line.text);
-                    let words = words.trim_start().trim_end_matches('›').trim_end();
+                    // The spinner takes the mark's column, so the words stay where they
+                    // will be once the call is done.
+                    let words = words.trim_start().trim_start_matches(tool_cards::TOOL_MARK).trim_start();
+                    let words = words.trim_end_matches('›').trim_end();
                     let row = format!(
-                        " \x1b[38;2;135;185;205m{}\x1b[0m {}",
+                        "  \x1b[38;2;135;185;205m{}\x1b[0m {}",
                         anim::spinner(t),
                         anim::shimmer(words, t, 1800, anim::Rgb(150, 160, 175), anim::Rgb(240, 245, 255)),
                     );

@@ -203,7 +203,7 @@ impl App {
             return;
         }
         if let Err(why) = save_session_file(session_id, &self.current_model, cwd_display, &self.history) {
-            self.notice(format!("Session not saved: {why}. Retried after the next turn and on exit."));
+            self.notice(format!("Session not saved: {why} · retrying after the next turn and on exit"));
         }
     }
 
@@ -226,7 +226,7 @@ impl App {
             self.custom_placeholder = Some("No other saved session in this folder".to_string());
             self.suggested_prompt = None;
         } else {
-            self.open_overlay(Overlay::Sessions(SelectMenu::new("Resume a Session", items).with_noun("sessions")));
+            self.open_overlay(Overlay::Sessions(SelectMenu::new("Resume a session", items).with_noun("sessions")));
         }
         self.renderer.request_reprint();
     }

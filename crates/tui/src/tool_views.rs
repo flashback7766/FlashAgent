@@ -2,7 +2,9 @@
 //! reads, boxed shell commands, directory listings, grep results grouped by
 //! file, subagents, memory, git, web and MCP tools.
 
-use crate::{clip_ansi, visible_width, LineKind, RenderLine};
+use unicode_width::UnicodeWidthChar;
+
+use crate::{plural, visible_width, LineKind, RenderLine};
 
 const RESET: &str = "\x1b[0m";
 const BORDER_DIM: &str = "\x1b[38;2;75;99;130m";
@@ -19,6 +21,67 @@ const BG_ADD: &str = "\x1b[48;2;20;55;30m";
 const BG_READ: &str = "\x1b[48;2;22;38;60m";
 const TEXT_READ: &str = "\x1b[38;2;145;195;255m";
 
+/// Clipped to `width` cells, with `…` where it was cut. Styles are kept, as
+/// `clip_ansi` keeps them.
+pub(crate) fn clip_ellipsis(text: &str, width: usize) -> String {
+    if visible_width(text) <= width {
+        return text.to_string();
+    }
+    let room = width.saturating_sub(1);
+    let mut out = String::with_capacity(text.len());
+    let mut cells = 0;
+    let mut cut = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            out.push(c);
+            if chars.peek() == Some(&'[') {
+                out.extend(chars.next());
+                for n in chars.by_ref() {
+                    out.push(n);
+                    if ('@'..='~').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if cut {
+            continue;
+        }
+        let w = c.width().unwrap_or(0);
+        if cells + w > room {
+            if width > 0 {
+                out.push('…');
+            }
+            cut = true;
+            continue;
+        }
+        cells += w;
+        out.push(c);
+    }
+    out
+}
+
+/// A captured line as the box can hold it: a carriage return redraws from
+/// the start of the line, a tab is spaces, and other control characters
+/// would move the cursor off the frame.
+fn box_text(line: &str) -> String {
+    let line = line.rsplit('\r').find(|part| !part.is_empty()).unwrap_or("");
+    line.replace('\t', "    ").chars().filter(|c| !c.is_control() || *c == '\x1b').collect()
+}
+
+/// `│  text  │`, padded or clipped to the box.
+fn box_row(styled: &str, style: &str, inner_w: usize) -> RenderLine {
+    let clipped = clip_ellipsis(styled, inner_w);
+    let pad = " ".repeat(inner_w.saturating_sub(visible_width(&clipped)));
+    (LineKind::Tool, format!("{BORDER_DIM}│{RESET}  {style}{clipped}{RESET}{pad}  {BORDER_DIM}│{RESET}"))
+}
+
+fn more_lines(n: usize) -> String {
+    format!("+{}", plural(n, "more line", "more lines"))
+}
+
 /// `──────── +N more lines ────────`
 pub fn render_fold_line(text: &str, width: usize) -> String {
     let vis_len = visible_width(text);
@@ -28,23 +91,40 @@ pub fn render_fold_line(text: &str, width: usize) -> String {
     format!("  {BORDER_DIM}{dash_str}{RESET} {TEXT_MUTED}{text}{RESET} {BORDER_DIM}{dash_str}{RESET}")
 }
 
-/// `╭─ Ran cargo build ────────────────╮`
+/// Outer width of a boxed card.
+fn box_width(width: usize) -> usize {
+    width.saturating_sub(4).clamp(16, 100)
+}
+
+/// `╭─ ~/FlashAgent ──────────────────╮`; an empty title leaves the edge plain.
 pub fn render_card_top(title: &str, width: usize) -> String {
-    let box_w = width.saturating_sub(4).clamp(30, 100);
-    let max_title_w = box_w.saturating_sub(8);
-    let clipped = clip_ansi(title, max_title_w);
+    let box_w = box_width(width);
+    if title.is_empty() {
+        return format!("{BORDER_DIM}╭{}╮{RESET}", "─".repeat(box_w.saturating_sub(2)));
+    }
+    let clipped = clip_ellipsis(title, box_w.saturating_sub(8));
     let title_vis = visible_width(&clipped);
     let dash_count = box_w.saturating_sub(title_vis + 5);
     format!("{BORDER_DIM}╭─ {RESET}{clipped}{RESET} {BORDER_DIM}{}╮{RESET}", "─".repeat(dash_count))
 }
 
 pub fn render_card_bottom(width: usize) -> String {
-    let box_w = width.saturating_sub(4).clamp(30, 100);
+    let box_w = box_width(width);
     let bot_dashes = box_w.saturating_sub(2);
     format!("{BORDER_DIM}╰{}╯{RESET}", "─".repeat(bot_dashes))
 }
 
-/// `~/FlashAgent $ cmd` in a rounded box, output folded after a limit.
+/// `cwd` with the home folder as `~`.
+fn short_cwd(cwd: &str) -> String {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).and_then(|h| h.into_string().ok());
+    match home.as_deref().filter(|h| !h.is_empty()).and_then(|h| cwd.strip_prefix(h)) {
+        Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => format!("~{rest}"),
+        _ => cwd.to_string(),
+    }
+}
+
+/// `$ cmd` in a rounded box titled with the folder it ran in, output folded
+/// after a limit.
 pub fn render_command_card(
     cwd: &str,
     cmd: &str,
@@ -54,8 +134,8 @@ pub fn render_command_card(
     width: usize,
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
-    let box_w = width.saturating_sub(4).clamp(30, 100);
-    let inner_w = box_w.saturating_sub(6).max(20);
+    let box_w = box_width(width);
+    let inner_w = box_w.saturating_sub(6);
 
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
     let status_header = if is_running {
@@ -67,41 +147,22 @@ pub fn render_command_card(
     };
     lines.push((LineKind::Tool, status_header));
 
-    lines.push((LineKind::Tool, render_card_top(cmd, width)));
-
-    let short_cwd = if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).and_then(|h| h.into_string().ok()) {
-        if cwd.starts_with(&home) {
-            format!("~{}", &cwd[home.len()..])
-        } else {
-            cwd.to_string()
-        }
-    } else {
-        cwd.to_string()
-    };
+    // The end of a path says where; its start is what gets cut.
+    let (folder, _) = crate::tail_window(&short_cwd(cwd), box_w.saturating_sub(8));
+    let title = if folder.is_empty() { String::new() } else { format!("{TEXT_PROMPT}{folder}") };
+    lines.push((LineKind::Tool, render_card_top(&title, width)));
 
     // Binary in yellow, flags in white.
     let mut parts = cmd.split_whitespace();
     let bin = parts.next().unwrap_or(cmd);
-    let args: Vec<&str> = parts.collect();
-    let args_str = args.join(" ");
-
+    let args_str = parts.collect::<Vec<&str>>().join(" ");
     let prompt_styled = if args_str.is_empty() {
-        format!("{TEXT_PROMPT}{short_cwd} ${RESET} {TEXT_YELLOW}{bin}{RESET}")
+        format!("{TEXT_PROMPT}${RESET} {TEXT_YELLOW}{bin}{RESET}")
     } else {
-        format!("{TEXT_PROMPT}{short_cwd} ${RESET} {TEXT_YELLOW}{bin}{RESET} {TEXT_BRIGHT}{args_str}{RESET}")
+        format!("{TEXT_PROMPT}${RESET} {TEXT_YELLOW}{bin}{RESET} {TEXT_BRIGHT}{args_str}{RESET}")
     };
-
-    let vis_prompt = visible_width(&prompt_styled);
-    let pad = " ".repeat(inner_w.saturating_sub(vis_prompt));
-    lines.push((
-        LineKind::Tool,
-        format!("{BORDER_DIM}│{RESET}  {prompt_styled}{pad}  {BORDER_DIM}│{RESET}"),
-    ));
-
-    lines.push((
-        LineKind::Tool,
-        format!("{BORDER_DIM}│{RESET}  {}{BORDER_DIM}│{RESET}", " ".repeat(inner_w + 2)),
-    ));
+    lines.push(box_row(&box_text(&prompt_styled), "", inner_w));
+    lines.push(box_row("", "", inner_w));
 
     if let Some(out) = output {
         let trimmed = out.trim_end();
@@ -111,40 +172,21 @@ pub fn render_command_card(
             let display_count = all_lines.len().min(MAX_LINES);
 
             for &raw_line in &all_lines[..display_count] {
-                let clipped = clip_ansi(raw_line, inner_w);
-                let vis = visible_width(&clipped);
-                let pad = " ".repeat(inner_w.saturating_sub(vis));
-                lines.push((
-                    LineKind::Tool,
-                    format!("{BORDER_DIM}│{RESET}  {TEXT_BRIGHT}{clipped}{RESET}{pad}  {BORDER_DIM}│{RESET}"),
-                ));
+                lines.push(box_row(&box_text(raw_line), TEXT_BRIGHT, inner_w));
             }
-
             if all_lines.len() > MAX_LINES {
-                let remaining = all_lines.len() - display_count;
-                let fold_text = format!("- And {remaining} More lines...");
-                let vis = visible_width(&fold_text);
-                let pad = " ".repeat(inner_w.saturating_sub(vis));
-                lines.push((
-                    LineKind::Tool,
-                    format!("{BORDER_DIM}│{RESET}  {TEXT_MUTED}{fold_text}{RESET}{pad}  {BORDER_DIM}│{RESET}"),
-                ));
+                lines.push(box_row(&more_lines(all_lines.len() - display_count), TEXT_MUTED, inner_w));
             }
         }
     } else if is_running {
-        let running_text = "Executing command...";
-        let pad = " ".repeat(inner_w.saturating_sub(running_text.len()));
-        lines.push((
-            LineKind::Tool,
-            format!("{BORDER_DIM}│{RESET}  {TEXT_MUTED}{running_text}{RESET}{pad}  {BORDER_DIM}│{RESET}"),
-        ));
+        lines.push(box_row("Executing command…", TEXT_MUTED, inner_w));
     }
 
     lines.push((LineKind::Tool, render_card_bottom(width)));
     lines
 }
 
-/// Capped with `- And N More...`.
+/// Capped with `+N more entries`.
 pub fn render_directory_card(
     path: &str,
     listing: Option<&str>,
@@ -174,7 +216,7 @@ pub fn render_directory_card(
             let remaining = raw_entries.len() - display_count;
             lines.push((
                 LineKind::Tool,
-                format!("    {TEXT_MUTED}- And {remaining} More...{RESET}"),
+                format!("    {TEXT_MUTED}+{}{RESET}", plural(remaining, "more entry", "more entries")),
             ));
         }
     }
@@ -197,11 +239,14 @@ pub fn render_read_card(
     let file_lines: Vec<&str> = raw_text.lines().collect();
     let count = file_lines.len();
 
-    let header = format!("  {TEXT_MUTED}Read{RESET} {TEXT_BRIGHT}{path}{RESET} {TEXT_MUTED}({count} lines){RESET} {chevron}");
+    let header = format!(
+        "  {TEXT_MUTED}Read{RESET} {TEXT_BRIGHT}{path}{RESET} {TEXT_MUTED}({}){RESET} {chevron}",
+        plural(count, "line", "lines")
+    );
     lines.push((LineKind::Tool, header));
 
     if offset > 0 {
-        lines.push((LineKind::Tool, render_fold_line(&format!("+{offset} more lines"), width)));
+        lines.push((LineKind::Tool, render_fold_line(&more_lines(offset), width)));
     }
 
     const MAX_PREVIEW: usize = 20;
@@ -218,7 +263,7 @@ pub fn render_read_card(
         };
 
         let budget = width.saturating_sub(14).max(10);
-        let clipped = clip_ansi(text, budget);
+        let clipped = clip_ellipsis(text, budget);
         let styled = format!(
             "  {TEXT_CYAN}{:>4} {:>4}{RESET} {BG_READ}{TEXT_READ}{}{RESET}",
             line_no, line_no, clipped
@@ -227,8 +272,7 @@ pub fn render_read_card(
     }
 
     if count > preview_count {
-        let remaining = count - preview_count;
-        lines.push((LineKind::Tool, render_fold_line(&format!("+{remaining} more lines"), width)));
+        lines.push((LineKind::Tool, render_fold_line(&more_lines(count - preview_count), width)));
     }
 
     lines
@@ -293,7 +337,7 @@ pub fn parse_diff_to_rows(diff_text: &str) -> Vec<DiffRow> {
     rows
 }
 
-/// `old new │ line`, red deletions, green additions, centred fold dividers.
+/// `old new │ line`, red deletions, green additions, centered fold dividers.
 pub fn render_edit_card(
     path: &str,
     added: usize,
@@ -313,27 +357,30 @@ pub fn render_edit_card(
 
     if let Some(text) = diff_or_content {
         let budget = width.saturating_sub(14).max(10);
-        let rows = parse_diff_to_rows(text);
+        // What is written is a file, not a diff: "- item" is a line of it.
+        let rows = if is_write { Vec::new() } else { parse_diff_to_rows(text) };
 
         if rows.is_empty() {
-            // No @@ hunks (write_file): everything is an addition.
-            for (i, raw_l) in text.lines().take(25).enumerate() {
-                let clipped = clip_ansi(raw_l, budget);
+            const MAX_WRITTEN: usize = 25;
+            for (i, raw_l) in text.lines().take(MAX_WRITTEN).enumerate() {
+                let clipped = clip_ellipsis(raw_l, budget);
                 let styled = format!(
-                    "       {TEXT_MUTED}{:>4}{RESET} {BG_ADD}{TEXT_GREEN}{}{RESET}",
+                    "       {TEXT_GREEN}{:>4}{RESET} {BG_ADD}{TEXT_GREEN}{}{RESET}",
                     i + 1, clipped
                 );
                 lines.push((LineKind::Tool, styled));
             }
             let total = text.lines().count();
-            if total > 25 {
-                lines.push((LineKind::Tool, render_fold_line(&format!("+{} more lines", total - 25), width)));
+            if total > MAX_WRITTEN {
+                lines.push((LineKind::Tool, render_fold_line(&more_lines(total - MAX_WRITTEN), width)));
             }
         } else {
-            for row in rows.into_iter().take(35) {
+            const MAX_ROWS: usize = 35;
+            let hidden = rows.iter().skip(MAX_ROWS).filter(|r| !matches!(r, DiffRow::Fold { .. })).count();
+            for row in rows.into_iter().take(MAX_ROWS) {
                 match row {
                     DiffRow::Same { old_line, new_line, text } => {
-                        let clipped = clip_ansi(&text, budget);
+                        let clipped = clip_ellipsis(&text, budget);
                         let styled = format!(
                             "  {TEXT_MUTED}{:>4} {:>4}{RESET} {TEXT_BRIGHT}{clipped}{RESET}",
                             old_line, new_line
@@ -341,7 +388,7 @@ pub fn render_edit_card(
                         lines.push((LineKind::Tool, styled));
                     }
                     DiffRow::Del { old_line, text } => {
-                        let clipped = clip_ansi(&text, budget);
+                        let clipped = clip_ellipsis(&text, budget);
                         let styled = format!(
                             "  {TEXT_RED}{:>4}{RESET}      {BG_DEL}{TEXT_RED}{clipped}{RESET}",
                             old_line
@@ -349,7 +396,7 @@ pub fn render_edit_card(
                         lines.push((LineKind::Tool, styled));
                     }
                     DiffRow::Add { new_line, text } => {
-                        let clipped = clip_ansi(&text, budget);
+                        let clipped = clip_ellipsis(&text, budget);
                         let styled = format!(
                             "       {TEXT_GREEN}{:>4}{RESET} {BG_ADD}{TEXT_GREEN}{clipped}{RESET}",
                             new_line
@@ -357,9 +404,12 @@ pub fn render_edit_card(
                         lines.push((LineKind::Tool, styled));
                     }
                     DiffRow::Fold { count } => {
-                        lines.push((LineKind::Tool, render_fold_line(&format!("+{count} more lines"), width)));
+                        lines.push((LineKind::Tool, render_fold_line(&more_lines(count), width)));
                     }
                 }
+            }
+            if hidden > 0 {
+                lines.push((LineKind::Tool, render_fold_line(&more_lines(hidden), width)));
             }
         }
     }
@@ -386,7 +436,7 @@ pub fn render_grep_card(
 
         for &raw_l in &raw_lines[..display_count] {
             let budget = width.saturating_sub(6).max(15);
-            let clipped = clip_ansi(raw_l, budget);
+            let clipped = clip_ellipsis(raw_l, budget);
 
             let highlighted = if !pattern.is_empty() && clipped.contains(pattern) {
                 clipped.replace(pattern, &format!("{TEXT_YELLOW}{pattern}{RESET}"))
@@ -399,7 +449,10 @@ pub fn render_grep_card(
 
         if raw_lines.len() > MAX_MATCHES {
             let remaining = raw_lines.len() - display_count;
-            lines.push((LineKind::Tool, format!("    {TEXT_MUTED}- And {remaining} More matches...{RESET}")));
+            lines.push((
+                LineKind::Tool,
+                format!("    {TEXT_MUTED}+{}{RESET}", plural(remaining, "more match", "more matches")),
+            ));
         }
     }
 
@@ -416,38 +469,27 @@ pub fn render_subagent_card(
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     let header = if is_running {
-        format!("  {TEXT_LAVENDER}Subagent{RESET} {TEXT_MUTED}executing task...{RESET} {}", crate::anim::spinner(crate::anim::now_ms()))
+        format!("  {TEXT_LAVENDER}Subagent{RESET} {TEXT_MUTED}executing task…{RESET} {}", crate::anim::spinner(crate::anim::now_ms()))
     } else {
         format!("  {TEXT_LAVENDER}Subagent{RESET} {TEXT_MUTED}finished task{RESET} {chevron}")
     };
     lines.push((LineKind::Tool, header));
 
-    lines.push((LineKind::Tool, render_card_top("Subagent Execution", width)));
-    let box_w = width.saturating_sub(4).clamp(30, 100);
-    let inner_w = box_w.saturating_sub(6).max(20);
-
-    let task_vis = format!("Task: \"{task}\"");
-    let clipped_task = clip_ansi(&task_vis, inner_w);
-    let pad = " ".repeat(inner_w.saturating_sub(visible_width(&clipped_task)));
-    lines.push((
-        LineKind::Tool,
-        format!("{BORDER_DIM}│{RESET}  {TEXT_BRIGHT}{clipped_task}{RESET}{pad}  {BORDER_DIM}│{RESET}"),
-    ));
+    lines.push((LineKind::Tool, render_card_top("Task", width)));
+    let inner_w = box_width(width).saturating_sub(6);
+    lines.push(box_row(&box_text(task.lines().next().unwrap_or_default()), TEXT_BRIGHT, inner_w));
 
     if let Some(out) = output {
         let trimmed = out.trim();
         if !trimmed.is_empty() {
-            lines.push((
-                LineKind::Tool,
-                format!("{BORDER_DIM}│{RESET}  {}{BORDER_DIM}│{RESET}", " ".repeat(inner_w + 2)),
-            ));
-            for raw_l in trimmed.lines().take(8) {
-                let clipped = clip_ansi(raw_l, inner_w);
-                let pad = " ".repeat(inner_w.saturating_sub(visible_width(&clipped)));
-                lines.push((
-                    LineKind::Tool,
-                    format!("{BORDER_DIM}│{RESET}  {TEXT_MUTED}{clipped}{RESET}{pad}  {BORDER_DIM}│{RESET}"),
-                ));
+            const MAX_LINES: usize = 8;
+            lines.push(box_row("", "", inner_w));
+            for raw_l in trimmed.lines().take(MAX_LINES) {
+                lines.push(box_row(&box_text(raw_l), TEXT_MUTED, inner_w));
+            }
+            let total = trimmed.lines().count();
+            if total > MAX_LINES {
+                lines.push(box_row(&more_lines(total - MAX_LINES), TEXT_MUTED, inner_w));
             }
         }
     }
@@ -470,8 +512,13 @@ pub fn render_memory_card(
     lines.push((LineKind::Tool, header));
 
     if let Some(text) = details {
-        for l in text.lines().take(10) {
+        const MAX_LINES: usize = 10;
+        for l in text.lines().take(MAX_LINES) {
             lines.push((LineKind::Tool, format!("    {TEXT_MUTED}{l}{RESET}")));
+        }
+        let total = text.lines().count();
+        if total > MAX_LINES {
+            lines.push((LineKind::Tool, format!("    {TEXT_MUTED}{}{RESET}", more_lines(total - MAX_LINES))));
         }
     }
 
@@ -487,16 +534,17 @@ pub fn render_git_card(
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     if is_diff {
-        let header = format!("  {TEXT_MUTED}Git Diff{RESET} {chevron}");
+        let header = format!("  {TEXT_MUTED}Git diff{RESET} {chevron}");
         lines.push((LineKind::Tool, header));
         if let Some(text) = output {
             lines.extend(render_edit_card("git-diff", 0, 0, Some(text), false, width));
         }
     } else {
-        let header = format!("  {TEXT_MUTED}Git Status{RESET} {chevron}");
+        let header = format!("  {TEXT_MUTED}Git status{RESET} {chevron}");
         lines.push((LineKind::Tool, header));
         if let Some(text) = output {
-            for l in text.lines().take(15) {
+            const MAX_LINES: usize = 15;
+            for l in text.lines().take(MAX_LINES) {
                 let trimmed = l.trim();
                 let colored = if trimmed.starts_with('M') {
                     format!("{TEXT_YELLOW}{l}{RESET}")
@@ -508,6 +556,10 @@ pub fn render_git_card(
                     format!("{TEXT_BRIGHT}{l}{RESET}")
                 };
                 lines.push((LineKind::Tool, format!("    {colored}")));
+            }
+            let total = text.lines().count();
+            if total > MAX_LINES {
+                lines.push((LineKind::Tool, format!("    {TEXT_MUTED}{}{RESET}", more_lines(total - MAX_LINES))));
             }
         }
     }
@@ -528,8 +580,8 @@ pub fn render_generic_card(
     lines.push((LineKind::Tool, header));
 
     lines.push((LineKind::Tool, render_card_top(name, width)));
-    let box_w = width.saturating_sub(4).clamp(30, 100);
-    let inner_w = box_w.saturating_sub(6).max(20);
+    let box_w = box_width(width);
+    let inner_w = box_w.saturating_sub(6);
 
     let formatted_args = if let Ok(val) = serde_json::from_str::<serde_json::Value>(args.trim()) {
         serde_json::to_string_pretty(&val).unwrap_or_else(|_| args.to_string())
@@ -537,13 +589,13 @@ pub fn render_generic_card(
         args.to_string()
     };
 
-    for arg_l in formatted_args.lines().take(10) {
-        let clipped = clip_ansi(arg_l, inner_w);
-        let pad = " ".repeat(inner_w.saturating_sub(visible_width(&clipped)));
-        lines.push((
-            LineKind::Tool,
-            format!("{BORDER_DIM}│{RESET}  {TEXT_MUTED}{clipped}{RESET}{pad}  {BORDER_DIM}│{RESET}"),
-        ));
+    const MAX_LINES: usize = 10;
+    for arg_l in formatted_args.lines().take(MAX_LINES) {
+        lines.push(box_row(&box_text(arg_l), TEXT_MUTED, inner_w));
+    }
+    let total = formatted_args.lines().count();
+    if total > MAX_LINES {
+        lines.push(box_row(&more_lines(total - MAX_LINES), TEXT_MUTED, inner_w));
     }
 
     if let Some(out) = output {
@@ -551,15 +603,14 @@ pub fn render_generic_card(
         if !trimmed.is_empty() {
             lines.push((
                 LineKind::Tool,
-                format!("{BORDER_DIM}│{RESET}  {}{BORDER_DIM}│{RESET}", "─".repeat(inner_w)),
+                format!("{BORDER_DIM}├{}┤{RESET}", "─".repeat(box_w.saturating_sub(2))),
             ));
-            for out_l in trimmed.lines().take(10) {
-                let clipped = clip_ansi(out_l, inner_w);
-                let pad = " ".repeat(inner_w.saturating_sub(visible_width(&clipped)));
-                lines.push((
-                    LineKind::Tool,
-                    format!("{BORDER_DIM}│{RESET}  {TEXT_BRIGHT}{clipped}{RESET}{pad}  {BORDER_DIM}│{RESET}"),
-                ));
+            for out_l in trimmed.lines().take(MAX_LINES) {
+                lines.push(box_row(&box_text(out_l), TEXT_BRIGHT, inner_w));
+            }
+            let total = trimmed.lines().count();
+            if total > MAX_LINES {
+                lines.push(box_row(&more_lines(total - MAX_LINES), TEXT_MUTED, inner_w));
             }
         }
     }
@@ -599,10 +650,66 @@ mod tests {
         let output = (1..=25).map(|i| format!("Compiling package_{i} v0.1.0")).collect::<Vec<_>>().join("\n");
         let lines = render_command_card("/home/flashback/FlashAgent", "cargo build --release", Some(&output), false, false, 80);
         let text_dump = lines.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
-        assert!(text_dump.contains("Ran") && text_dump.contains("cargo build --release"));
-        assert!(text_dump.contains("$") && text_dump.contains("cargo") && text_dump.contains("build --release"));
-        assert!(text_dump.contains("Compiling package_1"));
-        assert!(text_dump.contains("- And 10 More lines..."));
+        let plain = crate::strip_ansi(&text_dump);
+        assert!(plain.contains("Ran cargo build --release"));
+        assert!(plain.contains("$ cargo build --release"));
+        assert!(plain.contains("Compiling package_1"));
+        assert!(plain.contains("+10 more lines"), "{plain}");
+    }
+
+    fn plain_rows(lines: &[RenderLine]) -> Vec<String> {
+        lines.iter().map(|(_, t)| crate::strip_ansi(t)).collect()
+    }
+
+    /// Every row of the box from its top edge on, as wide as that edge.
+    fn assert_box_is_square(lines: &[RenderLine]) {
+        let rows = plain_rows(lines);
+        let top = rows.iter().position(|r| r.starts_with('╭')).expect("a top edge");
+        let width = crate::visible_width(&rows[top]);
+        for row in &rows[top..] {
+            assert_eq!(crate::visible_width(row), width, "{row:?} in\n{}", rows.join("\n"));
+        }
+    }
+
+    #[test]
+    fn the_command_is_said_once_in_the_box_and_never_pushes_its_edge() {
+        let cmd = format!("cargo test --workspace {}", "--features very-long-feature-name ".repeat(6));
+        let output = "ok\n\tindented by a tab\nprogress 10%\rprogress 100%";
+        for width in [40usize, 80, 120] {
+            let lines = render_command_card("/work/FlashAgent", &cmd, Some(output), false, false, width);
+            assert_box_is_square(&lines);
+            let rows = plain_rows(&lines);
+            assert!(rows[1].starts_with("╭─ /work/FlashAgent "), "the folder is the title: {:?}", rows[1]);
+            assert!(rows[2].contains("$ cargo test") && rows[2].contains('…'), "{:?}", rows[2]);
+            assert!(rows.iter().any(|r| r.contains("progress 100%")) && !rows.iter().any(|r| r.contains("10%")));
+        }
+    }
+
+    #[test]
+    fn the_generic_card_divider_lines_up_with_its_edges() {
+        let lines = render_generic_card("web_fetch", r#"{"url":"https://example.com"}"#, Some("fetched"), 80);
+        assert_box_is_square(&lines);
+        assert!(plain_rows(&lines).iter().any(|r| r.starts_with('├') && r.ends_with('┤')));
+    }
+
+    #[test]
+    fn a_written_file_is_all_additions_whatever_its_lines_start_with() {
+        let content = "# Notes\n- item one\n  indented\n+ plus\nplain";
+        let lines = render_edit_card("notes.md", 5, 0, Some(content), true, 80);
+        let rows = plain_rows(&lines);
+        for text in ["# Notes", "- item one", "  indented", "+ plus", "plain"] {
+            assert!(rows.iter().any(|r| r.ends_with(text)), "{text:?} missing from {rows:#?}");
+        }
+        assert!(!lines.iter().any(|(_, l)| l.contains(BG_DEL)), "a written line shown as a deletion");
+        assert_eq!(lines.iter().filter(|(_, l)| l.contains(BG_ADD)).count(), 5);
+    }
+
+    #[test]
+    fn counts_of_one_are_singular() {
+        let rows = plain_rows(&render_read_card("a.txt", Some("only"), 0, 10, 80));
+        assert!(rows[0].contains("(1 line)"), "{:?}", rows[0]);
+        let rows = plain_rows(&render_read_card("a.txt", Some("x"), 1, 10, 80));
+        assert!(rows[1].contains("+1 more line "), "{:?}", rows[1]);
     }
 
     #[test]
@@ -613,7 +720,7 @@ mod tests {
         let plain = crate::strip_ansi(&text_dump);
         assert!(plain.contains("Analyzed .audit"));
         assert!(plain.contains("2026-09-01-audit-step.md"));
-        assert!(plain.contains("- And 5 More..."));
+        assert!(plain.contains("+5 more entries"));
     }
 
     #[test]

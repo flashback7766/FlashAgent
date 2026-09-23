@@ -89,7 +89,7 @@ pub(crate) fn card_rows(value: &str, width: usize, max_rows: usize) -> Vec<Strin
                 continue;
             }
             if spaces > 3 {
-                shown.push_str(&format!(" \u{2423}x{spaces} "));
+                shown.push_str(&format!(" \u{b7}x{spaces} "));
             } else {
                 shown.push_str(&" ".repeat(spaces));
             }
@@ -104,23 +104,41 @@ pub(crate) fn card_rows(value: &str, width: usize, max_rows: usize) -> Vec<Strin
     if rows.len() > max_rows {
         let hidden: usize = rows[max_rows - 1..].iter().map(|r| r.chars().count()).sum();
         rows.truncate(max_rows - 1);
-        rows.push(format!("... {hidden} more characters (not shown; deny if unsure)"));
+        rows.push(format!(
+            "\u{2026} {} (not shown; deny if unsure)",
+            flashagent_tui::plural(hidden, "more character", "more characters")
+        ));
     }
     rows
 }
 
-/// Control characters, ANSI escapes included, are shown, not executed.
+/// Control characters, ANSI escapes included, are shown, not executed: in
+/// caret notation as `cat -v` writes them, so ESC reads `^[`.
 pub(crate) fn card_safe(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() && c != '\n' { '\u{fffd}' } else { c })
-        .collect()
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if !c.is_control() || c == '\n' {
+            out.push(c);
+            continue;
+        }
+        let code = c as u32;
+        if code >= 0x80 {
+            out.push_str("M-");
+        }
+        out.push('^');
+        out.push(match code & 0x7f {
+            0x7f => '?',
+            low => char::from_u32(low + 0x40).unwrap_or('?'),
+        });
+    }
+    out
 }
 
 /// From facts the loop reported, so a run stopped by a budget cannot read as
 /// finished whatever the model's summary claims.
 pub(crate) fn push_goal_report(chat: &mut ChatView, ledger: &GoalLedger, reason: DoneReason) {
     let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
-    let card_w = (w as usize).saturating_sub(4).clamp(44, 110);
+    let card_w = (w as usize).saturating_sub(4).clamp(24, 110);
     let inner_w = card_w.saturating_sub(2);
     let border = if matches!(reason, DoneReason::Completed) {
         "\x1b[38;2;145;205;140m"
@@ -182,4 +200,21 @@ pub(crate) fn wrap_plain(text: &str, width: usize) -> Vec<String> {
         rows.push(String::new());
     }
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_characters_are_shown_in_caret_notation() {
+        assert_eq!(card_safe("echo \u{1b}[8mhidden\r\nok\u{7f}"), "echo ^[[8mhidden^M\nok^?");
+        assert_eq!(card_safe("\u{9b}"), "M-^[");
+    }
+
+    #[test]
+    fn a_long_run_of_spaces_is_counted_in_drawable_characters() {
+        let rows = card_rows(&format!("a{}b", " ".repeat(12)), 40, 6);
+        assert_eq!(rows, ["a \u{b7}x12 b"]);
+    }
 }

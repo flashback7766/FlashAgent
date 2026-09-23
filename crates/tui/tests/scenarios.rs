@@ -14,6 +14,8 @@ const ROWS: u16 = 40;
 /// Generous: a debug build on a busy CI runner.
 const WAIT: Duration = Duration::from_secs(30);
 const PROMPT: &str = "Ask FlashAgent to do anything";
+/// The hint line under an approval card, whatever the call.
+const APPROVAL: &str = "Esc deny";
 
 /// Set up against `server`, past the trust question, ready for input.
 fn ready(home: &Home, server: &MockServer) -> Term {
@@ -38,22 +40,22 @@ fn the_wizard_sets_up_a_custom_server_and_opens_the_app() {
     // No config at all: a first run.
     let mut term = Term::start(&home, &["-y"], COLS, ROWS);
 
-    term.wait_for("Step 1: Choose LLM Backend", WAIT);
+    term.wait_for("Step 1: Choose your model server", WAIT);
     term.send("6");
     term.type_text(&server.url);
     term.send(ENTER);
 
-    term.wait_for("Step 2: API Key Configuration", WAIT);
+    term.wait_for("Step 2: API key", WAIT);
     term.send(ENTER);
 
-    term.wait_for("Step 3: Select Default Model", WAIT);
+    term.wait_for("Step 3: Choose the model", WAIT);
     term.wait_for(MODEL, WAIT);
     term.send(ENTER);
 
-    term.wait_for("Step 4: Agent Behavior & Permissions", WAIT);
+    term.wait_for("Step 4: Permissions", WAIT);
     term.send(ENTER);
 
-    term.wait_for("Step 5: Sampling Preset & Launch", WAIT);
+    term.wait_for("Step 5: Sampling and launch", WAIT);
     term.send(ENTER);
 
     // The tool-check verdict stays in the conversation instead of being cleared.
@@ -94,7 +96,7 @@ fn esc_never_quits_and_ctrl_d_does() {
     let status = term.wait_exit(WAIT);
     let screen = term.screen();
     assert!(status.is_some(), "still running after Ctrl+D; the screen was:\n{screen}");
-    assert!(!screen.contains("Session Saved"), "offered to resume a session that was not saved:\n{screen}");
+    assert!(!screen.contains("Session saved"), "offered to resume a session that was not saved:\n{screen}");
     assert!(home.sessions().is_empty(), "saved an empty session: {:?}", home.sessions());
 }
 
@@ -128,7 +130,7 @@ fn a_conversation_is_saved_when_quitting() {
     term.wait_for(PROMPT, WAIT);
 
     quit(&mut term);
-    term.wait_for("Session Saved", WAIT);
+    term.wait_for("Session saved", WAIT);
     assert_eq!(home.sessions().len(), 1, "the conversation was not saved");
 }
 
@@ -198,7 +200,7 @@ fn ctrl_k_finds_a_command_by_what_it_is_called_or_its_key() {
     // "f1" is the key of /context; typing it narrows the list to that.
     term.type_text("f1");
     term.send(ENTER);
-    term.wait_for("Context Window Breakdown", WAIT);
+    term.wait_for("Context usage", WAIT);
     term.send(ESC);
     term.wait_for(PROMPT, WAIT);
 
@@ -217,7 +219,7 @@ fn enter_runs_the_command_the_popup_highlights() {
     let term = ready(&home, &server);
     term.type_text("/hel");
     term.send(ENTER);
-    term.wait_for("Commands & Skills", WAIT);
+    term.wait_for("it never quits", WAIT);
     assert!(!term.screen().contains("Unknown command"), "{}", term.screen());
 }
 
@@ -319,7 +321,7 @@ fn planning_mode_runs_a_command_that_only_reads_without_asking() {
     term.send(ENTER);
     term.wait_for("Listed the folder.", WAIT);
     let screen = term.screen();
-    assert!(!screen.contains("Confirm:"), "a read-only command asked in Planning:\n{screen}");
+    assert!(!screen.contains(APPROVAL), "a read-only command asked in Planning:\n{screen}");
     let turns = server.turns();
     let last = sent(turns.last().expect("the model was asked again after the command"));
     assert!(last.contains("visible.txt"), "the command's output did not reach the model: {last}");
@@ -466,7 +468,7 @@ fn a_tilde_path_out_of_the_project_is_still_asked_about() {
     term.type_text("read my private file");
     term.send(ENTER);
     // The file is outside the project, so it must still be asked about.
-    term.wait_for("Confirm:", WAIT);
+    term.wait_for(APPROVAL, WAIT);
 }
 
 fn colours_on_screen(term: &Term) -> Vec<(u8, u8, u8)> {
@@ -518,8 +520,8 @@ const TINY: (u16, u16) = (60, 14);
 /// (how to open it, a word proving it is there, its last line). Waiting for
 /// the last line waits for the whole card to unfold.
 const SCREENS: &[(&str, &str, &str)] = &[
-    ("/settings", "Settings", "Esc save"),
-    ("/memory", "remembers", "esc — close"),
+    ("/settings", "Settings", "Esc save and close"),
+    ("/memory", "remembers", "Esc close"),
     ("/mcp", "MCP", "Esc close"),
     // Printed into the transcript, so the marker is its last line; the first has
     // scrolled away in a short terminal.
@@ -607,7 +609,7 @@ fn what_a_running_tool_is_doing_is_said_once() {
 }
 
 /// Shown only while a turn runs.
-const RUNNING_HINT: &str = "esc to interrupt";
+const RUNNING_HINT: &str = "Esc interrupt";
 
 /// Waits until the turn is over, so the next Enter starts a new turn.
 fn ask(term: &Term, prompt: &str, answer: &str) {
@@ -637,7 +639,7 @@ fn a_command_runs_once_it_is_allowed() {
 
     term.type_text("leave a marker");
     term.send(ENTER);
-    term.wait_for("Confirm:", WAIT);
+    term.wait_for(APPROVAL, WAIT);
     assert!(!home.work().join("marker.txt").exists(), "the command ran before it was allowed");
     // Allow is selected when the card opens.
     term.send(ENTER);
@@ -659,7 +661,7 @@ fn a_command_that_is_denied_never_runs_and_the_model_is_told() {
 
     term.type_text("leave a marker");
     term.send(ENTER);
-    term.wait_for("Confirm:", WAIT);
+    term.wait_for(APPROVAL, WAIT);
     term.send("d");
     term.wait_for("Understood, I will not run it.", WAIT);
 
@@ -809,7 +811,7 @@ fn an_mcp_tool_that_changes_things_asks_first_and_a_refusal_never_reaches_the_se
 
     term.type_text("delete everything");
     term.send(ENTER);
-    term.wait_for("Confirm:", WAIT);
+    term.wait_for(APPROVAL, WAIT);
     term.send("d");
     term.wait_for("Nothing was deleted.", WAIT);
 
@@ -847,7 +849,7 @@ fn a_goal_runs_without_asking_reports_what_it_did_and_hands_back_the_gates() {
 
     term.type_text("leave another marker");
     term.send(ENTER);
-    term.wait_for("Confirm:", WAIT);
+    term.wait_for(APPROVAL, WAIT);
     assert!(!home.work().join("after-marker.txt").exists(), "after the goal a command ran without asking");
     term.send("d");
     term.wait_for("Asked first.", WAIT);
@@ -867,7 +869,7 @@ fn a_goal_refuses_a_dangerous_command_without_waiting_on_a_card() {
     term.wait_for("Left it alone.", WAIT);
     term.wait_for("Goal report:", WAIT);
 
-    assert!(!term.screen().contains("Confirm:"), "a goal stopped on a card nobody is there to answer:\n{}", term.screen());
+    assert!(!term.screen().contains(APPROVAL), "a goal stopped on a card nobody is there to answer:\n{}", term.screen());
     assert!(!home.work().join("ran.txt").exists(), "the dangerous command ran during /goal");
     let history = sent(server.turns().last().unwrap());
     assert!(history.contains("refused during /goal"), "the model was not told why: {history}");
@@ -1231,7 +1233,7 @@ fn writing_outside_the_project_asks_even_in_accept_edits() {
 
     term.type_text("write a file next to the project");
     term.send(ENTER);
-    term.wait_for("Confirm:", WAIT);
+    term.wait_for(APPROVAL, WAIT);
     term.wait_for("outside the project", WAIT);
     let target = home.path().join("outside.txt");
     assert!(!target.exists(), "the file was written before anyone answered");
@@ -1259,7 +1261,7 @@ fn a_write_through_a_symlink_parent_asks_before_touching_the_external_file() {
     let term = ready(&home, &server);
     term.type_text("write through the link");
     term.send(ENTER);
-    term.wait_for("Confirm:", WAIT);
+    term.wait_for(APPROVAL, WAIT);
     term.wait_for("outside the project", WAIT);
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
     term.send("d");
@@ -1324,7 +1326,7 @@ fn resume_without_an_id_lists_this_folders_sessions_to_pick_from() {
     }
 
     let term = Term::start(&home, &["-y", "--resume"], COLS, ROWS);
-    term.wait_for("Resume a Session", WAIT);
+    term.wait_for("Resume a session", WAIT);
     term.wait_for("what is the magic number?", WAIT);
     term.send(ENTER);
     term.wait_for("Resumed session", WAIT);
@@ -1354,7 +1356,7 @@ fn slash_resume_switches_sessions_and_saves_the_one_that_was_open() {
     ask(&term, "new question", "New answer.");
     term.type_text("/resume");
     term.send(ENTER);
-    term.wait_for("Resume a Session", WAIT);
+    term.wait_for("Resume a session", WAIT);
     term.wait_for("old question", WAIT);
     term.send(ENTER);
     term.wait_for("Resumed session", WAIT);
@@ -1384,7 +1386,7 @@ fn a_saved_session_comes_back_with_resume() {
     let id = session.file_stem().unwrap().to_string_lossy().to_string();
 
     let term = Term::start(&home, &["-y", "--resume", &id], COLS, ROWS);
-    term.wait_for(&format!("Resumed session '{id}'"), WAIT);
+    term.wait_for(&format!("Resumed session {id}"), WAIT);
     term.wait_for("The magic number is 7.", WAIT);
     ask(&term, "is it still the same?", "Yes, still 7.");
 
@@ -1592,9 +1594,9 @@ fn an_approval_that_comes_up_over_open_settings_gets_the_answer() {
     term.type_text("leave a marker");
     term.send(ENTER);
     term.send(TAB);
-    term.wait_for("FlashAgent Settings", WAIT);
+    term.wait_for("╭─ Settings", WAIT);
     // The card over the settings must be the one Enter answers.
-    term.wait_for("Confirm:", WAIT);
+    term.wait_for(APPROVAL, WAIT);
     term.send(ENTER);
     term.wait_for("The marker is there.", WAIT);
     assert!(home.work().join("marker.txt").exists(), "Enter went to the settings under the card");
@@ -1625,10 +1627,10 @@ fn every_panel_opens_over_the_composer_and_esc_puts_the_composer_back() {
     let term = ready(&home, &server);
 
     for (key, title) in [
-        (F1, "Context Window Breakdown"),
-        (F3, "Select Model"),
-        (F4, "Select Thinking Effort"),
-        (TAB, "FlashAgent Settings"),
+        (F1, "Context usage"),
+        (F3, "Select model"),
+        (F4, "Thinking effort"),
+        (TAB, "╭─ Settings"),
     ] {
         term.send(key);
         term.wait_for(title, WAIT);
@@ -1648,7 +1650,7 @@ fn a_sampling_change_is_applied_and_saved() {
     // Only for those who look for it: no key of its own.
     term.type_text("/sampling");
     term.send(ENTER);
-    term.wait_for("Sampling Parameters", WAIT);
+    term.wait_for("Sampling parameters", WAIT);
     // Down to Temperature, one step up, Enter applies.
     term.send(DOWN);
     term.send(RIGHT);
@@ -1667,9 +1669,9 @@ fn turning_tips_off_in_settings_takes_the_tip_line_away() {
     term.wait_for("Tip:", WAIT);
 
     term.send(TAB);
-    term.wait_for("FlashAgent Settings", WAIT);
+    term.wait_for("╭─ Settings", WAIT);
     term.send("3");
-    term.wait_for("Developer Tips", WAIT);
+    term.wait_for("Developer tips", WAIT);
     term.send(DOWN);
     term.send(ENTER);
     term.wait_for("Disabled", WAIT);
@@ -1753,7 +1755,7 @@ fn export_writes_the_conversation_next_to_the_project() {
     term.wait_for(PROMPT, WAIT);
     term.type_text("/export");
     term.send(ENTER);
-    term.wait_for("Exported conversation to:", WAIT);
+    term.wait_for("Exported to", WAIT);
     let exported = std::fs::read_dir(home.work())
         .unwrap()
         .filter_map(Result::ok)
@@ -1769,7 +1771,7 @@ fn a_style_chosen_in_settings_reaches_the_next_message() {
     let term = ready(&home, &server);
 
     term.send(TAB);
-    term.wait_for("FlashAgent Settings", WAIT);
+    term.wait_for("╭─ Settings", WAIT);
     term.send("7");
     term.wait_for("Base style and tone", WAIT);
     term.send(RIGHT);
@@ -2101,7 +2103,7 @@ fn a_saved_session_is_found_by_something_said_inside_it() {
     }
 
     let term = Term::start(&home, &["-y", "--resume"], COLS, ROWS);
-    term.wait_for("Resume a Session", WAIT);
+    term.wait_for("Resume a session", WAIT);
     term.type_text("libssl");
     term.wait_for("(1/2", WAIT);
     let screen = term.screen();

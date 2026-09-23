@@ -1,37 +1,80 @@
 use super::*;
 
-const HELP: &str = "Commands & Skills (Tab to autocomplete, Ctrl+K to search them all):\n\
-     • /goal <task>           — autonomous run; its limits live in Settings → Goal\n\
-     • /resume                — pick a saved session from this folder and continue it\n\
-     • /settings (or Tab)     — open settings configuration tab\n\
-     • /context               — show detailed context window breakdown\n\
-     • /memory [summary]      — what FlashAgent remembers; the summary groups it by topic\n\
-     • /verbose [all|last|off] — toggle verbose mode (or press F2 / Alt+O / Ctrl+O)\n\
-     • /effort (or /t)        — choose thinking effort preset (or press F4 / Ctrl+T)\n\
-     • /model  (or /m)        — choose and switch model (or press F3)\n\
-     • /mode [plan|man|edits|all] — switch permission mode (or press Shift+Tab)\n\
-     • /mcp [list|market|test|add|reload] — manage Model Context Protocol servers\n\
-     • /sampling              — sampling parameters (advanced)\n\
-     • /compact [focus]       — summarize older turns to free context\n\
-     • /clear                 — clear chat scrollback\n\
-     • /regenerate (or Ctrl+R) — regenerate last model response from scratch\n\
-     • /rewind [n]            — take turns back: files and conversation return to before turn n\n\
-     • /diff · /commit <msg>  — git diff --stat / commit staged changes\n\
-     • /export [md|html|jsonl] — write the conversation to a file\n\
-     • /editor (or Ctrl+E)    — compose the prompt in an external editor\n\
-     • Alt+Enter · Ctrl+J · \\ then Enter — a new line in the prompt\n\
-     • ←/→ · Home/End · Ctrl+W · Alt+K — move and delete in the prompt\n\
-     • Ctrl+F                 — search the prompts sent before\n\
-     • Ctrl+V                 — paste a screenshot (Ctrl+Z takes it back); dropping an image works too\n\
-     • /update (or Ctrl+U) · /channel <stable|beta> — check, download and install an update\n\
-     • /skill:<name>          — invoke a skill from .agents/skills/\n\
-     • /exit                  — save the session and quit\n\
-     • /uninstall             — close FlashAgent and remove it; asks what data to delete\n\
-     • Tab                    — autocomplete popup or settings tab\n\
-     • Ctrl+K                 — every command and menu, searchable\n\
-     • Click a thought or a tool call — open or fold just that one\n\
-     • Esc                    — close, dismiss or interrupt; it never quits\n\
-     • Ctrl+D · Ctrl+C twice  — quit";
+const HELP_COMMANDS: &[(&str, &str)] = &[
+    ("/goal <task>", "an autonomous run; its limits are in Settings \u{2192} Goal"),
+    ("/resume", "pick a saved session from this folder and continue it"),
+    ("/settings, Tab", "settings"),
+    ("/model, /m, F3", "choose and switch the model"),
+    ("/effort, /t, F4", "thinking effort (also Ctrl+T)"),
+    ("/mode [plan|man|edits|all]", "permission mode (also Shift+Tab)"),
+    ("/context, F1", "what fills the context window"),
+    ("/compact [focus]", "summarize older turns to free context"),
+    ("/memory [summary]", "what FlashAgent remembers; the summary groups it by topic"),
+    ("/verbose [all|last|off]", "show thoughts and tool calls (also F2, Alt+O, Ctrl+O)"),
+    ("/regenerate, Ctrl+R", "answer the last prompt again from scratch"),
+    ("/rewind [n]", "files and conversation go back to before turn n"),
+    ("/diff, /commit <msg>", "git diff --stat; commit the staged changes"),
+    ("/export [md|html|jsonl]", "write the conversation to a file"),
+    ("/editor, Ctrl+E", "write the prompt in an external editor"),
+    ("/mcp [list|market|test|add|reload]", "Model Context Protocol servers"),
+    ("/sampling", "sampling parameters (advanced)"),
+    ("/skill:<name>", "run a skill from .agents/skills/"),
+    ("/update, Ctrl+U", "check for, download and install an update"),
+    ("/channel <stable|beta>", "switch the release channel"),
+    ("/clear", "clear the screen and scrollback"),
+    ("/uninstall", "close FlashAgent and remove it; asks what data to delete"),
+    ("/exit", "save the session and quit"),
+];
+
+const HELP_KEYS: &[(&str, &str)] = &[
+    ("Enter", "send; while a turn runs, steer it"),
+    ("Alt+Enter, Ctrl+J, \\ Enter", "a new line in the prompt"),
+    ("\u{2190}/\u{2192}, Home/End, Ctrl+W, Alt+K", "move and delete in the prompt"),
+    ("Ctrl+F", "search the prompts sent before"),
+    ("Ctrl+V", "paste a screenshot (Ctrl+Z takes it back); dropping an image works too"),
+    ("Ctrl+K", "every command and menu, searchable"),
+    ("Click", "open or fold one thought or tool call"),
+    ("Ctrl+D, Ctrl+C twice", "quit"),
+    ("Esc", "close, dismiss or interrupt; it never quits"),
+];
+
+/// Two sections of key and meaning, the meanings in one column and wrapped
+/// under themselves.
+fn help_text(width: usize) -> String {
+    const HEAD: &str = "\x1b[1;38;2;225;175;95m";
+    const KEY: &str = "\x1b[38;2;194;231;255m";
+    const WHAT: &str = "\x1b[38;2;165;160;150m";
+    const OFF: &str = "\x1b[0m";
+    let width = width.max(30);
+    let key_w = (width / 3).clamp(12, 26);
+    let what_w = width.saturating_sub(key_w + 4).max(16);
+    let mut out = Vec::new();
+    for (title, rows) in [
+        ("Commands and skills \u{b7} Tab completes them, Ctrl+K searches everything", HELP_COMMANDS),
+        ("Keys", HELP_KEYS),
+    ] {
+        if !out.is_empty() {
+            out.push(String::new());
+        }
+        out.push(format!("{HEAD}{title}{OFF}"));
+        for (key, what) in rows {
+            let wrapped = wrap_plain(what, what_w);
+            let key_cells = visible_width(key);
+            // A key too long for its column gets a line of its own.
+            let mut first = if key_cells > key_w {
+                out.push(format!("  {KEY}{key}{OFF}"));
+                None
+            } else {
+                Some(format!("  {KEY}{key}{OFF}{}", " ".repeat(key_w - key_cells + 2)))
+            };
+            for row in wrapped {
+                let lead = first.take().unwrap_or_else(|| " ".repeat(key_w + 4));
+                out.push(format!("{lead}{WHAT}{row}{OFF}"));
+            }
+        }
+    }
+    out.join("\n")
+}
 
 impl App {
     /// Enter on a non-empty prompt with no turn running.
@@ -56,7 +99,10 @@ impl App {
         let typed = self.input.take();
         self.autocomplete_idx = 0;
         match name {
-            "help" | "?" => self.chat.push_system(HELP),
+            "help" | "?" => {
+                let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
+                self.chat.push_system(&help_text(w as usize));
+            }
             "goal" if arg.is_empty() => self.show_goal_usage(),
             "goal" => self.start_goal(cx, arg),
             "skills" => self.list_skills(),
@@ -83,7 +129,7 @@ impl App {
             "clear" => self.clear_chat(),
             "regenerate" | "retry" => {
                 if !self.regenerate(cx) {
-                    self.notice("[No previous turn to regenerate]");
+                    self.notice("No previous turn to regenerate");
                 }
             }
             "effort" | "thinking" | "t" if arg.is_empty() => self.open_effort_menu(cx.source),
@@ -276,7 +322,7 @@ impl App {
         cx.tools_arc.set_goal_mode(true);
 
         let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
-        let card_w = (w as usize).saturating_sub(4).clamp(44, 110);
+        let card_w = (w as usize).saturating_sub(4).clamp(20, 110);
         let inner_w = card_w.saturating_sub(2);
         let border_color = "\x1b[38;2;225;175;95m";
         let reset = "\x1b[0m";
@@ -287,9 +333,11 @@ impl App {
             LineKind::System,
             format!("{border_color}╭─\x1b[1;38;2;245;240;232m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)),
         );
-        let meta_line = "Mode: Autonomous · Permissions: Auto-Approved · Thinking: Max · Esc to stop";
-        let budget_line = flashagent_tui::truncate_middle(&format!("Budget: {}", goal_budgets.summary()), inner_w.saturating_sub(2));
-        for row in [meta_line, budget_line.as_str()] {
+        let meta = "Accept All \u{b7} thinking high \u{b7} Esc stops the run";
+        let budget = format!("Budget: {}", goal_budgets.summary());
+        let rows: Vec<String> =
+            [meta, budget.as_str()].iter().flat_map(|text| wrap_plain(text, inner_w.saturating_sub(2))).collect();
+        for row in &rows {
             let pad_len = inner_w.saturating_sub(visible_width(row) + 1);
             self.chat.push_line(
                 LineKind::System,
@@ -343,7 +391,7 @@ impl App {
         let skills = flashagent_tui::autocomplete::load_skills(std::path::Path::new("."));
         let listed: Vec<String> = skills.iter().map(|s| format!("  • {} — {}", s.trigger, s.description)).collect();
         if listed.is_empty() {
-            self.notice("[No skills found. Add .agents/skills/<name>.md (project) or ~/.flashagent/skills/<name>.md (global).]");
+            self.notice("No skills yet · add .agents/skills/<name>.md here, or ~/.flashagent/skills/<name>.md for every project");
         } else {
             self.chat.push_system(&format!("Skills:\n{}", listed.join("\n")));
         }
@@ -352,7 +400,7 @@ impl App {
     fn run_skill(&mut self, cx: &LoopCtx<'_>, name: &str) {
         let name = name.trim();
         let Some(skill_content) = find_skill_file(name).and_then(|p| std::fs::read_to_string(p).ok()) else {
-            self.notice(format!("[Unknown skill '{name}'. Type /skills to list available skills.]"));
+            self.notice(format!("Unknown skill '{name}' · /skills lists them"));
             return;
         };
         self.chat.push_user(&format!("/skill:{name}"));
@@ -369,7 +417,7 @@ impl App {
             news = flashagent_tui::whatsnew::latest(3);
         }
         if news.is_empty() {
-            self.notice("[No changelog is bundled with this build.]");
+            self.notice("No changelog is bundled with this build");
         } else {
             let mut deferred = Vec::new();
             flashagent_tui::whatsnew::run_channel(news, now, cx.rx, &mut deferred).await.ok();
@@ -394,7 +442,7 @@ impl App {
             known.extend(p.presets.iter().filter(|p| !known.contains(p)).cloned().collect::<Vec<_>>());
         }
         if !known.contains(&wanted) {
-            self.notice(format!("[Unknown effort '{wanted}'. Available: {}]", known.join(", ")));
+            self.notice(format!("Unknown effort '{wanted}' · try {}", known.join(", ")));
             return;
         }
         self.current_effort = wanted;
@@ -410,11 +458,11 @@ impl App {
             "acceptedits" | "accept_edits" | "edits" | "auto" | "default" => PermissionMode::AcceptEdits,
             "bypass" | "accept_all" | "all" => PermissionMode::Bypass,
             "autonomic" => {
-                self.notice("[Autonomic mode is temporary and activated exclusively during `/goal <task>` execution]");
+                self.notice("Autonomous mode runs only inside /goal <task>");
                 return;
             }
             _ => {
-                self.notice("[Usage: /mode planning | /mode manual | /mode edits | /mode all]");
+                self.notice("Usage: /mode planning | /mode manual | /mode edits | /mode all");
                 return;
             }
         };
@@ -437,7 +485,7 @@ impl App {
             "stable" | "v" => UpdateChannel::Stable,
             "beta" | "b" => UpdateChannel::Beta,
             _ => {
-                self.notice("Invalid channel. Choose either: /channel stable or /channel beta");
+                self.notice("Unknown channel · /channel stable or /channel beta");
                 return;
             }
         };
@@ -460,7 +508,7 @@ impl App {
             "market" | "marketplace" => self.open_mcp(cx, McpViewTab::Marketplace).await,
             "test" if rest.is_empty() => self.chat.push_system("Usage: /mcp test <server_name>\nExample: /mcp test sqlite"),
             "test" => {
-                self.notice(format!("Testing MCP server '{rest}'..."));
+                self.notice(format!("Testing MCP server '{rest}'…"));
                 // Drawn before the wait, which can take a while.
                 self.draw(cx, None);
                 match cx.tools_arc.mcp_manager().test_server(rest).await {
@@ -482,7 +530,7 @@ impl App {
             ),
             "add" => {
                 let Some(item) = flashagent_tools::mcp::find_marketplace_item(rest) else {
-                    self.notice(format!("Unknown marketplace extension: '{rest}'. Type /mcp market to see available items."));
+                    self.notice(format!("Unknown extension '{rest}' · /mcp market lists them"));
                     return;
                 };
                 let cfg = flashagent_tools::mcp::scaffold_config(item);
@@ -499,7 +547,7 @@ impl App {
                             let _ = mgr.start_server(&server_id).await;
                         });
                     }
-                    Err(e) => self.notice(format!("\x1b[38;2;245;120;120mFailed to save MCP configuration:\x1b[0m {e}")),
+                    Err(e) => self.notice(format!("Failed to save the MCP configuration: {e}")),
                 }
             }
             "reload" => {
@@ -510,18 +558,20 @@ impl App {
                         let active = statuses.iter().filter(|s| s.state == flashagent_tools::mcp::ServerConnectionState::Active).count();
                         let tools: usize = statuses.iter().map(|s| s.tool_count).sum();
                         self.notice(format!(
-                            "\x1b[38;2;135;220;145m√ MCP reload complete:\x1b[0m {active} active server(s), {tools} discovered tool(s)."
+                            "MCP reloaded · {} · {}",
+                            flashagent_tui::plural(active, "active server", "active servers"),
+                            flashagent_tui::plural(tools, "tool", "tools")
                         ));
                     }
-                    Err(e) => self.notice(format!("\x1b[38;2;245;120;120mMCP reload failed:\x1b[0m {e}")),
+                    Err(e) => self.notice(format!("MCP reload failed: {e}")),
                 }
             }
-            _ => self.notice("[Usage: /mcp list | market | test <server> | add <id> | reload]"),
+            _ => self.notice("Usage: /mcp list | market | test <server> | add <id> | reload"),
         }
     }
 
     async fn compact_command(&mut self, cx: &LoopCtx<'_>, focus: &str) {
-        self.chat.push_system("Compacting context...");
+        self.chat.push_system("Compacting context…");
         self.custom_placeholder = None;
         self.suggested_prompt = None;
         // Drawn before the wait: the command is already gone from the composer.
@@ -553,7 +603,7 @@ impl App {
             "last" => (true, false),
             "off" | "none" | "collapse" => (false, false),
             _ => {
-                self.notice("[Usage: /verbose all | /verbose last | /verbose off]");
+                self.notice("Usage: /verbose all | /verbose last | /verbose off");
                 return;
             }
         };
@@ -575,9 +625,9 @@ impl App {
                     .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
                     .unwrap_or(0);
                 match untracked {
-                    0 => self.notice("[No changes to tracked files]"),
-                    1 => self.notice("[No changes to tracked files · 1 untracked file]"),
-                    n => self.notice(format!("[No changes to tracked files · {n} untracked files]")),
+                    0 => self.notice("No changes to tracked files"),
+                    1 => self.notice("No changes to tracked files · 1 untracked file"),
+                    n => self.notice(format!("No changes to tracked files · {n} untracked files")),
                 }
             }
             Err(e) => self.notice(format!("Failed to run git diff: {e}")),
@@ -586,7 +636,7 @@ impl App {
 
     fn rewind_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {
         let Some(store) = cx.perm.state().snapshots() else {
-            self.notice("[Rewind is not available in this session]");
+            self.notice("Rewind is not available in this session");
             return;
         };
         let prompts: Vec<String> =
@@ -594,12 +644,12 @@ impl App {
         let prompt_refs: Vec<&str> = prompts.iter().map(String::as_str).collect();
         let turns = store.rewindable(&prompt_refs);
         if turns.is_empty() {
-            self.notice("[Nothing to rewind to yet]");
+            self.notice("Nothing to rewind to yet");
             return;
         }
         let Some(n) = arg.parse::<usize>().ok().filter(|n| (1..=turns.len()).contains(n)) else {
             if !arg.is_empty() {
-                self.notice(format!("[No turn {arg} to rewind to: pick 1 to {}]", turns.len()));
+                self.notice(format!("No turn {arg} to rewind to: pick 1 to {}", turns.len()));
             }
             let mut text = String::from(
                 "Turns you can go back to. The files FlashAgent changed and the conversation return to how they were before the turn:\n",
@@ -618,7 +668,7 @@ impl App {
             return;
         };
         if self.running {
-            self.notice("[Wait for the turn to finish before rewinding]");
+            self.notice("Wait for the turn to finish before rewinding");
             return;
         }
         let target = turns[n - 1].clone();
@@ -689,7 +739,7 @@ impl App {
         match std::fs::write(&filename, content) {
             Ok(_) => {
                 let shown = std::fs::canonicalize(&filename).map_or(filename, |p| p.display().to_string());
-                self.notice(format!("Exported conversation to: {shown}"));
+                self.notice(format!("Exported to {shown}"));
             }
             Err(e) => self.notice(format!("Failed to export conversation: {e}")),
         }
@@ -715,7 +765,7 @@ impl App {
             for (path, why) in &report.failed {
                 self.chat.push_line(LineKind::ToolError, format!("Not put back: {} — {why}", store.display_path(path)));
             }
-            self.notice("Rewind incomplete. History and failed snapshots kept; fix the reported errors and retry /rewind.".to_string());
+            self.notice("Rewind incomplete · history kept; fix the errors above and run /rewind again".to_string());
             self.renderer.request_reprint();
             return;
         }

@@ -11,8 +11,22 @@ pub use flashagent_core::ColorTheme;
 static ACTIVE: AtomicU8 = AtomicU8::new(0);
 
 pub fn set(theme: ColorTheme) {
+    let theme = if theme == ColorTheme::Dark && terminal_is_light() { ColorTheme::Light } else { theme };
     let index = ColorTheme::all().iter().position(|t| *t == theme).unwrap_or(0);
     ACTIVE.store(index as u8, Ordering::Relaxed);
+}
+
+/// The dark palette is unreadable on a white background, so a terminal that
+/// says it has one (`COLORFGBG`, set by rxvt, Konsole, iTerm2 and others) gets
+/// the light theme unless another was chosen.
+fn terminal_is_light() -> bool {
+    static LIGHT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LIGHT.get_or_init(|| std::env::var("COLORFGBG").is_ok_and(|v| background_is_light(&v)))
+}
+
+/// `COLORFGBG` is `fg;bg` or `fg;default;bg`; 7 and 15 are the whites.
+fn background_is_light(colorfgbg: &str) -> bool {
+    matches!(colorfgbg.rsplit(';').next().and_then(|bg| bg.trim().parse::<u8>().ok()), Some(7 | 15))
 }
 
 pub fn active() -> ColorTheme {
@@ -146,7 +160,67 @@ fn transform(theme: ColorTheme, (r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
             let grey = clamp(40 + luminance((r, g, b)) as i32 * 215 / 255);
             (grey, grey, grey)
         }
+        ColorTheme::Light => light((r, g, b)),
     }
+}
+
+/// Greys and near-whites turn over (bright text goes dark, dark panels go
+/// pale); coloured accents keep their hue and deepen, so gold and green stay
+/// readable on white. Foreground and background alike: a picture drawn with
+/// both, like the mascot, stays one colour.
+fn light((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
+    let (h, s, l) = to_hsl((r, g, b));
+    // By absolute spread, not HSL saturation, which calls any dark tint vivid.
+    let chroma = r.max(g).max(b) - r.min(g).min(b);
+    let l = if chroma < 50 || !(0.25..=0.9).contains(&l) { 0.08 + (1.0 - l) * 0.85 } else { (l * 0.72).min(0.55) };
+    from_hsl(h, s, l)
+}
+
+fn to_hsl((r, g, b): (u8, u8, u8)) -> (f32, f32, f32) {
+    let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    if max == min {
+        return (0.0, 0.0, l);
+    }
+    let d = max - min;
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let h = if max == r {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    (h / 6.0, s, l)
+}
+
+fn from_hsl(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let to_byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    if s == 0.0 {
+        return (to_byte(l), to_byte(l), to_byte(l));
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let channel = |mut t: f32| {
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    (to_byte(channel(h + 1.0 / 3.0)), to_byte(channel(h)), to_byte(channel(h - 1.0 / 3.0)))
 }
 
 /// The eight are compared at their usual values; the terminal may paint them
@@ -195,6 +269,26 @@ fn nearest_ansi(rgb: (u8, u8, u8)) -> (u8, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_light_theme_darkens_text_and_keeps_accents_coloured() {
+        // Near-white answer text becomes near-black.
+        let (r, g, b) = light((245, 240, 232));
+        assert!(luminance((r, g, b)) < 60, "{r},{g},{b}");
+        // A dark panel becomes pale.
+        assert!(luminance(light((20, 30, 40))) > 200);
+        // Gold stays gold, only deeper.
+        let (r, g, b) = light((225, 175, 95));
+        assert!(r > g && g > b && luminance((r, g, b)) < 150, "{r},{g},{b}");
+    }
+
+    #[test]
+    fn a_white_background_is_recognised_from_colorfgbg() {
+        assert!(background_is_light("0;15"));
+        assert!(background_is_light("0;default;7"));
+        assert!(!background_is_light("15;0"));
+        assert!(!background_is_light("garbage"));
+    }
 
     const GOLD: &str = "\x1b[38;2;225;175;95m";
 

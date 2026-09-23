@@ -26,7 +26,7 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
             headline: format!("No model server answered at {base}"),
             hint: Some(
                 "Start your server (LM Studio, llama.cpp, Ollama), or point FlashAgent \
-                 somewhere else with Tab → LLM, or --url."
+                 somewhere else with Backend URL in Tab → General, or --url."
                     .to_string(),
             ),
             raw: raw.to_string(),
@@ -53,7 +53,7 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
     {
         return Explained {
             headline: "The conversation no longer fits in the model's context".to_string(),
-            hint: Some("/compact summarises the older turns and frees the space.".to_string()),
+            hint: Some("/compact summarizes the older turns and frees the space.".to_string()),
             raw: raw.to_string(),
         };
     }
@@ -63,7 +63,7 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
     {
         return Explained {
             headline: format!("{base} rejected the API key"),
-            hint: Some("Set or fix the key in Tab → LLM, or in ~/.flashagent/config.json.".to_string()),
+            hint: Some("Set the key again with flashagent --setup, or in ~/.flashagent/config.json.".to_string()),
             raw: raw.to_string(),
         };
     }

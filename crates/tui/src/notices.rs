@@ -199,7 +199,7 @@ impl App {
     }
 }
 
-/// E.g. `Update b235 · [████████░░░░░░░░] 52% · 3.5/6.7 MB`.
+/// E.g. `Update b235 · ████████──────── 52% · 3.5/6.7 MB`.
 pub(crate) fn update_progress_line(version: &str, stage: flashagent_svc::updater::UpdateProgress) -> String {
     use flashagent_svc::updater::UpdateProgress;
     pub(crate) const MB: f64 = 1024.0 * 1024.0;
@@ -208,9 +208,9 @@ pub(crate) fn update_progress_line(version: &str, stage: flashagent_svc::updater
             let done = (received.min(total) as f64 / total as f64).clamp(0.0, 1.0);
             let filled = (done * 16.0).round() as usize;
             format!(
-                "[{}{}] {:>3}% · {:.1}/{:.1} MB",
+                "{}{} {:>3}% · {:.1}/{:.1} MB",
                 "\u{2588}".repeat(filled),
-                "\u{2591}".repeat(16 - filled),
+                "\u{2500}".repeat(16 - filled),
                 (done * 100.0).round() as u32,
                 received as f64 / MB,
                 total as f64 / MB
@@ -220,8 +220,8 @@ pub(crate) fn update_progress_line(version: &str, stage: flashagent_svc::updater
         UpdateProgress::Downloading { received, .. } => {
             format!("{:.1} MB downloaded", received as f64 / MB)
         }
-        UpdateProgress::Verifying => "verifying checksum...".to_string(),
-        UpdateProgress::Installing => "installing...".to_string(),
+        UpdateProgress::Verifying => "verifying the checksum\u{2026}".to_string(),
+        UpdateProgress::Installing => "installing\u{2026}".to_string(),
     };
     format!("{UPDATE_LINE_PREFIX}{version} \u{b7} {detail}")
 }

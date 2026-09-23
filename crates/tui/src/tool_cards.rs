@@ -386,7 +386,7 @@ impl ChatView {
                 *count += 1;
                 *last_task = task;
                 *is_running = true;
-                line.text = card_line(&format!("Explored {count} tasks"), None);
+                line.text = card_line(&format!("Running {count} subagents"), None);
                 true
             })
         };
@@ -450,42 +450,64 @@ impl ChatView {
             last_call.result = result.map(str::to_string);
         }
 
+        // A folded group counts every call: one failure among many is still shown.
+        let calls = &self.lines[i].tool_calls;
+        let failed = calls.iter().filter(|c| c.is_error).count().max(usize::from(is_error));
+        let total = calls.len().max(1);
+        let all_failed = failed > 0 && failed >= total;
         let Some(mut group) = self.lines[i].tool_group.take() else { return };
-        let text = finished_text(&mut group, is_error);
-        self.lines[i].kind = if is_error { LineKind::ToolError } else { LineKind::Tool };
+        let text = finished_text(&mut group, is_error, failed, total);
+        let grouped = !matches!(group, ToolGroupKind::Custom { .. } | ToolGroupKind::Generic { .. } | ToolGroupKind::Memory { .. });
+        let shown_as_error = if grouped { all_failed } else { is_error };
+        self.lines[i].kind = if shown_as_error { LineKind::ToolError } else { LineKind::Tool };
         self.lines[i].text = text;
         self.lines[i].tool_group = Some(group);
     }
 }
 
-fn finished_text(group: &mut ToolGroupKind, is_error: bool) -> String {
+/// ` · 1 failed`, in red, after a group some of whose calls failed.
+fn failed_suffix(failed: usize, total: usize) -> String {
+    if failed == 0 || failed >= total {
+        return String::new();
+    }
+    format!(" {FAINT}\u{b7}{OFF} {FAILED}{failed} failed{OFF}")
+}
+
+fn finished_text(group: &mut ToolGroupKind, is_error: bool, failed: usize, total: usize) -> String {
     match group {
         ToolGroupKind::Command { count, last_cmd, is_running } => {
             *is_running = false;
-            match (is_error, *count) {
+            match (failed >= *count, *count) {
                 (true, 1) => failed_line("Failed", Some(&format_cmd(last_cmd))),
                 (true, n) => failed_line(&format!("Failed {n} commands"), None),
                 (false, 1) => card_line("Ran", Some(&format_cmd(last_cmd))),
-                (false, n) => card_line(&format!("Ran {n} commands"), None),
+                (false, n) => format!("{}{}", card_line(&format!("Ran {n} commands"), None), failed_suffix(failed, n)),
             }
         }
         ToolGroupKind::Explore { files, searches, last_target, is_running } => {
             *is_running = false;
-            format_explore(false, *files, *searches, last_target)
+            format!("{}{}", format_explore(false, *files, *searches, last_target), failed_suffix(failed, *files + *searches))
         }
         ToolGroupKind::Edit { path, added, deleted, is_running } => {
             *is_running = false;
             let basename =
                 std::path::Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path);
+            if failed >= total {
+                return failed_line("Failed to edit", Some(basename));
+            }
             format!(
-                "  {FAINT}{TOOL_MARK}{OFF} {MUTED}Edited{OFF} \x1b[1;38;2;225;230;240m{basename}{OFF} \x1b[38;2;145;205;140m+{added}{OFF} {FAILED}-{deleted}{OFF}"
+                "  {FAINT}{TOOL_MARK}{OFF} {MUTED}Edited{OFF} \x1b[1;38;2;225;230;240m{basename}{OFF} \x1b[38;2;145;205;140m+{added}{OFF} {FAILED}-{deleted}{OFF} {}{}",
+                chevron(),
+                failed_suffix(failed, total)
             )
         }
         ToolGroupKind::Subagent { count, last_task, is_running } => {
             *is_running = false;
-            match *count {
-                1 => card_line(&format!("{} finished", format_cmd(last_task)), None),
-                n => card_line(&format!("Explored {n} tasks"), None),
+            match (failed >= *count, *count) {
+                (true, 1) => failed_line("Subagent failed:", Some(&format_cmd(last_task))),
+                (false, 1) => card_line(&format!("{} finished", format_cmd(last_task)), None),
+                (true, n) => failed_line(&format!("{n} subagents failed"), None),
+                (false, n) => format!("{}{}", card_line(&format!("Ran {n} subagents"), None), failed_suffix(failed, n)),
             }
         }
         ToolGroupKind::Memory { scopes, is_running } => {

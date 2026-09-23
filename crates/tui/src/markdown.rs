@@ -90,6 +90,8 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
     let mut in_code_block = false;
+    let mut code_lang = String::new();
+    let mut carry = crate::highlight::Carry::default();
 
     let is_table_delimiter = |l: &str| -> bool {
         let t = l.trim();
@@ -123,6 +125,8 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
             in_code_block = !in_code_block;
             if in_code_block {
                 let lang = trimmed.strip_prefix("```").unwrap_or("").trim();
+                code_lang = lang.to_string();
+                carry = crate::highlight::Carry::default();
                 let title = if lang.is_empty() { "code".to_string() } else { lang.to_string() };
                 let border_color = "\x1b[38;2;75;99;130m";
                 let reset = "\x1b[0m";
@@ -144,12 +148,14 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
             let inner_w = width.saturating_sub(2);
             let inner_content_w = inner_w.saturating_sub(1);
 
+            // Coloured first, then wrapped: a wrap carries the colour of its piece.
+            let coloured = crate::highlight::highlight_line(&code_lang, line, &mut carry);
             let chunks = if line.is_empty() {
                 vec![String::new()]
             } else if visible_width(line) <= inner_content_w {
-                vec![line.to_string()]
+                vec![coloured]
             } else {
-                wrap(line, inner_content_w)
+                wrap(&coloured, inner_content_w)
             };
 
             for chunk in chunks {
@@ -161,7 +167,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 let vis = visible_width(&clipped);
                 let pad = inner_content_w.saturating_sub(vis);
                 out.push(format!(
-                    "{border_color}│{reset} \x1b[38;2;215;180;110m{clipped}\x1b[0m{}{border_color}│{reset}",
+                    "{border_color}│{reset} {clipped}\x1b[0m{}{border_color}│{reset}",
                     " ".repeat(pad)
                 ));
             }

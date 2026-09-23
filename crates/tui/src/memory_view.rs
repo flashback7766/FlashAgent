@@ -304,20 +304,19 @@ impl MemoryModal {
 
         let mut lines: Vec<RenderLine> = Vec::new();
         // The heading shrinks first; a sheared box is worse than a shorter name.
-        let title = [" What FlashAgent remembers (/memory) ", " What is remembered ", " Memory "]
+        let title = [" What FlashAgent remembers ", " What is remembered ", " Memory "]
             .into_iter()
             .find(|t| crate::visible_width(t) < inner_w)
             .unwrap_or(" Memory ");
         let dashes = inner_w.saturating_sub(crate::visible_width(title) + 1);
         lines.push((
             LineKind::System,
-            format!("  {border}┌─{accent}{title}{border}{}┐{reset}", "─".repeat(dashes)),
+            format!("  {border}╭─{accent}{title}{border}{}╮{reset}", "─".repeat(dashes)),
         ));
 
         let pad = |content: &str| -> String {
             let max_w = inner_w.saturating_sub(2);
-            let vis = crate::visible_width(content);
-            let clipped = if vis > max_w { crate::clip_ansi(content, max_w) } else { content.to_string() };
+            let clipped = crate::tool_views::clip_ellipsis(content, max_w);
             let fill = " ".repeat(max_w.saturating_sub(crate::visible_width(&clipped)));
             format!("  {border}│{reset} {clipped}{fill} {border}│{reset}")
         };
@@ -362,28 +361,17 @@ impl MemoryModal {
             Some(note) => {
                 lines.push((LineKind::System, pad(&format!("{accent}Tell the model what to change:{reset}"))));
                 lines.push((LineKind::System, pad(&format!("{text}{note}\x1b[7m \x1b[27m{reset}"))));
-                lines.push((LineKind::System, pad(&format!("{dim}enter — send · esc — cancel{reset}"))));
+                lines.push((LineKind::System, pad(&crate::key_hints(&[("Enter", "send"), ("Esc", "cancel")], inner_w.saturating_sub(2)))));
             }
             None => {
-                // Dropped from the middle so "esc — close" survives.
-                let hints = crate::fit_hints(
-                    &[
-                        ("↑/↓ — select".into(), format!("{dim}↑/↓ — select{reset}")),
-                        ("s — summary".into(), format!("{dim}s — summary{reset}")),
-                        (
-                            "e — tell the model what to change".into(),
-                            format!("{dim}e — tell the model what to change{reset}"),
-                        ),
-                        ("d — forget".into(), format!("{dim}d — forget{reset}")),
-                        ("esc — close".into(), format!("{dim}esc — close{reset}")),
-                    ],
-                    &format!("{dim} · {reset}"),
+                let hints = crate::key_hints(
+                    &[("↑/↓", "select"), ("d", "forget"), ("e", "correct it"), ("s", "summary"), ("Esc", "close")],
                     inner_w.saturating_sub(2),
                 );
                 lines.push((LineKind::System, pad(&hints)));
             }
         }
-        lines.push((LineKind::System, format!("  {border}└{}┘{reset}", "─".repeat(inner_w))));
+        lines.push((LineKind::System, format!("  {border}╰{}╯{reset}", "─".repeat(inner_w))));
         lines
     }
 
@@ -406,10 +394,10 @@ impl MemoryModal {
         let title = format!(" {accent}Memory summary{reset}{updated}");
         let dashes = inner_w.saturating_sub(crate::visible_width(&title) + 1);
         let mut lines: Vec<RenderLine> =
-            vec![(LineKind::System, format!("  {border}┌─{title}{border}{}┐{reset}", "─".repeat(dashes)))];
+            vec![(LineKind::System, format!("  {border}╭─{title}{border}{}╮{reset}", "─".repeat(dashes)))];
         let pad = |content: &str| -> String {
             let max_w = inner_w.saturating_sub(2);
-            let clipped = crate::clip_ansi(content, max_w);
+            let clipped = crate::tool_views::clip_ellipsis(content, max_w);
             let fill = " ".repeat(max_w.saturating_sub(crate::visible_width(&clipped)));
             format!("  {border}│{reset} {clipped}{fill} {border}│{reset}")
         };
@@ -428,11 +416,11 @@ impl MemoryModal {
             }
             SummaryState::Failed(why) => {
                 lines.push((LineKind::System, pad(&format!("\x1b[38;2;230;110;95mCould not write the summary:{reset} {text}{why}{reset}"))));
-                lines.push((LineKind::System, pad(&format!("{dim}ctrl+r — try again{reset}"))));
+                lines.push((LineKind::System, pad(&crate::key_hints(&[("Ctrl+R", "try again")], body_w))));
             }
             SummaryState::Ready(summary) => {
                 if summary.fingerprint != fingerprint(&self.rows) {
-                    lines.push((LineKind::System, pad(&format!("{dim}Memories changed since this was written · ctrl+r rewrites it{reset}"))));
+                    lines.push((LineKind::System, pad(&format!("{dim}Memories changed since this was written; Ctrl+R rewrites it{reset}"))));
                     lines.push((LineKind::System, pad("")));
                 }
                 for (i, (name, body)) in summary.sections.iter().enumerate() {
@@ -469,19 +457,19 @@ impl MemoryModal {
         lines.push((LineKind::System, pad(&ask)));
         lines.push((
             LineKind::System,
-            pad(&crate::fit_hints(
+            pad(&crate::key_hints(
                 &[
-                    ("type — ask".into(), format!("{dim}type — ask{reset}")),
-                    ("↑/↓ + enter — dive deeper".into(), format!("{dim}↑/↓ + enter — dive deeper{reset}")),
-                    ("ctrl+r — rewrite".into(), format!("{dim}ctrl+r — rewrite{reset}")),
-                    ("tab — list".into(), format!("{dim}tab — list{reset}")),
-                    ("esc — close".into(), format!("{dim}esc — close{reset}")),
+                    ("type", "to ask"),
+                    ("↑/↓", "pick a question"),
+                    ("Enter", "send"),
+                    ("Ctrl+R", "rewrite"),
+                    ("Tab", "list"),
+                    ("Esc", "close"),
                 ],
-                &format!("{dim} · {reset}"),
                 inner_w.saturating_sub(2),
             )),
         ));
-        lines.push((LineKind::System, format!("  {border}└{}┘{reset}", "─".repeat(inner_w))));
+        lines.push((LineKind::System, format!("  {border}╰{}╯{reset}", "─".repeat(inner_w))));
         lines
     }
 }
@@ -572,6 +560,7 @@ mod tests {
         let lines = m.render(80);
         let dump: String = lines.iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
         assert!(dump.contains("Nothing remembered yet"), "{dump}");
+        assert!(dump.contains("s summary") && dump.contains("Esc close") && dump.contains('╰'), "{dump}");
         assert_eq!(m.handle_key(KeyCode::Char('d'), KeyModifiers::NONE), MemoryAction::None);
         assert_eq!(m.handle_key(KeyCode::Esc, KeyModifiers::NONE), MemoryAction::Close);
     }

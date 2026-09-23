@@ -14,7 +14,7 @@ pub struct AutocompleteItem {
     /// E.g. "/help", "/expand", "/skill:rust-core".
     pub trigger: String,
     pub description: String,
-    /// `[cmd]` or `[skill]`.
+    /// Only a skill is labeled in the popup.
     pub category: AutocompleteCategory,
 }
 
@@ -320,7 +320,7 @@ impl AutocompletePopup {
         let top_dashes = inner_w.saturating_sub(title.chars().count() + 1);
         lines.push((
             LineKind::System,
-            format!("{border_color}┌─\x1b[38;2;180;175;165m{title}{border_color}{}┐{reset}", "─".repeat(top_dashes)),
+            format!("{border_color}╭─\x1b[38;2;180;175;165m{title}{border_color}{}╮{reset}", "─".repeat(top_dashes)),
         ));
 
         const MAX_VISIBLE: usize = 5;
@@ -344,47 +344,52 @@ impl AutocompletePopup {
                 " "
             };
 
-            let (badge_style, badge_text) = match item.category {
-                AutocompleteCategory::Command => ("\x1b[38;2;145;205;140m", "[cmd]"),
-                AutocompleteCategory::Skill => ("\x1b[38;2;175;170;225m", "[skill]"),
+            // Every row is a command; only a skill says what it is.
+            let badge_text = match item.category {
+                AutocompleteCategory::Command => "",
+                AutocompleteCategory::Skill => " skill",
             };
 
+            let trigger_w = item.trigger.chars().count().max(18);
             let cmd_styled = if is_sel {
-                format!("\x1b[1;38;2;240;235;225m{:<18}\x1b[0m", item.trigger)
+                format!("\x1b[1;38;2;240;235;225m{:<trigger_w$}\x1b[0m", item.trigger)
             } else {
-                format!("\x1b[38;2;180;175;165m{:<18}\x1b[0m", item.trigger)
+                format!("\x1b[38;2;180;175;165m{:<trigger_w$}\x1b[0m", item.trigger)
             };
 
-            // Borders, pointer, 18-column trigger, badge and spaces.
+            // Pointer, trigger, badge, the spaces between them and a right margin.
             let badge_w = badge_text.chars().count();
-            let fixed_w = 2 + 1 + 1 + 18 + 1 + badge_w + 2;
+            let fixed_w = 1 + 1 + 1 + trigger_w + 1 + badge_w + 1;
             let desc_budget = inner_w.saturating_sub(fixed_w);
 
-            let desc_clipped: String = item.description.chars().take(desc_budget).collect();
+            let desc_clipped = crate::tool_views::clip_ellipsis(&item.description, desc_budget);
             let desc_styled = if is_sel {
                 format!("\x1b[38;2;215;210;200m{desc_clipped}\x1b[0m")
             } else {
                 format!("\x1b[38;2;135;130;125m{desc_clipped}\x1b[0m")
             };
 
-            let row_raw = format!(" {pointer} {cmd_styled} {desc_styled}");
-            let vis_len = visible_width(&row_raw) + badge_w;
+            let row_raw = crate::tool_views::clip_ellipsis(
+                &format!(" {pointer} {cmd_styled} {desc_styled}"),
+                inner_w.saturating_sub(badge_w + 1),
+            );
+            let vis_len = visible_width(&row_raw) + badge_w + 1;
             let pad = " ".repeat(inner_w.saturating_sub(vis_len));
             lines.push((
                 LineKind::System,
-                format!("{border_color}│{reset}{row_raw}{pad}{badge_style}{badge_text}{reset}{border_color}│{reset}"),
+                format!("{border_color}│{reset}{row_raw}{pad}\x1b[38;2;125;121;115m{badge_text}{reset} {border_color}│{reset}"),
             ));
         }
 
         let bot_hint = if total > MAX_VISIBLE {
-            format!(" ({}/{} items) ", self.selected + 1, total)
+            format!(" {} of {} ", self.selected + 1, total)
         } else {
             String::new()
         };
         let bot_dashes = inner_w.saturating_sub(bot_hint.chars().count());
         lines.push((
             LineKind::System,
-            format!("{border_color}└{}\x1b[38;2;130;125;120m{bot_hint}{border_color}┘{reset}", "─".repeat(bot_dashes)),
+            format!("{border_color}╰{}\x1b[38;2;130;125;120m{bot_hint}{border_color}╯{reset}", "─".repeat(bot_dashes)),
         ));
 
         lines
@@ -452,6 +457,24 @@ mod tests {
         let rendered = popup.render(80);
         assert!(rendered.len() >= 3); // top border + items + bottom border
         assert!(rendered[0].1.contains("Commands"));
+    }
+
+    #[test]
+    fn only_a_skill_is_labeled_and_every_row_is_as_wide_as_the_frame() {
+        let popup = AutocompletePopup {
+            items: vec![
+                AutocompleteItem::new("/help", "Show command reference and keybindings", AutocompleteCategory::Command),
+                AutocompleteItem::new("/greet", "Say hello politely to whoever is there", AutocompleteCategory::Skill),
+                AutocompleteItem::new("/compact keep code details", "Compact context prioritizing code", AutocompleteCategory::Command),
+            ],
+            selected: 0,
+        };
+        for width in [40usize, 60, 100] {
+            let rows: Vec<String> = popup.render(width).iter().map(|(_, l)| crate::strip_ansi(l)).collect();
+            assert!(rows.iter().all(|r| visible_width(r) == width), "{width}: {rows:#?}");
+            assert!(!rows.iter().any(|r| r.contains("[cmd]")), "{rows:#?}");
+            assert!(rows[2].trim_end_matches('│').trim_end().ends_with("skill"), "{:?}", rows[2]);
+        }
     }
 
     #[test]
