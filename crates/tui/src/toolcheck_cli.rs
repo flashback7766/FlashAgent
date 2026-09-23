@@ -7,7 +7,7 @@ pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
     let probe = flashagent_llm::OpenAiCompat::new(&config.backend_url, "", config.api_key.clone());
     if config.model.trim().is_empty() || probe.discover_server().await.is_none() {
         return Some(format!(
-            "Tool-calling check skipped: no model at {url} yet. Run `flashagent --tool-test` once it is up."
+            "Tool-calling check skipped: {url} did not list any models. Run `flashagent --tool-test` once it does."
         ));
     }
     println!("\nChecking whether {} can drive tools…", config.model);
