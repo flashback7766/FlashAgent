@@ -78,10 +78,13 @@ if [ "$#" -eq 0 ]; then
     echo "  medium        : +5 (medium bugfix, input, session restoration)"
     echo "  big           : +10 (big bugfix, IPC/networking, updater transition)"
     echo "  major         : +15 (huge functionality, whole track/milestone)"
+    echo "  N             : +N exactly, for a release the types do not measure"
     exit 1
 fi
 
 TOTAL_INC=0
+# A number given outright is taken as it is; only the named types are capped.
+EXPLICIT_INC=0
 
 for arg in "$@"; do
     case "${arg,,}" in
@@ -102,7 +105,8 @@ for arg in "$@"; do
             ;;
         *)
             if [[ "${arg}" =~ ^[0-9]+$ ]]; then
-                INC="${arg}"
+                EXPLICIT_INC=$(( EXPLICIT_INC + arg ))
+                continue
             else
                 echo "Unknown change type: ${arg}" >&2
                 exit 1
@@ -112,11 +116,12 @@ for arg in "$@"; do
     TOTAL_INC=$(( TOTAL_INC + INC ))
 done
 
-# Hard cap at +15 per release
+# The named types add up to at most +15 per release; a number is not capped.
 if [ "${TOTAL_INC}" -gt 15 ]; then
-    echo "Notice: Capping total increment from +${TOTAL_INC} to maximum allowed +15."
+    echo "Notice: Capping the named increments from +${TOTAL_INC} to +15; give a number to jump further."
     TOTAL_INC=15
 fi
+TOTAL_INC=$(( TOTAL_INC + EXPLICIT_INC ))
 
 CURRENT_TAG="$(git -C "${ROOT_DIR}" describe --tags --match 'b[0-9]*' --exact-match 2>/dev/null || git -C "${ROOT_DIR}" describe --tags --match 'b[0-9]*' 2>/dev/null || echo "b286")"
 CURRENT_NUM="${CURRENT_TAG#b}"
