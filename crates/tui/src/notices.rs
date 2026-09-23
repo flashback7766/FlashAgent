@@ -154,6 +154,18 @@ impl BackgroundNotice {
     pub(crate) fn expired(&self) -> bool {
         self.expires.is_some_and(|t| std::time::Instant::now() >= t)
     }
+    /// A notice that keeps changing (a download's progress) changes its words in
+    /// place. A new one each time faded in from grey again at every step, so the
+    /// line flashed grey and green for as long as the download ran.
+    pub(crate) fn update_sticky(slot: &mut Option<Self>, text: String) {
+        match slot {
+            Some(shown) if !shown.expired() => {
+                shown.text = text;
+                shown.expires = None;
+            }
+            _ => *slot = Some(Self::sticky(text)),
+        }
+    }
 }
 
 pub(crate) enum UpdateNotice {
