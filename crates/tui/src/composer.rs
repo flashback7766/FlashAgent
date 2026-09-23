@@ -242,12 +242,13 @@ impl Composer {
             }
             line_start = line_end + 1;
         }
-        // A cursor at the end of a full row wraps to the next one.
+        // A cursor at the end of a full row wraps onto a row of its own. Only the
+        // last row of a line gets here (mid-line, the next row already holds the
+        // cursor), so the row below belongs to the next line: drawing the cursor
+        // there put it before text it would not type in front of.
         if cursor_at.1 >= width {
             cursor_at = (cursor_at.0 + 1, 0);
-            if cursor_at.0 == rows.len() {
-                rows.push(String::new());
-            }
+            rows.insert(cursor_at.0, String::new());
         }
         let total = rows.len();
         let first = if total <= max_rows { 0 } else { cursor_at.0.saturating_sub(max_rows - 1).min(total - max_rows) };
@@ -406,6 +407,16 @@ mod tests {
 
     fn shown(c: &Composer) -> String {
         format!("{}|{}", &c.text[..c.cursor], &c.text[c.cursor..])
+    }
+
+    #[test]
+    fn a_cursor_after_a_full_line_is_not_drawn_on_the_next_line() {
+        let layout = at("abcde\nxyz", 5).layout(5, 10);
+        assert_eq!(layout.rows, vec!["abcde", "", "xyz"]);
+        assert_eq!((layout.cursor_row, layout.cursor_col), (1, 0));
+        // At the very end the same, with nothing after it.
+        let layout = at("abcde", 5).layout(5, 10);
+        assert_eq!((layout.cursor_row, layout.cursor_col), (1, 0));
     }
 
     #[test]

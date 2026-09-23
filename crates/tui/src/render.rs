@@ -843,8 +843,13 @@ impl App {
     pub(crate) fn draw(&mut self, cx: &LoopCtx<'_>, autocomplete: Option<&AutocompletePopup>) {
         anim::set_enabled(self.config.animations);
         self.show_progress(cx);
-        // Read every frame, so leaving settings without saving restores the theme.
-        theme::set(self.config.color_theme);
+        // Read every frame, so leaving settings without saving restores the theme;
+        // while Settings is open, the theme picked there is the one shown.
+        let shown_theme = match &self.overlay {
+            Some(Overlay::Settings(view)) => view.config.color_theme,
+            _ => self.config.color_theme,
+        };
+        theme::set(shown_theme);
         let composer_flash = self.composer_flash();
         let channel_prompt: Option<String> = if self.uninstall_confirm {
             Some(

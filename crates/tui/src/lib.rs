@@ -208,6 +208,9 @@ pub struct ChatView {
     /// Settled lines rendered once, not re-parsed every frame.
     settled_cache: Mutex<SettledRenderCache>,
     row_owners: Mutex<RowOwners>,
+    /// What the transcript held when the context was last compacted: those
+    /// lines are no longer sent, so they no longer count.
+    context_baseline: (usize, usize, usize, usize),
 }
 
 pub fn format_explore(is_running: bool, files: usize, searches: usize, last_target: &str) -> String {
@@ -344,7 +347,21 @@ impl ChatView {
     }
 
     /// (user, assistant, reasoning, tools)
+    /// Since the last compaction; see [`Self::forget_counted_context`].
     pub fn raw_content_chars(&self) -> (usize, usize, usize, usize) {
+        let (user, assistant, reasoning, tools) = self.all_content_chars();
+        let (bu, ba, br, bt) = self.context_baseline;
+        (user.saturating_sub(bu), assistant.saturating_sub(ba), reasoning.saturating_sub(br), tools.saturating_sub(bt))
+    }
+
+    /// After compaction the transcript still shows what the model no longer
+    /// gets; counting it kept the gauge over the threshold, so every later turn
+    /// compacted again.
+    pub fn forget_counted_context(&mut self) {
+        self.context_baseline = self.all_content_chars();
+    }
+
+    fn all_content_chars(&self) -> (usize, usize, usize, usize) {
         let mut user = 0;
         let mut assistant = 0;
         let mut reasoning = 0;
@@ -375,6 +392,7 @@ impl ChatView {
         self.open_tool = None;
         self.card_len = 0;
         self.needs_reprint = false;
+        self.context_baseline = (0, 0, 0, 0);
         *self.settled_cache.lock() = SettledRenderCache::default();
     }
 

@@ -18,7 +18,8 @@ pub(crate) async fn compact_context(
     // Keep the current turn intact from its user message: a cut elsewhere can
     // orphan tool results or leave an assistant message first, which strict
     // servers reject.
-    let split_idx = history.iter().rposition(|m| m.role == flashagent_llm::Role::User)?;
+    // The current turn starts at its prompt, not at a tool's picture inside it.
+    let split_idx = history.iter().rposition(flashagent_core::is_prompt)?;
     if split_idx <= 1 {
         return None;
     }
