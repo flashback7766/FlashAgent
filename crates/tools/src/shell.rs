@@ -22,6 +22,17 @@ use crate::ToolError;
 /// Per background task.
 const BUFFER_CAP: usize = 200_000;
 
+/// The tail, with a line saying the start was dropped: 3,000 lines that begin
+/// at line 1401 must not look like the whole output.
+fn tail_noted(s: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    let tail = tail_str(s, max);
+    if tail.len() == s.len() {
+        std::borrow::Cow::Borrowed(tail)
+    } else {
+        std::borrow::Cow::Owned(format!("[earlier output omitted; the last {} bytes follow]\n{tail}", tail.len()))
+    }
+}
+
 fn tail_str(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
@@ -173,6 +184,25 @@ fn find_git_bash() -> Option<std::path::PathBuf> {
     beside_git.chain(usual).map(|root| root.join(r"bin\bash.exe")).find(|bash| bash.is_file())
 }
 
+/// A bare program name as a shell would find it. Windows process creation
+/// only tries `.exe`, so `npx` failed while npm installs `npx.cmd`; Rust runs a
+/// `.cmd` found this way through cmd.exe with its own quoting. Elsewhere, and
+/// for a name with an extension or a path, the name is used as given.
+pub(crate) fn find_program(command: &str) -> std::path::PathBuf {
+    let given = std::path::PathBuf::from(command);
+    if !cfg!(windows) || given.extension().is_some() || given.components().count() > 1 {
+        return given;
+    }
+    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    // Absolute entries only, as for Git Bash: a relative one is the open project.
+    dirs.iter()
+        .filter(|dir| dir.is_absolute())
+        .flat_map(|dir| exts.split(';').filter(|e| !e.is_empty()).map(move |ext| dir.join(format!("{command}{}", ext.to_ascii_lowercase()))))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or(given)
+}
+
 /// The platform line of the system prompt: the shell decides which commands
 /// the model can write.
 pub fn platform() -> String {
@@ -305,19 +335,19 @@ pub async fn run_foreground(cmd: &str, timeout: Duration) -> Result<String, Tool
             }
             drain_pumps(p1, p2).await;
             let out = buffer.lock();
-            let out = tail_str(&out, 4000);
+            let out = tail_noted(&out, 4000);
             return Err(ToolError::Other(format!(
                 "timeout after {}s, process killed. partial output:\n{}",
                 timeout.as_secs(),
-                if out.trim().is_empty() { "(no output)" } else { out }
+                if out.trim().is_empty() { "(no output)" } else { &out }
             )));
         }
     };
 
     let complete = drain_pumps(p1, p2).await;
     let out = buffer.lock();
-    let out = tail_str(&out, 16_000);
-    let out = if out.trim().is_empty() { "(no output)" } else { out };
+    let out = tail_noted(&out, 16_000);
+    let out = if out.trim().is_empty() { "(no output)" } else { &out };
     let note = if complete { "" } else { "\n[a background process still holds the output pipe; later output is not captured]" };
     if status.success() {
         Ok(format!("exit code: 0\noutput:\n{out}{note}"))
@@ -338,6 +368,18 @@ struct ShellTask {
 pub struct ShellRegistry {
     next_id: AtomicU32,
     tasks: Mutex<HashMap<u32, ShellTask>>,
+}
+
+/// A dev server started in the background must not outlive FlashAgent and
+/// keep holding its port.
+impl Drop for ShellRegistry {
+    fn drop(&mut self) {
+        for task in self.tasks.get_mut().values_mut() {
+            if matches!(task.child.try_wait(), Ok(None)) {
+                kill_tree(&mut task.child);
+            }
+        }
+    }
 }
 
 impl ShellRegistry {
@@ -370,10 +412,10 @@ impl ShellRegistry {
             Err(e) => format!("wait error: {e}"),
         };
         let guard = task.buffer.lock();
-        let output = tail_str(&guard, 4000);
+        let output = tail_noted(&guard, 4000);
         Ok(format!(
             "task {id}: {state}\noutput:\n{}",
-            if output.trim().is_empty() { "(no output yet)" } else { output }
+            if output.trim().is_empty() { "(no output yet)" } else { &output }
         ))
     }
 
@@ -395,6 +437,25 @@ impl ShellRegistry {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn a_bare_program_name_is_found_with_its_windows_extension() {
+        let found = super::find_program("cmd");
+        assert!(found.to_string_lossy().to_lowercase().ends_with("cmd.exe"), "{found:?}");
+        assert_eq!(super::find_program("tool.exe"), std::path::PathBuf::from("tool.exe"));
+    }
+
+    #[test]
+    fn a_cut_output_says_it_was_cut() {
+        let long: String = (1..=3000).map(|i| format!("line-{i}
+")).collect();
+        let shown = super::tail_noted(&long, 16_000);
+        assert!(shown.starts_with("[earlier output omitted"), "{}", &shown[..80]);
+        assert!(shown.ends_with("line-3000
+"));
+        assert_eq!(super::tail_noted("short", 100), "short");
+    }
+
     #[test]
     fn a_character_split_across_reads_decodes_whole() {
         let word = "привет".as_bytes();

@@ -65,7 +65,7 @@ impl McpClient {
         let name_str = name.into();
         let cmd_str = command.into();
 
-        let mut cmd = Command::new(&cmd_str);
+        let mut cmd = Command::new(crate::shell::find_program(&cmd_str));
         cmd.args(args);
         cmd.envs(env);
         cmd.current_dir(cwd);
@@ -113,8 +113,17 @@ impl McpClient {
         let pending_clone = pending.clone();
         let reply_tx = stdin_tx.clone();
         tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
+            // Bytes, not `lines()`: one line that is not UTF-8 ended the loop for
+            // good and every later reply timed out.
+            let mut reader = BufReader::new(stdout);
+            let mut raw = Vec::new();
+            loop {
+                raw.clear();
+                match reader.read_until(b'\n', &mut raw).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let line = String::from_utf8_lossy(&raw);
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -156,12 +165,23 @@ impl McpClient {
                     }
                 }
             }
+            // The server is gone: nothing will answer, so no call waits out its timeout.
+            pending_clone.lock().clear();
         });
 
         let stderr_ring = stderr_lines.clone();
         tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
+            // Kept reading past a line in another code page, or the server's
+            // later writes would hit a closed pipe.
+            let mut reader = BufReader::new(stderr);
+            let mut raw = Vec::new();
+            loop {
+                raw.clear();
+                match reader.read_until(b'\n', &mut raw).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let line = String::from_utf8_lossy(&raw).trim_end_matches(['\r', '\n']).to_string();
                 let mut ring = stderr_ring.lock();
                 if ring.len() >= STDERR_RING_BUFFER_SIZE {
                     ring.pop_front();

@@ -82,6 +82,11 @@ fn parse_hunks(patch_text: &str) -> Result<Vec<Hunk>, ToolError> {
             } else if let Some(rest) = line.strip_prefix(' ') {
                 (rest, Side::Both)
             } else if line.is_empty() {
+                // A blank line after a full hunk is the gap before the next one,
+                // or the patch's own trailing newline, not context.
+                if hunk.old_lines.len() >= hunk.old_count && hunk.new_lines.len() >= hunk.new_count {
+                    continue;
+                }
                 ("", Side::Both)
             } else {
                 continue;
@@ -200,8 +205,11 @@ fn apply_hunks(orig: &str, hunks: &[Hunk], rel_path: &str) -> Result<String, Too
         for line in file_lines.iter_mut().take(len.saturating_sub(1)) {
             if line.eol.is_empty() { line.eol = eol; }
         }
-        // The next hunk follows the location actually found, plus this hunk's size change.
-        drift = (pos as i128 - hunk.old_start.saturating_sub(1) as i128
+        // The next hunk follows the location actually found, plus this hunk's size
+        // change. An insertion's header names the line it follows, one past the
+        // index a replacement's header names.
+        let written_at = if expected_len == 0 { hunk.old_start } else { hunk.old_start.saturating_sub(1) };
+        drift = (pos as i128 - written_at as i128
             + inserted as i128 - expected_len as i128)
             .try_into().map_err(|_| ToolError::Other("patch line offset overflow".into()))?;
     }
@@ -234,6 +242,19 @@ pub fn preview_patch(cwd: &Path, rel_path: &str, patch_text: &str) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hunk_after_an_insertion_lands_on_the_line_it_names() {
+        let hunks = parse_hunks("@@ -1,0 +2,1 @@\n+X\n@@ -3,1 +4,1 @@\n-s\n+S\n").unwrap();
+        assert_eq!(apply_hunks("a\nb\ns\ns\ne\n", &hunks, "f").unwrap(), "a\nX\nb\nS\ns\ne\n");
+    }
+
+    #[test]
+    fn blank_lines_between_and_after_hunks_are_not_context() {
+        let patch = "@@ -1,1 +1,1 @@\n-a\n+A\n\n@@ -3,1 +3,1 @@\n-c\n+C\n\n\n";
+        let hunks = parse_hunks(patch).unwrap();
+        assert_eq!(apply_hunks("a\nb\nc\n", &hunks, "f").unwrap(), "A\nb\nC\n");
+    }
 
     #[test]
     fn test_apply_patch_success() {

@@ -136,9 +136,12 @@ pub fn get_marketplace() -> &'static [MarketplaceItem] {
 /// By id or case-insensitive query.
 pub fn find_marketplace_item(query: &str) -> Option<&'static MarketplaceItem> {
     let lower = query.trim().to_lowercase();
+    // The exact id first: "git" is the Git server, not the first name containing it (GitHub).
     MARKETPLACE_ITEMS
         .iter()
-        .find(|item| item.id == lower || item.name.to_lowercase().contains(&lower))
+        .find(|item| item.id == lower)
+        .or_else(|| MARKETPLACE_ITEMS.iter().find(|item| item.name.to_lowercase() == lower))
+        .or_else(|| MARKETPLACE_ITEMS.iter().find(|item| item.name.to_lowercase().contains(&lower)))
 }
 
 pub fn scaffold_config(item: &MarketplaceItem) -> McpServerConfig {
@@ -161,6 +164,12 @@ pub fn scaffold_config(item: &MarketplaceItem) -> McpServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_exact_id_wins_over_a_name_that_contains_it() {
+        assert_eq!(find_marketplace_item("git").map(|i| i.id), Some("git"));
+        assert_eq!(find_marketplace_item("github").map(|i| i.id), Some("github"));
+    }
 
     #[test]
     fn test_marketplace_find_item() {

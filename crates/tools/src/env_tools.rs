@@ -5,7 +5,7 @@ use std::process::Command;
 use crate::ToolError;
 
 fn check_tool_version(cmd: &str, arg: &str) -> Option<String> {
-    let out = Command::new(cmd).arg(arg).output().ok()?;
+    let out = Command::new(crate::shell::find_program(cmd)).arg(arg).output().ok()?;
     if out.status.success() {
         let line = String::from_utf8_lossy(&out.stdout);
         let first_line = line.lines().next()?.trim();

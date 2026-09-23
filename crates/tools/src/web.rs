@@ -79,7 +79,9 @@ fn decode_entities(text: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         rest = &rest[amp..];
-        let Some(semi) = rest[..rest.len().min(12)].find(';') else {
+        // Twelve characters, not bytes: `&amp;привет` must not be cut inside a letter.
+        let window = rest.char_indices().nth(12).map_or(rest.len(), |(i, _)| i);
+        let Some(semi) = rest[..window].find(';') else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -191,7 +193,11 @@ pub async fn fetch_text(url: &str) -> Result<String, ToolError> {
     Err(ToolError::Other(format!("fetch: more than {MAX_REDIRECTS} redirects")))
 }
 
-async fn read_fetched(resp: reqwest::Response) -> Result<String, ToolError> {
+/// The text is cut to 32,000 characters anyway; a multi-gigabyte file must
+/// not be held in memory whole first.
+const MAX_FETCH_BYTES: usize = 2 * 1024 * 1024;
+
+async fn read_fetched(mut resp: reqwest::Response) -> Result<String, ToolError> {
     let status = resp.status();
     let content_type = resp
         .headers()
@@ -199,10 +205,14 @@ async fn read_fetched(resp: reqwest::Response) -> Result<String, ToolError> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| ToolError::Other(format!("read body: {e}")))?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| ToolError::Other(format!("read body: {e}")))? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() >= MAX_FETCH_BYTES {
+            break;
+        }
+    }
+    let body = String::from_utf8_lossy(&bytes).into_owned();
     if !status.is_success() {
         return Err(ToolError::Other(format!("HTTP {status}: {}", truncate_body(&body, 500))));
     }
@@ -263,7 +273,9 @@ const SNIPPET_CLASSES: [&str; 2] = ["result__snippet", "result-snippet"];
 /// Anchored on the class names, not the page structure: each result is a link,
 /// and the first snippet after it belongs to it.
 pub fn parse_duckduckgo_html(html: &str, limit: usize) -> Vec<SearchResult> {
-    let lower = html.to_lowercase();
+    // ASCII only: offsets found in it slice `html`, and a full lowercase
+    // changes the length of letters such as `İ`.
+    let lower = html.to_ascii_lowercase();
     let mut marks: Vec<(usize, bool)> = tags_with_class(&lower, &LINK_CLASSES)
         .into_iter()
         .map(|at| (at, true))
@@ -365,7 +377,8 @@ fn result_url(href: &str) -> Option<String> {
         return url.starts_with("http").then_some(url);
     }
     let bare = href.trim_start_matches("https:").trim_start_matches("http:");
-    if bare.starts_with("//duckduckgo.com") || bare.starts_with("//ad.") || bare.starts_with('/') {
+    // `//host` is the absolute link itself; a single `/` is one of DuckDuckGo's pages.
+    if bare.starts_with("//duckduckgo.com") || bare.starts_with("//ad.") || (bare.starts_with('/') && !bare.starts_with("//")) {
         return None;
     }
     href.starts_with("http").then_some(href)
@@ -621,5 +634,22 @@ mod tests {
     fn entities_become_the_characters_they_stand_for() {
         assert_eq!(html_to_text("<p>a &amp; b &#39;c&#39; &#x27;d&#x27; &mdash; e&nbsp;f</p>"), "a & b 'c' 'd' — e f");
         assert_eq!(html_to_text("<p>Fish &amp chips &#zz; R&D</p>"), "Fish &amp chips &#zz; R&D");
+    }
+
+    #[test]
+    fn text_around_an_ampersand_in_any_script_decodes_without_a_panic() {
+        assert_eq!(html_to_text("<p>Q&привет мир</p>"), "Q&привет мир");
+        assert_eq!(html_to_text("<p>&laquo;Ёлка&raquo; 東京&amp;大阪</p>"), "«Ёлка» 東京&大阪");
+        let page = r#"<a class="result__a" href="https://example.com/">Q&amp;привет мир</a>"#;
+        assert_eq!(parse_duckduckgo_html(page, 5)[0].title, "Q&привет мир");
+    }
+
+    #[test]
+    fn a_direct_link_and_letters_that_change_length_keep_results_intact() {
+        let page = r#"<p>İstanbul İzmir İ</p><a class="result__a" href="https://example.com/">Title</a><a class="result__snippet">The snippet</a>"#;
+        let results = parse_duckduckgo_html(page, 5);
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert_eq!(results[0].url, "https://example.com/");
+        assert_eq!(results[0].snippet, "The snippet");
     }
 }
