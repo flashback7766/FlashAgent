@@ -233,7 +233,10 @@ impl App {
                     } else {
                         flashagent_core::CompactionVerdict::No
                     };
-                    if verdict.should() {
+                    // Only turns before the last are summarized: a single long turn (a
+                    // /goal run) has nothing to compact, and saying it failed misleads.
+                    let earlier_turns = self.history.iter().filter(|m| m.role == flashagent_llm::Role::User).count() > 1;
+                    if verdict.should() && earlier_turns {
                         // In the transcript: it changes what the model remembers.
                         self.chat.push_system("Compacting context…");
                         self.renderer.request_reprint();
