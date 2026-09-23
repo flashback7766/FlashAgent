@@ -212,10 +212,22 @@ impl Store {
         entries
     }
 
+    /// The file as listed (a hand-written `Build Notes.md`), else by slug.
+    fn existing(&self, name: &str) -> Option<(String, PathBuf)> {
+        let plain = !name.contains(['/', '\\']) && name != "." && name != ".." && !name.trim().is_empty();
+        let raw = self.dir().join(format!("{name}.md"));
+        if plain && raw.is_file() {
+            return Some((name.to_string(), raw));
+        }
+        let slug = slugify(name);
+        let path = self.dir().join(format!("{slug}.md"));
+        path.is_file().then_some((slug, path))
+    }
+
     pub fn get(&self, name: &str) -> Option<Entry> {
-        let path = self.dir().join(format!("{}.md", slugify(name)));
+        let (name, path) = self.existing(name)?;
         let text = std::fs::read_to_string(&path).ok()?;
-        Some(Entry::from_markdown(&slugify(name), &text))
+        Some(Entry::from_markdown(&name, &text))
     }
 
     /// Writing over an existing name is how a fact is corrected.
@@ -229,10 +241,9 @@ impl Store {
 
     /// `false` when there was nothing by that name.
     pub fn remove(&self, name: &str) -> std::io::Result<bool> {
-        let path = self.dir().join(format!("{}.md", slugify(name)));
-        if !path.exists() {
+        let Some((_, path)) = self.existing(name) else {
             return Ok(false);
-        }
+        };
         std::fs::remove_file(path)?;
         self.rewrite_index()?;
         Ok(true)
@@ -324,6 +335,19 @@ mod tests {
         let e = entry("tests-run-with-nextest", "the suite is run with cargo nextest, not cargo test");
         store.save(&e).unwrap();
         assert_eq!(store.get("tests-run-with-nextest").as_ref(), Some(&e));
+    }
+
+    #[test]
+    fn a_hand_written_memory_is_found_by_the_name_it_is_listed_under() {
+        let (store, _d) = temp_store();
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(store.dir().join("Build Notes.md"), "Run just build.").unwrap();
+        let listed = store.list();
+        assert_eq!(listed[0].name, "Build Notes");
+        assert!(store.get("Build Notes").is_some());
+        assert!(store.get("../Build Notes").is_none());
+        assert!(store.remove("Build Notes").unwrap());
+        assert!(store.list().is_empty());
     }
 
     #[test]

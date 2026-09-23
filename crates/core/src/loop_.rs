@@ -496,14 +496,22 @@ impl AgentLoop {
                     });
                     history.push(ChatMessage::tool_result(call.id.clone(), TRUNCATED_RESULT));
                 }
+                // A model that keeps hitting the length limit mid-call still spends the budget.
+                if let Some(reason) = self.budget_spent(tokens_used, output_tokens, started) {
+                    events(LoopEvent::Done(reason));
+                    return Ok((history, reason));
+                }
                 continue;
             }
 
             // Every recorded call must get a tool result, even on cancel, or strict
-            // servers reject the next request.
+            // servers reject the next request. Pictures come after all of them: a
+            // user message between two results breaks the same rule.
+            let mut image_msgs: Vec<ChatMessage> = Vec::new();
             for (i, call) in calls.iter().enumerate() {
                 if self.cancel.load(Ordering::Relaxed) {
                     answer_cancelled(&mut history, &calls[i..]);
+                    history.append(&mut image_msgs);
                     events(LoopEvent::Done(DoneReason::Cancelled));
                     return Ok((history, DoneReason::Cancelled));
                 }
@@ -518,6 +526,7 @@ impl AgentLoop {
                             result: Some(CANCELLED_RESULT.to_string()),
                         });
                         answer_cancelled(&mut history, &calls[i..]);
+                        history.append(&mut image_msgs);
                         events(LoopEvent::Done(DoneReason::Cancelled));
                         return Ok((history, DoneReason::Cancelled));
                     }
@@ -539,27 +548,30 @@ impl AgentLoop {
                         call.name
                     ));
                     msg.images = images;
-                    history.push(msg);
+                    image_msgs.push(msg);
                 }
             }
+            history.append(&mut image_msgs);
 
             while let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
                 events(LoopEvent::SteeringInjected(steer_msg.clone()));
                 history.push(ChatMessage::user(steer_msg));
             }
 
-            if self.config.max_tokens.is_some_and(|b| tokens_used >= b)
-                || self.config.max_output_tokens.is_some_and(|b| output_tokens >= b)
-            {
-                events(LoopEvent::Done(DoneReason::TokenBudget));
-                return Ok((history, DoneReason::TokenBudget));
-            }
-
-            if self.config.time_budget.is_some_and(|b| started.elapsed() >= b) {
-                events(LoopEvent::Done(DoneReason::TimeLimit));
-                return Ok((history, DoneReason::TimeLimit));
+            if let Some(reason) = self.budget_spent(tokens_used, output_tokens, started) {
+                events(LoopEvent::Done(reason));
+                return Ok((history, reason));
             }
         }
+    }
+
+    fn budget_spent(&self, tokens_used: i64, output_tokens: i64, started: Instant) -> Option<DoneReason> {
+        if self.config.max_tokens.is_some_and(|b| tokens_used >= b)
+            || self.config.max_output_tokens.is_some_and(|b| output_tokens >= b)
+        {
+            return Some(DoneReason::TokenBudget);
+        }
+        self.config.time_budget.is_some_and(|b| started.elapsed() >= b).then_some(DoneReason::TimeLimit)
     }
 }
 
@@ -796,10 +808,19 @@ pub fn detect_repetition_loop(text: &str) -> bool {
         return false;
     }
 
+    // Code repeats itself legitimately (closing tags, one decorator on two
+    // functions, `if __name__` in two examples), so only prose is judged by lines.
+    let mut in_fence = false;
     let lines: Vec<&str> = text
         .lines()
         .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
+        .filter(|l| {
+            if l.starts_with("```") {
+                in_fence = !in_fence;
+                return false;
+            }
+            !in_fence && !l.is_empty()
+        })
         .collect();
 
     if lines.len() >= 3 {
@@ -822,38 +843,31 @@ pub fn detect_repetition_loop(text: &str) -> bool {
         }
     }
 
-    // Repetition without newlines.
+    // Repetition without newlines: four times over, at least 48 bytes. A table
+    // rule (`|---|---|`) or a line of `=` is decoration, not a loop.
     let len = bytes.len();
     for w in 8..=80 {
-        if len >= w * 3 {
+        if len >= w * 4 && w * 4 >= 48 {
             let c1 = &bytes[len - w..];
-            let c2 = &bytes[len - w * 2..len - w];
-            let c3 = &bytes[len - w * 3..len - w * 2];
-            if c1 == c2 && c2 == c3 && !c1.iter().all(|&b| b == c1[0]) {
+            let repeats = (2..=4).all(|k| &bytes[len - w * k..len - w * (k - 1)] == c1);
+            if repeats && !c1.iter().all(|&b| b == c1[0]) && !c1.iter().all(|b| b"|-:=*#_~. \n".contains(b)) {
                 return true;
             }
         }
     }
 
     // A phrase of 25+ chars repeated 3+ times anywhere: an overthinking loop.
+    // Each clause counts once per line; a line without a stop is its own clause.
     if lines.len() >= 4 {
         let mut clause_counts = std::collections::HashMap::new();
         for line in &lines {
-            if line.len() >= 25 {
-                let count = clause_counts.entry(*line).or_insert(0);
+            let mut clauses: Vec<&str> = line.split(&['.', '!', '?', ';'][..]).map(str::trim).filter(|s| s.len() >= 25).collect();
+            clauses.dedup();
+            for clause in clauses {
+                let count = clause_counts.entry(clause).or_insert(0);
                 *count += 1;
                 if *count >= 3 {
                     return true;
-                }
-            }
-            for s in line.split(&['.', '!', '?', ';'][..]) {
-                let s_trim = s.trim();
-                if s_trim.len() >= 25 {
-                    let count = clause_counts.entry(s_trim).or_insert(0);
-                    *count += 1;
-                    if *count >= 3 {
-                        return true;
-                    }
                 }
             }
         }
@@ -869,22 +883,19 @@ pub fn clean_repetition_loop(text: &mut String) {
         let pattern = last_line.trim();
         if pattern.len() >= 6 {
             let mut lines: Vec<&str> = text.lines().collect();
+            // The trailing run of the pattern, blank lines between allowed.
             let mut repeat_count = 0;
-            while let Some(l) = lines.last() {
+            let mut first = lines.len();
+            for (i, l) in lines.iter().enumerate().rev() {
                 if l.trim() == pattern {
                     repeat_count += 1;
-                    if repeat_count > 1 {
-                        lines.pop();
-                    } else {
-                        break;
-                    }
-                } else if l.trim().is_empty() && repeat_count > 0 {
-                    lines.pop();
-                } else {
+                    first = i;
+                } else if !l.trim().is_empty() {
                     break;
                 }
             }
             if repeat_count > 1 {
+                lines.truncate(first + 1);
                 *text = lines.join("\n");
                 return;
             }
@@ -899,7 +910,11 @@ pub fn clean_repetition_loop(text: &mut String) {
             let c2 = &bytes[len - w * 2..len - w];
             let c3 = &bytes[len - w * 3..len - w * 2];
             if c1 == c2 && c2 == c3 && !c1.iter().all(|&b| b == c1[0]) {
-                let cut_pos = len - w * 2;
+                // A byte period can start inside a Cyrillic letter.
+                let mut cut_pos = len - w * 2;
+                while !text.is_char_boundary(cut_pos) {
+                    cut_pos -= 1;
+                }
                 text.truncate(cut_pos);
                 return;
             }
@@ -1311,6 +1326,56 @@ mod tests {
         assert_eq!(carrier.images, vec!["data:image/png;base64,AAEC".to_string()]);
         assert!(carrier.content.contains("view_image"), "{}", carrier.content);
         assert!(carrier.content.contains("not a new request"), "{}", carrier.content);
+    }
+
+    #[test]
+    fn pictures_from_two_calls_follow_both_results() {
+        struct ImageTool;
+        #[async_trait]
+        impl ToolExec for ImageTool {
+            async fn execute(&self, call: &ToolCall) -> ToolOutput {
+                ToolOutput { content: format!("opened {}", call.id), is_error: false, images: vec!["data:image/png;base64,AAEC".into()] }
+            }
+            fn specs(&self) -> Vec<ToolSpec> {
+                vec![]
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![
+                MockTurn {
+                    events: vec![
+                        Ok(LlmEvent::ToolCallDelta { index: 0, id: Some("a".into()), name: Some("view_image".into()), args_delta: "{}".into() }),
+                        Ok(LlmEvent::ToolCallDelta { index: 1, id: Some("b".into()), name: Some("view_image".into()), args_delta: "{}".into() }),
+                        Ok(LlmEvent::Done(FinishReason::ToolUse)),
+                    ],
+                },
+                text_turn("two diagrams"),
+            ]),
+        };
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let (history, _done) = run_loop(&l, &llm, &ImageTool, |_| {});
+        assert_protocol_valid(&history);
+        assert_eq!(history.iter().filter(|m| !m.images.is_empty()).count(), 2);
+    }
+
+    #[test]
+    fn a_call_cut_off_again_and_again_still_stops_at_the_token_budget() {
+        let cut_off = || MockTurn {
+            events: vec![
+                Ok(LlmEvent::ToolCallDelta { index: 0, id: Some("c".into()), name: Some("shell".into()), args_delta: "{\"cmd\":\"l".into() }),
+                Ok(LlmEvent::Usage(flashagent_llm::Usage { prompt: Some(10), completion: Some(600), cached: None, mtp: None })),
+                Ok(LlmEvent::Done(FinishReason::Length)),
+            ],
+        };
+        let llm = MockLlm { turns: std::sync::Mutex::new((0..5).map(|_| cut_off()).collect()) };
+        let config = LoopConfig { max_output_tokens: Some(1000), ..LoopConfig::default() };
+        let l = AgentLoop::new(config, Arc::new(AtomicBool::new(false)));
+        let (_history, done) = run_loop(&l, &llm, &MockTools::new(), |_| {});
+        assert!(matches!(done, DoneReason::TokenBudget), "{done:?}");
+        assert!(llm.turns.lock().unwrap().len() >= 3, "stopped after the second cut-off turn");
     }
 
     #[test]
@@ -1793,10 +1858,36 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_answers_are_not_taken_for_a_loop() {
+        for text in [
+            "Two examples:\n```python\nif __name__ == \"__main__\":\n    main()\n```\nand\n```python\nif __name__ == \"__main__\":\n    run()\n```\nBoth work.",
+            "```rust\n#[derive(Debug, Clone, PartialEq)]\nstruct A;\n#[derive(Debug, Clone, PartialEq)]\nstruct B;\n```",
+            "```html\n<div><div><div>\n</div>\n</div>\n</div>\n```",
+            "| a | b | c | d | e | f |\n|---|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 | 6 |",
+            "The configuration file is read at startup\nThe configuration file is read at startup, then cached.\nDone.\nOk.",
+        ] {
+            assert!(!detect_repetition_loop(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_loop_in_cyrillic_is_trimmed_without_a_panic() {
+        let mut text = format!("Ответ: {}", "повторяю снова ".repeat(8));
+        text.pop();
+        text.push('ё');
+        let mut cyr = format!("x{}", "ёжик ёлка ".repeat(10));
+        clean_repetition_loop(&mut text);
+        clean_repetition_loop(&mut cyr);
+    }
+
+    #[test]
     fn test_clean_repetition_loop_removes_duplicates() {
         let mut text = "Here is the plan:\n*Wait, I'll call list_dir.*\n*Wait, I'll call list_dir.*\n*Wait, I'll call list_dir.*".to_string();
         clean_repetition_loop(&mut text);
         assert_eq!(text, "Here is the plan:\n*Wait, I'll call list_dir.*");
+        let mut spaced = "Plan:\nI'll check the file now.\n\nI'll check the file now.\nI'll check the file now.\n".to_string();
+        clean_repetition_loop(&mut spaced);
+        assert_eq!(spaced, "Plan:\nI'll check the file now.");
     }
 
     #[test]

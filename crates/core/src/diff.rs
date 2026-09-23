@@ -37,10 +37,18 @@ pub fn unified(old: Option<&str>, new: &str, path: &str, context: usize) -> Stri
         return out;
     }
 
-    let ops = diff_ops(mid_old, mid_new);
-    if ops.is_empty() {
+    let mid_ops = diff_ops(mid_old, mid_new);
+    if mid_ops.is_empty() {
         return out; // identical
     }
+    // The trimmed ends are put back as unchanged lines: they are the context
+    // that shows which of several identical lines is being changed.
+    let ops: Vec<Op> = old_lines[..prefix]
+        .iter()
+        .map(|l| Op::Same(l))
+        .chain(mid_ops)
+        .chain(old_lines[old_lines.len() - suffix..].iter().map(|l| Op::Same(l)))
+        .collect();
 
     // Hunks are runs of changes plus up to `context` unchanged lines around them.
     let mut hunks: Vec<(usize, usize)> = Vec::new(); // [start, end) over ops
@@ -50,12 +58,11 @@ pub fn unified(old: Option<&str>, new: &str, path: &str, context: usize) -> Stri
     for (i, op) in ops.iter().enumerate() {
         let is_change = !matches!(op, Op::Same(_));
         if is_change {
-            if since_change != usize::MAX && since_change > 2 * context && end > start {
-                hunks.push((start, end));
-                start = i;
-            }
             if since_change == usize::MAX || since_change > 2 * context {
-                start = i;
+                if end > start {
+                    hunks.push((start, end));
+                }
+                start = i.saturating_sub(context);
             }
             since_change = 0;
             end = i + 1;
@@ -71,8 +78,8 @@ pub fn unified(old: Option<&str>, new: &str, path: &str, context: usize) -> Stri
     }
 
     for (hstart, hend) in hunks {
-        let mut old_pos = prefix + 1;
-        let mut new_pos = prefix + 1;
+        let mut old_pos = 1;
+        let mut new_pos = 1;
         for op in &ops[..hstart] {
             match op {
                 Op::Same(_) => {
@@ -169,6 +176,20 @@ mod tests {
         assert!(d.contains("-b"));
         assert!(d.contains("+B"));
         assert!(d.contains("@@"));
+    }
+
+    #[test]
+    fn a_change_shows_the_lines_around_it() {
+        let old = "fn a() {\n    x();\n    return None;\n}\nfn b() {\n    y();\n    return None;\n}\n";
+        let new = "fn a() {\n    x();\n    return None;\n}\nfn b() {\n    y();\n    return Some(1);\n}\n";
+        let d = unified(Some(old), new, "f.rs", 2);
+        assert!(d.contains("@@ -5,4 +5,4 @@\n fn b() {\n     y();\n-    return None;\n+    return Some(1);\n }\n"), "{d}");
+        // Two changes far apart are two hunks, each with its own context.
+        let old: String = (1..=20).map(|i| format!("{i}\n")).collect();
+        let new = old.replace("3\n", "three\n").replace("17\n", "seventeen\n");
+        let d = unified(Some(&old), &new, "n.txt", 1);
+        assert!(d.contains("@@ -2,3 +2,3 @@\n 2\n-3\n+three\n 4\n"), "{d}");
+        assert!(d.contains("@@ -16,3 +16,3 @@\n 16\n-17\n+seventeen\n 18\n"), "{d}");
     }
 
     #[test]
