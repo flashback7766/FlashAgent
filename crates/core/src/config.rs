@@ -39,6 +39,31 @@ impl BackendPreset {
                 url: "https://openrouter.ai/api/v1".into(),
                 description: "Unified cloud API for open and proprietary models".into(),
             },
+            Self {
+                name: "OpenAI".into(),
+                url: "https://api.openai.com/v1".into(),
+                description: "OpenAI cloud API (API key required)".into(),
+            },
+            Self {
+                name: "DeepSeek".into(),
+                url: "https://api.deepseek.com/v1".into(),
+                description: "DeepSeek cloud API (API key required)".into(),
+            },
+            Self {
+                name: "Mistral".into(),
+                url: "https://api.mistral.ai/v1".into(),
+                description: "Mistral cloud API (API key required)".into(),
+            },
+            Self {
+                name: "Groq".into(),
+                url: "https://api.groq.com/openai/v1".into(),
+                description: "Groq cloud API (API key required)".into(),
+            },
+            Self {
+                name: "Gemini".into(),
+                url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+                description: "Google Gemini, OpenAI-compatible endpoint (API key required)".into(),
+            },
         ]
     }
 }

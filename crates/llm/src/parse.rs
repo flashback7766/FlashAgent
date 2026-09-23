@@ -163,7 +163,19 @@ impl ChunkParser {
             }
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
                 for call in calls {
-                    let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    // Gemini leaves `index` out: a new id is then a new call.
+                    let index = match call.get("index").and_then(Value::as_u64) {
+                        Some(i) => i as usize,
+                        None => {
+                            let id = call.get("id").and_then(Value::as_str).filter(|id| !id.is_empty());
+                            let last = self.tool_ids.len().checked_sub(1);
+                            match (id, last) {
+                                (Some(id), Some(last)) if self.tool_ids[last].as_deref() != Some(id) => last + 1,
+                                (_, Some(last)) => last,
+                                (_, None) => 0,
+                            }
+                        }
+                    };
                     while self.tool_ids.len() <= index {
                         self.tool_ids.push(None);
                         self.tool_names.push(None);
@@ -192,7 +204,7 @@ impl ChunkParser {
             }
             if let Some(finish) = choice.get("finish_reason").and_then(Value::as_str) {
                 let reason = match finish {
-                    "tool_calls" => FinishReason::ToolUse,
+                    "tool_calls" | "function_call" | "tool_use" => FinishReason::ToolUse,
                     "length" => FinishReason::Length,
                     _ => FinishReason::Stop,
                 };
@@ -760,6 +772,17 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "<tool_call>@@@</tool_call> after");
+    }
+
+    #[test]
+    fn calls_without_an_index_are_told_apart_by_id() {
+        let mut p = ChunkParser::default();
+        let ev = p.feed(r#"{"choices":[{"delta":{"tool_calls":[
+            {"id":"a","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"x\"}"}},
+            {"id":"b","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"y\"}"}}
+        ]}}]}"#);
+        let indices: Vec<usize> = ev.iter().filter_map(|e| match e { LlmEvent::ToolCallDelta { index, .. } => Some(*index), _ => None }).collect();
+        assert_eq!(indices, vec![0, 1]);
     }
 
     #[test]

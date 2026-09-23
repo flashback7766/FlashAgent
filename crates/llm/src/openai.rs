@@ -26,6 +26,62 @@ pub struct OpenAiCompat {
     /// Model requests not yet finished, streams included. Background polling
     /// (the model list) waits for zero instead of competing with them.
     in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// What this server rejected, kept for the model: without it every turn
+    /// on a strict cloud API paid for a refused request first.
+    learned: std::sync::Arc<std::sync::RwLock<Learned>>,
+}
+
+/// Request fields that are not in every OpenAI-compatible API. A server that
+/// names one in a 400/422 gets requests without it from then on.
+const OPTIONAL_FIELDS: [&str; 10] = [
+    "temperature", "top_p", "top_k", "repeat_penalty", "repetition_penalty", "presence_penalty", "min_p",
+    "stream_options", "cache_prompt", "prompt_cache",
+];
+
+#[derive(Debug, Clone, Default)]
+struct Learned {
+    fields: Option<Fields>,
+    dropped: Vec<&'static str>,
+    /// Newer OpenAI models take `max_completion_tokens` and refuse `max_tokens`.
+    completion_tokens: bool,
+}
+
+impl Learned {
+    /// From the server's error text; false when it named nothing we can drop.
+    fn learn(&mut self, error: &str) -> bool {
+        let error = error.to_lowercase();
+        if !self.completion_tokens && error.contains("max_completion_tokens") {
+            self.completion_tokens = true;
+            return true;
+        }
+        let named: Vec<&'static str> = OPTIONAL_FIELDS
+            .iter()
+            .copied()
+            .filter(|f| !self.dropped.contains(f) && mentions(&error, f))
+            .collect();
+        self.dropped.extend(&named);
+        !named.is_empty()
+    }
+
+    fn apply(&self, body: &mut serde_json::Value) {
+        let Some(map) = body.as_object_mut() else { return };
+        for field in &self.dropped {
+            map.remove(*field);
+        }
+        if self.completion_tokens {
+            if let Some(n) = map.remove("max_tokens") {
+                map.insert("max_completion_tokens".into(), n);
+            }
+        }
+    }
+}
+
+/// `top_p` is named in "top_p is not supported", not in "top_probs".
+fn mentions(text: &str, field: &str) -> bool {
+    text.match_indices(field).any(|(i, _)| {
+        let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        !text[..i].chars().next_back().is_some_and(word) && !text[i + field.len()..].chars().next().is_some_and(word)
+    })
 }
 
 struct Busy(std::sync::Arc<std::sync::atomic::AtomicUsize>);
@@ -43,7 +99,7 @@ impl Drop for Busy {
     }
 }
 
-const MAX_ADAPTIVE_RETRIES: u8 = 2;
+const MAX_ADAPTIVE_RETRIES: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fields {
@@ -81,6 +137,7 @@ impl OpenAiCompat {
             max_retries: std::sync::atomic::AtomicUsize::new(0),
             effort_bias: std::sync::Arc::new(std::sync::atomic::AtomicI8::new(0)),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            learned: std::sync::Arc::default(),
         }
     }
 
@@ -135,6 +192,9 @@ impl OpenAiCompat {
         });
         if let Ok(mut lock) = self.profile.write() {
             *lock = derived;
+        }
+        if let Ok(mut lock) = self.learned.write() {
+            *lock = Learned::default();
         }
     }
 
@@ -440,7 +500,7 @@ impl OpenAiCompat {
             body["max_tokens"] = serde_json::json!(mt);
         }
         if fields == Fields::Standard {
-            return self.with_tools(body, tools);
+            return self.finish(body, tools);
         }
 
         // Keeps prefix KV cache reuse high (f_keep >= 0.9).
@@ -483,6 +543,13 @@ impl OpenAiCompat {
             }
         }
 
+        self.finish(body, tools)
+    }
+
+    fn finish(&self, mut body: serde_json::Value, tools: &[ToolSpec]) -> serde_json::Value {
+        if let Ok(learned) = self.learned.read() {
+            learned.apply(&mut body);
+        }
         self.with_tools(body, tools)
     }
 
@@ -533,7 +600,7 @@ impl crate::LlmBackend for OpenAiCompat {
         // MAX_ADAPTIVE_RETRIES times: learn the preset list if the error names one,
         // else drop fields (All -> NoExtraSampling -> Standard).
         let busy = Busy::new(&self.in_flight);
-        let mut fields = Fields::All;
+        let mut fields = self.learned.read().ok().and_then(|l| l.fields).unwrap_or(Fields::All);
         let mut adaptive_retries = 0u8;
         let resp = loop {
             let resp = self.send_with_retries(&self.body_at(messages, tools, options, fields)).await?;
@@ -542,7 +609,8 @@ impl crate::LlmBackend for OpenAiCompat {
             }
             let status = resp.status().as_u16();
             let body_text = resp.text().await.unwrap_or_default();
-            if status != 400 || adaptive_retries >= MAX_ADAPTIVE_RETRIES {
+            // 422: Mistral and other pydantic servers refuse unknown fields with it.
+            if !matches!(status, 400 | 422) || adaptive_retries >= MAX_ADAPTIVE_RETRIES {
                 return Err(LlmError::Status { status, body: body_text });
             }
             adaptive_retries += 1;
@@ -552,7 +620,19 @@ impl crate::LlmBackend for OpenAiCompat {
                         *lock = Some(learned);
                     }
                 }
-                _ => fields = fields.fewer(),
+                _ => {
+                    let mut learned = self.learned.read().map(|l| l.clone()).unwrap_or_default();
+                    if !learned.learn(&body_text) {
+                        if fields == Fields::Standard {
+                            return Err(LlmError::Status { status, body: body_text });
+                        }
+                        fields = fields.fewer();
+                        learned.fields = Some(fields);
+                    }
+                    if let Ok(mut lock) = self.learned.write() {
+                        *lock = learned;
+                    }
+                }
             }
         };
 
@@ -669,6 +749,22 @@ impl OpenAiCompat {
                 req = req.bearer_auth(key);
             }
             match req.send().await {
+                // Nothing was generated: rate limits and an overloaded gateway
+                // are worth waiting for, as long as the server's wait is short.
+                Ok(resp) if attempt < retries.max(2) && matches!(resp.status().as_u16(), 429 | 502 | 503 | 504 | 529) => {
+                    attempt += 1;
+                    let wait = resp
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.trim().parse::<f64>().ok())
+                        .map(Duration::from_secs_f64)
+                        .unwrap_or(Duration::from_secs(2u64.pow(attempt as u32)));
+                    if wait > Duration::from_secs(30) {
+                        return Ok(resp);
+                    }
+                    tokio::time::sleep(wait).await;
+                }
                 Ok(resp) => return Ok(resp),
                 // Connect errors only: after connecting, the server may already be generating.
                 Err(e) if attempt < retries && e.is_connect() => {
@@ -886,6 +982,53 @@ mod tests {
         }
         assert_eq!(text, "ok");
         assert!(b.profile().is_none(), "learned a bogus profile: {:?}", b.profile());
+    }
+
+    #[tokio::test]
+    async fn a_field_the_server_names_is_left_out_from_then_on() {
+        // A strict cloud API: refuses `top_k` and `max_tokens` by name.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = seen.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let mut buf = vec![0u8; 65536];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                log.lock().unwrap().push(req.clone());
+                let resp = if req.contains("\"top_k\"") {
+                    let body = r#"{"error":{"message":"Unrecognized request argument supplied: top_k"}}"#;
+                    format!("HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
+                } else if req.contains("\"max_tokens\"") {
+                    let body = r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."}}"#;
+                    format!("HTTP/1.1 422 Unprocessable Entity\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
+                } else {
+                    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+                    format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        let b = OpenAiCompat::new(format!("http://{addr}/v1"), "m", None);
+        let opts = crate::types::TurnOptions { top_k: Some(20), top_p: Some(0.9), max_tokens: Some(100), ..Default::default() };
+        for _ in 0..2 {
+            let mut stream = b.stream_with_options(&[ChatMessage::user("hi")], &[], &opts).await.expect("adapts to the server");
+            while stream.next().await.is_some() {}
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 4, "two refusals on the first turn, none on the second");
+        let last = seen.last().unwrap();
+        assert!(last.contains("\"max_completion_tokens\":100") && last.contains("\"top_p\"") && !last.contains("\"top_k\""), "{last}");
+    }
+
+    #[test]
+    fn a_field_is_named_only_as_a_whole_word() {
+        assert!(mentions("top_p is not supported", "top_p"));
+        assert!(!mentions("unknown field top_probs", "top_p"));
+        assert!(!mentions("bad logit_temperature", "temperature"));
     }
 
     #[tokio::test]
