@@ -7,14 +7,14 @@ FlashAgent is under active development. Security updates are applied to the late
 | Version                         | Supported          |
 | ------------------------------- | ------------------ |
 | Latest beta (`bNNN`, `beta` release) | :white_check_mark: |
-| Latest stable (`vX.Y.Z`, from v1.0.0) | :white_check_mark: |
+| Latest stable (`vX.Y.Z+bN`, from v1.0.0) | :white_check_mark: |
 | Older builds                    | :x:                |
 
 Release downloads are listed in each release's `SHA256SUMS`; the in-app updater refuses a binary whose checksum does not match.
 
 ## Reporting a Vulnerability
 
-Security is taken seriously. If you discover a security issue or vulnerability (especially relating to sandbox escapes, unauthorized shell command execution, or credential handling):
+Security is taken seriously. If you discover a security issue or vulnerability (especially relating to bypasses of the permission modes or approval cards, unauthorized shell command execution, or credential handling):
 
 1. **Do NOT disclose the issue publicly** on GitHub issues, discussions, or social media.
 2. Please open a [GitHub Security Advisory](https://github.com/flashback7766/FlashAgent/security/advisories/new) or contact the maintainer directly via Discord (`flashback7766`) or Telegram ([@flashback2k](https://t.me/flashback2k)).

@@ -15,6 +15,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Stable release: ./packaging/bump.sh stable 1.0.0
 # Tags vX.Y.Z+bN, where bN is the newest beta build: the stable release is
 # that build, released, so the updater can tell whether a later beta is newer.
+# CHANGELOG.md needs a '## vX.Y.Z+bN — title' section first, as a beta build
+# needs '## bN — title'.
 if [ "${1:-}" = "stable" ]; then
     SEMVER="${2:-}"
     if ! [[ "${SEMVER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -36,13 +38,35 @@ if [ "${1:-}" = "stable" ]; then
     echo " Cut from build : ${BUILD_TAG}"
     echo " New release   : ${NEW_TAG}"
     echo "=========================================="
+    # Same checks as a beta build: the release workflow takes the notes of the
+    # permanent release from this section, and the what's-new screen needs it.
+    if git -C "${ROOT_DIR}" rev-parse -q --verify "refs/tags/${NEW_TAG}" >/dev/null; then
+        echo "Tag ${NEW_TAG} already exists. A published tag is never moved." >&2
+        exit 1
+    fi
+    if ! awk -v h="## ${NEW_TAG} " 'index($0, h) == 1 { found = 1 } END { exit !found }' "${ROOT_DIR}/CHANGELOG.md"; then
+        echo "CHANGELOG.md has no '## ${NEW_TAG} — ...' section. Write it first; the release notes are taken from it." >&2
+        exit 1
+    fi
+    OTHER_CHANGES="$(git -C "${ROOT_DIR}" status --porcelain --untracked-files=no | grep -v ' CHANGELOG.md$' || true)"
+    if [ -n "${OTHER_CHANGES}" ]; then
+        echo "Uncommitted changes besides CHANGELOG.md; commit them first so the release commit is only the release:" >&2
+        echo "${OTHER_CHANGES}" >&2
+        exit 1
+    fi
     if [ -f "${ROOT_DIR}/README.md" ]; then
         sed -i "s/> \*\*Status:\*\* .*/> **Status:** Stable v${SEMVER}/" "${ROOT_DIR}/README.md"
-        git -C "${ROOT_DIR}" add README.md
-        git -C "${ROOT_DIR}" commit -q -m "Release ${NEW_TAG}"
+    fi
+    SUMMARY="$(grep -m1 -F "## ${NEW_TAG} " "${ROOT_DIR}/CHANGELOG.md" | sed "s/^## ${NEW_TAG} — //")"
+    git -C "${ROOT_DIR}" add CHANGELOG.md README.md
+    # Nothing to commit when the section was committed earlier and the status
+    # line already says this release.
+    if ! git -C "${ROOT_DIR}" diff --cached --quiet; then
+        git -C "${ROOT_DIR}" commit -q -m "Release ${NEW_TAG}: ${SUMMARY}"
     fi
     git -C "${ROOT_DIR}" tag -a "${NEW_TAG}" -m "FlashAgent ${NEW_TAG}"
-    echo "Tag ${NEW_TAG} created. Push it to publish: git push origin '${NEW_TAG}'"
+    echo "Committed and tagged ${NEW_TAG}."
+    echo "Publish: git push origin HEAD '${NEW_TAG}'   (the release workflow runs the tests before building)"
     exit 0
 fi
 

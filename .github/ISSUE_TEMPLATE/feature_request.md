@@ -19,7 +19,6 @@ A clear and concise description of any alternative solutions or features you've 
 - [ ] Local-first by default (no cloud dependencies required)
 - [ ] No Electron / webview bloat (native Rust performance)
 - [ ] Tool calling reliability over feature bloat
-- [ ] M3 Expressive aesthetics and high-craft UX
 
 ### Additional context
 Add any other context, mockups, or screenshots about the feature request here.

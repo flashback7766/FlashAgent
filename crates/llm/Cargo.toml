@@ -3,6 +3,7 @@ name = "flashagent-llm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 thiserror = { workspace = true }

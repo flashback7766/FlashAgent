@@ -5,6 +5,12 @@ if (set -o pipefail 2>/dev/null); then
 fi
 
 # FlashAgent one-line installer
+#
+#   curl -fsSL https://raw.githubusercontent.com/flashback7766/FlashAgent/main/install.sh | bash
+#
+# FLASHAGENT_CHANNEL=beta   the latest beta build instead of the latest stable
+# FLASHAGENT_VERSION=<tag>  one stable release by its tag, vX.Y.Z+bN
+# INSTALL_DIR=<folder>      where to put the binary
 REPO="flashback7766/FlashAgent"
 
 # INSTALL_DIR or BIN_DIR if set; system-wide for root, user-local otherwise.
@@ -23,57 +29,56 @@ TARGET_CHANNEL="${FLASHAGENT_CHANNEL:-${CHANNEL:-}}"
 
 echo "⚡ Installing FlashAgent..."
 
-# 1. Dependency check and auto-installation
-ensure_dependency() {
-  local cmd="$1"
-  local pkg="${2:-$1}"
-  if ! command -v "${cmd}" >/dev/null 2>&1; then
-    echo "Notice: Missing required tool '${cmd}'. Attempting auto-installation..."
-    local SUDO=""
-    if [ "$(id -u)" -ne 0 ]; then
-      if command -v sudo >/dev/null 2>&1; then
-        SUDO="sudo"
-      elif command -v doas >/dev/null 2>&1; then
-        SUDO="doas"
-      fi
-    fi
-
-    if command -v pacman >/dev/null 2>&1; then
-      ${SUDO} pacman -Sy --noconfirm "${pkg}"
-    elif command -v apt-get >/dev/null 2>&1; then
-      ${SUDO} apt-get update -y && ${SUDO} apt-get install -y "${pkg}"
-    elif command -v dnf >/dev/null 2>&1; then
-      ${SUDO} dnf install -y "${pkg}"
-    elif command -v microdnf >/dev/null 2>&1; then
-      ${SUDO} microdnf install -y "${pkg}"
-    elif command -v yum >/dev/null 2>&1; then
-      ${SUDO} yum install -y "${pkg}"
-    elif command -v zypper >/dev/null 2>&1; then
-      ${SUDO} zypper --non-interactive install "${pkg}"
-    elif command -v apk >/dev/null 2>&1; then
-      ${SUDO} apk add "${pkg}"
-    elif command -v xbps-install >/dev/null 2>&1; then
-      ${SUDO} xbps-install -Sy "${pkg}"
-    elif command -v brew >/dev/null 2>&1; then
-      brew install "${pkg}"
-    else
-      echo "Error: Required dependency '${cmd}' is missing and no supported package manager was detected."
-      echo "Please install '${pkg}' manually and re-run."
-      exit 1
-    fi
+# 1. Required tools. A script piped into bash does not install packages behind
+# your back: it says what is missing and how to get it, then stops.
+MISSING=""
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+  MISSING="${MISSING} curl"
+fi
+for tool in tar gzip; do
+  if ! command -v "${tool}" >/dev/null 2>&1; then
+    MISSING="${MISSING} ${tool}"
   fi
-}
+done
+# Alpine is musl-based; the release binary needs the glibc compatibility layer.
+if [ -f /etc/alpine-release ]; then
+  if ! apk info -e gcompat >/dev/null 2>&1 && [ ! -e /lib/ld-linux-x86-64.so.2 ]; then
+    MISSING="${MISSING} gcompat"
+  fi
+fi
 
-# HTTP helpers (dual curl / wget support)
+if [ -n "${MISSING}" ]; then
+  echo "Error: FlashAgent's installer needs:${MISSING}"
+  echo "Install them, then run this installer again:"
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "  sudo apt-get install -y${MISSING}"
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "  sudo dnf install -y${MISSING}"
+  elif command -v yum >/dev/null 2>&1; then
+    echo "  sudo yum install -y${MISSING}"
+  elif command -v pacman >/dev/null 2>&1; then
+    echo "  sudo pacman -S --needed${MISSING}"
+  elif command -v zypper >/dev/null 2>&1; then
+    echo "  sudo zypper install${MISSING}"
+  elif command -v apk >/dev/null 2>&1; then
+    echo "  apk add${MISSING}    (as root)"
+  elif command -v xbps-install >/dev/null 2>&1; then
+    echo "  sudo xbps-install -S${MISSING}"
+  elif command -v brew >/dev/null 2>&1; then
+    echo "  brew install${MISSING}"
+  else
+    echo "  (with your system's package manager)"
+  fi
+  exit 1
+fi
+
+# HTTP helpers (curl, or wget when there is no curl). HTTPS only, with retries.
 http_fetch() {
   local url="$1"
   if command -v curl >/dev/null 2>&1; then
-    curl -sSL "${url}"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO- "${url}"
+    curl -fsSL --retry 3 --proto '=https' "${url}"
   else
-    echo "Error: No HTTP client found (curl or wget required)." >&2
-    exit 1
+    wget -qO- "${url}"
   fi
 }
 
@@ -81,25 +86,11 @@ http_download() {
   local url="$1"
   local dest="$2"
   if command -v curl >/dev/null 2>&1; then
-    curl -sSL "${url}" -o "${dest}"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO "${dest}" "${url}"
+    curl -fsSL --retry 3 --proto '=https' "${url}" -o "${dest}"
   else
-    echo "Error: No HTTP client found (curl or wget required)." >&2
-    exit 1
+    wget -qO "${dest}" "${url}"
   fi
 }
-
-if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-  ensure_dependency curl
-fi
-ensure_dependency tar
-ensure_dependency gzip
-
-# Alpine Linux musl glibc compatibility layer
-if [ -f /etc/alpine-release ]; then
-  ensure_dependency gcompat
-fi
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -107,15 +98,21 @@ ARCH="$(uname -m)"
 case "${OS}" in
   Linux)
     case "${ARCH}" in
-      x86_64) ASSET_PATTERN="linux.*x86_64.*\.tar\.gz" ;;
-      *) echo "Error: Unsupported Linux architecture ${ARCH}"; exit 1 ;;
+      x86_64) ASSET_PATTERN="linux[^\"]*x86_64[^\"]*\.tar\.gz" ;;
+      *)
+        echo "Error: there is no prebuilt FlashAgent for Linux on ${ARCH} yet (only x86_64)."
+        echo "Build it from source instead: install Rust from https://rustup.rs, then run"
+        echo "  cargo install --git https://github.com/${REPO} flashagent-tui"
+        echo "(or follow the build steps in https://github.com/${REPO}/blob/main/CONTRIBUTING.md)."
+        exit 1
+        ;;
     esac
     EXT="tar.gz"
     ;;
   Darwin)
     case "${ARCH}" in
-      arm64|aarch64) ASSET_PATTERN="macos.*aarch64.*\.tar\.gz" ;;
-      x86_64) ASSET_PATTERN="macos.*x86_64.*\.tar\.gz" ;;
+      arm64|aarch64) ASSET_PATTERN="macos[^\"]*aarch64[^\"]*\.tar\.gz" ;;
+      x86_64) ASSET_PATTERN="macos[^\"]*x86_64[^\"]*\.tar\.gz" ;;
       *) echo "Error: Unsupported macOS architecture ${ARCH}"; exit 1 ;;
     esac
     EXT="tar.gz"
@@ -128,29 +125,47 @@ esac
 
 echo "Detected platform: ${OS} (${ARCH})"
 
+# first_asset <link prefix> <release JSON or HTML>: the first link to this
+# platform's archive. The Void Linux tarball matches the Linux pattern but is
+# laid out as a package, so it is skipped.
+first_asset() {
+  printf '%s\n' "$2" | grep -o "$1${ASSET_PATTERN}" | grep -v -- '-void-' | head -n 1 || true
+}
+
 DOWNLOAD_URL=""
 
-# Strategy 1: Specific version requested
+# Strategy 1: a specific version was asked for. Nothing else will do.
 if [ -n "${TARGET_VERSION}" ]; then
+  case "${TARGET_VERSION}" in
+    [0-9]*) TARGET_VERSION="v${TARGET_VERSION}" ;;
+  esac
   echo "Target version requested: ${TARGET_VERSION}"
-  RELEASE_JSON=$(http_fetch "https://api.github.com/repos/${REPO}/releases/tags/${TARGET_VERSION}" 2>/dev/null || true)
+  # The + in a stable tag (vX.Y.Z+bN) must not be read as a space.
+  TAG_IN_URL="$(printf '%s' "${TARGET_VERSION}" | sed 's/+/%2B/g')"
+  RELEASE_JSON=$(http_fetch "https://api.github.com/repos/${REPO}/releases/tags/${TAG_IN_URL}" 2>/dev/null || true)
   if [ -n "${RELEASE_JSON}" ]; then
-    DOWNLOAD_URL=$(echo "${RELEASE_JSON}" | grep -o "https://[^\"]*${ASSET_PATTERN}" | head -n 1 || true)
+    DOWNLOAD_URL=$(first_asset "https://[^\"]*" "${RELEASE_JSON}")
   fi
   # Fallback to expanded_assets if API rate-limited
   if [ -z "${DOWNLOAD_URL}" ]; then
-    EXPANDED_HTML=$(http_fetch "https://github.com/${REPO}/releases/expanded_assets/${TARGET_VERSION}" 2>/dev/null || true)
-    DOWNLOAD_REL=$(echo "${EXPANDED_HTML}" | grep -o "/${REPO}/releases/download/[^\"]*${ASSET_PATTERN}" | head -n 1 || true)
+    EXPANDED_HTML=$(http_fetch "https://github.com/${REPO}/releases/expanded_assets/${TAG_IN_URL}" 2>/dev/null || true)
+    DOWNLOAD_REL=$(first_asset "/${REPO}/releases/download/[^\"]*" "${EXPANDED_HTML}")
     if [ -n "${DOWNLOAD_REL}" ]; then
       DOWNLOAD_URL="https://github.com${DOWNLOAD_REL}"
     fi
+  fi
+  if [ -z "${DOWNLOAD_URL}" ]; then
+    echo "Error: no FlashAgent release ${TARGET_VERSION} with a ${OS} ${ARCH} build was found."
+    echo "Stable releases are tagged vX.Y.Z+bN; the list is at https://github.com/${REPO}/releases"
+    echo "Beta builds are not kept one by one: for the latest beta, unset FLASHAGENT_VERSION and set FLASHAGENT_CHANNEL=beta."
+    exit 1
   fi
 elif [ "${TARGET_CHANNEL}" != "beta" ] && [ "${TARGET_CHANNEL}" != "prerelease" ]; then
   # Strategy 2: the latest stable release (/releases/latest never returns prereleases).
   echo "Checking for latest stable release..."
   LATEST_STABLE_JSON=$(http_fetch "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
   if [ -n "${LATEST_STABLE_JSON}" ] && ! echo "${LATEST_STABLE_JSON}" | grep -q '"message":'; then
-    DOWNLOAD_URL=$(echo "${LATEST_STABLE_JSON}" | grep -o "https://[^\"]*${ASSET_PATTERN}" | head -n 1 || true)
+    DOWNLOAD_URL=$(first_asset "https://[^\"]*" "${LATEST_STABLE_JSON}")
     if [ -n "${DOWNLOAD_URL}" ]; then
       STABLE_TAG=$(echo "${LATEST_STABLE_JSON}" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | sed -e 's/"tag_name": *"//;s/"//' || true)
       echo "✔ Found latest stable release: ${STABLE_TAG}"
@@ -158,14 +173,14 @@ elif [ "${TARGET_CHANNEL}" != "beta" ] && [ "${TARGET_CHANNEL}" != "prerelease" 
   fi
 
   # Fallback for stable release via web redirect if API rate-limited
-  if [ -z "${DOWNLOAD_URL}" ]; then
-    LATEST_REDIRECT_URL=$(curl -sIL -o /dev/null -w "%{url_effective}" "https://github.com/${REPO}/releases/latest" 2>/dev/null || true)
+  if [ -z "${DOWNLOAD_URL}" ] && command -v curl >/dev/null 2>&1; then
+    LATEST_REDIRECT_URL=$(curl -fsSIL --retry 3 --proto '=https' -o /dev/null -w "%{url_effective}" "https://github.com/${REPO}/releases/latest" 2>/dev/null || true)
     if echo "${LATEST_REDIRECT_URL}" | grep -q '/releases/tag/'; then
       STABLE_TAG=$(echo "${LATEST_REDIRECT_URL}" | sed -e 's|.*/releases/tag/||')
       if [ -n "${STABLE_TAG}" ]; then
         echo "✔ Found latest stable release: ${STABLE_TAG}"
         EXPANDED_HTML=$(http_fetch "https://github.com/${REPO}/releases/expanded_assets/${STABLE_TAG}" 2>/dev/null || true)
-        DOWNLOAD_REL=$(echo "${EXPANDED_HTML}" | grep -o "/${REPO}/releases/download/[^\"]*${ASSET_PATTERN}" | head -n 1 || true)
+        DOWNLOAD_REL=$(first_asset "/${REPO}/releases/download/[^\"]*" "${EXPANDED_HTML}")
         if [ -n "${DOWNLOAD_REL}" ]; then
           DOWNLOAD_URL="https://github.com${DOWNLOAD_REL}"
         fi
@@ -184,11 +199,11 @@ fi
 if [ -z "${DOWNLOAD_URL}" ]; then
   RELEASE_JSON=$(http_fetch "https://api.github.com/repos/${REPO}/releases/tags/beta" 2>/dev/null || true)
   if [ -n "${RELEASE_JSON}" ]; then
-    DOWNLOAD_URL=$(echo "${RELEASE_JSON}" | grep -o "https://[^\"]*${ASSET_PATTERN}" | head -n 1 || true)
+    DOWNLOAD_URL=$(first_asset "https://[^\"]*" "${RELEASE_JSON}")
   fi
   if [ -z "${DOWNLOAD_URL}" ]; then
     EXPANDED_HTML=$(http_fetch "https://github.com/${REPO}/releases/expanded_assets/beta" 2>/dev/null || true)
-    DOWNLOAD_REL=$(echo "${EXPANDED_HTML}" | grep -o "/${REPO}/releases/download/[^\"]*${ASSET_PATTERN}" | head -n 1 || true)
+    DOWNLOAD_REL=$(first_asset "/${REPO}/releases/download/[^\"]*" "${EXPANDED_HTML}")
     if [ -n "${DOWNLOAD_REL}" ]; then
       DOWNLOAD_URL="https://github.com${DOWNLOAD_REL}"
     fi
@@ -199,10 +214,7 @@ fi
 if [ -z "${DOWNLOAD_URL}" ]; then
   RELEASE_JSON=$(http_fetch "https://api.github.com/repos/${REPO}/releases" 2>/dev/null || true)
   if [ -n "${RELEASE_JSON}" ]; then
-    DOWNLOAD_URL=$(echo "${RELEASE_JSON}" | grep -o "https://[^\"]*${ASSET_PATTERN}" | head -n 1 || true)
-    if [ -z "${DOWNLOAD_URL}" ]; then
-      DOWNLOAD_URL=$(echo "${RELEASE_JSON}" | grep -o "https://[^\"]*flashagent[^\"]*${ARCH}[^\"]*\.${EXT}" | head -n 1 || true)
-    fi
+    DOWNLOAD_URL=$(first_asset "https://[^\"]*" "${RELEASE_JSON}")
   fi
 
   # Scrape the release page when the API is rate-limited.
@@ -210,7 +222,7 @@ if [ -z "${DOWNLOAD_URL}" ]; then
     LATEST_TAG=$(http_fetch "https://github.com/${REPO}/releases" 2>/dev/null | grep -o 'data-item-id="release-[^"]*"' | head -n 1 | sed -e 's/data-item-id="release-//;s/"//g' || true)
     if [ -n "${LATEST_TAG}" ]; then
       EXPANDED_HTML=$(http_fetch "https://github.com/${REPO}/releases/expanded_assets/${LATEST_TAG}" 2>/dev/null || true)
-      DOWNLOAD_REL=$(echo "${EXPANDED_HTML}" | grep -o "/${REPO}/releases/download/[^\"]*${ASSET_PATTERN}" | head -n 1 || true)
+      DOWNLOAD_REL=$(first_asset "/${REPO}/releases/download/[^\"]*" "${EXPANDED_HTML}")
       if [ -n "${DOWNLOAD_REL}" ]; then
         DOWNLOAD_URL="https://github.com${DOWNLOAD_REL}"
       fi
@@ -228,51 +240,140 @@ TMP_DIR=$(mktemp -d)
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 echo "Downloading from ${DOWNLOAD_URL}..."
-http_download "${DOWNLOAD_URL}" "${TMP_DIR}/archive.${EXT}"
-
-mkdir -p "${INSTALL_DIR}"
-tar -xzf "${TMP_DIR}/archive.${EXT}" -C "${TMP_DIR}"
-
-# Atomic swap: move existing binary out of the way if currently running
-if [ -f "${INSTALL_DIR}/flashagent" ]; then
-  rm -f "${INSTALL_DIR}/flashagent.old" 2>/dev/null || true
-  mv -f "${INSTALL_DIR}/flashagent" "${INSTALL_DIR}/flashagent.old" 2>/dev/null || true
+if ! http_download "${DOWNLOAD_URL}" "${TMP_DIR}/archive.${EXT}"; then
+  echo "Error: the download failed. Nothing was installed."
+  exit 1
 fi
 
-# Locate binary in extracted archive
-if [ -f "${TMP_DIR}/flashagent" ]; then
-  mv -f "${TMP_DIR}/flashagent" "${INSTALL_DIR}/flashagent"
-elif [ -f "${TMP_DIR}/flashagent-tui" ]; then
-  mv -f "${TMP_DIR}/flashagent-tui" "${INSTALL_DIR}/flashagent"
-else
-  FOUND_BIN=$(find "${TMP_DIR}" -type f \( -name "flashagent" -o -name "flashagent-tui" \) | head -n 1 || true)
-  if [ -z "${FOUND_BIN}" ]; then
-    FOUND_BIN=$(find "${TMP_DIR}" -type f -perm -111 2>/dev/null | head -n 1 || true)
-  fi
-  if [ -n "${FOUND_BIN}" ]; then
-    mv -f "${FOUND_BIN}" "${INSTALL_DIR}/flashagent"
+# 2. Check the download against the release's SHA256SUMS, as the in-app
+# updater does. Releases from before the manifest existed have none: that is a
+# warning. A manifest that lacks the file or disagrees with it stops the install.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print tolower($1) }'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{ print tolower($1) }'
   else
-    echo "Error: Binary not found in extracted archive"
+    return 1
+  fi
+}
+
+ASSET_NAME="$(printf '%s' "${DOWNLOAD_URL##*/}" | sed 's/%2[Bb]/+/g')"
+SUMS_URL="${DOWNLOAD_URL%/*}/SHA256SUMS"
+if ! http_download "${SUMS_URL}" "${TMP_DIR}/SHA256SUMS" 2>/dev/null; then
+  echo "Warning: this release has no SHA256SUMS (older releases lack it); the download is not verified."
+elif ! ACTUAL_SUM="$(sha256_of "${TMP_DIR}/archive.${EXT}")"; then
+  echo "Warning: neither sha256sum nor shasum is installed; the download is not verified."
+else
+  # GitHub may rewrite '+' in an asset name; compare with it normalised too.
+  EXPECTED_SUM="$(awk -v a="${ASSET_NAME}" '
+    { n = $2; sub(/^\*/, "", n); na = a; nn = n; gsub(/\+/, ".", na); gsub(/\+/, ".", nn)
+      if (n == a || nn == na) { print tolower($1); exit } }' "${TMP_DIR}/SHA256SUMS")"
+  if [ -z "${EXPECTED_SUM}" ]; then
+    echo "Error: ${ASSET_NAME} is not listed in the release's SHA256SUMS. Nothing was installed."
     exit 1
   fi
+  if [ "${EXPECTED_SUM}" != "${ACTUAL_SUM}" ]; then
+    echo "Error: checksum mismatch for ${ASSET_NAME}."
+    echo "  expected ${EXPECTED_SUM}"
+    echo "  got      ${ACTUAL_SUM}"
+    echo "The download is damaged or was altered. Nothing was installed."
+    exit 1
+  fi
+  echo "✔ Checksum verified (SHA256SUMS)"
 fi
 
-chmod +x "${INSTALL_DIR}/flashagent"
+# 3. Find the binary in the archive before touching the existing install.
+EXTRACT_DIR="${TMP_DIR}/extract"
+mkdir -p "${EXTRACT_DIR}"
+tar -xzf "${TMP_DIR}/archive.${EXT}" -C "${EXTRACT_DIR}"
+
+NEW_BIN=""
+if [ -f "${EXTRACT_DIR}/flashagent" ]; then
+  NEW_BIN="${EXTRACT_DIR}/flashagent"
+elif [ -f "${EXTRACT_DIR}/flashagent-tui" ]; then
+  NEW_BIN="${EXTRACT_DIR}/flashagent-tui"
+else
+  NEW_BIN=$(find "${EXTRACT_DIR}" -type f \( -name "flashagent" -o -name "flashagent-tui" \) | head -n 1 || true)
+fi
+if [ -z "${NEW_BIN}" ] || [ ! -s "${NEW_BIN}" ]; then
+  echo "Error: no flashagent binary in the downloaded archive. Nothing was installed."
+  exit 1
+fi
+
+# 4. Install. The new binary is staged next to the old one, the old one is
+# moved aside (a running binary can be renamed but not always overwritten),
+# and it is put back if anything after that fails.
+TARGET="${INSTALL_DIR}/flashagent"
+BACKUP="${INSTALL_DIR}/flashagent.old"
+STAGED="${INSTALL_DIR}/.flashagent-install.$$"
+
+if ! mkdir -p "${INSTALL_DIR}" || ! cp "${NEW_BIN}" "${STAGED}" || ! chmod 755 "${STAGED}"; then
+  rm -f "${STAGED}" 2>/dev/null || true
+  echo "Error: cannot write to ${INSTALL_DIR}. Set INSTALL_DIR to a folder you own, or run as root."
+  exit 1
+fi
+
+HAD_OLD=0
+if [ -e "${TARGET}" ]; then
+  rm -f "${BACKUP}" 2>/dev/null || true
+  if ! mv -f "${TARGET}" "${BACKUP}"; then
+    rm -f "${STAGED}"
+    echo "Error: could not move the existing ${TARGET} aside. Nothing was changed."
+    exit 1
+  fi
+  HAD_OLD=1
+fi
+
+# Takes the new binary out again and puts the previous one back, if any.
+restore_old() {
+  rm -f "${TARGET}" 2>/dev/null || true
+  if [ "${HAD_OLD}" -eq 1 ] && [ -e "${BACKUP}" ] && mv -f "${BACKUP}" "${TARGET}"; then
+    echo "The previous flashagent was put back."
+  fi
+}
+
+if ! mv -f "${STAGED}" "${TARGET}"; then
+  rm -f "${STAGED}" 2>/dev/null || true
+  echo "Error: could not install ${TARGET}."
+  restore_old
+  exit 1
+fi
+
+# macOS Gatekeeper quarantine removal
+if [ "${OS}" = "Darwin" ]; then
+  xattr -dr com.apple.quarantine "${TARGET}" 2>/dev/null || true
+fi
+
+if ! INSTALLED_VERSION="$("${TARGET}" --version 2>/dev/null)"; then
+  echo "Error: the downloaded flashagent does not run on this system (\`${TARGET} --version\` failed)."
+  restore_old
+  exit 1
+fi
+
+rm -f "${BACKUP}" 2>/dev/null || true
 # Older installs also created a `flashagent-tui` alias; the command is just
 # `flashagent` now. Only remove the alias if it is ours (a link to flashagent).
 if [ -L "${INSTALL_DIR}/flashagent-tui" ] && [ "$(readlink "${INSTALL_DIR}/flashagent-tui")" = "flashagent" ]; then
   rm -f "${INSTALL_DIR}/flashagent-tui"
 fi
-rm -f "${INSTALL_DIR}/flashagent.old" 2>/dev/null || true
 
-# macOS Gatekeeper quarantine removal
-if [ "${OS}" = "Darwin" ]; then
-  xattr -dr com.apple.quarantine "${INSTALL_DIR}/flashagent" 2>/dev/null || true
+echo "✔ Successfully installed ${INSTALLED_VERSION} to ${TARGET}"
+
+# 5. PATH. Nothing to do when the folder is already on it; otherwise every
+# detected shell gets a line.
+case ":${PATH}:" in
+  *":${INSTALL_DIR}:"*) ON_PATH=1 ;;
+  *) ON_PATH=0 ;;
+esac
+
+if [ "${ON_PATH}" -eq 1 ]; then
+  echo "✔ ${INSTALL_DIR} is already on your PATH."
+  echo ""
+  echo "Run 'flashagent' to launch!"
+  exit 0
 fi
 
-echo "✔ Successfully installed FlashAgent to ${INSTALL_DIR}/flashagent"
-
-# Add INSTALL_DIR to PATH in every detected shell.
 UPDATED_SHELLS=""
 
 # 1. Fish shell support
@@ -308,13 +409,23 @@ if [ ! -f "${HOME}/.bashrc" ] && [ ! -f "${HOME}/.zshrc" ] && [ ! -f "${HOME}/.p
   UPDATED_SHELLS="${UPDATED_SHELLS} .profile"
 fi
 
-export PATH="${INSTALL_DIR}:${PATH}"
-
 if [ -n "${UPDATED_SHELLS}" ]; then
-  echo "✔ Automatically added ${INSTALL_DIR} to PATH in:${UPDATED_SHELLS}"
+  echo "✔ Added ${INSTALL_DIR} to PATH in:${UPDATED_SHELLS}"
 else
-  echo "✔ ${INSTALL_DIR} is already in your shell PATH."
+  echo "✔ ${INSTALL_DIR} is already added to PATH in your shell startup files."
 fi
 
+# This script ran in its own shell (curl | bash), so the terminal it was
+# started from does not see the new PATH yet.
+case "${SHELL:-}" in
+  */zsh) RC_HINT="${HOME}/.zshrc" ;;
+  */bash) RC_HINT="${HOME}/.bashrc" ;;
+  *) RC_HINT="" ;;
+esac
 echo ""
-echo "Run 'flashagent' to launch!"
+echo "Open a new terminal, then run 'flashagent' to launch."
+if [ -n "${RC_HINT}" ] && [ -f "${RC_HINT}" ] && grep -qF "${INSTALL_DIR}" "${RC_HINT}"; then
+  echo "Or, in this terminal: source ${RC_HINT} && flashagent"
+else
+  echo "Or, in this terminal: export PATH=\"${INSTALL_DIR}:\$PATH\" && flashagent"
+fi

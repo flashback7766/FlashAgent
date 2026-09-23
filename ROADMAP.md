@@ -2,7 +2,7 @@
 
 > v1 is the terminal app. The native UI (Track B) is postponed to v2.
 > Local models come first. Cloud APIs must still work properly, for anyone whose machine cannot run a model.
-> **v1.0 ships when Track A and Track C are complete.** Track V was the groundwork that had to land first.
+> **v1.0 ships when Track A is complete, except A11's native Anthropic protocol, together with what Track C ships today** (C0, the C3 packages, the C4 repository presentation, the C5 items marked done). Everything else in Track C is listed under [v1.x](#v1x--after-the-first-stable-release) at the end. Track V was the groundwork that had to land first.
 > Milestone status: `[ ]` / `[~]` / `[x]`. Updated upon completion, without arbitrary calendar deadlines.
 
 ## Track V — Ready for v1 (done in b266)
@@ -21,19 +21,19 @@ live run), not when unit tests pass — the same rule now applies to A and C.
 - [x] **V7. Fewer heuristics** — prefer capabilities the server reports (reasoning presets, context, tool support) over name-based guessing. *b266: reasoning is no longer guessed from model or architecture names; a model the server says nothing about is "unreported" (left to its default, Off still honoured) rather than "unsupported"; the kind of server (LM Studio, llama.cpp, other) comes from the API that answered, not from `1234`/`localhost` in the URL; llama-server context comes from `meta.n_ctx`; the backend that sends turns takes over startup discovery at once. Still guessed, on purpose: the local token counter picks its tokenizer by model name (no server reports one before a request), and the setup wizard guesses LM Studio from the URL until the server has answered.*
 
 ## Track A — Core Engine
-- [x] **A0. Workspace Skeleton** — 9 crates, CI (Linux + Windows), clippy strict with 0 warnings, MIT license, README.
+- [x] **A0. Workspace Skeleton** — 5 crates (core, llm, tools, tui, svc), CI on Linux, macOS and Windows, clippy strict with 0 warnings, MIT license, README.
 - [x] **A1. Data Layer** — SQLite + FTS5 (bundled), sessions/messages, versioned migrations, FTS triggers, Cyrillic/multilingual search. 5/5 tests. *Never used by the TUI (sessions are JSON files); removed from the repo, last present in commit 28ee7ea.*
 - [x] **A2. LLM Adapter** — OpenAI-compatible streaming, unified `ToolCall`, multi-parser (Hermes / Mistral / bare JSON) with self-healing JSON repair, reasoning, token usage with local fallback. 20/20 llm tests. *b233: the text multi-parser is now wired into the loop (it was unit-tested only); bounded 400 adaptation.*
 - [x] **A3. Agent Loop** — `AgentLoop` built over abstract `LlmSource` / `ToolExec` traits, UI event streams, cancellation token, 9/9 contract tests (multi-tool calls, stream truncation, step/token budget limits, prompt injection safety).
-- [x] **A4. Tools** — 9 built-in tools (read / write / edit-chunks / list_dir / glob / grep / run_shell / web_fetch / web_search), process sandboxing (background execution, timeouts, live stream output, task id tracking). 13/13 tools tests, 57 workspace tests. Adaptive sets in Track C.
+- [x] **A4. Tools** — 9 built-in tools (read / write / edit-chunks / list_dir / glob / grep / run_shell / web_fetch / web_search), a shell runner (background tasks, timeouts that kill the whole process tree, live stream output, task id tracking; commands run with the user's rights, there is no OS sandbox). 13/13 tools tests, 57 workspace tests. Adaptive sets in Track C.
 - [x] **A5. Permissions** — 4 security modes, narrow shell command parsing (parse_chain, quote handling, prefix bounds), diff preview pipeline (WritePreview + unified diff before writing), session-scoped rules, ApprovalGate for UI. 23 core tests (10 permissions + 4 diff), 68 workspace tests.
 - [x] **A6. Memory** — Dual-tier memory, auto-discovery of MEMORY.md / CLAUDE.md / AGENTS.md, threshold-based context injection (full text → outline + targeted tool lookup), untrusted content block markers. 5 memory tests, 73 workspace tests.
 - [x] **A7. TUI Client** — Terminal client (crossterm): streaming chat, interactive confirmation cards with diffs (TuiGate), Esc cancellation, memory injection. Smoke-tested on Linux. 4 tui tests, 77 workspace tests.
 - [x] **A7.1. TUI Polish** — Print-and-forget renderer (settled lines flushed to scrollback once), ctrl+o thinking toggle, spinner/status bar, Esc interrupt, interleaved reasoning/content delta fix (parallel streaming), settled_boundary = min(). 8 tui tests, 81 workspace tests.
 - [x] **A8. Subagents** — Dynamic roles, concurrency limits, parent review gate, inter-subagent messaging channels, strict permission inheritance.
 - [x] **A9. MCP** — Client, manager, marketplace registry. Native stdio JSON-RPC 2.0 transport, project & global configuration manager, curated verifiable marketplace, ApprovalGate enforcement for non-read-only calls, TUI slash commands (/mcp, /mcp list, /mcp market, /mcp test, /mcp add, /mcp reload). 46 tools tests, 131 workspace tests.
-- [x] **A10. Autonomous Goal Mode** — `/goal`, adaptive execution layers, task boundaries (steps/tokens/time/blacklist), filesystem snapshots + commits, live plan + final report. *Done: `/goal` entry, Accept All + max effort, ask_user and memory writes disabled, mode/effort restore, step/time/token budgets with a live burn-down, factual end-of-run report (V3). Done (b267): file snapshots before every write, `/rewind` to take turns back, since improved with a confirmation card that shows the per-file diff before anything moves. Done: a shell blacklist (`rm -rf`, `sudo`, force-push, `reset --hard`, `git clean -f`, `branch -D`, `dd`, `mkfs`, `shutdown`/`reboot`) that always asks a human even in Bypass mode; a git checkpoint commit every 10 completed steps, only inside an existing repository; a live plan via `update_plan`, offered only during `/goal`, rendered as a checklist that updates in place.*
-- [ ] **A11. Extended Backends** — Ollama, Anthropic, Mistral, DeepSeek, OpenRouter, configuration presets. *Local models come first; cloud APIs get working support for machines that cannot run a model. Already there: presets for LM Studio, Ollama, vLLM, llama.cpp and OpenRouter over the OpenAI-compatible protocol. Open: DeepSeek and Mistral presets, the native Anthropic protocol, and cloud checked end to end — streaming, tool calls, reasoning settings, and context from the provider's model list.*
+- [x] **A10. Autonomous Goal Mode** — `/goal`, adaptive execution layers, task boundaries (steps/tokens/time/blacklist), filesystem snapshots + commits, live plan + final report. *Done: `/goal` entry, Accept All + max effort, ask_user and memory writes disabled, mode/effort restore, step/time/token budgets with a live burn-down, factual end-of-run report (V3). Done (b267): file snapshots before every write, `/rewind` to take turns back, since improved with a confirmation card that shows the per-file diff before anything moves. Done: a shell blacklist (`rm -rf`, `sudo`, force-push, `reset --hard`, `git clean -f`, `branch -D`, `dd`, `mkfs`, `shutdown`/`reboot`) that always asks a human even in Accept All mode; a git checkpoint commit every 10 completed steps, only inside an existing repository; a live plan via `update_plan`, offered only during `/goal`, rendered as a checklist that updates in place.*
+- [~] **A11. Extended Backends** — Ollama, Anthropic, Mistral, DeepSeek, OpenRouter, configuration presets. *Local models come first; cloud APIs get working support for machines that cannot run a model. Already there: presets for LM Studio, Ollama, vLLM, llama.cpp and OpenRouter over the OpenAI-compatible protocol. Open for v1.0: DeepSeek and Mistral presets, and cloud checked end to end — streaming, tool calls, reasoning settings, and context from the provider's model list. The native Anthropic protocol moves to v1.x.*
 - [x] **A12. Migrator** — ~~Import data and settings from legacy ~/.flashgent (sessions, config).~~ *Closed 2026-09-14 without work: there is no `~/.flashgent` data to import; the legacy project survives only as source in `~/flashgent`.*
 
 ## Track B — Native UI (postponed to v2)
@@ -53,11 +53,11 @@ live run), not when unit tests pass — the same rule now applies to A and C.
 
 ## Track C — Product & Distribution
 - [x] **C0. Self-Updater** — GitHub Releases, Restart to Update, Stable / Beta channels. Background download, atomic binary replacement (dual-target system/user), channel switching (/channel), manual update (/update), in-app banner without interrupting session. *b233: SHA256SUMS verification, newest-by-version selection, no background beta downgrades, packages never installed as binaries.*
-- [ ] **C1. Telemetry** — Opt-in anonymous counters, opt-in crash stack traces.
-- [ ] **C2. Documentation** — mdBook documentation site on GitHub Pages, rustdoc, MCP guides and cookbooks.
-- [ ] **C3. Release Packaging** — Native installers (MSIX / NSIS for Windows, AppImage / deb / pacman for Linux, dmg for macOS), application icons, code signatures.
-- [ ] **C4. Public Launch** — Repository presentation: demo screenshots and GIFs, feature comparison matrix, quickstart < 5 minutes, good-first-issues, GitHub discussions.
-- [ ] **C5. Legacy Gems** — Porting battle-tested capabilities from legacy ~/flashgent:
+- [ ] **C1. Telemetry** — Opt-in anonymous counters, opt-in crash stack traces. *Moved to v1.x. None is built: the app sends no telemetry today.*
+- [ ] **C2. Documentation** — mdBook documentation site on GitHub Pages, rustdoc, MCP guides and cookbooks. *Moved to v1.x; the README and `docs/` are the documentation for v1.0.*
+- [~] **C3. Release Packaging** — Native installers (MSIX / NSIS for Windows, AppImage / deb / pacman for Linux, dmg for macOS), application icons, code signatures. *Shipping: deb, pacman, AppImage and Void packages, macOS tarballs (Apple Silicon and Intel), a Windows zip, the install scripts and the icon, with `SHA256SUMS` on every release. Moved to v1.x: MSIX / NSIS installers, a dmg, code signing and macOS notarization.*
+- [~] **C4. Public Launch** — Repository presentation: demo screenshots and GIFs, feature comparison matrix, quickstart < 5 minutes, good-first-issues, GitHub discussions. *Done: GIFs of real sessions, a quick start in the README, Discussions. Open: a feature comparison matrix and labelled good-first-issues.*
+- [~] **C5. Legacy Gems** — Porting battle-tested capabilities from legacy ~/flashgent. *The items not marked done below move to v1.x.*
   - **Argument Aliasing**: Tolerant tool parameter naming (`filePath`/`path`, `oldString`/`TargetContent`, `cmd`/`command`) in `flashagent-tools`. *Done (b268): in `effective_args`, so the approval card, the permission rules and the tool read the same renamed call; a call that already uses the right name keeps it; one flat edit becomes an edit list; MCP tools keep their own names.*
   - **AST Project Outline**: Background symbol indexing (classes, functions, structs, traits) in native Rust (`ignore` + regex) with compact project outline injection into system prompt.
   - **Context Steering**: Mid-flight user directive injection channel into `AgentLoop` during streaming/execution without resetting context. *Done: Enter while a turn runs.*
@@ -66,7 +66,17 @@ live run), not when unit tests pass — the same rule now applies to A and C.
   - **Deep Prompt Injection Hardening (`untrusted`)**: Per-session cryptographic nonce + template control token neutralisation + signature-based prompt hijacking detection.
   - **Batch Multi-File Editing**: Extending `edit_file` with batch file array support (`files: [{ path, edits }]`). *Done (b270): `edit_file` takes `files: [{path, edits}]` and applies every edit or none; `read_file` takes `files` (or `paths`) and reads up to 20 files under their own headers; the approval diff, `/rewind` snapshots and the `/goal` report cover every file.*
   - **Automatic Session Titling**: Asynchronous background micro-query to LLM after turn 1 to title the conversation.
-  - **UI Telemetry Markers**: Rolling generation speedometer `tg_3s` (3-second window) and command palette `Cmd/Ctrl+K`. *Done: `tg_3s`. Open: the command palette.*
+  - **Status-line markers**: Rolling generation speedometer `tg_3s` (3-second window) and command palette `Cmd/Ctrl+K`. *Done: `tg_3s`; the command palette (b340): Ctrl+K finds any command by its name, what it does, or its key.*
+
+## v1.x — after the first stable release
+
+Planned, not promised for v1.0:
+
+- **Telemetry (C1)**: opt-in anonymous counters and opt-in crash stack traces. Nothing is sent until it exists and you turn it on.
+- **Documentation site (C2)**: mdBook on GitHub Pages, rustdoc, MCP guides and cookbooks.
+- **Installers and signing (C3)**: MSIX / NSIS for Windows, a dmg for macOS, code signing, macOS notarization.
+- **Native Anthropic protocol (A11)**: today Anthropic models are reached through an OpenAI-compatible gateway such as OpenRouter.
+- **Remaining legacy gems (C5)**: AST project outline in the system prompt, deep prompt-injection hardening, automatic session titling.
 
 ## Execution Rules
 - One milestone = one branch = verifiable outcome. Sequence within tracks follows milestone numbering.

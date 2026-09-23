@@ -27,7 +27,7 @@ Eliminated by design:
 Inference and data stay local by default. The network operations FlashAgent makes:
 - OTA updates: GitHub Releases, checked, downloaded and installed in the background (checksum-verified), used from the next launch; can be turned off in Settings.
 - MCP servers configured by the user (confirmation required with argument preview for non-read-only actions).
-- Anonymous opt-in telemetry: launch counter, version, OS, active backends/tools. Zero session content. Crash reports: opt-in, sanitized stack traces only, no memory dumps.
+- Telemetry: planned, opt-in; none today. When it exists: a launch counter, version, OS, active backends/tools, zero session content; crash reports opt-in, sanitized stack traces only, no memory dumps.
 - Agent web tools (`web_fetch`/`web_search`): on by default and treated like reading a file, in every permission mode; they can be turned off in Settings.
 
 ## 4. Technology Stack (Definitively Decided)
@@ -46,7 +46,7 @@ Inference and data stay local by default. The network operations FlashAgent make
 | TUI | v1 is the terminal app. In v2 it stays: a client of the same core, for terminal users and for automated testing |
 | License | **MIT** |
 | Documentation | Repository-generated site (mdBook on GitHub Pages); concise entrypoint in README |
-| Releases | Stable + Beta channels, SemVer from day one |
+| Releases | Stable + Beta channels: betas are numbered builds (`b<N>`), stable releases are SemVer cut from a build (`vX.Y.Z+b<N>`); see [VERSIONING.md](VERSIONING.md) |
 | i18n | The interface and the repository are English only; the model always answers in the language the user wrote in |
 
 ## 5. Tool Calling — Reliability is Sacred

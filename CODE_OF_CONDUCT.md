@@ -48,6 +48,22 @@ or harmful.
 This Code of Conduct applies within all community spaces, and also applies when
 an individual is officially representing the community in public spaces.
 
+## Enforcement
+
+Instances of abusive, harassing, or otherwise unacceptable behavior may be
+reported privately to the maintainer,
+[@flashback7766](https://github.com/flashback7766) on GitHub, through the
+contacts on that profile or the Discord and Telegram contacts listed in
+[SECURITY.md](SECURITY.md). Please do not report conduct issues in a public
+issue or discussion. Security vulnerabilities go through the repository's
+[private security advisories](https://github.com/flashback7766/FlashAgent/security/advisories/new)
+instead.
+
+All complaints will be reviewed and investigated promptly and fairly. The
+maintainer will respect the privacy and security of the reporter of any
+incident, and may remove, edit, or reject comments, commits, code, issues, and
+other contributions that are not aligned with this Code of Conduct.
+
 ## Attribution
 
 This Code of Conduct is adapted from the [Contributor Covenant][homepage],
