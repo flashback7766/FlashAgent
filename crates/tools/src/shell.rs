@@ -45,19 +45,17 @@ where
     // A character split across two reads is held until its last bytes arrive;
     // decoding each read alone produced two U+FFFD.
     let mut carry: Vec<u8> = Vec::new();
-    let mut legacy = false;
     loop {
         match stream.read(&mut chunk).await {
             Ok(0) | Err(_) => {
                 if !carry.is_empty() {
-                    let text = if legacy { decode_legacy(&carry) } else { String::from_utf8_lossy(&carry).into_owned() };
-                    buffer.lock().push_str(&text);
+                    buffer.lock().push_str(&String::from_utf8_lossy(&carry));
                 }
                 break;
             }
             Ok(n) => {
                 carry.extend_from_slice(&chunk[..n]);
-                let text = decode(&mut carry, &mut legacy);
+                let text = decode(&mut carry);
                 let mut buf = buffer.lock();
                 buf.push_str(&text);
                 if buf.len() > BUFFER_CAP {
@@ -72,14 +70,12 @@ where
     }
 }
 
-/// UTF-8 until the first byte that cannot be: from then on the stream is in
-/// the legacy code page. cmd.exe and most Windows tools write that to a pipe,
-/// so an error from cmd on a Russian system arrived as mojibake.
-fn decode(bytes: &mut Vec<u8>, legacy: &mut bool) -> String {
-    if !*legacy && cfg!(windows) {
-        *legacy = std::str::from_utf8(bytes).is_err_and(|e| e.error_len().is_some());
-    }
-    if *legacy {
+/// UTF-8, or on Windows the legacy code page for a read that is not UTF-8:
+/// cmd.exe and most Windows tools write that to a pipe, so an error from cmd
+/// on a Russian system arrived as mojibake. Decided per read, so one native
+/// tool's line does not turn the rest of a Git Bash session into mojibake.
+fn decode(bytes: &mut Vec<u8>) -> String {
+    if cfg!(windows) && std::str::from_utf8(bytes).is_err_and(|e| e.error_len().is_some()) {
         return decode_legacy(&std::mem::take(bytes));
     }
     decode_complete(bytes)
@@ -162,9 +158,11 @@ fn find_git_bash() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
     let path_dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     // git.exe sits in <root>\cmd, <root>\bin or <root>\mingw64\bin.
+    // Absolute entries only: a relative one resolves inside whatever project
+    // is open, which could bring its own "git.exe" and "bin\bash.exe".
     let beside_git = path_dirs
         .into_iter()
-        .filter(|dir| dir.join("git.exe").is_file())
+        .filter(|dir| dir.is_absolute() && dir.join("git.exe").is_file())
         .flat_map(|dir| dir.ancestors().skip(1).take(2).map(PathBuf::from).collect::<Vec<_>>());
     let usual = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
         .into_iter()
@@ -203,8 +201,12 @@ fn shell_command(cmd: &str) -> tokio::process::Command {
     #[cfg(windows)]
     let mut c = match git_bash() {
         Some(bash) => {
+            // Git Bash reads its command line by its own rules: inside quotes
+            // `\\` becomes `\`, so the MSVC quoting `arg` does changed commands.
+            // Quoted always, with `\` and `"` escaped, it arrives as written.
             let mut c = tokio::process::Command::new(bash);
-            c.arg("-c").arg(cmd);
+            c.arg("-c");
+            c.raw_arg(format!("\"{}\"", cmd.replace('\\', r"\\").replace('"', "\\\"")));
             c
         }
         None => cmd_exe(cmd),
@@ -401,24 +403,33 @@ mod tests {
 
     #[test]
     fn output_that_is_not_utf8_is_read_in_the_legacy_code_page() {
-        let mut legacy = false;
         let mut plain = "ok \u{2713}".as_bytes().to_vec();
-        assert_eq!(decode(&mut plain, &mut legacy), "ok \u{2713}");
-        assert!(!legacy);
+        assert_eq!(decode(&mut plain), "ok \u{2713}");
         // "Привет" in CP866; whatever the OEM page, no byte may become U+FFFD.
         let mut oem = vec![b'>', 0x8F, 0xE0, 0xA8, 0xA2, 0xA5, 0xE2];
-        let text = decode(&mut oem, &mut legacy);
+        let text = decode(&mut oem);
         if cfg!(windows) {
-            assert!(legacy);
             assert_eq!(text.chars().count(), 7, "{text:?}");
             assert!(!text.contains('\u{FFFD}'), "{text:?}");
         }
+        // One such read does not decide for the next.
+        let mut after = "done \u{2713}".as_bytes().to_vec();
+        assert_eq!(decode(&mut after), "done \u{2713}");
     }
 
     #[tokio::test]
     async fn quoted_arguments_reach_the_command_as_written() {
         let out = run_foreground(r#"echo "a  b" c"#, Duration::from_secs(10)).await.unwrap();
-        assert!(out.contains("a  b c"), "{out}");
+        assert!(out.contains("a  b"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn backslashes_reach_a_posix_shell_as_written() {
+        if platform().contains("cmd.exe") {
+            return;
+        }
+        let out = run_foreground(r#"printf '%s|%s' 'a\\b' "q\"x""#, Duration::from_secs(10)).await.unwrap();
+        assert!(out.contains(r#"a\\b|q"x"#), "{out}");
     }
 
     #[cfg(windows)]
