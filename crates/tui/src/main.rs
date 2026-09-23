@@ -1292,10 +1292,9 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                     UpdateNotice::Progress { version, stage } => {
                         // Kept either way, so Ctrl+U can show a download that started unasked.
                         if app.update_watched {
-                            app.background = Some(BackgroundNotice::sticky(update_progress_line(&version, stage)));
+                            BackgroundNotice::update_sticky(&mut app.background, update_progress_line(&version, stage));
                         }
                         app.update_progress = Some((version, stage));
-                        app.renderer.request_reprint();
                     }
                     UpdateNotice::Ready { version } => {
                         app.pending_update = None;
@@ -2162,6 +2161,18 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn a_download_in_progress_does_not_fade_in_again_at_every_step() {
+        let mut slot = None;
+        BackgroundNotice::update_sticky(&mut slot, "Downloading b351 · 10%".into());
+        let born = slot.as_ref().unwrap().born;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        BackgroundNotice::update_sticky(&mut slot, "Downloading b351 · 20%".into());
+        let shown = slot.unwrap();
+        assert_eq!(shown.text, "Downloading b351 · 20%");
+        assert_eq!(shown.born, born, "the notice started its fade-in over again");
+    }
 
     #[test]
     fn a_shortcut_on_a_russian_layout_is_read_by_its_key() {
