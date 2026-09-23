@@ -1,5 +1,13 @@
 # Changelog
 
+## b388 — compaction that keeps the thread, and any OpenAI-compatible provider
+
+- **After compaction the model knows where it was.** The summary now follows a fixed handoff: your request and every instruction you gave, the files in play, errors and their fixes, your messages in order, what is pending and what was being done. It sees the tool calls with their arguments, not only their results.
+- **Nothing said before compaction is lost.** The messages it removes from the context are kept word for word in `~/.flashagent/sessions/compactions/<session>.jsonl`, readable only by you, and the model is told where, so it can look an exact command or wording up.
+- **A failed compaction changes nothing.** A summary cut short, one without the task or its state, or one that saves no space used to replace the conversation with one-line snippets; now the conversation stays as it was and you are told.
+- **Any OpenAI-compatible provider works, not only the ones with a preset.** A field a server refuses by name (`top_k` on OpenAI, anything unknown on Mistral, `max_tokens` on newer OpenAI models) is left out from then on, instead of costing a refused request every turn. Rate limits and busy gateways are waited out when the server says how long. Several tool calls in one Gemini reply are no longer merged into one.
+- **New presets:** OpenAI, DeepSeek, Mistral, Groq and Gemini, next to LM Studio, Ollama, vLLM, llama.cpp and OpenRouter.
+
 ## b383 — fixes to b378, one of them for your files' safety
 
 An independent review of b378 found these; update if you run b378.
