@@ -582,7 +582,7 @@ fn what_a_running_tool_is_doing_is_said_once() {
     // It used to appear twice, once inside the composer as if typed.
     let header = "Check the marker file";
     // Still running when the screen is read, in either platform's shell.
-    let slow = if cfg!(windows) { "ping -n 4 127.0.0.1 > nul" } else { "sleep 3" };
+    let slow = if cfg!(windows) { "ping -n 4 127.0.0.1" } else { "sleep 3" };
     let server = MockServer::start(vec![
         Reply::ToolCall {
             name: "run_shell".into(),

@@ -244,7 +244,7 @@ async fn a_command_runs_and_a_failing_one_reports_its_exit_code() {
     assert!(failed.is_error, "a non-zero exit must be an error: {}", failed.content);
     assert!(failed.content.contains("exit code: 3"), "{}", failed.content);
 
-    let many_lines = if cfg!(windows) {
+    let many_lines = if flashagent_tools::shell::platform().contains("cmd.exe") {
         "for /L %i in (1,1,20000) do @echo line %i"
     } else {
         "for i in $(seq 1 20000); do echo line $i; done"
