@@ -83,8 +83,8 @@ pub(crate) fn find_actual_string(text: &str, needle: &str) -> Option<String> {
     if text.contains(needle) {
         return Some(needle.to_string());
     }
-    if let Some(unnumbered) = without_read_file_numbers(needle) {
-        return find_actual_string(text, &unnumbered);
+    if let Some(found) = without_read_file_numbers(needle).and_then(|unnumbered| find_actual_string(text, &unnumbered)) {
+        return Some(found);
     }
 
     let needle_lines: Vec<String> = needle.lines().map(normalize_line).collect();
