@@ -802,11 +802,12 @@ fn is_plain_tab(k: &crossterm::event::KeyEvent) -> bool {
 }
 
 /// A newline only at the end is a word typed and Enter pressed together. A
-/// tab inside the text was pasted; one in front of a single line is the Tab
-/// key (Windows queues its release right behind it), so Settings still opens.
+/// tab with text after it was pasted (`\tfoo()`); a tab at the end is the
+/// Tab key, alone (Windows queues its release right behind it) or after a
+/// command being completed (`/mo` Tab).
 fn burst_events(text: &str) -> Vec<UiEvent> {
     let body = text.trim_end_matches('\n');
-    if body.contains('\n') || (body.contains('\t') && !body.starts_with('\t')) {
+    if body.contains('\n') || body.trim_end_matches('\t').contains('\t') {
         let mut out = vec![UiEvent::Paste(body.to_string())];
         // The trailing Enters were keys; one may be the user sending.
         out.extend((body.len()..text.len()).map(|_| UiEvent::Key(KeyCode::Enter, KeyModifiers::NONE)));
@@ -1894,6 +1895,8 @@ mod tests {
         assert!(matches!(events.as_slice(), [UiEvent::Paste(p), UiEvent::Key(KeyCode::Enter, _)] if p == "func main() {\n\tfmt.Println(\"hi\")"));
         let events = burst_events("\tfmt.Println(\"hi\")\n}\n");
         assert!(matches!(events.as_slice(), [UiEvent::Paste(_), UiEvent::Key(KeyCode::Enter, _)]));
+        assert!(matches!(burst_events("\tfoo()").as_slice(), [UiEvent::Paste(p)] if p == "\tfoo()"));
+        assert!(matches!(burst_events("/mo\t").last(), Some(UiEvent::Key(KeyCode::Tab, _))));
         assert!(matches!(burst_events("a\tb").as_slice(), [UiEvent::Paste(p)] if p == "a\tb"));
         // The Tab key alone, its release queued behind it, still opens Settings.
         assert!(matches!(burst_events("\t").as_slice(), [UiEvent::Key(KeyCode::Tab, _)]));

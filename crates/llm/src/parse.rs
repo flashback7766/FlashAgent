@@ -423,18 +423,20 @@ impl TextToolScanner {
         // Every trailing backtick: a fence is only seen when all three arrive
         // together, and one sent on its own would flip nothing.
         hold = hold.max(self.buf.len() - self.buf.trim_end_matches('`').len());
-        // The line being written may still become a bare call (`{"na`): once
-        // its `{` went out, the rest was no longer at a line start.
-        let line_start = match self.buf.rfind('\n') {
-            Some(p) => Some(p + 1),
-            None => (!self.mid_line).then_some(0),
-        };
-        if let Some(start) = line_start {
-            let line = &self.buf[start..];
-            let head = line.trim_start_matches([' ', '\t']);
-            let after = head.strip_prefix('{').or_else(|| head.strip_prefix('['));
-            if after.is_some_and(could_start_tool_call) && !self.in_fence_at(start) {
-                hold = hold.max(line.len());
+        // What is being written may still become a bare call: `{"na`, a `{` on a
+        // line of its own with the key on the next (pretty-printed), or a
+        // ```json fence whose call has not come yet. Once its start went out,
+        // the rest was no longer at a line start and the call was never seen.
+        let line_starts = std::iter::once(0)
+            .filter(|_| !self.mid_line)
+            .chain(self.buf.match_indices('\n').map(|(p, _)| p + 1));
+        for start in line_starts {
+            if start >= self.buf.len() || self.in_fence_at(start) {
+                continue;
+            }
+            if could_become_call(&self.buf[start..]) {
+                hold = hold.max(self.buf.len() - start);
+                break;
             }
         }
         hold.min(self.buf.len())
@@ -620,6 +622,14 @@ fn strip_partial_close(body: &str) -> &str {
     body
 }
 
+/// The text from a line start is the unfinished head of a bare call, maybe
+/// pretty-printed. A fence is not held for one: JSON in a fence is an
+/// example, and running an example is worse than missing a call.
+fn could_become_call(rest: &str) -> bool {
+    let head = rest.trim_start_matches([' ', '\t']);
+    head.strip_prefix('{').or_else(|| head.strip_prefix('[')).is_some_and(could_start_tool_call)
+}
+
 /// Not yet a call, but nothing written so far rules one out.
 fn could_start_tool_call(s: &str) -> bool {
     let trimmed = s.trim_start();
@@ -658,6 +668,9 @@ mod tests {
         let rest = r#"": "read_file", "arguments": {"path": "a.rs"}}"#;
         assert_eq!(scan(&["Reading.\n", "{\"", "name", rest]).1, vec!["read_file"]);
         assert_eq!(scan(&["Reading.\n", "{", "\"name", rest]).1, vec!["read_file"]);
+        // Pretty-printed and split at every token.
+        let pretty = ["Reading.\n", "{\n", "  \"name\"", ": \"read_file\",\n", "  \"arguments\": {\"path\": \"a.rs\"}\n", "}"];
+        assert_eq!(scan(&pretty).1, vec!["read_file"]);
         // Prose that only starts like one comes out as text.
         let (text, calls) = scan(&["Here:\n", "{", "\"id\": 1}\n"]);
         assert!(calls.is_empty());

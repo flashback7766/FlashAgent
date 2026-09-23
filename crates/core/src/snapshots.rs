@@ -142,6 +142,10 @@ impl SnapshotStore {
             let args: Option<serde_json::Value> = serde_json::from_str(args_json).ok();
             if let Some(title) = args.as_ref().and_then(|a| a.get("title")).and_then(|t| t.as_str()) {
                 let store = crate::memory_store::Store::new(&self.cwd);
+                // As the store resolves a name: the file as listed, then the slug.
+                if !title.contains(['/', '\\']) && !title.trim().is_empty() && title != ".." {
+                    self.keep_before(store.dir().join(format!("{title}.md")));
+                }
                 self.keep_before(store.dir().join(format!("{}.md", crate::memory_store::slugify(title))));
                 self.keep_before(store.index_path());
             }

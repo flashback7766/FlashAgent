@@ -110,7 +110,10 @@ pub fn terminal_safe(text: &str) -> String {
     let mut col = 0usize;
     for (escape, piece) in ansi_pieces(text) {
         if escape {
-            if piece.starts_with("\x1b[") && piece.ends_with('m') {
+            // Colour and weight only: `ESC[>4;2m` also ends in `m` and changes
+            // how the terminal reports keys.
+            let sgr = piece.strip_prefix("\x1b[").and_then(|p| p.strip_suffix('m'));
+            if sgr.is_some_and(|params| params.chars().all(|c| c.is_ascii_digit() || c == ';' || c == ':')) {
                 out.push_str(piece);
             }
             continue;
@@ -469,6 +472,7 @@ mod tests {
         assert_eq!(terminal_safe("\x1b[2J\x1b[Hdone\x1b[31m!\x1b[0m"), "done\x1b[31m!\x1b[0m");
         assert_eq!(terminal_safe("title\x1b]0;evil\x07 ok"), "title ok");
         assert_eq!(terminal_safe("a\nb"), "a b");
+        assert_eq!(terminal_safe("\x1b[>4;2mkeys"), "keys");
     }
 
     #[test]

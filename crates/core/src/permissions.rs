@@ -237,6 +237,9 @@ fn split_chain(cmd: &str, dialect: ShellDialect, comments: bool) -> Vec<String> 
                     quote = Some(c);
                     cur.push(c);
                 }
+                // cmd.exe hands `a;b` to `a` whole: split there, `git grep -e x;echo
+                // -Orm` passed as two harmless commands while git got `-Orm`.
+                ';' if dialect == ShellDialect::Cmd => cur.push(ch),
                 ';' | '&' | '|' | '\n' => {
                     segs.push(std::mem::take(&mut cur));
                 }
@@ -263,8 +266,9 @@ fn smuggles_side_effects(cmd: &str, dialects: &[ShellDialect]) -> bool {
 fn smuggles_in(cmd: &str, dialect: ShellDialect) -> bool {
     let quotes: &[char] = match dialect {
         ShellDialect::Posix => &['\'', '"'],
-        // `^` escapes the next character and `%VAR%` expands, even in quotes.
-        ShellDialect::Cmd if cmd.contains('^') || cmd.contains('%') => return true,
+        // `^` escapes the next character and `%VAR%` expands, even in quotes; what
+        // cmd /C makes of a second line is not worth guessing.
+        ShellDialect::Cmd if cmd.contains(['^', '%', '\n', '\r']) => return true,
         ShellDialect::Cmd => &['"'],
     };
     let mut quote: Option<char> = None;
@@ -486,6 +490,20 @@ fn is_read_only_shell_in(cmd: &str, dialects: &[ShellDialect]) -> bool {
     })
 }
 
+/// A word as the shell passes it on: quotes and backslashes go, so
+/// `-de''lete` is judged as the `-delete` it becomes.
+fn shell_word(word: &str) -> String {
+    word.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect()
+}
+
+/// `--op=rm` is `--open-files-in-pager=rm` to git, and GNU getopt takes any
+/// unique abbreviation the same way.
+fn long_option_prefix_of(arg: &str, names: &[&str]) -> bool {
+    let Some(name) = arg.strip_prefix("--") else { return false };
+    let name = name.split('=').next().unwrap_or(name);
+    !name.is_empty() && names.iter().any(|n| n.starts_with(name))
+}
+
 /// Leaves the project or names a variable: `/etc`, `C:\x`, `~/.ssh`,
 /// `../..`, `$HOME`, also as an option's value (`--from-file=/etc/passwd`,
 /// `-f/etc/passwd`).
@@ -496,17 +514,24 @@ fn reaches_outside(arg: &str) -> bool {
             || a.starts_with('\\')
             || a.starts_with('~')
             || a.contains('$')
-            || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+            || (bytes.len() >= 2
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && (bytes.len() == 2 || matches!(bytes[2], b'/' | b'\\')))
             || a.split(['/', '\\']).any(|part| part == "..")
     };
     let value = arg.split_once('=').map(|(_, v)| v);
-    let attached = arg.strip_prefix('-').filter(|rest| !rest.starts_with('-')).and_then(|rest| rest.get(1..));
+    // `cut -d/` is a delimiter, not the root.
+    let attached = arg.strip_prefix('-').filter(|rest| !rest.starts_with('-')).and_then(|rest| rest.get(1..)).filter(|v| *v != "/");
     outside(arg) || value.is_some_and(outside) || attached.is_some_and(outside)
 }
 
 fn read_only_segment(segment: &str) -> bool {
-    let words: Vec<String> =
-        segment.split_whitespace().map(|w| w.trim_matches(|c| c == '"' || c == '\'').to_string()).collect();
+    let words: Vec<String> = segment.split_whitespace().map(shell_word).collect();
+    // `{~,x}/.ssh` expands to a path no single word shows.
+    if words.iter().any(|w| w.contains('{')) {
+        return false;
+    }
     let Some(prog) = words.first() else { return false };
     let args = &words[1..];
     // `./ls` is whatever file sits there, and `VAR=x ls` can inject code
@@ -527,10 +552,8 @@ fn read_only_segment(segment: &str) -> bool {
         "rg" => !args.iter().any(|a| a.starts_with("--pre")),
         // `-o` writes a file, also inside a cluster such as `-ro`, and
         // `--compress-program` runs one.
-        "sort" => !args.iter().any(|a| {
-            a.starts_with("--output") || a.starts_with("--compress-program") || short_cluster_has(a, 'o')
-        }),
-        "tree" => !args.iter().any(|a| a.starts_with("--output") || short_cluster_has(a, 'o')),
+        "sort" => !args.iter().any(|a| long_option_prefix_of(a, &["output", "compress-program"]) || short_cluster_has(a, 'o')),
+        "tree" => !args.iter().any(|a| long_option_prefix_of(a, &["output"]) || short_cluster_has(a, 'o')),
         "file" => !has(&["-C", "--compile"]),
         "find" => !has(&["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"]),
         "git" => read_only_git(args),
@@ -549,13 +572,9 @@ fn read_only_git(args: &[String]) -> bool {
     let rest = &args[1..];
     // Each of these writes a file or starts another program.
     if rest.iter().any(|a| {
-        a.starts_with("--output")
-            || a.starts_with("--open-files-in-pager")
+        long_option_prefix_of(a, &["output", "open-files-in-pager", "ext-diff", "textconv", "filters"])
             // `-O<pager>` attached or in a cluster (`-iO...`) runs it.
             || short_cluster_has(a, 'O')
-            || a == "--ext-diff"
-            || a == "--textconv"
-            || a == "--filters"
     }) {
         return false;
     }
@@ -573,17 +592,43 @@ fn read_only_git(args: &[String]) -> bool {
 }
 
 fn blacklisted_segment(segment: &str) -> Option<&'static str> {
-    let words: Vec<&str> = segment.split_whitespace().collect();
-    // A leading `VAR=value` is still the command that follows it.
-    let start = words.iter().position(|w| !w.contains('=') || w.starts_with('-')).unwrap_or(words.len());
-    let words = &words[start..];
-    let prog = *words.first()?;
+    // As the shell will run it: `r''m` and `\rm` are rm.
+    let words: Vec<String> = segment.split_whitespace().map(shell_word).collect();
+    let mut rest: &[String] = &words;
+    // Through what only runs the command after it: `VAR=x rm`, `command rm`,
+    // `env A=b rm`, `nice -n 5 rm`, `xargs rm`.
+    loop {
+        match rest.first().map(String::as_str) {
+            Some(w) if w.contains('=') && !w.starts_with('-') => rest = &rest[1..],
+            Some("command" | "builtin" | "exec" | "env" | "nice" | "nohup" | "time" | "timeout" | "xargs" | "stdbuf") => {
+                rest = &rest[1..];
+                while rest.first().is_some_and(|w| w.starts_with('-') || w.parse::<f64>().is_ok()) {
+                    rest = &rest[1..];
+                }
+            }
+            _ => break,
+        }
+    }
+    let prog = rest.first()?;
     let prog = prog.rsplit('/').next().unwrap_or(prog);
+    let mut args = &rest[1..];
+    // git's own options come before its subcommand: `git -C . push --force`.
+    if prog == "git" {
+        while let Some(first) = args.first() {
+            match first.as_str() {
+                "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" => args = args.get(2..).unwrap_or(&[]),
+                w if w.starts_with('-') => args = &args[1..],
+                _ => break,
+            }
+        }
+    }
+    let sub = args.first().map(String::as_str);
+    let flag_args = if prog == "git" { args.get(1..).unwrap_or(&[]) } else { args };
 
     // Case-sensitive: `git branch -D` force-deletes, `-d` refuses on unmerged.
     let mut short_flags = String::new();
     let mut long_flags: Vec<&str> = Vec::new();
-    for w in &words[1..] {
+    for w in flag_args {
         if let Some(rest) = w.strip_prefix("--") {
             long_flags.push(rest.split('=').next().unwrap_or(rest));
         } else if let Some(rest) = w.strip_prefix('-') {
@@ -591,7 +636,9 @@ fn blacklisted_segment(segment: &str) -> Option<&'static str> {
         }
     }
     let has_short = |c: char| short_flags.contains(c);
-    let has_long = |name: &str| long_flags.contains(&name);
+    // Any abbreviation git or getopt would take: `--har` is `--hard`.
+    let has_long = |name: &str| long_flags.iter().any(|f| !f.is_empty() && name.starts_with(f));
+    let refspec = |c: char| flag_args.iter().any(|a| a.starts_with(c));
 
     match prog {
         "rm" if (has_short('r') || has_short('R') || has_long("recursive")) && (has_short('f') || has_long("force")) => {
@@ -601,13 +648,17 @@ fn blacklisted_segment(segment: &str) -> Option<&'static str> {
         "dd" => Some("dd can overwrite a whole disk"),
         p if p.starts_with("mkfs") => Some("mkfs formats a filesystem"),
         "shutdown" | "reboot" | "halt" | "poweroff" => Some("shuts the machine down"),
-        "git" => match words.get(1).copied() {
-            Some("push") if has_short('f') || has_long("force") || has_long("force-with-lease") => {
+        "git" => match sub {
+            // `+main` forces one ref; `:main` and --delete remove it.
+            Some("push") if has_short('f') || has_long("force") || has_long("force-with-lease") || refspec('+') => {
                 Some("git push --force can overwrite the remote's history")
+            }
+            Some("push") if has_short('d') || has_long("delete") || refspec(':') => {
+                Some("git push --delete removes a branch on the remote")
             }
             Some("reset") if has_long("hard") => Some("git reset --hard discards uncommitted work"),
             Some("clean") if has_short('f') || has_long("force") => Some("git clean -f deletes untracked files for good"),
-            Some("branch") if has_short('D') || has_long("delete") && (has_short('f') || has_long("force")) => {
+            Some("branch") if has_short('D') || (has_short('d') || has_long("delete")) && (has_short('f') || has_long("force")) => {
                 Some("git branch -D force-deletes a branch")
             }
             _ => None,
@@ -757,7 +808,10 @@ impl PermissionState {
         }
         let mut shown = Vec::new();
         for seg in parse_chain(&cmd) {
-            match always_rule(&seg) {
+            // A prefix would cover the dangerous variants, which the blacklist
+            // then asks about anyway: "Always" on `git push --force` must stick.
+            let rule = if blacklisted_segment(&seg).is_some() { ShellRule::Exact(seg.clone()) } else { always_rule(&seg) };
+            match rule {
                 ShellRule::Prefix(p) => {
                     shown.push(format!("{p} ..."));
                     self.allow_shell_prefix(&p);
@@ -996,6 +1050,61 @@ mod tests {
         // bash drops the comment, so the line after it is a command of its own.
         assert_eq!(parse_chain("ls # a 'quote\ncat x"), vec!["ls".to_string(), "cat x".to_string()]);
         assert_eq!(parse_chain("echo a#b"), vec!["echo a#b".to_string()]);
+    }
+
+    #[test]
+    fn quotes_inside_a_word_and_abbreviations_do_not_hide_a_flag() {
+        let posix = &[ShellDialect::Posix];
+        for cmd in [
+            "find . -name '*.tmp' -de''lete",
+            "find . -ex''ec rm {} +",
+            "rg --p''re=sh -e x",
+            "git log -1 -p --ou''tput=o2.txt",
+            "cat .''./.''./secret",
+            "git grep --op=rm -e x",
+            "sort -S 1K --comp=sh big.txt",
+            "sort --o=pwned x",
+            "cat {~,x}/.ssh/id_rsa",
+            "cat {/,}etc/passwd",
+        ] {
+            assert!(!is_read_only_shell_in(cmd, posix), "must not count as read-only: {cmd}");
+        }
+        for cmd in ["git log --oneline -n 5", "cut -d/ -f1 paths.txt", "grep -rn TODO src"] {
+            assert!(is_read_only_shell_in(cmd, posix), "should count as read-only: {cmd}");
+        }
+        // cmd.exe runs `git grep -e x;echo -Orm` as one git command.
+        assert!(!is_read_only_shell_in("git grep -e x;echo -Orm", &[ShellDialect::Cmd]));
+    }
+
+    #[test]
+    fn the_blacklist_knows_other_spellings_of_the_same_command() {
+        for cmd in [
+            "git push origin +main",
+            "git push origin --delete main",
+            "git push origin :main",
+            "git reset --har HEAD~3",
+            "git branch -d -f main",
+            "git -C . push --force",
+            "command rm -rf ~",
+            "r''m -rf ~",
+            "nice -n 5 rm -rf build",
+            "env A=b rm -rf build",
+        ] {
+            assert!(blacklisted_shell_reason(cmd).is_some(), "should be caught: {cmd}");
+        }
+        let state = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
+        let req = ApprovalRequest {
+            tool: "run_shell".into(),
+            args_json: serde_json::json!({ "command": "git push --force" }).to_string(),
+            category: Category::Shell,
+            diff: None,
+        };
+        state.allow_always(&req);
+        assert_eq!(state.decide(&call("run_shell", r#"{"command":"git push --force"}"#), None), Verdict::Allow, "Always sticks");
+        assert!(matches!(
+            state.decide(&call("run_shell", r#"{"command":"git push --force origin other"}"#), None),
+            Verdict::NeedApproval { .. }
+        ));
     }
 
     #[test]

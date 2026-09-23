@@ -563,8 +563,12 @@ impl App {
         match code {
             KeyCode::Enter => {
                 let Some(val) = menu.selected_value().cloned() else { return };
-                self.config.model = val.clone();
-                self.save_config();
+                // The menu lists the running server's models; after a new server was
+                // saved, its model must not be written beside that server's URL.
+                if self.config.backend_url.trim_end_matches('/') == cx.source.0.base_url() {
+                    self.config.model = val.clone();
+                    self.save_config();
+                }
                 self.switch_model(cx, &val);
                 self.refresh_welcome(cx.source, cx.mascot_mood);
                 self.notice(format!("Model: {}", self.current_model));
