@@ -9,14 +9,15 @@ d.wait_idle(120, quiet=6)
 # The menus open while an answer is streaming: none of them stops it.
 d.type("Write a 300-word story about a lighthouse keeper")
 d.key("Enter", pause=0)
-d.wait_for("Tokens -", 180)
+d.wait_for("t/s", 180)
 d.key("F3", pause=1.2)
 d.key("Down", "Up", pause=0.7)
 d.key("Escape", pause=1.0)
 d.key("F4", pause=1.2)
 d.key("Down", "Down", pause=0.7)
 d.key("Escape", pause=1.0)
-d.key("F5", pause=1.5)
+d.key("C-k", pause=1.0)  # every command, searchable
+d.type("theme")
 d.key("Escape", pause=1.0)
 d.key("Tab", pause=1.5)
 d.key("3", "Down", "Down", pause=0.9)  # the UI tab

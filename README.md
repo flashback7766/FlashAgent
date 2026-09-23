@@ -175,6 +175,7 @@ Settings live in `~/.flashagent/config.json` (`%USERPROFILE%\.flashagent\config.
 | `VISUAL`, `EDITOR` | Editor for <kbd>Ctrl</kbd>+<kbd>E</kbd> when Settings names none (otherwise `nano`) |
 | `FLASHAGENT_TOOL_TEST_JSON` | `--tool-test` also writes its raw results to this file |
 | `FLASHAGENT_DEV` | `1` turns self-updates off |
+| `COLORFGBG` | Set by many terminals; a white background there picks the light color theme |
 
 On Windows, `run_shell` uses Git Bash when Git for Windows is installed and `cmd.exe` otherwise; the model is told which, so it writes commands for that shell.
 

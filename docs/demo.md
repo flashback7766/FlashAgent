@@ -124,5 +124,7 @@ frame time on a 10,000-turn session.
 - **Nothing happens after Enter.** The server is not up; the mascot on the
   welcome card goes grey while it does not answer. Start the server;
   FlashAgent finds it within a few seconds.
-- **Colours look wrong.** Settings (**Tab**) → UI → Colour Theme →
-  *Terminal 16 colours* or *Monochrome*.
+- **Colours look wrong.** Settings (**Tab**) → UI → Color theme →
+  *Light background* on a white terminal, *Terminal 16 colors* where
+  24-bit colour is missing, or *Monochrome*. A terminal that reports a
+  light background through `COLORFGBG` gets the light theme by itself.
