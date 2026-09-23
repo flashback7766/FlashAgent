@@ -1655,8 +1655,15 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 // A paste goes to whatever has the keyboard first: a path pasted as a
                 // question's answer must not become an attachment.
                 let one_line = || pasted.replace("\r\n", " ").replace(['\n', '\r'], " ");
-                if question_gate.pending().is_some() {
-                    app.question_ui_state.write_in_text.push_str(&one_line());
+                if let Some(req) = question_gate.pending() {
+                    // As typing does: the card turns to the answer of one's own.
+                    let state = &mut app.question_ui_state;
+                    if let Some(opts) = req.options.as_ref().filter(|_| !state.is_writing) {
+                        state.selected_index = opts.len();
+                        state.is_writing = true;
+                        state.write_in_text.clear();
+                    }
+                    state.write_in_text.push_str(&one_line());
                 } else if let Some(Overlay::Sampling(sm)) = app.overlay.as_mut() {
                     for ch in one_line().chars() {
                         sm.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);

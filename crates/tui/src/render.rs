@@ -426,12 +426,12 @@ impl Renderer {
                     if req.multi_select {
                         tail.push((
                             LineKind::System,
-                            pad_box_row("   \x1b[38;2;135;130;125m[Space] Toggle [x] · [1-N / ↑↓] Select · [Enter] Confirm · [Esc] Cancel\x1b[0m", width),
+                            pad_box_row("   \x1b[38;2;135;130;125m[Space] Toggle [x] · [1-N / ↑↓] Select · [Enter] Confirm · type your own · [Esc] Cancel\x1b[0m", width),
                         ));
                     } else {
                         tail.push((
                             LineKind::System,
-                            pad_box_row("   \x1b[38;2;135;130;125m[1-N / ↑↓] Select · [Enter] Confirm · [Esc] Cancel\x1b[0m", width),
+                            pad_box_row("   \x1b[38;2;135;130;125m[1-N / ↑↓] Select · [Enter] Confirm · or type your own · [Esc] Cancel\x1b[0m", width),
                         ));
                     }
                 }
