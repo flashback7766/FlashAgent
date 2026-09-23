@@ -258,7 +258,11 @@ impl OpenAiCompat {
         val: &serde_json::Value,
         extra_v0: Option<&serde_json::Value>,
     ) -> Option<crate::thinking::ServerDiscovery> {
-        let kind = if url.ends_with("/api/v1/models") || url.ends_with("/api/v0/models") {
+        // OpenRouter's list is also at `/api/v1/models`; only LM Studio's answer
+        // has a `models` array or a per-model load `state`.
+        let lm_studio_shape = val.get("models").is_some_and(|m| m.is_array())
+            || val["data"].as_array().is_some_and(|d| d.iter().any(|m| m.get("state").is_some() || m.get("loaded_instances").is_some()));
+        let kind = if (url.ends_with("/api/v1/models") || url.ends_with("/api/v0/models")) && lm_studio_shape {
             crate::thinking::ServerKind::LmStudio
         } else if val["data"]
             .as_array()
@@ -282,13 +286,21 @@ impl OpenAiCompat {
             *lock = Some(url.to_string());
         }
         let current_model = self.model();
+        // The exact name before a similar one: `gpt-4o` must not become
+        // `gpt-4o-audio-preview` because the list happens to name that first.
+        let exact = |m: &crate::thinking::DiscoveredModel| !current_model.is_empty() && m.id == current_model;
+        let similar = |m: &crate::thinking::DiscoveredModel| {
+            !current_model.is_empty() && (m.id.contains(&current_model) || current_model.contains(&m.id))
+        };
         let active_opt = models
             .iter()
-            .find(|m| m.is_loaded && !current_model.is_empty() && (m.id == current_model || m.id.contains(&current_model) || current_model.contains(&m.id)))
-            .cloned()
-            .or_else(|| models.iter().find(|m| m.is_loaded).cloned())
-            .or_else(|| models.iter().find(|m| !current_model.is_empty() && (m.id == current_model || m.id.contains(&current_model) || current_model.contains(&m.id))).cloned())
-            .or_else(|| models.first().cloned());
+            .find(|m| m.is_loaded && exact(m))
+            .or_else(|| models.iter().find(|m| m.is_loaded && similar(m)))
+            .or_else(|| models.iter().find(|m| m.is_loaded))
+            .or_else(|| models.iter().find(|m| exact(m)))
+            .or_else(|| models.iter().find(|m| similar(m)))
+            .or_else(|| models.first())
+            .cloned();
 
         if let Some(ref active) = active_opt {
             self.set_model(&active.id);
@@ -387,10 +399,18 @@ impl OpenAiCompat {
 
     #[cfg(test)]
     fn body(&self, messages: &[ChatMessage], tools: &[ToolSpec], options: &crate::types::TurnOptions) -> serde_json::Value {
-        self.body_at(messages, tools, options, Fields::All)
+        let learned = self.learned.read().map(|l| l.clone()).unwrap_or_default();
+        self.body_at(messages, tools, options, Fields::All, &learned)
     }
 
-    fn body_at(&self, messages: &[ChatMessage], tools: &[ToolSpec], options: &crate::types::TurnOptions, fields: Fields) -> serde_json::Value {
+    fn body_at(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        options: &crate::types::TurnOptions,
+        fields: Fields,
+        learned: &Learned,
+    ) -> serde_json::Value {
         let current_model = self.model();
 
         // Unknown abilities default to nothing: a guessed preset puts fields in the
@@ -500,7 +520,7 @@ impl OpenAiCompat {
             body["max_tokens"] = serde_json::json!(mt);
         }
         if fields == Fields::Standard {
-            return self.finish(body, tools);
+            return self.finish(body, tools, learned);
         }
 
         // Keeps prefix KV cache reuse high (f_keep >= 0.9).
@@ -543,13 +563,11 @@ impl OpenAiCompat {
             }
         }
 
-        self.finish(body, tools)
+        self.finish(body, tools, learned)
     }
 
-    fn finish(&self, mut body: serde_json::Value, tools: &[ToolSpec]) -> serde_json::Value {
-        if let Ok(learned) = self.learned.read() {
-            learned.apply(&mut body);
-        }
+    fn finish(&self, mut body: serde_json::Value, tools: &[ToolSpec], learned: &Learned) -> serde_json::Value {
+        learned.apply(&mut body);
         self.with_tools(body, tools)
     }
 
@@ -600,11 +618,17 @@ impl crate::LlmBackend for OpenAiCompat {
         // MAX_ADAPTIVE_RETRIES times: learn the preset list if the error names one,
         // else drop fields (All -> NoExtraSampling -> Standard).
         let busy = Busy::new(&self.in_flight);
-        let mut fields = self.learned.read().ok().and_then(|l| l.fields).unwrap_or(Fields::All);
+        let mut learned = self.learned.read().map(|l| l.clone()).unwrap_or_default();
+        let mut fields = learned.fields.unwrap_or(Fields::All);
         let mut adaptive_retries = 0u8;
         let resp = loop {
-            let resp = self.send_with_retries(&self.body_at(messages, tools, options, fields)).await?;
+            let resp = self.send_with_retries(&self.body_at(messages, tools, options, fields, &learned)).await?;
             if resp.status().is_success() {
+                // Kept only once a request without those fields went through: a
+                // context overflow names no field and must not strip every request.
+                if let Ok(mut lock) = self.learned.write() {
+                    *lock = learned;
+                }
                 break resp;
             }
             let status = resp.status().as_u16();
@@ -621,16 +645,12 @@ impl crate::LlmBackend for OpenAiCompat {
                     }
                 }
                 _ => {
-                    let mut learned = self.learned.read().map(|l| l.clone()).unwrap_or_default();
                     if !learned.learn(&body_text) {
                         if fields == Fields::Standard {
                             return Err(LlmError::Status { status, body: body_text });
                         }
                         fields = fields.fewer();
                         learned.fields = Some(fields);
-                    }
-                    if let Ok(mut lock) = self.learned.write() {
-                        *lock = learned;
                     }
                 }
             }
@@ -758,7 +778,8 @@ impl OpenAiCompat {
                         .get(reqwest::header::RETRY_AFTER)
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| v.trim().parse::<f64>().ok())
-                        .map(Duration::from_secs_f64)
+                        // Negative, NaN or infinite would panic in `from_secs_f64`.
+                        .and_then(|s| Duration::try_from_secs_f64(s).ok())
                         .unwrap_or(Duration::from_secs(2u64.pow(attempt as u32)));
                     if wait > Duration::from_secs(30) {
                         return Ok(resp);
@@ -1022,6 +1043,33 @@ mod tests {
         assert_eq!(seen.len(), 4, "two refusals on the first turn, none on the second");
         let last = seen.last().unwrap();
         assert!(last.contains("\"max_completion_tokens\":100") && last.contains("\"top_p\"") && !last.contains("\"top_k\""), "{last}");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_names_no_field_does_not_strip_later_requests() {
+        let (url, _) = canned_server(
+            "400 Bad Request",
+            r#"{"error":{"message":"This model's maximum context length is 8192 tokens."}}"#,
+        )
+        .await;
+        let b = OpenAiCompat::new(url, "m", None);
+        let opts = crate::types::TurnOptions { top_k: Some(20), ..Default::default() };
+        assert!(b.stream_with_options(&[ChatMessage::user("hi")], &[], &opts).await.is_err());
+        let learned = b.learned.read().unwrap().clone();
+        assert!(learned.fields.is_none() && learned.dropped.is_empty(), "{learned:?}");
+        assert!(b.body(&[ChatMessage::user("hi")], &[], &opts).get("top_k").is_some());
+    }
+
+    #[test]
+    fn discovery_keeps_the_model_named_exactly_and_knows_openrouter_from_lm_studio() {
+        let b = OpenAiCompat::new("https://openrouter.ai/api/v1", "openai/gpt-4o", None);
+        let listing = serde_json::json!({ "data": [
+            { "id": "openai/gpt-4o-audio-preview", "context_length": 128000 },
+            { "id": "openai/gpt-4o", "context_length": 128000 }
+        ] });
+        let disc = b.apply_discovery("https://openrouter.ai/api/v1/models", &listing, None).expect("discovered");
+        assert_eq!(b.model(), "openai/gpt-4o");
+        assert_eq!(disc.kind, crate::thinking::ServerKind::Other);
     }
 
     #[test]

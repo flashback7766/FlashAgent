@@ -339,6 +339,7 @@ fn remove_binary(binary: &Path) -> std::io::Result<()> {
                 .arg(&parked)
                 .spawn();
             if let Some(parent) = binary.parent() {
+                crate::updater::remove_stale_backups(parent);
                 let _ = std::fs::remove_dir(parent);
             }
             return Ok(());
@@ -347,6 +348,7 @@ fn remove_binary(binary: &Path) -> std::io::Result<()> {
     std::fs::remove_file(binary)?;
     #[cfg(windows)]
     if let Some(parent) = binary.parent().filter(|p| p.ends_with("Programs\\FlashAgent") || p.ends_with("FlashAgent")) {
+        crate::updater::remove_stale_backups(parent);
         let _ = std::fs::remove_dir(parent);
     }
     Ok(())

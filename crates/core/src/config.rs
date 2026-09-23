@@ -78,9 +78,10 @@ fn default_min_p() -> Option<f32> { Some(0.0) }
 /// writes both, and a hand-edited config must not lose every setting to it.
 fn decode_text(bytes: &[u8]) -> Option<String> {
     let utf16 = |little: bool| {
-        let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| if little { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) })
+        let units: Vec<u16> = (2..bytes.len().saturating_sub(1))
+            .step_by(2)
+            .map(|i| [bytes[i], bytes[i + 1]])
+            .map(|pair| if little { u16::from_le_bytes(pair) } else { u16::from_be_bytes(pair) })
             .collect();
         String::from_utf16(&units).ok()
     };

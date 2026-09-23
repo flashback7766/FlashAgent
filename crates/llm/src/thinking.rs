@@ -621,35 +621,31 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
             return Some(Self::unsupported());
         }
 
-        // `['low', 'medium', 'high']` or `[off, on]`
-        if let Some(start_bracket) = err.find('[') {
-            if let Some(end_bracket) = err[start_bracket..].find(']') {
-                let inside = &err[start_bracket + 1..start_bracket + end_bracket];
-                let presets: Vec<String> = inside
-                    .split(',')
-                    .map(|s| s.trim().trim_matches('\'').trim_matches('"').trim().to_string())
-                    .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-                    .collect();
-
-                if !presets.is_empty() {
-                    let protocol = if err.contains("supported settings") || (presets.contains(&"off".to_string()) && presets.contains(&"on".to_string())) {
-                        ThinkingProtocol::LmStudio
-                    } else if err.contains("reasoning_effort") {
-                        ThinkingProtocol::ReasoningEffort
-                    } else if err.contains("reasoning") {
-                        ThinkingProtocol::ReasoningObject
-                    } else {
-                        ThinkingProtocol::ReasoningEffort
-                    };
-
-                    return Some(Self {
-                        presets,
-                        protocol,
-                        supported: true,
-                        default_preset: None,
-                    });
-                }
+        // `['low', 'medium', 'high']` or `[off, on]`: a flat list of plain words.
+        // A FastAPI error also has `"loc":["body","reasoning_effort"]`, which
+        // names the field, not its values.
+        let bracketed = err.match_indices('[').find_map(|(start, _)| {
+            let inside = &err[start + 1..start + 1 + err[start + 1..].find(']')?];
+            let before = err[..start].trim_end().trim_end_matches(':').trim_end().trim_end_matches('"');
+            if inside.contains('[') || before.ends_with("loc") {
+                return None;
             }
+            let words: Vec<String> =
+                inside.split(',').map(|s| s.trim().trim_matches('\'').trim_matches('"').trim().to_string()).collect();
+            let plain = |s: &String| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            words.iter().all(plain).then_some(words)
+        });
+        if let Some(presets) = bracketed {
+            let protocol = if err.contains("supported settings") || (presets.contains(&"off".to_string()) && presets.contains(&"on".to_string())) {
+                ThinkingProtocol::LmStudio
+            } else if err.contains("reasoning_effort") {
+                ThinkingProtocol::ReasoningEffort
+            } else if err.contains("reasoning") {
+                ThinkingProtocol::ReasoningObject
+            } else {
+                ThinkingProtocol::ReasoningEffort
+            };
+            return Some(Self { presets, protocol, supported: true, default_preset: None });
         }
 
         for prefix in &["one of:", "one of :", "expected:", "supported settings:", "supported values:"] {
@@ -958,6 +954,15 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fastapi_field_location_is_not_taken_for_the_allowed_values() {
+        let err = r#"{"detail":[{"type":"literal_error","loc":["body","reasoning_effort"],"msg":"Input should be 'low', 'medium' or 'high'"}]}"#;
+        let learned = ThinkingProfile::parse_api_error(err);
+        assert!(learned.as_ref().is_none_or(|p| !p.presets.contains(&"reasoning_effort".to_string())), "{learned:?}");
+        let listed = ThinkingProfile::parse_api_error("reasoning_effort must be one of ['low', 'medium', 'high']").unwrap();
+        assert_eq!(listed.presets, vec!["low", "medium", "high"]);
+    }
 
     #[test]
     fn a_model_is_not_given_reasoning_settings_because_of_its_name() {
