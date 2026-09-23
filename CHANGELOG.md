@@ -1,5 +1,28 @@
 # Changelog
 
+## b378 — one look everywhere, and a shell that works on Windows
+
+A large release, so the number jumps by 25, as the scale in `packaging/bump.sh` counts it: a milestone plus a big fix.
+
+- **Shell commands work on Windows.** They ran through cmd.exe, which knows none of the Unix commands models write, so `ls`, `cat` and `grep` failed wherever Git had not put its tools on PATH (the default). They now run in Git Bash when Git for Windows is installed; without it cmd.exe runs them, now with their quotes intact, and the model is told which shell it has. Output in the console's own code page, such as cmd's errors on a Russian system, reaches the model as text instead of mojibake, and a timeout or Esc stops the whole process tree.
+- **A model that says "I'll do X" does X.** Small models often end a turn on the announcement and stop, so a `/goal` run could finish having changed nothing. When the last sentence of a reply says what the model is about to do and no call came, it is asked once to make that call.
+- **An edit that misses says where it should have landed.** "old_string not found" now quotes the file's closest line and its number, an old_string copied from `read_file` with its line numbers still matches, and an edit that cannot apply goes back to the model straight away instead of asking you to approve something that would only fail. `edit_file` also tells the model that inserting a line means keeping its neighbour.
+- **Approval diffs keep their indentation.** The preview dropped every leading space of the code being approved; it now shows it as it will be written, tabs as spaces and escape codes as text. A new file asks "Create this file?".
+- **No "Compacting context failed" after a `/goal`.** A single long turn has nothing earlier to summarize, and automatic compaction no longer starts, and fails, on one.
+- **Esc clears a steering draft before it stops the turn.** It used to stop the answer in progress even when you only meant to clear what you had typed; the hint under the prompt says which one Esc will do.
+- **Approval cards ask a question.** "Run this command?" or "Change this file?" instead of "Confirm: edit_file", three buttons you can move between with the arrows (Always used to be unreachable), and the keys listed once, under the card. A diff preview no longer shows hunk headers or invented line numbers.
+- **Every key hint reads the same.** The key, then what it does, a dot between: `Enter send · Esc cancel`, with the way out last. Four different styles are gone, along with bracketed notices, `...` next to `…`, and counts like "1 models".
+- **Bad news looks like bad news.** A server that does not answer, a failed update and a model that cannot see an attached picture are announced in amber, not in the green of good news.
+- **A first start without a server is honest.** The welcome card no longer invents a 128k context, the wizard says no server answered and how to go on instead of "auto-detected model: default", the tool check is skipped rather than failing every scenario and blaming the model, the prompt no longer shows a prefill estimate for a server that is not there, and a failed turn is explained once instead of twice. The folder question says what trusting a folder means.
+- **Code in answers is coloured.** Keywords, strings, comments, numbers, types, calls and macros, for Rust, Python, JavaScript and TypeScript, Go, the C family, shell, PowerShell, SQL, Lua, Ruby, data files and diffs.
+- **A light theme.** Settings → UI → Color theme → Light background; a terminal that reports a white background through `COLORFGBG` gets it without asking.
+- **Questions from the model wrap.** A long question or option used to be cut at the card's edge; both now wrap, and the hint gives the real number range.
+- **Tool lines tell the truth about groups.** "Ran 3 commands" when the first had failed now reads "Ran 3 commands · 1 failed", and a failed edit says so instead of showing its line counts in green. A running call's words sit where they will be when it finishes, and every tool line has its mark in the same column.
+- **`/help` is two tables**, commands and keys, aligned and wrapped under themselves.
+- **Smaller screens.** Settings, MCP and context panels fit a 44-column terminal, the exit card prints the resume command whole on a narrow one, and the welcome card drops whole hints instead of cutting one in half.
+- **The Windows build starts on a fresh Windows.** It needed VCRUNTIME140.dll, which a clean install does not have; the C runtime is now built in.
+- **The README starts with a quick start**, and the install scripts check each download against the published SHA256 sums, fail on a version that does not exist instead of installing the beta, and put the old binary back if anything goes wrong.
+
 ## b353 — the lines under the prompt, as they were
 
 - **The tip, the prefill time and "Ready" are back.** b351 hid the tip while the model worked or the prompt had text, dropped the prefill time eight seconds after the first word, and took "Ready" off the status line. The lines under the prompt now behave as they did in b340. The new symbols stay: they replaced ones that showed as boxes.
