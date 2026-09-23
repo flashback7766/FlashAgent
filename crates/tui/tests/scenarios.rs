@@ -1702,6 +1702,32 @@ fn a_question_from_the_model_is_answered_from_its_card() {
 }
 
 #[test]
+fn typing_in_a_question_card_answers_in_ones_own_words() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "ask_user".into(),
+            arguments: serde_json::json!({ "question": "Which database?", "options": ["Postgres", "SQLite"] }),
+        },
+        Reply::Text("Redis it is.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("pick a database");
+    term.send(ENTER);
+    term.wait_for("Which database?", WAIT);
+    // No key to open the write-in first; the digit in it does not pick option 2.
+    term.type_text("Redis 2");
+    term.wait_for("Redis 2", WAIT);
+    term.send(ENTER);
+    term.wait_for("Redis it is.", WAIT);
+    let turns = server.turns();
+    let messages = turns.last().unwrap().body["messages"].as_array().cloned().unwrap_or_default();
+    let answer = messages.iter().find(|m| m["role"] == "tool").and_then(|m| m["content"].as_str()).unwrap_or_default().to_string();
+    assert!(answer.contains("Redis 2") && !answer.contains("SQLite"), "{answer}");
+}
+
+#[test]
 fn slash_channel_asks_before_switching() {
     let server = MockServer::start(Vec::new());
     let home = Home::new();

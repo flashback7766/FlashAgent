@@ -225,6 +225,13 @@ impl App {
             KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
                 if state.is_writing || req.options.is_none() {
                     state.write_in_text.push(c);
+                } else if let (Some(opts), false) = (&req.options, c.is_ascii_digit() || c.is_whitespace()) {
+                    // Typing starts an answer of one's own, with no key to open it first. A
+                    // path pasted into the card (keys, in a Windows console) is typed too,
+                    // so the digits in it no longer pick options.
+                    state.selected_index = opts.len();
+                    state.is_writing = true;
+                    state.write_in_text = c.to_string();
                 } else if let (Some(opts), Some(d)) = (&req.options, c.to_digit(10)) {
                     let idx = (d as usize).saturating_sub(1);
                     if idx < opts.len() {
