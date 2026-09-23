@@ -254,7 +254,6 @@ impl App {
         };
         self.chat.push_user(&shown);
         let content = self.with_memory_if_first(cx, text);
-        self.context_before_turn = self.context_usage.total_used();
         let mut user_msg = ChatMessage::user(content);
         if !self.attachments.is_empty() {
             user_msg.images = self.attachments.drain(..).map(|a| a.data_url).collect();
@@ -264,9 +263,14 @@ impl App {
         self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
     }
 
-    /// The memory block goes in front of the first user message.
+    /// The memory block goes in front of the first user message, and again
+    /// after compaction took that message away: project instructions must not
+    /// silently leave the context.
     fn with_memory_if_first(&self, cx: &LoopCtx<'_>, text: String) -> String {
-        let first = !self.history.iter().any(|m| m.role == flashagent_llm::Role::User);
+        let first = !self
+            .history
+            .iter()
+            .any(|m| m.role == flashagent_llm::Role::User && m.content.starts_with(cx.memory_block));
         if !first || cx.memory_block.is_empty() {
             text
         } else if text.trim().is_empty() {
@@ -578,7 +582,7 @@ impl App {
         self.draw(cx, None);
         let before = self.context_usage.total_used();
         let focus = (!focus.is_empty()).then_some(focus);
-        let earlier_turns = self.history.iter().filter(|m| m.role == flashagent_llm::Role::User).count() > 1;
+        let earlier_turns = self.history.iter().filter(|m| flashagent_core::is_prompt(m)).count() > 1;
         let archive = compaction_archive_path(cx.session_id);
         let compacted = if let Some(archive) = archive.as_deref() {
             compact_context(cx.source.as_ref(), &mut self.history, focus, archive).await.is_some()
@@ -586,6 +590,7 @@ impl App {
             false
         };
         if compacted {
+            self.chat.forget_counted_context();
             update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
             let saved = before.saturating_sub(self.context_usage.total_used());
             // In the transcript: the conversation itself changed.
@@ -649,7 +654,7 @@ impl App {
             return;
         };
         let prompts: Vec<String> =
-            self.history.iter().filter(|m| m.role == flashagent_llm::Role::User).map(|m| m.content.clone()).collect();
+            self.history.iter().filter(|m| flashagent_core::is_prompt(m)).map(|m| m.content.clone()).collect();
         let prompt_refs: Vec<&str> = prompts.iter().map(String::as_str).collect();
         let turns = store.rewindable(&prompt_refs);
         if turns.is_empty() {
@@ -763,7 +768,7 @@ impl App {
         let prompts: Vec<String> = self
             .history
             .iter()
-            .filter(|m| m.role == flashagent_llm::Role::User)
+            .filter(|m| flashagent_core::is_prompt(m))
             .map(|m| m.content.clone())
             .collect();
         let Some(prompt) = prompts.get(target.user_index).cloned() else {
@@ -783,7 +788,7 @@ impl App {
             .history
             .iter()
             .enumerate()
-            .filter(|(_, m)| m.role == flashagent_llm::Role::User)
+            .filter(|(_, m)| flashagent_core::is_prompt(m))
             .nth(target.user_index)
             .map(|(i, _)| i);
         if let Some(cut) = cut {

@@ -544,7 +544,7 @@ impl AgentLoop {
                     // A separate message, since a tool result is text only. It is marked so the
                     // model does not read it as the user speaking.
                     let mut msg = ChatMessage::user(format!(
-                        "[Image opened by {} and shown below — it is the result of that call, not a new request.]",
+                        "{TOOL_PICTURE_OPENING}{} and shown below — {TOOL_PICTURE_NOTE}",
                         call.name
                     ));
                     msg.images = images;
@@ -573,6 +573,16 @@ impl AgentLoop {
         }
         self.config.time_budget.is_some_and(|b| started.elapsed() >= b).then_some(DoneReason::TimeLimit)
     }
+}
+
+const TOOL_PICTURE_OPENING: &str = "[Image opened by ";
+const TOOL_PICTURE_NOTE: &str = "it is the result of that call, not a new request.]";
+
+/// Something the user said, not the user-role message that carries a tool's
+/// picture: finding "the last prompt" must skip those, or Ctrl+R answers a
+/// picture and a rewind takes back a turn too many.
+pub fn is_prompt(msg: &ChatMessage) -> bool {
+    msg.role == Role::User && !(msg.content.starts_with(TOOL_PICTURE_OPENING) && msg.content.contains(TOOL_PICTURE_NOTE))
 }
 
 /// 9 alphanumeric characters (Mistral chat templates insist on it), unique for
@@ -1326,6 +1336,8 @@ mod tests {
         assert_eq!(carrier.images, vec!["data:image/png;base64,AAEC".to_string()]);
         assert!(carrier.content.contains("view_image"), "{}", carrier.content);
         assert!(carrier.content.contains("not a new request"), "{}", carrier.content);
+        assert!(!is_prompt(carrier), "a picture is not something the user said");
+        assert!(is_prompt(&ChatMessage::user("[Image opened by me] and a real question")));
     }
 
     #[test]

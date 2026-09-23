@@ -103,6 +103,16 @@ impl App {
         });
     }
 
+    /// The command popup the arrows move in: only while a command is being
+    /// typed. A recalled prompt that starts with a path (`/home/me/shot.png
+    /// what is this`) has none, and the arrows go on through the history.
+    fn command_popup(&self) -> Option<AutocompletePopup> {
+        if self.running || self.history_index.is_some() || !self.input.starts_with('/') || self.input.line_count() != 1 {
+            return None;
+        }
+        AutocompletePopup::for_input(&self.input, std::path::Path::new("."), self.autocomplete_idx).filter(|ac| !ac.items.is_empty())
+    }
+
     /// Ends the history walk; an emptied prompt offers the suggestion again.
     fn edited(&mut self) {
         self.history_index = None;
@@ -114,7 +124,7 @@ impl App {
 
     /// Typing narrows, Ctrl+F again goes further back, Enter or → takes the match,
     /// Esc restores the draft.
-    fn history_search_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+    pub(crate) fn history_search_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         let Some(search) = self.history_search.as_mut() else { return };
         let ctrl = mods.contains(KeyModifiers::CONTROL);
         match code {
@@ -409,13 +419,11 @@ impl App {
             KeyCode::Up => {
                 if cx.gate.pending().is_some() {
                     self.confirm_select.toggle();
-                } else if !self.running && self.input.starts_with('/') && self.input.line_count() == 1 {
-                    if let Some(ac) = AutocompletePopup::for_input(&self.input, std::path::Path::new("."), self.autocomplete_idx) {
-                        if self.autocomplete_idx == 0 {
-                             self.autocomplete_idx = ac.items.len().saturating_sub(1);
-                        } else {
-                             self.autocomplete_idx -= 1;
-                        }
+                } else if let Some(ac) = self.command_popup() {
+                    if self.autocomplete_idx == 0 {
+                        self.autocomplete_idx = ac.items.len().saturating_sub(1);
+                    } else {
+                        self.autocomplete_idx -= 1;
                     }
                 } else if self.input.up() {
                     // Moved within a multi-line text.
@@ -439,10 +447,8 @@ impl App {
             KeyCode::Down => {
                 if cx.gate.pending().is_some() {
                     self.confirm_select.toggle();
-                } else if !self.running && self.input.starts_with('/') && self.input.line_count() == 1 {
-                    if let Some(ac) = AutocompletePopup::for_input(&self.input, std::path::Path::new("."), self.autocomplete_idx) {
-                        self.autocomplete_idx = (self.autocomplete_idx + 1) % ac.items.len();
-                    }
+                } else if let Some(ac) = self.command_popup() {
+                    self.autocomplete_idx = (self.autocomplete_idx + 1) % ac.items.len();
                 } else if self.input.down() {
                     // Moved within a multi-line text.
                 } else if !self.running {
@@ -501,7 +507,10 @@ impl App {
                 } else if (!self.input.is_empty() || !self.attachments.is_empty()) && !self.running {
                     // Enter takes what the popup highlights: "/he" and Enter is /help, as the
                     // arrows promised, not an unknown command.
-                    if self.input.starts_with('/') && self.input.line_count() == 1 {
+                    if self.input.starts_with('/')
+                        && self.input.line_count() == 1
+                        && !flashagent_tui::autocomplete::is_exact_command(&self.input.text())
+                    {
                         let picked = AutocompletePopup::for_input(&self.input, std::path::Path::new("."), self.autocomplete_idx)
                             .and_then(|ac| ac.current().map(|item| item.trigger.clone()));
                         if let Some(trigger) = picked.filter(|t| t.as_str() != self.input.trim()) {

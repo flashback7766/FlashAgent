@@ -308,12 +308,16 @@ impl App {
                 // The wizard had the whole screen.
                 self.renderer.request_reprint();
                 if completed {
-                    self.current_model = self.config.model.clone();
-                    cx.source.set_model(&self.current_model);
-                    cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
-                    cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
                     self.current_effort = self.config.thinking_effort.clone();
                     cx.perm.state().set_mode(self.config.permission_mode);
+                    // The running connection is to the old server: its model name
+                    // means nothing there, so it waits for a restart.
+                    if self.config.backend_url.trim_end_matches('/') == cx.source.0.base_url() {
+                        let model = self.config.model.clone();
+                        self.switch_model(cx, &model);
+                    } else {
+                        self.custom_placeholder = Some("New server saved; restart FlashAgent to connect to it".to_string());
+                    }
                     self.refresh_welcome(cx.source, cx.mascot_mood);
                 }
             }
@@ -400,10 +404,8 @@ impl App {
         cx.tools_arc.set_web_enabled(self.config.web_tools);
         cx.source.0.set_max_retries(self.config.network_retries);
         if self.config.model != self.current_model {
-            self.current_model = self.config.model.clone();
-            cx.source.set_model(&self.current_model);
-            cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
-            cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
+            let model = self.config.model.clone();
+            self.switch_model(cx, &model);
         }
         // During /goal the live mode/effort are the goal's; edits apply to what the
         // goal restores afterwards.
@@ -535,24 +537,35 @@ impl App {
         }
     }
 
+    /// Everything that follows the model, at once: the next prompt may go out
+    /// before the idle poll catches up (it never runs during a turn), and a
+    /// 128K budget on an 8K model overflows the server.
+    fn switch_model(&mut self, cx: &LoopCtx<'_>, model: &str) {
+        self.current_model = model.to_string();
+        cx.source.set_model(&self.current_model);
+        cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
+        cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
+        if let Some(m) = cx.source.discovery().and_then(|d| d.models.into_iter().find(|m| m.id == self.current_model)) {
+            self.current_context = m.context_display();
+            if let Some(len) = m.context_length.or(m.max_context_length) {
+                self.context_usage.total_capacity = len.max(1024);
+                cx.tools_arc.set_context_window(Some(len));
+            }
+            // The picked effort survives the switch; a non-reasoning model just gets no
+            // thinking fields.
+            if self.current_effort.is_empty() {
+                self.current_effort = "auto".to_string();
+            }
+        }
+    }
+
     fn model_menu_key(&mut self, cx: &LoopCtx<'_>, mut menu: SelectMenu<String>, code: KeyCode, mods: KeyModifiers) {
         match code {
             KeyCode::Enter => {
                 let Some(val) = menu.selected_value().cloned() else { return };
-                self.current_model = val;
-                self.config.model = self.current_model.clone();
+                self.config.model = val.clone();
                 self.save_config();
-                cx.source.set_model(&self.current_model);
-                cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
-                cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
-                if let Some(m) = cx.source.discovery().and_then(|d| d.models.into_iter().find(|m| m.id == self.current_model)) {
-                    self.current_context = m.context_display();
-                    // The picked effort survives the switch; a non-reasoning model just gets no
-                    // thinking fields.
-                    if self.current_effort.is_empty() {
-                        self.current_effort = "auto".to_string();
-                    }
-                }
+                self.switch_model(cx, &val);
                 self.refresh_welcome(cx.source, cx.mascot_mood);
                 self.notice(format!("Model: {}", self.current_model));
             }

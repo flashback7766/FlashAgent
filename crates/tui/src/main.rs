@@ -636,14 +636,23 @@ struct AppContext {
 /// Set while an external editor has the terminal; the key reader waits.
 static INPUT_PAUSED: AtomicBool = AtomicBool::new(false);
 
+/// The editor setting, or `$VISUAL`, `$EDITOR` and the platform's own. The
+/// default setting is the text `$EDITOR`, which is not a program: run as one,
+/// Ctrl+E failed on every fresh config.
+fn editor_command(preferred_editor: &str) -> String {
+    let configured = preferred_editor.trim();
+    if !configured.is_empty() && !matches!(configured, "$EDITOR" | "$VISUAL" | "${EDITOR}" | "${VISUAL}") {
+        return configured.to_string();
+    }
+    std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .ok()
+        .filter(|e| !e.trim().is_empty())
+        .unwrap_or_else(|| if cfg!(windows) { "notepad" } else { "vi" }.to_string())
+}
+
 fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::io::Result<String> {
-    let editor = if !preferred_editor.is_empty() {
-        preferred_editor.to_string()
-    } else {
-        std::env::var("VISUAL")
-            .or_else(|_| std::env::var("EDITOR"))
-            .unwrap_or_else(|_| "nano".to_string())
-    };
+    let editor = editor_command(preferred_editor);
 
     let temp_dir = std::env::temp_dir();
     let temp_file = temp_dir.join(format!("flashagent_prompt_{}.md", std::process::id()));
@@ -677,9 +686,9 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     INPUT_PAUSED.store(false, Ordering::SeqCst);
 
     let result = match status {
-        // The composer is one line: line breaks become spaces, the trailing newline goes.
+        // The composer takes several lines: only the trailing newline goes.
         Ok(s) if s.success() => std::fs::read_to_string(&temp_file)
-            .map(|text| text.trim_end().replace("\r\n", " ").replace(['\n', '\r'], " "))
+            .map(|text| text.trim_end().replace("\r\n", "\n"))
             .unwrap_or_else(|_| initial_text.to_string()),
         Ok(_) => initial_text.to_string(),
         Err(e) => {
@@ -768,7 +777,8 @@ fn gather_burst(first: char) -> Vec<UiEvent> {
                     text.push(c);
                 }
             }
-            Ok(Event::Key(k)) => match typed_char(&k) {
+            // Mid-burst a Tab is pasted text, not the Settings key.
+            Ok(Event::Key(k)) => match typed_char(&k).or_else(|| is_plain_tab(&k).then_some('\t')) {
                 Some(c) => text.push(c),
                 None => {
                     rest.push(UiEvent::Key(latin_shortcut(k.code, k.modifiers), k.modifiers));
@@ -787,10 +797,16 @@ fn gather_burst(first: char) -> Vec<UiEvent> {
     out
 }
 
-/// A newline only at the end is a word typed and Enter pressed together.
+fn is_plain_tab(k: &crossterm::event::KeyEvent) -> bool {
+    k.code == KeyCode::Tab && k.modifiers.is_empty()
+}
+
+/// A newline only at the end is a word typed and Enter pressed together. A
+/// tab inside the text was pasted; one in front of a single line is the Tab
+/// key (Windows queues its release right behind it), so Settings still opens.
 fn burst_events(text: &str) -> Vec<UiEvent> {
     let body = text.trim_end_matches('\n');
-    if body.contains('\n') {
+    if body.contains('\n') || (body.contains('\t') && !body.starts_with('\t')) {
         let mut out = vec![UiEvent::Paste(body.to_string())];
         // The trailing Enters were keys; one may be the user sending.
         out.extend((body.len()..text.len()).map(|_| UiEvent::Key(KeyCode::Enter, KeyModifiers::NONE)));
@@ -799,6 +815,7 @@ fn burst_events(text: &str) -> Vec<UiEvent> {
     text.chars()
         .map(|c| match c {
             '\n' => UiEvent::Key(KeyCode::Enter, KeyModifiers::NONE),
+            '\t' => UiEvent::Key(KeyCode::Tab, KeyModifiers::NONE),
             c => UiEvent::Key(KeyCode::Char(c), KeyModifiers::NONE),
         })
         .collect()
@@ -879,7 +896,10 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                     Ok(Event::Key(k)) => {
                         // Without bracketed paste (Windows' console) a paste arrives as keys, each
                         // newline an Enter. Keys already waiting with a newline among them are a paste.
-                        let events = match typed_char(&k) {
+                        // A Tab with more keys already waiting starts a paste of
+                        // tab-indented code; alone it opens Settings.
+                        let pasted_tab = || is_plain_tab(&k) && matches!(crossterm::event::poll(std::time::Duration::ZERO), Ok(true));
+                        let events = match typed_char(&k).or_else(|| pasted_tab().then_some('\t')) {
                             Some(first) => gather_burst(first),
                             None => vec![UiEvent::Key(latin_shortcut(k.code, k.modifiers), k.modifiers)],
                         };
@@ -1356,6 +1376,11 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 app.tick_n += 1;
                 app.tip_animator.tick();
                 app.start_recap_if_due(&source, &tx);
+                // A question that timed out (a /goal one after 120 s) goes without a
+                // key; its selection and half-written answer must not open the next.
+                if question_gate.pending().is_none() {
+                    app.question_ui_state = QuestionUiState::default();
+                }
                 if app.background.as_ref().is_some_and(BackgroundNotice::expired) {
                     app.background = None;
                     app.renderer.request_reprint();
@@ -1498,9 +1523,13 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                         tools_arc.set_vision_supported(model_sees_images(&source, &app.current_model));
                         update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
 
-                        if model_changed {
+                        // Only for the server in the config: after the wizard saved a
+                        // new one, the old server's model must not be written beside it.
+                        if model_changed && app.config.backend_url.trim_end_matches('/') == source.0.base_url() {
                             app.config.model = app.current_model.clone();
                             app.save_config();
+                        }
+                        if model_changed {
                             // The effort is the user's choice. A non-reasoning model just gets no
                             // thinking fields; turning "auto" into "off" here lost it for later models.
                             if app.current_effort.is_empty() {
@@ -1674,6 +1703,16 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                     for ch in one_line().chars() {
                         sm.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);
                     }
+                } else if let Some(menu) = app.overlay.as_mut().and_then(Overlay::select_menu_mut) {
+                    // A menu's filter (F3, Ctrl+K) takes the paste as typing.
+                    for ch in one_line().chars() {
+                        menu.push_filter_char(ch);
+                    }
+                } else if app.history_search.is_some() {
+                    // Ctrl+F: into the search, not the hidden prompt under it.
+                    for ch in one_line().chars() {
+                        app.history_search_key(KeyCode::Char(ch), KeyModifiers::NONE);
+                    }
                 } else if app.overlay.is_some() || gate.pending().is_some() {
                     // Nothing there takes text.
                 } else if let Some(att) = Attachment::from_dropped_path(&pasted) {
@@ -1846,6 +1885,25 @@ mod tests {
         // A trailing newline: the text, then Enter as a key.
         let events = burst_events("a\nb\n");
         assert!(matches!(events.as_slice(), [UiEvent::Paste(p), UiEvent::Key(KeyCode::Enter, _)] if p == "a\nb"));
+    }
+
+    #[test]
+    fn a_pasted_tab_keeps_its_line_from_being_sent_on_its_own() {
+        // A tab-indented first line with Enter after it was "typed, then sent".
+        let events = burst_events("func main() {\n\tfmt.Println(\"hi\")\n");
+        assert!(matches!(events.as_slice(), [UiEvent::Paste(p), UiEvent::Key(KeyCode::Enter, _)] if p == "func main() {\n\tfmt.Println(\"hi\")"));
+        let events = burst_events("\tfmt.Println(\"hi\")\n}\n");
+        assert!(matches!(events.as_slice(), [UiEvent::Paste(_), UiEvent::Key(KeyCode::Enter, _)]));
+        assert!(matches!(burst_events("a\tb").as_slice(), [UiEvent::Paste(p)] if p == "a\tb"));
+        // The Tab key alone, its release queued behind it, still opens Settings.
+        assert!(matches!(burst_events("\t").as_slice(), [UiEvent::Key(KeyCode::Tab, _)]));
+    }
+
+    #[test]
+    fn the_editor_setting_that_names_a_variable_is_not_run_as_a_program() {
+        assert_ne!(editor_command("$EDITOR"), "$EDITOR");
+        assert_ne!(editor_command(""), "");
+        assert_eq!(editor_command("code --wait"), "code --wait");
     }
 
     #[test]

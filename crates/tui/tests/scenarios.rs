@@ -765,6 +765,9 @@ fn compact_replaces_the_conversation_so_far_with_a_summary() {
     term.type_text("/compact");
     term.send(ENTER);
     term.wait_for("Context compacted", WAIT);
+    let screen = term.screen();
+    assert!(!screen.contains("· 0 saved"), "the transcript was still counted after compaction:
+{screen}");
     ask(&term, "the third question", "Third answer, after the summary.");
 
     assert!(

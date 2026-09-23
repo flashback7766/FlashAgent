@@ -53,8 +53,9 @@ impl App {
             cx.cancel.store(true, Ordering::Relaxed);
             self.cancel_requested = Some(std::time::Instant::now());
             self.turn_phase = TurnPhase::Stopping;
+            // Messages not yet delivered stay pinned; the turn's end puts them back
+            // in the prompt instead of dropping them.
             self.active_steer_tx = None;
-            self.pending_steers.clear();
             self.notice("Interrupting…");
         }
         self.renderer.request_reprint();
@@ -71,6 +72,18 @@ impl App {
 
     /// The last message in the history is what the model answers.
     pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
+        // The prompt names the model and the thinking mode, and F3 and F4 change
+        // both: "do not think" must not outlive a switch to high effort. Rebuilt
+        // only on a change, since the system prompt is the cached prefix.
+        if self.prompt_config.model.as_deref() != Some(self.current_model.as_str())
+            || self.prompt_config.effort.as_deref() != Some(self.current_effort.as_str())
+        {
+            self.prompt_config = self.prompt_config.clone().with_model(&self.current_model).with_effort(&self.current_effort);
+            self.apply_personality();
+        }
+        // Here, not only for typed prompts: a /goal, a skill or Ctrl+R measured
+        // their growth from a turn long gone and compacted too early.
+        self.context_before_turn = self.context_usage.total_used();
         update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
         cx.cancel.store(false, Ordering::Relaxed);
         self.suggested_prompt = None;
@@ -106,7 +119,7 @@ impl App {
 
     /// Ctrl+R and /regenerate. False when there is no prompt to answer again.
     pub(crate) fn regenerate(&mut self, cx: &LoopCtx<'_>) -> bool {
-        let Some(user_idx) = self.history.iter().rposition(|m| m.role == flashagent_llm::Role::User) else {
+        let Some(user_idx) = self.history.iter().rposition(flashagent_core::is_prompt) else {
             return false;
         };
         // Asking again says the last answer was not good enough: the one signal the
@@ -152,8 +165,11 @@ impl App {
         // A steer typed as the turn ended never reached the model; it goes back into
         // the prompt.
         let unsent = std::mem::take(&mut self.pending_steers);
-        if !unsent.is_empty() && self.input.is_empty() {
-            self.input.set(unsent.join(" "));
+        if !unsent.is_empty() {
+            // Ahead of a draft typed since: that draft is newer.
+            let draft = self.input.text().to_string();
+            let restored = unsent.join("\n");
+            self.input.set(if draft.trim().is_empty() { restored } else { format!("{restored}\n{draft}") });
             self.background = Some(BackgroundNotice::fading(
                 "The turn ended before your message reached it · Enter sends it now",
                 8,
@@ -202,6 +218,8 @@ impl App {
         match res {
             Ok((h, reason)) => {
                 self.history = h;
+                // A style picked while the turn ran was applied to the history it replaced.
+                self.apply_personality();
                 update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                 // The turn just read all of it. A later change (interrupted turn closed,
                 // compaction) makes a new prefix, which is warmed.
@@ -235,7 +253,7 @@ impl App {
                     };
                     // Only turns before the last are summarized: a single long turn (a
                     // /goal run) has nothing to compact, and saying it failed misleads.
-                    let earlier_turns = self.history.iter().filter(|m| m.role == flashagent_llm::Role::User).count() > 1;
+                    let earlier_turns = self.history.iter().filter(|m| flashagent_core::is_prompt(m)).count() > 1;
                     if verdict.should() && earlier_turns {
                         // In the transcript: it changes what the model remembers.
                         self.chat.push_system("Compacting context…");
@@ -251,6 +269,7 @@ impl App {
                         };
                         match compacted {
                             Some(_) => {
+                                self.chat.forget_counted_context();
                                 update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                                 let saved = before.saturating_sub(self.context_usage.total_used());
                                 self.chat.replace_last_system(&format!(
@@ -278,6 +297,7 @@ impl App {
             Err((e, h)) => {
                 // Keep the steps that already ran and changed files.
                 self.history = h;
+                self.apply_personality();
                 close_dangling_user(&mut self.history, "[no reply: the model backend failed]");
                 update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                 self.chat.on_event(&LoopEvent::Done(DoneReason::Failed));

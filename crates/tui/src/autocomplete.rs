@@ -147,6 +147,20 @@ fn cached_skills(cwd: &Path) -> Vec<AutocompleteItem> {
 
 /// Enter on such an item puts it in the prompt to be finished instead of
 /// running it bare.
+/// Short and second names the command handler takes (`/m` is `/model`); a
+/// line that already is one runs as typed instead of becoming the popup's
+/// first item.
+pub const COMMAND_ALIASES: &[&str] = &[
+    "/?", "/config", "/changelog", "/memories", "/retry", "/thinking", "/t", "/models", "/m", "/params", "/expand",
+    "/think", "/o", "/quit", "/q",
+];
+
+/// A whole command or alias, as typed.
+pub fn is_exact_command(input: &str) -> bool {
+    let typed = input.trim().to_lowercase();
+    COMMAND_ALIASES.contains(&typed.as_str()) || builtin_commands().iter().any(|c| c.trigger.to_lowercase() == typed)
+}
+
 pub fn needs_argument(trigger: &str) -> bool {
     matches!(trigger, "/goal" | "/commit" | "/channel")
 }
@@ -251,6 +265,11 @@ pub fn find_matches(input: &str, cwd: &Path) -> Vec<AutocompleteItem> {
         }
     }
 
+    // The command typed in full comes first: `/mode` is not `/model`.
+    if let Some(exact) = prefix_matches.iter().position(|item| item.trigger.to_lowercase() == query) {
+        let item = prefix_matches.remove(exact);
+        prefix_matches.insert(0, item);
+    }
     prefix_matches.extend(substr_matches);
     prefix_matches.extend(desc_matches);
     prefix_matches
@@ -417,6 +436,16 @@ mod skill_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_typed_in_full_is_not_swapped_for_a_longer_one() {
+        let found = find_matches("/mode", std::path::Path::new("."));
+        assert_eq!(found.first().map(|i| i.trigger.as_str()), Some("/mode"));
+        for typed in ["/mode", "/m", "/t", "/o", "/think", "/q"] {
+            assert!(is_exact_command(typed), "{typed}");
+        }
+        assert!(!is_exact_command("/he"));
+    }
 
     #[test]
     fn test_builtin_commands_exist() {
