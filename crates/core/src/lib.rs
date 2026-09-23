@@ -29,9 +29,9 @@ pub use memory_store::{Entry as MemoryEntry, Kind as MemoryEntryKind, Scope as M
 pub use memory::{collect, injection_block, outline, MemoryDoc, MemoryKind, GLOBAL_FILENAME, PROJECT_FILENAMES};
 pub use paths::{expand_home, resolve_path};
 pub use permissions::{
-    is_local_host, is_local_ip, is_read_only_shell, parse_chain, path_is_inside, url_host, ApprovalGate,
-    ApprovalRequest, Category, Decision, DenyAllGate, PermissionMode, PermissionState, PermissionedTools, RuleSet,
-    Verdict,
+    is_local_host, is_local_ip, is_read_only_shell, parse_chain, path_is_inside, set_shell_dialect, url_host,
+    ApprovalGate, ApprovalRequest, Category, Decision, DenyAllGate, PermissionMode, PermissionState,
+    PermissionedTools, RuleSet, ShellDialect, Verdict,
 };
 pub use personality::{BaseStyle, Level as TraitLevel, Personality, Trait as PersonalityTrait};
 pub use prompt::{build_system_prompt, SystemPromptConfig};

@@ -176,6 +176,7 @@ fn find_git_bash() -> Option<std::path::PathBuf> {
 /// The platform line of the system prompt: the shell decides which commands
 /// the model can write.
 pub fn platform() -> String {
+    announce_dialect();
     #[cfg(windows)]
     {
         if git_bash().is_some() {
@@ -188,6 +189,15 @@ pub fn platform() -> String {
     std::env::consts::OS.to_string()
 }
 
+/// The permission rules split a command the way this shell will.
+fn announce_dialect() {
+    #[cfg(windows)]
+    let dialect = if git_bash().is_some() { flashagent_core::ShellDialect::Posix } else { flashagent_core::ShellDialect::Cmd };
+    #[cfg(not(windows))]
+    let dialect = flashagent_core::ShellDialect::Posix;
+    flashagent_core::set_shell_dialect(dialect);
+}
+
 /// cmd.exe does not read the quoting `arg` would add; /S keeps the command's
 /// own quotes as written.
 #[cfg(windows)]
@@ -198,6 +208,7 @@ fn cmd_exe(cmd: &str) -> tokio::process::Command {
 }
 
 fn shell_command(cmd: &str) -> tokio::process::Command {
+    announce_dialect();
     #[cfg(windows)]
     let mut c = match git_bash() {
         Some(bash) => {
