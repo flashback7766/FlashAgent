@@ -50,9 +50,9 @@
 <table>
 <tr>
 <td width="50%"><img src="docs/screenshots/gifs/steering.gif" alt="Mid-flight steering"><br>
-<sub><b>Mid-flight steering</b> — type while the model works and press <kbd>Enter</kbd>: your guidance lands at the next safe point. <kbd>Esc</kbd> interrupts and keeps the partial output.</sub></td>
+<sub><b>Mid-flight steering</b> — type while the model works and press <kbd>Enter</kbd>: your guidance lands as soon as the tool call in progress returns, before the model's next step. <kbd>Esc</kbd> interrupts and keeps the partial output.</sub></td>
 <td width="50%"><img src="docs/screenshots/gifs/tools-diff.gif" alt="Tool execution and diff approval"><br>
-<sub><b>Tools & approvals</b> — every write, patch and shell command stops at a card naming the exact target: Allow, Always or Deny.</sub></td>
+<sub><b>Tools & approvals</b> — every write, patch and shell command stops at a card naming the exact target: Allow, Always allow or Deny.</sub></td>
 </tr>
 <tr>
 <td colspan="2"><img src="docs/screenshots/gifs/menus.gif" alt="Non-blocking menus"><br>
@@ -60,7 +60,7 @@
 </tr>
 </table>
 
-<sub>Every recording on this page is a real session against a small local model — Gemma 4 E2B (Q4_K_XL, 8k context) in LM Studio on a laptop — so the thoughts, timings and token counts are the ones it produced. Playback is sped up; nothing else is edited.</sub>
+<sub>Every recording on this page is a real session against a small local model — Gemma 4 E2B (Q4_K_XL) in LM Studio on a laptop — so the thoughts, timings and token counts are the ones it produced. Playback is sped up; nothing else is edited.</sub>
 
 ---
 
@@ -214,7 +214,7 @@ FlashAgent starts in the mode you left it in. Reads inside the project and web t
 
 <img src="docs/screenshots/gifs/goal-budget.gif" width="100%" alt="A goal stopped by its step budget, with the report card">
 
-<sub>Here a three-step budget cuts the run short and the card says so — <b>INCOMPLETE</b>, one file created and one edited, no shell commands run.</sub>
+<sub>Here a five-step budget cuts the run short and the card says so — <b>INCOMPLETE</b>, one file created and one edited, the <code>cargo check</code> it never got to not claimed.</sub>
 
 **Updates** — installed in the background: a new release is downloaded, verified against the release checksums and installed on its own, and the status line tells you to restart once it is in. <kbd>Ctrl</kbd>+<kbd>U</kbd> (or `/update`) shows the progress of a download that is already under way, or checks and installs right away when nothing is running; `flashagent --update` does the same from the shell. Background updates can be turned off in Settings; `--channel stable|beta` or `/channel` switches channels.
 
