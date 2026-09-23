@@ -377,13 +377,18 @@ pub fn render_edit_card(
         } else {
             const MAX_ROWS: usize = 35;
             let hidden = rows.iter().skip(MAX_ROWS).filter(|r| !matches!(r, DiffRow::Fold { .. })).count();
+            // An edit_file preview has no hunk headers, so no real line numbers:
+            // it is marked - and + rather than numbered from 1.
+            let numbered = text.lines().any(|l| l.starts_with("@@"));
+            let at = |n: usize, mark: &str| if numbered { n.to_string() } else { mark.to_string() };
             for row in rows.into_iter().take(MAX_ROWS) {
                 match row {
                     DiffRow::Same { old_line, new_line, text } => {
                         let clipped = clip_ellipsis(&text, budget);
                         let styled = format!(
                             "  {TEXT_MUTED}{:>4} {:>4}{RESET} {TEXT_BRIGHT}{clipped}{RESET}",
-                            old_line, new_line
+                            at(old_line, ""),
+                            at(new_line, "")
                         );
                         lines.push((LineKind::Tool, styled));
                     }
@@ -391,7 +396,7 @@ pub fn render_edit_card(
                         let clipped = clip_ellipsis(&text, budget);
                         let styled = format!(
                             "  {TEXT_RED}{:>4}{RESET}      {BG_DEL}{TEXT_RED}{clipped}{RESET}",
-                            old_line
+                            at(old_line, "-")
                         );
                         lines.push((LineKind::Tool, styled));
                     }
@@ -399,7 +404,7 @@ pub fn render_edit_card(
                         let clipped = clip_ellipsis(&text, budget);
                         let styled = format!(
                             "       {TEXT_GREEN}{:>4}{RESET} {BG_ADD}{TEXT_GREEN}{clipped}{RESET}",
-                            new_line
+                            at(new_line, "+")
                         );
                         lines.push((LineKind::Tool, styled));
                     }
