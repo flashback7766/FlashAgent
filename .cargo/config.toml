@@ -1,0 +1,7 @@
+# The Windows binary carries its own C runtime: VCRUNTIME140.dll is not on a
+# fresh Windows, and without it the exe does not start at all.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
