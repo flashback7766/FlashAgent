@@ -19,7 +19,7 @@ d.start(p)
 d.wait_idle(120, quiet=6)
 d.type("Add the doc comment /// A bare number means minutes. above parse_duration in src/parser.rs")
 d.key("Enter", pause=0)
-if d.wait_for("Deny", 300):
+if d.wait_for("Esc deny", 300):
     d.wait_idle(5, quiet=2.5)
     d.key("Enter", pause=0)
 d.wait_turn(300)

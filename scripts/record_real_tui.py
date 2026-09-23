@@ -44,7 +44,7 @@ d.wait_idle(120, quiet=6)  # the welcome card, and the warm-up behind it
 d.type("What does this project do, and where would I start reading?")
 d.key("Enter", pause=0)
 d.wait_turn(300)
-d.wait_for("(→", 60)  # the recap and the suggested next prompt
+d.wait_for("→ use", 60)  # the recap and the suggested next prompt
 d.wait_idle(10, quiet=2)
 d.key("Right", pause=2.5)
 d.stop()
