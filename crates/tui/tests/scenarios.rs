@@ -41,7 +41,7 @@ fn the_wizard_sets_up_a_custom_server_and_opens_the_app() {
     let mut term = Term::start(&home, &["-y"], COLS, ROWS);
 
     term.wait_for("Step 1: Choose your model server", WAIT);
-    term.send("6");
+    term.send("c");
     term.type_text(&server.url);
     term.send(ENTER);
 

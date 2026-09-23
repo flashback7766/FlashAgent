@@ -8,22 +8,20 @@ pub fn mask_api_key(key: &str) -> String {
     if key.is_empty() {
         return String::new();
     }
-    if key.len() <= 6 {
-        return "•".repeat(key.len());
+    // By characters: a key typed on a Russian layout is not ASCII.
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 6 {
+        return "•".repeat(chars.len());
     }
     let prefix_len = if key.starts_with("sk-or-") {
         6
     } else if key.starts_with("sk-") {
         3
     } else {
-        key.len().min(4)
+        4
     };
-    let prefix = &key[..prefix_len];
-    let suffix = if key.len() >= prefix_len + 4 {
-        &key[key.len() - 4..]
-    } else {
-        ""
-    };
+    let prefix: String = chars[..prefix_len].iter().collect();
+    let suffix: String = if chars.len() >= prefix_len + 4 { chars[chars.len() - 4..].iter().collect() } else { String::new() };
     format!("{prefix}••••••••{suffix}")
 }
 
@@ -58,7 +56,7 @@ impl SetupWizard {
                 } else {
                     config.backend_url.clone()
                 };
-                (5, url)
+                (Self::custom_idx(), url)
             }
         };
         let custom_cursor = custom_url.len();
@@ -81,6 +79,25 @@ impl SetupWizard {
             connection_status: None,
             sampling,
             discovered_kind: None,
+        }
+    }
+
+    /// Custom is the row after the presets, however many there are.
+    fn custom_idx() -> usize {
+        BackendPreset::all().len()
+    }
+
+    fn is_custom(&self) -> bool {
+        self.preset_idx == Self::custom_idx()
+    }
+
+    /// The key that picks a row: 1–9, then 0, and c for Custom.
+    fn row_key(i: usize) -> Option<char> {
+        match i {
+            _ if i == Self::custom_idx() => Some('c'),
+            0..=8 => char::from_digit(i as u32 + 1, 10),
+            9 => Some('0'),
+            _ => None,
         }
     }
 
@@ -263,7 +280,7 @@ impl SetupWizard {
                 continue;
             }
             match self.step {
-                0 if self.preset_idx == 5 => {
+                0 if self.is_custom() => {
                     self.insert_custom_char(c);
                 }
                 1 => {
@@ -291,7 +308,7 @@ impl SetupWizard {
         if code == KeyCode::Esc {
             match self.step {
                 0 => {
-                    if self.preset_idx == 5 && !self.custom_url.is_empty() {
+                    if self.is_custom() && !self.custom_url.is_empty() {
                         self.custom_url.clear();
                         self.custom_cursor = 0;
                         self.config.backend_url.clear();
@@ -339,7 +356,7 @@ impl SetupWizard {
         }
 
         // Step 0 with Custom selected: typing edits the URL.
-        if self.step == 0 && self.preset_idx == 5 {
+        if self.step == 0 && self.is_custom() {
             match code {
                 KeyCode::Enter => {
                     let mut trimmed = self.custom_url.trim().to_string();
@@ -359,7 +376,7 @@ impl SetupWizard {
                 }
                 KeyCode::Up => {
                     let presets = BackendPreset::all();
-                    self.preset_idx = 4;
+                    self.preset_idx = presets.len() - 1;
                     self.config.backend_url = presets[self.preset_idx].url.clone();
                     return None;
                 }
@@ -578,28 +595,8 @@ impl SetupWizard {
                 self.next_option();
                 None
             }
-            KeyCode::Char('1') => {
-                self.set_number(1);
-                None
-            }
-            KeyCode::Char('2') => {
-                self.set_number(2);
-                None
-            }
-            KeyCode::Char('3') => {
-                self.set_number(3);
-                None
-            }
-            KeyCode::Char('4') => {
-                self.set_number(4);
-                None
-            }
-            KeyCode::Char('5') => {
-                self.set_number(5);
-                None
-            }
-            KeyCode::Char('6') => {
-                self.set_number(6);
+            KeyCode::Char(c) => {
+                self.pick_key(c);
                 None
             }
             _ => None,
@@ -610,7 +607,7 @@ impl SetupWizard {
         let presets = BackendPreset::all();
         match self.step {
             0 => {
-                self.preset_idx = (self.preset_idx + 1) % 6;
+                self.preset_idx = (self.preset_idx + 1) % (presets.len() + 1);
                 if self.preset_idx < presets.len() {
                     self.config.backend_url = presets[self.preset_idx].url.clone();
                 } else {
@@ -629,7 +626,7 @@ impl SetupWizard {
         let presets = BackendPreset::all();
         match self.step {
             0 => {
-                self.preset_idx = (self.preset_idx + 6 - 1) % 6;
+                self.preset_idx = (self.preset_idx + presets.len()) % (presets.len() + 1);
                 if self.preset_idx < presets.len() {
                     self.config.backend_url = presets[self.preset_idx].url.clone();
                 } else {
@@ -644,23 +641,25 @@ impl SetupWizard {
         }
     }
 
-    fn set_number(&mut self, num: usize) {
+    fn pick_key(&mut self, key: char) {
         let presets = BackendPreset::all();
         if self.step == 0 {
-            if num >= 1 && num <= presets.len() {
-                self.preset_idx = num - 1;
-                self.config.backend_url = presets[self.preset_idx].url.clone();
-            } else if num == 6 {
-                self.preset_idx = 5;
+            let Some(row) = (0..=presets.len()).find(|&i| Self::row_key(i) == Some(key.to_ascii_lowercase())) else {
+                return;
+            };
+            self.preset_idx = row;
+            if row < presets.len() {
+                self.config.backend_url = presets[row].url.clone();
+            } else {
                 self.custom_cursor = self.custom_url.len();
                 self.config.backend_url = self.custom_url.clone();
             }
         } else if self.step == 3 {
-            match num {
-                1 => self.config.permission_mode = PermissionMode::Planning,
-                2 => self.config.permission_mode = PermissionMode::Manual,
-                3 => self.config.permission_mode = PermissionMode::AcceptEdits,
-                4 => self.config.permission_mode = PermissionMode::Bypass,
+            match key {
+                '1' => self.config.permission_mode = PermissionMode::Planning,
+                '2' => self.config.permission_mode = PermissionMode::Manual,
+                '3' => self.config.permission_mode = PermissionMode::AcceptEdits,
+                '4' => self.config.permission_mode = PermissionMode::Bypass,
                 _ => {}
             }
         }
@@ -699,24 +698,25 @@ impl SetupWizard {
                 for (i, p) in presets.iter().enumerate() {
                     let is_sel = i == self.preset_idx;
                     let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+                    let key = Self::row_key(i).map_or_else(|| "  ".to_string(), |k| format!("{k}."));
                     let row = if is_sel {
-                        format!("{ptr} \x1b[1;38;2;240;235;225m{}. {:<12}\x1b[0m \x1b[38;2;225;175;95m{}\x1b[0m", i + 1, p.name, p.url)
+                        format!("{ptr} \x1b[1;38;2;240;235;225m{key} {:<12}\x1b[0m \x1b[38;2;225;175;95m{}\x1b[0m", p.name, p.url)
                     } else {
-                        format!("{ptr} \x1b[38;2;160;155;145m{}. {:<12}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", i + 1, p.name, p.url)
+                        format!("{ptr} \x1b[38;2;160;155;145m{key} {:<12}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", p.name, p.url)
                     };
                     lines.push(pad_row(&row));
                 }
 
-                // 6. Custom backend, with an editable field and a dim placeholder.
-                let is_custom_sel = self.preset_idx == 5;
+                // Custom backend, with an editable field and a dim placeholder.
+                let is_custom_sel = self.is_custom();
                 let ptr = if is_custom_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
                 let placeholder_color = "\x1b[38;2;68;65;62m";
                 let placeholder_text = "type its URL";
                 let custom_row = if self.custom_url.is_empty() {
                     if is_custom_sel {
-                        format!("{ptr} \x1b[1;38;2;240;235;225m6. {:<12}\x1b[0m \x1b[7m \x1b[27m{placeholder_color}{placeholder_text}\x1b[0m", "Custom")
+                        format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<12}\x1b[0m \x1b[7m \x1b[27m{placeholder_color}{placeholder_text}\x1b[0m", "Custom")
                     } else {
-                        format!("{ptr} \x1b[38;2;160;155;145m6. {:<12}\x1b[0m {placeholder_color}{placeholder_text}\x1b[0m", "Custom")
+                        format!("{ptr} \x1b[38;2;160;155;145mc. {:<12}\x1b[0m {placeholder_color}{placeholder_text}\x1b[0m", "Custom")
                     }
                 } else if is_custom_sel {
                     let (before, at_and_after) = if self.custom_cursor < self.custom_url.len() {
@@ -728,9 +728,9 @@ impl SetupWizard {
                     } else {
                         (&self.custom_url[..], "\x1b[7m \x1b[27m".to_string())
                     };
-                    format!("{ptr} \x1b[1;38;2;240;235;225m6. {:<12}\x1b[0m \x1b[1;38;2;225;175;95m{before}{at_and_after}\x1b[0m", "Custom")
+                    format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<12}\x1b[0m \x1b[1;38;2;225;175;95m{before}{at_and_after}\x1b[0m", "Custom")
                 } else {
-                    format!("{ptr} \x1b[38;2;160;155;145m6. {:<12}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", "Custom", self.custom_url)
+                    format!("{ptr} \x1b[38;2;160;155;145mc. {:<12}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", "Custom", self.custom_url)
                 };
                 lines.push(pad_row(&custom_row));
                 if is_custom_sel {
@@ -902,8 +902,8 @@ impl SetupWizard {
         lines.push(pad_row(""));
         let hint_w = inner_w.saturating_sub(2);
         let hints: &[(&str, &str)] = match self.step {
-            0 if self.preset_idx == 5 => &[("type", "the URL"), ("\u{2191}/\u{2193}", "presets"), ("Enter", "next"), ("Esc", "clear or quit")],
-            0 => &[("\u{2191}/\u{2193}", "move"), ("1-6", "pick"), ("Enter", "next"), ("Esc", "quit")],
+            0 if self.is_custom() => &[("type", "the URL"), ("\u{2191}/\u{2193}", "presets"), ("Enter", "next"), ("Esc", "clear or quit")],
+            0 => &[("\u{2191}/\u{2193}", "move"), ("0-9 c", "pick"), ("Enter", "next"), ("Esc", "quit")],
             1 if self.is_cloud_backend() => &[("paste", "the key"), ("Enter", "check it"), ("Esc", "clear or back")],
             1 => &[("Enter", "skip"), ("Esc", "back")],
             2 => &[("\u{2191}/\u{2193}", "move"), ("type", "to filter"), ("Enter", "choose"), ("Esc", "clear or back")],
@@ -1080,9 +1080,9 @@ mod tests {
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 3);
         assert_eq!(wizard.config.permission_mode, PermissionMode::AcceptEdits);
-        wizard.set_number(1);
+        wizard.pick_key('1');
         assert_eq!(wizard.config.permission_mode, PermissionMode::Planning);
-        wizard.set_number(3);
+        wizard.pick_key('3');
         assert_eq!(wizard.config.permission_mode, PermissionMode::AcceptEdits);
 
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
@@ -1168,8 +1168,8 @@ mod tests {
         let initial_render = wizard.render(80).join("\n");
         assert!(initial_render.contains("type its URL"));
 
-        wizard.handle_key(KeyCode::Char('6'), KeyModifiers::empty());
-        assert_eq!(wizard.preset_idx, 5);
+        wizard.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
+        assert!(wizard.is_custom());
         let selected_render = wizard.render(80).join("\n");
         assert!(selected_render.contains("type its URL"));
         assert!(selected_render.contains("OpenAI-compatible URL"));
@@ -1211,15 +1211,49 @@ mod tests {
         let cfg = AppConfig::default();
         let mut wizard = SetupWizard::new(cfg);
 
-        wizard.handle_key(KeyCode::Char('6'), KeyModifiers::empty());
-        assert_eq!(wizard.preset_idx, 5);
+        wizard.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
+        assert!(wizard.is_custom());
 
+        let presets = BackendPreset::all();
         wizard.handle_key(KeyCode::Up, KeyModifiers::empty());
-        assert_eq!(wizard.preset_idx, 4);
-        assert_eq!(wizard.config.backend_url, "https://openrouter.ai/api/v1");
+        assert_eq!(wizard.preset_idx, presets.len() - 1);
+        assert_eq!(wizard.config.backend_url, presets[presets.len() - 1].url);
 
         wizard.handle_key(KeyCode::Down, KeyModifiers::empty());
-        assert_eq!(wizard.preset_idx, 5);
+        assert!(wizard.is_custom());
+    }
+
+    #[test]
+    fn every_preset_can_be_picked_and_none_is_mistaken_for_custom() {
+        let presets = BackendPreset::all();
+        let mut wizard = SetupWizard::new(AppConfig::default());
+        for (i, preset) in presets.iter().enumerate() {
+            let key = SetupWizard::row_key(i).expect("every preset has a key");
+            wizard.handle_key(KeyCode::Char(key), KeyModifiers::empty());
+            assert_eq!(wizard.preset_idx, i, "{}", preset.name);
+            assert!(!wizard.is_custom());
+            assert_eq!(wizard.config.backend_url, preset.url);
+        }
+        // The arrows reach every row and come back round.
+        let mut wizard = SetupWizard::new(AppConfig::default());
+        for _ in 0..=presets.len() {
+            wizard.handle_key(KeyCode::Down, KeyModifiers::empty());
+        }
+        assert_eq!(wizard.preset_idx, 0);
+        // A saved cloud preset opens on its own row.
+        let saved = AppConfig { backend_url: presets[presets.len() - 1].url.clone(), ..AppConfig::default() };
+        assert_eq!(SetupWizard::new(saved).preset_idx, presets.len() - 1);
+        let rendered = SetupWizard::new(AppConfig::default()).render(100).join("\n");
+        assert_eq!(rendered.matches("c. Custom").count(), 1, "{rendered}");
+        assert!(rendered.contains("0. Gemini"), "{rendered}");
+    }
+
+    #[test]
+    fn a_key_that_is_not_ascii_is_masked_without_a_panic() {
+        assert_eq!(mask_api_key("ыл-а1а"), "••••••");
+        let masked = mask_api_key("sk-abcdeабвгд1234");
+        assert!(masked.starts_with("sk-") && masked.ends_with("1234"), "{masked}");
+        assert_eq!(mask_api_key("ключ-длинный-ключ"), "ключ••••••••ключ");
     }
 
     #[test]
@@ -1227,7 +1261,7 @@ mod tests {
         let cfg = AppConfig::default();
         let mut wizard = SetupWizard::new(cfg);
 
-        wizard.handle_key(KeyCode::Char('6'), KeyModifiers::empty());
+        wizard.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
 
         // Without http://
         for c in "localhost:8000/v1".chars() {
@@ -1244,7 +1278,7 @@ mod tests {
         let cfg = AppConfig { backend_url: "http://10.0.0.5:1234/v1".to_string(), ..AppConfig::default() };
 
         let wizard = SetupWizard::new(cfg);
-        assert_eq!(wizard.preset_idx, 5);
+        assert!(wizard.is_custom());
         assert_eq!(wizard.custom_url, "http://10.0.0.5:1234/v1");
         assert_eq!(wizard.custom_cursor, "http://10.0.0.5:1234/v1".len());
         let rendered = wizard.render(80).join("\n");
@@ -1319,7 +1353,7 @@ mod tests {
     #[test]
     fn test_wizard_handle_paste_instantly_updates_fields() {
         let mut wizard = SetupWizard::new(AppConfig::default());
-        wizard.preset_idx = 5; // Custom backend
+        wizard.preset_idx = SetupWizard::custom_idx();
 
         wizard.handle_paste("http://192.168.1.50:8000/v1\r\n");
         assert_eq!(wizard.custom_url, "http://192.168.1.50:8000/v1");
