@@ -1,6 +1,8 @@
 # Changelog
 
-## b350 — every symbol drawn, every key heard, half the prompt
+## b351 — every symbol drawn, every key heard, half the prompt
+
+b350 was tagged with these changes and stopped by a test that tripped over a random tip; it was never published.
 
 - **No more boxes instead of symbols on Windows.** The prompt arrow, the spinner, the context bar and a dozen other symbols were missing from Consolas, the font of a Windows console outside Windows Terminal, and showed as `?` in a box. Every symbol the UI draws is now one that Consolas and Cascadia Mono both have, and a test fails if one that is not creeps back in.
 - **Shortcuts work with the Russian layout.** Ctrl+D arrived as Ctrl+в and did nothing; so did Ctrl+K, Ctrl+W, Ctrl+F and the rest that had no hand-written Russian twin. Any shortcut with Ctrl or Alt is now read by the key pressed, whatever the layout.
