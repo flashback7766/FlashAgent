@@ -635,8 +635,9 @@ impl Renderer {
             }
             // The counters show the model is alive and the notice must not be missed;
             // the key hints give way when both do not fit.
-            let esc = key_hints(&[("Esc", "interrupt")], width);
-            let steer = key_hints(&[("Enter", "steer"), ("Esc", "interrupt")], width);
+            let esc_does = if st.input.is_empty() { "interrupt" } else { "clear" };
+            let esc = key_hints(&[("Esc", esc_does)], width);
+            let steer = key_hints(&[("Enter", "steer"), ("Esc", esc_does)], width);
             let head = match st.background {
                 Some(text) => format!("{live}{dot}{}", st.background_style.paint(text)),
                 None => live.clone(),
