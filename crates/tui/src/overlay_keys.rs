@@ -92,17 +92,9 @@ impl App {
                 self.confirm_select = ConfirmSelect::new();
             }
             KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('\u{0444}') | KeyCode::Char('\u{0424}') => {
-                if let Some(req) = cx.gate.pending() {
-                    let rules = cx.perm.state().allow_always(&req);
-                    if rules.is_empty() {
-                        self.notice("[Allowed once: this command cannot be saved as a narrow rule]");
-                    } else {
-                        self.notice(format!("[Always allowed this session: {}]", rules.join(", ")));
-                    }
-                }
-                cx.gate.respond(Decision::Allow);
-                self.confirm_select = ConfirmSelect::new();
+                self.allow_always(cx);
             }
+            KeyCode::Enter if self.confirm_select.choice() == ConfirmChoice::Always => self.allow_always(cx),
             KeyCode::Enter => {
                 cx.gate.respond(self.confirm_select.decision());
                 self.confirm_select = ConfirmSelect::new();
@@ -112,6 +104,19 @@ impl App {
             KeyCode::Tab | KeyCode::Up | KeyCode::Down => self.confirm_select.toggle(),
             _ => {}
         }
+    }
+
+    fn allow_always(&mut self, cx: &LoopCtx<'_>) {
+        if let Some(req) = cx.gate.pending() {
+            let rules = cx.perm.state().allow_always(&req);
+            if rules.is_empty() {
+                self.notice("Allowed once · this command is too broad to allow always");
+            } else {
+                self.notice(format!("Always allowed this session: {}", rules.join(", ")));
+            }
+        }
+        cx.gate.respond(Decision::Allow);
+        self.confirm_select = ConfirmSelect::new();
     }
 
     fn channel_switch_key(&mut self, cx: &LoopCtx<'_>, sw: ChannelSwitch, code: KeyCode) {
@@ -272,7 +277,7 @@ impl App {
                 self.overlay = Some(Overlay::Settings(settings));
             }
             SettingsAction::RunToolTest => {
-                settings.tool_test_status = Some(format!("Probing {}...", self.current_model));
+                settings.tool_test_status = Some(format!("Probing {}…", self.current_model));
                 let source_bg = cx.source.clone();
                 let tx_bg = cx.tx.clone();
                 tokio::spawn(async move {
@@ -321,7 +326,7 @@ impl App {
                 if flashagent_svc::updater::is_dev_mode() {
                     settings.update_check_status = Some("Dev mode: updates disabled (source build)".into());
                 } else {
-                    settings.update_check_status = Some("Checking GitHub releases...".into());
+                    settings.update_check_status = Some("Checking GitHub releases…".into());
                     let ch = settings.config.update_channel;
                     let update_tx = cx.update_tx.clone();
                     tokio::spawn(async move {
@@ -459,7 +464,7 @@ impl App {
                 let removed = flashagent_core::MemoryStore::for_scope(scope, &cwd)
                     .map(|store| store.remove(&name).unwrap_or(false))
                     .unwrap_or(false);
-                self.notice(if removed { format!("[Forgot \"{name}\"]") } else { format!("[Could not forget \"{name}\"]") });
+                self.notice(if removed { format!("Forgot \"{name}\"") } else { format!("Could not forget \"{name}\"") });
                 self.overlay = Some(Overlay::Memory(open_memory_modal()));
             }
             MemoryAction::Summarize { .. } => {
@@ -549,7 +554,7 @@ impl App {
                     }
                 }
                 self.refresh_welcome(cx.source, cx.mascot_mood);
-                self.notice(format!("Switched active model to: {}", self.current_model));
+                self.notice(format!("Model: {}", self.current_model));
             }
             KeyCode::Esc => {}
             _ => {
@@ -655,7 +660,7 @@ impl App {
                 menu.select_by_value(&self.current_model);
                 self.open_overlay(Overlay::Model(menu));
             }
-            None => self.notice("[No models discovered from server]"),
+            None => self.notice("No models discovered from server"),
         }
     }
 

@@ -307,6 +307,8 @@ pub enum ColorTheme {
     Monochrome,
     /// The terminal's own 16 colours, for terminals without 24-bit colour.
     Ansi16,
+    /// For a white or light terminal background.
+    Light,
 }
 
 impl ColorTheme {
@@ -317,6 +319,7 @@ impl ColorTheme {
             ColorTheme::HighContrast,
             ColorTheme::Monochrome,
             ColorTheme::Ansi16,
+            ColorTheme::Light,
         ]
     }
 
@@ -326,7 +329,8 @@ impl ColorTheme {
             Self::Midnight => "Midnight",
             Self::HighContrast => "High contrast",
             Self::Monochrome => "Monochrome",
-            Self::Ansi16 => "Terminal 16 colours",
+            Self::Ansi16 => "Terminal 16 colors",
+            Self::Light => "Light background",
         }
     }
 
@@ -794,6 +798,7 @@ lenient_enum!(ColorTheme, "colour theme", {
     "mono" => ColorTheme::Monochrome,
     "ansi16" => ColorTheme::Ansi16,
     "ansi" => ColorTheme::Ansi16,
+    "light" => ColorTheme::Light,
     // Named by an older build that never used them.
     "monokai" => ColorTheme::Midnight,
 });

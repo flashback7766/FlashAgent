@@ -183,7 +183,7 @@ impl Trait {
         match self {
             Self::Warm => "Warm",
             Self::Enthusiastic => "Enthusiastic",
-            Self::HeadersAndLists => "Headers & Lists",
+            Self::HeadersAndLists => "Headers and lists",
             Self::Emoji => "Emoji",
         }
     }

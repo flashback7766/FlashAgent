@@ -2,7 +2,15 @@ use super::*;
 
 /// Once, right after setup.
 pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
-    println!("\nChecking whether {} can drive tools...", config.model);
+    // Without a server every probe fails, and the verdict would blame the model.
+    let url = config.backend_url.trim_end_matches('/');
+    let probe = flashagent_llm::OpenAiCompat::new(&config.backend_url, "", config.api_key.clone());
+    if config.model.trim().is_empty() || probe.discover_server().await.is_none() {
+        return Some(format!(
+            "Tool-calling check skipped: no model at {url} yet. Run `flashagent --tool-test` once it is up."
+        ));
+    }
+    println!("\nChecking whether {} can drive tools…", config.model);
     let source = BackendSource(flashagent_llm::OpenAiCompat::new(
         &config.backend_url,
         &config.model,

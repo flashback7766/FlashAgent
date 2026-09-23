@@ -20,7 +20,7 @@ use flashagent_tui::goal::{commit_goal_milestone, format_plan, GoalBudgets, Goal
 use flashagent_tui::MascotMood;
 use flashagent_tui::{
     clip_ansi, pad_box_row, render_session_saved_card, restore_line_color,
-    visible_width, welcome_card, WelcomeCard, AutocompletePopup, ChatView, ConfirmSelect,
+    visible_width, welcome_card, WelcomeCard, AutocompletePopup, ChatView, ConfirmChoice, ConfirmSelect,
     ContextModal, LineKind, McpModal, McpModalAction, McpViewTab, PrefillTracker, ReasoningExpansion,
     RenderLine, SamplingAction, SamplingView, SelectItem, SelectMenu, SettingsAction, SettingsView,
     TuiGate, TuiQuestionGate, UiEvent,
@@ -1117,7 +1117,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
             Ok(saved) => {
                 let restored = restore_session(saved, &mut app.chat, &mut app.history);
                 update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
-                app.notice(format!("Resumed session '{resume_id}' ({restored} messages loaded)."));
+                app.notice(format!("Resumed session {resume_id} · {}", flashagent_tui::plural(restored, "message", "messages")));
             }
             Err(why) => {
                 // The unreadable file keeps its name: saving over it would destroy what may
@@ -1175,7 +1175,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                     open_snapshots(perm, &session_id, &cwd);
                     app.latest_suggestion = None;
                     update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
-                    app.notice(format!("Resumed session '{session_id}' ({restored} messages loaded)."));
+                    app.notice(format!("Resumed session {session_id} · {}", flashagent_tui::plural(restored, "message", "messages")));
                     app.warm_prompt_cache(&source, perm, &memory_block);
                 }
                 Err(why) => app.notice(why),
@@ -1248,7 +1248,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 MascotMood::Offline => {
                     app.background = Some(
                         BackgroundNotice::sticky(format!(
-                            "No model server at {} \u{b7} start it, or pick another in Tab \u{2192} LLM",
+                            "No model server at {} \u{b7} start it, or change Backend URL in Tab \u{2192} General",
                             app.config.backend_url.trim_end_matches('/')
                         ))
                         .warning(),
@@ -2285,7 +2285,7 @@ mod tests {
         assert!(half.starts_with(UPDATE_LINE_PREFIX), "{half}");
         assert!(half.contains("50%"), "{half}");
         assert!(half.contains("3.3/6.7 MB"), "{half}");
-        assert!(half.contains('█') && half.contains('░'), "{half}");
+        assert!(half.contains('█') && half.contains('─'), "{half}");
 
         // No content-length: no fabricated bar.
         let unknown =

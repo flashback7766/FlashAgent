@@ -20,7 +20,7 @@ pub(crate) fn build_model_menu(source: &BackendSource) -> Option<SelectMenu<Stri
         let desc = format!("{load_tag} · {summary}");
         items.push(SelectItem::with_description(m.id.clone(), desc, m.id.clone()));
     }
-    Some(SelectMenu::new("Select Model", items).with_noun("models"))
+    Some(SelectMenu::new("Select model", items).with_noun("models"))
 }
 
 pub(crate) fn build_effort_menu(
@@ -80,7 +80,7 @@ pub(crate) fn build_effort_menu(
         items.push(SelectItem::with_description("medium", "Balanced reasoning depth", "medium".to_string()));
         items.push(SelectItem::with_description("high", "Deep reasoning exploration", "high".to_string()));
     }
-    SelectMenu::new("Select Thinking Effort", items).with_noun("options")
+    SelectMenu::new("Thinking effort", items).with_noun("options")
 }
 
 pub(crate) fn thinking_summary_str(source: &BackendSource, current_effort: &str) -> String {

@@ -30,7 +30,7 @@ impl App {
         );
         self.renderer.request_reprint();
         let checking = |channel: flashagent_core::config::UpdateChannel| {
-            BackgroundNotice::fading(format!("{UPDATE_LINE_PREFIX}\u{b7} checking the {} channel...", channel.label()), 30)
+            BackgroundNotice::fading(format!("{UPDATE_LINE_PREFIX}\u{b7} checking the {} channel\u{2026}", channel.label()), 30)
         };
         match action {
             UpdateKeyAction::DevMode => {
@@ -62,7 +62,7 @@ impl App {
         let busy = cx.update_busy.clone();
         let pending = if action == UpdateKeyAction::InstallPending { self.pending_update.clone() } else { None };
         self.background = Some(match &pending {
-            Some((version, ..)) => BackgroundNotice::sticky(format!("{UPDATE_LINE_PREFIX}{version} \u{b7} starting download...")),
+            Some((version, ..)) => BackgroundNotice::sticky(format!("{UPDATE_LINE_PREFIX}{version} \u{b7} starting the download\u{2026}")),
             None => checking(self.config.update_channel),
         });
         let channel = self.config.update_channel;

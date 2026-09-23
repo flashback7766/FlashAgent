@@ -1,4 +1,4 @@
-//! Sampling menu (`/sampling`, `F5`, Settings): preset and each parameter, live.
+//! Sampling menu (`/sampling`, Settings): preset and each parameter, live.
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use flashagent_core::{AppConfig, SamplingPreset};
@@ -245,21 +245,16 @@ impl SamplingView {
         let reset = "\x1b[0m";
         let inner_w = width.saturating_sub(6).clamp(20, 110);
 
-        let title = " Sampling Parameters (/sampling · F5) ";
+        let title = " Sampling parameters ";
         let dash_count = inner_w.saturating_sub(title.chars().count() + 1);
         lines.push((
             LineKind::System,
-            format!("  {border_color}┌─\x1b[1;38;2;225;175;95m{title}{border_color}{}┐{reset}", "─".repeat(dash_count)),
+            format!("  {border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)),
         ));
 
         let pad_row = |content: &str| -> String {
             let max_w = inner_w.saturating_sub(2);
-            let vis = crate::visible_width(content);
-            let clipped = if vis > max_w {
-                crate::clip_ansi(content, max_w)
-            } else {
-                content.to_string()
-            };
+            let clipped = crate::tool_views::clip_ellipsis(content, max_w);
             let clipped_vis = crate::visible_width(&clipped);
             let pad = " ".repeat(max_w.saturating_sub(clipped_vis));
             format!("  {border_color}│{reset} {clipped}{pad} {border_color}│{reset}")
@@ -274,7 +269,7 @@ impl SamplingView {
         let (label0, val0) = if is_preset_sel {
             (
                 format!("\x1b[1;38;2;240;235;225m{:<18}\x1b[0m", "Preset"),
-                format!("\x1b[1;38;2;225;175;95m{:<22}\x1b[0m \x1b[38;2;135;130;125m(←/→ to cycle preset)\x1b[0m", preset_val),
+                format!("\x1b[1;38;2;225;175;95m{:<22}\x1b[0m {}", preset_val, crate::key_hints(&[("←/→", "change")], 20)),
             )
         } else {
             (
@@ -288,8 +283,8 @@ impl SamplingView {
             (1, "Temperature", &self.temp_buf, "0.00..2.00 (coding: 0.60, mtp: 0.30, chat: 0.80, precise: 0.10)"),
             (2, "Top P", &self.top_p_buf, "0.00..1.00 (coding: 0.95, mtp: 0.90, precise: 0.75)"),
             (3, "Top K", &self.top_k_buf, "0..500     (coding: 20, mtp: 40, chat: 50, precise: 10)"),
-            (4, "Repeat Penalty", &self.repeat_penalty_buf, "0.00..2.00 (coding: 1.00, mtp: 1.02, gemma: 1.08, chat: 1.10)"),
-            (5, "Presence Penalty", &self.presence_penalty_buf, "-2.00..2.00 (chat: 0.10, mtp-chat: 0.05, default: 0.00)"),
+            (4, "Repeat penalty", &self.repeat_penalty_buf, "0.00..2.00 (coding: 1.00, mtp: 1.02, gemma: 1.08, chat: 1.10)"),
+            (5, "Presence penalty", &self.presence_penalty_buf, "-2.00..2.00 (chat: 0.10, mtp-chat: 0.05, default: 0.00)"),
             (6, "Min P", &self.min_p_buf, "0.00..1.00 (mtp-code: 0.05, mtp: 0.03, default: 0.00)"),
         ];
 
@@ -314,19 +309,23 @@ impl SamplingView {
         let is_apply_sel = self.selected_index == 7;
         let ptr7 = if is_apply_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
         let apply_styled = if is_apply_sel {
-            "\x1b[1;38;2;225;175;95m[ Apply & Return to Chat (Enter) ]\x1b[0m"
+            "\x1b[1;38;2;225;175;95m[ Apply and return to chat ]\x1b[0m"
         } else {
-            "\x1b[38;2;160;155;145m[ Apply & Return to Chat (Enter) ]\x1b[0m"
+            "\x1b[38;2;160;155;145m[ Apply and return to chat ]\x1b[0m"
         };
         lines.push((LineKind::System, pad_row("")));
         lines.push((LineKind::System, pad_row(&format!("{ptr7} {apply_styled}"))));
 
         lines.push((LineKind::System, pad_row("")));
-        lines.push((LineKind::System, pad_row("\x1b[38;2;135;130;125mtype digits/./- · ←/→ adjust · ↑/↓ navigate · Enter apply · Esc back\x1b[0m")));
+        let hints = crate::key_hints(
+            &[("0-9", "type a value"), ("←/→", "adjust"), ("↑/↓", "move"), ("Enter", "apply"), ("Esc", "cancel")],
+            inner_w.saturating_sub(2),
+        );
+        lines.push((LineKind::System, pad_row(&hints)));
 
         lines.push((
             LineKind::System,
-            format!("  {border_color}└{}┘{reset}", "─".repeat(inner_w)),
+            format!("  {border_color}╰{}╯{reset}", "─".repeat(inner_w)),
         ));
 
         lines
@@ -388,6 +387,18 @@ mod tests {
         assert_eq!(view.repeat_penalty_buf, "1.08");
         assert_eq!(view.presence_penalty_buf, "0.02");
         assert_eq!(view.min_p_buf, "0.03");
+    }
+
+    #[test]
+    fn the_panel_is_a_closed_rounded_box_that_says_how_to_leave() {
+        let view = SamplingView::new(&AppConfig::default());
+        for width in [40usize, 80, 120] {
+            let rows: Vec<String> = view.render(width).iter().map(|(_, l)| crate::strip_ansi(l)).collect();
+            let top = crate::visible_width(&rows[0]);
+            assert!(rows.iter().all(|r| crate::visible_width(r) == top), "{width}: {rows:#?}");
+            assert!(rows[0].trim_start().starts_with('╭') && rows[rows.len() - 1].trim_start().starts_with('╰'));
+            assert!(rows[rows.len() - 2].trim_end_matches(['│', ' ']).ends_with("Esc cancel"), "{width}: {rows:#?}");
+        }
     }
 
     #[test]

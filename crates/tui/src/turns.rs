@@ -55,7 +55,7 @@ impl App {
             self.turn_phase = TurnPhase::Stopping;
             self.active_steer_tx = None;
             self.pending_steers.clear();
-            self.notice("Interrupting...");
+            self.notice("Interrupting…");
         }
         self.renderer.request_reprint();
     }
@@ -192,7 +192,7 @@ impl App {
                 push_goal_report(&mut self.chat, &ledger, reason);
             }
             self.notice(format!(
-                "[Goal \"{}\" finished · Restored mode to {} and thinking to {}]",
+                "Goal \"{}\" finished · back to {} mode, thinking {}",
                 flashagent_tui::truncate_middle(&saved.task, 40),
                 saved.mode.label(),
                 saved.effort
@@ -235,7 +235,7 @@ impl App {
                     };
                     if verdict.should() {
                         // In the transcript: it changes what the model remembers.
-                        self.chat.push_system("Compacting context...");
+                        self.chat.push_system("Compacting context…");
                         self.renderer.request_reprint();
                         // Drawn before the wait: the command is already gone from the composer.
                         self.draw(cx, None);

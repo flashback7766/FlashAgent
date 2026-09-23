@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyModifiers};
 use flashagent_tools::mcp::{MarketplaceItem, McpTestReport, ServerConnectionState, ServerStatus};
-use crate::{clip_ansi, visible_width, LineKind, RenderLine};
+use crate::tool_views::clip_ellipsis;
+use crate::{plural, visible_width, LineKind, RenderLine};
 
 const RESET: &str = "\x1b[0m";
 const BORDER_GOLD: &str = "\x1b[38;2;225;175;95m";
@@ -28,9 +29,9 @@ impl McpViewTab {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Overview => "1. Overview",
-            Self::Servers => "2. Servers",
-            Self::Marketplace => "3. Marketplace",
+            Self::Overview => "1 Overview",
+            Self::Servers => "2 Servers",
+            Self::Marketplace => "3 Marketplace",
         }
     }
 
@@ -172,41 +173,52 @@ impl McpModal {
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
         let mut lines = Vec::new();
-        let box_w = width.saturating_sub(6).clamp(52, 100);
+        let box_w = width.saturating_sub(6).min(100);
         let inner_text_w = box_w.saturating_sub(2);
         let border_color = BORDER_GOLD;
         let reset = RESET;
 
         let pad_row = |content: &str| -> String {
-            let clipped = if visible_width(content) > inner_text_w {
-                clip_ansi(content, inner_text_w)
-            } else {
-                content.to_string()
-            };
+            let clipped = clip_ellipsis(content, inner_text_w);
             let clipped_vis = visible_width(&clipped);
             let pad = " ".repeat(inner_text_w.saturating_sub(clipped_vis));
             format!("  {border_color}│{reset} {clipped}{pad} {border_color}│{reset}")
         };
 
-        let title_styled = " \x1b[1;38;2;225;175;95mModel Context Protocol (MCP)\x1b[0m \x1b[38;2;160;155;145m(Tab 1-3 to switch)\x1b[0m ";
-        let title_vis = visible_width(title_styled);
-        let dashes = box_w.saturating_sub(title_vis + 1);
+        // The heading shrinks first; a sheared box is worse than a shorter name.
+        let title = [" Model Context Protocol (MCP) ", " MCP "]
+            .into_iter()
+            .find(|t| visible_width(t) < box_w.saturating_sub(1))
+            .unwrap_or(" MCP ");
+        let title_styled = format!("\x1b[1;38;2;225;175;95m{title}\x1b[0m");
+        let dashes = box_w.saturating_sub(visible_width(title) + 1);
         lines.push((
             LineKind::System,
-            format!("  {border_color}╭─{title_styled}{}╮{reset}", "─".repeat(dashes)),
+            format!("  {border_color}╭─{title_styled}{border_color}{}╮{reset}", "─".repeat(dashes)),
         ));
 
-        let mut tabs_line = String::from(" ");
-        for tab in McpViewTab::all() {
-            let is_cur = *tab == self.active_tab;
-            let tab_lbl = tab.label();
-            if is_cur {
-                tabs_line.push_str(&format!("\x1b[1;38;2;225;175;95m[{tab_lbl}]\x1b[0m  "));
-            } else {
-                tabs_line.push_str(&format!("\x1b[38;2;135;130;125m {tab_lbl} \x1b[0m  "));
-            }
-        }
-        lines.push((LineKind::System, pad_row(&tabs_line)));
+        // Tighter as the window narrows; at the narrowest the other tabs are their numbers.
+        let tabs_line = |gap: usize, numbers_only: bool| -> String {
+            let tabs: Vec<String> = McpViewTab::all()
+                .iter()
+                .map(|tab| {
+                    let tab_lbl = tab.label();
+                    if *tab == self.active_tab {
+                        format!("\x1b[1;38;2;225;175;95m[{tab_lbl}]\x1b[0m")
+                    } else {
+                        let shown = if numbers_only { tab_lbl.split(' ').next().unwrap_or(tab_lbl) } else { tab_lbl };
+                        format!("\x1b[38;2;135;130;125m {shown} \x1b[0m")
+                    }
+                })
+                .collect();
+            format!(" {}", tabs.join(&" ".repeat(gap)))
+        };
+        let tabs = [(2, false), (1, false), (0, false)]
+            .into_iter()
+            .map(|(gap, numbers_only)| tabs_line(gap, numbers_only))
+            .find(|line| visible_width(line) <= inner_text_w)
+            .unwrap_or_else(|| tabs_line(0, true));
+        lines.push((LineKind::System, pad_row(&tabs)));
         lines.push((
             LineKind::System,
             format!("  {border_color}├{}┤{reset}", "─".repeat(box_w)),
@@ -220,7 +232,7 @@ impl McpModal {
                 let active_count = self.servers.iter().filter(|s| s.state == ServerConnectionState::Active).count();
                 let total_tools: usize = self.servers.iter().map(|s| s.tool_count).sum();
                 let stats = format!(
-                    "{TEXT_BRIGHT}Configured:{RESET} {}  ·  {TEXT_GREEN}Connected:{RESET} {}  ·  {TEXT_CYAN}Discovered Tools:{RESET} {}",
+                    "{TEXT_BRIGHT}Configured:{RESET} {}  ·  {TEXT_GREEN}Connected:{RESET} {}  ·  {TEXT_CYAN}Tools found:{RESET} {}",
                     self.servers.len(),
                     active_count,
                     total_tools
@@ -228,7 +240,7 @@ impl McpModal {
                 lines.push((LineKind::System, pad_row(&stats)));
 
                 let paths_display = if self.loaded_paths.is_empty() {
-                    "None found (Checked .mcp.json, ~/.flashagent/mcp.json)".to_string()
+                    "none (looked for .mcp.json and ~/.flashagent/mcp.json)".to_string()
                 } else {
                     self.loaded_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
                 };
@@ -236,9 +248,9 @@ impl McpModal {
                 lines.push((LineKind::System, pad_row("")));
 
                 let actions = [
-                    ("Browse Configured Servers", "View tools, status, ping latency"),
-                    ("Curated Extensions Marketplace", "Explore SQLite, GitHub, Postgres..."),
-                    ("Reload MCP Configurations", "Restart child processes and re-discover tools"),
+                    ("Browse configured servers", "Tools, status and ping time"),
+                    ("Curated extensions marketplace", "SQLite, GitHub, Postgres and more"),
+                    ("Reload MCP configurations", "Restart child processes and rediscover tools"),
                 ];
                 for (idx, (action, desc)) in actions.iter().enumerate() {
                     let is_sel = idx == self.selected_index;
@@ -255,7 +267,7 @@ impl McpModal {
                 if self.servers.is_empty() {
                     lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}No MCP servers configured yet in .mcp.json or ~/.flashagent/mcp.json{RESET}"))));
                     lines.push((LineKind::System, pad_row("")));
-                    lines.push((LineKind::System, pad_row(&format!("{TEXT_CYAN}Press Tab or '3' to browse curated marketplace extensions{RESET}"))));
+                    lines.push((LineKind::System, pad_row(&format!("{TEXT_CYAN}Press Tab or 3 to browse the marketplace{RESET}"))));
                 } else {
                     for (idx, s) in self.servers.iter().enumerate() {
                         let is_sel = idx == self.selected_index;
@@ -266,10 +278,11 @@ impl McpModal {
                             ServerConnectionState::Stopped => "\x1b[38;2;225;175;95m○ stopped\x1b[0m",
                             ServerConnectionState::Error(_) => "\x1b[38;2;245;120;120m× error\x1b[0m",
                         };
+                        let tools = plural(s.tool_count, "tool", "tools");
                         let row = if is_sel {
-                            format!("{ptr} \x1b[1;38;2;240;235;225m{:<18}\x1b[0m {st_badge}  \x1b[1;38;2;225;175;95m{} tool(s)\x1b[0m", s.name, s.tool_count)
+                            format!("{ptr} \x1b[1;38;2;240;235;225m{:<18}\x1b[0m {st_badge}  \x1b[1;38;2;225;175;95m{tools}\x1b[0m", s.name)
                         } else {
-                            format!("{ptr} \x1b[38;2;160;155;145m{:<18}\x1b[0m {st_badge}  \x1b[38;2;135;130;125m{} tool(s)\x1b[0m", s.name, s.tool_count)
+                            format!("{ptr} \x1b[38;2;160;155;145m{:<18}\x1b[0m {st_badge}  \x1b[38;2;135;130;125m{tools}\x1b[0m", s.name)
                         };
                         lines.push((LineKind::System, pad_row(&row)));
                     }
@@ -297,16 +310,8 @@ impl McpModal {
             lines.push((LineKind::System, pad_row("")));
         }
 
-        // Dropped from the middle in a narrow window, so "Esc close" stays.
-        let dim = "\x1b[38;2;135;130;125m";
-        let hints = crate::fit_hints(
-            &[
-                ("Tab/1-3 switch tab".into(), format!("{dim}Tab/1-3 switch tab\x1b[0m")),
-                ("↑/↓ navigate".into(), format!("{dim}↑/↓ navigate\x1b[0m")),
-                ("Enter select".into(), format!("{dim}Enter select\x1b[0m")),
-                ("Esc close".into(), format!("{dim}Esc close\x1b[0m")),
-            ],
-            &format!("{dim} · \x1b[0m"),
+        let hints = crate::key_hints(
+            &[("Tab/1-3", "switch tab"), ("↑/↓", "move"), ("Enter", "select"), ("Esc", "close")],
             inner_text_w.saturating_sub(1),
         );
         lines.push((LineKind::System, pad_row(&hints)));
@@ -321,18 +326,15 @@ impl McpModal {
 }
 
 fn box_line(content: &str, inner_w: usize, border: &str) -> String {
-    let clipped = if visible_width(content) > inner_w {
-        clip_ansi(content, inner_w)
-    } else {
-        content.to_string()
-    };
+    let clipped = clip_ellipsis(content, inner_w);
     let vis_len = visible_width(&clipped);
     let pad_len = inner_w.saturating_sub(vis_len);
     format!("{border}│{RESET} {clipped}{RESET}{} {border}│{RESET}", " ".repeat(pad_len))
 }
 
 fn box_top(title: &str, inner_w: usize, border: &str) -> String {
-    let t_vis = visible_width(title);
+    let title = clip_ellipsis(title, inner_w.saturating_sub(1));
+    let t_vis = visible_width(&title);
     let dashes = inner_w.saturating_sub(t_vis + 1);
     format!("{border}╭─ {TEXT_BRIGHT}{title}{RESET}{border} {}╮{RESET}", "─".repeat(dashes))
 }
@@ -341,45 +343,49 @@ fn box_bottom(inner_w: usize, border: &str) -> String {
     format!("{border}╰{}╯{RESET}", "─".repeat(inner_w + 2))
 }
 
-
-
+/// Outer width of the report cards.
+fn report_width(width: usize) -> usize {
+    width.saturating_sub(4).clamp(20, 110)
+}
 
 /// `/mcp test <server>`
 pub fn render_mcp_test_report(report: &McpTestReport, width: usize) -> Vec<String> {
-    let box_w = width.saturating_sub(4).clamp(44, 110);
-    let inner_w = box_w.saturating_sub(4);
+    let inner_w = report_width(width).saturating_sub(4);
     let mut lines = Vec::new();
 
-    let title = format!("MCP Test Report: {}", report.name);
+    let title = format!("MCP test report: {}", report.name);
     lines.push(box_top(&title, inner_w, BORDER_GOLD));
 
-    let ver = report.server_version.as_deref().unwrap_or("1.0.0");
-    let lat_str = format!("{:.2}ms", report.latency.as_secs_f64() * 1000.0);
-    lines.push(box_line(
-        &format!("{TEXT_GREEN}● Handshake Successful{RESET}  ·  {TEXT_MUTED}Version:{RESET} {ver}  ·  {TEXT_CYAN}Latency:{RESET} {lat_str}"),
-        inner_w,
-        BORDER_GOLD,
+    let mut status = format!("{TEXT_GREEN}● Handshake successful{RESET}");
+    // Only what the server said: a made-up version reads as a fact.
+    if let Some(ver) = report.server_version.as_deref().filter(|v| !v.trim().is_empty()) {
+        status.push_str(&format!("  ·  {TEXT_MUTED}Version:{RESET} {ver}"));
+    }
+    status.push_str(&format!(
+        "  ·  {TEXT_CYAN}Latency:{RESET} {:.2}ms",
+        report.latency.as_secs_f64() * 1000.0
     ));
+    lines.push(box_line(&status, inner_w, BORDER_GOLD));
     lines.push(box_line(&format!("{TEXT_MUTED}Command: {}{RESET}", report.command), inner_w, BORDER_GOLD));
     lines.push(box_line("", inner_w, BORDER_GOLD));
 
     lines.push(box_line(
-        &format!("{TEXT_BRIGHT}Discovered Tools ({}):{RESET}", report.tools.len()),
+        &format!("{TEXT_BRIGHT}Discovered tools ({}):{RESET}", report.tools.len()),
         inner_w,
         BORDER_GOLD,
     ));
 
     for (name, desc, read_only) in &report.tools {
         let tag = if *read_only {
-            format!("{TEXT_GREEN}[Read-only: Auto-approved]{RESET}")
+            format!("{TEXT_GREEN}[Read-only: auto-approved]{RESET}")
         } else {
-            format!("{TEXT_YELLOW}[Approval Required: Preview]{RESET}")
+            format!("{TEXT_YELLOW}[Asks for approval]{RESET}")
         };
         let tool_head = format!("  • {TEXT_CYAN}{name}{RESET}  {tag}");
         lines.push(box_line(&tool_head, inner_w, BORDER_GOLD));
 
         if let Some(d) = desc {
-            let clipped = clip_ansi(d, inner_w.saturating_sub(6));
+            let clipped = clip_ellipsis(d, inner_w.saturating_sub(4));
             lines.push(box_line(&format!("    {TEXT_MUTED}{clipped}{RESET}"), inner_w, BORDER_GOLD));
         }
     }
@@ -388,13 +394,21 @@ pub fn render_mcp_test_report(report: &McpTestReport, width: usize) -> Vec<Strin
     lines
 }
 
+/// How to set `var` in the shell the user starts FlashAgent from.
+fn set_env_line(var: &str) -> String {
+    if cfg!(windows) {
+        format!("$env:{var} = \"your-key-here\"")
+    } else {
+        format!("export {var}=\"your-key-here\"")
+    }
+}
+
 /// `/mcp add`
 pub fn render_mcp_add_success(item: &MarketplaceItem, target_path: &Path, width: usize) -> Vec<String> {
-    let box_w = width.saturating_sub(4).clamp(44, 110);
-    let inner_w = box_w.saturating_sub(4);
+    let inner_w = report_width(width).saturating_sub(4);
     let mut lines = Vec::new();
 
-    let title = format!("Added MCP Extension: {}", item.name);
+    let title = format!("Added MCP extension: {}", item.name);
     lines.push(box_top(&title, inner_w, BORDER_GOLD));
 
     lines.push(box_line(
@@ -412,13 +426,13 @@ pub fn render_mcp_add_success(item: &MarketplaceItem, target_path: &Path, width:
             BORDER_GOLD,
         ));
         for v in item.env_vars {
-            lines.push(box_line(&format!("  export {v}=\"your-key-here\""), inner_w, BORDER_GOLD));
+            lines.push(box_line(&format!("  {}", set_env_line(v)), inner_w, BORDER_GOLD));
         }
     }
 
     lines.push(box_line("", inner_w, BORDER_GOLD));
     lines.push(box_line(
-        &format!("Run {TEXT_CYAN}/mcp test {}{RESET} to verify connection.", item.id),
+        &format!("Run {TEXT_CYAN}/mcp test {}{RESET} to check the connection.", item.id),
         inner_w,
         BORDER_GOLD,
     ));
@@ -445,7 +459,48 @@ mod tests {
         let text = lines.join("\n");
         assert!(text.contains("sqlite"));
         assert!(text.contains("read_query"));
-        assert!(text.contains("Read-only: Auto-approved"));
+        assert!(text.contains("Read-only: auto-approved"));
+        assert!(text.contains("Version:\x1b[0m 1.0.0"));
+    }
+
+    #[test]
+    fn a_version_the_server_did_not_report_is_not_made_up() {
+        let report = McpTestReport {
+            name: "sqlite".to_string(),
+            command: "uvx mcp-server-sqlite".to_string(),
+            latency: Duration::from_millis(4),
+            tools: Vec::new(),
+            server_version: None,
+        };
+        let text = crate::strip_ansi(&render_mcp_test_report(&report, 80).join("\n"));
+        assert!(!text.contains("Version") && text.contains("Latency: 4.00ms"), "{text}");
+        assert!(text.contains("Discovered tools (0)"), "{text}");
+    }
+
+    #[test]
+    fn the_env_line_is_in_the_syntax_of_the_platforms_shell() {
+        let line = set_env_line("GITHUB_TOKEN");
+        if cfg!(windows) {
+            assert_eq!(line, "$env:GITHUB_TOKEN = \"your-key-here\"");
+        } else {
+            assert_eq!(line, "export GITHUB_TOKEN=\"your-key-here\"");
+        }
+    }
+
+    #[test]
+    fn a_server_with_one_tool_says_tool() {
+        let server = |tool_count| ServerStatus {
+            name: "one".into(),
+            command: "uvx one".into(),
+            state: ServerConnectionState::Active,
+            tool_count,
+            tool_names: Vec::new(),
+            read_only: true,
+            description: None,
+        };
+        let modal = McpModal::new(Vec::new(), vec![server(1), server(3)], McpViewTab::Servers);
+        let text = crate::strip_ansi(&modal.render(80).iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join("\n"));
+        assert!(text.contains("1 tool ") && text.contains("3 tools") && !text.contains("(s)"), "{text}");
     }
 
     #[test]
@@ -465,7 +520,7 @@ mod tests {
                 *tab,
             );
 
-            for width in [60, 80, 100, 120] {
+            for width in [44, 52, 60, 80, 100, 120] {
                 let rendered = modal.render(width);
                 assert!(!rendered.is_empty());
                 let expected_w = visible_width(&rendered[0].1);

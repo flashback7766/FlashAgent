@@ -44,7 +44,7 @@ impl GoalBudgets {
         }
         let mut parts = Vec::new();
         if let Some(n) = self.steps {
-            parts.push(format!("{n} steps"));
+            parts.push(crate::plural(n as usize, "step", "steps"));
         }
         if let Some(t) = self.time {
             parts.push(format!("{} max", human_duration(t)));
@@ -351,8 +351,8 @@ pub fn commit_goal_milestone(ledger: &GoalLedger, cwd: &Path, completed_steps: u
         return None;
     }
     Some(format!(
-        "  \x1b[38;2;155;165;180mcheckpoint:\x1b[0m \x1b[38;2;225;230;240mcommitted {} file(s) after step {completed_steps}\x1b[0m",
-        files.len()
+        "  \x1b[38;2;155;165;180mcheckpoint:\x1b[0m \x1b[38;2;225;230;240mcommitted {} after step {completed_steps}\x1b[0m",
+        crate::plural(files.len(), "file", "files")
     ))
 }
 
@@ -360,8 +360,8 @@ fn stop_line(reason: DoneReason, budgets: &GoalBudgets, step: u32) -> String {
     match reason {
         DoneReason::Completed => "Stopped: model finished its turn".to_string(),
         DoneReason::StepLimit => format!(
-            "Stopped: step budget reached ({} steps) — INCOMPLETE",
-            budgets.steps.map_or(step.to_string(), |s| s.to_string())
+            "Stopped: step budget reached ({}) — INCOMPLETE",
+            crate::plural(budgets.steps.unwrap_or(step) as usize, "step", "steps")
         ),
         DoneReason::TokenBudget => format!(
             "Stopped: token budget reached ({}) — INCOMPLETE",
@@ -459,6 +459,8 @@ mod tests {
         assert_eq!(b.time, Some(Duration::from_secs(1800)));
         assert_eq!(b.output_tokens, Some(200_000));
         assert_eq!(b.summary(), "40 steps · 30m00s max · 200.0k generated tokens");
+        assert_eq!(GoalBudgets::steps_only(Some(1)).summary(), "1 step");
+        assert!(stop_line(DoneReason::StepLimit, &GoalBudgets::steps_only(Some(1)), 1).contains("(1 step)"));
     }
 
     #[test]

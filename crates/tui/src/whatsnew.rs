@@ -441,21 +441,20 @@ impl WhatsNew {
         .unwrap_or_else(|| " new ".to_string());
         let dashes = inner_w.saturating_sub(crate::visible_width(&title) + 1);
         lines.push(format!(
-            "  {BORDER}┌─{ACCENT}{title}{BORDER}{}┐{RESET}",
+            "  {BORDER}╭─{ACCENT}{title}{BORDER}{}╮{RESET}",
             "─".repeat(dashes)
         ));
 
         let pad = |content: &str| -> String {
             let max_w = inner_w.saturating_sub(2);
-            let vis = crate::visible_width(content);
-            let clipped = if vis > max_w { crate::clip_ansi(content, max_w) } else { content.to_string() };
+            let clipped = crate::tool_views::clip_ellipsis(content, max_w);
             let pad = " ".repeat(max_w.saturating_sub(crate::visible_width(&clipped)));
             format!("  {BORDER}│{RESET} {clipped}{pad} {BORDER}│{RESET}")
         };
 
         let Some(page) = self.pages.get(self.page) else {
             lines.push(pad(""));
-            lines.push(format!("  {BORDER}└{}┘{RESET}", "─".repeat(inner_w)));
+            lines.push(format!("  {BORDER}╰{}╯{RESET}", "─".repeat(inner_w)));
             return lines;
         };
 
@@ -490,22 +489,30 @@ impl WhatsNew {
         } else {
             String::new()
         };
-        let detail = if self.expanded { "tab — less" } else { "tab — more" };
-        let back = if self.page > 0 { " · ← — back" } else { "" };
+        let detail = ("Tab", if self.expanded { "less" } else { "more" });
+        let back = ("←", "back");
         let needed = self.presses_needed();
-        let hint = if needed > 1 {
-            format!("press enter {needed} times to go on{back}")
+        let enter_times = format!("Enter \u{d7}{needed}");
+        // The way out goes last: it is the hint kept when the row is short.
+        let mut hints: Vec<(&str, &str)> = Vec::new();
+        if needed > 1 {
+            if self.page > 0 {
+                hints.push(back);
+            }
+            hints.push((&enter_times, "continue"));
         } else if !self.fully_revealed() {
-            format!("enter — show all · {detail} · esc — skip")
+            hints.extend([("Enter", "show all"), detail, ("Esc", "skip")]);
         } else if self.page + 1 < self.pages.len() {
-            format!("enter — next · ← — back · {detail} · esc — skip")
-        } else if self.pages.len() > 1 {
-            format!("enter — start working · ← — back · {detail}")
+            hints.extend([("Enter", "next"), back, detail, ("Esc", "skip")]);
         } else {
-            format!("enter — start working · {detail}")
-        };
-        lines.push(pad(&format!("{counter}{DIM}{hint}{RESET}")));
-        lines.push(format!("  {BORDER}└{}┘{RESET}", "─".repeat(inner_w)));
+            if self.pages.len() > 1 {
+                hints.push(back);
+            }
+            hints.extend([detail, ("Enter", "start working")]);
+        }
+        let room = inner_w.saturating_sub(2 + crate::visible_width(&counter));
+        lines.push(pad(&format!("{counter}{}", crate::key_hints(&hints, room))));
+        lines.push(format!("  {BORDER}╰{}╯{RESET}", "─".repeat(inner_w)));
         lines
     }
 }
@@ -776,7 +783,7 @@ mod tests {
         assert!(rows_short * 2 < rows_long, "short {rows_short} vs full {rows_long}");
         let dump = crate::strip_ansi(&short.render().join("\n"));
         assert!(dump.contains('…'), "the mark saying there is more is missing:\n{dump}");
-        assert!(dump.contains("tab — more"), "{dump}");
+        assert!(dump.contains("Tab more"), "{dump}");
     }
 
     #[test]
@@ -899,7 +906,7 @@ mod tests {
     #[test]
     fn the_note_takes_three_presses_to_leave() {
         let mut view = WhatsNew::new(releases_between(PAGED, "b250", "b260"), "b260", 100, 40);
-        assert!(crate::strip_ansi(&view.render().join("\n")).contains("press enter 3 times"));
+        assert!(crate::strip_ansi(&view.render().join("\n")).contains("Enter \u{d7}3 continue"));
         assert_eq!(view.handle_key(KeyCode::Enter), None);
         assert_eq!(view.handle_key(KeyCode::Char(' ')), None);
         assert_eq!(view.page, 0, "two presses are not enough");

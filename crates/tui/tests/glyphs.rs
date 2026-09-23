@@ -7,6 +7,38 @@ use std::path::Path;
 /// Checked against the character maps of consola.ttf and CascadiaMono.ttf.
 const IN_BOTH_FONTS: &str = "«»¶·×—•…›←↑→↓∙√─│┌┐└┘├┤┬┴┼╭╮╯╰▀▄█▌■□▪▲▸►▼▾◊○●◦♦";
 
+/// `\u{2423}` in a string is drawn as the character it names.
+fn unescape(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find('\\') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        if let Some(escaped) = after.strip_prefix('\\') {
+            // `\\u{…}` is a backslash followed by text.
+            out.push_str("\\\\");
+            rest = escaped;
+            continue;
+        }
+        let decoded = after
+            .strip_prefix("u{")
+            .and_then(|hex| hex.split_once('}'))
+            .and_then(|(hex, tail)| Some((char::from_u32(u32::from_str_radix(hex, 16).ok()?)?, tail)));
+        match decoded {
+            Some((c, tail)) => {
+                out.push(c);
+                rest = tail;
+            }
+            None => {
+                out.push('\\');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn drawn_symbols(path: &Path, found: &mut Vec<(char, String)>) {
     let text = std::fs::read_to_string(path).unwrap();
     // Tests may use anything; they are not drawn.
@@ -15,13 +47,20 @@ fn drawn_symbols(path: &Path, found: &mut Vec<(char, String)>) {
         if line.trim_start().starts_with("//") {
             continue;
         }
-        let line = line.split(" // ").next().unwrap_or_default();
+        let line = unescape(line.split(" // ").next().unwrap_or_default());
         for c in line.chars().filter(|c| !c.is_ascii() && !c.is_alphabetic()) {
             if !IN_BOTH_FONTS.contains(c) {
                 found.push((c, format!("{}:{}", path.display(), i + 1)));
             }
         }
     }
+}
+
+#[test]
+fn escapes_are_read_as_the_characters_they_name() {
+    assert_eq!(unescape(r#"format!(" \u{2423}x{n} ")"#), r#"format!(" ␣x{n} ")"#);
+    assert_eq!(unescape(r#"'\u{fffd}' \n \x1b"#), r#"'�' \n \x1b"#);
+    assert_eq!(unescape(r#""\\u{2423}""#), r#""\\u{2423}""#);
 }
 
 #[test]
