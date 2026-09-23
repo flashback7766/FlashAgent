@@ -76,6 +76,15 @@ pub fn wrap_styled(text: &str, width: usize) -> Vec<String> {
             continue;
         }
 
+        // An indented line wraps under its own indent, not at the left edge.
+        let body = line.trim_start_matches(' ');
+        let indent = line.len() - body.len();
+        if indent > 0 && indent + 10 <= width {
+            let pad = " ".repeat(indent);
+            out.extend(wrap_styled(body, width - indent).into_iter().map(|row| format!("{pad}{row}")));
+            continue;
+        }
+
         let mut cur = String::new();
         let mut cur_vis = 0;
         let mut active_style: Option<String> = None;
@@ -338,6 +347,16 @@ pub fn plural(n: usize, one: &str, many: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_indented_line_wraps_under_its_indent() {
+        let rows = wrap_styled("  \x1b[2mstart the server or point it somewhere else with the url\x1b[0m", 24);
+        assert!(rows.len() > 2, "{rows:?}");
+        for row in &rows {
+            assert!(row.starts_with("  ") && !row.starts_with("   "), "{row:?}");
+            assert!(visible_width(row) <= 24, "{row:?}");
+        }
+    }
 
     #[test]
     fn tail_window_keeps_the_end_and_counts_wide_characters() {
