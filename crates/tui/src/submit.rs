@@ -578,7 +578,14 @@ impl App {
         self.draw(cx, None);
         let before = self.context_usage.total_used();
         let focus = (!focus.is_empty()).then_some(focus);
-        if compact_context(cx.source, &mut self.history, focus).await.is_some() {
+        let earlier_turns = self.history.iter().filter(|m| m.role == flashagent_llm::Role::User).count() > 1;
+        let archive = compaction_archive_path(cx.session_id);
+        let compacted = if let Some(archive) = archive.as_deref() {
+            compact_context(cx.source.as_ref(), &mut self.history, focus, archive).await.is_some()
+        } else {
+            false
+        };
+        if compacted {
             update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
             let saved = before.saturating_sub(self.context_usage.total_used());
             // In the transcript: the conversation itself changed.
@@ -586,6 +593,8 @@ impl App {
                 "Context compacted · {} saved · the conversation so far is now a summary",
                 ContextUsage::format_tokens(saved)
             ));
+        } else if earlier_turns {
+            self.chat.replace_last_system("Compaction failed or saved no space · conversation unchanged");
         } else {
             self.chat.replace_last_system("Nothing to compact yet");
         }

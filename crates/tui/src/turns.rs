@@ -244,7 +244,12 @@ impl App {
                         self.draw(cx, None);
                         let source_compact = cx.source.clone();
                         let before = self.context_usage.total_used();
-                        match compact_context(&source_compact, &mut self.history, None).await {
+                        let compacted = if let Some(archive) = compaction_archive_path(cx.session_id) {
+                            compact_context(source_compact.as_ref(), &mut self.history, None, &archive).await
+                        } else {
+                            None
+                        };
+                        match compacted {
                             Some(_) => {
                                 update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                                 let saved = before.saturating_sub(self.context_usage.total_used());

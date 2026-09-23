@@ -93,6 +93,56 @@ pub(crate) fn save_session_file(session_id: &str, model: &str, cwd: &str, histor
     save_session_in(&base_dir, session_id, model, cwd, history)
 }
 
+/// Earlier turns are removed from the model's live context after compaction.
+/// Keep their exact wire messages in a separate, append-only transcript so the
+/// summary can point the agent back to commands and user wording if needed.
+pub(crate) fn compaction_archive_path(session_id: &str) -> Option<std::path::PathBuf> {
+    if !is_session_id(session_id) {
+        return None;
+    }
+    Some(sessions_dir()?.join("compactions").join(format!("{session_id}.jsonl")))
+}
+
+pub(crate) fn append_compaction_archive(path: &std::path::Path, messages: &[ChatMessage]) -> Result<(), String> {
+    use std::io::Write;
+    let mut chunk = Vec::new();
+    for message in messages {
+        serde_json::to_writer(&mut chunk, &SavedMessage::from(message))
+            .map_err(|e| format!("cannot encode compaction archive: {e}"))?;
+        chunk.push(b'\n');
+    }
+    let parent = path.parent().ok_or("compaction archive has no parent directory")?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot protect {}: {e}", parent.display()))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)
+        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("cannot protect {}: {e}", path.display()))?;
+    }
+    let previous_len = file.metadata().map_err(|e| format!("cannot inspect {}: {e}", path.display()))?.len();
+    if let Err(e) = file.write_all(&chunk).and_then(|_| file.sync_all()) {
+        let _ = file.set_len(previous_len);
+        let _ = file.sync_all();
+        return Err(format!("cannot write {}: {e}", path.display()));
+    }
+    Ok(())
+}
+
 pub(crate) fn save_session_in(
     base_dir: &std::path::Path,
     session_id: &str,
@@ -367,6 +417,17 @@ pub(crate) fn close_dangling_user(history: &mut Vec<ChatMessage>, note: &str) {
 mod session_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn compaction_archive_is_private_to_the_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("compactions").join("session_test.jsonl");
+        append_compaction_archive(&archive, &[ChatMessage::user("private conversation")]).unwrap();
+        assert_eq!(std::fs::metadata(archive.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(std::fs::metadata(&archive).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
     fn write(dir: &std::path::Path, id: &str, timestamp: u64, cwd: &str, first_prompt: &str) {
         let saved = SavedSession {
             id: id.to_string(),
@@ -521,4 +582,3 @@ mod session_tests {
         assert!(rendered.iter().any(|(kind, text)| *kind == LineKind::User && text.contains("[image]")));
     }
 }
-

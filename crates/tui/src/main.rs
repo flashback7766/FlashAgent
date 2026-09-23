@@ -1858,28 +1858,50 @@ mod tests {
     }
 
     fn offline_source() -> BackendSource {
-        // Nothing listens on port 9, so compaction takes its offline fallback.
+        // Nothing listens on port 9; a failed compaction must preserve history.
         BackendSource(flashagent_llm::OpenAiCompat::new("http://127.0.0.1:9/v1", "m", None))
+    }
+
+    struct ScriptedCompaction(flashagent_llm::FinishReason);
+
+    #[async_trait::async_trait]
+    impl LlmSource for ScriptedCompaction {
+        async fn turn(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[flashagent_llm::ToolSpec],
+        ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+            let events = vec![
+                Ok(flashagent_llm::LlmEvent::TextDelta("Summary:\n1. Primary Request and Intent: first question\n7. Pending Tasks: continue the work\n8. Current Work: read a file".into())),
+                Ok(flashagent_llm::LlmEvent::Done(self.0)),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
     }
 
     #[tokio::test]
     async fn compaction_never_orphans_tool_results_or_stacks_system_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("conversation.jsonl");
         let call = flashagent_llm::ToolCall { id: "c1".into(), name: "read_file".into(), args_json: "{}".into() };
         let mut asst_call = ChatMessage::assistant("");
         asst_call.tool_calls = vec![call];
         let mut history = vec![
             ChatMessage::system("SYSTEM PROMPT"),
             ChatMessage::user("first question"),
-            ChatMessage::assistant("first answer"),
+            ChatMessage::assistant("first answer".repeat(1000)),
             ChatMessage::user("read a file"),
             asst_call,
             ChatMessage::tool_result("c1", "file body"),
             ChatMessage::assistant("here it is"),
         ];
-        let freed = compact_context(&offline_source(), &mut history, None).await;
+        let freed = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive).await;
         assert!(freed.is_some());
         assert_eq!(history.iter().filter(|m| m.role == flashagent_llm::Role::System).count(), 1);
         assert!(history[0].content.starts_with("SYSTEM PROMPT"));
+        assert!(history[0].content.contains("The summary below covers the earlier conversation.\nSummary:"));
+        assert!(history[0].content.contains("Continue the current task from this summary"));
+        assert!(history[0].content.contains(&archive.display().to_string()));
         assert!(history[0].content.contains("first question"));
         // The kept region is the whole current turn, from its prompt.
         assert_eq!(history[1].role, flashagent_llm::Role::User);
@@ -1890,16 +1912,82 @@ mod tests {
         // A second compaction keeps the earlier summary.
         history.push(ChatMessage::user("next"));
         history.push(ChatMessage::assistant("ok"));
-        compact_context(&offline_source(), &mut history, None).await;
+        history.push(ChatMessage::assistant("more work".repeat(1000)));
+        assert!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive).await.is_some());
         assert!(history[0].content.contains("first question"));
         assert_eq!(history[0].content.matches(COMPACTED_MARK.trim()).count(), 1);
+        assert_eq!(history[0].content.matches("The summary below covers the earlier conversation.").count(), 1);
+        let archived = std::fs::read_to_string(&archive).unwrap();
+        assert!(archived.contains("first answer"));
+        assert!(archived.contains("read a file"));
+        assert!(archived.contains("file body"));
+        let records: Vec<SavedMessage> = archived.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(records.iter().filter(|m| m.content == "first question").count(), 1);
+        assert!(!records.iter().any(|m| m.content == "next"), "the active turn stays live");
     }
 
     #[tokio::test]
     async fn single_turn_history_is_already_compact() {
         let mut history = vec![ChatMessage::system("s"), ChatMessage::user("u"), ChatMessage::assistant("a")];
-        assert_eq!(compact_context(&offline_source(), &mut history, None).await, None);
+        assert_eq!(compact_context(&offline_source(), &mut history, None, std::path::Path::new("unused.jsonl")).await, None);
         assert_eq!(history.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn failed_or_truncated_compaction_keeps_the_original_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("conversation.jsonl");
+        let original = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("important instruction"),
+            ChatMessage::assistant("work already done".repeat(1000)),
+            ChatMessage::user("current task"),
+        ];
+        for reason in [flashagent_llm::FinishReason::Length, flashagent_llm::FinishReason::ToolUse] {
+            let mut history = original.clone();
+            assert_eq!(compact_context(&ScriptedCompaction(reason), &mut history, None, &archive).await, None);
+            assert_eq!(history.len(), original.len());
+            assert_eq!(history[2].content, original[2].content);
+        }
+        let mut history = original.clone();
+        assert_eq!(compact_context(&offline_source(), &mut history, None, &archive).await, None);
+        assert_eq!(history[1].content, "important instruction");
+        assert!(!archive.exists());
+
+        let blocker = dir.path().join("not_a_directory");
+        std::fs::write(&blocker, "file").unwrap();
+        let mut history = original.clone();
+        assert_eq!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &blocker.join("archive.jsonl")).await, None);
+        assert_eq!(history[2].content, original[2].content, "archive failure must not discard history");
+    }
+
+    #[test]
+    fn compaction_input_keeps_goal_instructions_tool_calls_and_results() {
+        let mut call = ChatMessage::assistant("");
+        call.tool_calls.push(flashagent_llm::ToolCall {
+            id: "c1".into(), name: "run_shell".into(), args_json: r#"{"command":"cargo test"}"#.into(),
+        });
+        let messages = vec![
+            ChatMessage::user("memory preamble\n\n---\n\n[AUTONOMOUS GOAL DIRECTIVE]\nTarget goal: ship the release\nBudget: 8 steps"),
+            call,
+            ChatMessage::tool_result("c1", "tests passed"),
+            ChatMessage::tool_result("c2", "x".repeat(50_000)),
+        ];
+        let transcript = compaction_transcript(&messages, None);
+        assert!(transcript.contains("Target goal: ship the release"));
+        assert!(transcript.contains("Budget: 8 steps"));
+        assert!(transcript.contains("Tool call c1 run_shell: {\"command\":\"cargo test\"}"));
+        assert!(transcript.contains("Tool: tests passed"));
+        assert!(transcript.contains("Tool result for call: c1"));
+        assert!(!transcript.contains("memory preamble"));
+        assert!(transcript.len() < 5_000, "a huge tool result is shortened for the summary request");
+    }
+
+    #[test]
+    fn compaction_summary_needs_goal_pending_work_and_current_state() {
+        assert!(!summary_has_handoff_state("Summary:\n1. Primary Request and Intent: do the work"));
+        assert!(!summary_has_handoff_state("Summary:\n1. Goal\n7. Pending Tasks"));
+        assert!(summary_has_handoff_state("Summary:\n1. Primary Request and Intent: do the work\n7. Pending Tasks: None\n8. Current Work: waiting for a new task"));
     }
 
     #[test]
