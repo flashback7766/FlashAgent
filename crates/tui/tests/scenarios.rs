@@ -1499,7 +1499,7 @@ fn sending_only_an_image_submits_the_turn_with_image_part_and_no_text() {
         term.send(&format!("\x1b[200~{}\x1b[201~", image_path.display()));
         // Recognised as it is dropped, before anything is sent.
         term.wait_for("shot.png 800×600", WAIT);
-        term.wait_for("Enter to send image", WAIT);
+        term.wait_for("Enter to send the image", WAIT);
     }
 
     term.send(ENTER);
