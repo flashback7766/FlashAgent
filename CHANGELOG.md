@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## b340 — a screen that holds still and says less
 
 - **The screen no longer flickers on Windows.** Every animation (the mascot breathing, the welcome card drawing itself in, a card's border pulsing) cleared the whole screen and drew it again, and between the two the screen was blank. Terminals that support synchronized output hid that; Windows' console does not, and Rust's standard output also hands it a frame in pieces of about 2 KB, drawn as they arrive. Now only the rows that changed are written, each over the old one, nothing is cleared first, and on Windows the frame goes to the console in one call. Watched through ConPTY, as under Windows Terminal, ten seconds on the welcome screen with animations on showed the screen half drawn 70 times; now it shows it 0 times, and sends 46 KB where it sent 350 KB. A streamed answer sends a fifth of the bytes. A test now fails if the screen is ever seen half drawn.
 - **The setup wizard, the release notes and the directory question stopped flickering too.** They cleared and redrew the screen 20 to 25 times a second whether anything changed or not.
