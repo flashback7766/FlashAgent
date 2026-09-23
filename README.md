@@ -142,7 +142,7 @@ flashagent --url http://localhost:11434/v1 --model qwen2.5-coder:32b   # one-off
 
 ## What it can do
 
-**Tools** — `read_file`, `write_file`, `edit_file` (exact replacements, tolerant of CRLF and quote styles), `patch_file` (unified diffs), `list_dir`, `glob`, `grep` (parallel), `outline_file`, `git_status`, `git_diff`, `run_shell` (foreground with timeout or background tasks you can poll and kill; timeouts kill the whole process tree), `env_info`, `ask_user` (interactive choices in the composer), memory tools, `spawn_agent` (subagents that inherit your permissions), and `web_fetch` / `web_search` (on by default, run like a read; turn them off in Settings). The toolset shrinks automatically for small context windows.
+**Tools** — `read_file`, `write_file`, `edit_file` (exact replacements, tolerant of CRLF and quote styles), `patch_file` (unified diffs), `list_dir`, `glob`, `grep` (parallel), `outline_file`, `git_status`, `git_diff`, `run_shell` (foreground with timeout or background tasks you can poll and kill; timeouts kill the whole process tree; on Windows it runs Git Bash when installed, cmd.exe otherwise), `env_info`, `ask_user` (interactive choices in the composer), memory tools, `spawn_agent` (subagents that inherit your permissions), and `web_fetch` / `web_search` (on by default, run like a read; turn them off in Settings). The toolset shrinks automatically for small context windows.
 
 **Permission modes** — cycle with <kbd>Shift</kbd>+<kbd>Tab</kbd> or `/mode`:
 

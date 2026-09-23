@@ -82,6 +82,12 @@ tool start and finish, usage) is emitted for the UI.
 Every tool call the model makes gets a result, including when the user
 cancels, because strict servers reject a history with an unanswered call.
 
+`run_shell` uses `sh` on Unix. On Windows it uses Git Bash when Git for
+Windows is installed, since models write Unix commands and cmd.exe runs
+none of them; otherwise cmd.exe, and the system prompt names the shell
+either way. Output that is not UTF-8 is decoded from the console's OEM code
+page, which is what cmd.exe and most Windows tools write to a pipe.
+
 ## Permissions
 
 Four modes: Planning (read-only; shell commands on a short list of programs

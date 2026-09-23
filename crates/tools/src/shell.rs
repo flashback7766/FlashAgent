@@ -2,6 +2,10 @@
 //! live output buffer. Each command gets its own process group, so a timeout
 //! or cancel kills the whole pipeline, not just `sh` while its children keep
 //! our pipes open.
+//!
+//! On Windows commands go to Git Bash when it is installed: models write Unix
+//! commands, and cmd.exe runs none of them. Without it, cmd.exe runs them and
+//! the system prompt says so.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -41,17 +45,19 @@ where
     // A character split across two reads is held until its last bytes arrive;
     // decoding each read alone produced two U+FFFD.
     let mut carry: Vec<u8> = Vec::new();
+    let mut legacy = false;
     loop {
         match stream.read(&mut chunk).await {
             Ok(0) | Err(_) => {
                 if !carry.is_empty() {
-                    buffer.lock().push_str(&String::from_utf8_lossy(&carry));
+                    let text = if legacy { decode_legacy(&carry) } else { String::from_utf8_lossy(&carry).into_owned() };
+                    buffer.lock().push_str(&text);
                 }
                 break;
             }
             Ok(n) => {
                 carry.extend_from_slice(&chunk[..n]);
-                let text = decode_complete(&mut carry);
+                let text = decode(&mut carry, &mut legacy);
                 let mut buf = buffer.lock();
                 buf.push_str(&text);
                 if buf.len() > BUFFER_CAP {
@@ -64,6 +70,50 @@ where
             }
         }
     }
+}
+
+/// UTF-8 until the first byte that cannot be: from then on the stream is in
+/// the legacy code page. cmd.exe and most Windows tools write that to a pipe,
+/// so an error from cmd on a Russian system arrived as mojibake.
+fn decode(bytes: &mut Vec<u8>, legacy: &mut bool) -> String {
+    if !*legacy && cfg!(windows) {
+        *legacy = std::str::from_utf8(bytes).is_err_and(|e| e.error_len().is_some());
+    }
+    if *legacy {
+        return decode_legacy(&std::mem::take(bytes));
+    }
+    decode_complete(bytes)
+}
+
+#[cfg(not(windows))]
+fn decode_legacy(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// The console's OEM code page, the one cmd.exe writes in.
+#[cfg(windows)]
+fn decode_legacy(bytes: &[u8]) -> String {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MultiByteToWideChar(code_page: u32, flags: u32, src: *const u8, src_len: i32, dst: *mut u16, dst_len: i32)
+            -> i32;
+    }
+    const CP_OEMCP: u32 = 1;
+    let Ok(len) = i32::try_from(bytes.len()) else {
+        return String::from_utf8_lossy(bytes).into_owned();
+    };
+    if len == 0 {
+        return String::new();
+    }
+    // SAFETY: the first call only measures; the second writes at most `size`
+    // units into a buffer of exactly that many.
+    let size = unsafe { MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0) };
+    if size <= 0 {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let mut wide = vec![0u16; size as usize];
+    let written = unsafe { MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), size) };
+    String::from_utf16_lossy(&wide[..written.max(0) as usize])
 }
 
 /// An incomplete trailing character stays in `bytes`. Invalid sequences decode
@@ -99,12 +149,65 @@ fn decode_complete(bytes: &mut Vec<u8>) -> String {
     out
 }
 
+/// Git for Windows' `bin\bash.exe`, which puts its Unix tools on PATH. Not
+/// `System32\bash.exe`: that is WSL, a different machine with its own files.
+#[cfg(windows)]
+fn git_bash() -> Option<&'static std::path::Path> {
+    static FOUND: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    FOUND.get_or_init(find_git_bash).as_deref()
+}
+
+#[cfg(windows)]
+fn find_git_bash() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let path_dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    // git.exe sits in <root>\cmd, <root>\bin or <root>\mingw64\bin.
+    let beside_git = path_dirs
+        .into_iter()
+        .filter(|dir| dir.join("git.exe").is_file())
+        .flat_map(|dir| dir.ancestors().skip(1).take(2).map(PathBuf::from).collect::<Vec<_>>());
+    let usual = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(|p| PathBuf::from(p).join("Git"))
+        .chain(std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join(r"Programs\Git")))
+        .chain(std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join(r"scoop\apps\git\current")));
+    beside_git.chain(usual).map(|root| root.join(r"bin\bash.exe")).find(|bash| bash.is_file())
+}
+
+/// The platform line of the system prompt: the shell decides which commands
+/// the model can write.
+pub fn platform() -> String {
+    #[cfg(windows)]
+    {
+        if git_bash().is_some() {
+            "windows; run_shell uses Git Bash: POSIX commands, forward slashes in paths".to_string()
+        } else {
+            "windows; run_shell uses cmd.exe: Windows commands (dir, type, findstr), not Unix ones".to_string()
+        }
+    }
+    #[cfg(not(windows))]
+    std::env::consts::OS.to_string()
+}
+
+/// cmd.exe does not read the quoting `arg` would add; /S keeps the command's
+/// own quotes as written.
+#[cfg(windows)]
+fn cmd_exe(cmd: &str) -> tokio::process::Command {
+    let mut c = tokio::process::Command::new("cmd");
+    c.raw_arg(format!("/D /S /C \"{cmd}\""));
+    c
+}
+
 fn shell_command(cmd: &str) -> tokio::process::Command {
     #[cfg(windows)]
-    let mut c = {
-        let mut c = tokio::process::Command::new("cmd");
-        c.arg("/C").arg(cmd);
-        c
+    let mut c = match git_bash() {
+        Some(bash) => {
+            let mut c = tokio::process::Command::new(bash);
+            c.arg("-c").arg(cmd);
+            c
+        }
+        None => cmd_exe(cmd),
     };
     #[cfg(not(windows))]
     let mut c = {
@@ -125,6 +228,16 @@ fn kill_tree(child: &mut Child) {
         unsafe {
             libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
         }
+    }
+    // Before the shell dies: taskkill finds the children through their parent.
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
     let _ = child.start_kill();
 }
@@ -285,6 +398,47 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn output_that_is_not_utf8_is_read_in_the_legacy_code_page() {
+        let mut legacy = false;
+        let mut plain = "ok \u{2713}".as_bytes().to_vec();
+        assert_eq!(decode(&mut plain, &mut legacy), "ok \u{2713}");
+        assert!(!legacy);
+        // "Привет" in CP866; whatever the OEM page, no byte may become U+FFFD.
+        let mut oem = vec![b'>', 0x8F, 0xE0, 0xA8, 0xA2, 0xA5, 0xE2];
+        let text = decode(&mut oem, &mut legacy);
+        if cfg!(windows) {
+            assert!(legacy);
+            assert_eq!(text.chars().count(), 7, "{text:?}");
+            assert!(!text.contains('\u{FFFD}'), "{text:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn quoted_arguments_reach_the_command_as_written() {
+        let out = run_foreground(r#"echo "a  b" c"#, Duration::from_secs(10)).await.unwrap();
+        assert!(out.contains("a  b c"), "{out}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cmd_exe_keeps_the_commands_own_quotes() {
+        let out = cmd_exe(r#"echo "a  b" & ver"#).stdout(Stdio::piped()).output().await.unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("\"a  b\""), "{text}");
+        assert!(text.contains("Windows"), "{text}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn unix_commands_run_on_windows_when_git_bash_is_installed() {
+        if git_bash().is_none() {
+            return;
+        }
+        let out = run_foreground("ls -a | grep -c .", Duration::from_secs(10)).await.unwrap();
+        assert!(out.contains("exit code: 0"), "{out}");
+    }
 
     #[tokio::test]
     async fn foreground_echo_captures_output() {

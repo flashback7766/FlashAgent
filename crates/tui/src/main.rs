@@ -912,7 +912,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
 
     let system_prompt_config = SystemPromptConfig::new()
         .with_cwd(&cwd_display)
-        .with_platform(std::env::consts::OS)
+        .with_platform(flashagent_tools::shell::platform())
         .with_model(&model)
         .with_effort(&initial_effort);
     let system_prompt_text =
