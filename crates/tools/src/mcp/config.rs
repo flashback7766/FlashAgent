@@ -106,6 +106,22 @@ pub fn expand_env_vars(raw: &str) -> String {
     result
 }
 
+/// Server by server: one entry this client cannot run (an HTTP server has no
+/// `command`) used to fail the whole file and drop every other server.
+/// `None` only when the file is not a JSON object.
+fn parse_servers(content: &str) -> Option<HashMap<String, McpServerConfig>> {
+    let root: serde_json::Value = serde_json::from_str(content.trim_start_matches('\u{feff}')).ok()?;
+    let root = root.as_object()?;
+    let servers = root.get("mcpServers").or_else(|| root.get("servers")).and_then(|s| s.as_object());
+    Some(
+        servers
+            .into_iter()
+            .flatten()
+            .filter_map(|(name, cfg)| Some((name.clone(), serde_json::from_value::<McpServerConfig>(cfg.clone()).ok()?)))
+            .collect(),
+    )
+}
+
 /// Project config overrides global.
 pub fn load_mcp_configs(cwd: &Path) -> (HashMap<String, McpServerConfig>, Vec<PathBuf>) {
     let mut servers = HashMap::new();
@@ -115,13 +131,9 @@ pub fn load_mcp_configs(cwd: &Path) -> (HashMap<String, McpServerConfig>, Vec<Pa
     if let Some(home) = dirs_next().or_else(|| std::env::var("HOME").ok().map(PathBuf::from)) {
         let global_path = home.join(".flashagent").join("mcp.json");
         if global_path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&global_path) {
-                if let Ok(parsed) = serde_json::from_str::<McpConfigFile>(&content) {
-                    for (name, cfg) in parsed.mcp_servers {
-                        servers.insert(name, cfg);
-                    }
-                    loaded_paths.push(global_path);
-                }
+            if let Some(parsed) = std::fs::read_to_string(&global_path).ok().and_then(|c| parse_servers(&c)) {
+                servers.extend(parsed);
+                loaded_paths.push(global_path);
             }
         }
     }
@@ -130,14 +142,10 @@ pub fn load_mcp_configs(cwd: &Path) -> (HashMap<String, McpServerConfig>, Vec<Pa
     let project_candidates = [cwd.join(".mcp.json"), cwd.join("mcp.json")];
     for p in &project_candidates {
         if p.is_file() {
-            if let Ok(content) = std::fs::read_to_string(p) {
-                if let Ok(parsed) = serde_json::from_str::<McpConfigFile>(&content) {
-                    for (name, cfg) in parsed.mcp_servers {
-                        servers.insert(name, cfg);
-                    }
-                    loaded_paths.push(p.clone());
-                    break;
-                }
+            if let Some(parsed) = std::fs::read_to_string(p).ok().and_then(|c| parse_servers(&c)) {
+                servers.extend(parsed);
+                loaded_paths.push(p.clone());
+                break;
             }
         }
     }
@@ -156,20 +164,30 @@ fn dirs_next() -> Option<PathBuf> {
     }
 }
 
-/// Writes to the project `.mcp.json`.
+/// Writes to the project `.mcp.json`, editing it in place: servers this
+/// client cannot run and fields it does not know stay as they were, and a file
+/// it cannot read is left alone instead of replaced.
 pub fn save_server_to_project(cwd: &Path, name: &str, config: McpServerConfig) -> Result<PathBuf, String> {
     let target = cwd.join(".mcp.json");
-    let mut file_cfg = if target.is_file() {
+    let mut root = if target.is_file() {
         let content = std::fs::read_to_string(&target)
             .map_err(|e| format!("Failed to read {}: {e}", target.display()))?;
-        serde_json::from_str::<McpConfigFile>(&content).unwrap_or_default()
+        match serde_json::from_str::<serde_json::Value>(content.trim_start_matches('\u{feff}')) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => return Err(format!("{} is not a JSON object FlashAgent can edit; add the server by hand", target.display())),
+        }
     } else {
-        McpConfigFile::default()
+        serde_json::Map::new()
     };
+    let key = if root.contains_key("mcpServers") || !root.contains_key("servers") { "mcpServers" } else { "servers" };
+    let servers = root.entry(key).or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(servers) = servers.as_object_mut() else {
+        return Err(format!("\"{key}\" in {} is not an object; add the server by hand", target.display()));
+    };
+    let value = serde_json::to_value(&config).map_err(|e| format!("Failed to serialize config: {e}"))?;
+    servers.insert(name.to_string(), value);
 
-    file_cfg.mcp_servers.insert(name.to_string(), config);
-
-    let serialized = serde_json::to_string_pretty(&file_cfg)
+    let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(root))
         .map_err(|e| format!("Failed to serialize config: {e}"))?;
 
     std::fs::write(&target, serialized)
@@ -181,6 +199,25 @@ pub fn save_server_to_project(cwd: &Path, name: &str, config: McpServerConfig) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_this_client_cannot_run_neither_hides_nor_loses_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".mcp.json");
+        std::fs::write(&file, r#"{"mcpServers":{"docs":{"type":"http","url":"https://x"},"db":{"command":"uvx","args":["db"]}},"extra":1}"#).unwrap();
+        let (servers, _) = load_mcp_configs(dir.path());
+        assert!(servers.contains_key("db"), "{servers:?}");
+        save_server_to_project(dir.path(), "fetch", McpServerConfig::new("uvx", vec!["fetch".into()])).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        for name in ["docs", "db", "fetch"] {
+            assert!(saved["mcpServers"].get(name).is_some(), "{name} lost: {saved}");
+        }
+        assert_eq!(saved["extra"], 1);
+        // A file it cannot read is not replaced.
+        std::fs::write(&file, "{ // a comment\n}").unwrap();
+        assert!(save_server_to_project(dir.path(), "x", McpServerConfig::new("x", vec![])).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{ // a comment\n}");
+    }
 
     #[test]
     fn test_env_var_expansion() {

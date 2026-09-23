@@ -58,7 +58,12 @@ fn resolve(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
 pub fn view_image(cwd: &Path, args_json: &str, vision_supported: bool) -> ToolOutput {
     let fail = |msg: String| ToolOutput { content: msg, is_error: true, images: Vec::new() };
 
-    let args: ViewImageArgs = match serde_json::from_str(args_json) {
+    // Through the same resolver as the approval card and the permissions, so
+    // `file_path` is read as the path they showed.
+    let Some(value) = flashagent_llm::effective_args(args_json, "view_image") else {
+        return fail("view_image: bad arguments: not a JSON object".to_string());
+    };
+    let args: ViewImageArgs = match serde_json::from_value(value) {
         Ok(a) => a,
         Err(e) => return fail(format!("view_image: bad arguments: {e}")),
     };
@@ -134,6 +139,14 @@ mod tests {
         assert!(out.content.contains("1440×900"), "{}", out.content);
         assert_eq!(out.images.len(), 1);
         assert!(out.images[0].starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn a_path_given_as_file_path_is_the_one_approved() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("d.png"), png(2, 2)).unwrap();
+        let out = view_image(dir.path(), r#"{"file_path":"d.png"}"#, true);
+        assert!(!out.is_error, "{}", out.content);
     }
 
     #[test]

@@ -168,15 +168,31 @@ impl BuiltinTools {
             }
             "edit_file" => {
                 let args: EditArgs = serde_json::from_value(v.clone()).ok()?;
-                // A batch is shown whole, one diff per file.
-                let diffs: Vec<String> = args
-                    .targets()
+                // A batch is shown whole, one diff per file. A file named twice
+                // (also as `./a.txt`) is shown from its original to what both
+                // parts make of it, as edit_files writes it: previewing each part
+                // on its own hid the second one.
+                let mut files: Vec<(std::path::PathBuf, String, String, Option<String>)> = Vec::new();
+                for (path, edits) in args.targets() {
+                    let key = fs_tools::same_file_key(&self.cwd, &path);
+                    let at = files.iter().position(|f| f.0 == key);
+                    let current = match at {
+                        Some(i) => files[i].3.clone(),
+                        None => fs_tools::read_raw(&self.cwd, &path),
+                    };
+                    let new = current.clone().and_then(|text| fs_tools::apply_edits(text, &edits).ok());
+                    match at {
+                        Some(i) => files[i].3 = new,
+                        None => {
+                            if let Some(old) = current {
+                                files.push((key, path, old, new));
+                            }
+                        }
+                    }
+                }
+                let diffs: Vec<String> = files
                     .iter()
-                    .filter_map(|(path, edits)| {
-                        let old = fs_tools::read_raw(&self.cwd, path)?;
-                        let new = fs_tools::apply_edits(old.clone(), edits).ok()?;
-                        Some(flashagent_core::unified(Some(&old), &new, &self.shown_path(path), 3))
-                    })
+                    .filter_map(|(_, path, old, new)| Some(flashagent_core::unified(Some(old), new.as_ref()?, &self.shown_path(path), 3)))
                     .collect();
                 if diffs.is_empty() {
                     None
@@ -352,17 +368,19 @@ impl WritePreview for BuiltinTools {
         if targets.iter().any(|(path, _)| !flashagent_core::path_is_inside(&self.cwd, path)) {
             return None;
         }
-        // A file named twice in a batch gets its second edits on the result of the first.
-        let mut texts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        // A file named twice in a batch, also as `./a.txt`, gets its second
+        // edits on the result of the first.
+        let mut texts: std::collections::HashMap<std::path::PathBuf, String> = std::collections::HashMap::new();
         for (path, edits) in targets {
-            let text = match texts.remove(&path) {
+            let key = fs_tools::same_file_key(&self.cwd, &path);
+            let text = match texts.remove(&key) {
                 Some(text) => text,
                 None => fs_tools::read_raw(&self.cwd, &path)?,
             };
             if let Err(e) = fs_tools::check_edits(&path, &text, &edits) {
                 return Some(format!("error: {e}"));
             }
-            texts.insert(path, fs_tools::apply_edits(text, &edits).ok()?);
+            texts.insert(key, fs_tools::apply_edits(text, &edits).ok()?);
         }
         None
     }
@@ -765,6 +783,21 @@ mod tests {
         assert_eq!(outside, None, "a file outside the project is not read to say so");
         assert_eq!(home, None, "a file under ~ is not read to say so");
         assert_eq!(twice, None, "a second edit of the same file applies to the first one's result");
+    }
+
+    #[test]
+    fn a_file_named_twice_in_a_batch_is_previewed_and_checked_as_written() {
+        let (dir, tools) = batch_tools("twice", &[("a.txt", "one\n")]);
+        let hidden = batch_call("edit_file", serde_json::json!({ "files": [
+            { "path": "a.txt", "edits": [ { "old_string": "one", "new_string": "two" } ] },
+            { "path": "./a.txt", "edits": [ { "old_string": "two", "new_string": "rm -rf" } ] }
+        ] }));
+        let preview = tools.write_preview(&hidden).unwrap_or_default();
+        let doomed = tools.doomed(&hidden);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(preview.contains("+rm -rf"), "the card must show what will be written: {preview}");
+        assert!(!preview.contains("+two"), "{preview}");
+        assert_eq!(doomed, None, "./a.txt is the same file as a.txt");
     }
 
     #[tokio::test]

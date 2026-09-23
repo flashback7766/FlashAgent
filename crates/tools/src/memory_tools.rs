@@ -114,6 +114,23 @@ fn default_scope(args: &MemoryWriteArgs) -> Scope {
     }
 }
 
+/// The memory an update or removal is about: in the scope named, or else
+/// wherever one by that title already is, project first. Writing a second one
+/// in the default scope left the old fact standing beside the correction.
+fn locate(cwd: &Path, scope: Option<&str>, title: &str) -> Result<Option<(Scope, Store, Entry)>, ToolError> {
+    let scopes = match scope {
+        Some(explicit) => vec![Scope::parse(Some(explicit))],
+        None => vec![Scope::Project, Scope::Global],
+    };
+    for scope in scopes {
+        let Ok(store) = store(cwd, scope) else { continue };
+        if let Some(entry) = store.get(title) {
+            return Ok(Some((scope, store, entry)));
+        }
+    }
+    Ok(None)
+}
+
 fn entry_from(args: &MemoryWriteArgs, existing: Option<&Entry>) -> Entry {
     let description = args
         .description
@@ -125,9 +142,10 @@ fn entry_from(args: &MemoryWriteArgs, existing: Option<&Entry>) -> Entry {
         // stands in.
         .unwrap_or_else(|| first_sentence(&args.content));
     Entry {
-        name: slugify(&args.title),
+        // An existing memory keeps its file name and kind unless told otherwise.
+        name: existing.map_or_else(|| slugify(&args.title), |e| e.name.clone()),
         description,
-        kind: args.kind.as_deref().map(Kind::parse).unwrap_or(Kind::Decision),
+        kind: args.kind.as_deref().map(Kind::parse).or(existing.map(|e| e.kind)).unwrap_or(Kind::Decision),
         // Correcting a fact does not change when it was first learned.
         recorded: existing.map(|e| e.recorded.clone()).filter(|r| !r.is_empty()).unwrap_or_else(today),
         body: args.content.trim().to_string(),
@@ -179,9 +197,13 @@ pub fn memory_update(
     args: MemoryWriteArgs,
 ) -> Result<String, ToolError> {
     check_goal_mutation(is_goal_mode, "memory_update")?;
-    let scope = default_scope(&args);
-    let store = store(cwd, scope)?;
-    let existing = store.get(&slugify(&args.title));
+    let (scope, store, existing) = match locate(cwd, args.scope.as_deref(), &args.title)? {
+        Some((scope, store, entry)) => (scope, store, Some(entry)),
+        None => {
+            let scope = default_scope(&args);
+            (scope, store(cwd, scope)?, None)
+        }
+    };
     let entry = entry_from(&args, existing.as_ref());
     store.save(&entry).map_err(|e| ToolError::Other(format!("failed to write memory: {e}")))?;
     Ok(match existing {
@@ -196,11 +218,12 @@ pub fn memory_remove(
     args: MemoryRemoveArgs,
 ) -> Result<String, ToolError> {
     check_goal_mutation(is_goal_mode, "memory_remove")?;
-    let scope = Scope::parse(args.scope.as_deref());
-    let store = store(cwd, scope)?;
-    let removed = store
-        .remove(&args.title)
-        .map_err(|e| ToolError::Other(format!("failed to update memory: {e}")))?;
+    let (scope, removed) = match locate(cwd, args.scope.as_deref(), &args.title)? {
+        Some((scope, store, _)) => {
+            (scope, store.remove(&args.title).map_err(|e| ToolError::Other(format!("failed to update memory: {e}")))?)
+        }
+        None => (Scope::parse(args.scope.as_deref()), false),
+    };
     if removed {
         Ok(format!("Forgot '{}' from {} memory.", slugify(&args.title), scope.label()))
     } else {
@@ -301,6 +324,28 @@ mod tests {
         assert!(memory_create(dir.path(), &goal, write("x", "y")).is_err());
         assert!(memory_update(dir.path(), &goal, write("x", "y")).is_err());
         assert!(memory_remove(dir.path(), &goal, MemoryRemoveArgs { title: "x".into(), scope: None }).is_err());
+    }
+
+    #[test]
+    fn an_update_corrects_the_memory_where_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let entry = Entry {
+            name: "editor".into(),
+            description: "The user edits with helix".into(),
+            kind: Kind::Preference,
+            recorded: today(),
+            body: "helix".into(),
+        };
+        Store::new(&project).save(&entry).unwrap();
+        // As a model sends it: no type, no scope.
+        let correction = MemoryWriteArgs { kind: None, scope: None, ..write("Editor", "The user edits with neovim.") };
+        memory_update(&project, &goal_off(), correction).unwrap();
+        let entries = Store::new(&project).list();
+        assert_eq!(entries.len(), 1, "no second memory beside the corrected one");
+        assert_eq!(entries[0].kind, Kind::Preference, "its kind is kept");
+        assert!(entries[0].body.contains("neovim"));
     }
 
     #[test]

@@ -61,14 +61,32 @@ where
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(from = "RawQuestionItem")]
 pub struct QuestionItem {
-    #[serde(alias = "prompt", alias = "title", alias = "text", alias = "header")]
     pub question: String,
     /// Up to 10.
-    #[serde(default, deserialize_with = "deserialize_flexible_options", alias = "choices", alias = "items")]
     pub options: Option<Vec<String>>,
-    #[serde(default, alias = "is_multi_select", alias = "multiple")]
     pub multi_select: Option<bool>,
+}
+
+/// Claude-style items carry a short `header` beside the question; as an alias
+/// of `question` it made such an item a duplicate field and failed the call.
+#[derive(Deserialize)]
+struct RawQuestionItem {
+    #[serde(default, alias = "prompt", alias = "title", alias = "text")]
+    question: Option<String>,
+    #[serde(default)]
+    header: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_flexible_options", alias = "choices", alias = "items")]
+    options: Option<Vec<String>>,
+    #[serde(default, alias = "is_multi_select", alias = "multiple")]
+    multi_select: Option<bool>,
+}
+
+impl From<RawQuestionItem> for QuestionItem {
+    fn from(raw: RawQuestionItem) -> Self {
+        Self { question: raw.question.or(raw.header).unwrap_or_default(), options: raw.options, multi_select: raw.multi_select }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -461,6 +479,15 @@ mod tests {
         let json = r#"{"prompt": "Pick a tool", "choices": "git, cargo, rustc"}"#;
         let parsed: AskUserArgs = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.question.as_deref(), Some("Pick a tool"));
+        let claude: AskUserArgs = serde_json::from_str(
+            r#"{"questions":[{"question":"Which database?","header":"Database","options":["Postgres","SQLite"]},{"header":"Only a header"}]}"#,
+        )
+        .expect("a header beside the question is not a duplicate field");
+        let questions: Vec<String> = claude.questions.unwrap().into_iter().map(|q| match q {
+            QuestionItemOrString::Item(item) => item.question,
+            QuestionItemOrString::Simple(s) => s,
+        }).collect();
+        assert_eq!(questions, vec!["Which database?", "Only a header"]);
         assert_eq!(
             parsed.options,
             Some(vec!["git".into(), "cargo".into(), "rustc".into()])

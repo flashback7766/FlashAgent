@@ -17,6 +17,13 @@ pub struct EditChunk {
     pub replace_all: bool,
 }
 
+/// The file a batch entry names, for telling `a.txt` and `./a.txt` apart
+/// from two files.
+pub(crate) fn same_file_key(cwd: &Path, path: &str) -> PathBuf {
+    let file = resolve(cwd, path);
+    file.canonicalize().unwrap_or(file)
+}
+
 fn resolve(cwd: &Path, path: &str) -> PathBuf {
     flashagent_core::resolve_path(cwd, path)
 }
@@ -33,7 +40,7 @@ pub(crate) fn read_file(cwd: &Path, path: &str, offset: usize, limit: usize) -> 
     let mut out = String::new();
     let mut line = Vec::new();
     let mut number = 0usize;
-    while number < offset + limit {
+    while number < offset.saturating_add(limit) {
         line.clear();
         match reader.read_until(b'\n', &mut line) {
             Ok(0) => break,
@@ -71,7 +78,8 @@ pub(crate) fn read_raw(cwd: &Path, path: &str) -> Option<String> {
 }
 
 fn normalize_line(s: &str) -> String {
-    s.trim_end_matches(&['\r', '\n', ' ', '\t'][..])
+    s.trim_start_matches('\u{feff}')
+        .trim_end_matches(&['\r', '\n', ' ', '\t'][..])
         .replace(['‘', '’'], "'")
         .replace(['“', '”'], "\"")
 }
@@ -115,7 +123,8 @@ pub(crate) fn find_actual_string(text: &str, needle: &str) -> Option<String> {
             }
         }
         if all_match {
-            let start = text_line_spans[i].0;
+            // The BOM stays where it is; it is not the model's to replace.
+            let start = if i == 0 && text.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { text_line_spans[i].0 };
             let end = text_line_spans[i + k - 1].1;
             let span_str = &text[start..end];
             let target_str = if !needle.ends_with('\n') && span_str.ends_with('\n') {
@@ -127,10 +136,26 @@ pub(crate) fn find_actual_string(text: &str, needle: &str) -> Option<String> {
         }
     }
 
+    // The same block twice is one text: the caller counts it and asks for
+    // replace_all, instead of saying it is not there.
+    matches.sort();
+    matches.dedup();
     if matches.len() == 1 {
         Some(matches.remove(0))
     } else {
         None
+    }
+}
+
+/// new_string in the file's own line endings: models write `\n`, and a CRLF
+/// file must not end up with both.
+fn in_line_endings_of<'a>(text: &str, new: &'a str) -> std::borrow::Cow<'a, str> {
+    let lines = text.matches('\n').count();
+    let crlf = text.matches("\r\n").count();
+    if lines > 0 && crlf * 2 > lines && new.contains('\n') && !new.contains('\r') {
+        std::borrow::Cow::Owned(new.replace('\n', "\r\n"))
+    } else {
+        std::borrow::Cow::Borrowed(new)
     }
 }
 
@@ -202,10 +227,11 @@ pub(crate) fn apply_edits(mut text: String, edits: &[EditChunk]) -> Result<Strin
                 "edit: old_string matches {count} times; add more context or set replace_all"
             )));
         }
+        let new_string = in_line_endings_of(&text, &edit.new_string).into_owned();
         text = if edit.replace_all {
-            text.replace(&target_string, &edit.new_string)
+            text.replace(&target_string, &new_string)
         } else {
-            text.replacen(&target_string, &edit.new_string, 1)
+            text.replacen(&target_string, &new_string, 1)
         };
     }
     Ok(text)
@@ -247,10 +273,11 @@ pub(crate) fn check_edits(path: &str, text: &str, edits: &[EditChunk]) -> Result
             )));
         }
         applied += if edit.replace_all { count } else { 1 };
+        let new_string = in_line_endings_of(&checked, &edit.new_string).into_owned();
         checked = if edit.replace_all {
-            checked.replace(&target_string, &edit.new_string)
+            checked.replace(&target_string, &new_string)
         } else {
-            checked.replacen(&target_string, &edit.new_string, 1)
+            checked.replacen(&target_string, &new_string, 1)
         };
     }
     Ok(applied)
@@ -497,6 +524,47 @@ pub(crate) fn grep(
 mod tests {
     use super::*;
     use crate::testing::tempdir;
+
+    fn chunk(old: &str, new: &str, replace_all: bool) -> EditChunk {
+        EditChunk { old_string: old.into(), new_string: new.into(), replace_all }
+    }
+
+    #[test]
+    fn an_edit_keeps_a_crlf_file_in_crlf() {
+        let dir = tempdir();
+        write_file(&dir, "w.txt", "one\r\ntwo\r\nthree\r\n").unwrap();
+        edit_file(&dir, "w.txt", &[chunk("one\ntwo", "ONE\nTWO\nextra", false)]).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("w.txt")).unwrap(), "ONE\r\nTWO\r\nextra\r\nthree\r\n");
+        // An LF file stays LF.
+        write_file(&dir, "u.txt", "a\nb\n").unwrap();
+        edit_file(&dir, "u.txt", &[chunk("a", "a\nx", false)]).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("u.txt")).unwrap(), "a\nx\nb\n");
+    }
+
+    #[test]
+    fn a_block_found_twice_by_the_tolerant_match_is_counted_not_lost() {
+        let dir = tempdir();
+        write_file(&dir, "d.txt", "x = 1\r\ny = 2\r\nz\r\nx = 1\r\ny = 2\r\n").unwrap();
+        let err = edit_file(&dir, "d.txt", &[chunk("x = 1\ny = 2", "q", false)]).unwrap_err().to_string();
+        assert!(err.contains("2 times"), "{err}");
+        edit_file(&dir, "d.txt", &[chunk("x = 1\ny = 2", "q", true)]).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("d.txt")).unwrap(), "q\r\nz\r\nq\r\n");
+    }
+
+    #[test]
+    fn a_byte_order_mark_neither_hides_line_one_nor_is_lost() {
+        let dir = tempdir();
+        write_file(&dir, "p.cs", "\u{feff}using A;\r\nusing B;\r\nclass C {}\r\n").unwrap();
+        edit_file(&dir, "p.cs", &[chunk("using A;\nusing B;", "using A;\nusing B;\nusing D;", false)]).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("p.cs")).unwrap(), "\u{feff}using A;\r\nusing B;\r\nusing D;\r\nclass C {}\r\n");
+    }
+
+    #[test]
+    fn a_huge_limit_reads_to_the_end_instead_of_overflowing() {
+        let dir = tempdir();
+        write_file(&dir, "l.txt", "one\ntwo\n").unwrap();
+        assert!(read_file(&dir, "l.txt", 1, usize::MAX).unwrap().contains("two"));
+    }
 
     #[test]
     fn read_write_edit_roundtrip() {
