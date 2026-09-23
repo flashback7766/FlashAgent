@@ -367,7 +367,7 @@ impl ToolExec for BuiltinTools {
             },
             ToolSpec {
                 name: "edit_file".into(),
-                description: "Replace exact old_string matches in a file. For several files pass files instead of path and edits (up to 20); all apply or none do".into(),
+                description: "Replace exact old_string matches in a file; new_string replaces old_string whole, so to insert a line keep its neighbour in new_string too. For several files pass files instead of path and edits (up to 20); all apply or none do".into(),
                 parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"old_string": {"type": "string"}, "new_string": {"type": "string"}, "replace_all": {"type": "boolean"}}, "required": ["old_string", "new_string"]}}, "files": {"type": "array", "description": "Several files changed as one change", "items": {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"old_string": {"type": "string"}, "new_string": {"type": "string"}, "replace_all": {"type": "boolean"}}, "required": ["old_string", "new_string"]}}}, "required": ["path", "edits"]}}}, "required": ["header"]}"#.into(),
             },
             ToolSpec {
