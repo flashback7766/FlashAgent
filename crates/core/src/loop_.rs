@@ -197,6 +197,7 @@ impl AgentLoop {
         let mut output_tokens: i64 = 0;
         let started = Instant::now();
         let mut stall_nudges: usize = 0;
+        let mut promise_nudges: usize = 0;
         // A stalled scratchpad reply and the nudge answering it: sent with the next
         // request only, never stored.
         let mut transient: Vec<ChatMessage> = Vec::new();
@@ -443,6 +444,14 @@ impl AgentLoop {
                     continue;
                 }
 
+                // "I'll add the comment." and nothing more: a small model often ends its
+                // turn on the announcement. Once per turn it is asked to make the call.
+                if !is_scratchpad && promise_nudges < 1 && !specs.is_empty() && announces_a_tool_call(&assistant_text) {
+                    promise_nudges += 1;
+                    transient = history.pop().into_iter().chain([ChatMessage::user(PROMISE_NUDGE)]).collect();
+                    continue;
+                }
+
                 if is_scratchpad || assistant_text.trim().is_empty() {
                     let fallback_source = if assistant_text.trim().is_empty() {
                         &assistant_reasoning
@@ -568,6 +577,33 @@ fn synth_call_id() -> String {
 
 /// Sent when the model ended its turn on thinking alone.
 const STALL_NUDGE: &str = "Please provide your direct, final answer to my request now. Do not repeat the thinking process; output only your final response.";
+
+/// Sent when the model announced a tool call and ended its turn without it.
+const PROMISE_NUDGE: &str = "You said what you would do next but did not do it. Make that tool call now.";
+
+/// Whether a reply ends by saying what the model is about to do, rather than
+/// with an answer: its last sentence is "I'll ..." or "Let me ...", in English
+/// or Russian. Closings like "let me know" and questions are not promises.
+pub fn announces_a_tool_call(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || text.ends_with('?') {
+        return false;
+    }
+    let body = text.trim_end_matches(['.', ':', '\u{2026}', '!']);
+    // Sentences end at a stop followed by a space: "tasks.py" is not one.
+    let start = [". ", "! ", "? ", "\n"].iter().filter_map(|sep| body.rfind(sep).map(|i| i + sep.len())).max().unwrap_or(0);
+    let last = body[start..].trim().trim_start_matches(['*', '#', '-', '>', ' ']).to_lowercase();
+    const CLOSINGS: [&str; 7] = ["let me know", "if you", "happy to", "feedback", "wait for", "дайте знать", "если "];
+    if CLOSINGS.iter().any(|c| last.contains(c)) {
+        return false;
+    }
+    const OPENINGS: [&str; 20] = [
+        "i'll ", "i will ", "let me ", "let's ", "i'm going to ", "i am going to ", "now i'll ", "next, i'll ",
+        "next i'll ", "first, i'll ", "first i'll ", "now let me ", "now, let me ", "i need to ", "сейчас ",
+        "давай", "теперь ", "далее ", "сначала ", "я сейчас ",
+    ];
+    OPENINGS.iter().any(|o| last.starts_with(o))
+}
 
 /// Per reply, before what there is stands as the answer.
 const MAX_CONTINUATIONS: usize = 3;
@@ -1291,6 +1327,42 @@ mod tests {
                                  fn main() {}";
         assert!(!is_pure_thinking_scratchpad(steps_with_answer));
         assert!(!is_pure_thinking_scratchpad("Direct answer without thinking"));
+    }
+
+    #[test]
+    fn an_announced_call_that_never_came_is_asked_for_once() {
+        let promised = text_turn("I'll add a doc comment to the add function in src/lib.rs.");
+        let llm = RecordingLlm::new(vec![promised, tool_turn("shell", "c1"), text_turn("Done.")]);
+        let tools = MockTools::new();
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let (history, done) = run_loop(&l, &llm, &tools, |_| {});
+        assert!(matches!(done, DoneReason::Completed));
+        assert_eq!(tools.calls.lock().unwrap().len(), 1, "the promised call was never made");
+        let requests = llm.requests.lock().unwrap();
+        assert!(requests[1].last().unwrap().content.contains("Make that tool call now"));
+        // The nudge is not kept.
+        assert!(history.iter().all(|m| m.content != PROMISE_NUDGE));
+    }
+
+    #[test]
+    fn what_counts_as_a_promise() {
+        for yes in [
+            "I'll read tasks.py to see what it does.",
+            "The config is fine.\n\nLet me run the tests:",
+            "**Next step**\nNow I'll edit the parser.",
+            "Сейчас прочитаю файл.",
+        ] {
+            assert!(announces_a_tool_call(yes), "{yes:?}");
+        }
+        for no in [
+            "The project is a to-do list. Start with tasks.py.",
+            "Done. Let me know if you want more.",
+            "Should I also update the tests?",
+            "I'll wait for your feedback.",
+            "",
+        ] {
+            assert!(!announces_a_tool_call(no), "{no:?}");
+        }
     }
 
     #[test]
