@@ -1,6 +1,6 @@
 //! Settings screen (`/settings`, or Tab on empty input).
 
-use flashagent_core::{AppConfig, BackendPreset, PersonalityTrait, SamplingPreset};
+use flashagent_core::{AppConfig, BackendPreset, PersonalityTrait};
 use crossterm::event::{KeyCode, KeyModifiers};
 use crate::{LineKind, RenderLine};
 
@@ -15,7 +15,7 @@ pub enum SettingsAction {
     /// The F4 effort menu.
     OpenEffortMenu,
     OpenWizard,
-    /// The F5 sampling menu.
+    /// The sampling menu (advanced).
     OpenSamplingMenu,
     CheckUpdatesNow,
     OpenMcpMenu,
@@ -168,16 +168,14 @@ impl SettingsView {
         SettingsTab::Aesthetics => vec![
             ("Swift Mascot", if self.config.show_mascot { "Enabled (animated)".into() } else { "Disabled".into() }),
             ("Developer Tips", if self.config.show_tips { "Enabled (rotating deck)".into() } else { "Disabled".into() }),
-            ("TTFT & Prefill Speed", if self.config.show_ttft { "Enabled (lightning badge)".into() } else { "Disabled".into() }),
-            ("Token Counters", if self.config.show_tokens { "Enabled (prompt/gen count)".into() } else { "Disabled".into() }),
+            ("Prefill Speed", if self.config.show_ttft { "Enabled (TTFT and t/s after a turn starts)".into() } else { "Disabled".into() }),
+            ("Generation Speed", if self.config.show_tokens { "Enabled (t/s while the model writes)".into() } else { "Disabled".into() }),
             ("Clipboard Toasts", if self.config.show_toasts { "Enabled".into() } else { "Disabled".into() }),
             ("Animations", if self.config.animations { "Enabled (sweeps, pulses, unfolding panels)".into() } else { "Reduced (spinners only)".into() }),
             ("Colour Theme", self.config.color_theme.label().to_string()),
         ],
         SettingsTab::Reasoning => vec![
             ("Thinking Effort", self.config.thinking_effort.clone()),
-            ("Sampling Preset", self.config.sampling_preset.label().into()),
-            ("Temperature", format!("{:.2}", self.config.temperature)),
             ("Context Alert", if self.config.context_warn_threshold > 0 { format!("Warn at {}%", self.config.context_warn_threshold) } else { "Disabled".into() }),
             ("Auto-Compact History", if self.config.auto_compact_context {
                 // Zero follows the window; "0%" would read as "always".
@@ -188,6 +186,8 @@ impl SettingsView {
             } else { "Disabled".into() }),
             ("Web Tools", if self.config.web_tools { "Enabled (web_fetch, web_search)".into() } else { "Disabled".into() }),
             ("Network Retries", format!("{} retries on connection failure", self.config.network_retries)),
+            // Last, and for those who know what the numbers do.
+            ("Sampling (advanced)", format!("{} · temperature {:.2}", self.config.sampling_preset.label(), self.config.temperature)),
         ],
         SettingsTab::Goal => vec![
             ("Step Limit", match self.config.goal_max_steps {
@@ -405,32 +405,27 @@ impl SettingsView {
             },
             SettingsTab::Reasoning => match self.selected_index {
                 0 => SettingsAction::OpenEffortMenu,
-                1 => SettingsAction::OpenSamplingMenu,
-                2 => {
-                    self.adjust_temperature(0.10);
-                    self.is_dirty = true;
-                    SettingsAction::None
-                }
-                3 => {
+                1 => {
                     self.cycle_warn_threshold();
                     self.is_dirty = true;
                     SettingsAction::None
                 }
-                4 => {
+                2 => {
                     self.config.auto_compact_context = !self.config.auto_compact_context;
                     self.is_dirty = true;
                     SettingsAction::None
                 }
-                5 => {
+                3 => {
                     self.config.web_tools = !self.config.web_tools;
                     self.is_dirty = true;
                     SettingsAction::None
                 }
-                6 => {
+                4 => {
                     self.cycle_network_retries();
                     self.is_dirty = true;
                     SettingsAction::None
                 }
+                5 => SettingsAction::OpenSamplingMenu,
                 _ => SettingsAction::None,
             },
             SettingsTab::Tools => match self.selected_index {
@@ -492,12 +487,11 @@ impl SettingsView {
             },
             SettingsTab::Reasoning => match self.selected_index {
                 0 => self.cycle_effort(),
-                1 => self.cycle_sampling(),
-                2 => self.adjust_temperature(if delta > 0 { 0.05 } else { -0.05 }),
-                3 => self.cycle_warn_threshold(),
-                4 => self.config.auto_compact_context = !self.config.auto_compact_context,
-                5 => self.config.web_tools = !self.config.web_tools,
-                6 => self.cycle_network_retries(),
+                1 => self.cycle_warn_threshold(),
+                2 => self.config.auto_compact_context = !self.config.auto_compact_context,
+                3 => self.config.web_tools = !self.config.web_tools,
+                4 => self.cycle_network_retries(),
+                5 => self.cycle_sampling(),
                 _ => {}
             },
             SettingsTab::Tools => {
@@ -562,13 +556,6 @@ impl SettingsView {
     fn cycle_sampling(&mut self) {
         let next = self.config.sampling_preset.next();
         next.apply_to_config(&mut self.config);
-        self.is_dirty = true;
-    }
-
-    fn adjust_temperature(&mut self, delta: f32) {
-        let new_temp = (self.config.temperature + delta).clamp(0.0, 2.0);
-        self.config.temperature = (new_temp * 100.0).round() / 100.0;
-        self.config.sampling_preset = SamplingPreset::Custom;
         self.is_dirty = true;
     }
 

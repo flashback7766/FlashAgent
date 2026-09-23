@@ -100,21 +100,6 @@ pub fn shimmer(text: &str, t: u64, period_ms: u64, base: Rgb, glow: Rgb) -> Stri
     out
 }
 
-/// Oldest first, scaled to the largest value.
-pub fn sparkline(values: &[f64]) -> String {
-    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let max = values.iter().copied().fold(0.0_f64, f64::max);
-    values
-        .iter()
-        .map(|v| {
-            if max <= 0.0 {
-                BARS[0]
-            } else {
-                BARS[((v / max) * (BARS.len() - 1) as f64).round().clamp(0.0, 7.0) as usize]
-            }
-        })
-        .collect()
-}
 
 /// 530 ms on, 530 ms off. Always lit when motion is off.
 pub fn blink_on(t: u64) -> bool {
@@ -161,12 +146,6 @@ mod tests {
         assert_eq!(progress(100, 400, 200), 1.0);
     }
 
-    #[test]
-    fn sparkline_scales_to_the_tallest_value() {
-        assert_eq!(sparkline(&[0.0, 5.0, 10.0]), "▁▅█");
-        assert_eq!(sparkline(&[0.0, 0.0]), "▁▁");
-        assert_eq!(sparkline(&[]), "");
-    }
 
     #[test]
     fn colours_mix_linearly_and_clamp() {

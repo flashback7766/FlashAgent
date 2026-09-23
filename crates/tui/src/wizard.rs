@@ -1,6 +1,5 @@
 //! First-run setup wizard: backend, API key, model, behaviour, sampling.
 
-use std::io::Write;
 use flashagent_core::{AppConfig, BackendPreset, PermissionMode};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 
@@ -537,24 +536,24 @@ impl SetupWizard {
             }
         }
 
-        // Step 4: sampling and launch.
+        // Step 4: a sampling preset and launch. The numbers behind a preset are for
+        // those who look for them, in Settings → Reasoning → Sampling (advanced).
         if self.step == 4 {
-            let act = self.sampling.handle_key(code, mods);
-            match act {
-                crate::sampling::SamplingAction::Close => {
-                    self.step = 3;
-                    return None;
-                }
-                crate::sampling::SamplingAction::SaveAndClose => {
+            match code {
+                KeyCode::Esc => self.step = 3,
+                KeyCode::Enter => {
                     self.sampling.apply_to_config(&mut self.config);
                     self.config.setup_completed = true;
                     let _ = self.config.save();
                     return Some(true);
                 }
-                crate::sampling::SamplingAction::None => {
-                    return None;
+                KeyCode::Left | KeyCode::Right => {
+                    self.sampling.selected_index = 0;
+                    let _ = self.sampling.handle_key(code, mods);
                 }
+                _ => {}
             }
+            return None;
         }
 
         // Step 0 (presets) and step 3 (behaviour).
@@ -868,62 +867,18 @@ impl SetupWizard {
                 }
             }
             4 => {
-                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 5: Sampling Parameters & Launch\x1b[0m"));
-                lines.push(pad_row("\x1b[38;2;160;155;145mConfigure sampling preset and numeric parameters (direct digit input):\x1b[0m"));
+                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 5: Sampling Preset & Launch\x1b[0m"));
+                lines.push(pad_row("\x1b[38;2;160;155;145mHow the model samples. The preset suits most models; its numbers are in Settings \u{2192} Reasoning.\x1b[0m"));
                 lines.push(pad_row(""));
 
-                let is_preset_sel = self.sampling.selected_index == 0;
-                let ptr0 = if is_preset_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
                 let preset_val = format!("[ {} ]", self.sampling.preset.label());
-                let (l0, v0) = if is_preset_sel {
-                    (
-                        format!("\x1b[1;38;2;240;235;225m{:<18}\x1b[0m", "Preset"),
-                        format!("\x1b[1;38;2;225;175;95m{:<22}\x1b[0m \x1b[38;2;135;130;125m(←/→ to cycle preset)\x1b[0m", preset_val),
-                    )
-                } else {
-                    (
-                        format!("\x1b[38;2;160;155;145m{:<18}\x1b[0m", "Preset"),
-                        format!("\x1b[38;2;200;195;185m{:<22}\x1b[0m", preset_val),
-                    )
-                };
-                lines.push(pad_row(&format!("{ptr0} {l0} {v0}")));
+                lines.push(pad_row(&format!(
+                    "\x1b[1;38;2;225;175;95m▸\x1b[0m \x1b[1;38;2;240;235;225m{:<18}\x1b[0m \x1b[1;38;2;225;175;95m{:<22}\x1b[0m",
+                    "Preset", preset_val
+                )));
 
-                let fields = [
-                    (1, "Temperature", &self.sampling.temp_buf, "0.00..2.00 (coding: 0.60, mtp: 0.30, chat: 0.80, precise: 0.10)"),
-                    (2, "Top P", &self.sampling.top_p_buf, "0.00..1.00 (coding: 0.95, mtp: 0.90, precise: 0.75)"),
-                    (3, "Top K", &self.sampling.top_k_buf, "0..500     (coding: 20, mtp: 40, chat: 50, precise: 10)"),
-                    (4, "Repeat Penalty", &self.sampling.repeat_penalty_buf, "0.00..2.00 (coding: 1.00, mtp: 1.02, gemma: 1.08, chat: 1.10)"),
-                    (5, "Presence Penalty", &self.sampling.presence_penalty_buf, "-2.00..2.00 (chat: 0.10, mtp-chat: 0.05, default: 0.00)"),
-                    (6, "Min P", &self.sampling.min_p_buf, "0.00..1.00 (mtp-code: 0.05, mtp: 0.03, default: 0.00)"),
-                ];
-
-                for (idx, label, buf, range_hint) in fields {
-                    let is_sel = self.sampling.selected_index == idx;
-                    let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
-                    let display_val = if is_sel { format!("{}█", buf) } else { buf.to_string() };
-                    let (label_styled, val_styled) = if is_sel {
-                        (
-                            format!("\x1b[1;38;2;240;235;225m{:<18}\x1b[0m", label),
-                            format!("\x1b[1;38;2;225;175;95m{:<10}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", display_val, range_hint),
-                        )
-                    } else {
-                        (
-                            format!("\x1b[38;2;160;155;145m{:<18}\x1b[0m", label),
-                            format!("\x1b[38;2;200;195;185m{:<10}\x1b[0m \x1b[38;2;100;95;90m{}\x1b[0m", display_val, range_hint),
-                        )
-                    };
-                    lines.push(pad_row(&format!("{ptr} {label_styled} {val_styled}")));
-                }
-
-                let is_apply_sel = self.sampling.selected_index == 7;
-                let ptr7 = if is_apply_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
-                let apply_styled = if is_apply_sel {
-                    "\x1b[1;38;2;145;205;140m[ Save & Launch FlashAgent (Enter) ]\x1b[0m"
-                } else {
-                    "\x1b[38;2;160;155;145m[ Save & Launch FlashAgent (Enter) ]\x1b[0m"
-                };
                 lines.push(pad_row(""));
-                lines.push(pad_row(&format!("{ptr7} {apply_styled}")));
+                lines.push(pad_row("  \x1b[1;38;2;145;205;140m[ Save & Launch FlashAgent (Enter) ]\x1b[0m"));
             }
             _ => {}
         }
@@ -951,7 +906,7 @@ impl SetupWizard {
                 lines.push(pad_row("\x1b[38;2;135;130;125m↑/↓ / 1-4 — select mode · enter — next · esc — back\x1b[0m"));
             }
             4 => {
-                lines.push(pad_row("\x1b[38;2;135;130;125mtype digits/./- · ←/→ adjust · ↑/↓ navigate · Enter launch · Esc back\x1b[0m"));
+                lines.push(pad_row("\x1b[38;2;135;130;125m←/→ preset · enter — launch · esc — back\x1b[0m"));
             }
             _ => {}
         }
@@ -984,17 +939,10 @@ pub async fn run_wizard_channel(
         wizard.apply_discovered_models(disc);
     }
 
+    let mut painter = crate::screen::Screen::new();
     let completed = loop {
         let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
-        let lines = wizard.render(term_w as usize);
-
-        let mut buffer = String::from("\x1b[H\x1b[2J\r\n");
-        for line in lines {
-            buffer.push_str(&line);
-            buffer.push_str("\r\n");
-        }
-        let _ = stdout.write_all(buffer.as_bytes());
-        let _ = stdout.flush();
+        crate::screen::paint_page(&mut painter, &wizard.render(term_w as usize), true);
 
         tokio::select! {
             Some(ev) = rx.recv() => {
@@ -1030,9 +978,9 @@ pub async fn run_wizard_channel(
         *config = wizard.config;
     }
 
-    let _ = stdout.write_all(b"\x1b[H\x1b[2J");
+    // The app repaints every row over what is left; raw mode stays on, run_app
+    // is still active.
     let _ = execute!(stdout, cursor::Show);
-    // Raw mode stays on: run_app is still active.
     Ok(completed)
 }
 
@@ -1055,17 +1003,10 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
         wizard.apply_discovered_models(disc);
     }
 
+    let mut painter = crate::screen::Screen::new();
     let completed = loop {
         let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
-        let lines = wizard.render(term_w as usize);
-
-        let mut buffer = String::from("\x1b[H\x1b[2J\r\n");
-        for line in lines {
-            buffer.push_str(&line);
-            buffer.push_str("\r\n");
-        }
-        let _ = stdout.write_all(buffer.as_bytes());
-        let _ = stdout.flush();
+        crate::screen::paint_page(&mut painter, &wizard.render(term_w as usize), true);
 
         if crossterm::event::poll(std::time::Duration::from_millis(50))? {
             match crossterm::event::read()? {

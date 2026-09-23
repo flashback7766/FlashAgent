@@ -19,6 +19,7 @@ pub mod goal;
 pub mod mcp_view;
 pub mod prefill;
 pub mod sampling;
+pub mod screen;
 pub mod select;
 pub mod settings;
 pub mod startup;
@@ -172,9 +173,19 @@ impl ChatLine {
 #[derive(Default, Clone)]
 struct SettledRenderCache {
     lines: SettledLines,
+    /// Beside `lines`, see `RowOwners`.
+    owners: std::sync::Arc<Vec<Option<usize>>>,
     boundary: usize,
     width: usize,
     expansion: ReasoningExpansion,
+}
+
+/// For each row of the last `render_split`, settled then live, the line a click
+/// on it opens or folds: a thought or a tool call. `None` for every other row.
+#[derive(Default)]
+struct RowOwners {
+    settled: std::sync::Arc<Vec<Option<usize>>>,
+    live: Vec<Option<usize>>,
 }
 
 /// Shared, not copied: a long session has tens of thousands of rows, and
@@ -195,6 +206,7 @@ pub struct ChatView {
     needs_reprint: bool,
     /// Settled lines rendered once, not re-parsed every frame.
     settled_cache: Mutex<SettledRenderCache>,
+    row_owners: Mutex<RowOwners>,
 }
 
 pub fn format_explore(is_running: bool, files: usize, searches: usize, last_target: &str) -> String {
@@ -861,11 +873,13 @@ impl ChatView {
         let cached_settled_match = {
             let cache = self.settled_cache.lock();
             if cache.boundary == boundary && cache.width == width && cache.expansion == expansion && !cache.lines.is_empty() {
-                Some(cache.lines.clone())
+                Some((cache.lines.clone(), cache.owners.clone()))
             } else {
                 None
             }
         };
+        // Where each line's rows start, in settled or live, for `RowOwners`.
+        let mut starts: Vec<(bool, usize, usize)> = Vec::new();
 
         let push_reasoning = |target: &mut Vec<RenderLine>, text: &str, secs: Option<u64>, is_streaming: bool, is_expanded: bool, stage: &str| {
             if !is_expanded {
@@ -1003,8 +1017,10 @@ impl ChatView {
                 }
             }
             previous_block = Some(block);
+            starts.push((i < boundary, target.len(), i));
             let is_last_turn = i >= last_user_idx;
-            let is_expanded = expansion.all || (expansion.last && is_last_turn);
+            // A card the user opened or folded by clicking keeps that.
+            let is_expanded = line.is_expanded.unwrap_or(expansion.all || (expansion.last && is_last_turn));
 
             if line.kind == LineKind::User {
                 current_turn_user_idx = i;
@@ -1073,8 +1089,7 @@ impl ChatView {
             }
 
             if line.kind == LineKind::Tool || line.kind == LineKind::ToolError {
-                let effective_expanded = line.is_expanded.unwrap_or(is_expanded);
-                if effective_expanded {
+                if is_expanded {
                     if !line.tool_calls.is_empty() {
                         for call in &line.tool_calls {
                             let card_lines = render_single_tool_card(call, width);
@@ -1144,21 +1159,61 @@ impl ChatView {
                 target.push((line.kind, text));
             }
         }
-        let settled = match cached_settled_match {
+        let owners_of = |rows: &[RenderLine], settled_rows: bool| {
+            let mut owners = vec![None; rows.len()];
+            let marks: Vec<(usize, usize)> = starts.iter().filter(|(s, ..)| *s == settled_rows).map(|(_, at, i)| (*at, *i)).collect();
+            for (k, (at, i)) in marks.iter().enumerate() {
+                let end = marks.get(k + 1).map_or(rows.len(), |(next, _)| *next);
+                let foldable = matches!(self.lines[*i].kind, LineKind::Reasoning | LineKind::Tool | LineKind::ToolError | LineKind::Assistant);
+                for row in *at..end.min(rows.len()) {
+                    // Only the rows of the thought or the call, not an answer beside it.
+                    if foldable && matches!(rows[row].0, LineKind::Reasoning | LineKind::Tool | LineKind::ToolError) && !rows[row].1.trim().is_empty() {
+                        owners[row] = Some(*i);
+                    }
+                }
+            }
+            owners
+        };
+        let live_owners = owners_of(&live, false);
+        let (settled, settled_owners) = match cached_settled_match {
             Some(cached) => cached,
             None => {
+                let owners = std::sync::Arc::new(owners_of(&settled, true));
                 let settled = std::sync::Arc::new(settled);
                 if boundary > 0 {
                     let mut cache = self.settled_cache.lock();
                     cache.lines = settled.clone();
+                    cache.owners = owners.clone();
                     cache.boundary = boundary;
                     cache.width = width;
                     cache.expansion = expansion;
                 }
-                settled
+                (settled, owners)
             }
         };
+        *self.row_owners.lock() = RowOwners { settled: settled_owners, live: live_owners };
         (settled, live)
+    }
+
+    /// Opens or folds the thought or tool call drawn on `row` (settled rows, then
+    /// live, as the last `render_split` returned them). False when that row is
+    /// neither.
+    pub fn toggle_row(&mut self, row: usize, expansion: impl Into<ReasoningExpansion>) -> bool {
+        let expansion = expansion.into();
+        let owner = {
+            let owners = self.row_owners.lock();
+            match row.checked_sub(owners.settled.len()) {
+                None => owners.settled.get(row).copied().flatten(),
+                Some(live_row) => owners.live.get(live_row).copied().flatten(),
+            }
+        };
+        let Some(i) = owner else { return false };
+        let last_user_idx = self.lines.iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0);
+        let Some(line) = self.lines.get_mut(i) else { return false };
+        let shown = line.is_expanded.unwrap_or(expansion.all || (expansion.last && i >= last_user_idx));
+        line.is_expanded = Some(!shown);
+        *self.settled_cache.lock() = SettledRenderCache::default();
+        true
     }
 
     /// `❯` prefix on user lines.
@@ -1734,6 +1789,36 @@ mod tests {
         assert!(all_exp.iter().any(|(_, t)| t.contains("details of turn 2")));
     }
 
+    #[test]
+    fn a_click_opens_one_thought_and_leaves_the_others() {
+        let mut v = ChatView::default();
+        for n in 1..=2 {
+            v.push_user(&format!("msg {n}"));
+            v.on_event(&LoopEvent::ReasoningDelta(format!("Thinking Process:\n1. Plan: step {n}\ndetails of turn {n}")));
+            v.on_event(&LoopEvent::TurnDelta(format!("answer {n}")));
+            v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
+        }
+        let rows = |v: &ChatView| {
+            let (settled, live) = v.render_split(200, ReasoningExpansion::none());
+            settled.iter().chain(live.iter()).map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>()
+        };
+        let before = rows(&v);
+        let first_thought = before.iter().position(|t| t.contains("Thought:")).expect("a folded thought");
+        // The answer next to it is not a card.
+        let answer = before.iter().position(|t| t.contains("answer 1")).unwrap();
+        assert!(!v.toggle_row(answer, ReasoningExpansion::none()));
+
+        assert!(v.toggle_row(first_thought, ReasoningExpansion::none()));
+        let after = rows(&v);
+        assert!(after.iter().any(|t| t.contains("details of turn 1")), "{after:#?}");
+        assert!(!after.iter().any(|t| t.contains("details of turn 2")), "the other thought opened too");
+
+        // A second click folds it again.
+        let opened = after.iter().position(|t| t.contains("details of turn 1")).unwrap();
+        assert!(v.toggle_row(opened, ReasoningExpansion::none()));
+        assert!(!rows(&v).iter().any(|t| t.contains("details of turn 1")));
+    }
+
     #[tokio::test]
     async fn tui_gate_roundtrip() {
         let gate = TuiGate::new();
@@ -1947,24 +2032,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_thinking_face_never_changes_width() {
-        let mut seen = std::collections::HashSet::new();
-        for tick in 0..200usize {
-            let face = thinking_face(tick);
-            assert_eq!(visible_width(face), 5, "status line would jitter: {face}");
-            seen.insert(face);
-        }
-        assert!(seen.len() > 1, "the face must actually animate");
-        // Repaints are event-driven, so a one-frame blink would be invisible.
-        let cycle: Vec<&str> = (0..24).map(thinking_face).collect();
-        let shortest = cycle
-            .chunk_by(|a, b| a == b)
-            .map(|run| run.len())
-            .min()
-            .unwrap_or(0);
-        assert!(shortest >= 4, "an expression lasting {shortest} frames would be missed");
-    }
 
     #[test]
     fn a_tool_line_reads_as_the_model_explained_it() {

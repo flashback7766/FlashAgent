@@ -168,17 +168,6 @@ pub(crate) fn mascot_color(px: u8, breath: u8, offline: bool) -> Option<(u8, u8,
     Some(color)
 }
 
-/// For the status line during a turn, since the welcome card is gone by then.
-/// Always five columns, so the line does not jitter. `phase` is 80 ms of wall
-/// clock, not UI ticks (repaints follow events), and each expression holds a
-/// few hundred ms so a blink is not missed.
-pub fn thinking_face(phase: usize) -> &'static str {
-    match phase % 24 {
-        20..=23 => "(-_-)",
-        16..=19 => "(^_-)",
-        _ => "(•_•)",
-    }
-}
 
 /// Blinks every ~4 s, breathes continuously. Every line is exactly 16 columns,
 /// transparent pixels included, so centring keeps rows aligned.
@@ -442,14 +431,14 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
             format!(" {M3_MUT}Context: {RESET} {M3_ICE}{ctx_val}{RESET}"),
             format!(" {M3_MUT}Mode:    {RESET} {M3_LGT}{mode_val}{RESET}"),
             format!(" {M3_MUT}Memory:  {RESET} {M3_TXT}{memory_docs}{RESET} {M3_MUT}active document(s){RESET}"),
-            format!(" {M3_MUT}Config:  {RESET} {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET} {M3_MUT}·{RESET} {M3_ICE}F5{RESET} {M3_MUT}sampling{RESET}"),
+            format!(" {M3_MUT}Config:  {RESET} {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET}"),
         ];
 
         let right_bot = [
             format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}for autonomy{RESET}"),
-            format!(" {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET} {M3_MUT}·{RESET} {M3_ICE}Esc Esc{RESET} {M3_MUT}quit{RESET}"),
+            format!(" {M3_ICE}Ctrl+K{RESET} {M3_MUT}commands{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+D{RESET} {M3_MUT}quit{RESET}"),
             format!(" {M3_ICE}F1{RESET} {M3_MUT}context{RESET} {M3_MUT}·{RESET} {M3_ICE}F2{RESET} {M3_MUT}verbose{RESET} {M3_MUT}·{RESET} {M3_ICE}F3{RESET} {M3_MUT}model{RESET}"),
-            format!(" {M3_ICE}F4{RESET} {M3_MUT}effort{RESET} {M3_MUT}·{RESET} {M3_ICE}F5{RESET} {M3_MUT}sampling{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+V{RESET} {M3_MUT}paste image{RESET}"),
+            format!(" {M3_ICE}F4{RESET} {M3_MUT}effort{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+V{RESET} {M3_MUT}paste image{RESET}"),
             format!(" {M3_ICE}Ctrl+R{RESET} {M3_MUT}regen{RESET} {M3_MUT}·{RESET} {M3_ICE}/help{RESET} {M3_MUT}or{RESET} {M3_ICE}/skills{RESET} {M3_MUT}for more{RESET}"),
         ];
 
@@ -512,15 +501,15 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
             let hints = fit_parts(
                 &[
                     ("Tab settings".into(), format!("{M3_ICE}Tab{RESET} {M3_MUT}settings{RESET}")),
-                    ("Esc Esc quit".into(), format!("{M3_ICE}Esc Esc{RESET} {M3_MUT}quit{RESET}")),
-                    ("F1..F5 hotkeys".into(), format!("{M3_ICE}F1..F5{RESET} {M3_MUT}hotkeys{RESET}")),
+                    ("Ctrl+K commands".into(), format!("{M3_ICE}Ctrl+K{RESET} {M3_MUT}commands{RESET}")),
+                    ("Ctrl+D quit".into(), format!("{M3_ICE}Ctrl+D{RESET} {M3_MUT}quit{RESET}")),
                 ],
                 &format!(" {M3_MUT}\u{b7}{RESET} "),
                 inner_w.saturating_sub(2),
             );
             lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {hints}"), inner_w))));
         } else {
-            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal{RESET} {M3_MUT}·{RESET} {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET} {M3_MUT}·{RESET} {M3_ICE}Esc Esc{RESET} {M3_MUT}quit{RESET}"), inner_w))));
+            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+K{RESET} {M3_MUT}commands{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+D{RESET} {M3_MUT}quit{RESET}"), inner_w))));
         }
         lines.push((LineKind::System, bot));
     }

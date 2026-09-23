@@ -1,7 +1,6 @@
 //! Terminal client: wires backend, loop, tools and permissions in-process and
 //! renders through `flashagent_tui`.
 
-use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -168,6 +167,10 @@ async fn main() -> Result<()> {
     }
 
     use std::io::IsTerminal;
+    // The screens before the chat (setup, release notes, trust) wear the chosen
+    // look too.
+    flashagent_tui::theme::set(config.color_theme);
+    flashagent_tui::anim::set_enabled(config.animations);
     // Carried into the first conversation: the screen it was printed on is about
     // to be cleared.
     let mut first_run_verdict: Option<String> = None;
@@ -183,8 +186,9 @@ async fn main() -> Result<()> {
         ran_setup = true;
     }
 
-    // Once, after the binary moved forward, show what arrived.
-    if std::io::stdout().is_terminal() {
+    // Once, after the binary moved forward, show what arrived. Never right after
+    // the first setup: there is nothing new to someone who just arrived.
+    if std::io::stdout().is_terminal() && !ran_setup {
         let now = flashagent_svc::updater::current_version();
         let news = match config.last_seen_version.as_deref() {
             Some(seen) => flashagent_tui::whatsnew::since(Some(seen), now),
@@ -370,6 +374,7 @@ async fn main() -> Result<()> {
 
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::cursor::Show,
@@ -426,9 +431,11 @@ async fn main() -> Result<()> {
         pending_discovery,
     })
     .await;
+    flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
+    // The frame may have hidden the cursor (a menu was open); the shell needs it back.
     let _ = crossterm::execute!(
         std::io::stdout(),
-        crossterm::cursor::MoveToColumn(0),
+        crossterm::cursor::Show,
         DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen
@@ -547,10 +554,6 @@ struct App {
     cwd_display: String,
     /// For the welcome card.
     memory_docs: usize,
-    /// Sampled a few times a second during a turn.
-    speed_history: Vec<f64>,
-    /// On the animation clock.
-    last_speed_sample: u64,
     /// Colour and time, on the animation clock.
     turn_flash: Option<(flashagent_tui::anim::Rgb, u64)>,
     overlay: Option<overlay::Overlay>,
@@ -566,11 +569,11 @@ struct App {
     /// Unprompted things (an update, compaction) go on the line under the input.
     background: Option<BackgroundNotice>,
     channel_switch: Option<ChannelSwitch>,
-    /// A second press soon after quits.
-    last_esc: Option<std::time::Instant>,
     uninstall_confirm: bool,
     /// So a new turn can stop it.
     recap_task: Option<tokio::task::JoinHandle<()>>,
+    /// When the recap of the last turn is to be written, if the user stays quiet.
+    recap_due: Option<std::time::Instant>,
     /// The cached prefix as far as the app knows (see `warm.rs`), and the warm-up
     /// request sending one.
     cache_warm_key: Option<u64>,
@@ -935,6 +938,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     }
 
     let started_at = std::time::Instant::now();
+    const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+    let mut last_draw = started_at;
     let mut app = App {
         question_ui_state: QuestionUiState::default(),
         history: vec![ChatMessage::system(system_prompt_text)],
@@ -965,8 +970,6 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         prompt_config: system_prompt_config,
         cwd_display: cwd_display.clone(),
         memory_docs,
-        speed_history: Vec::new(),
-        last_speed_sample: 0,
         turn_flash: None,
         overlay: None,
         last_tool_name: None,
@@ -979,9 +982,9 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         renderer: Renderer::new(),
         background: None,
         channel_switch: None,
-        last_esc: None,
         uninstall_confirm: false,
         recap_task: None,
+        recap_due: None,
         cache_warm_key: None,
         warm_task: None,
         pending_resume: None,
@@ -1104,8 +1107,6 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                     session_id = id;
                     open_snapshots(perm, &session_id, &cwd);
                     app.latest_suggestion = None;
-                    app.renderer.printed_settled = 0;
-                    app.renderer.prev_expansion = None;
                     update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
                     app.notice(format!("Resumed session '{session_id}' ({restored} messages loaded)."));
                     app.warm_prompt_cache(&source, perm, &memory_block);
@@ -1113,13 +1114,6 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 Err(why) => app.notice(why),
             }
         }
-        // LM Studio on this machine logs what each call really processed; on another
-        // host that log is not ours to read.
-        app.token_tracker.lm_studio_local = source
-            .discovery()
-            .is_some_and(|d| d.kind == flashagent_llm::thinking::ServerKind::LmStudio)
-            && flashagent_core::url_host(&app.config.backend_url)
-                .is_some_and(|h| h == "localhost" || h.starts_with("127.") || h == "::1");
         // The face shows whether the model server answered. Discovery reruns,
         // so starting the server later turns it around on its own.
         let mascot_mood = if source.discovery().is_some() {
@@ -1149,7 +1143,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         }
         // Two tip rows only when the window can spare them.
         let tip_rows = if term_h >= 20 { 2 } else { 1 };
-        let tip_lines = app.tip_animator.render_lines(app.tick_n, term_w as usize, tip_rows);
+        let tip_lines = app.tip_animator.render_lines(term_w as usize, tip_rows);
         // A macro, not a function: it borrows this frame's own values.
         macro_rules! loop_ctx {
             () => {
@@ -1200,9 +1194,13 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
             }
         }
 
-        {
+        // A burst of events (a fast stream, a key held down) is drawn once rather
+        // than once per event, or the screen falls behind what it shows; never
+        // more than a frame late.
+        if rx.is_empty() || last_draw.elapsed() >= FRAME {
             let cx = loop_ctx!();
             app.draw(&cx, autocomplete.as_ref());
+            last_draw = std::time::Instant::now();
         }
 
         let ev = tokio::select! {
@@ -1284,7 +1282,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
             _ = tick.tick() => {
                 app.tick_n += 1;
                 app.tip_animator.tick();
-                app.sample_speed();
+                app.start_recap_if_due(&source, &tx);
                 if app.background.as_ref().is_some_and(BackgroundNotice::expired) {
                     app.background = None;
                     app.renderer.request_reprint();
@@ -1575,6 +1573,13 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                         MouseEventKind::ScrollDown => {
                             app.renderer.scroll_down(3);
                         }
+                        // A click on a thought or a tool call opens or folds that one alone.
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                            let expansion = ReasoningExpansion { all: app.all_expanded, last: app.last_expanded };
+                            if let Some(row) = app.renderer.chat_row_at(m.row) {
+                                app.chat.toggle_row(row, expansion);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1606,6 +1611,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 app.renderer.request_reprint();
             }
             UiEvent::Key(code, mods) => {
+                app.postpone_recap();
                 let mut cx = loop_ctx!();
                 let flow = match app.handle_overlay_key(&mut cx, code, mods).await {
                     Flow::Next => app.handle_key(&mut cx, code, mods).await,
@@ -1620,7 +1626,6 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         }
     }
 
-    app.renderer.clear_tail();
     Ok(finish!())
 }
 
@@ -2085,123 +2090,22 @@ mod tests {
 
 
     #[test]
-    fn test_token_tracker_initial_state() {
-        let tracker = TokenTracker::new("default".to_string());
-        assert_eq!(tracker.format_stats_width(120), None);
-    }
+    fn the_status_line_names_the_mode_and_what_the_turn_waits_on() {
+        let running = format_status_left(true, false, false, None, "Normal", "");
+        assert!(running.contains("[Normal]"), "{running}");
+        // The phase is in the composer; saying it again here was noise.
+        assert!(!running.contains("Generating"), "{running}");
+        assert!(!running.contains("Ready"), "{running}");
 
-    #[test]
-    fn test_token_tracker_turn_start_and_usage() {
-        let mut tracker = TokenTracker::new("default".to_string());
-        tracker.on_turn_start("default".to_string(), 17);
+        let idle = format_status_left(false, false, false, None, "Normal", "");
+        assert!(idle.contains("[Normal]") && idle.contains("Ready"), "{idle}");
 
-        let stats = tracker.format_stats_width(120).expect("should have stats");
-        assert!(stats.contains("17 prompt"));
+        let goal = format_status_left(true, true, false, Some("step 12/250 · 4.2k tok · 3m05s/1h0m"), "Autonomous", "");
+        assert!(goal.contains("[Goal: Autonomous]"), "{goal}");
+        assert!(goal.contains("step 12/250") && goal.contains("3m05s/1h0m"), "{goal}");
 
-        let usage = flashagent_llm::Usage {
-            prompt: Some(17),
-            completion: Some(25),
-            cached: None,
-            mtp: Some(flashagent_llm::MtpStats {
-                total_draft_tokens: 16,
-                accepted_draft_tokens: 13,
-                rejected_draft_tokens: 3,
-            }),
-        };
-        tracker.on_usage(&usage);
-        tracker.last_tg = Some(24.3);
-        tracker.on_finished();
-
-        let formatted = tracker.format_stats_width(120).expect("should format stats");
-        assert!(formatted.contains("17 prompt"));
-        assert!(formatted.contains("24.3 tg"));
-        assert!(formatted.contains("mtp: 81%"));
-    }
-
-    #[test]
-    fn test_token_tracker_mtp_omitted_when_not_applicable() {
-        let mut tracker = TokenTracker::new("default".to_string());
-        tracker.on_turn_start("default".to_string(), 4920);
-
-        let usage = flashagent_llm::Usage {
-            prompt: Some(4920),
-            completion: Some(100),
-            cached: None,
-            mtp: None,
-        };
-        tracker.on_usage(&usage);
-        tracker.last_tg = Some(15.2);
-        tracker.on_finished();
-
-        let formatted = tracker.format_stats_width(120).expect("should format stats");
-        assert!(formatted.contains("4.9K prompt"));
-        assert!(formatted.contains("15.2 tg"));
-        assert!(!formatted.contains("mtp:"));
-    }
-
-    #[test]
-    fn test_format_status_left_running_does_not_duplicate_metrics() {
-        let mut tracker = TokenTracker::new("default".to_string());
-        tracker.on_turn_start("default".to_string(), 4920);
-        let usage = flashagent_llm::Usage {
-            prompt: Some(4920),
-            completion: Some(100),
-            cached: None,
-            mtp: None,
-        };
-        tracker.on_usage(&usage);
-        tracker.last_tg = Some(44.4);
-        tracker.last_ttft = Some(std::time::Duration::from_millis(1770));
-
-        // While running: no duplicated prompt tokens or TTFT.
-        let status = format_status_left(true, false, false, None, "Normal", Some(&tracker), 80, "", 0);
-        assert!(status.contains("Generating response..."));
-        assert!(status.contains("[Normal]"));
-        assert!(!status.contains("4.9K"));
-        assert!(!status.contains("TTFT"));
-        assert!(!status.contains("44.4 tg"));
-
-        tracker.on_finished();
-        let status_done = format_status_left(false, false, false, None, "Normal", Some(&tracker), 80, "", 0);
-        assert!(status_done.contains("4.9K prompt"));
-        assert!(status_done.contains("TTFT 1.77s"));
-        assert!(status_done.contains("44.4 tg"));
-        assert!(!status_done.contains("Generating response..."));
-    }
-
-    #[test]
-    fn test_format_status_left_goal_active_modes() {
-        let tracker = TokenTracker::new("default".to_string());
-        let status_running = format_status_left(true, true, false, None, "Autonomous", Some(&tracker), 80, "", 0);
-        assert!(status_running.contains("[Goal: Autonomous]"));
-        assert!(status_running.contains("Generating response..."));
-
-        let status_ready = format_status_left(false, true, false, None, "Autonomous", None, 80, "", 0);
-        assert!(status_ready.contains("[Goal: Autonomous]"));
-        assert!(status_ready.contains("Ready"));
-    }
-
-    #[test]
-    fn test_goal_progress_replaces_the_generic_running_text() {
-        let tracker = TokenTracker::new("default".to_string());
-        let status = format_status_left(
-            true,
-            true,
-            false,
-            Some("step 12/250 · 4.2k tok · 3m05s/1h0m"),
-            "Autonomous",
-            Some(&tracker),
-            80,
-            "",
-            0,
-        );
-        assert!(status.contains("step 12/250"), "{status}");
-        assert!(status.contains("3m05s/1h0m"), "{status}");
-        assert!(!status.contains("Generating response..."), "{status}");
-
-        let waiting = format_status_left(true, false, true, None, "Manual", Some(&tracker), 80, "", 0);
+        let waiting = format_status_left(true, false, true, None, "Manual", "");
         assert!(waiting.contains("Waiting for your answer"), "{waiting}");
-        assert!(!waiting.contains("Generating response..."), "{waiting}");
     }
 
     #[test]
@@ -2291,18 +2195,6 @@ mod tests {
     }
 
     #[test]
-    fn the_face_keeps_the_user_company_only_while_working() {
-        let tracker = TokenTracker::new("default".to_string());
-        let working = format_status_left(true, false, false, None, "Normal", Some(&tracker), 80, "", 0);
-        assert!(working.contains("(•_•)"), "{working}");
-        let blinking = format_status_left(true, false, false, None, "Normal", Some(&tracker), 80, "", 46);
-        assert!(blinking.contains("(-_-)"), "{blinking}");
-        // Idle, the mascot is on the welcome card; two would be too many.
-        let idle = format_status_left(false, false, false, None, "Normal", None, 80, "", 0);
-        assert!(!idle.contains("(•_•)"), "{idle}");
-    }
-
-    #[test]
     fn a_resumed_session_gets_the_whole_card_not_a_stuck_reveal() {
         // A resumed session's card must never start truncated.
         let card = flashagent_tui::welcome_card(&flashagent_tui::WelcomeCard {
@@ -2315,7 +2207,10 @@ mod tests {
         });
         assert!(card.len() > 1);
         assert_eq!(opening_card(card.clone(), false).len(), card.len(), "resume draws it whole");
-        assert_eq!(opening_card(card, true).len(), 1, "a fresh start animates it in");
+        let opening = opening_card(card.clone(), true);
+        assert_eq!(opening.len(), card.len(), "the card holds its height while it appears");
+        assert_eq!(opening[0], card[0], "a fresh start animates it in from the top");
+        assert!(opening[1..].iter().all(|(_, text)| text.trim().is_empty()));
     }
 
     #[test]

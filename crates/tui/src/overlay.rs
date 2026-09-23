@@ -16,20 +16,22 @@ pub(crate) enum Overlay {
     Context(ContextModal),
     Memory(MemoryModal),
     Mcp(McpModal),
+    /// Ctrl+K: every command, searched by typing.
+    Palette(SelectMenu<String>),
 }
 
 impl Overlay {
     /// For mouse-wheel scrolling.
     pub(crate) fn select_menu_mut(&mut self) -> Option<&mut SelectMenu<String>> {
         match self {
-            Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Sessions(menu) => Some(menu),
+            Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Sessions(menu) | Overlay::Palette(menu) => Some(menu),
             _ => None,
         }
     }
 
     pub(crate) fn render(&self, width: usize) -> Vec<RenderLine> {
         match self {
-            Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Sessions(menu) => menu.render(width),
+            Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Sessions(menu) | Overlay::Palette(menu) => menu.render(width),
             Overlay::Rewind(card) => card.render(width),
             Overlay::Settings(view) => view.render(width),
             Overlay::Sampling(view) => view.render(width),
@@ -46,6 +48,34 @@ impl App {
             Some(Overlay::Settings(view)) => Some(view),
             _ => None,
         }
+    }
+
+    /// Each command with the key that also does it, so "f1" finds /context.
+    pub(crate) fn open_palette(&mut self) {
+        let key_for = |trigger: &str| match trigger {
+            "/context" => "F1",
+            "/verbose" => "F2",
+            "/model" => "F3",
+            "/effort" => "F4",
+            "/settings" => "Tab",
+            "/regenerate" => "Ctrl+R",
+            "/editor" => "Ctrl+E",
+            "/update" => "Ctrl+U",
+            "/exit" => "Ctrl+D",
+            _ => "",
+        };
+        let mut commands = flashagent_tui::autocomplete::builtin_commands();
+        commands.extend(flashagent_tui::autocomplete::load_skills(std::path::Path::new(".")));
+        let items = commands
+            .into_iter()
+            .map(|c| {
+                let key = key_for(&c.trigger);
+                let label = if key.is_empty() { c.trigger.clone() } else { format!("{}  {key}", c.trigger) };
+                let value = if flashagent_tui::autocomplete::needs_argument(&c.trigger) { format!("{} ", c.trigger) } else { c.trigger };
+                SelectItem::with_description(label, c.description, value)
+            })
+            .collect();
+        self.open_overlay(Overlay::Palette(SelectMenu::new("Commands", items).with_noun("commands")));
     }
 
     pub(crate) fn open_overlay(&mut self, overlay: Overlay) {

@@ -4,9 +4,45 @@ impl App {
     /// A new turn is starting: on a local server the recap would make it wait, and
     /// its suggestion would be stale. Dropping the request stops the generation.
     pub(crate) fn cancel_recap(&mut self) {
+        self.recap_due = None;
         if let Some(task) = self.recap_task.take() {
             task.abort();
         }
+    }
+
+    /// The recap is one more request to the model, which on a local server holds
+    /// the next question up. It is written only once the user has gone quiet.
+    pub(crate) fn schedule_recap(&mut self) {
+        self.cancel_recap();
+        self.recap_due = Some(std::time::Instant::now() + recap_idle());
+    }
+
+    /// Typing means the user is still here.
+    pub(crate) fn postpone_recap(&mut self) {
+        if let Some(due) = self.recap_due.as_mut() {
+            *due = (*due).max(std::time::Instant::now() + recap_idle());
+        }
+    }
+
+    /// Once due, with no turn running.
+    pub(crate) fn start_recap_if_due(&mut self, source: &Arc<BackendSource>, tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>) {
+        if self.running || !self.recap_due.is_some_and(|due| std::time::Instant::now() >= due) {
+            return;
+        }
+        self.recap_due = None;
+        let source_bg = source.clone();
+        let tx_bg = tx.clone();
+        let history_bg = self.history.clone();
+        let turn_id = self.chat.user_turn_count() as u64;
+        self.recap_task = Some(tokio::spawn(async move {
+            if let Some((llm_recap, llm_suggestion)) = generate_llm_recap_and_suggestion(&source_bg, &history_bg).await {
+                let _ = tx_bg.send(UiEvent::BackgroundRecap {
+                    turn_id,
+                    recap: llm_recap,
+                    suggestion: llm_suggestion,
+                });
+            }
+        }));
     }
 
     /// Cooperative: the loop answers pending tool calls and returns its history,
@@ -49,7 +85,6 @@ impl App {
         let turn_opts = build_turn_options(&self.config, &self.current_effort);
         self.turn_counter += 1;
         self.turn_outcome = flashagent_core::TurnOutcome::default();
-        self.speed_history.clear();
         self.turn_flash = None;
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
         self.active_steer_tx = Some(steer_tx);
@@ -95,9 +130,6 @@ impl App {
         }
         self.chat.truncate_to_last_user();
         self.renderer.scroll_to_bottom();
-        self.renderer.printed_settled = 0;
-        self.renderer.prev_expansion = None;
-        self.renderer.request_reprint();
         self.last_expanded = false;
         self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
         true
@@ -232,20 +264,7 @@ impl App {
                     self.suggested_prompt = None;
                     self.renderer.request_reprint();
 
-                    let source_bg = cx.source.clone();
-                    let tx_bg = cx.tx.clone();
-                    let history_bg = self.history.clone();
-                    let turn_id = self.chat.user_turn_count() as u64;
-                    self.cancel_recap();
-                    self.recap_task = Some(tokio::spawn(async move {
-                        if let Some((llm_recap, llm_suggestion)) = generate_llm_recap_and_suggestion(&source_bg, &history_bg).await {
-                            let _ = tx_bg.send(UiEvent::BackgroundRecap {
-                                turn_id,
-                                recap: llm_recap,
-                                suggestion: llm_suggestion,
-                            });
-                        }
-                    }));
+                    self.schedule_recap();
                 }
             }
             Err((e, h)) => {
@@ -280,4 +299,14 @@ impl App {
 
         Flow::Next
     }
+}
+
+/// Three minutes without a key or a turn. `FLASHAGENT_RECAP_IDLE_SECS` sets it
+/// (the scenario tests use 0).
+fn recap_idle() -> std::time::Duration {
+    static IDLE: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *IDLE.get_or_init(|| {
+        let secs = std::env::var("FLASHAGENT_RECAP_IDLE_SECS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(180);
+        std::time::Duration::from_secs(secs)
+    })
 }

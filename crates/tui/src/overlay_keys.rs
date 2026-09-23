@@ -66,6 +66,11 @@ impl App {
                 Overlay::Model(menu) => self.model_menu_key(cx, menu, code, mods),
                 Overlay::Rewind(card) => self.rewind_key(cx, card, code),
                 Overlay::Effort(menu) => self.effort_menu_key(cx, menu, code),
+                Overlay::Palette(menu) => {
+                    let flow = self.palette_key(cx, menu, code, mods).await;
+                    self.renderer.request_reprint();
+                    return flow;
+                }
             }
             self.renderer.request_reprint();
             return Flow::Continue;
@@ -288,6 +293,8 @@ impl App {
                 for ev in deferred {
                     let _ = cx.tx.send(ev);
                 }
+                // The wizard had the whole screen.
+                self.renderer.request_reprint();
                 if completed {
                     self.current_model = self.config.model.clone();
                     cx.source.set_model(&self.current_model);
@@ -575,7 +582,45 @@ impl App {
         self.overlay = Some(Overlay::Effort(menu));
     }
 
-    /// Once scrolled back, plain arrows scroll too; typing returns to the bottom.
+    /// Typing narrows, Enter runs the command; one that needs an argument is put
+    /// in the prompt to be finished. A draft in the prompt survives.
+    async fn palette_key(&mut self, cx: &mut LoopCtx<'_>, mut menu: SelectMenu<String>, code: KeyCode, mods: KeyModifiers) -> Flow {
+        let ctrl = mods.contains(KeyModifiers::CONTROL);
+        match code {
+            KeyCode::Esc => return Flow::Continue,
+            KeyCode::Char(c) if ctrl && matches!(c, 'k' | 'K' | '\u{043b}' | '\u{041b}') => return Flow::Continue,
+            KeyCode::Up => menu.up(),
+            KeyCode::Down | KeyCode::Tab => menu.down(),
+            KeyCode::PageUp => menu.page_up(),
+            KeyCode::PageDown => menu.page_down(),
+            KeyCode::Backspace => menu.pop_filter_char(),
+            KeyCode::Char(c) if !ctrl && !mods.contains(KeyModifiers::ALT) => menu.push_filter_char(c),
+            KeyCode::Enter => {
+                let Some(command) = menu.selected_value().cloned().filter(|_| !menu.filtered_indices().is_empty()) else {
+                    self.overlay = Some(Overlay::Palette(menu));
+                    return Flow::Continue;
+                };
+                if command.ends_with(' ') {
+                    self.input.set(command);
+                    return Flow::Continue;
+                }
+                let draft = self.input.to_string();
+                self.input.set(command);
+                let flow = self.submit_input(cx).await;
+                // The command took the prompt; what was being written comes back.
+                if self.input.is_empty() {
+                    self.input.set(draft);
+                }
+                return flow;
+            }
+            _ => {}
+        }
+        self.overlay = Some(Overlay::Palette(menu));
+        Flow::Continue
+    }
+
+    /// Once scrolled back, plain arrows scroll too. The composer stays on screen,
+    /// so typing keeps the place; sending returns to the bottom.
     fn scroll_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Flow {
         let (_, height) = crossterm::terminal::size().unwrap_or((100, 24));
         let page = (height as usize / 2).max(5);
@@ -588,7 +633,7 @@ impl App {
             KeyCode::End | KeyCode::Esc if scrolled => self.renderer.scroll_to_bottom(),
             KeyCode::Up if modified || scrolled => self.renderer.scroll_up(2),
             KeyCode::Down if modified || scrolled => self.renderer.scroll_down(2),
-            KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Enter => {
+            KeyCode::Enter => {
                 self.renderer.scroll_to_bottom();
                 return Flow::Next;
             }

@@ -643,33 +643,26 @@ fn layout(releases: &[Release], text_w: usize, rows: usize, expanded: bool) -> V
     pages
 }
 
-/// Inside the running app, where the event reader owns stdin and raw mode stays on.
+/// Inside the running app, where the event reader owns stdin, raw mode stays on
+/// and the alternate screen is already up: entering and leaving it again would
+/// drop the app onto the shell's screen. Events for the app (a turn still
+/// streaming) go to `deferred`, for the caller to hand back.
 pub async fn run_channel(
     releases: Vec<Release>,
     to: &str,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::UiEvent>,
+    deferred: &mut Vec<crate::UiEvent>,
 ) -> std::io::Result<()> {
-    use crossterm::{cursor, execute, terminal::{EnterAlternateScreen, LeaveAlternateScreen}};
-    use std::io::Write;
-
     if releases.is_empty() {
         return Ok(());
     }
 
-    let mut stdout = std::io::stdout();
-    let _ = execute!(stdout, EnterAlternateScreen, cursor::Hide);
-
     let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
     let mut view = WhatsNew::new(releases, to, w as usize, h as usize);
+    let mut painter = crate::screen::Screen::new();
 
     loop {
-        let mut buf = String::from("\x1b[H\x1b[2J\r\n");
-        for line in view.render() {
-            buf.push_str(&line);
-            buf.push_str("\r\n");
-        }
-        let _ = stdout.write_all(buf.as_bytes());
-        let _ = stdout.flush();
+        crate::screen::paint_page(&mut painter, &view.render(), true);
 
         // Redraw on a timer while entries arrive; once whole, just wait for a key.
         let next = tokio::time::timeout(Duration::from_millis(40), rx.recv()).await;
@@ -680,12 +673,12 @@ pub async fn run_channel(
                 }
             }
             Ok(Some(crate::UiEvent::Resize(w, h))) => view.relayout(w as usize, h as usize),
+            Ok(Some(crate::UiEvent::Mouse(_) | crate::UiEvent::Paste(_))) => {}
+            Ok(Some(other)) => deferred.push(other),
             Ok(None) => break,
-            _ => {}
+            Err(_) => {}
         }
     }
-
-    let _ = execute!(stdout, cursor::Show, LeaveAlternateScreen);
     Ok(())
 }
 
@@ -695,7 +688,6 @@ pub async fn run(releases: Vec<Release>, to: &str) -> std::io::Result<()> {
         cursor, execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     };
-    use std::io::Write;
 
     if releases.is_empty() {
         return Ok(());
@@ -708,17 +700,9 @@ pub async fn run(releases: Vec<Release>, to: &str) -> std::io::Result<()> {
     let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
     let mut view = WhatsNew::new(releases, to, w as usize, h as usize);
 
+    let mut painter = crate::screen::Screen::new();
     loop {
-        let buffer = {
-            let mut buf = String::from("\x1b[H\x1b[2J\r\n");
-            for line in view.render() {
-                buf.push_str(&line);
-                buf.push_str("\r\n");
-            }
-            buf
-        };
-        let _ = stdout.write_all(buffer.as_bytes());
-        let _ = stdout.flush();
+        crate::screen::paint_page(&mut painter, &view.render(), true);
 
         if crossterm::event::poll(Duration::from_millis(40)).unwrap_or(false) {
             match crossterm::event::read()? {

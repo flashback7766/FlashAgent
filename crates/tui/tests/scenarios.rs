@@ -53,7 +53,7 @@ fn the_wizard_sets_up_a_custom_server_and_opens_the_app() {
     term.wait_for("Step 4: Agent Behavior & Permissions", WAIT);
     term.send(ENTER);
 
-    term.wait_for("Step 5: Sampling Parameters & Launch", WAIT);
+    term.wait_for("Step 5: Sampling Preset & Launch", WAIT);
     term.send(ENTER);
 
     // The tool-check verdict stays in the conversation instead of being cleared.
@@ -66,55 +66,57 @@ fn the_wizard_sets_up_a_custom_server_and_opens_the_app() {
     assert_eq!(config["backend_url"], server.url.as_str());
     assert_eq!(config["model"], MODEL);
 
-    quit_with_double_esc(&mut term);
+    quit(&mut term);
 }
 
-/// Esc, then Esc again once the app says that is what it takes.
-fn quit_with_double_esc(term: &mut Term) {
-    term.send(ESC);
-    term.wait_for(ESC_AGAIN, WAIT);
-    term.send(ESC);
-    assert!(term.wait_exit(WAIT).is_some(), "a second Esc did not quit; the screen was:\n{}", term.screen());
+/// Ctrl+D on an empty prompt.
+fn quit(term: &mut Term) {
+    term.send(CTRL_D);
+    assert!(term.wait_exit(WAIT).is_some(), "Ctrl+D did not quit; the screen was:\n{}", term.screen());
 }
 
-const ESC_AGAIN: &str = "Press Esc again to quit";
+const CTRL_D: &str = "\x04";
 
 #[test]
-fn one_esc_on_an_empty_prompt_does_not_quit_and_a_second_one_does() {
+fn esc_never_quits_and_ctrl_d_does() {
     let server = MockServer::start(Vec::new());
     let home = Home::new();
     let mut term = ready(&home, &server);
 
-    term.send(ESC);
-    term.wait_for(ESC_AGAIN, WAIT);
-    assert!(term.wait_exit(Duration::from_millis(500)).is_none(), "one stray Esc quit the app");
+    // Pressed to close a menu and then whatever is under it, as fast as a person does.
+    for _ in 0..4 {
+        term.send(ESC);
+    }
+    assert!(term.wait_exit(Duration::from_millis(800)).is_none(), "Esc quit the app");
+    term.wait_for(PROMPT, WAIT);
 
-    term.send(ESC);
+    term.send(CTRL_D);
     let status = term.wait_exit(WAIT);
     let screen = term.screen();
-    assert!(status.is_some(), "still running after the second Esc; the screen was:\n{screen}");
+    assert!(status.is_some(), "still running after Ctrl+D; the screen was:\n{screen}");
     assert!(!screen.contains("Session Saved"), "offered to resume a session that was not saved:\n{screen}");
     assert!(home.sessions().is_empty(), "saved an empty session: {:?}", home.sessions());
 }
 
 #[test]
-fn a_late_second_esc_asks_again_instead_of_quitting() {
-    let server = MockServer::start(Vec::new());
+fn a_second_ctrl_c_on_an_empty_prompt_quits() {
+    let server = MockServer::start(vec![Reply::Text("Hello from the mock model.".into())]);
     let home = Home::new();
     let mut term = ready(&home, &server);
+    term.type_text("say hello");
+    term.send(ENTER);
+    term.wait_for("Hello from the mock model.", WAIT);
+    term.wait_for(PROMPT, WAIT);
 
-    term.send(ESC);
-    term.wait_for(ESC_AGAIN, WAIT);
-    // Longer than the double-press window: a new first press.
-    std::thread::sleep(Duration::from_millis(2500));
-    term.send(ESC);
-    assert!(term.wait_exit(Duration::from_millis(800)).is_none(), "an Esc long after the first one quit");
-    term.send(ESC);
-    assert!(term.wait_exit(WAIT).is_some(), "a quick second press did not quit");
+    // The first press copies the answer and says a second one quits.
+    term.send("\x03");
+    term.wait_for("press Ctrl+C again to exit", WAIT);
+    term.send("\x03");
+    assert!(term.wait_exit(WAIT).is_some(), "a second Ctrl+C did not quit");
 }
 
 #[test]
-fn a_conversation_is_saved_when_quitting_with_double_esc() {
+fn a_conversation_is_saved_when_quitting() {
     let server = MockServer::start(vec![Reply::Text("Hello from the mock model.".into())]);
     let home = Home::new();
     let mut term = ready(&home, &server);
@@ -125,7 +127,7 @@ fn a_conversation_is_saved_when_quitting_with_double_esc() {
     // The answer is on screen before the turn has settled.
     term.wait_for(PROMPT, WAIT);
 
-    quit_with_double_esc(&mut term);
+    quit(&mut term);
     term.wait_for("Session Saved", WAIT);
     assert_eq!(home.sessions().len(), 1, "the conversation was not saved");
 }
@@ -158,6 +160,99 @@ fn sending_the_next_prompt_stops_the_recap_still_being_written() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+fn the_recap_waits_until_the_user_has_gone_quiet() {
+    let server = MockServer::start(vec![Reply::Text("First answer.".into())]);
+    let home = Home::new();
+    home.set_up(&server.url);
+    let term = Term::start_with_env(&home, &["-y"], COLS, ROWS, &[("FLASHAGENT_RECAP_IDLE_SECS", "3")]);
+    term.wait_for(PROMPT, WAIT);
+    let recaps = || server.requests().iter().filter(|r| !r.is_turn() && r.body.to_string().contains("conversation analyzer")).count();
+
+    ask(&term, "first question", "First answer.");
+    // Typing keeps it back: the model stays free for the next question.
+    for _ in 0..4 {
+        std::thread::sleep(Duration::from_millis(900));
+        term.send("x");
+        term.send("\x7f");
+    }
+    assert_eq!(recaps(), 0, "the recap was asked for while the user was typing");
+
+    let deadline = std::time::Instant::now() + WAIT;
+    while recaps() == 0 {
+        assert!(std::time::Instant::now() < deadline, "no recap once the user went quiet");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn ctrl_k_finds_a_command_by_what_it_is_called_or_its_key() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.send("\x0b");
+    term.wait_for("Commands", WAIT);
+    // "f1" is the key of /context; typing it narrows the list to that.
+    term.type_text("f1");
+    term.send(ENTER);
+    term.wait_for("Context Window Breakdown", WAIT);
+    term.send(ESC);
+    term.wait_for(PROMPT, WAIT);
+
+    // A command that needs an argument waits in the prompt for it.
+    term.send("\x0b");
+    term.wait_for("Commands", WAIT);
+    term.type_text("goal");
+    term.send(ENTER);
+    term.wait_for("\u{276f} /goal", WAIT);
+}
+
+#[test]
+fn enter_runs_the_command_the_popup_highlights() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let term = ready(&home, &server);
+    term.type_text("/hel");
+    term.send(ENTER);
+    term.wait_for("Commands & Skills", WAIT);
+    assert!(!term.screen().contains("Unknown command"), "{}", term.screen());
+}
+
+#[test]
+fn scrolling_back_moves_the_conversation_and_keeps_the_composer() {
+    let story: String = (0..120).map(|i| format!("line{i}\n\n")).collect();
+    let server = MockServer::start(vec![Reply::Text(story)]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+    ask(&term, "tell me a long story", "line119");
+
+    term.send("\x1b[5~");
+    let screen = term.wait_for("more lines below", WAIT);
+    assert!(screen.contains(PROMPT), "the composer scrolled away:\n{screen}");
+    // Typing keeps the place.
+    term.type_text("a reply");
+    let screen = term.wait_for("a reply", WAIT);
+    assert!(screen.contains("more lines below"), "typing jumped back to the bottom:\n{screen}");
+    term.send("\x1b[F");
+    term.wait_gone("more lines below", WAIT);
+    term.wait_for("line119", WAIT);
+}
+
+#[test]
+fn a_click_on_a_thought_opens_it() {
+    let server = MockServer::start(vec![Reply::Text("<think>Weighing the options carefully</think>Done thinking.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+    ask(&term, "think about it", "Done thinking.");
+    let screen = term.wait_for("Thought:", WAIT);
+    assert!(!screen.contains("Weighing the options"), "already open:\n{screen}");
+    let row = screen.lines().position(|l| l.contains("Thought:")).unwrap();
+    // SGR mouse report: left button down, then up, at column 5 of that row.
+    term.write(&format!("\x1b[<0;5;{}M\x1b[<0;5;{}m", row + 1, row + 1));
+    term.wait_for("Weighing the options", WAIT);
 }
 
 #[test]
@@ -201,7 +296,7 @@ fn the_next_launch_starts_in_the_mode_the_user_left_in() {
         // Accept All is remembered too.
         term.send("\x1b[Z");
         term.wait_for("Permission mode set to: Accept All", WAIT);
-        quit_with_double_esc(&mut term);
+        quit(&mut term);
     }
     let config: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
@@ -1173,18 +1268,17 @@ fn a_write_through_a_symlink_parent_asks_before_touching_the_external_file() {
 }
 
 #[test]
-fn every_answer_ends_with_a_status_line_that_names_the_cache() {
-    // No cache info from the server, like LM Studio over the network: the line
-    // says so instead of inventing a number.
+fn after_an_answer_the_status_line_is_the_mode_not_a_report() {
     let server = MockServer::start(vec![Reply::Text("Status please.".into())]);
     let home = Home::new();
     let term = ready(&home, &server);
     ask(&term, "how did that go?", "Status please.");
-    term.wait_for("cache hit n/a", WAIT);
-    let screen = term.screen();
-    assert!(!screen.contains("status:"), "status line should not duplicate as a message in chat:\n{screen}");
-    let status = screen.lines().find(|l| l.contains("cache hit n/a")).unwrap_or_default();
-    assert!(status.contains("prompt") && status.contains("cache hit n/a"), "{status}");
+    let screen = term.wait_for("Ready", WAIT);
+    let status = screen.lines().find(|l| l.contains("Ready")).unwrap_or_default();
+    assert!(status.contains("[Accept Edits]"), "{status}");
+    for noise in ["cache hit", "prompt", "TTFT", "tg", "Tokens -"] {
+        assert!(!screen.contains(noise), "{noise:?} is back on screen:\n{screen}");
+    }
 }
 
 #[test]
@@ -1197,7 +1291,7 @@ fn continue_opens_the_latest_session_of_this_folder() {
     {
         let mut term = ready(&home, &server);
         ask(&term, "first question", "First answer.");
-        quit_with_double_esc(&mut term);
+        quit(&mut term);
     }
     // Session ids are stamped to the second.
     std::thread::sleep(Duration::from_millis(1100));
@@ -1205,7 +1299,7 @@ fn continue_opens_the_latest_session_of_this_folder() {
         let mut term = Term::start(&home, &["-y"], COLS, ROWS);
         term.wait_for(PROMPT, WAIT);
         ask(&term, "second question", "Second answer.");
-        quit_with_double_esc(&mut term);
+        quit(&mut term);
     }
     assert_eq!(home.sessions().len(), 2);
 
@@ -1225,7 +1319,7 @@ fn resume_without_an_id_lists_this_folders_sessions_to_pick_from() {
     {
         let mut term = ready(&home, &server);
         ask(&term, "what is the magic number?", "The magic number is 7.");
-        quit_with_double_esc(&mut term);
+        quit(&mut term);
     }
 
     let term = Term::start(&home, &["-y", "--resume"], COLS, ROWS);
@@ -1250,7 +1344,7 @@ fn slash_resume_switches_sessions_and_saves_the_one_that_was_open() {
     {
         let mut term = ready(&home, &server);
         ask(&term, "old question", "Old answer.");
-        quit_with_double_esc(&mut term);
+        quit(&mut term);
     }
     std::thread::sleep(Duration::from_millis(1100));
 
@@ -1270,7 +1364,7 @@ fn slash_resume_switches_sessions_and_saves_the_one_that_was_open() {
     let history = sent(server.turns().last().unwrap());
     assert!(history.contains("old question"), "the model did not get the resumed conversation: {history}");
     assert!(!history.contains("new question"), "the conversation switched away from leaked into the resumed one: {history}");
-    quit_with_double_esc(&mut term);
+    quit(&mut term);
 }
 
 #[test]
@@ -1283,7 +1377,7 @@ fn a_saved_session_comes_back_with_resume() {
     {
         let mut term = ready(&home, &server);
         ask(&term, "what is the magic number?", "The magic number is 7.");
-        quit_with_double_esc(&mut term);
+        quit(&mut term);
     }
     let session = home.sessions().pop().expect("the conversation was saved");
     let id = session.file_stem().unwrap().to_string_lossy().to_string();
@@ -1318,7 +1412,7 @@ fn a_session_that_fails_to_load_is_left_as_it_was() {
     term.wait_for("unreadable", WAIT);
     term.wait_for(PROMPT, WAIT);
     ask(&term, "start over then", "A fresh answer.");
-    quit_with_double_esc(&mut term);
+    quit(&mut term);
 
     assert_eq!(std::fs::read(&damaged).unwrap(), bytes, "the damaged session was written over");
     assert_eq!(home.sessions().len(), 2, "the new conversation was not saved beside it: {:?}", home.sessions());
@@ -1336,8 +1430,8 @@ fn two_instances_started_together_keep_their_own_sessions() {
     second.wait_for(PROMPT, WAIT);
     ask(&first, "the first one", "Noted.");
     ask(&second, "the second one", "Noted.");
-    quit_with_double_esc(&mut first);
-    quit_with_double_esc(&mut second);
+    quit(&mut first);
+    quit(&mut second);
 
     let saved: Vec<String> = home.sessions().iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
     assert_eq!(saved.len(), 2, "one session was saved over the other: {:?}", home.sessions());
@@ -1519,7 +1613,6 @@ fn png_bytes(width: u32, height: u32) -> Vec<u8> {
 const F1: &str = "\x1bOP";
 const F3: &str = "\x1bOR";
 const F4: &str = "\x1bOS";
-const F5: &str = "\x1b[15~";
 const TAB: &str = "\t";
 const DOWN: &str = "\x1b[B";
 const RIGHT: &str = "\x1b[C";
@@ -1534,7 +1627,6 @@ fn every_panel_opens_over_the_composer_and_esc_puts_the_composer_back() {
         (F1, "Context Window Breakdown"),
         (F3, "Select Model"),
         (F4, "Select Thinking Effort"),
-        (F5, "Sampling Parameters"),
         (TAB, "FlashAgent Settings"),
     ] {
         term.send(key);
@@ -1552,7 +1644,9 @@ fn a_sampling_change_is_applied_and_saved() {
     let home = Home::new();
     let term = ready(&home, &server);
 
-    term.send(F5);
+    // Only for those who look for it: no key of its own.
+    term.type_text("/sampling");
+    term.send(ENTER);
     term.wait_for("Sampling Parameters", WAIT);
     // Down to Temperature, one step up, Enter applies.
     term.send(DOWN);
@@ -1970,13 +2064,13 @@ fn a_saved_session_is_found_by_something_said_inside_it() {
     {
         let mut term = ready(&home, &server);
         ask(&term, "why does the build fail?", "libssl-dev");
-        quit_with_double_esc(&mut term);
+        quit(&mut term);
     }
     {
         let mut term = Term::start(&home, &["-y"], COLS, ROWS);
         term.wait_for(PROMPT, WAIT);
         ask(&term, "write the docs", "Docs written.");
-        quit_with_double_esc(&mut term);
+        quit(&mut term);
     }
 
     let term = Term::start(&home, &["-y", "--resume"], COLS, ROWS);
@@ -2015,7 +2109,7 @@ fn measure_startup_and_memory() {
         if let Some(mb) = term.pid().and_then(rss_mb) {
             println!("idle memory: {mb:.1} MB");
         }
-        quit_with_double_esc(&mut term);
+        quit(&mut term);
     }
     starts.sort_by(f64::total_cmp);
     println!("time to the first usable frame: median {:.0} ms (runs: {starts:.0?})", starts[2]);
@@ -2039,7 +2133,7 @@ fn measure_startup_and_memory() {
     if let Some(mb) = term.pid().and_then(rss_mb) {
         println!("memory with {turns} turns loaded: {mb:.1} MB");
     }
-    quit_with_double_esc(&mut term);
+    quit(&mut term);
 }
 
 #[test]
@@ -2076,7 +2170,7 @@ fn a_chosen_voice_reaches_the_model_as_an_example_and_nowhere_else() {
     assert!(messages.last().unwrap()["content"].to_string().contains("hello there"));
 
     assert!(!term.screen().contains("git stash"), "the example was shown:\n{}", term.screen());
-    quit_with_double_esc(&mut term);
+    quit(&mut term);
     let saved: String = home.sessions().iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
     assert!(!saved.contains("git stash"), "the example was saved with the session");
 }
@@ -2111,4 +2205,157 @@ fn the_opening_of_the_first_request_is_sent_ahead_so_the_server_has_it_cached() 
     assert!(prompt.starts_with(opening), "the first prompt does not begin with what was warmed:\n{opening}\n---\n{prompt}");
     assert_eq!(warm_ups[0].body["tools"], turn.body["tools"], "the warm-up offered other tools");
     assert_eq!(warm_ups.len(), 1, "the same prefix was warmed twice");
+}
+
+
+/// The screen is never seen half drawn. The real binary runs in a
+/// pseudo-terminal (on Windows, the console's own ConPTY, as under Windows
+/// Terminal), and the screen is looked at after every read of its output: a
+/// frame that clears first and draws after shows up as a screen suddenly
+/// missing most of what it had.
+mod never_half_drawn {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use super::support::mock_server::{MockServer, Reply};
+    use super::support::term::Home;
+
+    const COLS: u16 = 120;
+    const ROWS: u16 = 40;
+
+    #[derive(Default, Clone, Copy, Debug)]
+    struct Seen {
+        reads: usize,
+        /// Reads after which under 60% of the most the screen ever showed was left.
+        half_drawn: usize,
+        most: usize,
+    }
+
+    struct Watched {
+        seen: Arc<Mutex<Seen>>,
+        writer: Arc<Mutex<Box<dyn Write + Send>>>,
+        child: Box<dyn portable_pty::Child + Send + Sync>,
+        _master: Box<dyn portable_pty::MasterPty + Send>,
+    }
+
+    impl Watched {
+        /// Counting starts once the prompt is up and the welcome card has drawn itself in.
+        fn start(home: &Home) -> Self {
+            let pty = native_pty_system().openpty(PtySize { rows: ROWS, cols: COLS, pixel_width: 0, pixel_height: 0 }).unwrap();
+            let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_flashagent"));
+            cmd.arg("-y");
+            cmd.cwd(home.work());
+            cmd.env("HOME", home.path());
+            cmd.env("USERPROFILE", home.path());
+            cmd.env("FLASHAGENT_CONFIG_PATH", home.config_path());
+            cmd.env("TERM", "xterm-256color");
+            let child = pty.slave.spawn_command(cmd).unwrap();
+            drop(pty.slave);
+            let writer = Arc::new(Mutex::new(pty.master.take_writer().unwrap()));
+            let mut reader = pty.master.try_clone_reader().unwrap();
+            let seen = Arc::new(Mutex::new(Seen::default()));
+            let settled_at = Arc::new(Mutex::new(None::<Instant>));
+            let (seen2, writer2, settled2) = (seen.clone(), writer.clone(), settled_at.clone());
+            std::thread::spawn(move || {
+                let mut parser = vt100::Parser::new(ROWS, COLS, 0);
+                let mut buf = [0u8; 65536];
+                loop {
+                    let n = match reader.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    parser.process(&buf[..n]);
+                    if buf[..n].windows(4).any(|w| w == b"\x1b[6n") {
+                        let (row, col) = parser.screen().cursor_position();
+                        let _ = writer2.lock().unwrap().write_all(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
+                    }
+                    let contents = parser.screen().contents();
+                    let filled = contents.chars().filter(|c| !c.is_whitespace()).count();
+                    let mut settled = settled2.lock().unwrap();
+                    if settled.is_none() && contents.contains("Ask FlashAgent") {
+                        *settled = Some(Instant::now());
+                    }
+                    let mut seen = seen2.lock().unwrap();
+                    if settled.is_some_and(|t| t.elapsed() > Duration::from_secs(1)) {
+                        seen.reads += 1;
+                        if filled * 10 < seen.most * 6 {
+                            seen.half_drawn += 1;
+                        }
+                    }
+                    seen.most = seen.most.max(filled);
+                }
+            });
+            let started = Instant::now();
+            while !settled_at.lock().unwrap().is_some_and(|t| t.elapsed() > Duration::from_secs(1)) {
+                assert!(started.elapsed() < Duration::from_secs(30), "the prompt never came up");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Watched { seen, writer, child, _master: pty.master }
+        }
+
+        fn send(&self, keys: &[u8]) {
+            self.writer.lock().unwrap().write_all(keys).unwrap();
+            std::thread::sleep(Duration::from_millis(120));
+        }
+
+        fn seen(&self) -> Seen {
+            *self.seen.lock().unwrap()
+        }
+    }
+
+    impl Drop for Watched {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+        }
+    }
+
+    fn animated(home: &Home, server: &MockServer) {
+        home.set_up_with(&server.url, serde_json::json!({ "animations": true, "show_tips": true, "show_mascot": true }));
+    }
+
+    #[test]
+    fn the_welcome_screen_is_never_seen_half_drawn() {
+        let server = MockServer::start(Vec::new());
+        let home = Home::new();
+        animated(&home, &server);
+        let term = Watched::start(&home);
+
+        // The mascot breathes, the tip types itself; then a menu opens and closes, and
+        // the prompt is typed into and emptied again.
+        std::thread::sleep(Duration::from_secs(3));
+        term.send(b"\t");
+        std::thread::sleep(Duration::from_millis(800));
+        term.send(b"\x1b");
+        std::thread::sleep(Duration::from_millis(800));
+        for _ in 0..2 {
+            for key in [b"a", b"b", b"c"] {
+                term.send(key);
+            }
+            for _ in 0..3 {
+                term.send(b"\x7f");
+            }
+        }
+        let seen = term.seen();
+        assert!(seen.reads > 20, "too little was drawn to judge: {seen:?}");
+        assert_eq!(seen.half_drawn, 0, "the screen was seen half drawn: {seen:?}");
+    }
+
+    #[test]
+    fn a_streaming_answer_is_never_seen_half_drawn() {
+        // Long enough to scroll the welcome card off the screen.
+        let story: String = (0..300).map(|i| if i % 12 == 11 { format!("word{i}.\n\n") } else { format!("word{i} ") }).collect();
+        let server = MockServer::start(vec![Reply::Slow { text: story, per_word: Duration::from_millis(15) }]);
+        let home = Home::new();
+        animated(&home, &server);
+        let term = Watched::start(&home);
+
+        term.send(b"tell me a story");
+        term.send(b"\r");
+        std::thread::sleep(Duration::from_secs(6));
+        let seen = term.seen();
+        assert!(seen.reads > 50, "too little was drawn to judge: {seen:?}");
+        assert_eq!(seen.half_drawn, 0, "the screen was seen half drawn: {seen:?}");
+    }
 }
