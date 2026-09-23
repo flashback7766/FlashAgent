@@ -60,7 +60,7 @@
 </tr>
 </table>
 
-<sub>Every recording on this page is a real session against a local model — Gemma 4 E2B in LM Studio, 64k context — so the timings and token counts in the status line are the ones it produced. Playback is sped up; nothing else is edited.</sub>
+<sub>Every recording on this page is a real session against a small local model — Gemma 4 E2B (Q4_K_XL, 8k context) in LM Studio on a laptop — so the thoughts, timings and token counts are the ones it produced. Playback is sped up; nothing else is edited.</sub>
 
 ---
 
@@ -208,7 +208,7 @@ FlashAgent starts in the mode you left it in. Reads inside the project and web t
 
 **Memory & rules** — `MEMORY.md`, `CLAUDE.md`, `AGENTS.md`, `.cursorrules`, `.agents/rules/*.md` and `~/.flashagent/MEMORY.md` are picked up automatically and injected within a token budget (whole files when they fit, outlines when they do not).
 
-**Sessions** — conversations are saved on exit. `flashagent --continue` picks up the latest one in the current folder; `flashagent --resume` (or `/resume` inside the app) lists this folder's sessions to choose from; `flashagent --resume <session_id>` opens one directly. `/compact` summarises older turns to free context, and it happens automatically near the limit. `/rewind` takes turns back: files and conversation return to before the turn you pick.
+**Sessions** — conversations are saved on exit. `flashagent --continue` picks up the latest one in the current folder; `flashagent --resume` (or `/resume` inside the app) lists this folder's sessions to choose from; `flashagent --resume <session_id>` opens one directly. `/compact` summarizes older turns to free context, and it happens automatically near the limit. `/rewind` takes turns back: files and conversation return to before the turn you pick.
 
 **Autonomous mode (`/goal <task>`)** — runs the task end to end in Accept All mode with maximum reasoning effort. It has no limits unless you set them in Settings → Goal (steps, time, generated tokens). Dangerous shell commands are refused outright during the run. If the model asks you something and you do not answer within two minutes, it picks the most reasonable option itself and says so in its summary. It keeps a live plan on screen, commits what it changed every ten steps inside a git repository, and ends with a factual report card — steps, generated tokens, elapsed, files created and edited, shell commands that failed, and whether a limit cut the run short — built from what the loop did, not from what the model says it did. Your previous permission mode and effort are restored afterwards, and `/rewind` takes the run's file changes back.
 
@@ -220,7 +220,7 @@ FlashAgent starts in the mode you left it in. Reads inside the project and web t
 
 <img src="docs/screenshots/gifs/update-progress.gif" width="100%" alt="Ctrl+U checking, downloading and installing an update">
 
-**What leaves your machine** — requests to the model server you configure; update checks against GitHub Releases (on by default, off with Settings → Auto-Update); `web_fetch` requests to the pages the model asks for and `web_search` queries to DuckDuckGo, or Brave Search with `BRAVE_API_KEY` (on by default, off with Settings → Web Tools); and whatever the MCP servers you add do. There is no telemetry.
+**What leaves your machine** — requests to the model server you configure; update checks against GitHub Releases (on by default, off with Settings → Updates → Auto-update); `web_fetch` requests to the pages the model asks for and `web_search` queries to DuckDuckGo, or Brave Search with `BRAVE_API_KEY` (on by default, off with Settings → LLM → Web tools); and whatever the MCP servers you add do. There is no telemetry.
 
 ---
 
@@ -230,7 +230,7 @@ FlashAgent starts in the mode you left it in. Reads inside the project and web t
 | :--- | :--- |
 | <kbd>Enter</kbd> | Send prompt · while the model works: steer it |
 | <kbd>Alt</kbd>+<kbd>Enter</kbd> / <kbd>Ctrl</kbd>+<kbd>J</kbd> | New line in the prompt (also <kbd>Shift</kbd>+<kbd>Enter</kbd> where the terminal reports it, or `\` then <kbd>Enter</kbd>) |
-| <kbd>Esc</kbd> | Close a menu or card · interrupt the running turn · clear the prompt · never quits |
+| <kbd>Esc</kbd> | Close a menu or card · clear the prompt · then interrupt the running turn · never quits |
 | <kbd>Ctrl</kbd>+<kbd>D</kbd> | Quit (empty prompt) |
 | <kbd>Ctrl</kbd>+<kbd>C</kbd> | Interrupt the running turn · otherwise copy the prompt text, or the last answer when the prompt is empty · on an empty prompt, a second press within a second quits (the first does when there is nothing to copy) |
 | <kbd>Ctrl</kbd>+<kbd>K</kbd> | Every command, searchable by name or key |
