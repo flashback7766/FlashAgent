@@ -594,21 +594,32 @@ const PROMISE_NUDGE: &str = "You said what you would do next but did not do it. 
 /// or Russian. Closings like "let me know" and questions are not promises.
 pub fn announces_a_tool_call(text: &str) -> bool {
     let text = text.trim();
-    if text.is_empty() || text.ends_with('?') {
+    if text.is_empty() {
+        return false;
+    }
+    // A question anywhere in the last paragraph hands the turn to the user.
+    let paragraph = text.rsplit("\n\n").next().unwrap_or(text);
+    if paragraph.contains('?') {
         return false;
     }
     let body = text.trim_end_matches(['.', ':', '\u{2026}', '!']);
     // Sentences end at a stop followed by a space: "tasks.py" is not one.
-    let start = [". ", "! ", "? ", "\n"].iter().filter_map(|sep| body.rfind(sep).map(|i| i + sep.len())).max().unwrap_or(0);
+    let start = [". ", "! ", "\n"].iter().filter_map(|sep| body.rfind(sep).map(|i| i + sep.len())).max().unwrap_or(0);
     let last = body[start..].trim().trim_start_matches(['*', '#', '-', '>', ' ']).to_lowercase();
-    const CLOSINGS: [&str; 7] = ["let me know", "if you", "happy to", "feedback", "wait for", "дайте знать", "если "];
+    // Anything waiting on the user, or said to them, is not a call left undone.
+    const CLOSINGS: [&str; 14] = [
+        "let me know", "you", "happy to", "feedback", "wait", "in mind", "once ", "дайте знать", "если ", "вы ",
+        "вам ", "ваш", "подтверд", "жду",
+    ];
     if CLOSINGS.iter().any(|c| last.contains(c)) {
         return false;
     }
-    const OPENINGS: [&str; 20] = [
+    // First person and about to act: a bare "Теперь" or "Now" also opens plain statements.
+    const OPENINGS: [&str; 24] = [
         "i'll ", "i will ", "let me ", "let's ", "i'm going to ", "i am going to ", "now i'll ", "next, i'll ",
-        "next i'll ", "first, i'll ", "first i'll ", "now let me ", "now, let me ", "i need to ", "сейчас ",
-        "давай", "теперь ", "далее ", "сначала ", "я сейчас ",
+        "next i'll ", "first, i'll ", "first i'll ", "now let me ", "now, let me ", "сейчас я ", "теперь я ",
+        "далее я ", "сначала я ", "я сейчас ", "давайте посмотр", "давай посмотр", "сейчас посмотр",
+        "сейчас прочита", "сейчас провер", "сейчас запущ",
     ];
     OPENINGS.iter().any(|o| last.starts_with(o))
 }
@@ -1365,6 +1376,7 @@ mod tests {
             "The config is fine.\n\nLet me run the tests:",
             "**Next step**\nNow I'll edit the parser.",
             "Сейчас прочитаю файл.",
+            "I'll list the directory to confirm the file structure.",
         ] {
             assert!(announces_a_tool_call(yes), "{yes:?}");
         }
@@ -1373,6 +1385,11 @@ mod tests {
             "Done. Let me know if you want more.",
             "Should I also update the tests?",
             "I'll wait for your feedback.",
+            "Теперь функция возвращает Result вместо паники.",
+            "I'll keep that in mind.",
+            "Should I proceed? I'll wait.",
+            "I'll delete the old migrations once you confirm.",
+            "I need to see the error output to help.",
             "",
         ] {
             assert!(!announces_a_tool_call(no), "{no:?}");
