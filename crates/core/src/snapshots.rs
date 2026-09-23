@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 /// Larger files are not copied; rewind reports them.
 pub const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Memory tools write under `~/.flashagent`, not the project, so they are not here.
 const WRITING_TOOLS: &[&str] = &["write_file", "edit_file", "patch_file"];
+/// Project memory is files in the project like any other; global memory in
+/// `~/.flashagent` is the user's own and is left as it is.
+const MEMORY_TOOLS: &[&str] = &["memory_create", "memory_update", "memory_remove"];
 
 /// State before the turn first touched the file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +138,15 @@ impl SnapshotStore {
 
     /// Called before a tool runs: keeps a file this turn has not touched yet.
     pub fn before_write(&self, tool: &str, args_json: &str) {
+        if MEMORY_TOOLS.contains(&tool) {
+            let args: Option<serde_json::Value> = serde_json::from_str(args_json).ok();
+            if let Some(title) = args.as_ref().and_then(|a| a.get("title")).and_then(|t| t.as_str()) {
+                let store = crate::memory_store::Store::new(&self.cwd);
+                self.keep_before(store.dir().join(format!("{}.md", crate::memory_store::slugify(title))));
+                self.keep_before(store.index_path());
+            }
+            return;
+        }
         if !WRITING_TOOLS.contains(&tool) {
             return;
         }
@@ -274,6 +285,8 @@ impl SnapshotStore {
                 continue;
             }
             match &file.before {
+                // Created and gone again, or never written (a global memory).
+                Before::Missing if !file.path.exists() => {}
                 Before::Missing => {
                     let current = std::fs::read_to_string(&file.path).unwrap_or_default();
                     out.push(FilePreview {
@@ -294,8 +307,10 @@ impl SnapshotStore {
                         .unwrap_or_default();
                     // From the current file to `before`: `+` is brought back, `-` taken away.
                     let diff = crate::diff::unified(Some(&current), &before, "f", 0);
-                    let added = diff.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count();
-                    let removed = diff.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count();
+                    // Past the two header lines: `-- sql` and `++i;` are content.
+                    let body = || diff.lines().skip(2);
+                    let added = body().filter(|l| l.starts_with('+')).count();
+                    let removed = body().filter(|l| l.starts_with('-')).count();
                     out.push(FilePreview { path: file.path.clone(), added, removed, will_delete: false, too_large: false });
                 }
             }
@@ -491,6 +506,36 @@ mod tests {
         s.before_write("memory_create", &args("a.txt"));
         s.before_write("read_file", &args("a.txt"));
         assert_eq!(s.rewindable(&["p"])[0].files, 0);
+    }
+
+    #[test]
+    fn a_project_memory_written_in_the_turn_is_taken_back_too() {
+        let (project, _snaps, s) = store();
+        let index = project.path().join("MEMORY.md");
+        std::fs::write(&index, "# Memory\n").unwrap();
+        s.begin_turn("p");
+        s.before_write("memory_create", r#"{"title":"Tests use nextest","content":"x"}"#);
+        std::fs::create_dir_all(project.path().join("memory")).unwrap();
+        let note = project.path().join("memory").join("tests-use-nextest.md");
+        std::fs::write(&note, "x").unwrap();
+        std::fs::write(&index, "# Memory\n- tests-use-nextest\n").unwrap();
+        let preview = s.preview_rewind(0);
+        assert_eq!(preview.len(), 2, "{preview:?}");
+        s.rewind(0);
+        assert!(!note.exists());
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), "# Memory\n");
+    }
+
+    #[test]
+    fn a_line_that_starts_like_a_diff_header_is_still_counted() {
+        let (project, _snaps, s) = store();
+        let a = project.path().join("q.sql");
+        std::fs::write(&a, "-- sql comment\nselect 1;\n").unwrap();
+        s.begin_turn("p");
+        s.before_write("edit_file", &args("q.sql"));
+        std::fs::write(&a, "++counter;\nselect 1;\n").unwrap();
+        let preview = s.preview_rewind(0);
+        assert_eq!((preview[0].added, preview[0].removed), (1, 1), "{preview:?}");
     }
 
     #[test]

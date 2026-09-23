@@ -74,6 +74,24 @@ fn default_repeat_penalty() -> Option<f32> { Some(1.0) }
 fn default_presence_penalty() -> Option<f32> { Some(0.0) }
 fn default_min_p() -> Option<f32> { Some(0.0) }
 
+/// UTF-8 with or without a BOM, or UTF-16 with one: Windows PowerShell 5.1
+/// writes both, and a hand-edited config must not lose every setting to it.
+fn decode_text(bytes: &[u8]) -> Option<String> {
+    let utf16 = |little: bool| {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| if little { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) })
+            .collect();
+        String::from_utf16(&units).ok()
+    };
+    match bytes {
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8(rest.to_vec()).ok(),
+        [0xFF, 0xFE, ..] => utf16(true),
+        [0xFE, 0xFF, ..] => utf16(false),
+        _ => String::from_utf8(bytes.to_vec()).ok(),
+    }
+}
+
 /// Accepts any case or separators (`"Beta"`, `"accept_edits"`,
 /// `"AcceptEdits"`): configs are edited by hand, and a strict spelling would
 /// cost the user their settings.
@@ -489,11 +507,11 @@ impl AppConfig {
             .map(|h| PathBuf::from(h).join(".flashagent").join("config.json"))
     }
 
-    /// Default when missing or invalid.
+    /// Default when missing or invalid; a file that is not text is said so.
     pub fn load() -> Self {
         if let Some(path) = Self::default_path() {
             if path.exists() {
-                if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Some(content) = std::fs::read(&path).ok().and_then(|bytes| decode_text(&bytes)) {
                     let (cfg, rejected) = Self::from_json_str(&content);
                     for field in &rejected {
                         eprintln!(
@@ -505,6 +523,7 @@ impl AppConfig {
                     }
                     return cfg;
                 }
+                eprintln!("Warning: {} could not be read as text; using the default settings.", path.display());
             }
         }
         Self::default()
@@ -791,6 +810,19 @@ mod tests {
         let prev_len = cfg.trusted_directories.len();
         cfg.trust_directory(&temp_dir);
         assert_eq!(cfg.trusted_directories.len(), prev_len);
+    }
+
+    #[test]
+    fn a_config_saved_by_windows_powershell_keeps_its_settings() {
+        let json = r#"{"model":"qwen","backend_url":"http://localhost:1234/v1"}"#;
+        let bom = [&[0xEF, 0xBB, 0xBF][..], json.as_bytes()].concat();
+        let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain(json.encode_utf16().flat_map(|u| u.to_le_bytes())).collect();
+        for bytes in [bom, utf16] {
+            let text = decode_text(&bytes).expect("decoded");
+            let (cfg, rejected) = AppConfig::from_json_str(&text);
+            assert!(rejected.is_empty(), "{rejected:?}");
+            assert_eq!(cfg.model, "qwen");
+        }
     }
 
     #[test]
