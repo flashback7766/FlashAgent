@@ -16,13 +16,9 @@ d.key("Escape", pause=1.0)
 d.key("F4", pause=1.2)
 d.key("Down", "Down", pause=0.7)
 d.key("Escape", pause=1.0)
-d.key("C-k", pause=1.0)  # every command, searchable
-d.type("theme")
-d.key("Escape", pause=1.0)
 d.key("Tab", pause=1.5)
 d.key("3", "Down", "Down", pause=0.9)  # the UI tab
 d.key("7", "Down", pause=0.9)  # the voice
-
 d.key("Escape", pause=1.5)
 d.wait_turn(300)
 d.wait_idle(10, quiet=2)
