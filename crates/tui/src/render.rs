@@ -296,8 +296,13 @@ impl Renderer {
                         ("\x1b[38;2;135;130;125m", " ")
                     };
                     // Only the diff's own marker goes: the indentation is part of the change.
+                    // A note above the diff ("outside the project: ...") has none.
+                    let body = match line.as_bytes().first() {
+                        Some(b'+' | b'-' | b' ') => &line[1..],
+                        _ => line,
+                    };
                     // Shown, never executed: an escape in the new text must not hide part of it.
-                    let line_clean = card_safe(&line.get(1..).unwrap_or_default().replace('\t', "    "));
+                    let line_clean = card_safe(&body.replace('\t', "    "));
                     let line_clipped = clip_ansi(&line_clean, inner_w.saturating_sub(6));
                     tail.push((
                         LineKind::System,
