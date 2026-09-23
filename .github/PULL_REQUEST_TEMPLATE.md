@@ -12,11 +12,11 @@ Briefly describe the changes introduced by this pull request and the rationale b
 Please describe the tests you ran to verify your changes.
 
 - [ ] `cargo test --workspace` passed with all tests green
-- [ ] `cargo clippy --workspace -- -D warnings` passed with zero warnings
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passed with zero warnings
 - [ ] Manual verification in terminal / UI (describe what you tested)
 
 ## Checklist
-- [ ] My code adheres to the style and architectural guidelines of FlashAgent ([ARCHITECTURE.md](ARCHITECTURE.md))
-- [ ] I have verified alignment with [PHILOSOPHY.md](PHILOSOPHY.md)
+- [ ] My code adheres to the style and architectural guidelines of FlashAgent ([ARCHITECTURE.md](https://github.com/flashback7766/FlashAgent/blob/main/ARCHITECTURE.md))
+- [ ] I have verified alignment with [PHILOSOPHY.md](https://github.com/flashback7766/FlashAgent/blob/main/PHILOSOPHY.md)
 - [ ] I have added tests covering new functionality or bug fixes
 - [ ] Documentation has been updated where appropriate

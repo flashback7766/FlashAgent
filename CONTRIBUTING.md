@@ -11,7 +11,7 @@ Please take a moment to review this document before submitting contributions.
 Before writing code or proposing features, please read **[PHILOSOPHY.md](PHILOSOPHY.md)**.
 FlashAgent adheres strictly to a few inviolable principles:
 1. **Local-first by default**: No telemetry, no cloud lock-in, no session leakage.
-2. **0% Electron / Chromium**: pure native Rust, one binary, about 12 MB of memory when idle.
+2. **0% Electron / Chromium**: pure native Rust, one binary, about 10 MB of memory when idle ([measured](docs/numbers.md)).
 3. **Rock-solid tool calling**: Tool execution cannot be a lottery. Protocol invariants and self-healing parsing are sacred.
 4. **M3 Expressive craft**: High UX fidelity, rich terminal ergonomics, smooth visual feedback.
 
@@ -22,9 +22,9 @@ If a proposed feature contradicts [PHILOSOPHY.md](PHILOSOPHY.md), it will be pol
 ## Development Setup
 
 ### Prerequisites
-- **Rust 1.85+** (`rustup update stable`)
+- **Rust 1.88+** (`rustup update stable`)
 - Linux, macOS, or Windows
-- A local LLM server (e.g. [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.ai), [llama.cpp](https://github.com/ggerganov/llama.cpp), or [vLLM](https://github.com/vllm-project/vllm)) or an OpenAI-compatible API key.
+- A local LLM server (e.g. [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com), [llama.cpp](https://github.com/ggml-org/llama.cpp), or [vLLM](https://github.com/vllm-project/vllm)) or an OpenAI-compatible API key.
 
 ### Building & Testing
 ```bash
@@ -35,8 +35,8 @@ cd FlashAgent
 # Run the complete test suite
 cargo test --workspace
 
-# Run strict clippy linter (warnings are treated as errors)
-cargo clippy --workspace -- -D warnings
+# Run strict clippy linter (warnings are treated as errors), as CI does
+cargo clippy --workspace --all-targets -- -D warnings
 
 # Build the release binary
 cargo build --release
@@ -63,7 +63,7 @@ cargo build --release
 2. Follow Rust idiomatic conventions:
    - Format with `cargo fmt`.
    - Ensure all tests pass: `cargo test --workspace`.
-   - Ensure clippy is happy: `cargo clippy --workspace -- -D warnings`.
+   - Ensure clippy is happy: `cargo clippy --workspace --all-targets -- -D warnings`.
 3. Keep pull requests focused on a single logical change.
 4. Open a Pull Request referencing any related issues.
 

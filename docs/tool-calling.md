@@ -48,7 +48,7 @@ recovery.
 Raw per-scenario output: [`docs/tool-calling/results-2026-09-12.json`](tool-calling/results-2026-09-12.json).
 
 Measured on one machine (LM Studio, CUDA, one model resident at a time,
-loaded and unloaded between runs). Time is the total for all five scenarios —
+loaded and unloaded between runs). Time is the total for all eight scenarios —
 it includes prompt processing, so treat it as an order of magnitude, not a
 benchmark of throughput.
 

@@ -33,3 +33,22 @@ jobs:
 
       - name: Strict Clippy verification
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # The oldest Rust the README and CONTRIBUTING.md promise (rust-version in
+  # Cargo.toml). The floor comes from dependencies in Cargo.lock (icu_*,
+  # image), not only from our own code; change it in all four places at once.
+  msrv:
+    name: Minimum Rust version (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check the workspace
+        run: cargo check --workspace --all-targets

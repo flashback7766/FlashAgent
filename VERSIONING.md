@@ -81,19 +81,29 @@ that commit. It stops instead when the tag already exists (a published tag
 is never moved), when the changelog has no section for the new version, or
 when other changes are uncommitted and would end up in the release commit.
 
-Stable release, cut from the newest beta build:
+Stable release, cut from the newest beta build. The changelog section comes
+first here too, headed with the full stable version:
+
+```markdown
+## v1.0.0+b290 — short title
+```
 
 ```bash
-./packaging/bump.sh stable 1.0.0     # commits README, tags v1.0.0+b290
+./packaging/bump.sh stable 1.0.0     # commits README and the changelog, tags v1.0.0+b290
 git push origin HEAD 'v1.0.0+b290'
 ```
+
+It stops for the same reasons as a beta build: the tag exists, the changelog
+has no section for it, or other changes are uncommitted.
 
 Pushing the tag runs `.github/workflows/release.yml`. It first runs the whole
 test suite on Linux, Windows and macOS (the CI workflow, called from the
 release) and builds nothing if any of it fails. Then it embeds the tag in
 the binary (`FLASHAGENT_VERSION`), publishes the assets to the rolling
 `beta` or `stable` release, and rejects any tag that is neither `bN` nor
-`vX.Y.Z+bN`.
+`vX.Y.Z+bN`. A stable tag also gets a permanent release of its own, named
+after the tag, with that version's changelog section as its notes; the
+rolling `stable` release is replaced by the next stable, this one stays.
 
 ### Choosing MAJOR.MINOR.PATCH for a stable release
 

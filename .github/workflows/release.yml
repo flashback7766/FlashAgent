@@ -206,6 +206,49 @@ jobs:
           - macOS: \`flashagent-macos-${VERSION}-aarch64.tar.gz\` (Apple Silicon) / \`flashagent-macos-${VERSION}-x86_64.tar.gz\` (Intel)
           EOF
 
+      - name: Take the stable release notes from CHANGELOG.md
+        if: steps.channel.outputs.tag == 'stable'
+        shell: bash
+        env:
+          VERSION: ${{ steps.channel.outputs.version }}
+        run: |
+          # The section packaging/bump.sh requires before it tags a stable:
+          # from '## vX.Y.Z+bN — title' up to the next '## ' heading.
+          awk -v h="## ${VERSION} " '
+            index($0, h) == 1 { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > changelog_section.md
+          if grep -q '[^[:space:]]' changelog_section.md; then
+            { cat changelog_section.md; printf '\n---\n\n'; cat release_body.md; } > stable_notes.md
+          else
+            echo "::warning::CHANGELOG.md has no '## ${VERSION} — ...' section; the ${VERSION} release gets the generic notes"
+            cp release_body.md stable_notes.md
+          fi
+          cat stable_notes.md
+
+      - name: Publish the permanent stable release
+        if: steps.channel.outputs.tag == 'stable'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.channel.outputs.version }}
+        run: |
+          # The rolling `stable` release is replaced by the next stable; this
+          # one stays, named after its tag, with that version's changelog. It
+          # is created before the rolling release, which must stay the newest
+          # by creation date, and is never marked latest. A re-run replaces
+          # the release; the tag itself is kept.
+          if gh release view "${VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release delete "${VERSION}" --yes --repo "${GITHUB_REPOSITORY}"
+          fi
+          gh release create "${VERSION}" release-assets/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --title "FlashAgent ${VERSION}" \
+            --notes-file stable_notes.md \
+            --latest=false
+
       - name: Publish to the rolling channel release
         shell: bash
         env:

@@ -21,7 +21,10 @@ foreach ($exe in $candidates) {
         & $exe --version *> $null
         if ($LASTEXITCODE -eq 0) {
             & $exe --uninstall
-            exit $LASTEXITCODE
+            # Run as a file, pass its exit code on. Under `irm | iex`, `exit`
+            # would close the window, so the script just stops here.
+            if ($MyInvocation.MyCommand.Path) { exit $LASTEXITCODE }
+            return
         }
     }
 }
