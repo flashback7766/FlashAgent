@@ -338,6 +338,27 @@ impl WritePreview for BuiltinTools {
     fn write_preview(&self, call: &ToolCall) -> Option<String> {
         self.preview_for(call)
     }
+
+    /// Only inside the project: the error quotes a line of the file, which
+    /// for a file outside it would be a read nobody approved.
+    fn doomed(&self, call: &ToolCall) -> Option<String> {
+        if call.name != "edit_file" {
+            return None;
+        }
+        let v = flashagent_llm::effective_args(&call.args_json, &call.name)?;
+        let args: EditArgs = serde_json::from_value(v).ok()?;
+        for (path, edits) in args.targets() {
+            let file = std::path::Path::new(&self.cwd).join(&path);
+            if !file.starts_with(&self.cwd) || path.contains("..") {
+                continue;
+            }
+            let text = fs_tools::read_raw(&self.cwd, &path)?;
+            if let Err(e) = fs_tools::check_edits(&path, &text, &edits) {
+                return Some(format!("error: {e}"));
+            }
+        }
+        None
+    }
 }
 
 #[async_trait]
@@ -715,6 +736,21 @@ mod tests {
 
     fn batch_call(name: &str, args: serde_json::Value) -> ToolCall {
         ToolCall { id: "t".into(), name: name.into(), args_json: args.to_string() }
+    }
+
+    #[test]
+    fn an_edit_that_cannot_apply_is_known_before_anyone_approves_it() {
+        use flashagent_core::WritePreview;
+        let (dir, tools) = batch_tools("doomed", &[("a.rs", "fn one() {}\n")]);
+        let missing = batch_call("edit_file", serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "fn two() {}", "new_string": "x" } ] }));
+        let fine = batch_call("edit_file", serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "fn one() {}", "new_string": "x" } ] }));
+        let outside = batch_call("edit_file", serde_json::json!({ "path": "../a.rs", "edits": [ { "old_string": "nope", "new_string": "x" } ] }));
+        let doomed = tools.doomed(&missing);
+        let (fine, outside) = (tools.doomed(&fine), tools.doomed(&outside));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(doomed.as_deref().is_some_and(|e| e.contains("closest line is 1")), "{doomed:?}");
+        assert_eq!(fine, None);
+        assert_eq!(outside, None, "a file outside the project is not read to say so");
     }
 
     #[tokio::test]

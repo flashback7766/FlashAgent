@@ -59,6 +59,12 @@ pub trait ToolExec: Send + Sync {
 /// Unified diff of what a write/edit call would change, for the approval preview.
 pub trait WritePreview: Send + Sync {
     fn write_preview(&self, call: &ToolCall) -> Option<String>;
+
+    /// The error a write would certainly end in (an edit whose old_string is
+    /// not in the file), so nobody is asked to approve it first.
+    fn doomed(&self, _call: &ToolCall) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Default)]

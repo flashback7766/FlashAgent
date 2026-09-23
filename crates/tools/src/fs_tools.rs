@@ -215,7 +215,16 @@ pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<S
     let file = resolve(cwd, path);
     let text = std::fs::read_to_string(&file)
         .map_err(|e| ToolError::Other(format!("read {path}: {e}")))?;
-    let mut checked = text.clone();
+    let applied = check_edits(path, &text, edits)?;
+    let text = apply_edits(text, edits)?;
+    std::fs::write(&file, &text)?;
+    Ok(format!("applied {applied} edit(s) to {path}"))
+}
+
+/// What edit_file would do to `text`, without writing: how many replacements,
+/// or the error it would fail with.
+pub(crate) fn check_edits(path: &str, text: &str, edits: &[EditChunk]) -> Result<usize, ToolError> {
+    let mut checked = text.to_string();
     let mut applied = 0usize;
     for edit in edits {
         if edit.old_string.is_empty() {
@@ -244,9 +253,7 @@ pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<S
             checked.replacen(&target_string, &edit.new_string, 1)
         };
     }
-    let text = apply_edits(text, edits)?;
-    std::fs::write(&file, &text)?;
-    Ok(format!("applied {applied} edit(s) to {path}"))
+    Ok(applied)
 }
 
 /// A batch is for a handful of related files, not the whole project.
