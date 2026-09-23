@@ -99,8 +99,10 @@ pub(crate) fn card_rows(value: &str, width: usize, max_rows: usize) -> Vec<Strin
             }
         }
     }
-    let chars: Vec<char> = shown.chars().collect();
-    let mut rows: Vec<String> = chars.chunks(width.max(1)).map(|c| c.iter().collect()).collect();
+    // By cells, as the row is clipped: split by characters, a wide character
+    // made rows twice as wide as the card and the rest of each row was cut off,
+    // hiding part of the command being approved.
+    let mut rows = split_cells(&shown, width.max(1));
     if rows.len() > max_rows {
         let hidden: usize = rows[max_rows - 1..].iter().map(|r| r.chars().count()).sum();
         rows.truncate(max_rows - 1);
@@ -165,17 +167,43 @@ pub(crate) fn push_goal_report(chat: &mut ChatView, ledger: &GoalLedger, reason:
     chat.push_line(LineKind::System, format!("{border}╰{}╯{reset}", "─".repeat(inner_w)));
 }
 
-/// Keeps a leading indent.
+fn cells(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
+}
+
+/// Rows of at most `width` cells, never splitting a character.
+fn split_cells(text: &str, width: usize) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut used = 0;
+    for g in text.graphemes(true) {
+        let w = cells(g);
+        if used + w > width && !row.is_empty() {
+            rows.push(std::mem::take(&mut row));
+            used = 0;
+        }
+        row.push_str(g);
+        used += w;
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
+/// Keeps a leading indent. Measured in cells: counted in characters, a
+/// Japanese question ran past the card and its end was cut off.
 pub(crate) fn wrap_plain(text: &str, width: usize) -> Vec<String> {
     let width = width.max(8);
-    if text.chars().count() <= width {
+    if cells(text) <= width {
         return vec![text.to_string()];
     }
     let indent: String = text.chars().take_while(|c| *c == ' ').collect();
     let mut rows = Vec::new();
     let mut row = String::new();
     for word in text.split_whitespace() {
-        let candidate = if row.is_empty() { word.chars().count() } else { row.chars().count() + 1 + word.chars().count() };
+        let candidate = if row.is_empty() { cells(word) } else { cells(&row) + 1 + cells(word) };
         if !row.is_empty() && candidate > width {
             rows.push(std::mem::take(&mut row));
             row.push_str(&indent);
@@ -186,11 +214,10 @@ pub(crate) fn wrap_plain(text: &str, width: usize) -> Vec<String> {
         }
         row.push_str(word);
         // A single word longer than the card: hard-split it.
-        while row.chars().count() > width {
-            let head: String = row.chars().take(width).collect();
-            let tail: String = row.chars().skip(width).collect();
-            rows.push(head);
-            row = tail;
+        if cells(&row) > width {
+            let mut pieces = split_cells(&row, width);
+            row = pieces.pop().unwrap_or_default();
+            rows.extend(pieces);
         }
     }
     if !row.is_empty() {
@@ -210,6 +237,18 @@ mod tests {
     fn control_characters_are_shown_in_caret_notation() {
         assert_eq!(card_safe("echo \u{1b}[8mhidden\r\nok\u{7f}"), "echo ^[[8mhidden^M\nok^?");
         assert_eq!(card_safe("\u{9b}"), "M-^[");
+    }
+
+    #[test]
+    fn wide_text_is_split_by_the_cells_it_takes() {
+        let command = format!("echo {} ; rm -rf ~/projects ; echo {}", "你".repeat(33), "好".repeat(10));
+        let rows = card_rows(&command, 40, 12);
+        assert!(rows.iter().all(|r| cells(r) <= 40), "{rows:?}");
+        assert!(rows.concat().contains("rm -rf ~/projects"), "{rows:?}");
+        let question = "このリポジトリにはテストが二つあります。どちらを先に実行しますか？結果によって次の手順が変わります。";
+        let wrapped = wrap_plain(question, 40);
+        assert!(wrapped.iter().all(|r| cells(r) <= 40), "{wrapped:?}");
+        assert_eq!(wrapped.concat(), question);
     }
 
     #[test]

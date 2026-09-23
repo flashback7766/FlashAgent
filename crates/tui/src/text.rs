@@ -26,39 +26,136 @@ fn track_style(word: &str, active_style: &mut Option<String>) {
     }
 }
 
-/// Measured in cells: a double-width character is never split, and escape
-/// codes travel with their piece without counting towards its width.
+/// Text and escape sequences in order, `(true, seq)` for an escape. A CSI
+/// sequence ends at its final byte, searched for after `ESC [`: `[` is itself
+/// in the final-byte range, and stopping there printed `38;2;220;215;205m`.
+fn ansi_pieces(text: &str) -> Vec<(bool, &str)> {
+    let mut out = Vec::new();
+    let mut plain_from = 0;
+    let mut i = 0;
+    let bytes = text.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] != 0x1b {
+            i += 1;
+            continue;
+        }
+        if plain_from < i {
+            out.push((false, &text[plain_from..i]));
+        }
+        let end = if bytes.get(i + 1) == Some(&b'[') {
+            bytes[i + 2..].iter().position(|b| (0x40..=0x7e).contains(b)).map_or(bytes.len(), |p| i + 2 + p + 1)
+        } else if bytes.get(i + 1) == Some(&b']') {
+            // An OSC string runs to BEL or ESC \.
+            let body = &bytes[i + 2..];
+            body.iter()
+                .position(|b| *b == 0x07)
+                .map(|p| i + 2 + p + 1)
+                .or_else(|| body.windows(2).position(|w| w == b"\x1b\\").map(|p| i + 2 + p + 2))
+                .unwrap_or(bytes.len())
+        } else {
+            (i + 2).min(bytes.len())
+        };
+        // Never inside a character: an escape's bytes are ASCII up to its end.
+        let end = (end..=bytes.len()).find(|&e| text.is_char_boundary(e)).unwrap_or(bytes.len());
+        out.push((true, &text[i..end]));
+        i = end;
+        plain_from = end;
+    }
+    if plain_from < bytes.len() {
+        out.push((false, &text[plain_from..]));
+    }
+    out
+}
+
+fn cells(grapheme: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(grapheme)
+}
+
+/// Measured in cells, grapheme by grapheme: a double-width character or an
+/// emoji joined into one symbol is never split, and escape codes travel with
+/// their piece without counting towards its width.
 fn break_wide_word(word: &str, width: usize) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut cur_vis = 0usize;
-    let mut chars = word.char_indices();
-    while let Some((at, c)) = chars.next() {
-        if c == '\x1b' {
-            let rest = &word[at..];
-            let end = rest
-                .find(|c: char| ('@'..='~').contains(&c))
-                .map(|p| p + 1)
-                .unwrap_or(rest.len());
-            cur.push_str(&rest[..end]);
-            // Escape sequences are ASCII, so one byte is one character.
-            for _ in 1..end {
-                chars.next();
-            }
+    for (escape, piece) in ansi_pieces(word) {
+        if escape {
+            cur.push_str(piece);
             continue;
         }
-        let cells = c.width().unwrap_or(0);
-        if cur_vis > 0 && cur_vis + cells > width {
-            out.push(std::mem::take(&mut cur));
-            cur_vis = 0;
+        for g in piece.graphemes(true) {
+            let w = cells(g);
+            if cur_vis > 0 && cur_vis + w > width {
+                out.push(std::mem::take(&mut cur));
+                cur_vis = 0;
+            }
+            cur.push_str(g);
+            cur_vis += w;
         }
-        cur.push(c);
-        cur_vis += cells;
     }
     if !cur.is_empty() {
         out.push(cur);
     }
     out
+}
+
+/// Text from a tool or the model, as a screen row can hold it: a tab becomes
+/// spaces to the next stop of four, colour codes stay, and any other escape
+/// or control character is dropped. Printed as they are, `ESC[2J` wiped the
+/// screen, a cursor move drew over other rows and a tab jumped over cells
+/// nothing painted, leaving old text showing through.
+pub fn terminal_safe(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut col = 0usize;
+    for (escape, piece) in ansi_pieces(text) {
+        if escape {
+            if piece.starts_with("\x1b[") && piece.ends_with('m') {
+                out.push_str(piece);
+            }
+            continue;
+        }
+        for c in piece.chars() {
+            match c {
+                '\t' => {
+                    let n = 4 - col % 4;
+                    out.extend(std::iter::repeat_n(' ', n));
+                    col += n;
+                }
+                '\n' | '\r' => {
+                    out.push(' ');
+                    col += 1;
+                }
+                c if c.is_control() => {}
+                c => {
+                    out.push(c);
+                    col += c.width().unwrap_or(0);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The leading spaces of a styled line, and the rest with every escape found
+/// among those spaces moved in front of it.
+fn split_indent(line: &str) -> (String, String) {
+    let mut lead = String::new();
+    let mut escapes = String::new();
+    let mut rest_at = line.len();
+    for (escape, piece) in ansi_pieces(line) {
+        if escape {
+            escapes.push_str(piece);
+            continue;
+        }
+        let spaces = piece.len() - piece.trim_start_matches(' ').len();
+        lead.push_str(&piece[..spaces]);
+        if spaces < piece.len() {
+            rest_at = piece.as_ptr() as usize - line.as_ptr() as usize + spaces;
+            break;
+        }
+    }
+    (lead, format!("{escapes}{}", &line[rest_at.min(line.len())..]))
 }
 
 /// Active ANSI styles carry across wraps; each line ends with a reset.
@@ -76,12 +173,14 @@ pub fn wrap_styled(text: &str, width: usize) -> Vec<String> {
             continue;
         }
 
-        // An indented line wraps under its own indent, not at the left edge.
-        let body = line.trim_start_matches(' ');
-        let indent = line.len() - body.len();
+        // An indented line wraps under its own indent, not at the left edge. The
+        // indent is counted past any colour codes in front of it: highlighted code
+        // opens with one, and its wrapped lines lost their indentation.
+        let (lead, body) = split_indent(line);
+        let indent = visible_width(&lead);
         if indent > 0 && indent + 10 <= width {
             let pad = " ".repeat(indent);
-            out.extend(wrap_styled(body, width - indent).into_iter().map(|row| format!("{pad}{row}")));
+            out.extend(wrap_styled(&body, width - indent).into_iter().map(|row| format!("{pad}{row}")));
             continue;
         }
 
@@ -106,8 +205,11 @@ pub fn wrap_styled(text: &str, width: usize) -> Vec<String> {
                 }
                 let mut pieces = break_wide_word(word, width);
                 let last = pieces.pop().unwrap_or_default();
+                // Piece by piece: a colour opened inside the word must close at
+                // the end of its row and open again on the next.
                 for piece in pieces {
                     cur.push_str(&piece);
+                    track_style(&piece, &mut active_style);
                     if active_style.is_some() {
                         cur.push_str("\x1b[0m");
                     }
@@ -118,7 +220,7 @@ pub fn wrap_styled(text: &str, width: usize) -> Vec<String> {
                 }
                 cur_vis = visible_width(&last);
                 cur.push_str(&last);
-                track_style(word, &mut active_style);
+                track_style(&last, &mut active_style);
                 continue;
             }
             // By visible width: counting the carried-over escape as text put a space
@@ -213,56 +315,39 @@ pub fn restore_line_color(text: &str, prefix: &str) -> String {
 /// Escapes are kept whole: cutting inside one prints its tail (`[39m`) and
 /// leaks style across lines.
 pub fn clip_ansi(text: &str, width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut out = String::with_capacity(text.len());
-    let mut cells = 0;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // ESC [ ... final byte (@-~), copied verbatim.
-            out.push(c);
-            if chars.peek() == Some(&'[') {
-                if let Some(bracket) = chars.next() {
-                    out.push(bracket);
-                    while let Some(&n) = chars.peek() {
-                        out.push(n);
-                        chars.next();
-                        if ('@'..='~').contains(&n) {
-                            break;
-                        }
-                    }
-                }
+    let mut used = 0;
+    // Once something does not fit, nothing after it is text: a narrower
+    // character later would make the result something other than a prefix.
+    let mut full = false;
+    for (escape, piece) in ansi_pieces(text) {
+        if escape {
+            out.push_str(piece);
+            continue;
+        }
+        for g in piece.graphemes(true) {
+            let w = cells(g);
+            if full || used + w > width {
+                full = true;
+                continue;
             }
-            continue;
+            used += w;
+            out.push_str(g);
         }
-        let char_w = c.width().unwrap_or(0);
-        if cells + char_w > width {
-            continue;
-        }
-        cells += char_w;
-        out.push(c);
     }
     out
 }
 
+/// Grapheme by grapheme, as the composer measures, so a joined emoji takes
+/// the same cells in both.
 pub fn visible_width(text: &str) -> usize {
-    let mut cells = 0;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                while let Some(&n) = chars.peek() {
-                    chars.next();
-                    if ('@'..='~').contains(&n) {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        cells += c.width().unwrap_or(0);
+    use unicode_segmentation::UnicodeSegmentation;
+    // Most rows: plain ASCII, one cell a byte.
+    if text.is_ascii() && !text.contains('\x1b') {
+        return text.bytes().filter(|b| !b.is_ascii_control()).count();
     }
-    cells
+    ansi_pieces(text).into_iter().filter(|(escape, _)| !escape).flat_map(|(_, piece)| piece.graphemes(true)).map(cells).sum()
 }
 
 /// With a leading ellipsis when the start had to go. The composer shows the
@@ -347,6 +432,50 @@ pub fn plural(n: usize, one: &str, many: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_coloured_token_wraps_without_printing_its_escapes() {
+        let code = "let v = self.config.backend.settings.values.get(key).unwrap_or_default().to_string();";
+        let mut carry = crate::highlight::Carry::default();
+        let coloured = crate::highlight::highlight_line("rust", code, &mut carry);
+        let rows = wrap_styled(&coloured, 40);
+        for row in &rows {
+            assert!(visible_width(row) <= 40, "{row:?}");
+            assert!(!strip_ansi(row).contains("[0m") && !strip_ansi(row).contains(";2;"), "escape printed as text: {row:?}");
+        }
+        assert_eq!(rows.iter().map(|r| strip_ansi(r)).collect::<String>().replace(' ', ""), code.replace(' ', ""));
+    }
+
+    #[test]
+    fn highlighted_code_keeps_its_indent_when_wrapped() {
+        let code = "        result = compute_the_value(first_argument, second_argument, third)";
+        let mut carry = crate::highlight::Carry::default();
+        let coloured = crate::highlight::highlight_line("python", code, &mut carry);
+        for row in wrap_styled(&coloured, 60) {
+            assert!(strip_ansi(&row).starts_with("        "), "{:?}", strip_ansi(&row));
+        }
+    }
+
+    #[test]
+    fn a_clip_is_a_prefix_of_what_it_clips() {
+        assert_eq!(clip_ansi("abcd日本語xyz", 5), "abcd");
+        assert_eq!(strip_ansi(&clip_ansi("\x1b[1mab\x1b[0m日x", 3)), "ab");
+    }
+
+    #[test]
+    fn only_text_and_colour_reach_a_row() {
+        assert_eq!(terminal_safe("\tfmt"), "    fmt");
+        assert_eq!(terminal_safe("ab\tc"), "ab  c");
+        assert_eq!(terminal_safe("\x1b[2J\x1b[Hdone\x1b[31m!\x1b[0m"), "done\x1b[31m!\x1b[0m");
+        assert_eq!(terminal_safe("title\x1b]0;evil\x07 ok"), "title ok");
+        assert_eq!(terminal_safe("a\nb"), "a b");
+    }
+
+    #[test]
+    fn a_joined_emoji_is_as_wide_as_the_composer_measures_it() {
+        let family = "hi \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} x";
+        assert_eq!(visible_width(family), unicode_width::UnicodeWidthStr::width(family));
+    }
 
     #[test]
     fn an_indented_line_wraps_under_its_indent() {

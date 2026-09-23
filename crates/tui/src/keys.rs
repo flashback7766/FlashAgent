@@ -509,7 +509,7 @@ impl App {
                     // arrows promised, not an unknown command.
                     if self.input.starts_with('/')
                         && self.input.line_count() == 1
-                        && !flashagent_tui::autocomplete::is_exact_command(&self.input.text())
+                        && !flashagent_tui::autocomplete::is_exact_command(self.input.text())
                     {
                         let picked = AutocompletePopup::for_input(&self.input, std::path::Path::new("."), self.autocomplete_idx)
                             .and_then(|ac| ac.current().map(|item| item.trigger.clone()));

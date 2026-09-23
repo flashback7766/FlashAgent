@@ -107,6 +107,16 @@ fn recolor_sgr(theme: ColorTheme, params: &str) -> String {
 fn painted(theme: ColorTheme, ground: Ground, rgb: (u8, u8, u8)) -> Vec<String> {
     match theme {
         ColorTheme::Ansi16 => {
+            // The body text is near-white and panels near-black, drawn for a dark
+            // screen. Mapped to bright white and black they vanished on a white one
+            // (macOS Terminal's default); the terminal's own colours fit either.
+            let (r, g, b) = rgb;
+            let (hi, lo) = (r.max(g).max(b), r.min(g).min(b));
+            match ground {
+                Ground::Fore if lo >= 200 && hi - lo < 40 => return vec!["39".to_string()],
+                Ground::Back if hi <= 70 => return vec!["49".to_string()],
+                _ => {}
+            }
             let (code, bright) = nearest_ansi(rgb);
             let base = match ground {
                 Ground::Fore => 30,
@@ -338,9 +348,13 @@ mod tests {
         assert_eq!(themed, "\x1b[93mx");
         let back = recolor_for(ColorTheme::Ansi16, "\x1b[48;2;10;10;180mx");
         assert_eq!(back, "\x1b[44mx");
-        // The read card's near-black blue is a background and should land on black.
+        // The read card's near-black blue and the near-white body text take the
+        // terminal's own background and text colour: black and bright white made
+        // a black panel of invisible text on a white screen.
         let card = recolor_for(ColorTheme::Ansi16, "\x1b[48;2;22;38;60mx");
-        assert_eq!(card, "\x1b[40mx");
+        assert_eq!(card, "\x1b[49mx");
+        let body = recolor_for(ColorTheme::Ansi16, "\x1b[38;2;232;227;218mx");
+        assert_eq!(body, "\x1b[39mx");
         assert!(!themed.contains("38;2"), "no 24-bit colour may survive this theme");
     }
 

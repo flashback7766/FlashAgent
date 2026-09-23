@@ -949,14 +949,26 @@ impl ChatView {
                 let reset = "\x1b[0m";
 
                 let header_prefix = "╭─ ";
-                let vis_header_len = 3 + visible_width(&title_vis) + 1;
+                // A long stage name is cut to the box: unclipped, the header ran
+                // past the body and its corner fell off the screen.
+                let title_room = box_w.saturating_sub(6);
+                let (title_styled, title_w) = if visible_width(&title_vis) > title_room {
+                    let clipped = tool_views::clip_ellipsis(&title_styled, title_room);
+                    let w = visible_width(&clipped);
+                    (clipped, w)
+                } else {
+                    (title_styled, visible_width(&title_vis))
+                };
+                let vis_header_len = 3 + title_w + 1;
                 let dash_count = box_w.saturating_sub(vis_header_len + 1);
                 target.push((
                     LineKind::Reasoning,
                     format!("{border_color}{header_prefix}{reset}{title_styled} {border_color}{}╮{reset}", "─".repeat(dash_count)),
                 ));
                 let inner_w = box_w.saturating_sub(6).max(15);
-                for chunk in wrap(trimmed_text, inner_w) {
+                // Tabs as spaces before the rows are measured and padded.
+                let safe_text: Vec<String> = trimmed_text.lines().map(terminal_safe).collect();
+                for chunk in wrap(&safe_text.join("\n"), inner_w) {
                     let styled_chunk = md(&chunk);
                     let vis_len = visible_width(&styled_chunk);
                     let pad = " ".repeat(inner_w.saturating_sub(vis_len));
@@ -1187,7 +1199,7 @@ impl ChatView {
                 continue;
             }
 
-            let wrapped = wrap(&line.text, if line.kind == LineKind::User { width - 2 } else { width });
+            let wrapped = wrap(&line.text, if line.kind == LineKind::User { width.saturating_sub(2) } else { width });
             for (j, chunk) in wrapped.into_iter().enumerate() {
                 let text = match line.kind {
                     LineKind::User => {
