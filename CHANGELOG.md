@@ -1,5 +1,10 @@
 # Changelog
 
+## b352 — a steady download line, and answers typed straight into a question
+
+- **The update line no longer flashes while it downloads.** Each step of the download put up a new notice, and a new notice fades in from grey, so the line blinked grey and green until the download finished. It now changes its numbers in place.
+- **Type an answer of your own straight into a question card.** Letters used to be ignored until the last option, "Custom", was chosen; now the first letter opens the answer of your own. Digits still pick options. A path pasted into the card no longer has its digits picking options at random.
+
 ## b351 — every symbol drawn, every key heard, half the prompt
 
 b350 was tagged with these changes and stopped by a test that tripped over a random tip; it was never published.
