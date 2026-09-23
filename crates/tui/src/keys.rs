@@ -1,8 +1,5 @@
 use super::*;
 
-/// A second Esc on an empty prompt within this window quits.
-pub(crate) const ESC_QUIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
-
 impl App {
     /// The next launch starts in the current mode. A `/goal` run's Accept All is
     /// never remembered.
@@ -167,16 +164,11 @@ impl App {
                     self.attachments.clear();
                     self.background = Some(BackgroundNotice::fading("Attachments cleared".to_string(), 4));
                     self.renderer.request_reprint();
-                } else if self.last_esc.is_some_and(|t| t.elapsed() < ESC_QUIT_WINDOW) {
-                    // A single stray Esc used to quit outright.
-                    return Flow::Quit;
                 } else {
-                    // The first press also clears a suggestion, so quitting after an answer is
-                    // still two presses.
+                    // Esc closes and cancels, and never quits: it is pressed twice to close a
+                    // menu and then a card as often as to leave. Ctrl+D and Ctrl+C Ctrl+C quit.
                     self.suggested_prompt = None;
                     self.latest_suggestion = None;
-                    self.last_esc = Some(std::time::Instant::now());
-                    self.custom_placeholder = Some("Press Esc again to quit".to_string());
                     self.renderer.request_reprint();
                 }
             }
@@ -356,10 +348,6 @@ impl App {
                 self.open_model_menu(cx.source);
             }
 
-            KeyCode::F(5) => {
-                self.open_overlay(Overlay::Sampling(SamplingView::new(&self.config)));
-            }
-
             // Shift+Tab arrives as BackTab or as Tab with Shift.
             KeyCode::BackTab | KeyCode::Tab if matches!(code, KeyCode::BackTab) || mods.contains(KeyModifiers::SHIFT) => {
                 let next_mode = cx.perm.state().mode().next();
@@ -506,6 +494,20 @@ impl App {
                         self.renderer.request_reprint();
                     }
                 } else if (!self.input.is_empty() || !self.attachments.is_empty()) && !self.running {
+                    // Enter takes what the popup highlights: "/he" and Enter is /help, as the
+                    // arrows promised, not an unknown command.
+                    if self.input.starts_with('/') && self.input.line_count() == 1 {
+                        let picked = AutocompletePopup::for_input(&self.input, std::path::Path::new("."), self.autocomplete_idx)
+                            .and_then(|ac| ac.current().map(|item| item.trigger.clone()));
+                        if let Some(trigger) = picked.filter(|t| t.as_str() != self.input.trim()) {
+                            self.autocomplete_idx = 0;
+                            if flashagent_tui::autocomplete::needs_argument(&trigger) {
+                                self.input.set(format!("{trigger} "));
+                                return Flow::Next;
+                            }
+                            self.input.set(trigger);
+                        }
+                    }
                     match self.submit_input(cx).await {
                         Flow::Continue => return Flow::Continue,
                         Flow::Quit => return Flow::Quit,
@@ -524,6 +526,11 @@ impl App {
             }
             // Shell editing keys, on either layout.
             KeyCode::Char(c) if cx.gate.pending().is_none() && mods.contains(KeyModifiers::CONTROL) => match latin(c) {
+                'k' if self.running => {
+                    self.background = Some(BackgroundNotice::fading("Commands open once the turn is done · Esc interrupts it", 4));
+                    self.renderer.request_reprint();
+                }
+                'k' => self.open_palette(),
                 'a' => self.input.home(),
                 'j' => {
                     self.input.insert_char('\n');
@@ -531,10 +538,6 @@ impl App {
                 }
                 'w' | 'h' => {
                     self.input.delete_word_before();
-                    self.edited();
-                }
-                'k' => {
-                    self.input.delete_to_line_end();
                     self.edited();
                 }
                 'f' if self.input_history.is_empty() => {
@@ -550,6 +553,11 @@ impl App {
             KeyCode::Char(c) if cx.gate.pending().is_none() && mods.contains(KeyModifiers::ALT) => match latin(c) {
                 'b' => self.input.word_left(),
                 'f' => self.input.word_right(),
+                // Ctrl+K belongs to the command palette.
+                'k' => {
+                    self.input.delete_to_line_end();
+                    self.edited();
+                }
                 _ => {}
             },
             _ => {}

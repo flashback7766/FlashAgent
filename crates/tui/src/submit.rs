@@ -1,6 +1,6 @@
 use super::*;
 
-const HELP: &str = "Commands & Skills (Tab to autocomplete):\n\
+const HELP: &str = "Commands & Skills (Tab to autocomplete, Ctrl+K to search them all):\n\
      • /goal <task>           — autonomous run; its limits live in Settings → Goal\n\
      • /resume                — pick a saved session from this folder and continue it\n\
      • /settings (or Tab)     — open settings configuration tab\n\
@@ -11,7 +11,7 @@ const HELP: &str = "Commands & Skills (Tab to autocomplete):\n\
      • /model  (or /m)        — choose and switch model (or press F3)\n\
      • /mode [plan|man|edits|all] — switch permission mode (or press Shift+Tab)\n\
      • /mcp [list|market|test|add|reload] — manage Model Context Protocol servers\n\
-     • /sampling              — sampling parameters (or press F5)\n\
+     • /sampling              — sampling parameters (advanced)\n\
      • /compact [focus]       — summarize older turns to free context\n\
      • /clear                 — clear chat scrollback\n\
      • /regenerate (or Ctrl+R) — regenerate last model response from scratch\n\
@@ -20,7 +20,7 @@ const HELP: &str = "Commands & Skills (Tab to autocomplete):\n\
      • /export [md|html|jsonl] — write the conversation to a file\n\
      • /editor (or Ctrl+E)    — compose the prompt in an external editor\n\
      • Alt+Enter · Ctrl+J · \\ then Enter — a new line in the prompt\n\
-     • ←/→ · Home/End · Ctrl+W · Ctrl+K — move and delete in the prompt\n\
+     • ←/→ · Home/End · Ctrl+W · Alt+K — move and delete in the prompt\n\
      • Ctrl+F                 — search the prompts sent before\n\
      • Ctrl+V                 — paste a screenshot (Ctrl+Z takes it back); dropping an image works too\n\
      • /update (or Ctrl+U) · /channel <stable|beta> — check, download and install an update\n\
@@ -28,7 +28,10 @@ const HELP: &str = "Commands & Skills (Tab to autocomplete):\n\
      • /exit                  — save the session and quit\n\
      • /uninstall             — close FlashAgent and remove it; asks what data to delete\n\
      • Tab                    — autocomplete popup or settings tab\n\
-     • Esc                    — dismiss suggestions / interrupt; twice on an empty prompt quits";
+     • Ctrl+K                 — every command and menu, searchable\n\
+     • Click a thought or a tool call — open or fold just that one\n\
+     • Esc                    — close, dismiss or interrupt; it never quits\n\
+     • Ctrl+D · Ctrl+C twice  — quit";
 
 impl App {
     /// Enter on a non-empty prompt with no turn running.
@@ -112,10 +115,14 @@ impl App {
             "compact" => self.compact_command(cx, arg).await,
             "verbose" | "expand" | "think" | "o" => self.verbose_command(arg),
             "exit" | "quit" | "q" => return Some(Flow::Quit),
-            "editor" => match open_in_external_editor("", &self.config.external_editor) {
-                Ok(edited) => self.input.set(edited),
-                Err(err) => self.notice(format!("Failed to launch external editor: {err}")),
-            },
+            "editor" => {
+                match open_in_external_editor("", &self.config.external_editor) {
+                    Ok(edited) => self.input.set(edited),
+                    Err(err) => self.notice(format!("Failed to launch external editor: {err}")),
+                }
+                // Coming back to the alternate screen found it blank.
+                self.renderer.request_reprint();
+            }
             "diff" => self.git_diff_summary(),
             "rewind" => self.rewind_command(cx, arg),
             "commit" => self.git_commit(arg),
@@ -334,11 +341,7 @@ impl App {
 
     fn list_skills(&mut self) {
         let skills = flashagent_tui::autocomplete::load_skills(std::path::Path::new("."));
-        let listed: Vec<String> = skills
-            .iter()
-            .filter(|s| s.trigger.starts_with("/skill:"))
-            .map(|s| format!("  • {} — {}", s.trigger, s.description))
-            .collect();
+        let listed: Vec<String> = skills.iter().map(|s| format!("  • {} — {}", s.trigger, s.description)).collect();
         if listed.is_empty() {
             self.notice("[No skills found. Add .agents/skills/<name>.md (project) or ~/.flashagent/skills/<name>.md (global).]");
         } else {
@@ -368,17 +371,20 @@ impl App {
         if news.is_empty() {
             self.notice("[No changelog is bundled with this build.]");
         } else {
-            flashagent_tui::whatsnew::run_channel(news, now, cx.rx).await.ok();
+            let mut deferred = Vec::new();
+            flashagent_tui::whatsnew::run_channel(news, now, cx.rx, &mut deferred).await.ok();
+            for ev in deferred {
+                let _ = cx.tx.send(ev);
+            }
+            // It drew over the whole screen.
+            self.renderer.request_reprint();
         }
     }
 
     fn clear_chat(&mut self) {
+        self.cancel_recap();
         self.chat.clear();
-        self.renderer.printed_settled = 0;
-        self.renderer.prev_expansion = None;
         self.renderer.scroll_to_bottom();
-        // Only a full repaint removes the old lines after a clear.
-        self.renderer.request_reprint();
     }
 
     fn set_effort(&mut self, cx: &LoopCtx<'_>, arg: &str) {
@@ -726,8 +732,6 @@ impl App {
         }
         self.chat.truncate_before_nth_last_user(taken_back);
         self.renderer.scroll_to_bottom();
-        self.renderer.printed_settled = 0;
-        self.renderer.prev_expansion = None;
         update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
         self.suggested_prompt = None;
         self.latest_suggestion = None;

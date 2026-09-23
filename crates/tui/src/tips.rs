@@ -1,14 +1,11 @@
 //! Tips shown in the footer with a typewriter animation.
 
 pub static TIPS_POOL: &[&str] = &[
-    "Tab on an empty prompt opens Settings; Shift+Tab cycles the permission mode.",
-    "F1 shows where the context window is going, token by token.",
-    "F2 cycles verbose mode: off, the last turn, or every thought and tool call.",
-    "F3 switches model; F4 picks the thinking effort; F5 opens sampling.",
-    "Ctrl+R asks for the last answer again from scratch.",
+    "Shift+Tab cycles the permission mode: Planning, Manual, Accept Edits, Accept All.",
+    "Click a thought or a tool call to open or fold just that one; F2 does them all.",
     "Press Enter while the agent is working to steer it without stopping the turn.",
     "Esc interrupts a running turn and keeps everything it already did.",
-    "Ctrl+V pastes a screenshot for a vision model; Ctrl+Z takes it back.",
+    "Ctrl+Z takes back an attached image before it is sent.",
     "Drop an image file on the window to attach it to the next message.",
     "Ctrl+E writes the prompt in your external editor.",
     "Ctrl+U checks for an update, downloads it and shows the progress.",
@@ -170,18 +167,16 @@ impl TipAnimator {
         }
     }
 
-    /// Visible text and cursor visibility.
-    pub fn render_state(&self, tick_n: usize) -> (String, bool) {
+    /// Visible text and whether the caret shows: only while the text moves, so
+    /// a tip at rest is not a second blinking cursor beside the real one.
+    pub fn render_state(&self) -> (String, bool) {
         let visible: String = self.tip_text.chars().take(self.char_count).collect();
-        let caret = match self.phase {
-            TipPhase::Typing | TipPhase::Erasing => true,
-            TipPhase::Holding | TipPhase::Pause => (tick_n / 6).is_multiple_of(2),
-        } && crate::anim::enabled();
+        let caret = matches!(self.phase, TipPhase::Typing | TipPhase::Erasing) && crate::anim::enabled();
         (visible, caret)
     }
 
-    pub fn render_line(&self, tick_n: usize, max_w: usize) -> String {
-        let (visible, caret_on) = self.render_state(tick_n);
+    pub fn render_line(&self, max_w: usize) -> String {
+        let (visible, caret_on) = self.render_state();
         let clipped = if max_w > 1 {
             let limit = max_w.saturating_sub(1);
             if visible.chars().count() > limit {
@@ -200,20 +195,23 @@ impl TipAnimator {
         format!("\x1b[38;2;175;170;160m{clipped}\x1b[0m{caret}")
     }
 
-    /// At most `max_lines` rows: extra rows in a short window belong to the
-    /// conversation.
-    pub fn render_lines(&self, tick_n: usize, width: usize, max_lines: usize) -> Vec<String> {
+    /// At most `max_lines` rows, and as many for every tip at a given width: a
+    /// footer that grew by a row while a long tip typed out, and shrank when it
+    /// was erased, moved the whole conversation above it up and down. Extra rows
+    /// in a short window belong to the conversation.
+    pub fn render_lines(&self, width: usize, max_lines: usize) -> Vec<String> {
         let avail1 = width.saturating_sub(8); // "  Tip: " is 7 chars + 1 char margin
         let avail2 = width.saturating_sub(8); // "       " is 7 chars indent + 1 char margin
+        let longest = TIPS_POOL.iter().map(|t| t.chars().count()).max().unwrap_or(0).max(self.total_chars);
 
-        if max_lines <= 1 || width < 30 || self.total_chars <= avail1 {
-            let single = self.render_line(tick_n, avail1);
+        if max_lines <= 1 || width < 30 || longest <= avail1 {
+            let single = self.render_line(avail1);
             return vec![format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m {single}")];
         }
 
         let (line1_full, line2_full) = split_tip_at_word_boundary(self.tip_text, avail1);
         let l1_char_count = line1_full.chars().count();
-        let (visible_total, caret_on) = self.render_state(tick_n);
+        let (visible_total, caret_on) = self.render_state();
         let caret = if caret_on {
             "\x1b[1;38;2;225;175;95m▌\x1b[0m"
         } else {
@@ -222,7 +220,7 @@ impl TipAnimator {
 
         if self.char_count <= l1_char_count {
             let typed1 = visible_total;
-            vec![format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{typed1}\x1b[0m{caret}")]
+            vec![format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{typed1}\x1b[0m{caret}"), String::new()]
         } else {
             let l2_start_char = self.tip_text.chars().count().saturating_sub(line2_full.chars().count());
             let l2_typed_chars = self.char_count.saturating_sub(l2_start_char);
@@ -335,7 +333,7 @@ mod tests {
         }
         assert_eq!(anim.phase, TipPhase::Typing);
 
-        let rendered = anim.render_line(0, 80);
+        let rendered = anim.render_line(80);
         assert!(!rendered.is_empty());
     }
 
@@ -389,30 +387,54 @@ mod tests {
         anim.total_chars = anim.tip_text.chars().count();
         anim.phase = TipPhase::Typing;
 
-        let lines_wide = anim.render_lines(0, 160, 2);
+        let lines_wide = anim.render_lines(160, 2);
         assert_eq!(lines_wide.len(), 1);
         assert!(lines_wide[0].contains("Tip:"));
 
-        // 70 columns: the tip needs two lines once typed out.
+        // 70 columns: the tip needs two lines once typed out, and holds both rows
+        // from the first character to the last, so the footer never changes height.
         anim.char_count = 0;
-        let lines_c0 = anim.render_lines(0, 70, 2);
-        assert_eq!(lines_c0.len(), 1);
+        let lines_c0 = anim.render_lines(70, 2);
+        assert_eq!(lines_c0.len(), 2);
+        assert_eq!(lines_c0[1], "");
 
         anim.char_count = 20;
-        let lines_c20 = anim.render_lines(0, 70, 2);
-        assert_eq!(lines_c20.len(), 1);
+        let lines_c20 = anim.render_lines(70, 2);
+        assert_eq!(lines_c20.len(), 2);
+        assert!(lines_c20[0].contains('▌'), "the caret follows the typing");
 
         anim.char_count = anim.total_chars;
         anim.phase = TipPhase::Holding;
-        let lines_holding = anim.render_lines(0, 70, 2);
+        let lines_holding = anim.render_lines(70, 2);
         assert_eq!(lines_holding.len(), 2);
         assert!(lines_holding[0].contains("Tip:"));
         assert!(lines_holding[1].starts_with("       ")); // 7 space indent
+        assert!(!lines_holding.concat().contains('▌'), "a tip at rest has no caret");
 
-        // Line 2 erases first.
+        // Line 2 erases first, and its row stays.
         anim.phase = TipPhase::Erasing;
         anim.char_count = 20; // erased down into line 1
-        let lines_erasing = anim.render_lines(0, 70, 2);
-        assert_eq!(lines_erasing.len(), 1); // the second line has been erased
+        let lines_erasing = anim.render_lines(70, 2);
+        assert_eq!(lines_erasing.len(), 2);
+        assert_eq!(lines_erasing[1], "");
+    }
+
+    #[test]
+    fn every_tip_takes_the_same_rows_at_one_width() {
+        let mut anim = TipAnimator::new();
+        for width in [40, 70, 100, 200] {
+            let rows: std::collections::HashSet<usize> = TIPS_POOL
+                .iter()
+                .flat_map(|tip| {
+                    anim.tip_text = *tip;
+                    anim.total_chars = tip.chars().count();
+                    (0..=anim.total_chars).map(|n| {
+                        anim.char_count = n;
+                        anim.render_lines(width, 2).len()
+                    }).collect::<Vec<_>>()
+                })
+                .collect();
+            assert_eq!(rows.len(), 1, "at {width} columns the footer changes height: {rows:?}");
+        }
     }
 }

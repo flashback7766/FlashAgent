@@ -119,19 +119,26 @@ skipped when a turn has just read the same prefix.
 
 ## Terminal UI
 
-The screen is drawn by `render.rs` as print-and-forget: rows of the
-transcript that can no longer change are printed once into the terminal's
-own scrollback, and only the "tail" is redrawn on each frame. The tail is
-the turn in progress, the composer and the footer.
+The app runs on the alternate screen. `render.rs` builds each frame as the
+rows that should be on it: the end of the transcript, then the "tail" (the
+turn in progress, the composer and the footer). `screen::Screen` compares
+them with the rows already on the terminal and writes only those that
+changed, each over the old one by absolute position. Nothing is cleared
+first, so a terminal that shows a frame half-written shows old rows beside
+new ones, never a blank screen. On Windows the frame goes to the console in
+one `WriteConsoleW` call, since the standard library splits console output
+into pieces of about 2 KB and the console draws between them. The setup
+wizard, the release notes and the trust question draw through the same
+`Screen`.
 
 ```mermaid
 graph LR
     E[LoopEvent] --> C[ChatView lines]
     C -->|render_split| S[settled rows, shared]
     C -->|render_split| L[live rows]
-    S -->|new ones only| P[printed to scrollback]
-    L --> T[tail: live + composer + footer]
-    T --> R[theme recolour] --> O[terminal]
+    S --> V[viewport: last screenful]
+    L --> T[tail: live + composer + footer] --> V
+    V --> D[Screen: changed rows only] --> R[theme recolour] --> O[terminal]
 ```
 
 - `ChatView::render_split` keeps the settled rows in a cache shared through
@@ -139,8 +146,17 @@ graph LR
   falls in, so its cost barely grows with the length of the session (see
   [docs/numbers.md](docs/numbers.md)).
 - Every row is measured in display cells and clipped or wrapped to the
-  width. A row wider than the terminal would wrap, the tail would take more
-  rows than counted, and the next redraw would land in the wrong place.
+  width. A row wider than the terminal would wrap and push every row under
+  it down. The bottom row stays one column short, because a character in
+  the last cell makes some consoles scroll the screen.
+- The conversation scrolls; the composer and the footer under it do not.
+  Scrolled back, the view stays on the same lines while new ones arrive.
+- `ChatView::render_split` also records which conversation line each row
+  came from, so a click on a thought or a tool call opens or folds that one
+  (`ChatLine::is_expanded` overrides F2 for it).
+- Nothing moves the layout while it animates: the welcome card holds its
+  full height while it draws itself in, and the tip line keeps the same
+  number of rows for every tip at a given width.
 - Themes are applied to the finished frame by rewriting its 24-bit colour
   sequences, so the drawing code has one palette.
 - Motion (Settings → Animations) goes through `anim::enabled()`. Off, only

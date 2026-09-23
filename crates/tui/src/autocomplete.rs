@@ -51,7 +51,7 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
     vec![
         AutocompleteItem::new("/help", "Show command reference and keybindings", AutocompleteCategory::Command),
         AutocompleteItem::new("/settings", "Open interactive settings tab (or press Tab on empty prompt)", AutocompleteCategory::Command),
-        AutocompleteItem::new("/sampling", "Open sampling parameters menu (or press F5)", AutocompleteCategory::Command),
+        AutocompleteItem::new("/sampling", "Sampling parameters, for those who tune them", AutocompleteCategory::Command),
         AutocompleteItem::new("/memory", "See what FlashAgent remembers; forget or correct a fact", AutocompleteCategory::Command),
         AutocompleteItem::new("/whatsnew", "Show what changed in the latest releases", AutocompleteCategory::Command),
         AutocompleteItem::new("/context", "Show detailed context window token breakdown", AutocompleteCategory::Command),
@@ -59,14 +59,12 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/effort", "Select thinking effort preset (off, low, medium, high)", AutocompleteCategory::Command),
         AutocompleteItem::new("/model", "Open model selection menu or switch model", AutocompleteCategory::Command),
         AutocompleteItem::new("/verbose", "Toggle verbose mode for thoughts and tool calls (all, last, off)", AutocompleteCategory::Command),
-        AutocompleteItem::new("/expand", "Toggle verbose mode for thoughts and tool calls (all, last, off)", AutocompleteCategory::Command),
         AutocompleteItem::new("/mode", "Cycle permission mode (Planning, Manual, Accept Edits, Accept All)", AutocompleteCategory::Command),
         AutocompleteItem::new("/goal", "Autonomous run: /goal <task> (limits in Settings → Goal)", AutocompleteCategory::Command),
         AutocompleteItem::new("/resume", "Pick a saved session from this folder and continue it", AutocompleteCategory::Command),
         AutocompleteItem::new("/mcp", "List and manage Model Context Protocol servers", AutocompleteCategory::Command),
         AutocompleteItem::new("/compact", "Compact conversation context (optional: /compact <focus instructions>)", AutocompleteCategory::Command),
         AutocompleteItem::new("/regenerate", "Regenerate the last assistant response from scratch (or press Ctrl+R)", AutocompleteCategory::Command),
-        AutocompleteItem::new("/retry", "Retry and regenerate the last assistant response from scratch (Ctrl+R)", AutocompleteCategory::Command),
         AutocompleteItem::new("/update", "Check and apply FlashAgent updates in-place", AutocompleteCategory::Command),
         AutocompleteItem::new("/channel", "Switch release channel: /channel <stable|beta>", AutocompleteCategory::Command),
         AutocompleteItem::new("/diff", "Preview unstaged git changes and diff stat", AutocompleteCategory::Command),
@@ -132,6 +130,27 @@ pub fn sub_commands(input: &str) -> Option<Vec<AutocompleteItem>> {
     }
 }
 
+/// `load_skills`, read again at most every two seconds: the popup asks every frame.
+fn cached_skills(cwd: &Path) -> Vec<AutocompleteItem> {
+    type Cache = Option<(std::time::Instant, std::path::PathBuf, Vec<AutocompleteItem>)>;
+    static CACHE: std::sync::Mutex<Cache> = std::sync::Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, dir, items)) = cache.as_ref() {
+        if dir == cwd && at.elapsed() < std::time::Duration::from_secs(2) {
+            return items.clone();
+        }
+    }
+    let items = load_skills(cwd);
+    *cache = Some((std::time::Instant::now(), cwd.to_path_buf(), items.clone()));
+    items
+}
+
+/// Enter on such an item puts it in the prompt to be finished instead of
+/// running it bare.
+pub fn needs_argument(trigger: &str) -> bool {
+    matches!(trigger, "/goal" | "/commit" | "/channel")
+}
+
 /// From `.agents/skills/*.md` and `~/.flashagent/skills/*.md`.
 pub fn load_skills(cwd: &Path) -> Vec<AutocompleteItem> {
     let mut skills = Vec::new();
@@ -178,17 +197,13 @@ pub fn load_skills(cwd: &Path) -> Vec<AutocompleteItem> {
                 format!("Skill {stem}")
             };
 
-            // Both /skill:<name> and /<name>.
-            skills.push(AutocompleteItem::new(
-                format!("/skill:{stem}"),
-                desc.clone(),
-                AutocompleteCategory::Skill,
-            ));
-            skills.push(AutocompleteItem::new(
-                format!("/{stem}"),
-                desc,
-                AutocompleteCategory::Skill,
-            ));
+            // Listed once, as /<name>; /skill:<name> still runs it, and is what is
+            // listed when a built-in command already has the short name.
+            let short = format!("/{stem}");
+            let trigger = if builtin_commands().iter().any(|c| c.trigger == short) { format!("/skill:{stem}") } else { short };
+            if !skills.iter().any(|s: &AutocompleteItem| s.trigger == trigger) {
+                skills.push(AutocompleteItem::new(trigger, desc, AutocompleteCategory::Skill));
+            }
         }
     }
 
@@ -201,19 +216,19 @@ pub fn find_matches(input: &str, cwd: &Path) -> Vec<AutocompleteItem> {
         return Vec::new();
     }
 
-    // Sub-command context first.
-    if trimmed.contains(' ') {
-        if let Some(subs) = sub_commands(trimmed) {
-            let lower = trimmed.to_lowercase();
-            return subs
-                .into_iter()
-                .filter(|s| s.trigger.to_lowercase().starts_with(&lower) || lower.starts_with(&s.trigger.to_lowercase()))
-                .collect();
-        }
+    // After a space the command is chosen: its sub-commands, or nothing while its
+    // argument is typed ("/goal fix the parser" is not a search).
+    if input.trim_start().contains(' ') {
+        let lower = input.trim_start().to_lowercase();
+        return sub_commands(&lower)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.trigger.to_lowercase().starts_with(lower.trim_end()) && s.trigger.to_lowercase() != lower.trim_end())
+            .collect();
     }
 
     let mut pool = builtin_commands();
-    pool.extend(load_skills(cwd));
+    pool.extend(cached_skills(cwd));
 
     let query = trimmed.to_lowercase();
     let sub_query = query.trim_start_matches('/');
@@ -230,7 +245,8 @@ pub fn find_matches(input: &str, cwd: &Path) -> Vec<AutocompleteItem> {
             prefix_matches.push(item);
         } else if !sub_query.is_empty() && trig_lower.contains(sub_query) {
             substr_matches.push(item);
-        } else if !sub_query.is_empty() && desc_lower.contains(sub_query) {
+        } else if sub_query.chars().count() >= 3 && desc_lower.contains(sub_query) {
+            // Shorter, and every description with a "c" in it matched "/c".
             desc_matches.push(item);
         }
     }
@@ -300,7 +316,7 @@ impl AutocompletePopup {
         let border_color = "\x1b[38;2;100;95;90m";
         let reset = "\x1b[0m";
 
-        let title = " Suggestions (tab: complete · ↑/↓: select) ";
+        let title = " Commands ";
         let top_dashes = inner_w.saturating_sub(title.chars().count() + 1);
         lines.push((
             LineKind::System,
@@ -401,7 +417,9 @@ mod tests {
     fn test_builtin_commands_exist() {
         let cmds = builtin_commands();
         assert!(cmds.iter().any(|c| c.trigger == "/help"));
-        assert!(cmds.iter().any(|c| c.trigger == "/expand"));
+        assert!(cmds.iter().any(|c| c.trigger == "/verbose"));
+        // Aliases still run, but are not listed twice.
+        assert!(!cmds.iter().any(|c| c.trigger == "/expand" || c.trigger == "/retry"));
         assert!(cmds.iter().any(|c| c.trigger == "/effort"));
     }
 
@@ -409,8 +427,9 @@ mod tests {
     fn test_find_matches_prefix_filtering() {
         let temp = std::env::temp_dir();
         let matches = find_matches("/ex", &temp);
-        assert!(!matches.is_empty());
-        assert_eq!(matches[0].trigger, "/expand");
+        let triggers: Vec<&str> = matches.iter().map(|m| m.trigger.as_str()).collect();
+        // Names that start with it first, then names that contain it.
+        assert_eq!(&triggers[..2], ["/export", "/exit"]);
     }
 
     #[test]
@@ -432,7 +451,7 @@ mod tests {
         let popup = AutocompletePopup::for_input("/", &temp, 0).expect("should find matches for /");
         let rendered = popup.render(80);
         assert!(rendered.len() >= 3); // top border + items + bottom border
-        assert!(rendered[0].1.contains("Suggestions"));
+        assert!(rendered[0].1.contains("Commands"));
     }
 
     #[test]
@@ -441,5 +460,37 @@ mod tests {
         let popup = AutocompletePopup::for_input("/h", &temp, 0).expect("matches");
         let completed = popup.complete_input("/h");
         assert_eq!(completed, "/help ");
+    }
+
+    #[test]
+    fn a_short_query_matches_names_not_descriptions() {
+        let temp = std::env::temp_dir();
+        let matches = find_matches("/c", &temp);
+        assert!(matches.iter().all(|m| m.trigger.contains('c')), "{:?}", matches.iter().map(|m| &m.trigger).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn typing_an_argument_hides_the_popup_and_a_sub_command_shows_its_own() {
+        let temp = std::env::temp_dir();
+        assert!(find_matches("/goal fix the parser", &temp).is_empty());
+        let modes: Vec<String> = find_matches("/mode ", &temp).into_iter().map(|m| m.trigger).collect();
+        assert!(modes.contains(&"/mode manual".to_string()), "{modes:?}");
+        let narrowed: Vec<String> = find_matches("/mode pl", &temp).into_iter().map(|m| m.trigger).collect();
+        assert_eq!(narrowed, ["/mode planning"]);
+        // Written out in full: nothing left to suggest.
+        assert!(find_matches("/mode planning", &temp).is_empty());
+    }
+
+    #[test]
+    fn a_skill_is_listed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = dir.path().join(".agents/skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::write(skills.join("greet.md"), "description: Say hello\n").unwrap();
+        std::fs::write(skills.join("help.md"), "description: Clashes with /help\n").unwrap();
+        let items = load_skills(dir.path());
+        let triggers: Vec<&str> = items.iter().map(|i| i.trigger.as_str()).collect();
+        assert!(triggers.contains(&"/greet") && !triggers.contains(&"/skill:greet"), "{triggers:?}");
+        assert!(triggers.contains(&"/skill:help") && !triggers.contains(&"/help"), "{triggers:?}");
     }
 }

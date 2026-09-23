@@ -88,7 +88,7 @@ stopped. The mode it switched to for the run is restored after.
 
 ## 7. Sessions (1 min)
 
-Quit with **Esc Esc**. The card on the way out gives the `--resume`
+Quit with **Ctrl+D**. The card on the way out gives the `--resume`
 command. Then:
 
 ```bash

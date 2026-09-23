@@ -84,6 +84,11 @@ pub struct Term {
 
 impl Term {
     pub fn start(home: &Home, args: &[&str], cols: u16, rows: u16) -> Self {
+        // The recap would otherwise wait three quiet minutes.
+        Self::start_with_env(home, args, cols, rows, &[("FLASHAGENT_RECAP_IDLE_SECS", "0")])
+    }
+
+    pub fn start_with_env(home: &Home, args: &[&str], cols: u16, rows: u16, env: &[(&str, &str)]) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .expect("open a pseudo-terminal");
@@ -96,6 +101,9 @@ impl Term {
         cmd.env("TERM", "xterm-256color");
         cmd.env_remove("FLASHAGENT_API_KEY");
         cmd.env_remove("FLASHAGENT_TRUST_DIR");
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
         let child = pty.slave.spawn_command(cmd).expect("start flashagent");
         drop(pty.slave);
 

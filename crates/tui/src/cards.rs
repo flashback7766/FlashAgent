@@ -36,11 +36,11 @@ impl App {
             mood,
         });
         let card = match reveal_rows {
-            Some(rows) => card.into_iter().take(rows.max(1)).collect(),
+            Some(rows) => revealed(card, rows),
             None => card,
         };
+        // Only the rows that changed are drawn; nothing to ask for.
         self.chat.update_welcome_card(card);
-        self.renderer.request_reprint();
     }
 }
 
@@ -48,10 +48,21 @@ impl App {
 /// otherwise it goes up whole.
 pub(crate) fn opening_card(card: Vec<RenderLine>, animate: bool) -> Vec<RenderLine> {
     if animate {
-        card.into_iter().take(1).collect()
+        revealed(card, 1)
     } else {
         card
     }
+}
+
+/// The first `rows` rows drawn, the rest held blank: the card is at its full
+/// height from the first frame, so the composer under it does not step down
+/// the screen while it appears.
+pub(crate) fn revealed(card: Vec<RenderLine>, rows: usize) -> Vec<RenderLine> {
+    card.into_iter()
+        .enumerate()
+        // A space, not nothing: an empty line wraps to no row at all.
+        .map(|(i, (kind, text))| (kind, if i < rows.max(1) { text } else { " ".to_string() }))
+        .collect()
 }
 
 /// `None` once the card is whole.

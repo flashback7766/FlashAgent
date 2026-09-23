@@ -239,25 +239,17 @@ pub async fn run_trust_screen(cwd: &mut PathBuf) -> anyhow::Result<StartupAction
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     };
-    use std::io::Write;
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     let _ = execute!(stdout, EnterAlternateScreen, cursor::Hide);
 
     let mut screen = TrustScreen::new(cwd.clone());
+    let mut painter = crate::screen::Screen::new();
 
     let res = loop {
         let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
-        let lines = screen.render(term_w as usize);
-
-        let mut buffer = String::from("\x1b[H\x1b[2J");
-        for line in lines {
-            buffer.push_str(&line);
-            buffer.push_str("\r\n");
-        }
-        let _ = stdout.write_all(buffer.as_bytes());
-        let _ = stdout.flush();
+        crate::screen::paint_page(&mut painter, &screen.render(term_w as usize), false);
 
         if crossterm::event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = crossterm::event::read()? {

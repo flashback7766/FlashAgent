@@ -14,30 +14,22 @@ pub(crate) fn color(kind: LineKind) -> crossterm::style::Color {
     }
 }
 
-/// A terminal that knows the mode shows the frame only once complete, so a
-/// full repaint never flickers; others ignore it.
-const SYNC_BEGIN: &str = "\x1b[?2026h";
-const SYNC_END: &str = "\x1b[?2026l";
-
-/// Settled lines are printed to the scrollback once and never redrawn; only
-/// the live tail (streaming line, open tool, cards, input) is repainted each
-/// frame by moving the cursor up over it. Native scrollback works for free.
+/// The screen is one list of rows: the end of the transcript, then the live tail
+/// (streaming line, open tool, cards, input, footer). `flashagent_tui::screen`
+/// writes only the rows that changed, in place, so nothing flickers however
+/// often a frame comes.
 pub(crate) struct Renderer {
-    /// To erase next frame.
-    pub(crate) tail_height: u16,
-    pub(crate) prev_width: u16,
-    pub(crate) printed_settled: usize,
-    /// A flip needs a full repaint: settled reasoning was printed in the other form.
-    pub(crate) prev_expansion: Option<ReasoningExpansion>,
-    /// E.g. a notice updated in place.
-    pub(crate) needs_reprint: bool,
-    pub(crate) prev_cursor_tail_offset: u16,
     /// Lines scrolled back from the bottom; 0 is anchored.
     pub(crate) scroll_offset: usize,
     /// All lines, settled and tail, less what fits on screen.
     pub(crate) max_scroll: usize,
-    /// An idle tick that would write the same bytes writes nothing.
-    last_frame: String,
+    /// Lines last frame, so a view scrolled back stays on what the user reads
+    /// while new lines arrive under it.
+    total_lines: usize,
+    /// The conversation rows on screen: the first one's index (settled, then live)
+    /// and how many, from the top of the screen. For clicks.
+    chat_view: (usize, usize),
+    screen: flashagent_tui::screen::Screen,
     /// The card on screen last frame and when it opened.
     card: (CardKey, u64),
 }
@@ -52,19 +44,11 @@ pub(crate) struct FrameState<'a> {
     pub(crate) tip: Option<&'a str>,
     pub(crate) tip_animated: Option<&'a str>,
     pub(crate) tip_lines: Option<&'a [String]>,
-    pub(crate) token_tracker: Option<&'a TokenTracker>,
     pub(crate) reasoning_expand: ReasoningExpansion,
     pub(crate) tick_n: usize,
     pub(crate) running: bool,
-    /// For the working status line.
-    pub(crate) elapsed_secs: u64,
-    /// 80 ms steps of wall clock since the turn began; repaints are event-driven.
-    pub(crate) face_phase: usize,
-    pub(crate) model_tokens: usize,
-    /// Rolling 3-second window (tg_3s).
-    pub(crate) tokens_per_sec: f64,
-    /// Prompt cache reuse from the latest turn, if reported.
-    pub(crate) f_keep: Option<f64>,
+    /// Generation speed over the last 3 seconds; `None` when counters are off.
+    pub(crate) tokens_per_sec: Option<f64>,
     pub(crate) confirm_selection: Decision,
     pub(crate) question_state: Option<&'a QuestionUiState>,
     pub(crate) custom_placeholder: Option<&'a str>,
@@ -81,8 +65,6 @@ pub(crate) struct FrameState<'a> {
     pub(crate) prompt_title: &'a str,
     pub(crate) context_warn_threshold: usize,
     pub(crate) pending_steers: &'a [String],
-    /// Oldest first, for the footer sparkline.
-    pub(crate) speed_history: &'a [f64],
     /// The colour of how the last turn ended, and how far (0..=1) it has faded.
     pub(crate) composer_flash: Option<(Rgb, f32)>,
 }
@@ -104,15 +86,11 @@ const BORDER_ESC: &str = "\x1b[38;2;95;90;85m";
 impl Renderer {
     pub(crate) fn new() -> Self {
         Self {
-            tail_height: 0,
-            prev_width: 0,
-            printed_settled: 0,
-            prev_expansion: None,
-            needs_reprint: false,
-            prev_cursor_tail_offset: 0,
             scroll_offset: 0,
             max_scroll: 0,
-            last_frame: String::new(),
+            total_lines: 0,
+            chat_view: (0, 0),
+            screen: flashagent_tui::screen::Screen::new(),
             card: (CardKey::Composer, 0),
         }
     }
@@ -124,36 +102,15 @@ impl Renderer {
             && anim::now_ms().saturating_sub(self.card.1) < UNFOLD_MS + 40
     }
 
+    /// Rows that did not change are skipped, so this is needed only when
+    /// something else drew on the screen (an editor, a full-screen view) or
+    /// cleared it: the next frame writes every row again.
     pub(crate) fn request_reprint(&mut self) {
-        self.needs_reprint = true;
-    }
-
-    pub(crate) fn clear_tail(&mut self) {
-        if self.tail_height > 0 {
-            let mut out = String::new();
-            if self.prev_cursor_tail_offset > 0 {
-                out.push_str(&format!("\x1b[{}F", self.prev_cursor_tail_offset));
-            } else {
-                out.push('\r');
-            }
-            out.push_str("\x1b[J");
-            let _ = crossterm::queue!(
-                std::io::stdout(),
-                crossterm::cursor::MoveToColumn(0),
-                crossterm::style::Print(out),
-            );
-            let _ = std::io::stdout().flush();
-            self.tail_height = 0;
-            self.prev_cursor_tail_offset = 0;
-        }
+        self.screen.invalidate();
     }
 
     pub(crate) fn scroll_up(&mut self, lines: usize) {
-        let old = self.scroll_offset;
         self.scroll_offset = (self.scroll_offset + lines).min(self.max_scroll);
-        if old != self.scroll_offset {
-            self.needs_reprint = true;
-        }
     }
 
     pub(crate) fn scroll_to_top(&mut self) {
@@ -161,66 +118,44 @@ impl Renderer {
     }
 
     pub(crate) fn scroll_down(&mut self, lines: usize) {
-        let old = self.scroll_offset;
         self.scroll_offset = self.scroll_offset.saturating_sub(lines);
-        if old != self.scroll_offset {
-            self.needs_reprint = true;
-        }
     }
 
     pub(crate) fn scroll_to_bottom(&mut self) {
-        if self.scroll_offset > 0 {
-            self.scroll_offset = 0;
-            self.needs_reprint = true;
-        }
+        self.scroll_offset = 0;
+    }
+
+    /// The conversation row drawn on screen row `y`, if one is.
+    pub(crate) fn chat_row_at(&self, y: u16) -> Option<usize> {
+        let (first, count) = self.chat_view;
+        ((y as usize) < count).then_some(first + y as usize)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The mode, and what the turn waits on when that is not the model: the phase
+/// itself is written in the composer, the speed on the line above.
 pub(crate) fn format_status_left(
     running: bool,
     is_goal_active: bool,
     awaiting_user: bool,
     goal_progress: Option<&str>,
     mode_label: &str,
-    token_tracker: Option<&TokenTracker>,
-    budget: usize,
     expand_status: &str,
-    face_phase: usize,
 ) -> String {
-    if running {
-        // The welcome card is gone by now; the mascot keeps the user company here.
-        let face = format!(
-            "\x1b[38;2;138;180;248m{}\x1b[0m ",
-            flashagent_tui::thinking_face(face_phase)
-        );
-        let mode_str = if is_goal_active {
-            "\x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m".to_string()
-        } else {
-            format!("\x1b[38;2;145;205;140m[{mode_label}]\x1b[0m")
-        };
-        // During a goal the budget burn-down is more useful than "Generating...".
-        let activity = match (awaiting_user, goal_progress) {
-            // Stopped at an approval card: waiting for the user, not generating.
-            (true, _) => "\x1b[38;2;225;175;95mWaiting for your answer\x1b[0m".to_string(),
-            (false, Some(p)) => format!("\x1b[38;2;168;199;250m{p}\x1b[0m"),
-            (false, None) => "\x1b[38;2;168;199;250mGenerating response...\x1b[0m".to_string(),
-        };
-        format!("  {face}{mode_str} \x1b[38;2;100;95;90m·\x1b[0m {activity}{expand_status}")
-    } else if let Some(stats) = token_tracker.and_then(|tt| tt.format_stats_width(budget)) {
-        if is_goal_active {
-            format!("  \x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m \x1b[38;2;100;95;90m·\x1b[0m {stats}{expand_status}")
-        } else {
-            format!("  {stats}{expand_status}")
-        }
+    let mode_str = if is_goal_active {
+        "\x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m".to_string()
     } else {
-        let mode_str = if is_goal_active {
-            "\x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m".to_string()
-        } else {
-            format!("\x1b[38;2;145;205;140m[{mode_label}]\x1b[0m")
-        };
-        format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;140;135;130mReady\x1b[0m{expand_status}")
-    }
+        format!("\x1b[38;2;145;205;140m[{mode_label}]\x1b[0m")
+    };
+    let activity = match (running, awaiting_user, goal_progress) {
+        // Stopped at an approval card: waiting for the user, not generating.
+        (true, true, _) => "\x1b[38;2;225;175;95mWaiting for your answer\x1b[0m".to_string(),
+        // During a goal the budget burn-down.
+        (true, false, Some(p)) => format!("\x1b[38;2;168;199;250m{p}\x1b[0m"),
+        (true, false, None) => return format!("  {mode_str}{expand_status}"),
+        (false, ..) => "\x1b[38;2;140;135;130mReady\x1b[0m".to_string(),
+    };
+    format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m {activity}{expand_status}")
 }
 
 impl Renderer {
@@ -237,16 +172,6 @@ impl Renderer {
     ) {
         let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
         let width = width as usize;
-        let resized = self.prev_width != width as u16;
-        self.prev_width = width as u16;
-        let toggled = self.prev_expansion != Some(st.reasoning_expand);
-        self.prev_expansion = Some(st.reasoning_expand);
-
-        // After a resize the scrollback has old-width lines; after a thinking-mode
-        // flip or an in-place notice update, settled lines are stale. Both reprint
-        // everything.
-        let reprint_all = resized || toggled || self.needs_reprint;
-        self.needs_reprint = false;
 
         let (settled, live) = chat.render_split(width, st.reasoning_expand);
         let mut tail: Vec<RenderLine> = live;
@@ -292,7 +217,8 @@ impl Renderer {
         let card_start = tail.len();
 
         let mut input_line_idx;
-        let mut custom_cursor_col: Option<u16> = None;
+        // Where the user types, when they type into the composer.
+        let mut text_cursor: Option<u16> = None;
 
         if let Some(req) = gate.pending() {
             // The composer becomes the approval card.
@@ -379,7 +305,6 @@ impl Renderer {
                 LineKind::System,
                 format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
             ));
-            custom_cursor_col = Some(0);
         } else if let Some(prompt) = st.channel_prompt {
             let title = format!(" {} ", st.prompt_title);
             let title = title.as_str();
@@ -410,7 +335,6 @@ impl Renderer {
                 LineKind::System,
                 format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
             ));
-            custom_cursor_col = Some(0);
         } else if let Some(req) = question_gate.pending() {
             // The composer becomes the question card.
             let title = " Question from FlashAgent ";
@@ -522,12 +446,8 @@ impl Renderer {
                 ));
             }
 
+            // The answer being written shows its own block cursor.
             input_line_idx = typing_line_idx.unwrap_or(tail.len().saturating_sub(1));
-            if typing_line_idx.is_some() {
-                custom_cursor_col = Some(((write_text.chars().count() + 6) as u16).min(width.saturating_sub(2) as u16));
-            } else {
-                custom_cursor_col = Some(4);
-            }
 
             tail.push((
                 LineKind::System,
@@ -537,7 +457,6 @@ impl Renderer {
             // The composer turns into the open menu or screen.
             tail.extend(overlay.render(width));
             input_line_idx = tail.len().saturating_sub(1);
-            custom_cursor_col = Some(0);
         } else {
             tail.push((
                 LineKind::System,
@@ -554,6 +473,7 @@ impl Renderer {
             }
 
             input_line_idx = tail.len();
+            text_cursor = Some(4);
             let cycle = if anim::enabled() { (st.tick_n % 28) as f32 / 28.0 } else { 0.25 };
             let phase = (cycle * std::f32::consts::PI * 2.0).sin() * 0.5 + 0.5;
             let r = (210.0 + phase * 45.0) as u8;
@@ -567,7 +487,7 @@ impl Renderer {
                     |f| format!("\x1b[38;2;155;160;175m{}\x1b[0m", f.lines().next().unwrap_or_default()),
                 );
                 let label = "\x1b[38;2;135;130;125mfind in history:\x1b[0m";
-                custom_cursor_col = Some((visible_width(query) + 21).min(width.saturating_sub(2)) as u16);
+                text_cursor = Some((visible_width(query) + 21).min(width.saturating_sub(2)) as u16);
                 vec![format!(" {prompt_styled} {label} \x1b[1;38;2;240;235;225m{query}\x1b[0m"), format!("   {found_line}")]
             } else if st.input.is_empty() {
                 vec![if let Some(prefill) = st.prefill_status {
@@ -606,7 +526,7 @@ impl Renderer {
                 let max_rows = (height as usize / 3).clamp(1, 10);
                 let layout = st.input.layout(width.saturating_sub(6).max(1), max_rows);
                 input_line_idx += layout.cursor_row;
-                custom_cursor_col = Some((layout.cursor_col + 4).min(width.saturating_sub(2)) as u16);
+                text_cursor = Some((layout.cursor_col + 4).min(width.saturating_sub(2)) as u16);
                 let dim = |s: &str| format!("\x1b[38;2;100;95;90m{s}\x1b[0m");
                 let last = layout.rows.len() - 1;
                 layout
@@ -652,7 +572,6 @@ impl Renderer {
                 let bottom = tail.len() - 1;
                 tail.drain(card_start + shown - 1..bottom);
                 input_line_idx = input_line_idx.min(tail.len() - 1);
-                custom_cursor_col = Some(0);
             }
         }
 
@@ -682,36 +601,20 @@ impl Renderer {
         } else if autocomplete.is_some() {
             "  \x1b[38;2;135;130;125mtab — complete · ↑/↓ — select · enter — send · esc — dismiss\x1b[0m".to_string()
         } else if st.running {
-            let cache_str = if let Some(fk) = st.f_keep {
-                format!(" \x1b[38;2;75;99;130m·\x1b[0m \x1b[38;2;120;220;140mcache {:.0}%\x1b[0m", fk * 100.0)
-            } else {
-                String::new()
-            };
-            let ttft_str = if let Some(spd_str) = st.ttft_display {
-                format!(" \x1b[38;2;75;99;130m·\x1b[0m {spd_str}")
-            } else {
-                String::new()
-            };
-            let spark = if st.speed_history.len() >= 2 && st.speed_history.iter().any(|v| *v > 0.0) {
-                format!(" \x1b[38;2;138;180;248m{}\x1b[0m", anim::sparkline(st.speed_history))
-            } else {
-                String::new()
-            };
-            // Disabled counters are left out: "0 tokens" reads as a stalled model.
-            let live = if st.token_tracker.is_some() {
-                format!(
-                    "  {} \x1b[38;2;168;199;250mTokens - \x1b[1;38;2;235;240;250m{}\x1b[0m \x1b[38;2;194;231;255m({:.1}/s)\x1b[0m{spark}{cache_str}{ttft_str} \x1b[38;2;75;99;130m·\x1b[0m \x1b[38;2;155;165;180m{}s\x1b[0m",
-                    anim::spinner(t),
-                    st.model_tokens,
-                    st.tokens_per_sec,
-                    st.elapsed_secs,
-                )
-            } else {
-                format!("  {} \x1b[38;2;155;165;180m{}s\x1b[0m", anim::spinner(t), st.elapsed_secs)
-            };
+            // The spinner says it is alive; then only how fast it writes and how fast it
+            // read the prompt. A speed of 0 before the first token reads as a stall, so
+            // it waits for one.
+            let dot = " \x1b[38;2;75;99;130m·\x1b[0m ";
+            let mut live = format!("  {}", anim::spinner(t));
+            if let Some(speed) = st.tokens_per_sec.filter(|s| *s > 0.0) {
+                live.push_str(&format!(" \x1b[38;2;194;231;255m{speed:.1} t/s\x1b[0m"));
+            }
+            if let Some(prefill) = st.ttft_display {
+                live.push_str(&format!("{dot}{prefill}"));
+            }
             // The counters show the model is alive and the notice must not be missed;
             // the key hints give way when both do not fit.
-            let tail_hint = "\x1b[38;2;135;130;125m· tab/f1-f5 menus · enter to steer · esc to interrupt\x1b[0m";
+            let tail_hint = "\x1b[38;2;135;130;125m· enter to steer · esc to interrupt\x1b[0m";
             match st.background {
                 Some(text) => {
                     let notice = format!(" \x1b[38;2;75;99;130m·\x1b[0m {}", st.background_style.paint(text));
@@ -737,29 +640,13 @@ impl Renderer {
                 width.saturating_sub(2),
             );
             format!("  \x1b[38;2;135;130;125m{hints}\x1b[0m")
+        } else if chat.has_user_message() {
+            // The welcome card lists the keys; once it has scrolled away, the one key
+            // that finds every other.
+            let hints = plain_hints(&["ctrl+k — commands", "/help", "ctrl+d — quit"], width.saturating_sub(2));
+            format!("  \x1b[38;2;135;130;125m{hints}\x1b[0m")
         } else {
-            // Measured, since fixed column thresholds clipped the longer lists mid-word.
-            const FOOTERS: [&str; 4] = [
-                "enter — send · tab — settings · f1 — context · f2 — verbose · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · ctrl+f — history · esc esc — quit",
-                "enter — send · tab — settings · f1 — context · f3 — model · f4 — effort · f5 — sampling · ctrl+r — regen · esc esc — quit",
-                "enter — send · tab — settings · f3 — model · f4 — effort · f5 — sampling · esc esc — quit",
-                "enter — send · tab — settings · f3 — model · esc esc — quit",
-            ];
-            if let Some(fits) = FOOTERS.iter().find(|f| visible_width(f) + 2 <= width) {
-                format!("  \x1b[38;2;135;130;125m{fits}\x1b[0m")
-            } else {
-                // Below ~68 columns, assembled from what fits so it ends on a word.
-                let hints = flashagent_tui::fit_parts(
-                    &[
-                        ("enter — send".into(), "enter — send".into()),
-                        ("tab — menu".into(), "tab — menu".into()),
-                        ("esc esc — quit".into(), "esc esc — quit".into()),
-                    ],
-                    " · ",
-                    width.saturating_sub(2),
-                );
-                format!("  \x1b[38;2;135;130;125m{hints}\x1b[0m")
-            }
+            String::new()
         };
         tail.push((LineKind::System, left_hint));
 
@@ -827,19 +714,13 @@ impl Renderer {
         } else {
             ""
         };
-        // The turn stats give way before the verbose tag is clipped.
-        let budget = width.saturating_sub(gauge_vis + 4 + visible_width(expand_status));
-
         let left_telemetry = format_status_left(
             st.running,
             st.is_goal_active,
             gate.pending().is_some() || question_gate.pending().is_some(),
             st.goal_progress,
             st.mode.label(),
-            st.token_tracker,
-            budget,
             expand_status,
-            st.face_phase,
         );
 
         let left_vis = visible_width(&left_telemetry);
@@ -862,128 +743,67 @@ impl Renderer {
         };
         tail.push((LineKind::System, status_row));
 
-        let view_h = (height as usize).saturating_sub(2).max(5);
-        self.max_scroll = (settled.len() + tail.len()).saturating_sub(view_h);
+        // The conversation scrolls; the composer and the footer under it stay where
+        // they are, so a reply can be written while reading back.
+        let height = height as usize;
+        let chat_len = settled.len() + card_start;
+        let bottom = &tail[card_start..];
+        let chat_room = height.saturating_sub(bottom.len());
+        if self.scroll_offset > 0 && chat_len > self.total_lines {
+            // New lines arrived under a view scrolled back: it stays on what is read.
+            self.scroll_offset += chat_len - self.total_lines;
+        }
+        self.total_lines = chat_len;
+        // One row of the room goes to the line that says the view is scrolled.
+        self.max_scroll = chat_len.saturating_sub(chat_room.saturating_sub(1).max(1));
         self.scroll_offset = self.scroll_offset.min(self.max_scroll);
 
-        if self.scroll_offset > 0 {
-            let total_len = settled.len() + tail.len();
-            let end = total_len.saturating_sub(self.scroll_offset);
-            let start = end.saturating_sub(view_h);
-            let visible_slice = settled.iter().chain(tail.iter()).skip(start).take(end - start);
-
-            let mut out = String::from(SYNC_BEGIN);
-            out.push_str("\x1b[H\x1b[2J");
-            let mut first = true;
-            for (kind, text) in visible_slice {
-                if !first {
-                    out.push_str("\r\n");
-                }
-                first = false;
-                let clipped = clip_ansi(text, width);
-                let prefix = crossterm::style::SetForegroundColor(color(*kind)).to_string();
-                out.push_str(&prefix);
-                out.push_str(&restore_line_color(&clipped, &prefix));
-                out.push_str("\x1b[39m");
-            }
-            out.push_str("\r\n");
-            let scroll_status = format!(
-                " \x1b[7m ↑ Scrolled up {} lines (↓ / Esc / PageDown / type to return) \x1b[0m",
+        // Every row gets its kind's colour, restored after each reset inside it,
+        // and is cut to the width: a row wider than the screen would wrap onto
+        // the next and push everything under it down.
+        let styled = |(kind, text): &RenderLine| {
+            let prefix = crossterm::style::SetForegroundColor(color(*kind)).to_string();
+            format!("{prefix}{}\x1b[39m", restore_line_color(&clip_ansi(text, width), &prefix))
+        };
+        let chat = || settled.iter().chain(tail[..card_start].iter());
+        let mut first_chat_row = chat_len.saturating_sub(chat_room);
+        let mut rows: Vec<String> = if self.scroll_offset > 0 && chat_room > 1 {
+            let end = chat_len - self.scroll_offset;
+            let start = end.saturating_sub(chat_room - 1);
+            first_chat_row = start;
+            let mut rows: Vec<String> = chat().skip(start).take(end - start).map(styled).collect();
+            let marker = format!(
+                " \x1b[38;2;100;95;90m── \x1b[38;2;225;175;95m↓ {} more lines below\x1b[38;2;100;95;90m · End or Esc to return ──\x1b[0m",
                 self.scroll_offset
             );
-            out.push_str(&clip_ansi(&scroll_status, width));
-            out.push_str(SYNC_END);
-            if !reprint_all && out == self.last_frame {
-                return;
-            }
-            self.last_frame.clone_from(&out);
-            crossterm::queue!(
-                std::io::stdout(),
-                crossterm::cursor::MoveToColumn(0),
-                crossterm::style::Print(theme::recolor(&out)),
-            )
-            .ok();
-            std::io::stdout().flush().ok();
-            return;
-        }
-
-        let mut out = String::from(SYNC_BEGIN);
-        if reprint_all {
-            // Full repaint. On the welcome screen also purge scrollback (\x1b[3J), so
-            // lines the terminal reflowed on resize are wiped.
-            if !chat.has_user_message() {
-                out.push_str("\x1b[3J\x1b[H\x1b[2J");
-            } else {
-                out.push_str("\x1b[H\x1b[2J");
-            }
+            rows.push(marker);
+            rows
         } else {
-            // Cursor up to the top of the previous tail, erase down.
-            if self.prev_cursor_tail_offset > 0 {
-                out.push_str(&format!("\x1b[{}F", self.prev_cursor_tail_offset));
-            } else {
-                out.push('\r');
-            }
-            out.push_str("\x1b[J"); // clear from cursor down
-        }
-
-        let mut first = true;
-        let mut print_line = |out: &mut String, kind: &LineKind, text: &str| {
-            if !first {
-                out.push_str("\r\n");
-            }
-            first = false;
-            // A tail line wider than the terminal wraps physically and desyncs
-            // tail_height (the duplication bug).
-            let clipped = clip_ansi(text, width);
-            let prefix = crossterm::style::SetForegroundColor(color(*kind)).to_string();
-            out.push_str(&prefix);
-            out.push_str(&restore_line_color(&clipped, &prefix));
-            out.push_str("\x1b[39m");
+            // Anchored: the end of the conversation right above the composer, or, while
+            // it is short, the composer right under it.
+            chat().skip(chat_len.saturating_sub(chat_room)).map(styled).collect()
         };
-        let prints_settled = reprint_all || settled.len() > self.printed_settled;
-        if reprint_all {
-            for (k, t) in settled.iter() {
-                print_line(&mut out, k, t);
-            }
-            self.printed_settled = settled.len();
-        } else if settled.len() > self.printed_settled {
-            // Newly frozen lines print once and never repaint.
-            for (k, t) in &settled[self.printed_settled..] {
-                print_line(&mut out, k, t);
-            }
-            self.printed_settled = settled.len();
-        }
-        for (k, t) in &tail {
-            print_line(&mut out, k, t);
-        }
-        self.tail_height = tail.len() as u16;
-        self.prev_cursor_tail_offset = input_line_idx as u16;
-
-        let lift_up = (tail.len() - 1 - input_line_idx) as u16;
-        let cursor_col = custom_cursor_col.unwrap_or_else(|| ((st.input.chars().count() + 4) as u16).min(width.saturating_sub(2) as u16));
-        // Park the cursor on the input line.
-        if lift_up > 0 {
-            out.push_str(&format!("\x1b[{lift_up}A"));
-        }
-        out.push_str(&format!("\x1b[{}G", cursor_col + 1));
-        out.push_str(SYNC_END);
-        if !prints_settled && out == self.last_frame {
-            return;
-        }
-        self.last_frame.clone_from(&out);
-        crossterm::queue!(
-            std::io::stdout(),
-            crossterm::cursor::MoveToColumn(0),
-            crossterm::style::Print(theme::recolor(&out)),
-        )
-        .ok();
-        std::io::stdout().flush().ok();
+        let chat_rows = rows.len();
+        rows.extend(bottom.iter().map(styled));
+        // A composer taller than the screen keeps its end, where the typing is.
+        let cut = rows.len().saturating_sub(height);
+        rows.drain(..cut);
+        let scrolled_marker = usize::from(self.scroll_offset > 0 && chat_room > 1);
+        self.chat_view = (first_chat_row + cut, chat_rows.saturating_sub(scrolled_marker).saturating_sub(cut));
+        // The terminal's cursor is shown only where text is typed; cards and menus
+        // mark their own choice.
+        let cursor = text_cursor.and_then(|col| {
+            let row = (chat_rows + input_line_idx.checked_sub(card_start)?).checked_sub(cut)?;
+            Some((row as u16, col))
+        });
+        self.screen.paint(&rows, cursor);
     }
 }
 
 impl App {
     pub(crate) fn draw(&mut self, cx: &LoopCtx<'_>, autocomplete: Option<&AutocompletePopup>) {
         anim::set_enabled(self.config.animations);
+        self.show_progress(cx);
         // Read every frame, so leaving settings without saving restores the theme.
         theme::set(self.config.color_theme);
         let composer_flash = self.composer_flash();
@@ -1005,7 +825,6 @@ impl App {
         let ttft_display = self.token_tracker.ttft_display();
         let tg_speed = self.token_tracker.tg_3s();
         let config = &self.config;
-        let turn_clock = |ms_per_step: u128| self.turn_started.map(|t| (t.elapsed().as_millis() / ms_per_step) as usize).unwrap_or(0);
 
         self.renderer.frame(
             &self.chat,
@@ -1026,16 +845,10 @@ impl App {
                 tip: config.show_tips.then_some(self.tip_animator.tip_text),
                 tip_animated: None,
                 tip_lines: config.show_tips.then_some(cx.tip_lines.as_slice()),
-                token_tracker: config.show_tokens.then_some(&self.token_tracker),
                 reasoning_expand: ReasoningExpansion { all: self.all_expanded, last: self.last_expanded },
                 tick_n: self.tick_n,
                 running: self.running,
-                elapsed_secs: turn_clock(1000) as u64,
-                // The face is company; the spinner is the sign of work.
-                face_phase: if config.animations { turn_clock(80) } else { 0 },
-                model_tokens: if config.show_tokens { self.token_tracker.total_model_tokens } else { 0 },
-                tokens_per_sec: if config.show_tokens { tg_speed } else { 0.0 },
-                f_keep: if config.show_tokens { self.token_tracker.last_f_keep } else { None },
+                tokens_per_sec: config.show_tokens.then_some(tg_speed),
                 confirm_selection: self.confirm_select.decision(),
                 question_state: Some(&self.question_ui_state),
                 custom_placeholder: self.custom_placeholder.as_deref(),
@@ -1051,7 +864,6 @@ impl App {
                 background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                 context_warn_threshold: config.context_warn_threshold,
                 pending_steers: &self.pending_steers,
-                speed_history: &self.speed_history,
                 composer_flash,
             },
         );
@@ -1059,6 +871,29 @@ impl App {
 
     pub(crate) fn animating(&self) -> bool {
         self.renderer.animating() || self.composer_flash().is_some()
+    }
+
+    /// The taskbar button says a turn is running, waiting on an answer, or how
+    /// far an update has downloaded, so a long `/goal` can be left in the
+    /// background.
+    pub(crate) fn show_progress(&self, cx: &LoopCtx<'_>) {
+        use flashagent_tui::screen::{set_progress, Progress};
+        let downloading = self.update_progress.as_ref().and_then(|(_, stage)| match stage {
+            flashagent_svc::updater::UpdateProgress::Downloading { received, total: Some(total) } if *total > 0 => {
+                Some(((*received as f64 / *total as f64) * 100.0).round() as u8)
+            }
+            _ => None,
+        });
+        let progress = if self.running && (cx.gate.pending().is_some() || cx.question_gate.pending().is_some()) {
+            Progress::Waiting
+        } else if self.running {
+            Progress::Busy
+        } else if let Some(pct) = downloading {
+            Progress::Percent(pct)
+        } else {
+            Progress::None
+        };
+        set_progress(progress);
     }
 
     /// While it lasts.
@@ -1076,21 +911,6 @@ impl App {
             Some(_) => Rgb(225, 175, 95),
         };
         self.turn_flash = Some((colour, anim::now_ms()));
-    }
-
-    /// A few times a second.
-    pub(crate) fn sample_speed(&mut self) {
-        const EVERY_MS: u64 = 250;
-        const KEEP: usize = 24;
-        let t = anim::now_ms();
-        if !self.running || t.saturating_sub(self.last_speed_sample) < EVERY_MS {
-            return;
-        }
-        self.last_speed_sample = t;
-        self.speed_history.push(self.token_tracker.tg_3s());
-        if self.speed_history.len() > KEEP {
-            self.speed_history.remove(0);
-        }
     }
 }
 

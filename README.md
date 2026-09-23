@@ -40,7 +40,7 @@
 </tr>
 <tr>
 <td colspan="2"><img src="docs/screenshots/gifs/menus.gif" alt="Non-blocking menus"><br>
-<sub><b>Non-blocking menus</b> — switch model (<kbd>F3</kbd>), thinking effort (<kbd>F4</kbd>) or sampling (<kbd>F5</kbd>) while tokens keep streaming.</sub></td>
+<sub><b>Non-blocking menus</b> — switch model (<kbd>F3</kbd>) or thinking effort (<kbd>F4</kbd>) while tokens keep streaming.</sub></td>
 </tr>
 </table>
 
@@ -186,23 +186,25 @@ FlashAgent starts in the mode you left it in. Reads inside the project and web t
 | Key | Action |
 | :--- | :--- |
 | <kbd>Enter</kbd> | Send prompt · while the model works: steer it |
-| <kbd>Esc</kbd> | Close menu / dismiss suggestion / interrupt the running turn · twice on an empty prompt: quit |
+| <kbd>Esc</kbd> | Close menu / dismiss suggestion / interrupt the running turn · never quits |
+| <kbd>Ctrl</kbd>+<kbd>D</kbd> | Quit (empty prompt) |
 | <kbd>Ctrl</kbd>+<kbd>C</kbd> | Interrupt the running turn · otherwise copy input or last answer · twice on an empty prompt: quit |
+| <kbd>Ctrl</kbd>+<kbd>K</kbd> | Every command, searchable by name or key |
 | <kbd>Tab</kbd> | Settings (empty prompt) · complete a `/command` |
 | <kbd>Shift</kbd>+<kbd>Tab</kbd> | Cycle permission mode |
 | <kbd>F1</kbd> | Context window breakdown |
 | <kbd>F2</kbd> | Verbose mode: collapsed → last turn → everything |
 | <kbd>F3</kbd> / <kbd>Alt</kbd>+<kbd>M</kbd> | Model picker with fuzzy search |
 | <kbd>F4</kbd> / <kbd>Ctrl</kbd>+<kbd>T</kbd> | Thinking effort presets reported by the model |
-| <kbd>F5</kbd> | Sampling parameters and presets |
+| Click | Open or fold that one thought or tool call |
 | <kbd>Ctrl</kbd>+<kbd>O</kbd> / <kbd>Alt</kbd>+<kbd>O</kbd> | Expand last / all reasoning blocks |
 | <kbd>Ctrl</kbd>+<kbd>R</kbd> | Regenerate the last answer |
 | <kbd>Ctrl</kbd>+<kbd>E</kbd> | Compose the prompt in your editor |
 | <kbd>Ctrl</kbd>+<kbd>U</kbd> | Install a pending update |
 | <kbd>→</kbd> | Accept the suggested follow-up prompt |
-| <kbd>PgUp</kbd> / <kbd>PgDn</kbd> | Scroll the conversation |
+| <kbd>PgUp</kbd> / <kbd>PgDn</kbd> | Scroll the conversation; the prompt stays where it is |
 
-Type `/help` for every slash command: `/goal`, `/mode`, `/model`, `/effort`, `/sampling`, `/context`, `/compact`, `/mcp`, `/skills`, `/diff`, `/commit`, `/export`, `/update`, `/channel`, `/exit` and more.
+Type `/help` for every slash command: `/goal`, `/mode`, `/model`, `/effort`, `/context`, `/compact`, `/mcp`, `/skills`, `/diff`, `/commit`, `/export`, `/update`, `/channel`, `/exit` and more.
 
 ---
 
