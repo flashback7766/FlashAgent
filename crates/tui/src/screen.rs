@@ -7,7 +7,7 @@
 
 use std::io::Write as _;
 
-use crate::{clip_ansi, visible_width};
+use crate::{clip_ansi, terminal_safe, visible_width};
 
 /// A terminal that knows the mode shows the frame only once complete; others
 /// ignore it.
@@ -67,7 +67,9 @@ impl Screen {
             .map(|i| match rows.get(i) {
                 // The bottom row stays a column short: a character in the last cell
                 // of the screen makes some consoles scroll the whole screen up.
-                Some(row) => clip_ansi(row, if i + 1 == h { w.saturating_sub(1) } else { w }),
+                // Last line of defence: whatever reached a row, only text and colour
+                // go to the terminal.
+                Some(row) => clip_ansi(&terminal_safe(row), if i + 1 == h { w.saturating_sub(1) } else { w }),
                 None => String::new(),
             })
             .collect();

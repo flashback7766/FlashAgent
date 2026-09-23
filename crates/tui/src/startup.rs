@@ -150,7 +150,11 @@ impl TrustScreen {
             TrustScreenMode::Select => {
                 lines.push(format!("{prompt_style}FlashAgent{reset} {text_dim}\u{b7} trust this folder?{reset}"));
                 lines.push(String::new());
-                lines.push(format!("  {text_bright}{}{reset}", self.cwd.display()));
+                // The folder's own name is at the end of the path: in a narrow window
+                // the start goes, never the name of what is being trusted.
+                let path = self.cwd.display().to_string();
+                let (shown, _) = crate::tail_window(&path, width.saturating_sub(4).max(10));
+                lines.push(format!("  {text_bright}{shown}{reset}"));
                 lines.push(String::new());
 
                 let desc = "FlashAgent will read, edit and run commands here. Continue only if you trust \

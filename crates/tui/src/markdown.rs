@@ -148,7 +148,10 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
             let inner_w = width.saturating_sub(2);
             let inner_content_w = inner_w.saturating_sub(1);
 
-            // Coloured first, then wrapped: a wrap carries the colour of its piece.
+            // Tabs as spaces before anything is measured: a tab counted as no cells
+            // pushed the right border off the row. Coloured first, then wrapped: a
+            // wrap carries the colour of its piece.
+            let line = &crate::terminal_safe(line);
             let coloured = crate::highlight::highlight_line(&code_lang, line, &mut carry);
             let chunks = if line.is_empty() {
                 vec![String::new()]
@@ -243,13 +246,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 for (c, &w) in col_widths.iter().enumerate() {
                     let raw_cell = header_row.get(c).map(|s| s.as_str()).unwrap_or("");
                     let styled = md(raw_cell);
-                    let vis = visible_width(&styled);
-                    let cell_content = if vis > w {
-                        clip_ansi(&styled, w)
-                    } else {
-                        let pad = " ".repeat(w.saturating_sub(vis));
-                        format!("{styled}{pad}")
-                    };
+                    let cell_content = fit_cell(styled, w);
                     header_str.push_str(&format!(" \x1b[1;38;2;240;235;225m{cell_content}\x1b[0m {border_color}│{reset}"));
                 }
                 out.push(header_str);
@@ -271,13 +268,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                     for (c, &w) in col_widths.iter().enumerate() {
                         let raw_cell = row.get(c).map(|s| s.as_str()).unwrap_or("");
                         let styled = md(raw_cell);
-                        let vis = visible_width(&styled);
-                        let cell_content = if vis > w {
-                            clip_ansi(&styled, w)
-                        } else {
-                            let pad = " ".repeat(w.saturating_sub(vis));
-                            format!("{styled}{pad}")
-                        };
+                        let cell_content = fit_cell(styled, w);
                         row_str.push_str(&format!(" {cell_content} {border_color}│{reset}"));
                     }
                     out.push(row_str);
@@ -314,7 +305,9 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 // Wrapped here: a line the terminal wraps itself is invisible to the renderer,
                 // which then erases the wrong rows.
                 for chunk in wrap_styled(&format!("{mark} {}", md(title)), width) {
-                    out.push(format!("{colour}{chunk}\x1b[0m"));
+                    // Inline code resets the colour after itself; the heading's own
+                    // comes back, or the rest of the title took the body colour.
+                    out.push(format!("{colour}{}\x1b[0m", restore_line_color(&chunk, colour)));
                 }
                 i += 1;
                 continue;
@@ -417,6 +410,14 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
     }
 
     out
+}
+
+/// Exactly `width` cells: clipped when longer, and padded after a clip too,
+/// since a wide character that does not fit leaves the cell a column short.
+fn fit_cell(styled: String, width: usize) -> String {
+    let fitted = if visible_width(&styled) > width { clip_ansi(&styled, width) } else { styled };
+    let pad = width.saturating_sub(visible_width(&fitted));
+    format!("{fitted}{}", " ".repeat(pad))
 }
 
 #[cfg(test)]

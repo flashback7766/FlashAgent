@@ -22,8 +22,10 @@ const BG_READ: &str = "\x1b[48;2;22;38;60m";
 const TEXT_READ: &str = "\x1b[38;2;145;195;255m";
 
 /// Clipped to `width` cells, with `…` where it was cut. Styles are kept, as
-/// `clip_ansi` keeps them.
+/// `clip_ansi` keeps them; tabs and any other escape in a file or command
+/// output are made safe first, so the width measured is the width drawn.
 pub(crate) fn clip_ellipsis(text: &str, width: usize) -> String {
+    let text = &crate::terminal_safe(text);
     if visible_width(text) <= width {
         return text.to_string();
     }
@@ -68,7 +70,7 @@ pub(crate) fn clip_ellipsis(text: &str, width: usize) -> String {
 /// would move the cursor off the frame.
 fn box_text(line: &str) -> String {
     let line = line.rsplit('\r').find(|part| !part.is_empty()).unwrap_or("");
-    line.replace('\t', "    ").chars().filter(|c| !c.is_control() || *c == '\x1b').collect()
+    crate::terminal_safe(line)
 }
 
 /// `│  text  │`, padded or clipped to the box.

@@ -258,7 +258,9 @@ impl Renderer {
                     width,
                 )
             };
-            let value_w = inner_w.saturating_sub(14).max(20);
+            // The same budget label_row clips to, for the widest label: rows of
+            // any other width lost their ends.
+            let value_w = inner_w.saturating_sub(12).max(1);
             let (label, value): (&str, String) = if let Some(cmd) = field("command") {
                 ("command:", cmd)
             } else if let Some(path) = field("path") {
@@ -406,6 +408,12 @@ impl Renderer {
             let sel_idx = q_state.map(|s| s.selected_index).unwrap_or(0);
             let is_writing = q_state.map(|s| s.is_writing).unwrap_or(false);
             let write_text = q_state.map(|s| s.write_in_text.as_str()).unwrap_or("");
+            // The end of the answer, where it is being typed, fitted to the row after
+            // its label: a long answer ran past the border, cursor and all. Pasted
+            // control characters are shown, not sent to the terminal.
+            let answer_in = |label_cells: usize| {
+                flashagent_tui::tail_window(&card_safe(write_text), inner_w.saturating_sub(label_cells + 4)).0
+            };
             let mut typing_line_idx = None;
 
             if let Some(ref opts) = req.options {
@@ -448,9 +456,11 @@ impl Renderer {
                 let write_ptr = if is_write_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
                 if is_writing {
                     typing_line_idx = Some(tail.len());
+                    let label = format!("{write_num}. Your answer: ");
+                    let shown = answer_in(4 + label.len());
                     tail.push((
                         LineKind::User,
-                        pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. Your answer:\x1b[0m \x1b[1;38;2;240;235;225m{write_text}█\x1b[0m"), width),
+                        pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. Your answer:\x1b[0m \x1b[1;38;2;240;235;225m{shown}█\x1b[0m"), width),
                     ));
                     let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "back to the choices")], inner_w.saturating_sub(4));
                     tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
@@ -471,9 +481,10 @@ impl Renderer {
                 }
             } else {
                 typing_line_idx = Some(tail.len());
+                let shown = answer_in(4);
                 tail.push((
                     LineKind::User,
-                    pad_box_row(&format!("  \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{write_text}█\x1b[0m"), width),
+                    pad_box_row(&format!("  \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{shown}█\x1b[0m"), width),
                 ));
                 let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "cancel")], inner_w.saturating_sub(4));
                 tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
@@ -785,6 +796,33 @@ impl Renderer {
         // The conversation scrolls; the composer and the footer under it stay where
         // they are, so a reply can be written while reading back.
         let height = height as usize;
+        // A card taller than the screen keeps its head (what is asked, what is to
+        // be approved) and its end (the choices, the keys); rows between go, and a
+        // row says so. Cut from the top like the composer, it lost its title and
+        // target first.
+        if matches!(card_key, CardKey::Approval | CardKey::Question | CardKey::Channel) {
+            const HEAD: usize = 2;
+            const END: usize = 6;
+            let card_rows = tail.len() - card_start;
+            if card_rows > height && card_rows > HEAD + END {
+                let from = card_start + HEAD;
+                let to = (from + card_rows - height + 1).min(tail.len() - END);
+                if to > from + 1 {
+                    let hidden = to - from;
+                    let note = format!(
+                        " \x1b[38;2;135;130;125m\u{2026} {} not shown \u{b7} a taller window shows them\x1b[0m",
+                        flashagent_tui::plural(hidden, "row", "rows")
+                    );
+                    let marker = pad_box_row(&note, width).replace(BORDER_ESC, &border_color);
+                    tail.splice(from..to, [(LineKind::System, marker)]);
+                    if input_line_idx >= to {
+                        input_line_idx -= hidden - 1;
+                    } else if input_line_idx >= from {
+                        input_line_idx = from;
+                    }
+                }
+            }
+        }
         let chat_len = settled.len() + card_start;
         let bottom = &tail[card_start..];
         let chat_room = height.saturating_sub(bottom.len());
