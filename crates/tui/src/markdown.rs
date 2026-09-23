@@ -13,7 +13,9 @@ pub fn md(line: &str) -> String {
             if let Some(end) = line[i + 2..].find("**") {
                 let inner = &line[i + 2..i + 2 + end];
                 if !inner.is_empty() {
-                    out.push_str(&crossterm::style::style(inner.to_string()).bold().to_string());
+                    // Styled inside too: a model writes **the `load` call** as often as not.
+                    // Only the weight is switched off after, so code inside stays bold.
+                    out.push_str(&format!("\x1b[1m{}\x1b[22m", md(inner)));
                     i += 2 + end + 2;
                     continue;
                 }
@@ -24,11 +26,8 @@ pub fn md(line: &str) -> String {
             if let Some(end) = line[i + 1..].find('`') {
                 let inner = &line[i + 1..i + 1 + end];
                 if !inner.is_empty() {
-                    out.push_str(
-                        &crossterm::style::style(inner.to_string())
-                            .with(crossterm::style::Color::Rgb { r: 215, g: 180, b: 110 })
-                            .to_string(),
-                    );
+                    // Only the colour is reset, so bold around it carries on.
+                    out.push_str(&format!("\x1b[38;2;215;180;110m{inner}\x1b[39m"));
                     i += 1 + end + 1;
                     continue;
                 }
@@ -301,8 +300,8 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                     out.push(String::new());
                 }
                 let (colour, mark) = match hashes {
-                    1 => ("\x1b[1;38;2;255;255;255m", '◆'),
-                    2 => ("\x1b[1;38;2;194;231;255m", '◈'),
+                    1 => ("\x1b[1;38;2;255;255;255m", '♦'),
+                    2 => ("\x1b[1;38;2;194;231;255m", '◊'),
                     3 => ("\x1b[1;38;2;225;230;240m", '▸'),
                     _ => ("\x1b[38;2;180;185;200m", '▪'),
                 };
@@ -358,9 +357,9 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
 
             // `[ ] `, `[x] `, `[X] `
             let (check_str, content_clean, check_vis) = if let Some(stripped) = raw_content.strip_prefix("[ ] ") {
-                ("\x1b[38;2;140;145;160m☐\x1b[0m ", stripped, 2)
+                ("\x1b[38;2;140;145;160m□\x1b[0m ", stripped, 2)
             } else if let Some(stripped) = raw_content.strip_prefix("[x] ").or_else(|| raw_content.strip_prefix("[X] ")) {
-                ("\x1b[38;2;145;205;140m☑\x1b[0m ", stripped, 2)
+                ("\x1b[38;2;145;205;140m■\x1b[0m ", stripped, 2)
             } else {
                 ("", raw_content.as_str(), 0)
             };
@@ -435,6 +434,11 @@ mod tests {
         assert_eq!(strip_ansi(&bold), "a strong word");
         let code = md("call `main()` now");
         assert_eq!(strip_ansi(&code), "call main() now");
+        // Code inside bold is code, and the bold carries on after it.
+        let both = md("**the `load` call**");
+        assert_eq!(strip_ansi(&both), "the load call");
+        assert!(both.contains("\x1b[38;2;215;180;110mload\x1b[39m"), "{both:?}");
+        assert!(!both[both.find("load").unwrap()..].starts_with("load\x1b[0m"), "{both:?}");
         // An unclosed marker is text.
         assert_eq!(md("2 ** 3 is eight"), "2 ** 3 is eight");
         assert_eq!(md("an unclosed `tick"), "an unclosed `tick");
@@ -523,7 +527,7 @@ https://example.com/a/very/long/url/that/cannot/be/broken/anywhere/at/all/really
         let text = out.join("\n");
         assert!(text.contains("one") && text.contains("nested"), "{text}");
         assert!(text.contains("1.") && text.contains("2."), "numbers are kept: {text}");
-        assert!(text.contains('☐') && text.contains('☑'), "checkboxes: {text}");
+        assert!(text.contains('□') && text.contains('■'), "checkboxes: {text}");
 
         let indent = |needle: &str| {
             out.iter()

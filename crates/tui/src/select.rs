@@ -285,7 +285,7 @@ impl<T> SelectMenu<T> {
                 let item = &self.items[idx];
                 let is_cur = idx == self.selected;
                 let (cursor, label_styled) = if is_cur {
-                    (" \x1b[1;38;2;225;175;95m❯\x1b[0m", format!("\x1b[1;38;2;245;240;232m{}\x1b[0m", item.label))
+                    (" \x1b[1;38;2;225;175;95m›\x1b[0m", format!("\x1b[1;38;2;245;240;232m{}\x1b[0m", item.label))
                 } else {
                     ("  ", format!("\x1b[38;2;160;155;145m{}\x1b[0m", item.label))
                 };

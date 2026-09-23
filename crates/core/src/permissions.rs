@@ -555,8 +555,9 @@ impl PermissionState {
         Some(Verdict::NeedApproval { diff: Some(format!("a local address: {host}")) })
     }
 
-    /// Never allowed by mode alone: a card where someone is watching, a refusal
-    /// in Planning and during `/goal`.
+    /// A refusal in Planning and during `/goal`, a card in Manual and Accept
+    /// Edits. Accept All lets it through: the shell there already reaches any
+    /// file unasked, so a card for the file tools only got in the way.
     fn outside_project_verdict(&self, call: &ToolCall, diff: Option<String>) -> Option<Verdict> {
         let root = self.project_root.lock().expect("root lock").clone()?;
         let category = self.category(&call.name);
@@ -574,6 +575,9 @@ impl PermissionState {
             return Some(Verdict::Deny(format!(
                 "{outside} is outside the project; files outside it are not {done} in planning mode"
             )));
+        }
+        if self.mode() == PermissionMode::Bypass {
+            return None;
         }
         let note = format!("outside the project: {outside}");
         Some(Verdict::NeedApproval {
@@ -1110,13 +1114,17 @@ mod tests {
     }
 
     #[test]
-    fn a_file_outside_the_project_asks_in_every_mode_where_someone_can_answer() {
+    fn a_file_outside_the_project_asks_unless_everything_is_accepted() {
         let dir = project();
         let outside = tempfile::tempdir().unwrap();
         let outside_file = outside.path().join("notes.txt").to_string_lossy().to_string();
         let write_out = call("write_file", &serde_json::json!({ "path": "../escape.txt", "content": "x" }).to_string());
         let read_out = call("read_file", &serde_json::json!({ "file_path": outside_file }).to_string());
-        for mode in [PermissionMode::Manual, PermissionMode::AcceptEdits, PermissionMode::Bypass] {
+        let accept_all = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
+        accept_all.set_project_root(dir.path().to_path_buf());
+        assert_eq!(accept_all.decide(&write_out, None), Verdict::Allow, "Accept All writes outside the project");
+        assert_eq!(accept_all.decide(&read_out, None), Verdict::Allow, "Accept All reads outside the project");
+        for mode in [PermissionMode::Manual, PermissionMode::AcceptEdits] {
             let state = PermissionState::new(mode, Arc::new(DenyAllGate));
             state.set_project_root(dir.path().to_path_buf());
             match state.decide(&write_out, Some("+x".into())) {

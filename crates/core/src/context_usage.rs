@@ -96,7 +96,7 @@ impl ContextUsage {
         Self::format_capacity_tokens(tokens)
     }
 
-    /// `❪▌─────────❫ 6% · 4.1K/64K`
+    /// `▌───────── 6% · 4.1K/64K`
     pub fn format_compact_gauge(&self, bar_width: usize) -> String {
         let pct = self.percentage().clamp(0.0, 100.0);
         let bar_width = bar_width.max(4);
@@ -110,16 +110,14 @@ impl ContextUsage {
         };
 
         let rail_color = "\x1b[38;2;60;65;78m"; // recessed dark rail
-        let bracket_color = "\x1b[38;2;100;105;120m"; // subtle pill bracket
         let reset = "\x1b[0m";
-
-        const SUB_BLOCKS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
 
         let total_eighths = ((pct / 100.0) * (bar_width as f32) * 8.0).round() as usize;
         let full_blocks = (total_eighths / 8).min(bar_width);
         let rem_eighths = total_eighths % 8;
-        let sub_block = if full_blocks < bar_width && rem_eighths > 0 {
-            SUB_BLOCKS[rem_eighths]
+        // Only the half block: the eighths are missing from Consolas.
+        let sub_block = if full_blocks < bar_width && rem_eighths >= 4 {
+            "▌"
         } else {
             ""
         };
@@ -134,7 +132,7 @@ impl ContextUsage {
         let cap_str = Self::format_capacity_tokens(self.total_capacity);
 
         format!(
-            "{bracket_color}❪{reset}{fill_color}{full_str}{sub_block}{reset}{rail_color}{empty_str}{reset}{bracket_color}❫{reset} \x1b[1;38;2;245;240;235m{pct:.0}%\x1b[0m \x1b[38;2;120;125;140m·\x1b[0m \x1b[38;2;160;165;180m{used_str}\x1b[38;2;110;115;130m/\x1b[38;2;160;165;180m{cap_str}\x1b[0m"
+            "{fill_color}{full_str}{sub_block}{reset}{rail_color}{empty_str}{reset} \x1b[1;38;2;245;240;235m{pct:.0}%\x1b[0m \x1b[38;2;120;125;140m·\x1b[0m \x1b[38;2;160;165;180m{used_str}\x1b[38;2;110;115;130m/\x1b[38;2;160;165;180m{cap_str}\x1b[0m"
         )
     }
 }

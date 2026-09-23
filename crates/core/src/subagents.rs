@@ -194,8 +194,8 @@ impl ToolExec for SubagentTool {
     fn specs(&self) -> Vec<ToolSpec> {
         vec![ToolSpec {
             name: "spawn_agent".into(),
-            description: "Run a subagent with a role, a task, and optional limits. The subagent works independently and returns a final answer. Use it to delegate a self-contained research or implementation task while you keep coordinating. Its result is a string you can quote or build on.".into(),
-            parameters_json: r#"{"type":"object","properties":{"role":{"type":"string","description":"Role name: researcher, coder, reviewer, planner, or any custom role"},"task":{"type":"string","description":"The task for the subagent, stated clearly and self-contained"},"max_steps":{"type":"integer","description":"Max loop steps (default 20)"},"timeout_secs":{"type":"integer","description":"Max wall-clock seconds (default none)"}},"required":["task"]}"#.into(),
+            description: "Delegate a self-contained research or coding task to a subagent; it works on its own and returns its final answer.".into(),
+            parameters_json: r#"{"type":"object","properties":{"role":{"type":"string","description":"researcher, coder, reviewer, planner, or a custom role"},"task":{"type":"string","description":"The whole task, self-contained"},"max_steps":{"type":"integer","description":"Max loop steps (default 20)"},"timeout_secs":{"type":"integer","description":"Max wall-clock seconds (default none)"}},"required":["task"]}"#.into(),
         }]
     }
 

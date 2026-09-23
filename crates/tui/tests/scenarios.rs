@@ -207,7 +207,7 @@ fn ctrl_k_finds_a_command_by_what_it_is_called_or_its_key() {
     term.wait_for("Commands", WAIT);
     term.type_text("goal");
     term.send(ENTER);
-    term.wait_for("\u{276f} /goal", WAIT);
+    term.wait_for("\u{203a} /goal", WAIT);
 }
 
 #[test]
@@ -1273,9 +1273,10 @@ fn after_an_answer_the_status_line_is_the_mode_not_a_report() {
     let home = Home::new();
     let term = ready(&home, &server);
     ask(&term, "how did that go?", "Status please.");
-    let screen = term.wait_for("Ready", WAIT);
-    let status = screen.lines().find(|l| l.contains("Ready")).unwrap_or_default();
-    assert!(status.contains("[Accept Edits]"), "{status}");
+    // Idle once the key hints are back in place of the spinner.
+    let screen = term.wait_for("ctrl+k — commands", WAIT);
+    let status = screen.lines().find(|l| l.contains("[Accept Edits]")).unwrap_or_default();
+    assert_eq!(status.trim().split("  ").next(), Some("[Accept Edits]"), "only the mode on the left: {status}");
     for noise in ["cache hit", "prompt", "TTFT", "tg", "Tokens -"] {
         assert!(!screen.contains(noise), "{noise:?} is back on screen:\n{screen}");
     }

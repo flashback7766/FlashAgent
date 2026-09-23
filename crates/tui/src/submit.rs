@@ -398,7 +398,7 @@ impl App {
             return;
         }
         self.current_effort = wanted;
-        self.refresh_welcome(cx.source, cx.perm.state().mode(), cx.mascot_mood);
+        self.refresh_welcome(cx.source, cx.mascot_mood);
         self.notice(format!("Thinking effort set to: {}", self.current_effort));
     }
 
@@ -420,7 +420,7 @@ impl App {
         };
         cx.perm.state().set_mode(mode);
         self.remember_mode(mode);
-        self.refresh_welcome(cx.source, mode, cx.mascot_mood);
+        self.refresh_welcome(cx.source, cx.mascot_mood);
         self.notice(format!("Permission mode set to: {}", mode.label()));
     }
 
@@ -510,7 +510,7 @@ impl App {
                         let active = statuses.iter().filter(|s| s.state == flashagent_tools::mcp::ServerConnectionState::Active).count();
                         let tools: usize = statuses.iter().map(|s| s.tool_count).sum();
                         self.notice(format!(
-                            "\x1b[38;2;135;220;145m✔ MCP reload complete:\x1b[0m {active} active server(s), {tools} discovered tool(s)."
+                            "\x1b[38;2;135;220;145m√ MCP reload complete:\x1b[0m {active} active server(s), {tools} discovered tool(s)."
                         ));
                     }
                     Err(e) => self.notice(format!("\x1b[38;2;245;120;120mMCP reload failed:\x1b[0m {e}")),

@@ -449,9 +449,9 @@ impl MemoryModal {
                     lines.push((LineKind::System, pad(&format!("{heading}Dive deeper{reset}"))));
                     for (i, q) in summary.dive_deeper.iter().enumerate() {
                         let row = if i == self.dive_selected && self.ask.is_empty() {
-                            format!("{accent}↳{reset} {link}{q}{reset}")
+                            format!("{accent}└{reset} {link}{q}{reset}")
                         } else {
-                            format!("{dim}↳ {q}{reset}")
+                            format!("{dim}└ {q}{reset}")
                         };
                         lines.push((LineKind::System, pad(&row)));
                     }
@@ -460,11 +460,11 @@ impl MemoryModal {
         }
         lines.push((LineKind::System, pad("")));
         let ask = if self.ask.is_empty() {
-            format!("{accent}❯{reset} {dim}Ask or update…{reset}")
+            format!("{accent}›{reset} {dim}Ask or update…{reset}")
         } else {
             let (shown, _) = crate::tail_window(&self.ask, body_w.saturating_sub(2));
             let caret = if crate::anim::blink_on(t) { "\x1b[7m \x1b[27m" } else { " " };
-            format!("{accent}❯{reset} {text}{shown}{caret}{reset}")
+            format!("{accent}›{reset} {text}{shown}{caret}{reset}")
         };
         lines.push((LineKind::System, pad(&ask)));
         lines.push((
@@ -603,7 +603,7 @@ mod tests {
         .unwrap();
         m.summary = SummaryState::Ready(MemorySummary { sections, dive_deeper: dive, updated: 0, fingerprint: fingerprint(&m.rows) });
         let shown = dump(&m);
-        assert!(shown.contains("Overview") && shown.contains("Автомобиль") && shown.contains("↳ Сравните версии DiLink"), "{shown}");
+        assert!(shown.contains("Overview") && shown.contains("Автомобиль") && shown.contains("└ Сравните версии DiLink"), "{shown}");
         assert!(shown.lines().all(|l| crate::visible_width(l) <= 90), "{shown}");
 
         // Going back to the list and in again does not ask a second time.

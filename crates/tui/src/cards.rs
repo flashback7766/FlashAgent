@@ -3,8 +3,8 @@ use flashagent_tui::WelcomeCard;
 
 impl App {
     /// Only while the conversation has not started.
-    pub(crate) fn refresh_welcome(&mut self, source: &BackendSource, mode: PermissionMode, mood: MascotMood) {
-        self.animate_welcome(source, mode, mood, None, None);
+    pub(crate) fn refresh_welcome(&mut self, source: &BackendSource, mood: MascotMood) {
+        self.animate_welcome(source, mood, None, None);
     }
 
     /// `width` overrides the terminal's; `reveal_rows` draws only that many rows
@@ -12,7 +12,6 @@ impl App {
     pub(crate) fn animate_welcome(
         &mut self,
         source: &BackendSource,
-        mode: PermissionMode,
         mood: MascotMood,
         width: Option<usize>,
         reveal_rows: Option<usize>,
@@ -25,7 +24,6 @@ impl App {
         let card = welcome_card(&WelcomeCard {
             model: &self.current_model,
             cwd: &self.cwd_display,
-            mode: mode.label(),
             memory_docs: self.memory_docs,
             thinking: Some(&th_sum),
             context_window: self.current_context.as_deref(),
@@ -82,7 +80,7 @@ pub(crate) fn card_rows(value: &str, width: usize, max_rows: usize) -> Vec<Strin
     let mut shown = String::new();
     for line in value.lines() {
         if !shown.is_empty() {
-            shown.push('\u{21b5}'); // ↵ marks a real newline
+            shown.push('¶'); // ¶ marks a real newline
         }
         let mut spaces = 0usize;
         for c in line.chars().chain(std::iter::once('\0')) {

@@ -153,7 +153,7 @@ flashagent --url http://localhost:11434/v1 --model qwen2.5-coder:32b   # one-off
 | **Accept Edits** (first run) | run | ask | ask (`read_only` ones run) |
 | **Accept All** | run | run, except dangerous commands (`rm -rf`, `sudo`, `git push --force`, `git reset --hard`, ...), which ask | run |
 
-FlashAgent starts in the mode you left it in. Reads inside the project and web tools are always allowed. Reading or writing a file outside the project, or fetching a local address (`localhost`, your local network, a cloud metadata endpoint), asks in every mode and is refused in Planning and during `/goal`. Approval cards offer **Allow**, **Always** and **Deny**; "Always" on a shell command stores a narrow per-command rule for the session.
+FlashAgent starts in the mode you left it in. Reads inside the project and web tools are always allowed. Reading or writing a file outside the project asks in Manual and Accept Edits, is allowed in Accept All (where the shell already reaches any file), and is refused in Planning and during `/goal`. Fetching a local address (`localhost`, your local network, a cloud metadata endpoint) asks in every mode and is refused in Planning and during `/goal`. Approval cards offer **Allow**, **Always** and **Deny**; "Always" on a shell command stores a narrow per-command rule for the session.
 
 **MCP** — add servers in `.mcp.json` (project) or `~/.flashagent/mcp.json` (global), browse a small vetted marketplace with `/mcp market`, install with `/mcp add <id>`, test with `/mcp test <name>`. Mark a server or individual tools `read_only` to skip approval for them — only your config can do that; a server's own claims (tool names, `readOnlyHint`) never bypass an approval card.
 
