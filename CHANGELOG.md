@@ -1,5 +1,15 @@
 # Changelog
 
+## b383 — fixes to b378, one of them for your files' safety
+
+An independent review of b378 found these; update if you run b378.
+
+- **An edit's error no longer quotes a file outside the project.** b378 answered an edit that could not apply with the file's closest line, to save you an approval that would only fail. The check that the file was inside the project read the path as text, so `~/.aws/credentials` passed, and a prompt-injected model could read a line of it without asking. It now uses the same rule as the permissions (`~`, `..` and symlinks resolved), and any batch reaching outside the project goes to the approval card as before.
+- **Git Bash runs commands exactly as written.** Every `\\` in a command reached bash as `\`, which silently changed `sed` patterns, `printf` output, JSON and Windows paths.
+- **One odd line no longer garbles a whole command's output.** A single line in the console's legacy code page switched the decoding of everything after it; each read is now decoded on its own.
+- **"I'll … once you confirm" is not a call left undone.** b378 asked the model to go ahead after sentences that waited on you, and after plain statements that began with "Теперь" or "Now". Only first-person announcements count now.
+- **A newline inside a question or an option** no longer breaks the question card, and an edit that names the same file twice in one batch is checked on the result of its first part.
+
 ## b378 — one look everywhere, and a shell that works on Windows
 
 A large release, so the number jumps by 25, as the scale in `packaging/bump.sh` counts it: a milestone plus a big fix.
