@@ -2195,7 +2195,7 @@ mod tests {
         assert!(!running.contains("Ready"), "{running}");
 
         let idle = format_status_left(false, false, false, None, "Normal", "");
-        assert!(idle.contains("[Normal]") && !idle.contains("Ready"), "{idle}");
+        assert!(idle.contains("[Normal]") && idle.contains("Ready"), "{idle}");
 
         let goal = format_status_left(true, true, false, Some("step 12/250 · 4.2k tok · 3m05s/1h0m"), "Autonomous", "");
         assert!(goal.contains("[Goal: Autonomous]"), "{goal}");

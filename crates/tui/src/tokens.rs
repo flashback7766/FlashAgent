@@ -145,12 +145,7 @@ impl TokenTracker {
         }
     }
 
-    /// For a few seconds after the first token: after that the speed it writes
-    /// at is what matters.
     pub(crate) fn ttft_display(&self) -> Option<String> {
-        if self.first_token_time?.elapsed() > std::time::Duration::from_secs(8) {
-            return None;
-        }
         let ttft = self.last_ttft?;
         let spd = self.last_prefill_speed?;
         let speed_str = if spd >= 1000.0 {
