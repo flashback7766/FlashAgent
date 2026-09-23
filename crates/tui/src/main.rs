@@ -70,6 +70,7 @@ struct QuestionUiState {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
+    flashagent_svc::updater::remove_stale_backups_beside_exe();
     let mut config = AppConfig::load();
     let mut force_setup = false;
     let mut skip_trust = false;

@@ -23,15 +23,15 @@ impl SseDecoder {
     }
 }
 
+/// Whichever separator comes first: a server may mix `\r\n\r\n` records
+/// with `\n\n` keep-alive comments.
 fn find_double_newline(buf: &[u8]) -> Option<(usize, usize)> {
-    buf.windows(2)
-        .position(|w| w == b"\n\n")
-        .map(|p| (p, p + 2))
-        .or_else(|| {
-            buf.windows(4)
-                .position(|w| w == b"\r\n\r\n")
-                .map(|p| (p, p + 4))
-        })
+    let lf = buf.windows(2).position(|w| w == b"\n\n").map(|p| (p, p + 2));
+    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| (p, p + 4));
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(if b.0 < a.0 { b } else { a }),
+        (a, b) => a.or(b),
+    }
 }
 
 fn extract_data(record: &[u8]) -> Option<String> {
@@ -148,14 +148,15 @@ impl ChunkParser {
             return events;
         };
         for choice in choices {
+            // A last chunk may carry only the finish reason, and `length` must not be lost.
             let Some(delta) = choice.get("delta") else {
+                if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str).map(finish_reason) {
+                    events.push(LlmEvent::Done(reason));
+                }
                 continue;
             };
-            if let Some(reasoning) = delta
-                .get("reasoning_content")
-                .or_else(|| delta.get("reasoning"))
-                .and_then(Value::as_str)
-            {
+            // `"reasoning_content": null` beside a real `"reasoning"` is common.
+            if let Some(reasoning) = ["reasoning_content", "reasoning"].iter().find_map(|k| delta.get(*k).and_then(Value::as_str)) {
                 events.push(LlmEvent::ReasoningDelta(reasoning.to_string()));
             }
             if let Some(text) = delta.get("content").and_then(Value::as_str) {
@@ -180,9 +181,11 @@ impl ChunkParser {
                         self.tool_ids.push(None);
                         self.tool_names.push(None);
                     }
+                    // An empty id or name in a later chunk is absent, not a rename.
                     let id = call
                         .get("id")
                         .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
                         .map(str::to_string)
                         .or_else(|| self.tool_ids[index].clone());
                     self.tool_ids[index] = Some(id.clone().unwrap_or_default());
@@ -190,6 +193,7 @@ impl ChunkParser {
                         .get("function")
                         .and_then(|f| f.get("name"))
                         .and_then(Value::as_str)
+                        .filter(|name| !name.is_empty())
                         .map(str::to_string)
                         .or_else(|| self.tool_names[index].clone());
                     self.tool_names[index] = name.clone();
@@ -202,16 +206,19 @@ impl ChunkParser {
                     events.push(LlmEvent::ToolCallDelta { index, id, name, args_delta });
                 }
             }
-            if let Some(finish) = choice.get("finish_reason").and_then(Value::as_str) {
-                let reason = match finish {
-                    "tool_calls" | "function_call" | "tool_use" => FinishReason::ToolUse,
-                    "length" => FinishReason::Length,
-                    _ => FinishReason::Stop,
-                };
+            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str).map(finish_reason) {
                 events.push(LlmEvent::Done(reason));
             }
         }
         events
+    }
+}
+
+fn finish_reason(finish: &str) -> FinishReason {
+    match finish {
+        "tool_calls" | "function_call" | "tool_use" => FinishReason::ToolUse,
+        "length" => FinishReason::Length,
+        _ => FinishReason::Stop,
     }
 }
 
@@ -404,8 +411,7 @@ impl TextToolScanner {
         if hermes_open || mistral_open || bare_open {
             return self.buf.len();
         }
-        // "```" too: a fence split across deltas must be seen whole.
-        let markers = [START_HERMES, END_HERMES, START_MISTRAL, "\"name\"", "\"ask_user\"", "```"];
+        let markers = [START_HERMES, END_HERMES, START_MISTRAL, "\"name\"", "\"ask_user\""];
         let mut hold = 0usize;
         for m in markers {
             for skip in 1..m.len() {
@@ -414,9 +420,22 @@ impl TextToolScanner {
                 }
             }
         }
-        // A trailing "{" at a line start may be the head of a bare call.
-        if self.buf.ends_with('{') && (self.buf.len() == 1 || self.buf.ends_with("\n{")) {
-            hold = hold.max(1);
+        // Every trailing backtick: a fence is only seen when all three arrive
+        // together, and one sent on its own would flip nothing.
+        hold = hold.max(self.buf.len() - self.buf.trim_end_matches('`').len());
+        // The line being written may still become a bare call (`{"na`): once
+        // its `{` went out, the rest was no longer at a line start.
+        let line_start = match self.buf.rfind('\n') {
+            Some(p) => Some(p + 1),
+            None => (!self.mid_line).then_some(0),
+        };
+        if let Some(start) = line_start {
+            let line = &self.buf[start..];
+            let head = line.trim_start_matches([' ', '\t']);
+            let after = head.strip_prefix('{').or_else(|| head.strip_prefix('['));
+            if after.is_some_and(could_start_tool_call) && !self.in_fence_at(start) {
+                hold = hold.max(line.len());
+            }
         }
         hold.min(self.buf.len())
     }
@@ -601,21 +620,63 @@ fn strip_partial_close(body: &str) -> &str {
     body
 }
 
+/// Not yet a call, but nothing written so far rules one out.
+fn could_start_tool_call(s: &str) -> bool {
+    let trimmed = s.trim_start();
+    TOOL_CALL_KEYS.iter().any(|c| c.starts_with(trimmed) || trimmed.starts_with(c))
+}
+
 fn is_tool_call_start(s: &str) -> bool {
     let trimmed = s.trim_start();
-    let candidates = [
+    TOOL_CALL_KEYS.iter().any(|c| trimmed.starts_with(c))
+}
+
+const TOOL_CALL_KEYS: [&str; 24] = [
         "\"name\"", "'name'", "\"tool\"", "'tool'", "\"function\"", "'function'",
         "\"ask_user\"", "'ask_user'", "\"run_shell\"", "'run_shell'",
         "\"read_file\"", "'read_file'", "\"write_file\"", "'write_file'",
         "\"edit_file\"", "'edit_file'", "\"patch_file\"", "'patch_file'",
         "\"list_dir\"", "'list_dir'", "\"glob\"", "'glob'", "\"grep\"", "'grep'",
-    ];
-    candidates.iter().any(|c| trimmed.starts_with(c))
-}
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fence_that_arrives_in_its_own_delta_still_hides_its_example() {
+        let example = r#"<tool_call>{"name":"run_shell","arguments":{"command":"rm -rf /"}}</tool_call>"#;
+        assert!(scan(&["Format:\n", "```", "\n", example, "\n", "```", "\n", "Done."]).1.is_empty());
+        assert!(scan(&["Format:\n", "``", "`\n", example, "\n`", "``\n"]).1.is_empty());
+        // A closing fence on its own does not leave the fence open.
+        let real = r#"<tool_call>{"name":"read_file","arguments":{"path":"a.rs"}}</tool_call>"#;
+        assert_eq!(scan(&["```\n", "code\n", "```", "\n", real]).1, vec!["read_file"]);
+    }
+
+    #[test]
+    fn a_bare_call_split_across_deltas_is_still_found() {
+        let rest = r#"": "read_file", "arguments": {"path": "a.rs"}}"#;
+        assert_eq!(scan(&["Reading.\n", "{\"", "name", rest]).1, vec!["read_file"]);
+        assert_eq!(scan(&["Reading.\n", "{", "\"name", rest]).1, vec!["read_file"]);
+        // Prose that only starts like one comes out as text.
+        let (text, calls) = scan(&["Here:\n", "{", "\"id\": 1}\n"]);
+        assert!(calls.is_empty());
+        assert_eq!(text, "Here:\n{\"id\": 1}\n");
+    }
+
+    #[test]
+    fn stream_details_some_servers_send_are_read() {
+        let mut p = ChunkParser::default();
+        assert_eq!(p.feed(r#"{"choices":[{"index":0,"finish_reason":"length"}]}"#), vec![LlmEvent::Done(FinishReason::Length)]);
+        let ev = p.feed(r#"{"choices":[{"delta":{"reasoning_content":null,"reasoning":"x"}}]}"#);
+        assert_eq!(ev, vec![LlmEvent::ReasoningDelta("x".into())]);
+        let mut p = ChunkParser::default();
+        p.feed(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{"}}]}}]}"#);
+        let ev = p.feed(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","function":{"name":"","arguments":"}"}}]}}]}"#);
+        assert!(matches!(&ev[0], LlmEvent::ToolCallDelta { id: Some(id), name: Some(name), .. } if id == "c1" && name == "read_file"), "{ev:?}");
+        let mut d = SseDecoder::default();
+        assert_eq!(d.feed(b"data: A\r\n\r\ndata: B\r\n\r\n: ping\n\n"), vec!["A", "B"]);
+    }
 
     #[test]
     fn sse_decoder_handles_split_chunks() {

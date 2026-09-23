@@ -200,9 +200,15 @@ fn unwrapped_args(args_json: &str, tool_name: &str) -> Option<serde_json::Value>
     const WRAPPERS: [&str; 3] = ["arguments", "parameters", "args"];
     const METADATA: [&str; 5] = ["name", "tool", "id", "type", "function"];
     let only_wrapper_keys = obj.keys().all(|k| WRAPPERS.contains(&k.as_str()) || METADATA.contains(&k.as_str()));
-    if only_wrapper_keys {
-        if let Some(inner) = WRAPPERS.iter().find_map(|w| obj.get(*w)) {
-            return unwrap_inner(inner);
+    // An external tool may take `name` and `arguments` itself (an MCP gateway's
+    // `call_tool`), so its wrapper is only taken off when it names this tool.
+    let names_this_tool = || {
+        ["name", "tool"].iter().filter_map(|k| obj.get(*k)?.as_str()).any(|n| n == tool_name || tool_name.ends_with(&format!("__{n}")))
+    };
+    if only_wrapper_keys && (!tool_name.starts_with("mcp__") || names_this_tool()) {
+        // `{"args": ["-v"]}` is an argument named args, not a wrapper.
+        if let Some(inner) = WRAPPERS.iter().find_map(|w| obj.get(*w)).and_then(unwrap_inner) {
+            return Some(inner);
         }
     }
     Some(value)
@@ -525,6 +531,17 @@ fn extract_embedded_json(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_external_tool_keeps_arguments_named_like_a_wrapper() {
+        let gateway = effective_args(r#"{"name":"search","arguments":{"q":"x"}}"#, "mcp__gw__call_tool").unwrap();
+        assert_eq!(gateway["name"], "search");
+        let args = effective_args(r#"{"args":["-v"]}"#, "mcp__cli__run").unwrap();
+        assert_eq!(args["args"][0], "-v");
+        // A wrapper that names the tool is still taken off.
+        let wrapped = effective_args(r#"{"name":"mcp__gh__search","arguments":{"q":"x"}}"#, "mcp__gh__search").unwrap();
+        assert_eq!(wrapped["q"], "x");
+    }
 
     #[test]
     fn effective_args_never_diverges_between_readers() {

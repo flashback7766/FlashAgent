@@ -316,12 +316,18 @@ pub fn extract_binary_bytes(asset_name: &str, payload: &[u8]) -> anyhow::Result<
     Ok(payload.to_vec())
 }
 
-/// In `sha256sum` format.
+/// In `sha256sum` format. The manifest is written before upload and GitHub
+/// renames characters such as the `+` of a stable build (`v1.0.0+b290`), so
+/// names are compared with those characters made alike.
 pub fn expected_checksum(manifest: &str, asset_name: &str) -> Option<String> {
+    let alike = |name: &str| -> String {
+        name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '.' }).collect()
+    };
+    let wanted = alike(asset_name);
     manifest.lines().find_map(|line| {
         let (hash, name) = line.split_once(char::is_whitespace)?;
         let name = name.trim_start().trim_start_matches('*');
-        (name == asset_name).then(|| hash.to_ascii_lowercase())
+        (name == asset_name || alike(name) == wanted).then(|| hash.to_ascii_lowercase())
     })
 }
 
@@ -378,8 +384,10 @@ pub fn is_writable(path: &Path) -> bool {
     }
 }
 
-/// The running binary when it is replaceable; otherwise
-/// `~/.local/bin/flashagent` for the current user.
+/// The running binary when it is replaceable; otherwise the per-user
+/// install location: `~/.local/bin/flashagent`, or on Windows where
+/// install.ps1 puts it. Never a bare name, which would land in whatever
+/// folder FlashAgent was started from.
 pub fn resolve_install_target() -> anyhow::Result<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         let real_path = std::fs::canonicalize(&exe).unwrap_or(exe);
@@ -388,13 +396,38 @@ pub fn resolve_install_target() -> anyhow::Result<PathBuf> {
         }
     }
 
-    if let Ok(home) = std::env::var("HOME") {
-        let local_bin = PathBuf::from(home).join(".local").join("bin");
-        std::fs::create_dir_all(&local_bin)?;
-        return Ok(local_bin.join("flashagent"));
+    #[cfg(windows)]
+    let fallback = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Programs").join("FlashAgent").join("flashagent.exe"));
+    #[cfg(not(windows))]
+    let fallback = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("bin").join("flashagent"));
+    let Some(target) = fallback else {
+        anyhow::bail!("the folder of the running FlashAgent cannot be written to, and there is no per-user folder to install into");
+    };
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir)?;
     }
+    Ok(target)
+}
 
-    Ok(PathBuf::from("flashagent"))
+/// On Windows a replaced binary is parked beside the new one while it still
+/// runs; nothing removed it, so every update left a full copy behind and
+/// uninstall found the folder not empty. Removed at the next start.
+pub fn remove_stale_backups(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".flashagent-old.") && name.ends_with(".bak") {
+            // The one this process just parked is still running; it fails and stays.
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+pub fn remove_stale_backups_beside_exe() {
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| std::fs::canonicalize(e).ok()).and_then(|e| e.parent().map(Path::to_path_buf)) {
+        remove_stale_backups(&dir);
+    }
 }
 
 pub fn atomic_replace_executable(target: &Path, new_binary_bytes: &[u8]) -> anyhow::Result<()> {
@@ -758,7 +791,20 @@ mod tests {
         assert_eq!(expected_checksum(manifest, "flashagent-b233-linux-x86_64.tar.gz").as_deref(), Some("0f1e"));
         assert_eq!(expected_checksum(manifest, "flashagent-windows-x86_64.exe").as_deref(), Some("abcd"));
         assert_eq!(expected_checksum(manifest, "missing"), None);
+        let stable = "beef  flashagent-v1.0.0+b400-linux-x86_64.tar.gz\n";
+        assert_eq!(expected_checksum(stable, "flashagent-v1.0.0.b400-linux-x86_64.tar.gz").as_deref(), Some("beef"));
+        assert_eq!(expected_checksum(stable, "flashagent-v1.0.0+b400-linux-x86_64.tar.gz").as_deref(), Some("beef"));
         assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn a_parked_old_binary_is_removed_later() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".flashagent-old.4242.bak"), "old exe").unwrap();
+        std::fs::write(dir.path().join("flashagent.exe"), "new exe").unwrap();
+        remove_stale_backups(dir.path());
+        assert!(!dir.path().join(".flashagent-old.4242.bak").exists());
+        assert!(dir.path().join("flashagent.exe").exists());
     }
 
     #[test]
