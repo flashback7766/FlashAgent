@@ -153,8 +153,7 @@ pub(crate) fn format_status_left(
         // During a goal the budget burn-down.
         (true, false, Some(p)) => format!("\x1b[38;2;168;199;250m{p}\x1b[0m"),
         (true, false, None) => return format!("  {mode_str}{expand_status}"),
-        // Idle: the empty prompt already says so.
-        (false, ..) => return format!("  {mode_str}{expand_status}"),
+        (false, ..) => "\x1b[38;2;140;135;130mReady\x1b[0m".to_string(),
     };
     format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m {activity}{expand_status}")
 }
@@ -651,17 +650,7 @@ impl Renderer {
         };
         tail.push((LineKind::System, left_hint));
 
-        // Line 2: the tip, on two lines in narrow terminals. Only while nothing else
-        // wants the eye: not while the model works, the user types, or a card or menu
-        // is open. Its rows stay, blank, so the composer does not move.
-        let tip_start = tail.len();
-        let tip_wanted = !st.running
-            && st.input.is_empty()
-            && overlay.is_none()
-            && autocomplete.is_none()
-            && st.history_search.is_none()
-            && gate.pending().is_none()
-            && question_gate.pending().is_none();
+        // Line 2: the tip, on two lines in narrow terminals.
         if let Some(lines) = st.tip_lines {
             for line in lines {
                 let tip_row = clip_ansi(line, width.saturating_sub(2));
@@ -697,12 +686,6 @@ impl Renderer {
                 let raw_tip = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{tip_content}\x1b[0m");
                 let tip_row = clip_ansi(&raw_tip, width.saturating_sub(2));
                 tail.push((LineKind::System, tip_row));
-            }
-        }
-
-        if !tip_wanted {
-            for row in &mut tail[tip_start..] {
-                row.1.clear();
             }
         }
 
