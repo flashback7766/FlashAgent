@@ -150,7 +150,8 @@ impl App {
         }
         match code {
             KeyCode::Esc => {
-                if self.running {
+                // A steering draft goes first: a turn stopped to clear two words is lost work.
+                if self.running && self.input.is_empty() {
                     self.interrupt(cx);
                 } else if !self.input.is_empty() {
                     self.input.clear();

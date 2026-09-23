@@ -703,6 +703,27 @@ fn esc_during_a_turn_stops_it_and_keeps_what_was_already_said() {
 }
 
 #[test]
+fn esc_clears_a_steering_draft_before_it_stops_the_turn() {
+    let words: Vec<String> = (1..=60).map(|i| format!("word{i}")).collect();
+    let server = MockServer::start(vec![Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(300) }]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("count slowly");
+    term.send(ENTER);
+    term.wait_for("word3", WAIT);
+    term.type_text("draftsteer");
+    term.wait_for("Esc clear", WAIT);
+    term.send(ESC);
+    term.wait_gone("draftsteer", WAIT);
+    // Still running: the draft went, the turn did not.
+    let screen = term.wait_for(RUNNING_HINT, WAIT);
+    assert!(!screen.contains("Request interrupted by user"), "{screen}");
+    term.send(ESC);
+    term.wait_for("Request interrupted by user", Duration::from_secs(10));
+}
+
+#[test]
 fn compact_replaces_the_conversation_so_far_with_a_summary() {
     let server = MockServer::start(vec![
         Reply::Text("First answer.".into()),
