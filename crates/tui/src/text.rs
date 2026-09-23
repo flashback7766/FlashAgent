@@ -187,8 +187,8 @@ pub fn format_cmd(cmd: &str) -> String {
     let first_line = first_line.as_str();
     let max_len = 70;
     if first_line.chars().count() > max_len {
-        let truncated: String = first_line.chars().take(max_len - 3).collect();
-        format!("{truncated}...")
+        let truncated: String = first_line.chars().take(max_len - 1).collect();
+        format!("{truncated}\u{2026}")
     } else {
         first_line.to_string()
     }
@@ -321,13 +321,18 @@ pub fn truncate_middle(s: &str, max_len: usize) -> String {
     if char_count <= max_len || max_len < 5 {
         return s.chars().take(max_len).collect();
     }
-    let keep = max_len.saturating_sub(3);
+    let keep = max_len.saturating_sub(1);
     let left = keep.div_ceil(2);
     let right = keep / 2;
 
     let prefix: String = s.chars().take(left).collect();
     let suffix: String = s.chars().skip(char_count - right).collect();
-    format!("{prefix}...{suffix}")
+    format!("{prefix}\u{2026}{suffix}")
+}
+
+/// `1 line`, `3 lines`.
+pub fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 #[cfg(test)]

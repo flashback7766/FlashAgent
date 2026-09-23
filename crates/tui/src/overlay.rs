@@ -75,7 +75,7 @@ impl App {
                 SelectItem::with_description(label, c.description, value)
             })
             .collect();
-        self.open_overlay(Overlay::Palette(SelectMenu::new("Commands", items).with_noun("commands")));
+        self.open_overlay(Overlay::Palette(SelectMenu::new("Command Palette", items).with_noun("commands")));
     }
 
     pub(crate) fn open_overlay(&mut self, overlay: Overlay) {

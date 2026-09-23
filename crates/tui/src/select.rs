@@ -247,7 +247,9 @@ impl<T> SelectMenu<T> {
         });
 
         let count_str = if self.filter.is_empty() {
-            format!("({} {item_noun})", self.items.len())
+            let count = self.items.len();
+            let noun = if count == 1 { item_noun.strip_suffix('s').unwrap_or(item_noun) } else { item_noun };
+            format!("({count} {noun})")
         } else {
             format!("({total_matches}/{} · \"{}\")", self.items.len(), self.filter)
         };
@@ -433,6 +435,6 @@ mod tests {
             vec![SelectItem::new("local", "local")],
         ).with_noun("servers");
         let custom_lines = custom_menu.render(80);
-        assert!(custom_lines.iter().any(|(_, t)| t.contains("(1 servers)")));
+        assert!(custom_lines.iter().any(|(_, t)| t.contains("(1 server)")));
     }
 }

@@ -252,6 +252,26 @@ pub fn fit_hints(parts: &[(String, String)], separator: &str, width: usize) -> S
     out
 }
 
+/// Key hints, in one style everywhere: the key brighter than what it does,
+/// `·` between hints, e.g. `[("Enter", "send"), ("Esc", "cancel")]`. An empty
+/// action shows the key alone. Fitted to `width` as `fit_hints` does.
+pub fn key_hints(pairs: &[(&str, &str)], width: usize) -> String {
+    const KEY: &str = "\x1b[38;2;185;180;170m";
+    const WHAT: &str = "\x1b[38;2;125;121;115m";
+    const OFF: &str = "\x1b[0m";
+    let parts: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(key, what)| {
+            if what.is_empty() {
+                (key.to_string(), format!("{KEY}{key}{OFF}"))
+            } else {
+                (format!("{key} {what}"), format!("{KEY}{key}{OFF} {WHAT}{what}{OFF}"))
+            }
+        })
+        .collect();
+    fit_hints(&parts, &format!(" {WHAT}\u{b7}{OFF} "), width)
+}
+
 fn plain_width(parts: &[(String, String)], sep_w: usize) -> usize {
     let text: usize = parts.iter().map(|(plain, _)| plain.chars().count()).sum();
     text + sep_w * parts.len().saturating_sub(1)
@@ -433,12 +453,16 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
             format!(" {M3_MUT}Config:  {RESET} {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET}"),
         ];
 
+        // A narrow card drops whole hints rather than cutting one mid-word.
+        let key = |k: &str, what: &str| (format!("{k} {what}"), format!("{M3_ICE}{k}{RESET} {M3_MUT}{what}{RESET}"));
+        let sep = format!(" {M3_MUT}\u{b7}{RESET} ");
+        let fit = |parts: &[(String, String)]| format!(" {}", fit_parts(parts, &sep, w2.saturating_sub(1)));
         let right_bot = [
             format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}for autonomy{RESET}"),
-            format!(" {M3_ICE}Ctrl+K{RESET} {M3_MUT}commands{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+D{RESET} {M3_MUT}quit{RESET}"),
-            format!(" {M3_ICE}F1{RESET} {M3_MUT}context{RESET} {M3_MUT}·{RESET} {M3_ICE}F2{RESET} {M3_MUT}verbose{RESET} {M3_MUT}·{RESET} {M3_ICE}F3{RESET} {M3_MUT}model{RESET}"),
-            format!(" {M3_ICE}F4{RESET} {M3_MUT}effort{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+V{RESET} {M3_MUT}paste image{RESET}"),
-            format!(" {M3_ICE}Ctrl+R{RESET} {M3_MUT}regen{RESET} {M3_MUT}·{RESET} {M3_ICE}/help{RESET} {M3_MUT}or{RESET} {M3_ICE}/skills{RESET} {M3_MUT}for more{RESET}"),
+            fit(&[key("Ctrl+K", "commands"), key("Ctrl+D", "quit")]),
+            fit(&[key("F1", "context"), key("F2", "verbose"), key("F3", "model")]),
+            fit(&[key("F4", "effort"), key("Ctrl+V", "paste image")]),
+            fit(&[key("Ctrl+R", "regen"), key("/help", "for more")]),
         ];
 
         lines.push((LineKind::System, top));

@@ -97,8 +97,18 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
             None,
         ),
         "ask_user" => {
-            let question =
-                format_cmd(text("question").or_else(|| text("prompt")).unwrap_or("confirmation"));
+            // Models send one question, or several in `questions`.
+            let questions = parsed.get("questions").and_then(|v| v.as_array());
+            let first = questions
+                .and_then(|q| q.first())
+                .and_then(|q| q.get("question"))
+                .and_then(|v| v.as_str());
+            let mut question =
+                format_cmd(first.or_else(|| text("question")).or_else(|| text("prompt")).unwrap_or("a question"));
+            let more = questions.map_or(0, |q| q.len().saturating_sub(1));
+            if more > 0 {
+                question.push_str(&format!(" (+{more} more)"));
+            }
             Labels {
                 run: card_line("Asking user:", Some(&question)),
                 done: card_line("Asked user:", Some(&question)),

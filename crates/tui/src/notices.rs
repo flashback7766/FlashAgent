@@ -102,6 +102,8 @@ pub(crate) struct BackgroundNotice {
     pub(crate) expires: Option<std::time::Instant>,
     /// It fades in rather than popping onto the line.
     pub(crate) born: std::time::Instant,
+    /// Something is wrong (no server, a failed update): amber, not green.
+    pub(crate) warning: bool,
 }
 
 const NOTICE_FADE_IN_MS: f32 = 350.0;
@@ -110,15 +112,17 @@ const NOTICE_FADE_IN_MS: f32 = 350.0;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct NoticeStyle {
     pub(crate) fade: f32,
+    pub(crate) warning: bool,
 }
 
 impl NoticeStyle {
-    pub(crate) const FULL: Self = Self { fade: 1.0 };
+    pub(crate) const FULL: Self = Self { fade: 1.0, warning: false };
 
     pub(crate) fn paint(self, text: &str) -> String {
         let lerp = |from: f32, to: f32| (to + (from - to) * self.fade).round() as u8;
-        // From the healthy green towards the muted hint grey.
-        let (r, g, b) = (lerp(120.0, 100.0), lerp(220.0, 95.0), lerp(140.0, 90.0));
+        // From the healthy green, or the warning amber, towards the muted hint grey.
+        let (r0, g0, b0) = if self.warning { (235.0, 175.0, 90.0) } else { (120.0, 220.0, 140.0) };
+        let (r, g, b) = (lerp(r0, 100.0), lerp(g0, 95.0), lerp(b0, 90.0));
         let bold = if self.fade > 0.6 { "1;" } else { "" };
         format!("\x1b[{bold}38;2;{r};{g};{b}m{text}\x1b[0m")
     }
@@ -135,12 +139,17 @@ impl BackgroundNotice {
             None => 1.0,
             Some(at) => at.saturating_duration_since(std::time::Instant::now()).as_secs_f32().clamp(0.0, 1.0),
         };
-        NoticeStyle { fade: fade_in.min(fade_out) }
+        NoticeStyle { fade: fade_in.min(fade_out), warning: self.warning }
+    }
+
+    pub(crate) fn warning(mut self) -> Self {
+        self.warning = true;
+        self
     }
 
     /// Stays until replaced: for anything the user still has to act on.
     pub(crate) fn sticky(text: impl Into<String>) -> Self {
-        Self { text: text.into(), expires: None, born: std::time::Instant::now() }
+        Self { text: text.into(), expires: None, born: std::time::Instant::now(), warning: false }
     }
 
     pub(crate) fn fading(text: impl Into<String>, secs: u64) -> Self {
@@ -148,6 +157,7 @@ impl BackgroundNotice {
             text: text.into(),
             expires: Some(std::time::Instant::now() + std::time::Duration::from_secs(secs)),
             born: std::time::Instant::now(),
+            warning: false,
         }
     }
 
@@ -162,6 +172,7 @@ impl BackgroundNotice {
             Some(shown) if !shown.expired() => {
                 shown.text = text;
                 shown.expires = None;
+                shown.warning = false;
             }
             _ => *slot = Some(Self::sticky(text)),
         }
