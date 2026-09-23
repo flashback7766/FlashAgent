@@ -17,7 +17,6 @@ pub struct WelcomeCard<'a> {
     pub model: &'a str,
     /// Already shortened for display.
     pub cwd: &'a str,
-    pub mode: &'a str,
     /// Loaded into the prompt.
     pub memory_docs: usize,
     pub thinking: Option<&'a str>,
@@ -39,7 +38,6 @@ impl Default for WelcomeCard<'_> {
         Self {
             model: "",
             cwd: "",
-            mode: "",
             memory_docs: 0,
             thinking: None,
             context_window: None,
@@ -319,7 +317,6 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
     let &WelcomeCard {
         model,
         cwd,
-        mode,
         memory_docs,
         thinking,
         context_window,
@@ -402,10 +399,7 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         } else {
             th_str
         };
-        let ctx_clean = ctx_short.strip_suffix(" ctx").unwrap_or(ctx_short);
-        let model_meta_len = w1.saturating_sub(18).clamp(14, 26);
-        let model_meta = truncate_middle(model, model_meta_len);
-        let left_meta = format!("{M3_PRI}{model_meta}{RESET} {M3_MUT}·{RESET} {M3_LGT}{th_short}{RESET} {M3_MUT}·{RESET} {M3_ICE}{ctx_clean}{RESET}");
+        // The model and its settings are on the right; the left says where.
         let cwd_meta = format!("{M3_MUT}{}{RESET}", truncate_middle(&cwd_clean, w1.saturating_sub(4)));
 
         let left_lines = [
@@ -418,19 +412,24 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
             center_cell(&mascot[4], w1),
             center_cell(&mascot[5], w1),
             "".to_string(),
-            center_cell(&left_meta, w1),
             center_cell(&cwd_meta, w1),
+            "".to_string(),
         ];
 
         let model_val = truncate_middle(model, w2.saturating_sub(13));
         let ctx_val = truncate_middle(context_window.unwrap_or("128k capacity (local)"), w2.saturating_sub(13));
-        let mode_val = truncate_middle(mode, w2.saturating_sub(13));
+        let memory_val = match memory_docs {
+            0 => format!("{M3_MUT}no rule files yet{RESET}"),
+            1 => format!("{M3_TXT}1{RESET} {M3_MUT}rule file{RESET}"),
+            n => format!("{M3_TXT}{n}{RESET} {M3_MUT}rule files{RESET}"),
+        };
 
         let right_top = [
             format!(" {M3_MUT}Model:   {RESET} {M3_TXT_B}{model_val}{RESET}"),
             format!(" {M3_MUT}Context: {RESET} {M3_ICE}{ctx_val}{RESET}"),
-            format!(" {M3_MUT}Mode:    {RESET} {M3_LGT}{mode_val}{RESET}"),
-            format!(" {M3_MUT}Memory:  {RESET} {M3_TXT}{memory_docs}{RESET} {M3_MUT}active document(s){RESET}"),
+            // The mode is on the status line under the prompt.
+            format!(" {M3_MUT}Effort:  {RESET} {M3_LGT}{th_short}{RESET} {M3_MUT}(F4){RESET}"),
+            format!(" {M3_MUT}Memory:  {RESET} {memory_val}"),
             format!(" {M3_MUT}Config:  {RESET} {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET}"),
         ];
 

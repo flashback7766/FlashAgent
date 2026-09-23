@@ -153,7 +153,8 @@ pub(crate) fn format_status_left(
         // During a goal the budget burn-down.
         (true, false, Some(p)) => format!("\x1b[38;2;168;199;250m{p}\x1b[0m"),
         (true, false, None) => return format!("  {mode_str}{expand_status}"),
-        (false, ..) => "\x1b[38;2;140;135;130mReady\x1b[0m".to_string(),
+        // Idle: the empty prompt already says so.
+        (false, ..) => return format!("  {mode_str}{expand_status}"),
     };
     format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m {activity}{expand_status}")
 }
@@ -183,7 +184,7 @@ impl Renderer {
                 let wrapped = wrap_plain(steer, avail);
                 for (j, chunk) in wrapped.into_iter().enumerate() {
                     let text = if j == 0 {
-                        format!(" \x1b[1;38;2;225;175;95m❯\x1b[0m \x1b[1;38;2;240;235;225m{chunk}\x1b[0m{suffix}")
+                        format!(" \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{chunk}\x1b[0m{suffix}")
                     } else {
                         format!("   \x1b[1;38;2;240;235;225m{chunk}\x1b[0m")
                     };
@@ -438,7 +439,7 @@ impl Renderer {
                 typing_line_idx = Some(tail.len());
                 tail.push((
                     LineKind::User,
-                    pad_box_row(&format!("  \x1b[1;38;2;225;175;95m❯\x1b[0m \x1b[1;38;2;240;235;225m{write_text}█\x1b[0m"), width),
+                    pad_box_row(&format!("  \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{write_text}█\x1b[0m"), width),
                 ));
                 tail.push((
                     LineKind::System,
@@ -479,7 +480,7 @@ impl Renderer {
             let r = (210.0 + phase * 45.0) as u8;
             let g = (150.0 + phase * 55.0) as u8;
             let b = (75.0 + phase * 40.0) as u8;
-            let prompt_styled = format!("\x1b[1;38;2;{r};{g};{b}m❯\x1b[0m");
+            let prompt_styled = format!("\x1b[1;38;2;{r};{g};{b}m›\x1b[0m");
             let input_rows: Vec<String> = if let Some((query, found)) = st.history_search {
                 // The found prompt stands in the input, the search above it.
                 let found_line = found.map_or_else(
@@ -650,7 +651,17 @@ impl Renderer {
         };
         tail.push((LineKind::System, left_hint));
 
-        // Line 2: the tip, on two lines in narrow terminals.
+        // Line 2: the tip, on two lines in narrow terminals. Only while nothing else
+        // wants the eye: not while the model works, the user types, or a card or menu
+        // is open. Its rows stay, blank, so the composer does not move.
+        let tip_start = tail.len();
+        let tip_wanted = !st.running
+            && st.input.is_empty()
+            && overlay.is_none()
+            && autocomplete.is_none()
+            && st.history_search.is_none()
+            && gate.pending().is_none()
+            && question_gate.pending().is_none();
         if let Some(lines) = st.tip_lines {
             for line in lines {
                 let tip_row = clip_ansi(line, width.saturating_sub(2));
@@ -689,6 +700,12 @@ impl Renderer {
             }
         }
 
+        if !tip_wanted {
+            for row in &mut tail[tip_start..] {
+                row.1.clear();
+            }
+        }
+
         // Line 3: turn stats on the left, context gauge on the right. The mode is
         // never cut; the gauge shrinks first, down to the percentage.
         let mode_room = 2 + visible_width(st.mode.label()) + 2 + 1;
@@ -701,7 +718,7 @@ impl Renderer {
         .find(|g| mode_room + visible_width(g) + 3 <= width)
         .unwrap_or_default();
         let gauge_str = if st.context_warn_threshold > 0 && context_usage.percentage() >= st.context_warn_threshold as f32 {
-            format!("\x1b[1;38;2;245;140;80m⚠ High Ctx ({:.0}%)\x1b[0m {gauge_base}", context_usage.percentage())
+            format!("\x1b[1;38;2;245;140;80m! High Ctx ({:.0}%)\x1b[0m {gauge_base}", context_usage.percentage())
         } else {
             gauge_base
         };

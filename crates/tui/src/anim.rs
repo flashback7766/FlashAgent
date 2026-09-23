@@ -39,7 +39,8 @@ impl Rgb {
     }
 }
 
-pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+// Braille is missing from Consolas, the console font on many Windows setups.
+pub const SPINNER: &[&str] = &["·", "∙", "•", "●", "•", "∙"];
 
 /// One step every 80 ms.
 pub fn spinner(t: u64) -> &'static str {

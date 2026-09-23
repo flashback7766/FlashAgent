@@ -691,11 +691,63 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     Ok(result)
 }
 
+/// With a Russian layout Ctrl+D arrives as Ctrl+в. A shortcut is read by the key
+/// pressed, so the letter goes back to the Latin one on the same key (ЙЦУКЕН →
+/// QWERTY). Plain typing is left alone.
+fn latin_shortcut(code: KeyCode, mods: KeyModifiers) -> KeyCode {
+    const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбюё";
+    const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
+    let KeyCode::Char(c) = code else { return code };
+    if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        return code;
+    }
+    let lower = c.to_lowercase().next().unwrap_or(c);
+    match RU.chars().position(|r| r == lower).and_then(|i| EN.chars().nth(i)) {
+        Some(l) if c.is_uppercase() => KeyCode::Char(l.to_ascii_uppercase()),
+        Some(l) => KeyCode::Char(l),
+        None => code,
+    }
+}
+
+thread_local! {
+    /// Characters whose key is down, so a release can be told from an Alt code.
+    static HELD: std::cell::RefCell<Vec<char>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A character missing from the keyboard layout (`{` on a Russian one) is typed,
+/// and pasted through a Windows console, as an Alt code, which arrives only as
+/// the release of Alt carrying the character: a release with no press before it.
+fn alt_code_char(k: &crossterm::event::KeyEvent) -> Option<char> {
+    let KeyCode::Char(c) = k.code else { return None };
+    if k.modifiers.contains(KeyModifiers::CONTROL) || c.is_control() {
+        return None;
+    }
+    let was_held = HELD.with(|held| {
+        let mut held = held.borrow_mut();
+        held.iter().position(|h| *h == c).map(|i| held.swap_remove(i)).is_some()
+    });
+    (!was_held).then_some(c)
+}
+
 /// A character, or a newline for Enter.
 fn typed_char(k: &crossterm::event::KeyEvent) -> Option<char> {
+    if let KeyCode::Char(c) = k.code {
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            // Bounded: a release the console never sends must not grow it forever.
+            if held.len() >= 16 {
+                held.remove(0);
+            }
+            held.push(c);
+        });
+    }
     let plain = !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    // AltGr is Ctrl+Alt on Windows. A layout without `{` on a key of its own (the
+    // Russian one) delivers a pasted brace that way, and it is text, not a shortcut.
+    let alt_gr = k.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT);
     match k.code {
         KeyCode::Char(c) if plain => Some(c),
+        KeyCode::Char(c) if alt_gr && !c.is_ascii_alphanumeric() && !c.is_control() => Some(c),
         KeyCode::Enter if k.modifiers.is_empty() => Some('\n'),
         _ => None,
     }
@@ -710,11 +762,15 @@ fn gather_burst(first: char) -> Vec<UiEvent> {
     let wait = |text: &str| std::time::Duration::from_millis(if text.ends_with('\n') { 30 } else { 5 });
     while matches!(crossterm::event::poll(wait(&text)), Ok(true)) {
         match crossterm::event::read() {
-            Ok(Event::Key(k)) if k.kind == KeyEventKind::Release => {}
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Release => {
+                if let Some(c) = alt_code_char(&k) {
+                    text.push(c);
+                }
+            }
             Ok(Event::Key(k)) => match typed_char(&k) {
                 Some(c) => text.push(c),
                 None => {
-                    rest.push(UiEvent::Key(k.code, k.modifiers));
+                    rest.push(UiEvent::Key(latin_shortcut(k.code, k.modifiers), k.modifiers));
                     break;
                 }
             },
@@ -807,12 +863,24 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                     Err(_) => return,
                 }
                 match crossterm::event::read() {
-                    Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => {
+                    // Mid-paste only: alone, an unmatched release is more likely a key let go
+                    // after Shift than a character.
+                    Ok(Event::Key(k)) if k.kind == KeyEventKind::Release => {
+                        let pasting = matches!(crossterm::event::poll(std::time::Duration::ZERO), Ok(true));
+                        if let Some(c) = alt_code_char(&k).filter(|_| pasting) {
+                            for ev in gather_burst(c) {
+                                if tx.send(ev).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    Ok(Event::Key(k)) => {
                         // Without bracketed paste (Windows' console) a paste arrives as keys, each
                         // newline an Enter. Keys already waiting with a newline among them are a paste.
                         let events = match typed_char(&k) {
                             Some(first) => gather_burst(first),
-                            None => vec![UiEvent::Key(k.code, k.modifiers)],
+                            None => vec![UiEvent::Key(latin_shortcut(k.code, k.modifiers), k.modifiers)],
                         };
                         for ev in events {
                             if tx.send(ev).is_err() {
@@ -1025,7 +1093,6 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     let initial_card = welcome_card(&WelcomeCard {
         model: &app.current_model,
         cwd: &cwd_display,
-        mode: perm.state().mode().label(),
         memory_docs,
         thinking: Some(&thinking_summary),
         context_window: app.current_context.as_deref(),
@@ -1138,7 +1205,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         if (term_w, term_h) != app.last_term_size {
             app.last_term_size = (term_w, term_h);
             if !app.chat.has_user_message() {
-                app.animate_welcome(&source, perm.state().mode(), mascot_mood, Some(term_w as usize), None);
+                app.animate_welcome(&source, mascot_mood, Some(term_w as usize), None);
             }
         }
         // Two tip rows only when the window can spare them.
@@ -1275,7 +1342,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 if app.animating() || (welcome_reveal_rows(started_at).is_some() && !app.chat.has_user_message()) =>
             {
                 if let Some(rows) = welcome_reveal_rows(started_at).filter(|_| !app.running) {
-                    app.animate_welcome(&source, perm.state().mode(), mascot_mood, None, Some(rows));
+                    app.animate_welcome(&source, mascot_mood, None, Some(rows));
                 }
                 continue;
             }
@@ -1330,7 +1397,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                         || reveal_rows.is_some()
                         || flashagent_tui::mascot_needs_repaint(app.tick_n))
                 {
-                    app.animate_welcome(&source, perm.state().mode(), mascot_mood, Some(current_term_size.0 as usize), reveal_rows);
+                    app.animate_welcome(&source, mascot_mood, Some(current_term_size.0 as usize), reveal_rows);
                 }
                 if term_resized {
                     app.renderer.request_reprint();
@@ -1435,7 +1502,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                             }
                         }
 
-                        app.refresh_welcome(&source, perm.state().mode(), mascot_mood);
+                        app.refresh_welcome(&source, mascot_mood);
                         let ctx_tag = app.current_context.clone().unwrap_or_default();
 
                         if model_changed {
@@ -1551,7 +1618,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 let term_resized = (cols, rows) != app.last_term_size;
                 app.last_term_size = (cols, rows);
                 if !app.chat.has_user_message() && term_resized {
-                    app.animate_welcome(&source, perm.state().mode(), mascot_mood, Some(cols as usize), None);
+                    app.animate_welcome(&source, mascot_mood, Some(cols as usize), None);
                 }
                 app.renderer.request_reprint();
             }
@@ -2090,6 +2157,18 @@ mod tests {
 
 
     #[test]
+    fn a_shortcut_on_a_russian_layout_is_read_by_its_key() {
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(latin_shortcut(KeyCode::Char('в'), ctrl), KeyCode::Char('d'));
+        assert_eq!(latin_shortcut(KeyCode::Char('Л'), ctrl), KeyCode::Char('K'));
+        assert_eq!(latin_shortcut(KeyCode::Char('в'), KeyModifiers::ALT), KeyCode::Char('d'));
+        // Typing stays Russian.
+        assert_eq!(latin_shortcut(KeyCode::Char('в'), KeyModifiers::NONE), KeyCode::Char('в'));
+        assert_eq!(latin_shortcut(KeyCode::Char('в'), KeyModifiers::SHIFT), KeyCode::Char('в'));
+        assert_eq!(latin_shortcut(KeyCode::Enter, ctrl), KeyCode::Enter);
+    }
+
+    #[test]
     fn the_status_line_names_the_mode_and_what_the_turn_waits_on() {
         let running = format_status_left(true, false, false, None, "Normal", "");
         assert!(running.contains("[Normal]"), "{running}");
@@ -2098,7 +2177,7 @@ mod tests {
         assert!(!running.contains("Ready"), "{running}");
 
         let idle = format_status_left(false, false, false, None, "Normal", "");
-        assert!(idle.contains("[Normal]") && idle.contains("Ready"), "{idle}");
+        assert!(idle.contains("[Normal]") && !idle.contains("Ready"), "{idle}");
 
         let goal = format_status_left(true, true, false, Some("step 12/250 · 4.2k tok · 3m05s/1h0m"), "Autonomous", "");
         assert!(goal.contains("[Goal: Autonomous]"), "{goal}");
@@ -2200,7 +2279,6 @@ mod tests {
         let card = flashagent_tui::welcome_card(&flashagent_tui::WelcomeCard {
             model: "m",
             cwd: "/tmp",
-            mode: "Manual",
             width: 100,
             height: 30,
             ..Default::default()

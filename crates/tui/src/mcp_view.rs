@@ -264,7 +264,7 @@ impl McpModal {
                             ServerConnectionState::Active => "\x1b[38;2;135;220;145m● active\x1b[0m",
                             ServerConnectionState::Disabled => "\x1b[38;2;135;130;125m○ disabled\x1b[0m",
                             ServerConnectionState::Stopped => "\x1b[38;2;225;175;95m○ stopped\x1b[0m",
-                            ServerConnectionState::Error(_) => "\x1b[38;2;245;120;120m✕ error\x1b[0m",
+                            ServerConnectionState::Error(_) => "\x1b[38;2;245;120;120m× error\x1b[0m",
                         };
                         let row = if is_sel {
                             format!("{ptr} \x1b[1;38;2;240;235;225m{:<18}\x1b[0m {st_badge}  \x1b[1;38;2;225;175;95m{} tool(s)\x1b[0m", s.name, s.tool_count)
@@ -398,7 +398,7 @@ pub fn render_mcp_add_success(item: &MarketplaceItem, target_path: &Path, width:
     lines.push(box_top(&title, inner_w, BORDER_GOLD));
 
     lines.push(box_line(
-        &format!("{TEXT_GREEN}✔ Scaffolding saved to {}{RESET}", target_path.display()),
+        &format!("{TEXT_GREEN}√ Scaffolding saved to {}{RESET}", target_path.display()),
         inner_w,
         BORDER_GOLD,
     ));

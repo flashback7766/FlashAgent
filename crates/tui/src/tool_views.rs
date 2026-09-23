@@ -57,7 +57,7 @@ pub fn render_command_card(
     let box_w = width.saturating_sub(4).clamp(30, 100);
     let inner_w = box_w.saturating_sub(6).max(20);
 
-    let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
+    let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
     let status_header = if is_running {
         format!("  {TEXT_MUTED}Running{RESET} {TEXT_BRIGHT}{cmd}{RESET} {}", crate::anim::spinner(crate::anim::now_ms()))
     } else if is_error {
@@ -152,7 +152,7 @@ pub fn render_directory_card(
     _width: usize,
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
-    let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
+    let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     let header = if is_running {
         format!("  {TEXT_MUTED}Analyzing{RESET} {TEXT_BRIGHT}{path}{RESET} {}", crate::anim::spinner(crate::anim::now_ms()))
@@ -191,7 +191,7 @@ pub fn render_read_card(
     width: usize,
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
-    let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
+    let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     let raw_text = content.unwrap_or("");
     let file_lines: Vec<&str> = raw_text.lines().collect();
@@ -303,7 +303,7 @@ pub fn render_edit_card(
     width: usize,
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
-    let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
+    let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     let action_verb = if is_write { "Wrote" } else { "Edited" };
     let header = format!(
@@ -374,7 +374,7 @@ pub fn render_grep_card(
     width: usize,
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
-    let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
+    let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     let header = format!("  {TEXT_MUTED}Searched{RESET} {TEXT_YELLOW}\"{pattern}\"{RESET} {chevron}");
     lines.push((LineKind::Tool, header));
@@ -413,7 +413,7 @@ pub fn render_subagent_card(
     width: usize,
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
-    let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
+    let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     let header = if is_running {
         format!("  {TEXT_LAVENDER}Subagent{RESET} {TEXT_MUTED}executing task...{RESET} {}", crate::anim::spinner(crate::anim::now_ms()))
@@ -463,7 +463,7 @@ pub fn render_memory_card(
     _width: usize,
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
-    let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
+    let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
     let scope_tag = scopes.join(", ");
 
     let header = format!("  {TEXT_LAVENDER}Memory{RESET} {TEXT_MUTED}{action}{RESET} {TEXT_BRIGHT}[{scope_tag}]{RESET} {chevron}");
@@ -484,7 +484,7 @@ pub fn render_git_card(
     width: usize,
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
-    let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
+    let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     if is_diff {
         let header = format!("  {TEXT_MUTED}Git Diff{RESET} {chevron}");
@@ -522,7 +522,7 @@ pub fn render_generic_card(
     width: usize,
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
-    let chevron = "\x1b[38;2;120;125;140m⌵\x1b[0m";
+    let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     let header = format!("  {TEXT_MUTED}Ran{RESET} {TEXT_BRIGHT}{name}{RESET} {chevron}");
     lines.push((LineKind::Tool, header));

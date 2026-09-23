@@ -302,7 +302,7 @@ impl App {
                     cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
                     self.current_effort = self.config.thinking_effort.clone();
                     cx.perm.state().set_mode(self.config.permission_mode);
-                    self.refresh_welcome(cx.source, cx.perm.state().mode(), cx.mascot_mood);
+                    self.refresh_welcome(cx.source, cx.mascot_mood);
                 }
             }
             SettingsAction::OpenSamplingMenu => {
@@ -405,7 +405,7 @@ impl App {
                 self.current_effort = chosen_effort;
             }
         }
-        self.refresh_welcome(cx.source, cx.perm.state().mode(), cx.mascot_mood);
+        self.refresh_welcome(cx.source, cx.mascot_mood);
     }
 
     /// Looks up what the channel would install while the card is up.
@@ -482,9 +482,9 @@ impl App {
                     Ok(report) => {
                         let ver = report.server_version.as_deref().unwrap_or("1.0.0");
                         let lat = format!("{:.1}ms", report.latency.as_secs_f64() * 1000.0);
-                        format!("✔ {name} connected (v{ver}, {lat}, {} tools)", report.tools.len())
+                        format!("√ {name} connected (v{ver}, {lat}, {} tools)", report.tools.len())
                     }
-                    Err(e) => format!("✕ {name} failed: {e}"),
+                    Err(e) => format!("× {name} failed: {e}"),
                 });
                 modal.servers = mgr.server_status_list().await;
             }
@@ -493,7 +493,7 @@ impl App {
                     let cfg = flashagent_tools::mcp::scaffold_config(item);
                     match flashagent_tools::mcp::save_server_to_project(std::path::Path::new("."), item.id, cfg) {
                         Ok(path) => {
-                            modal.status_message = Some(format!("✔ Added {} to {}", item.name, path.display()));
+                            modal.status_message = Some(format!("√ Added {} to {}", item.name, path.display()));
                             let mgr = cx.tools_arc.mcp_manager();
                             let server_id = item.id.to_string();
                             tokio::spawn(async move {
@@ -501,7 +501,7 @@ impl App {
                                 let _ = mgr.start_server(&server_id).await;
                             });
                         }
-                        Err(e) => modal.status_message = Some(format!("✕ Failed to install {id}: {e}")),
+                        Err(e) => modal.status_message = Some(format!("× Failed to install {id}: {e}")),
                     }
                 }
             }
@@ -541,7 +541,7 @@ impl App {
                         self.current_effort = "auto".to_string();
                     }
                 }
-                self.refresh_welcome(cx.source, cx.perm.state().mode(), cx.mascot_mood);
+                self.refresh_welcome(cx.source, cx.mascot_mood);
                 self.notice(format!("Switched active model to: {}", self.current_model));
             }
             KeyCode::Esc => {}
@@ -571,7 +571,7 @@ impl App {
             KeyCode::Enter => {
                 if let Some(val) = menu.selected_value().cloned() {
                     self.current_effort = val;
-                    self.refresh_welcome(cx.source, cx.perm.state().mode(), cx.mascot_mood);
+                    self.refresh_welcome(cx.source, cx.mascot_mood);
                     self.notice(format!("Thinking effort set to: {}", self.current_effort));
                 }
                 return;

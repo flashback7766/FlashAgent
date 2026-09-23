@@ -188,7 +188,7 @@ impl TrustScreen {
                     "  {text_dim}Enter directory path (relative or absolute, ~ for home):{reset}"
                 ));
                 lines.push(format!(
-                    "  {prompt_style}❯ {text_bright}{input}\x1b[7m {reset}"
+                    "  {prompt_style}› {text_bright}{input}\x1b[7m {reset}"
                 ));
                 if let Some(err) = error {
                     lines.push(format!("  {text_error}Error: {err}{reset}"));

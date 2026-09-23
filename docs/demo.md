@@ -36,7 +36,7 @@ the window, down to 44×10.
 
 > What does this project do, and where would you start reading?
 
-Show: tool calls as one line each (`▸ Reading …`), thinking marked `✻` and
+Show: tool calls as one line each (`▸ Reading …`), thinking marked `•` and
 folded, the answer at the left edge. Press **F2** to unfold the thinking.
 
 ## 3. The permission layer (3 min)

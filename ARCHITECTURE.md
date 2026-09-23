@@ -89,7 +89,9 @@ that only read run, everything else is refused), Manual (ask before anything
 that is not a read), Accept Edits (file changes allowed, shell asks), Accept
 All. Shell approvals can be remembered per command prefix, and a prefix never
 covers a different subcommand: approving `npm test` does not approve
-`npm publish`. A short blacklist of dangerous commands (recursive force
+`npm publish`. A file outside the project asks in Manual and Accept Edits
+and is refused in Planning and during `/goal`; Accept All lets it through,
+since its shell already reaches any file. A short blacklist of dangerous commands (recursive force
 deletes, `sudo`, force pushes, hard resets, ...) still asks in Accept All and
 is refused outright during `/goal`, where nobody is there to answer. A
 declined call is returned to the model as an error it must not retry. The
@@ -157,6 +159,13 @@ graph LR
 - Nothing moves the layout while it animates: the welcome card holds its
   full height while it draws itself in, and the tip line keeps the same
   number of rows for every tip at a given width.
+- Every symbol the UI draws is in both Consolas and Cascadia Mono: a Windows
+  console outside Windows Terminal falls back to no other font and shows a
+  missing one as a box. `crates/tui/tests/glyphs.rs` checks the source.
+- Shortcuts are read by the key, not the letter: with a Russian layout
+  Ctrl+D arrives as Ctrl+в and is turned back into Ctrl+D. A character the
+  layout lacks (`{` on a Russian one) comes from the console as an Alt code,
+  a key release with no press before it, and is taken as typed.
 - Themes are applied to the finished frame by rewriting its 24-bit colour
   sequences, so the drawing code has one palette.
 - Motion (Settings → Animations) goes through `anim::enabled()`. Off, only

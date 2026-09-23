@@ -221,7 +221,7 @@ impl RewindConfirm {
         for (label, is_yes) in [("Yes, rewind", true), ("No, cancel", false)] {
             let is_cur = self.confirm == is_yes;
             let (cursor, label_styled) = if is_cur {
-                (" \x1b[1;38;2;225;175;95m❯\x1b[0m", format!("\x1b[1;38;2;245;240;232m{label}\x1b[0m"))
+                (" \x1b[1;38;2;225;175;95m›\x1b[0m", format!("\x1b[1;38;2;245;240;232m{label}\x1b[0m"))
             } else {
                 ("  ", format!("\x1b[38;2;160;155;145m{label}\x1b[0m"))
             };

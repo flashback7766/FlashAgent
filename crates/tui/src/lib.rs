@@ -888,16 +888,16 @@ impl ChatView {
                     // A light sweep and a margin spinner: still working, without words.
                     let t = anim::now_ms();
                     format!(
-                        " \x1b[38;2;138;180;248m{}\x1b[0m \x1b[1m{}\x1b[0m {chevron}",
+                        "  \x1b[38;2;138;180;248m{}\x1b[0m \x1b[1m{}\x1b[0m {chevron}",
                         anim::spinner(t),
                         anim::shimmer(&format!("Thinking: {stage}"), t, 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255)),
                     )
                 } else if let Some(s) = secs {
-                    format!("  \x1b[38;2;120;125;140m✻\x1b[0m \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m \x1b[38;2;140;145;160m({s}s)\x1b[0m {chevron}")
+                    format!("  \x1b[38;2;120;125;140m•\x1b[0m \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m \x1b[38;2;140;145;160m({s}s)\x1b[0m {chevron}")
                 } else {
                     // Thinking lifted out of the answer text has no measured duration, but it
                     // is plainly over.
-                    format!("  \x1b[38;2;120;125;140m✻\x1b[0m \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m {chevron}")
+                    format!("  \x1b[38;2;120;125;140m•\x1b[0m \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m {chevron}")
                 };
                 let budget = width.saturating_sub(4);
                 let clipped_styled = clip_ansi(&text_styled, budget);
@@ -1003,16 +1003,27 @@ impl ChatView {
                         }
                     }
                 }
+                previous_block = Some(block_of(line.kind));
                 continue;
             }
 
+            // The row above may be on the other side of the settled boundary, or in the
+            // cache: the question settles while its thinking is still live.
+            let blank = |row: &RenderLine| row.1.trim().is_empty();
+            let row_above_blank = if i < boundary {
+                settled.last().map(blank)
+            } else {
+                live.last()
+                    .or_else(|| settled.last())
+                    .or_else(|| cached_settled_match.as_ref().and_then(|(rows, _)| rows.last()))
+                    .map(blank)
+            };
             let target = if i < boundary { &mut settled } else { &mut live };
             // A blank row between asking, working and answering.
             let block = block_of(line.kind);
             if let Some(previous) = previous_block {
                 let crossing = previous != block && previous != Block::Other && block != Block::Other;
-                let already_blank = target.last().is_some_and(|(_, t)| t.trim().is_empty());
-                if crossing && !already_blank && !target.is_empty() {
+                if crossing && row_above_blank == Some(false) {
                     target.push((LineKind::System, String::new()));
                 }
             }
@@ -1042,7 +1053,10 @@ impl ChatView {
                     turn_tools_executed,
                 );
                 turn_reasoning_stages.push(stage.clone());
-                let is_streaming = self.streaming_reasoning == Some(i);
+                // Once the answer below it has words, the thought is over, though a
+                // server that interleaves may still add to it.
+                let answer_begun = self.streaming.is_some_and(|a| a > i && !self.lines[a].text.trim().is_empty());
+                let is_streaming = self.streaming_reasoning == Some(i) && !answer_begun;
                 push_reasoning(target, &line.text, line.reasoning_secs, is_streaming, is_expanded, &stage);
                 continue;
             }
@@ -1080,7 +1094,7 @@ impl ChatView {
                     if self.streaming == Some(i) {
                         if let Some((_, last)) = target.last_mut().filter(|(k, _)| *k == LineKind::Assistant) {
                             if visible_width(last) < width && anim::blink_on(anim::now_ms()) {
-                                last.push_str("\x1b[38;2;225;175;95m▍\x1b[0m");
+                                last.push_str("\x1b[38;2;225;175;95m▌\x1b[0m");
                             }
                         }
                     }
@@ -1216,7 +1230,7 @@ impl ChatView {
         true
     }
 
-    /// `❯` prefix on user lines.
+    /// `›` prefix on user lines.
     pub fn render(&self, width: usize) -> Vec<(LineKind, String)> {
         let (settled, live) = self.render_split(width, true);
         let mut all = std::sync::Arc::unwrap_or_clone(settled);
@@ -1225,20 +1239,18 @@ impl ChatView {
     }
 }
 
-use crossterm::style::Stylize;
-
 /// Kind and text.
 pub type RenderLine = (LineKind, String);
 
 pub const SPINNER: &[&str] = anim::SPINNER;
 
-pub const GLYPH_PROMPT: &str = "❯";
+pub const GLYPH_PROMPT: &str = "›";
 
 /// Diamonds, not circles or checks.
-pub const GLYPH_RUN: &str = "◈"; // tool call in flight
-pub const GLYPH_OK: &str = "◆"; // tool finished
-pub const GLYPH_ERR: &str = "◇"; // tool failed (hollow = broken)
-pub const GLYPH_SUB: &str = "↳"; // sub-result hanging under a call
+pub const GLYPH_RUN: &str = "◊"; // tool call in flight
+pub const GLYPH_OK: &str = "♦"; // tool finished
+pub const GLYPH_ERR: &str = "×"; // tool failed (hollow = broken)
+pub const GLYPH_SUB: &str = "└"; // sub-result hanging under a call
 
 #[cfg(test)]
 mod tests {
@@ -1292,7 +1304,6 @@ mod tests {
         let card = welcome_card(&WelcomeCard {
             model: "gpt-4",
             cwd: "/home/user/repo",
-            mode: "Manual",
             memory_docs: 2,
             thinking: Some("high"),
             context_window: Some("32k ctx"),
@@ -1305,7 +1316,6 @@ mod tests {
         let card80 = welcome_card(&WelcomeCard {
             model: "qwen3.6-35b-a3b-mtp",
             cwd: "/home/user/repo",
-            mode: "Manual",
             memory_docs: 2,
             thinking: Some("high"),
             context_window: Some("128k ctx"),
@@ -1315,7 +1325,6 @@ mod tests {
         let card100 = welcome_card(&WelcomeCard {
             model: "qwen3.6-35b-a3b-mtp",
             cwd: "/home/user/repo",
-            mode: "Manual",
             memory_docs: 2,
             thinking: Some("high"),
             context_window: Some("128k ctx"),
@@ -1325,7 +1334,6 @@ mod tests {
         let card120 = welcome_card(&WelcomeCard {
             model: "qwen3.6-35b-a3b-mtp",
             cwd: "/home/user/repo",
-            mode: "Manual",
             memory_docs: 2,
             thinking: Some("high"),
             context_window: Some("128k ctx"),
@@ -1560,7 +1568,8 @@ mod tests {
         let lines = v.render(80);
         let reasoning: Vec<_> = lines.iter().filter(|(k, _)| *k == LineKind::Reasoning).collect();
         assert_eq!(reasoning.len(), 3, "reasoning rendered as boxed container: {reasoning:?}");
-        assert!(reasoning[0].1.contains("Thinking"));
+        // The answer has begun, so the thought reads as finished.
+        assert!(reasoning[0].1.contains("Thought"), "{reasoning:?}");
         assert!(reasoning[1].1.contains("thinking about task"));
         assert!(reasoning[2].1.contains('╰'));
         let assistant: Vec<_> = lines.iter().filter(|(k, _)| *k == LineKind::Assistant).collect();
@@ -1790,6 +1799,45 @@ mod tests {
     }
 
     #[test]
+    fn a_thought_is_over_once_the_answer_begins() {
+        let mut v = ChatView::default();
+        v.push_user("q");
+        v.on_event(&LoopEvent::ReasoningDelta("**Formulating Response**
+ok".into()));
+        v.on_event(&LoopEvent::TurnDelta("
+".into()));
+        let rows = |v: &ChatView| {
+            let (settled, live) = v.render_split(100, ReasoningExpansion::none());
+            settled.iter().chain(live.iter()).map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>()
+        };
+        assert!(rows(&v).iter().any(|t| t.contains("Thinking:")), "a blank delta is not the answer yet");
+        v.on_event(&LoopEvent::TurnDelta("The answer".into()));
+        let (settled, live) = v.render_split(100, ReasoningExpansion::none());
+        let rows: Vec<String> = settled.iter().chain(live.iter()).map(|(_, t)| crate::strip_ansi(t)).collect();
+        assert!(rows.iter().any(|t| t.contains("Thought:")), "{rows:#?}");
+        assert!(!rows.iter().any(|t| t.contains("Thinking:")), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_live_thought_keeps_its_distance_from_the_settled_question() {
+        let mut v = ChatView::default();
+        v.push_user("first");
+        v.on_event(&LoopEvent::TurnDelta("answer".into()));
+        v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
+        v.push_user("second");
+        v.on_event(&LoopEvent::ReasoningDelta("**Understanding the Request**
+hm".into()));
+        // Twice: the second frame reads the settled rows from the cache.
+        for _ in 0..2 {
+            let (settled, live) = v.render_split(100, ReasoningExpansion::none());
+            let rows: Vec<String> = settled.iter().chain(live.iter()).map(|(_, t)| crate::strip_ansi(t)).collect();
+            let ask = rows.iter().position(|t| t.contains("second")).unwrap();
+            assert!(rows[ask + 1].trim().is_empty(), "no blank row under the question: {rows:#?}");
+            assert!(rows[ask + 2].contains("Thinking"), "{rows:#?}");
+        }
+    }
+
+    #[test]
     fn a_click_opens_one_thought_and_leaves_the_others() {
         let mut v = ChatView::default();
         for n in 1..=2 {
@@ -2003,7 +2051,6 @@ mod tests {
         let card = welcome_card(&WelcomeCard {
             model: "test-model",
             cwd: "~FlashAgent",
-            mode: "Manual",
             memory_docs: 1,
             thinking: Some("high"),
             context_window: Some("128k"),
@@ -2120,7 +2167,6 @@ mod tests {
                 let card = welcome_card(&WelcomeCard {
                     model: "gemma-4-e2b-it-qat@q4_k_xl",
                     cwd: "/home/someone/projects/flashagent",
-                    mode: "Accept Edits",
                     thinking: Some("auto [off, on]"),
                     context_window: Some("64k ctx"),
                     width,
@@ -2151,7 +2197,6 @@ mod tests {
             welcome_card(&WelcomeCard {
                 model: "m",
                 cwd: "~/work",
-                mode: "Manual",
                 width: 100,
                 height,
                 ..Default::default()
@@ -2172,7 +2217,6 @@ mod tests {
             let card = welcome_card(&WelcomeCard {
                 model: "gemma-4-e2b-it-qat@q4_k_xl",
                 cwd: "/home/someone/projects/flashagent",
-                mode: "Accept Edits",
                 thinking: Some("auto [off, on]"),
                 context_window: Some("64k ctx"),
                 width,
@@ -2254,8 +2298,8 @@ mod tests {
         let joined = rendered.join("\n");
 
         assert!(!joined.contains("## Stack"));
-        assert!(joined.contains("◈ Stack"));
-        assert!(joined.contains("◈ Architecture"));
+        assert!(joined.contains("◊ Stack"));
+        assert!(joined.contains("◊ Architecture"));
 
         assert!(joined.contains('╭'));
         assert!(joined.contains('├'));
@@ -2328,8 +2372,8 @@ mod tests {
         let rendered = render_markdown_text(md_input, 80);
         let joined = rendered.join("\n");
 
-        assert!(joined.contains('☑'));
-        assert!(joined.contains('☐'));
+        assert!(joined.contains('■'));
+        assert!(joined.contains('□'));
 
         assert!(joined.contains('•'));
         assert!(joined.contains('◦'));
@@ -2504,7 +2548,6 @@ mod tests {
         let card_80x24 = welcome_card(&WelcomeCard {
             model: "test-model",
             cwd: "/home/user/project",
-            mode: "Accept Edits",
             memory_docs: 3,
             thinking: Some("auto"),
             context_window: Some("128k"),
@@ -2522,7 +2565,6 @@ mod tests {
         let card_50x16 = welcome_card(&WelcomeCard {
             model: "test-model",
             cwd: "/home/user/project",
-            mode: "Accept Edits",
             memory_docs: 3,
             thinking: Some("auto"),
             context_window: Some("128k"),
@@ -2540,7 +2582,6 @@ mod tests {
         let card_36x12 = welcome_card(&WelcomeCard {
             model: "test-model",
             cwd: "/home/user/project",
-            mode: "Accept Edits",
             memory_docs: 3,
             thinking: Some("auto"),
             context_window: Some("128k"),

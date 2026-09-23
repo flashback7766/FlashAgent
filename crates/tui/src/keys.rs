@@ -353,7 +353,7 @@ impl App {
                 let next_mode = cx.perm.state().mode().next();
                 cx.perm.state().set_mode(next_mode);
                 self.remember_mode(next_mode);
-                self.refresh_welcome(cx.source, cx.perm.state().mode(), cx.mascot_mood);
+                self.refresh_welcome(cx.source, cx.mascot_mood);
                 self.custom_placeholder = Some(format!("Permission mode set to: {}", next_mode.label()));
                 self.suggested_prompt = None;
                 self.renderer.request_reprint();
