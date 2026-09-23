@@ -449,6 +449,8 @@ impl AgentLoop {
                 if !is_scratchpad && promise_nudges < 1 && !specs.is_empty() && announces_a_tool_call(&assistant_text) {
                     promise_nudges += 1;
                     transient = history.pop().into_iter().chain([ChatMessage::user(PROMISE_NUDGE)]).collect();
+                    // The announcement stays on screen; what follows starts a new paragraph.
+                    events(LoopEvent::TurnDelta("\n\n".to_string()));
                     continue;
                 }
 
@@ -1335,9 +1337,15 @@ mod tests {
         let llm = RecordingLlm::new(vec![promised, tool_turn("shell", "c1"), text_turn("Done.")]);
         let tools = MockTools::new();
         let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
-        let (history, done) = run_loop(&l, &llm, &tools, |_| {});
+        let mut shown = String::new();
+        let (history, done) = run_loop(&l, &llm, &tools, |e| {
+            if let LoopEvent::TurnDelta(d) = e {
+                shown.push_str(&d);
+            }
+        });
         assert!(matches!(done, DoneReason::Completed));
         assert_eq!(tools.calls.lock().unwrap().len(), 1, "the promised call was never made");
+        assert!(shown.contains("src/lib.rs.\n\n"), "the next reply ran into the announcement: {shown:?}");
         let requests = llm.requests.lock().unwrap();
         assert!(requests[1].last().unwrap().content.contains("Make that tool call now"));
         // The nudge is not kept.
