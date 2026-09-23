@@ -76,10 +76,15 @@ fn normalize_line(s: &str) -> String {
         .replace(['“', '”'], "\"")
 }
 
-/// Tolerates CRLF/LF, curly quotes and trailing whitespace differences.
+/// Tolerates CRLF/LF, curly quotes and trailing whitespace differences, and
+/// the line numbers read_file puts in front of each line when a model copies
+/// them into old_string.
 pub(crate) fn find_actual_string(text: &str, needle: &str) -> Option<String> {
     if text.contains(needle) {
         return Some(needle.to_string());
+    }
+    if let Some(unnumbered) = without_read_file_numbers(needle) {
+        return find_actual_string(text, &unnumbered);
     }
 
     let needle_lines: Vec<String> = needle.lines().map(normalize_line).collect();
@@ -129,6 +134,51 @@ pub(crate) fn find_actual_string(text: &str, needle: &str) -> Option<String> {
     }
 }
 
+/// `     12\tcode` on every line, as read_file prints it; `None` otherwise.
+fn without_read_file_numbers(needle: &str) -> Option<String> {
+    let mut out = Vec::new();
+    for line in needle.lines() {
+        let (number, rest) = line.split_once('\t')?;
+        if number.trim().is_empty() || !number.trim().chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        out.push(rest);
+    }
+    (!out.is_empty()).then(|| out.join("\n"))
+}
+
+/// Said when old_string is not in the file: the line most like its first
+/// line, so a model can copy the exact text instead of guessing again.
+fn not_found(path: &str, text: &str, needle: &str) -> ToolError {
+    let first = needle.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+    let bigrams = |s: &str| -> Vec<(char, char)> {
+        let chars: Vec<char> = s.chars().filter(|c| !c.is_whitespace()).collect();
+        chars.windows(2).map(|w| (w[0], w[1])).collect()
+    };
+    let want = bigrams(first);
+    let closest = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(i, l)| {
+            let have = bigrams(l.trim());
+            let shared = want.iter().filter(|b| have.contains(b)).count();
+            let score = 2.0 * shared as f32 / (want.len() + have.len()).max(1) as f32;
+            (score, i + 1, l)
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0));
+    let mut message = format!("edit: old_string not found in {path}");
+    if let Some((_, line_no, line)) = closest.filter(|c| c.0 >= 0.5) {
+        message.push_str(&format!(
+            ". The closest line is {line_no}: `{}`. Copy old_string exactly from the file, without line numbers",
+            line.trim_end()
+        ));
+    } else {
+        message.push_str(". Read the file again and copy old_string exactly, without line numbers");
+    }
+    ToolError::Other(message)
+}
+
 /// Ambiguity is an error, not a guess. Shared by [`edit_file`] and the diff preview.
 pub(crate) fn apply_edits(mut text: String, edits: &[EditChunk]) -> Result<String, ToolError> {
     for edit in edits {
@@ -176,11 +226,11 @@ pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<S
         } else if let Some(actual) = find_actual_string(&checked, &edit.old_string) {
             actual
         } else {
-            return Err(ToolError::Other(format!("edit: old_string not found in {path}")));
+            return Err(not_found(path, &checked, &edit.old_string));
         };
         let count = checked.matches(&target_string).count();
         if count == 0 {
-            return Err(ToolError::Other(format!("edit: old_string not found in {path}")));
+            return Err(not_found(path, &checked, &edit.old_string));
         }
         if count > 1 && !edit.replace_all {
             return Err(ToolError::Other(format!(
@@ -591,6 +641,22 @@ mod tests {
         let out = list_dir(&dir, ".").unwrap();
         assert!(out.contains("inner/"));
         assert!(out.lines().all(|l| l != "f.txt/"));
+    }
+
+    #[test]
+    fn line_numbers_copied_from_read_file_still_match() {
+        let text = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+        let copied = "     1\tpub fn add(a: i32, b: i32) -> i32 {\n     2\t    a + b";
+        assert_eq!(find_actual_string(text, copied).as_deref(), Some("pub fn add(a: i32, b: i32) -> i32 {\n    a + b"));
+    }
+
+    #[test]
+    fn a_missing_old_string_points_at_the_closest_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "use std::io;\n\npub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n").unwrap();
+        let edits = [EditChunk { old_string: "pub fn add(a: u32, b: u32) -> u32 {".into(), new_string: "x".into(), replace_all: false }];
+        let err = edit_file(dir.path(), "lib.rs", &edits).unwrap_err().to_string();
+        assert!(err.contains("closest line is 3: `pub fn add(a: i32, b: i32) -> i32 {`"), "{err}");
     }
 
     #[test]
