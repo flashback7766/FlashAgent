@@ -1246,10 +1246,13 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
             let previous = std::mem::replace(&mut app.announced_mood, mascot_mood);
             match mascot_mood {
                 MascotMood::Offline => {
-                    app.background = Some(BackgroundNotice::sticky(format!(
-                        "No model server at {} \u{b7} start it, or pick another in Tab \u{2192} LLM",
-                        app.config.backend_url.trim_end_matches('/')
-                    )));
+                    app.background = Some(
+                        BackgroundNotice::sticky(format!(
+                            "No model server at {} \u{b7} start it, or pick another in Tab \u{2192} LLM",
+                            app.config.backend_url.trim_end_matches('/')
+                        ))
+                        .warning(),
+                    );
                 }
                 MascotMood::Happy if previous == MascotMood::Offline => {
                     app.background = Some(BackgroundNotice::fading(
@@ -1324,10 +1327,13 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                             s.update_check_status = Some(format!("Error: {error}"));
                         }
                         if std::mem::take(&mut app.update_watched) {
-                            app.background = Some(BackgroundNotice::fading(
-                                format!("Update failed: {}", flashagent_tui::truncate_middle(&error, 90)),
-                                10,
-                            ));
+                            app.background = Some(
+                                BackgroundNotice::fading(
+                                    format!("Update failed: {}", flashagent_tui::truncate_middle(&error, 90)),
+                                    10,
+                                )
+                                .warning(),
+                            );
                         }
                     }
                 }

@@ -129,9 +129,10 @@ impl SetupWizard {
         self.available_models = filtered_models.iter().map(|m| m.id.clone()).collect();
         let loaded_count = self.discovered_models.iter().filter(|m| m.is_loaded).count();
         let status = if is_lm && loaded_count > 0 {
-            format!("Connected ({loaded_count} loaded model(s) in LM Studio)")
+            format!("Connected ({loaded_count} loaded {} in LM Studio)", if loaded_count == 1 { "model" } else { "models" })
         } else {
-            format!("Connected ({} model(s) found)", self.available_models.len())
+            let n = self.available_models.len();
+            format!("Connected ({n} {} found)", if n == 1 { "model" } else { "models" })
         };
         self.connection_status = Some(status);
         if let Some(first) = self.available_models.first() {

@@ -222,9 +222,13 @@ impl App {
                     self.attachments.push(att);
                     self.suggested_prompt = None;
                     if !model_sees_images(cx.source, &self.current_model) {
-                        self.background = Some(BackgroundNotice::sticky(format!(
-                            "{label} attached · {} cannot see images — press F3 for one that can", self.current_model
-                        )));
+                        self.background = Some(
+                            BackgroundNotice::sticky(format!(
+                                "{label} attached · {} cannot see images — press F3 for one that can",
+                                self.current_model
+                            ))
+                            .warning(),
+                        );
                     } else {
                         self.background = Some(BackgroundNotice::fading(
                             format!("{label} attached · Ctrl+Z removes it"),
