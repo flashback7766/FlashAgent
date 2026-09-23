@@ -1,5 +1,9 @@
 # Changelog
 
+## b353 — the lines under the prompt, as they were
+
+- **The tip, the prefill time and "Ready" are back.** b351 hid the tip while the model worked or the prompt had text, dropped the prefill time eight seconds after the first word, and took "Ready" off the status line. The lines under the prompt now behave as they did in b340. The new symbols stay: they replaced ones that showed as boxes.
+
 ## b352 — a steady download line, and answers typed straight into a question
 
 - **The update line no longer flashes while it downloads.** Each step of the download put up a new notice, and a new notice fades in from grey, so the line blinked grey and green until the download finished. It now changes its numbers in place.
