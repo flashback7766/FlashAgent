@@ -382,7 +382,8 @@ impl Renderer {
             ));
 
             // Wrapped: the question is what the user answers, so none of it is cut.
-            for row in wrap_plain(&card_safe(&req.question), inner_w.saturating_sub(3)) {
+            // Line by line: a newline kept inside one row would misplace every row after it.
+            for row in req.question.lines().flat_map(|line| wrap_plain(&card_safe(line), inner_w.saturating_sub(3))) {
                 tail.push((LineKind::System, pad_box_row(&format!(" \x1b[1;38;2;240;235;225m{row}\x1b[0m"), width)));
             }
             if let Some(deadline) = req.deadline {
@@ -424,7 +425,14 @@ impl Renderer {
                     // A long option wraps under its own text, not under its number.
                     let lead = format!("{num}. ");
                     let indent = 4 + if req.multi_select { 4 } else { 0 } + lead.len();
-                    let rows = wrap_plain(&card_safe(opt), inner_w.saturating_sub(indent + 1).max(10));
+                    let mut rows: Vec<String> = opt
+                        .lines()
+                        .flat_map(|line| wrap_plain(&card_safe(line), inner_w.saturating_sub(indent + 1).max(10)))
+                        .collect();
+                    // An empty option still gets its numbered row.
+                    if rows.is_empty() {
+                        rows.push(String::new());
+                    }
                     for (j, row) in rows.iter().enumerate() {
                         let line = if j == 0 {
                             format!("  {ptr} {check_box}{colour}{lead}{row}\x1b[0m")
