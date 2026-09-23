@@ -212,9 +212,9 @@ FlashAgent starts in the mode you left it in. Reads inside the project and web t
 
 **Autonomous mode (`/goal <task>`)** — runs the task end to end in Accept All mode with maximum reasoning effort. It has no limits unless you set them in Settings → Goal (steps, time, generated tokens). Dangerous shell commands are refused outright during the run. If the model asks you something and you do not answer within two minutes, it picks the most reasonable option itself and says so in its summary. It keeps a live plan on screen, commits what it changed every ten steps inside a git repository, and ends with a factual report card — steps, generated tokens, elapsed, files created and edited, shell commands that failed, and whether a limit cut the run short — built from what the loop did, not from what the model says it did. Your previous permission mode and effort are restored afterwards, and `/rewind` takes the run's file changes back.
 
-<img src="docs/screenshots/gifs/goal-budget.gif" width="100%" alt="A goal stopped by its step budget, with the report card">
+<img src="docs/screenshots/gifs/goal-budget.gif" width="100%" alt="A goal run ending with its report card">
 
-<sub>Here a five-step budget cuts the run short and the card says so — <b>INCOMPLETE</b>, one file created and one edited, the <code>cargo check</code> it never got to not claimed.</sub>
+<sub>The card is built from what the loop saw, not from what the model says: here one file created and one edited, and no shell command run, so the <code>cargo check</code> the task asked for is plainly missing.</sub>
 
 **Updates** — installed in the background: a new release is downloaded, verified against the release checksums and installed on its own, and the status line tells you to restart once it is in. <kbd>Ctrl</kbd>+<kbd>U</kbd> (or `/update`) shows the progress of a download that is already under way, or checks and installs right away when nothing is running; `flashagent --update` does the same from the shell. Background updates can be turned off in Settings; `--channel stable|beta` or `/channel` switches channels.
 
