@@ -789,6 +789,10 @@ impl ToolExec for PermissionedTools {
                 images: Vec::new(),
             },
             Verdict::NeedApproval { diff } => {
+                // Approving it would only lead to the same error.
+                if let Some(error) = self.preview.as_deref().and_then(|p| p.doomed(call)) {
+                    return ToolOutput { content: error, is_error: true, images: Vec::new() };
+                }
                 let req = ApprovalRequest {
                     tool: call.name.clone(),
                     args_json: call.args_json.clone(),
