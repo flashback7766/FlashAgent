@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="packaging/desktop/flashagent.svg" width="96" height="96" alt="FlashAgent logo">
+<img src="docs/mascot.svg" width="128" height="96" alt="FlashAgent mascot">
 
 # FlashAgent
 
