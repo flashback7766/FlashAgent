@@ -36,6 +36,9 @@ pub(crate) struct Renderer {
 
 pub(crate) struct FrameState<'a> {
     pub(crate) input: &'a flashagent_tui::Composer,
+    /// The provider in use and its model, at the end of the status line: the
+    /// first to go when it is narrow.
+    pub(crate) provider: (&'a str, &'a str),
     /// Ctrl+F: the query and the prompt it found.
     pub(crate) history_search: Option<(&'a str, Option<&'a str>)>,
     pub(crate) mode: PermissionMode,
@@ -156,6 +159,20 @@ pub(crate) fn format_status_left(
         (false, ..) => "\x1b[38;2;140;135;130mReady\x1b[0m".to_string(),
     };
     format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m {activity}{expand_status}")
+}
+
+/// " · Anthropic · claude-opus-5-5", in parts the status line drops from
+/// the end when it is narrow: the model first, then the provider.
+pub(crate) fn format_provider(provider: &str, model: &str) -> String {
+    let dot = " \x1b[38;2;100;95;90m\u{b7}\x1b[0m ";
+    let mut out = String::new();
+    if !provider.is_empty() {
+        out.push_str(&format!("{dot}\x1b[38;2;140;135;130m{provider}\x1b[0m"));
+    }
+    if !model.is_empty() {
+        out.push_str(&format!("{dot}\x1b[38;2;175;170;160m{model}\x1b[0m"));
+    }
+    out
 }
 
 impl Renderer {
@@ -764,7 +781,7 @@ impl Renderer {
         } else {
             ""
         };
-        let left_telemetry = format_status_left(
+        let mut left_telemetry = format_status_left(
             st.running,
             st.is_goal_active,
             gate.pending().is_some() || question_gate.pending().is_some(),
@@ -772,6 +789,7 @@ impl Renderer {
             st.mode.label(),
             expand_status,
         );
+        left_telemetry.push_str(&format_provider(st.provider.0, st.provider.1));
 
         let left_vis = visible_width(&left_telemetry);
         let status_row = if left_vis + gauge_vis + 3 <= width {
@@ -919,6 +937,7 @@ impl App {
             &self.context_usage,
             FrameState {
                 input: &self.input,
+                provider: (self.config.active_profile().name.as_str(), self.current_model.as_str()),
                 history_search: self
                     .history_search
                     .as_ref()

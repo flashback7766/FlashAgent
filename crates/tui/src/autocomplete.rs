@@ -79,8 +79,25 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
     ]
 }
 
+/// The saved providers, `(name, how it is reached)`, for `/provider <name>`.
+/// Set by the app whenever its config is saved; completion reads no files.
+static PROVIDERS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_provider_names(providers: Vec<(String, String)>) {
+    *PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()) = providers;
+}
+
 pub fn sub_commands(input: &str) -> Option<Vec<AutocompleteItem>> {
     let lower = input.to_lowercase();
+    if lower.starts_with("/provider ") {
+        let providers = PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
+        return Some(
+            providers
+                .iter()
+                .map(|(name, reached)| AutocompleteItem::new(format!("/provider {name}"), reached.clone(), AutocompleteCategory::Command))
+                .collect(),
+        );
+    }
     if lower.starts_with("/expand ") || lower == "/expand" || lower.starts_with("/verbose ") || lower == "/verbose" {
         Some(vec![
             AutocompleteItem::new("/verbose all", "Expand both thoughts and tool calls permanently", AutocompleteCategory::Command),
@@ -437,6 +454,16 @@ mod skill_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_saved_providers_complete_after_the_command() {
+        set_provider_names(vec![("LM Studio".into(), "OpenAI-compatible".into()), ("Anthropic".into(), "Anthropic".into())]);
+        let found: Vec<String> = find_matches("/provider an", Path::new(".")).into_iter().map(|i| i.trigger).collect();
+        assert_eq!(found, vec!["/provider Anthropic"], "matched however it is written");
+        assert_eq!(find_matches("/provider ", Path::new(".")).len(), 2);
+        assert!(find_matches("/provider Anthropic", Path::new(".")).is_empty(), "typed in full: nothing left to offer");
+        set_provider_names(Vec::new());
+    }
 
     #[test]
     fn a_command_typed_in_full_is_not_swapped_for_a_longer_one() {

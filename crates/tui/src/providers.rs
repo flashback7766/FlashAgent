@@ -31,6 +31,11 @@ pub fn key_status(profile: &ProviderProfile) -> String {
     }
 }
 
+/// What `/provider ` completes: each saved name and how it is reached.
+pub fn completion_entries(config: &AppConfig) -> Vec<(String, String)> {
+    config.providers.iter().map(|p| (p.name.clone(), describe(p))).collect()
+}
+
 /// How a provider is spoken to, where, and the model it starts with.
 pub fn describe(profile: &ProviderProfile) -> String {
     let model = if profile.model.is_empty() { "the loaded model" } else { profile.model.as_str() };
@@ -79,23 +84,30 @@ pub fn provider_arg(config: &AppConfig, arg: &str) -> ProviderArg {
     }
 }
 
-/// The model to go on with after a switch: the one saved for the provider if
-/// the server lists it (a partial name matched to its full id, as at start),
-/// else the one it has loaded, else its first. Without an answer, the saved one.
+/// The model to go on with, at start or after a switch: the one saved for the
+/// provider if the server lists it, else the one it has loaded, else its
+/// first. Without an answer, the saved one.
+///
+/// Matched exactly first (Gemini's `models/` prefix aside), then as part of a
+/// longer id (`qwen3` finds `qwen3-coder-30b`), and only then as a longer name
+/// holding an id, the closest first: a saved `gemini-2.5-flash-lite` must not
+/// become `gemini-2.5-flash` because that is listed first.
 pub fn model_after_switch(saved: &str, disc: Option<&ServerDiscovery>) -> String {
     let Some(disc) = disc else { return saved.to_string() };
-    if !saved.is_empty() {
-        let exact = disc.models.iter().find(|m| m.id == saved);
-        let partial = || disc.models.iter().find(|m| m.id.contains(saved) || saved.contains(m.id.as_str()));
-        if let Some(m) = exact.or_else(partial) {
+    let bare = |id: &str| id.strip_prefix("models/").unwrap_or(id).to_ascii_lowercase();
+    let wanted = bare(saved);
+    if !wanted.is_empty() {
+        let exact = disc.models.iter().find(|m| bare(&m.id) == wanted);
+        let longer = || disc.models.iter().filter(|m| bare(&m.id).contains(&wanted)).min_by_key(|m| m.id.len());
+        let shorter = || disc.models.iter().filter(|m| wanted.contains(&bare(&m.id))).max_by_key(|m| m.id.len());
+        if let Some(m) = exact.or_else(longer).or_else(shorter) {
             return m.id.clone();
         }
     }
     disc.active_model
         .as_ref()
         .or_else(|| disc.models.first())
-        .map(|m| m.id.clone())
-        .unwrap_or_else(|| saved.to_string())
+        .map_or_else(|| saved.to_string(), |m| m.id.clone())
 }
 
 /// What F3 and Settings offer: on LM Studio only the loaded models when any
@@ -511,6 +523,17 @@ mod tests {
 
     fn text(lines: &[RenderLine]) -> String {
         lines.iter().map(|(_, l)| crate::strip_ansi(l)).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn a_saved_model_is_matched_exactly_before_by_part_of_its_name() {
+        let disc = discovery(vec![model("gemini-2.5-flash", false), model("gemini-2.5-flash-lite", false)], None);
+        assert_eq!(model_after_switch("gemini-2.5-flash-lite", Some(&disc)), "gemini-2.5-flash-lite");
+        assert_eq!(model_after_switch("models/gemini-2.5-flash-lite", Some(&disc)), "gemini-2.5-flash-lite", "Google's prefix aside");
+        assert_eq!(model_after_switch("gemini-2.5-flash-lite-preview-06-17", Some(&disc)), "gemini-2.5-flash-lite", "the closest id it holds");
+        let disc = discovery(vec![model("qwen3-coder-30b-a3b", false), model("qwen3-coder-30b", false)], None);
+        assert_eq!(model_after_switch("qwen3-coder", Some(&disc)), "qwen3-coder-30b", "the shortest id holding it");
+        assert_eq!(model_after_switch("", Some(&disc)), "qwen3-coder-30b-a3b", "nothing saved: the first");
     }
 
     #[test]
