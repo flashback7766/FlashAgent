@@ -52,12 +52,64 @@ fn extract_data(record: &[u8]) -> Option<String> {
 pub struct ChunkParser {
     tool_ids: Vec<Option<String>>,
     tool_names: Vec<Option<String>>,
+    /// Inside Gemini's `<thought>…</thought>` in the content.
+    in_thought: bool,
+    /// A tag cut between two chunks, waiting for the rest.
+    tag_carry: String,
 }
 
+const THOUGHT_OPEN: &str = "<thought>";
+const THOUGHT_CLOSE: &str = "</thought>";
+
 impl ChunkParser {
+    /// Gemini sends its thought summaries in the content, between `<thought>`
+    /// tags (or marks a whole chunk as thought): they are reasoning, shown as
+    /// such and kept out of the answer.
+    fn split_thought(&mut self, text: &str, events: &mut Vec<LlmEvent>) {
+        let mut rest = std::mem::take(&mut self.tag_carry) + text;
+        loop {
+            let tag = if self.in_thought { THOUGHT_CLOSE } else { THOUGHT_OPEN };
+            match rest.find(tag) {
+                Some(at) => {
+                    self.emit_piece(&rest[..at], events);
+                    self.in_thought = !self.in_thought;
+                    rest = rest[at + tag.len()..].to_string();
+                }
+                None => {
+                    // Hold what may be the start of the tag.
+                    let keep = (1..tag.len()).rev().find(|&n| rest.ends_with(&tag[..n])).unwrap_or(0);
+                    let cut = rest.len() - keep;
+                    self.emit_piece(&rest[..cut], events);
+                    self.tag_carry = rest[cut..].to_string();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// At the end, a held `<` was just text.
+    fn flush_carry(&mut self, events: &mut Vec<LlmEvent>) {
+        let carry = std::mem::take(&mut self.tag_carry);
+        self.emit_piece(&carry, events);
+    }
+
+    fn emit_piece(&self, piece: &str, events: &mut Vec<LlmEvent>) {
+        if piece.is_empty() {
+            return;
+        }
+        events.push(if self.in_thought {
+            LlmEvent::ReasoningDelta(piece.to_string())
+        } else {
+            LlmEvent::TextDelta(piece.to_string())
+        });
+    }
+
     pub fn feed(&mut self, payload: &str) -> Vec<LlmEvent> {
         if payload.trim() == "[DONE]" {
-            return vec![LlmEvent::Done(FinishReason::Stop)];
+            let mut events = Vec::new();
+            self.flush_carry(&mut events);
+            events.push(LlmEvent::Done(FinishReason::Stop));
+            return events;
         }
         let Ok(v) = serde_json::from_str::<Value>(payload) else {
             return vec![];
@@ -160,7 +212,14 @@ impl ChunkParser {
                 events.push(LlmEvent::ReasoningDelta(reasoning.to_string()));
             }
             if let Some(text) = delta.get("content").and_then(Value::as_str) {
-                events.push(LlmEvent::TextDelta(text.to_string()));
+                let marked_thought = delta.pointer("/extra_content/google/thought").and_then(Value::as_bool) == Some(true);
+                if marked_thought {
+                    events.push(LlmEvent::ReasoningDelta(text.to_string()));
+                } else if self.in_thought || !self.tag_carry.is_empty() || text.contains('<') {
+                    self.split_thought(text, &mut events);
+                } else {
+                    events.push(LlmEvent::TextDelta(text.to_string()));
+                }
             }
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
                 for call in calls {
@@ -207,6 +266,7 @@ impl ChunkParser {
                 }
             }
             if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str).map(finish_reason) {
+                self.flush_carry(&mut events);
                 events.push(LlmEvent::Done(reason));
             }
         }
@@ -675,6 +735,28 @@ mod tests {
         let (text, calls) = scan(&["Here:\n", "{", "\"id\": 1}\n"]);
         assert!(calls.is_empty());
         assert_eq!(text, "Here:\n{\"id\": 1}\n");
+    }
+
+    #[test]
+    fn gemini_thoughts_in_the_content_are_reasoning_even_split_across_chunks() {
+        let mut p = ChunkParser::default();
+        let chunk = |t: &str| serde_json::json!({ "choices": [ { "delta": { "content": t } } ] }).to_string();
+        let mut events = Vec::new();
+        for piece in ["<thou", "ght>Planning the ", "answer</tho", "ught>Hello", " <b>there</b>"] {
+            events.extend(p.feed(&chunk(piece)));
+        }
+        let reasoning: String = events.iter().filter_map(|e| match e { LlmEvent::ReasoningDelta(t) => Some(t.as_str()), _ => None }).collect();
+        let text: String = events.iter().filter_map(|e| match e { LlmEvent::TextDelta(t) => Some(t.as_str()), _ => None }).collect();
+        assert_eq!(reasoning, "Planning the answer");
+        assert_eq!(text, "Hello <b>there</b>");
+        let mut p = ChunkParser::default();
+        let mut ends = p.feed(&chunk("a < b and b <"));
+        ends.extend(p.feed("[DONE]"));
+        let text: String = ends.iter().filter_map(|e| match e { LlmEvent::TextDelta(t) => Some(t.as_str()), _ => None }).collect();
+        assert_eq!(text, "a < b and b <");
+        let mut p = ChunkParser::default();
+        let marked = r#"{"choices":[{"delta":{"content":"weighing","extra_content":{"google":{"thought":true}}}}]}"#;
+        assert_eq!(p.feed(marked), vec![LlmEvent::ReasoningDelta("weighing".into())]);
     }
 
     #[test]

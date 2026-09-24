@@ -18,6 +18,11 @@ pub enum ThinkingProtocol {
     LmStudio,
     /// The server said nothing about reasoning. Only "off" is sent.
     Unreported,
+    /// Google's OpenAI-compatible endpoint: `extra_body.google.thinking_config`
+    /// with a level (Gemini 3) or a token budget (2.5), and `include_thoughts`,
+    /// without which the thinking is never shown. It cannot go with
+    /// `reasoning_effort`, so that is not sent.
+    Gemini,
 }
 
 /// Decided by the API that answered, not by the address.
@@ -303,6 +308,10 @@ impl ThinkingProfile {
         let is_off = effort == "off" || effort == "disabled" || effort == "none" || effort == "false" || effort == "0";
         match self.protocol {
             ThinkingProtocol::Unreported => {}
+            ThinkingProtocol::Gemini => {
+                let model = body["model"].as_str().unwrap_or_default().to_string();
+                body["extra_body"] = serde_json::json!({ "google": { "thinking_config": gemini_thinking_config(&model, effort) } });
+            }
             ThinkingProtocol::ReasoningEffort => {
                 if is_off {
                     let off_val = if self.presets.iter().any(|p| p.eq_ignore_ascii_case("off")) {
@@ -772,8 +781,88 @@ pub fn merge_server_models(mut primary: Vec<DiscoveredModel>, other: Vec<Discove
 }
 
 /// LM Studio `/api/v1/models`, `/api/v0/models`, or OpenAI `/v1/models`.
+/// What Gemini takes for a preset. 2.5 counts a budget of tokens (0 is off,
+/// -1 lets the model decide); 3 and later take the level by name.
+pub fn gemini_thinking_config(model: &str, effort: &str) -> serde_json::Value {
+    let effort = effort.to_ascii_lowercase();
+    if model.contains("gemini-2.5") {
+        let budget: i64 = match effort.as_str() {
+            "none" | "off" | "disabled" | "0" => 0,
+            "minimal" | "low" => 1024,
+            "medium" => 8192,
+            "high" | "max" | "xhigh" => 24576,
+            _ => -1,
+        };
+        return serde_json::json!({ "thinking_budget": budget, "include_thoughts": budget != 0 });
+    }
+    match effort.as_str() {
+        "minimal" | "low" | "medium" | "high" => serde_json::json!({ "thinking_level": effort, "include_thoughts": true }),
+        _ => serde_json::json!({ "include_thoughts": true }),
+    }
+}
+
+/// The levels each Gemini family takes, from Google's compatibility notes:
+/// only 2.5 Flash and Flash-Lite can turn thinking off, and 3.x Pro has no
+/// `minimal`.
+pub fn gemini_profile(model: &str, thinks: bool) -> ThinkingProfile {
+    if !thinks {
+        return ThinkingProfile::unsupported();
+    }
+    let presets: &[&str] = if model.contains("gemini-2.5") {
+        if model.contains("pro") { &["low", "medium", "high"] } else { &["none", "low", "medium", "high"] }
+    } else if model.contains("pro") {
+        &["low", "medium", "high"]
+    } else {
+        &["minimal", "low", "medium", "high"]
+    };
+    ThinkingProfile {
+        presets: presets.iter().map(|p| p.to_string()).collect(),
+        protocol: ThinkingProtocol::Gemini,
+        supported: true,
+        default_preset: None,
+    }
+}
+
+/// Gemini's own model list (`/v1beta/models`): the compatible one has no
+/// context sizes and says nothing of thinking. Chat models only.
+pub fn parse_gemini_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
+    let Some(models) = data.get("models").and_then(|m| m.as_array()) else { return Vec::new() };
+    models
+        .iter()
+        .filter(|m| {
+            m.get("supportedGenerationMethods")
+                .and_then(|g| g.as_array())
+                .is_some_and(|g| g.iter().any(|x| x == "generateContent"))
+        })
+        .filter_map(|m| {
+            let id = m.get("name")?.as_str()?.to_string();
+            let thinks = m.get("thinking").and_then(|t| t.as_bool()).unwrap_or(false);
+            let context = m.get("inputTokenLimit").and_then(|v| v.as_u64()).map(|n| n as usize);
+            Some(DiscoveredModel {
+                display_name: m.get("displayName").and_then(|v| v.as_str()).map(str::to_string),
+                is_loaded: false,
+                context_length: context,
+                max_context_length: context,
+                thinking: gemini_profile(&id, thinks),
+                supports_tools: true,
+                supports_vision: true,
+                id,
+            })
+        })
+        .collect()
+}
+
 pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
     let mut discovered = Vec::new();
+
+    // Gemini's own list: `{"models": [{"name": "models/…", "inputTokenLimit": …}]}`.
+    let is_gemini = data
+        .get("models")
+        .and_then(|m| m.as_array())
+        .is_some_and(|m| m.iter().any(|x| x.get("inputTokenLimit").is_some() && x.get("name").is_some()));
+    if is_gemini {
+        return parse_gemini_models(data);
+    }
 
     // LM Studio v1: `{"models": [...]}`
     if let Some(models) = data.get("models").and_then(|m| m.as_array()) {
@@ -954,6 +1043,34 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemini_models_bring_their_context_and_thinking_levels() {
+        let native = serde_json::json!({ "models": [
+            { "name": "models/gemini-2.5-flash", "inputTokenLimit": 1048576, "thinking": true,
+              "supportedGenerationMethods": ["generateContent", "countTokens"] },
+            { "name": "models/gemini-2.5-pro", "inputTokenLimit": 1048576, "thinking": true,
+              "supportedGenerationMethods": ["generateContent"] },
+            { "name": "models/gemini-3-flash", "inputTokenLimit": 1048576, "thinking": true,
+              "supportedGenerationMethods": ["generateContent"] },
+            { "name": "models/text-embedding-004", "inputTokenLimit": 2048,
+              "supportedGenerationMethods": ["embedContent"] }
+        ] });
+        let models = parse_server_models(&native);
+        assert_eq!(models.len(), 3, "embedding models are not chat models");
+        assert_eq!(models[0].context_length, Some(1048576));
+        assert_eq!(models[0].thinking.presets, vec!["none", "low", "medium", "high"]);
+        assert_eq!(models[1].thinking.presets, vec!["low", "medium", "high"], "2.5 Pro cannot turn thinking off");
+        assert_eq!(models[2].thinking.presets, vec!["minimal", "low", "medium", "high"]);
+
+        assert_eq!(gemini_thinking_config("models/gemini-2.5-flash", "none"), serde_json::json!({ "thinking_budget": 0, "include_thoughts": false }));
+        assert_eq!(gemini_thinking_config("models/gemini-2.5-pro", "high")["thinking_budget"], 24576);
+        assert_eq!(gemini_thinking_config("models/gemini-3-flash", "low"), serde_json::json!({ "thinking_level": "low", "include_thoughts": true }));
+        let mut body = serde_json::json!({ "model": "models/gemini-3-flash" });
+        models[2].thinking.apply_to_request(&mut body, "high");
+        assert_eq!(body["extra_body"]["google"]["thinking_config"]["thinking_level"], "high");
+        assert!(body.get("reasoning_effort").is_none(), "it cannot go together with thinking_config");
+    }
 
     #[test]
     fn a_fastapi_field_location_is_not_taken_for_the_allowed_values() {
