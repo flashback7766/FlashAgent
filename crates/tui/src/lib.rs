@@ -1786,7 +1786,10 @@ mod tests {
         let mut v2 = ChatView::default();
         v2.on_event(&LoopEvent::ReasoningDelta("freeform thoughts about task".into()));
         let (_, live2) = v2.render_split(100, false);
-        assert!(live2.iter().any(|(_, t)| (t.contains("Thinking") || t.contains("Thought")) && (t.contains('›') || t.contains('>'))));
+        // Plain text: while streaming the title shimmers, a colour per letter, when
+        // animations are on (a global other tests switch).
+        let plain = |t: &String| strip_ansi(t);
+        assert!(live2.iter().any(|(_, t)| (plain(t).contains("Thinking") || plain(t).contains("Thought")) && (t.contains('›') || t.contains('>'))));
         v2.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
         let (settled2, _) = v2.render_split(100, false);
         assert!(settled2.iter().any(|(_, t)| (t.contains("Thought") || t.contains("Thinking")) && (t.contains('›') || t.contains('>'))));
