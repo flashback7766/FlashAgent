@@ -276,7 +276,8 @@ impl SetupWizard {
     /// Into the active text field: custom URL, API key or model search.
     pub fn handle_paste(&mut self, text: &str) {
         for c in text.chars() {
-            if c == '\r' || c == '\n' {
+            // A key copied from a web page often brings a space or line break with it.
+            if c == '\r' || c == '\n' || (self.step == 1 && c.is_whitespace()) {
                 continue;
             }
             match self.step {
@@ -303,6 +304,23 @@ impl SetupWizard {
     pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<bool> {
         if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
             return Some(false); // cancelled
+        }
+
+        // Ctrl+V (Ctrl+М on a Russian layout) and Shift+Insert read the clipboard
+        // here: the classic Windows console hands them over as keys instead of
+        // pasting, so the API key could not be pasted at all.
+        let paste_key = (mods.contains(KeyModifiers::CONTROL)
+            && matches!(code, KeyCode::Char('v' | 'V' | '\u{043c}' | '\u{041c}')))
+            || (code == KeyCode::Insert && mods.contains(KeyModifiers::SHIFT));
+        if paste_key {
+            let takes_text = matches!(self.step, 1 | 2) || (self.step == 0 && self.is_custom());
+            if takes_text {
+                match crate::clipboard::get_clipboard_text() {
+                    Some(text) => self.handle_paste(&text),
+                    None => self.connection_status = Some("The clipboard has no text to paste".to_string()),
+                }
+            }
+            return None;
         }
 
         if code == KeyCode::Esc {
@@ -774,8 +792,10 @@ impl SetupWizard {
                     };
                     format!("\x1b[7m \x1b[27m{placeholder_color}{placeholder}\x1b[0m")
                 } else {
+                    // The length shows that a paste landed, and whether it landed twice.
                     let masked = mask_api_key(&self.api_key_input);
-                    format!("\x1b[1;38;2;225;175;95m{masked}\x1b[7m \x1b[27m\x1b[0m")
+                    let count = crate::plural(self.api_key_input.chars().count(), "character", "characters");
+                    format!("\x1b[1;38;2;225;175;95m{masked}\x1b[7m \x1b[27m\x1b[0m \x1b[38;2;135;130;125m({count})\x1b[0m")
                 };
                 lines.push(pad_row(&format!("  \x1b[1;38;2;240;235;225mAPI Key:\x1b[0m {key_display}")));
 
@@ -1246,6 +1266,16 @@ mod tests {
         let rendered = SetupWizard::new(AppConfig::default()).render(100).join("\n");
         assert_eq!(rendered.matches("c. Custom").count(), 1, "{rendered}");
         assert!(rendered.contains("0. Gemini"), "{rendered}");
+    }
+
+    #[test]
+    fn a_pasted_key_loses_the_whitespace_it_was_copied_with_and_shows_its_length() {
+        let mut wizard = SetupWizard::new(AppConfig::default());
+        wizard.step = 1;
+        wizard.handle_paste(" sk-or-v1-abc def\r\n");
+        assert_eq!(wizard.api_key_input, "sk-or-v1-abcdef");
+        let shown = crate::strip_ansi(&wizard.render(100).join("\n"));
+        assert!(shown.contains("(15 characters)"), "{shown}");
     }
 
     #[test]
