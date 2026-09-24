@@ -417,6 +417,7 @@ struct Decoder {
     replay: Replay,
     /// Every chunk repeats the running totals; the last one is sent, once.
     usage: Option<Usage>,
+    thought: crate::parse::ThoughtTags,
     done: bool,
 }
 
@@ -434,12 +435,19 @@ impl WireDecoder for Decoder {
     fn finish(&mut self) -> Vec<Result<LlmEvent, LlmError>> {
         // A last event the server did not close with a blank line.
         let mut out = self.feed(b"\n\n");
+        self.flush_text(&mut out);
         self.flush_usage(&mut out);
         out
     }
 }
 
 impl Decoder {
+    fn flush_text(&mut self, out: &mut Vec<Result<LlmEvent, LlmError>>) {
+        let mut events = Vec::new();
+        self.thought.flush(&mut events);
+        out.extend(events.into_iter().map(Ok));
+    }
+
     fn flush_usage(&mut self, out: &mut Vec<Result<LlmEvent, LlmError>>) {
         if let Some(usage) = self.usage.take() {
             out.push(Ok(LlmEvent::Usage(usage)));
@@ -476,7 +484,11 @@ impl Decoder {
         if self.replay != before {
             out.push(Ok(LlmEvent::Replay(self.replay.to_value())));
         }
-        let finish = match candidate.get("finishReason").and_then(Value::as_str).unwrap_or_default() {
+        let reason = candidate.get("finishReason").and_then(Value::as_str).unwrap_or_default();
+        if !matches!(reason, "" | "FINISH_REASON_UNSPECIFIED") {
+            self.flush_text(out);
+        }
+        let finish = match reason {
             "" | "FINISH_REASON_UNSPECIFIED" => return true,
             "STOP" if self.calls > 0 => FinishReason::ToolUse,
             "STOP" => FinishReason::Stop,
@@ -496,6 +508,7 @@ impl Decoder {
     fn read_part(&mut self, part: &Value, out: &mut Vec<Result<LlmEvent, LlmError>>) {
         let signature = part.get("thoughtSignature").and_then(Value::as_str).filter(|s| !s.is_empty());
         if let Some(call) = part.get("functionCall") {
+            self.flush_text(out);
             let id = match call.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
                 Some(id) => {
                     self.replay.ids.push(id.to_string());
@@ -521,8 +534,10 @@ impl Decoder {
         if text.is_empty() {
             return;
         }
-        let thought = part.get("thought").and_then(Value::as_bool).unwrap_or(false);
-        out.push(Ok(if thought { LlmEvent::ReasoningDelta(text.to_string()) } else { LlmEvent::TextDelta(text.to_string()) }));
+        let marked = part.get("thought").and_then(Value::as_bool).unwrap_or(false);
+        let mut events = Vec::new();
+        self.thought.split(text.to_string(), marked, &mut events);
+        out.extend(events.into_iter().map(Ok));
     }
 }
 
@@ -913,6 +928,45 @@ mod tests {
                 LlmEvent::Done(FinishReason::Stop),
             ]
         );
+    }
+
+    fn split_text(events: &[LlmEvent]) -> (String, String) {
+        let mut reasoning = String::new();
+        let mut text = String::new();
+        for e in events {
+            match e {
+                LlmEvent::ReasoningDelta(t) => reasoning.push_str(t),
+                LlmEvent::TextDelta(t) => text.push_str(t),
+                _ => {}
+            }
+        }
+        (reasoning, text)
+    }
+
+    #[test]
+    fn a_thought_tag_opened_in_a_thought_and_closed_in_the_answer_is_never_shown() {
+        // As gemini-3.5-flash-lite answered "hi": the thought opened a tag and
+        // the answer began by closing it, so both were on screen.
+        let part = |text: &str, thought: bool| json!({ "candidates": [{ "content": { "role": "model", "parts": [{ "text": text, "thought": thought }] } }] });
+        let stream = sse(&[
+            part("**Analyzing Request**\n\n<thought>Acknowledge and Note\n\nHi.", true),
+            part("</tho", false),
+            part("ught>Hello! What are we breaking or building today?", false),
+            json!({ "candidates": [{ "content": { "role": "model", "parts": [{ "text": "" }] }, "finishReason": "STOP" }] }),
+        ]);
+        let events = ok_events(decode(&[&stream]));
+        let (reasoning, text) = split_text(&events);
+        assert_eq!(reasoning, "**Analyzing Request**\n\nAcknowledge and Note\n\nHi.");
+        assert_eq!(text, "Hello! What are we breaking or building today?");
+        assert_eq!(events.last(), Some(&LlmEvent::Done(FinishReason::Stop)));
+
+        // A tag a thought opens and nothing closes does not swallow the answer.
+        let stream = sse(&[part("<thought>Planning", true), part("The answer.", false)]);
+        assert_eq!(split_text(&ok_events(decode(&[&stream]))), ("Planning".into(), "The answer.".into()));
+
+        // Tags the answer itself carries are reasoning between them, as on the OpenAI path.
+        let stream = sse(&[part("<thought>Checking</thought>Done. a < b", false)]);
+        assert_eq!(split_text(&ok_events(decode(&[&stream]))), ("Checking".into(), "Done. a < b".into()));
     }
 
     #[test]
