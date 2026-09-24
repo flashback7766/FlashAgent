@@ -2,7 +2,7 @@
 //! endpoint, the model, what the server was found to support and refuse) and
 //! hands each request to the module for the protocol its endpoint speaks.
 
-use std::sync::atomic::{AtomicBool, AtomicI8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +20,9 @@ pub type EventStream = BoxStream<'static, Result<LlmEvent, LlmError>>;
 
 pub struct Client {
     endpoint: RwLock<Endpoint>,
+    /// Counts changes of endpoint, so what the previous server answered is
+    /// not written over what the new one is found to be.
+    generation: AtomicU64,
     model: RwLock<String>,
     pub(crate) http: reqwest::Client,
     profile: RwLock<Option<ThinkingProfile>>,
@@ -66,6 +69,7 @@ impl Client {
     pub fn new(endpoint: Endpoint, model: impl Into<String>) -> Self {
         Self {
             endpoint: RwLock::new(endpoint),
+            generation: AtomicU64::new(0),
             model: RwLock::new(model.into()),
             // No total timeout: a slow local model can stream for many minutes. The idle
             // read timeout catches a server that stopped sending.
@@ -106,17 +110,24 @@ impl Client {
     /// the fields it refused) does not carry over. The model is kept: the
     /// caller picks one from the new server's list.
     pub fn set_endpoint(&self, endpoint: Endpoint) {
-        {
-            let mut current = self.endpoint.write();
-            if *current == endpoint {
-                return;
-            }
-            *current = endpoint;
+        let mut current = self.endpoint.write();
+        if *current == endpoint {
+            return;
         }
+        *current = endpoint;
+        // Under the endpoint lock, which `settle_discovery` holds while it
+        // checks the generation and writes: the two never interleave.
+        self.generation.fetch_add(1, Ordering::SeqCst);
         *self.discovery.write() = None;
         *self.working_models_url.write() = None;
         *self.profile.write() = None;
         *self.learned.write() = Default::default();
+    }
+
+    /// Read before anything about the server, and handed back with what it
+    /// answered: an answer from before a change of endpoint is dropped.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     pub fn requests_in_flight(&self) -> usize {
@@ -226,19 +237,37 @@ impl Client {
     }
 
     /// The models a server listed, whatever its protocol: picks the active
-    /// one, adopts its thinking profile and keeps the list.
-    pub(crate) fn settle_discovery(&self, models: Vec<DiscoveredModel>, kind: ServerKind) -> Option<ServerDiscovery> {
+    /// one, adopts its thinking profile and keeps the list, with `models_url`
+    /// if that is where the list was. `None`, and nothing kept, when the list
+    /// is empty or the endpoint changed since `generation` was read.
+    pub(crate) fn settle_discovery(
+        &self,
+        generation: u64,
+        models: Vec<DiscoveredModel>,
+        kind: ServerKind,
+        models_url: Option<String>,
+    ) -> Option<ServerDiscovery> {
         if models.is_empty() {
             return None;
         }
+        // Held to the end; nothing below may read the endpoint again, as a
+        // second read behind a waiting `set_endpoint` would deadlock.
+        let endpoint = self.endpoint.read();
+        if self.generation() != generation {
+            return None;
+        }
         let current = self.model();
+        // Ollama loads any installed model on demand, so there the model the
+        // user chose stays chosen; preferring a loaded one would undo a pick at
+        // the next look.
+        let on_demand = kind == ServerKind::Ollama;
         // The exact name before a similar one: `gpt-4o` must not become
         // `gpt-4o-audio-preview` because the list happens to name that first.
-        let exact = |m: &DiscoveredModel| !current.is_empty() && m.id == current;
+        let exact = |m: &DiscoveredModel| !current.is_empty() && (m.id == current || (on_demand && m.id == format!("{current}:latest")));
         let similar = |m: &DiscoveredModel| !current.is_empty() && (m.id.contains(&current) || current.contains(&m.id));
         let active = models
             .iter()
-            .find(|m| m.is_loaded && exact(m))
+            .find(|m| (m.is_loaded || on_demand) && exact(m))
             .or_else(|| models.iter().find(|m| m.is_loaded && similar(m)))
             .or_else(|| models.iter().find(|m| m.is_loaded))
             .or_else(|| models.iter().find(|m| exact(m)))
@@ -255,7 +284,10 @@ impl Client {
             }
         }
 
-        let disc = ServerDiscovery { base_url: self.base_url(), models, active_model: active, kind };
+        if models_url.is_some() {
+            *self.working_models_url.write() = models_url;
+        }
+        let disc = ServerDiscovery { base_url: endpoint.url.clone(), models, active_model: active, kind };
         *self.discovery.write() = Some(disc.clone());
         Some(disc)
     }
@@ -336,11 +368,13 @@ impl Client {
     /// Asks the server what it runs: the models, their context windows,
     /// whether they reason, see images and call tools.
     pub async fn discover_server(&self) -> Option<ServerDiscovery> {
+        // First, so an endpoint changed while the server is asked is noticed.
+        let generation = self.generation();
         match self.protocol() {
-            ApiProtocol::OpenAi => crate::openai::discover(self).await,
-            ApiProtocol::Anthropic => crate::anthropic::discover(self).await,
-            ApiProtocol::Gemini => crate::gemini::discover(self).await,
-            ApiProtocol::Ollama => crate::ollama::discover(self).await,
+            ApiProtocol::OpenAi => crate::openai::discover(self, generation).await,
+            ApiProtocol::Anthropic => crate::anthropic::discover(self, generation).await,
+            ApiProtocol::Gemini => crate::gemini::discover(self, generation).await,
+            ApiProtocol::Ollama => crate::ollama::discover(self, generation).await,
         }
     }
 
@@ -485,6 +519,7 @@ mod tests {
             default_preset: None,
         });
         llm.settle_discovery(
+            0,
             vec![DiscoveredModel {
                 id: "m".into(),
                 display_name: None,
@@ -496,6 +531,7 @@ mod tests {
                 supports_vision: false,
             }],
             ServerKind::LmStudio,
+            None,
         );
         assert!(llm.discovery().is_some());
 
@@ -508,5 +544,41 @@ mod tests {
         assert!(llm.discovery().is_none() && llm.profile().is_none());
         assert_eq!(llm.model(), "m", "the caller picks the next model");
         assert_eq!(crate::LlmBackend::name(&llm), "anthropic");
+    }
+
+    #[tokio::test]
+    async fn what_the_server_left_behind_answers_is_not_kept() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // Holds every answer until the client has moved on.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let old = format!("http://{}", listener.local_addr().unwrap());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let (asked_tx, mut asked) = mpsc::unbounded_channel();
+        let held = release.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let (held, asked_tx) = (held.clone(), asked_tx.clone());
+                tokio::spawn(async move {
+                    let _ = sock.read(&mut [0u8; 4096]).await;
+                    let _ = asked_tx.send(());
+                    let _permit = held.acquire().await;
+                    let body = r#"{"data":[{"id":"old-model"}]}"#;
+                    let head = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len());
+                    let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+                });
+            }
+        });
+
+        let llm = Client::new(Endpoint::new(ApiProtocol::OpenAi, format!("{old}/v1"), None), "new-model");
+        let switch = async {
+            asked.recv().await;
+            llm.set_endpoint(Endpoint::new(ApiProtocol::OpenAi, "http://127.0.0.1:9/v1", None));
+            release.add_permits(16);
+        };
+        let (found, ()) = tokio::join!(llm.discover_server(), switch);
+        assert!(found.is_none(), "the old server's list came back as the new one's");
+        assert!(llm.discovery().is_none());
+        assert_eq!(llm.model(), "new-model", "the old server's model replaced the chosen one");
+        assert!(llm.working_models_url.read().is_none());
     }
 }
