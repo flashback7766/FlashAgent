@@ -25,8 +25,8 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         return Explained {
             headline: format!("No model server answered at {base}"),
             hint: Some(
-                "Start your server (LM Studio, llama.cpp, Ollama), or point FlashAgent \
-                 somewhere else with Backend URL in Tab → General, or --url."
+                "Start your server (LM Studio, llama.cpp, Ollama), or switch to another \
+                 provider with /provider."
                     .to_string(),
             ),
             raw: raw.to_string(),
@@ -63,7 +63,7 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
     {
         return Explained {
             headline: format!("{base} rejected the API key"),
-            hint: Some("Set the key again with flashagent --setup, or in ~/.flashagent/config.json.".to_string()),
+            hint: Some("Set its key in /provider → Edit providers, or in the provider's environment variable.".to_string()),
             raw: raw.to_string(),
         };
     }
@@ -71,7 +71,7 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
     if lower.contains("429") || lower.contains("rate limit") || lower.contains("quota") {
         return Explained {
             headline: format!("{base} is rate-limiting this key"),
-            hint: Some("Wait and press Ctrl+R, or switch to a local model with F3.".to_string()),
+            hint: Some("Wait and press Ctrl+R, or switch to a local provider with /provider.".to_string()),
             raw: raw.to_string(),
         };
     }

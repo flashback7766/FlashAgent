@@ -5,6 +5,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "pick a saved session from this folder and continue it"),
     ("/settings, Tab", "settings"),
     ("/model, /m, F3", "choose and switch the model"),
+    ("/provider [name]", "switch to another saved provider, local or cloud; add or edit them"),
     ("/effort, /t, F4", "thinking effort (also Ctrl+T)"),
     ("/mode [plan|man|edits|all]", "permission mode (also Shift+Tab)"),
     ("/context, F1", "what fills the context window"),
@@ -140,6 +141,7 @@ impl App {
                     arg.chars().for_each(|c| menu.push_filter_char(c));
                 }
             }
+            "provider" | "providers" => self.provider_command(cx, arg),
             "sampling" | "params" => self.open_overlay(Overlay::Sampling(SamplingView::new(&self.config))),
             "mode" => self.mode_command(cx, arg),
             "uninstall" => {

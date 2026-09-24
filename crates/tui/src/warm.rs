@@ -2,7 +2,7 @@
 //! has nothing cached: system prompt, tool schemas and memory are read from
 //! scratch (34 s for 8.3k tokens on LM Studio with Gemma 4 E2B, 0.9 s once
 //! cached). So the prefix is sent with a one-token answer while the user types:
-//! at start, after `--resume`, after a model or voice switch. It is assembled
+//! at start, after `--resume`, after a switch of model, provider or voice. It is assembled
 //! the way the agent loop assembles a turn, so the cached tokens match.
 
 use super::*;
@@ -29,10 +29,11 @@ pub(crate) fn warm_messages(history: &[ChatMessage], prelude: &[ChatMessage], me
     messages
 }
 
-/// So the same prefix is not sent twice.
-fn prefix_key(model: &str, messages: &[ChatMessage], specs: &[flashagent_llm::ToolSpec]) -> u64 {
+/// So the same prefix is not sent twice to the same server: after a switch
+/// of provider it is another server's cache, even for a model of the same name.
+fn prefix_key(server: &str, model: &str, messages: &[ChatMessage], specs: &[flashagent_llm::ToolSpec]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    model.hash(&mut h);
+    (server, model).hash(&mut h);
     for m in messages {
         (m.role as u8).hash(&mut h);
         m.content.hash(&mut h);
@@ -50,10 +51,10 @@ fn prefix_key(model: &str, messages: &[ChatMessage], specs: &[flashagent_llm::To
 }
 
 impl App {
-    fn warm_key(&self, perm: &'static PermissionedTools, memory_block: &str) -> (u64, Vec<ChatMessage>, Vec<flashagent_llm::ToolSpec>) {
+    fn warm_key(&self, server: &str, perm: &'static PermissionedTools, memory_block: &str) -> (u64, Vec<ChatMessage>, Vec<flashagent_llm::ToolSpec>) {
         let messages = warm_messages(&self.history, &self.config.personality.voice_prelude(), memory_block);
         let specs = perm.specs();
-        (prefix_key(&self.current_model, &messages, &specs), messages, specs)
+        (prefix_key(server, &self.current_model, &messages, &specs), messages, specs)
     }
 
     /// Skipped when already sent or a turn has just read it.
@@ -72,7 +73,7 @@ impl App {
                 self.cache_warm_key = None;
             }
         }
-        let (key, messages, specs) = self.warm_key(perm, memory_block);
+        let (key, messages, specs) = self.warm_key(&source.0.base_url(), perm, memory_block);
         if self.cache_warm_key == Some(key) {
             return;
         }
@@ -102,8 +103,8 @@ impl App {
     }
 
     /// The next request's prefix is already cached after a turn.
-    pub(crate) fn note_prompt_cached(&mut self, perm: &'static PermissionedTools, memory_block: &str) {
-        self.cache_warm_key = Some(self.warm_key(perm, memory_block).0);
+    pub(crate) fn note_prompt_cached(&mut self, source: &BackendSource, perm: &'static PermissionedTools, memory_block: &str) {
+        self.cache_warm_key = Some(self.warm_key(&source.0.base_url(), perm, memory_block).0);
     }
 }
 
@@ -140,12 +141,13 @@ mod tests {
     #[test]
     fn a_change_of_model_voice_or_history_is_a_new_prefix() {
         let h = vec![ChatMessage::system("S")];
-        let base = prefix_key("m", &warm_messages(&h, &[], ""), &[]);
-        assert_eq!(base, prefix_key("m", &warm_messages(&h, &[], ""), &[]));
-        assert_ne!(base, prefix_key("other", &warm_messages(&h, &[], ""), &[]));
-        assert_ne!(base, prefix_key("m", &warm_messages(&h, &[ChatMessage::user("q")], ""), &[]));
+        let base = prefix_key("s", "m", &warm_messages(&h, &[], ""), &[]);
+        assert_eq!(base, prefix_key("s", "m", &warm_messages(&h, &[], ""), &[]));
+        assert_ne!(base, prefix_key("s", "other", &warm_messages(&h, &[], ""), &[]));
+        assert_ne!(base, prefix_key("another server", "m", &warm_messages(&h, &[], ""), &[]), "a provider switch warms the new server");
+        assert_ne!(base, prefix_key("s", "m", &warm_messages(&h, &[ChatMessage::user("q")], ""), &[]));
         let mut longer = h.clone();
         longer.push(ChatMessage::user("x"));
-        assert_ne!(base, prefix_key("m", &warm_messages(&longer, &[], ""), &[]));
+        assert_ne!(base, prefix_key("s", "m", &warm_messages(&longer, &[], ""), &[]));
     }
 }

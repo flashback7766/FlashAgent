@@ -13,7 +13,7 @@ background service and no IPC.
 | Crate | What it holds |
 |---|---|
 | `core` | Agent loop and its events, permission modes and approval gating, subagents, memory (rule files and the per-fact store), system prompt, config, auto-effort learning, tool-calling check. |
-| `llm` | One backend: an OpenAI-compatible streaming client. Thinking-preset discovery, text tool-call parsing, JSON repair, token estimates. |
+| `llm` | One model client and the protocols it speaks: OpenAI-compatible, Anthropic, Gemini, Ollama. Thinking-preset discovery, text tool-call parsing, JSON repair, token estimates. |
 | `tools` | Built-in tools (files, patching, shell, search, git, memory, web), the MCP client and marketplace, subagent spawning. |
 | `tui` | The terminal UI: chat view, composer, menus, settings, setup wizard, `/goal`, image attachments, what's-new screen. |
 | `svc` | The self-updater. |
@@ -41,7 +41,7 @@ sequenceDiagram
     actor User
     participant TUI as tui (App)
     participant Loop as core::AgentLoop
-    participant Model as llm::OpenAiCompat
+    participant Model as llm::Client
     participant Gate as core::PermissionedTools
     participant Tools as tools::BuiltinTools
 
@@ -105,17 +105,52 @@ mode the user is in is saved as the one to start in next time.
 
 ## Model backend
 
-Anything that speaks the OpenAI chat-completions API: LM Studio, Ollama,
-llama.cpp, vLLM, OpenRouter. What a model supports (context window, tool
-use, vision, thinking presets) is read from the server; the thinking
-profile is re-read when the model changes.
+`llm::Client` holds what outlives a request (the endpoint, the model, what
+the server was found to support and to refuse) and hands each request to
+the module for the protocol its endpoint speaks:
+
+| Protocol | Speaks to |
+|---|---|
+| OpenAI-compatible (`/chat/completions`) | LM Studio, llama.cpp, vLLM, Jan, KoboldCpp, text-generation-webui, LocalAI, OpenAI, OpenRouter, DeepSeek, Mistral, Groq, xAI, Together, Fireworks, Cerebras, any other copy |
+| Anthropic (`/v1/messages`) | Anthropic |
+| Gemini (`generateContent`) | Google Gemini |
+| Ollama (`/api/chat`) | Ollama, which can set the context window there and not on its `/v1` |
+
+The protocol is chosen with the provider, never guessed per request: one
+address can speak two (Ollama answers both). An address typed by hand gets
+`ApiProtocol::detect`, which recognises only hosts that speak one protocol
+and takes anything else as OpenAI-compatible. What a model supports (context
+window, tool use, vision, thinking presets) is read from the server; the
+thinking profile is re-read when the model changes.
+
+**Providers.** `config.json` keeps a list of providers (`ProviderProfile`
+in `core::config`: name, protocol, address, key, model) and the name of the
+one in use; `AppConfig::endpoint()` is that one's. The presets
+(`BackendPreset`) carry their protocol and the environment variables a key
+is looked for in. A provider with no saved key uses the first of those that
+is set, then `FLASHAGENT_API_KEY`. A config from before providers
+(`backend_url`, `api_key`, `model`) is read as one provider named after its
+server's preset. `--url` is a provider for the one run, never saved.
+
+**Switching.** `/provider`, Settings and the setup wizard change the provider
+while the app runs (`provider_switch.rs`): `Client::set_endpoint` drops what
+was learned about the old server, discovery asks the new one, and the model
+saved for the provider is taken up if the server lists it, else the loaded
+or first one. The context window, thinking profile, vision, effort bias,
+model list, system prompt and welcome card follow the model, and the new
+server's prompt cache is warmed. The history is protocol-neutral, so the
+conversation carries on. A switch is refused while a turn runs. Discovery
+settles its answer into whatever endpoint the client has when it ends, so a
+switch waits for a look already under way, and of two quick switches only
+the later one changes the client.
 
 A local server reuses the part of a request it has already read, so each
 request keeps its opening fixed: system prompt, voice example, history, and
 only then anything temporary. The first message would still start cold, so
 `warm.rs` sends that opening ahead, with a one-token answer, while the user
-types: at start, after `--resume`, after a change of model or voice. It is
-skipped when a turn has just read the same prefix.
+types: at start, after `--resume`, after a change of model, provider or
+voice. It is skipped when a turn has just read the same prefix from the
+same server.
 
 ## Memory
 
@@ -197,7 +232,8 @@ A conversation is saved after each turn and on exit, to
 
 ## Storage
 
-Plain files under `~/.flashagent/`: `config.json`, `sessions/*.json`,
+Plain files under `~/.flashagent/`: `config.json` (settings and the saved
+providers, keys included), `sessions/*.json`,
 `snapshots/<session>/` (file copies for `/rewind`), `prompt_history.jsonl`
 (what was sent, for ↑ and Ctrl+F; kept only while sessions are saved),
 `memory/` and `MEMORY.md`, `rules/`, `skills/`, `mcp.json`, `effort.json`,

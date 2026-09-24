@@ -46,6 +46,7 @@ mod turns;
 mod overlay;
 mod memory_summary;
 mod warm;
+mod provider_switch;
 use render::*;
 use overlay::Overlay;
 use tokens::*;
@@ -59,6 +60,8 @@ use memory_summary::*;
 use compact::*;
 use cards::*;
 use toolcheck_cli::*;
+use provider_switch::ProviderSwitch;
+use overlay_keys::navigate_menu;
 
 #[derive(Default, Clone)]
 struct QuestionUiState {
@@ -76,21 +79,12 @@ async fn main() -> Result<()> {
     let mut skip_trust = false;
     let mut session_start = SessionStart::New;
     let mut tool_test: Option<bool> = None;
+    let (mut cli_url, mut cli_model) = (None, None);
     let mut args = std::env::args().skip(1).peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--url" => {
-                if let Some(val) = args.next() {
-                    // For this run only: saving keeps the URL the config file had.
-                    config.url_override = Some((val.clone(), config.backend_url.clone()));
-                    config.backend_url = val;
-                }
-            }
-            "--model" => {
-                if let Some(val) = args.next() {
-                    config.model = val;
-                }
-            }
+            "--url" => cli_url = args.next(),
+            "--model" => cli_model = args.next(),
             "-v" | "--version" => {
                 println!("FlashAgent {}", flashagent_svc::updater::current_version());
                 return Ok(());
@@ -155,11 +149,20 @@ async fn main() -> Result<()> {
             "--setup" => force_setup = true,
             "-y" | "--yes" => skip_trust = true,
             "-h" | "--help" => {
-                println!("FlashAgent TUI\n\nUsage: flashagent [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Specify LLM model name\n  --url <endpoint>     API endpoint (default: http://localhost:1234/v1)\n  --setup              Run first-time setup wizard\n  --tool-test [--all-models]  Check whether the model can drive tools\n  -r, --resume [id]    Resume a saved session (without an id: pick one from this folder)\n  -c, --continue       Continue the latest session in this folder\n  -y, --yes            Skip directory trust confirmation\n  --uninstall [-y]     Remove FlashAgent; asks what data to delete (-y: take the defaults)\n  -h, --help           Show this help message");
+                println!("FlashAgent TUI\n\nUsage: flashagent [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Model to use, saved for the provider in use\n  --url <endpoint>     Talk to this server for this run only (saved providers: /provider)\n  --setup              Run first-time setup wizard\n  --tool-test [--all-models]  Check whether the model can drive tools\n  -r, --resume [id]    Resume a saved session (without an id: pick one from this folder)\n  -c, --continue       Continue the latest session in this folder\n  -y, --yes            Skip directory trust confirmation\n  --uninstall [-y]     Remove FlashAgent; asks what data to delete (-y: take the defaults)\n  -h, --help           Show this help message");
                 return Ok(());
             }
             other => anyhow::bail!("usage: flashagent [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--tool-test [--all-models]] [--setup] [-r|--resume [id]] [-c|--continue] [-y|--yes] (got {other})"),
         }
+    }
+
+    // After every flag is read, so their order does not matter: the model goes
+    // to the server this run uses.
+    if let Some(url) = cli_url {
+        config.use_url_for_this_run(&url);
+    }
+    if let Some(model) = cli_model {
+        config.active_profile_mut().model = model;
     }
 
     if let Some(all_models) = tool_test {
@@ -209,7 +212,7 @@ async fn main() -> Result<()> {
 
     let endpoint = config.endpoint();
     let url = endpoint.url.clone();
-    let mut model = config.model.clone();
+    let mut model = config.active_profile().model.clone();
 
     if std::env::var("FLASHAGENT_TRUST_DIR").is_ok() {
         skip_trust = true;
@@ -281,9 +284,13 @@ async fn main() -> Result<()> {
     if let Some(ref disc) = discovery {
         backend.adopt_discovery(disc);
     }
-    config.model = model.clone();
+    if !model.is_empty() {
+        config.active_profile_mut().model = model.clone();
+    }
 
-    if model.is_empty() {
+    // With another provider saved, the app opens anyway: /provider reaches it.
+    let elsewhere = config.providers.iter().any(|p| !p.same_server(config.active_profile()));
+    if model.is_empty() && !elsewhere {
         anyhow::bail!(
             "No model specified and could not connect to LLM server at {url} to auto-detect a loaded model.\n\
              Please start your server (e.g. LM Studio on port 1234) or run with --model <name> or --setup."
@@ -515,6 +522,9 @@ struct LoopCtx<'a> {
     channel_probe_tx: &'a tokio::sync::mpsc::UnboundedSender<ChannelTarget>,
     /// While an update is being checked or installed.
     update_busy: &'a Arc<AtomicBool>,
+    /// While the client asks a server what it runs; a switch of provider waits
+    /// for it.
+    is_discovering: &'a Arc<AtomicBool>,
     session_id: &'a String,
     mascot_mood: MascotMood,
     /// Already laid out.
@@ -608,7 +618,13 @@ struct App {
     announced_mood: MascotMood,
     config: AppConfig,
     available_models: Vec<String>,
+    /// A switch of provider whose server has not answered yet.
+    provider_switch: Option<ProviderSwitch>,
 }
+
+/// How the line under the prompt says the server is not there, so a switch
+/// of provider can take it away.
+pub(crate) const OFFLINE_NOTICE: &str = "No model server at";
 
 struct AppContext {
     config: AppConfig,
@@ -1097,6 +1113,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         announced_mood: MascotMood::Checking,
         config: app_config,
         available_models,
+        provider_switch: None,
     };
     update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
 
@@ -1114,6 +1131,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     };
     let initial_card = welcome_card(&WelcomeCard {
         model: &app.current_model,
+        provider: Some(&app.config.active_profile().name),
         cwd: &cwd_display,
         memory_docs,
         thinking: Some(&thinking_summary),
@@ -1205,7 +1223,9 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         }
         // The face shows whether the model server answered. Discovery reruns,
         // so starting the server later turns it around on its own.
-        let mascot_mood = if source.discovery().is_some() {
+        let mascot_mood = if app.provider_switch.is_some() {
+            MascotMood::Checking
+        } else if source.discovery().is_some() {
             MascotMood::Happy
         } else if started_at.elapsed() < std::time::Duration::from_secs(5) {
             MascotMood::Checking
@@ -1251,6 +1271,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                     channel_watch_tx: &channel_watch_tx,
                     channel_probe_tx: &channel_probe_tx,
                     update_busy: &update_busy,
+                    is_discovering: &is_discovering,
                     session_id: &session_id,
                     mascot_mood,
                     tip_lines: &tip_lines,
@@ -1270,8 +1291,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 MascotMood::Offline => {
                     app.background = Some(
                         BackgroundNotice::sticky(format!(
-                            "No model server at {} \u{b7} start it, or change Backend URL in Tab \u{2192} General",
-                            app.config.backend_url.trim_end_matches('/')
+                            "{OFFLINE_NOTICE} {} \u{b7} start it, or /provider switches to another",
+                            source.0.base_url()
                         ))
                         .warning(),
                     );
@@ -1498,14 +1519,16 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 }
                 app.renderer.request_reprint();
             }
+            UiEvent::ProviderReady { url, discovery } => {
+                let cx = loop_ctx!();
+                app.provider_ready(&cx, &url, discovery);
+                continue;
+            }
+            // From a server the client has since left (a provider switch after
+            // startup's first look), or overtaken by a switch under way.
+            UiEvent::ServerDiscovered(disc) if app.provider_switch.is_some() || disc.base_url != source.0.base_url() => {}
             UiEvent::ServerDiscovered(disc) => {
-                let is_lm_studio = disc.kind == flashagent_llm::thinking::ServerKind::LmStudio;
-                let has_loaded = disc.models.iter().any(|m| m.is_loaded);
-                app.available_models = if is_lm_studio && has_loaded {
-                    disc.models.iter().filter(|m| m.is_loaded).map(|m| m.id.clone()).collect()
-                } else {
-                    disc.models.iter().map(|m| m.id.clone()).collect()
-                };
+                app.available_models = flashagent_tui::providers::offered_models(&disc);
                 if let Some(active) = disc.active_model {
                     let new_ctx_len = active.context_length.or(active.max_context_length).unwrap_or(131_072);
                     let new_ctx_disp = active.context_display();
@@ -1524,10 +1547,10 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                         tools_arc.set_vision_supported(model_sees_images(&source, &app.current_model));
                         update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
 
-                        // Only for the server in the config: after the wizard saved a
-                        // new one, the old server's model must not be written beside it.
-                        if model_changed && app.config.backend_url.trim_end_matches('/') == source.0.base_url() {
-                            app.config.model = app.current_model.clone();
+                        // Only for the provider the client talks to: another's model
+                        // must not be written beside it.
+                        if model_changed && app.on_active_provider(&source) {
+                            app.config.active_profile_mut().model = app.current_model.clone();
                             app.save_config();
                         }
                         if model_changed {
@@ -1704,6 +1727,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                     for ch in one_line().chars() {
                         sm.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);
                     }
+                } else if let Some(Overlay::Providers(view)) = app.overlay.as_mut() {
+                    view.handle_paste(&pasted);
                 } else if let Some(menu) = app.overlay.as_mut().and_then(Overlay::select_menu_mut) {
                     // A menu's filter (F3, Ctrl+K) takes the paste as typing.
                     for ch in one_line().chars() {
@@ -2124,7 +2149,7 @@ mod tests {
         let view = settings_for_runtime(&cfg, PermissionMode::Bypass, "high", "gemma", &[], 131_072);
         assert_eq!(view.config.permission_mode, PermissionMode::Bypass);
         assert_eq!(view.config.thinking_effort, "high");
-        assert_eq!(view.config.model, "gemma");
+        assert_eq!(view.config.active_profile().model, "gemma");
     }
 
     #[test]
