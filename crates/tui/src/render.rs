@@ -739,6 +739,47 @@ fn append_composer(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize
     (input_line_idx, text_cursor)
 }
 
+fn append_channel_card(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize, inner_w: usize, t: u64) -> usize {
+    let prompt = st.channel_prompt.expect("channel card needs a prompt");
+    let title = format!(" {} ", st.prompt_title);
+    let title = title.as_str();
+    // Same weight as an approval card: this replaces the binary.
+    let border_color = anim::pulse(t, 1800, Rgb(225, 175, 95), Rgb(250, 215, 150)).fg();
+    let reset = "\x1b[0m";
+    let dash_w = inner_w.saturating_sub(visible_width(title) + 1);
+    tail.push((
+        LineKind::System,
+        format!("{border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
+    ));
+    // Word-wrapped: a sentence to read, not a command to inspect.
+    for row in wrap_plain(prompt, inner_w.saturating_sub(3)) {
+        tail.push((
+            LineKind::System,
+            pad_box_row(&format!(" \x1b[38;2;240;235;225m{row}\x1b[0m"), width),
+        ));
+    }
+    tail.push((
+        LineKind::System,
+        pad_box_row(" \x1b[1;38;2;30;26;22;48;2;225;175;95m Yes \x1b[0m  \x1b[38;2;190;185;175m No \x1b[0m", width),
+    ));
+    let input_line_idx = tail.len();
+    tail.push((
+        LineKind::System,
+        format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
+    ));
+    input_line_idx
+}
+
+struct LayoutInputs<'a> {
+    width: usize,
+    height: u16,
+    card_key: CardKey,
+    card_start: usize,
+    input_line_idx: usize,
+    text_cursor: Option<u16>,
+    border_color: &'a str,
+}
+
 impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn frame(
@@ -807,33 +848,8 @@ impl Renderer {
 
         if gate.pending().is_some() {
             input_line_idx = append_approval_card(&mut tail, gate, &st, width, inner_w, &border_color);
-        } else if let Some(prompt) = st.channel_prompt {
-            let title = format!(" {} ", st.prompt_title);
-            let title = title.as_str();
-            // Same weight as an approval card: this replaces the binary.
-            let border_color = anim::pulse(t, 1800, Rgb(225, 175, 95), Rgb(250, 215, 150)).fg();
-            let reset = "\x1b[0m";
-            let dash_w = inner_w.saturating_sub(visible_width(title) + 1);
-            tail.push((
-                LineKind::System,
-                format!("{border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
-            ));
-            // Word-wrapped: a sentence to read, not a command to inspect.
-            for row in wrap_plain(prompt, inner_w.saturating_sub(3)) {
-                tail.push((
-                    LineKind::System,
-                    pad_box_row(&format!(" \x1b[38;2;240;235;225m{row}\x1b[0m"), width),
-                ));
-            }
-            tail.push((
-                LineKind::System,
-                pad_box_row(" \x1b[1;38;2;30;26;22;48;2;225;175;95m Yes \x1b[0m  \x1b[38;2;190;185;175m No \x1b[0m", width),
-            ));
-            input_line_idx = tail.len();
-            tail.push((
-                LineKind::System,
-                format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
-            ));
+        } else if st.channel_prompt.is_some() {
+            input_line_idx = append_channel_card(&mut tail, &st, width, inner_w, t);
         } else if question_gate.pending().is_some() {
             input_line_idx = append_question_card(&mut tail, question_gate, &st, width, inner_w, &border_color);
         } else if let Some(overlay) = overlay {
@@ -884,87 +900,93 @@ impl Renderer {
         tail.push((LineKind::System, footer_status(width, context_usage, &st, awaiting_user)));
 
 
-        // The conversation scrolls; the composer and the footer under it stay where
-        // they are, so a reply can be written while reading back.
-        let height = height as usize;
-        // A card taller than the screen keeps its head (what is asked, what is to
-        // be approved) and its end (the choices, the keys); rows between go, and a
-        // row says so. Cut from the top like the composer, it lost its title and
-        // target first.
-        if matches!(card_key, CardKey::Approval | CardKey::Question | CardKey::Channel) {
-            const HEAD: usize = 2;
-            const END: usize = 6;
-            let card_rows = tail.len() - card_start;
-            if card_rows > height && card_rows > HEAD + END {
-                let from = card_start + HEAD;
-                let to = (from + card_rows - height + 1).min(tail.len() - END);
-                if to > from + 1 {
-                    let hidden = to - from;
-                    let note = format!(
-                        " \x1b[38;2;135;130;125m\u{2026} {} not shown \u{b7} a taller window shows them\x1b[0m",
-                        flashagent_tui::plural(hidden, "row", "rows")
-                    );
-                    let marker = pad_box_row(&note, width).replace(BORDER_ESC, &border_color);
-                    tail.splice(from..to, [(LineKind::System, marker)]);
-                    if input_line_idx >= to {
-                        input_line_idx -= hidden - 1;
-                    } else if input_line_idx >= from {
-                        input_line_idx = from;
-                    }
+        self.paint_layout(&settled, &mut tail, LayoutInputs {
+            width, height, card_key, card_start, input_line_idx, text_cursor, border_color: &border_color,
+        });
+    }
+    fn paint_layout(&mut self, settled: &[RenderLine], tail: &mut Vec<RenderLine>, layout: LayoutInputs<'_>) {
+        let LayoutInputs { width, height, card_key, card_start, mut input_line_idx, text_cursor, border_color } = layout;
+    // The conversation scrolls; the composer and the footer under it stay where
+    // they are, so a reply can be written while reading back.
+    let height = height as usize;
+    // A card taller than the screen keeps its head (what is asked, what is to
+    // be approved) and its end (the choices, the keys); rows between go, and a
+    // row says so. Cut from the top like the composer, it lost its title and
+    // target first.
+    if matches!(card_key, CardKey::Approval | CardKey::Question | CardKey::Channel) {
+        const HEAD: usize = 2;
+        const END: usize = 6;
+        let card_rows = tail.len() - card_start;
+        if card_rows > height && card_rows > HEAD + END {
+            let from = card_start + HEAD;
+            let to = (from + card_rows - height + 1).min(tail.len() - END);
+            if to > from + 1 {
+                let hidden = to - from;
+                let note = format!(
+                    " \x1b[38;2;135;130;125m\u{2026} {} not shown \u{b7} a taller window shows them\x1b[0m",
+                    flashagent_tui::plural(hidden, "row", "rows")
+                );
+                let marker = pad_box_row(&note, width).replace(BORDER_ESC, border_color);
+                tail.splice(from..to, [(LineKind::System, marker)]);
+                if input_line_idx >= to {
+                    input_line_idx -= hidden - 1;
+                } else if input_line_idx >= from {
+                    input_line_idx = from;
                 }
             }
         }
-        let chat_len = settled.len() + card_start;
-        let bottom = &tail[card_start..];
-        let chat_room = height.saturating_sub(bottom.len());
-        if self.scroll_offset > 0 && chat_len > self.total_lines {
-            // New lines arrived under a view scrolled back: it stays on what is read.
-            self.scroll_offset += chat_len - self.total_lines;
-        }
-        self.total_lines = chat_len;
-        // One row of the room goes to the line that says the view is scrolled.
-        self.max_scroll = chat_len.saturating_sub(chat_room.saturating_sub(1).max(1));
-        self.scroll_offset = self.scroll_offset.min(self.max_scroll);
+    }
+    let chat_len = settled.len() + card_start;
+    let bottom = &tail[card_start..];
+    let chat_room = height.saturating_sub(bottom.len());
+    if self.scroll_offset > 0 && chat_len > self.total_lines {
+        // New lines arrived under a view scrolled back: it stays on what is read.
+        self.scroll_offset += chat_len - self.total_lines;
+    }
+    self.total_lines = chat_len;
+    // One row of the room goes to the line that says the view is scrolled.
+    self.max_scroll = chat_len.saturating_sub(chat_room.saturating_sub(1).max(1));
+    self.scroll_offset = self.scroll_offset.min(self.max_scroll);
 
-        // Every row gets its kind's colour, restored after each reset inside it,
-        // and is cut to the width: a row wider than the screen would wrap onto
-        // the next and push everything under it down.
-        let styled = |(kind, text): &RenderLine| {
-            let prefix = crossterm::style::SetForegroundColor(color(*kind)).to_string();
-            format!("{prefix}{}\x1b[39m", restore_line_color(&clip_ansi(text, width), &prefix))
-        };
-        let chat = || settled.iter().chain(tail[..card_start].iter());
-        let mut first_chat_row = chat_len.saturating_sub(chat_room);
-        let mut rows: Vec<String> = if self.scroll_offset > 0 && chat_room > 1 {
-            let end = chat_len - self.scroll_offset;
-            let start = end.saturating_sub(chat_room - 1);
-            first_chat_row = start;
-            let mut rows: Vec<String> = chat().skip(start).take(end - start).map(styled).collect();
-            let marker = format!(
-                " \x1b[38;2;100;95;90m── \x1b[38;2;225;175;95m↓ {} below\x1b[38;2;100;95;90m · End or Esc to return ──\x1b[0m",
-                flashagent_tui::plural(self.scroll_offset, "more line", "more lines")
-            );
-            rows.push(marker);
-            rows
-        } else {
-            // Anchored: the end of the conversation right above the composer, or, while
-            // it is short, the composer right under it.
-            chat().skip(chat_len.saturating_sub(chat_room)).map(styled).collect()
-        };
-        let chat_rows = rows.len();
-        rows.extend(bottom.iter().map(styled));
-        // A composer taller than the screen keeps its end, where the typing is.
-        let cut = rows.len().saturating_sub(height);
-        rows.drain(..cut);
-        let scrolled_marker = usize::from(self.scroll_offset > 0 && chat_room > 1);
-        self.chat_view = (first_chat_row + cut, chat_rows.saturating_sub(scrolled_marker).saturating_sub(cut));
-        // The terminal's cursor is shown only where text is typed; cards and menus
-        // mark their own choice.
-        let cursor = text_cursor.and_then(|col| {
-            let row = (chat_rows + input_line_idx.checked_sub(card_start)?).checked_sub(cut)?;
-            Some((row as u16, col))
-        });
-        self.screen.paint(&rows, cursor);
+    // Every row gets its kind's colour, restored after each reset inside it,
+    // and is cut to the width: a row wider than the screen would wrap onto
+    // the next and push everything under it down.
+    let styled = |(kind, text): &RenderLine| {
+        let prefix = crossterm::style::SetForegroundColor(color(*kind)).to_string();
+        format!("{prefix}{}\x1b[39m", restore_line_color(&clip_ansi(text, width), &prefix))
+    };
+    let chat = || settled.iter().chain(tail[..card_start].iter());
+    let mut first_chat_row = chat_len.saturating_sub(chat_room);
+    let mut rows: Vec<String> = if self.scroll_offset > 0 && chat_room > 1 {
+        let end = chat_len - self.scroll_offset;
+        let start = end.saturating_sub(chat_room - 1);
+        first_chat_row = start;
+        let mut rows: Vec<String> = chat().skip(start).take(end - start).map(styled).collect();
+        let marker = format!(
+            " \x1b[38;2;100;95;90m── \x1b[38;2;225;175;95m↓ {} below\x1b[38;2;100;95;90m · End or Esc to return ──\x1b[0m",
+            flashagent_tui::plural(self.scroll_offset, "more line", "more lines")
+        );
+        rows.push(marker);
+        rows
+    } else {
+        // Anchored: the end of the conversation right above the composer, or, while
+        // it is short, the composer right under it.
+        chat().skip(chat_len.saturating_sub(chat_room)).map(styled).collect()
+    };
+    let chat_rows = rows.len();
+    rows.extend(bottom.iter().map(styled));
+    // A composer taller than the screen keeps its end, where the typing is.
+    let cut = rows.len().saturating_sub(height);
+    rows.drain(..cut);
+    let scrolled_marker = usize::from(self.scroll_offset > 0 && chat_room > 1);
+    self.chat_view = (first_chat_row + cut, chat_rows.saturating_sub(scrolled_marker).saturating_sub(cut));
+    // The terminal's cursor is shown only where text is typed; cards and menus
+    // mark their own choice.
+    let cursor = text_cursor.and_then(|col| {
+        let row = (chat_rows + input_line_idx.checked_sub(card_start)?).checked_sub(cut)?;
+        Some((row as u16, col))
+    });
+    self.screen.paint(&rows, cursor);
     }
 }
 
