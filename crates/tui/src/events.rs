@@ -261,6 +261,18 @@ impl App {
 
     pub(crate) fn on_server_discovered(&mut self, cx: &LoopCtx<'_>, disc: flashagent_llm::ServerDiscovery) {
         self.available_models = flashagent_tui::providers::offered_models(&disc);
+        // A cloud listing names no loaded model, so the one above never
+        // renames `models/gemini-…`, saved that way, when the listing is late.
+        if let Some(listed) = disc.active_model.is_none().then(|| flashagent_tui::providers::listed_name(&self.current_model, &disc)).flatten() {
+            self.current_model = listed;
+            cx.source.set_model(&self.current_model);
+            if self.on_active_provider(cx.source) {
+                self.config.active_profile_mut().model = self.current_model.clone();
+                self.save_config();
+            }
+            self.refresh_welcome(cx.source, cx.mascot_mood);
+            self.renderer.request_reprint();
+        }
         if let Some(active) = disc.active_model {
             let new_ctx_len = active.context_length.or(active.max_context_length).unwrap_or(131_072);
             let new_ctx_disp = active.context_display();
