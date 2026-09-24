@@ -4,18 +4,14 @@ use super::*;
 pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
     // Without a server every probe fails, and the verdict would blame the model.
     let url = config.backend_url.trim_end_matches('/');
-    let probe = flashagent_llm::OpenAiCompat::new(&config.backend_url, "", config.api_key.clone());
+    let probe = flashagent_llm::Client::new(config.endpoint(), "");
     if config.model.trim().is_empty() || probe.discover_server().await.is_none() {
         return Some(format!(
             "Tool-calling check skipped: {url} did not list any models. Run `flashagent --tool-test` once it does."
         ));
     }
     println!("\nChecking whether {} can drive tools…", config.model);
-    let source = BackendSource(flashagent_llm::OpenAiCompat::new(
-        &config.backend_url,
-        &config.model,
-        config.api_key.clone(),
-    ));
+    let source = BackendSource(flashagent_llm::Client::new(config.endpoint(), &config.model));
     let report = flashagent_core::toolcheck::check_model(
         &source,
         &config.model,
@@ -49,11 +45,7 @@ pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool) -> 
     let timeout = std::time::Duration::from_secs(120);
     let mut models = vec![config.model.clone()];
     if all_models {
-        let probe = BackendSource(flashagent_llm::OpenAiCompat::new(
-            &config.backend_url,
-            &config.model,
-            config.api_key.clone(),
-        ));
+        let probe = BackendSource(flashagent_llm::Client::new(config.endpoint(), &config.model));
         match probe.discover_server().await {
             Some(disc) if !disc.models.is_empty() => {
                 models = disc
@@ -73,11 +65,7 @@ pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool) -> 
     let mut reports = Vec::new();
     for model in &models {
         println!("\n{model}");
-        let source = BackendSource(flashagent_llm::OpenAiCompat::new(
-            &config.backend_url,
-            model,
-            config.api_key.clone(),
-        ));
+        let source = BackendSource(flashagent_llm::Client::new(config.endpoint(), model));
         let report = flashagent_core::toolcheck::check_model(&source, model, timeout).await;
         for line in report.lines() {
             println!("{line}");

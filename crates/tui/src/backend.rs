@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) struct BackendSource(pub(crate) flashagent_llm::OpenAiCompat);
+pub(crate) struct BackendSource(pub(crate) flashagent_llm::Client);
 
 impl BackendSource {
     pub(crate) fn profile(&self) -> Option<flashagent_llm::thinking::ThinkingProfile> {
