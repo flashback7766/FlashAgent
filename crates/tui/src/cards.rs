@@ -43,16 +43,6 @@ impl App {
     }
 }
 
-/// Animated, it starts as its top border and the tick loop draws the rest;
-/// otherwise it goes up whole.
-pub(crate) fn opening_card(card: Vec<RenderLine>, animate: bool) -> Vec<RenderLine> {
-    if animate {
-        revealed(card, 1)
-    } else {
-        card
-    }
-}
-
 /// The first `rows` rows drawn, the rest held blank: the card is at its full
 /// height from the first frame, so the composer under it does not step down
 /// the screen while it appears.

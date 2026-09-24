@@ -262,21 +262,30 @@ fn the_recap_waits_until_the_user_has_gone_quiet() {
     let server = MockServer::start(vec![Reply::Text("First answer.".into())]);
     let home = Home::new();
     home.set_up(&server.url);
-    // Five seconds of quiet, keys under one apart: a busy runner that reads a key
-    // late still sees one well inside the window.
-    let term = Term::start_with_env(&home, &["-y"], COLS, ROWS, &[("FLASHAGENT_RECAP_IDLE_SECS", "5")]);
+    // Keep typing for longer than the quiet period, waiting until each key is
+    // visible so the test measures what the app received. The period is long
+    // beside the pause between keys: a runner busy with other terminals can
+    // take seconds to show one.
+    let term = Term::start_with_env(&home, &["-y"], COLS, ROWS, &[("FLASHAGENT_RECAP_IDLE_SECS", "8")]);
     term.wait_for(PROMPT, WAIT);
     let recaps = || server.requests().iter().filter(|r| !r.is_turn() && r.body.to_string().contains("conversation analyzer")).count();
 
     ask(&term, "first question", "First answer.");
-    // Typing keeps it back: the model stays free for the next question.
-    for _ in 0..6 {
-        std::thread::sleep(Duration::from_millis(900));
-        term.send("x");
-        term.send("\x7f");
+    // Typing keeps it back, and so does pasting, each for longer than the
+    // period: the model stays free for the next question. A Windows console
+    // turns a paste into keys.
+    for count in 1..=20 {
+        if cfg!(unix) && count > 10 {
+            term.send("\x1b[200~z\x1b[201~");
+        } else {
+            term.send("z");
+        }
+        term.wait_for(&format!("› {}", "z".repeat(count)), WAIT);
+        std::thread::sleep(Duration::from_millis(800));
     }
     assert_eq!(recaps(), 0, "the recap was asked for while the user was typing");
 
+    term.send(ESC);
     let deadline = std::time::Instant::now() + WAIT;
     while recaps() == 0 {
         assert!(std::time::Instant::now() < deadline, "no recap once the user went quiet");
@@ -420,6 +429,24 @@ fn planning_mode_runs_a_command_that_only_reads_without_asking() {
     let turns = server.turns();
     let last = sent(turns.last().expect("the model was asked again after the command"));
     assert!(last.contains("visible.txt"), "the command's output did not reach the model: {last}");
+}
+
+#[test]
+fn the_tool_test_asks_the_server_about_the_model_first_as_the_app_does() {
+    // A model that takes no tools met its first scenario with a refusal the
+    // app never sends it: the check did not know what the server said.
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    home.set_up(&server.url);
+    let term = Term::start(&home, &["--tool-test"], COLS, ROWS);
+    term.wait_for("makes a tool call at all", WAIT);
+    let requests = server.requests();
+    let first_turn = requests.iter().position(|r| r.is_turn()).expect("the check sent a turn");
+    assert!(
+        requests[..first_turn].iter().any(|r| r.method == "GET" && r.path.ends_with("/models")),
+        "the first scenario went out before the model list was read: {:?}",
+        requests.iter().map(|r| format!("{} {}", r.method, r.path)).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -2180,11 +2207,11 @@ fn idle_screen_moves(animations: bool, watch: Duration) -> (String, Option<Strin
     let home = Home::new();
     let term = ready_with(&home, &server, serde_json::json!({ "animations": animations }));
     std::thread::sleep(Duration::from_millis(300));
-    let first = term.screen();
+    let first = term.screen_colours();
     let deadline = std::time::Instant::now() + watch;
     while std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
-        let now = term.screen();
+        let now = term.screen_colours();
         if now != first {
             return (first, Some(now));
         }
@@ -2197,7 +2224,7 @@ fn with_animations_off_an_idle_screen_holds_still() {
     // With motion off, nothing may change while nobody does anything.
     let (first, moved) = idle_screen_moves(false, Duration::from_millis(1500));
     assert_eq!(moved, None, "the screen moved with animations off; it was:\n{first}");
-    // The tip pauses between its moves: watched long enough to see one on a slow runner.
+    // The mascot breathes in colour alone, so the screen is compared with its colours.
     let (_, moved) = idle_screen_moves(true, Duration::from_secs(10));
     assert!(moved.is_some(), "this test cannot tell: nothing moves with animations on either");
 }
@@ -2648,8 +2675,8 @@ fn a_task_stopped_from_the_task_list_wakes_nobody() {
 
     term.type_text("/tasks");
     term.send(ENTER);
-    // Its last row: the card unfolds as it opens.
-    let list = term.wait_for("Esc close", WAIT);
+    // The autocomplete popup also says "Esc close" before Enter opens this card.
+    let list = term.wait_for("#1", WAIT);
     assert!(list.contains("#1") && list.contains("running"), "{list}");
     term.send("k");
     term.wait_for("stopped", WAIT);
@@ -2675,8 +2702,8 @@ fn quitting_says_how_many_background_tasks_it_stops() {
 
 #[test]
 fn a_notice_waits_while_the_user_is_typing() {
-    // Long enough to be typing before it ends, on a slow runner too.
-    let command = if cfg!(windows) { "ping -n 9 127.0.0.1 >NUL" } else { "sleep 8" };
+    // The task finishes only after the draft is visible, even on a busy runner.
+    let command = "i=0; while [ \"$i\" -lt 300 ] && [ ! -f release-notice ]; do sleep 0.1; i=$((i+1)); done";
     let server = MockServer::start(vec![
         Reply::ToolCall {
             name: "run_shell".into(),
@@ -2689,6 +2716,8 @@ fn a_notice_waits_while_the_user_is_typing() {
     let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
     ask(&term, "wait a second", "Waiting on it.");
     term.type_text("half a thought");
+    term.wait_for("half a thought", WAIT);
+    std::fs::write(home.work().join("release-notice"), "go").unwrap();
     term.wait_for("Background task 1 exited", WAIT);
     std::thread::sleep(Duration::from_millis(1000));
     assert_eq!(server.turns().len(), 2, "a turn started under the user's draft");

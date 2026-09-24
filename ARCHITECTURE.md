@@ -91,6 +91,16 @@ tool start and finish, usage) is emitted for the UI.
 Every tool call the model makes gets a result, including when the user
 cancels, because strict servers reject a history with an unanswered call.
 
+The loop nudges the model on its own at times: to go on with an answer cut
+off at the output limit, to answer instead of ending on a scratchpad, or to
+make a call it announced and did not make. A nudge goes out with one
+request and is not stored, and a continuation is merged into the answer it
+continues. A reply that carries signed state (Anthropic's thinking) is the
+exception: the signature is bound to the request as sent, so the nudge and
+what it answered stay in the history as they were. `core::is_prompt` tells
+such messages, like tool pictures and task notices, from what the user
+said.
+
 `run_shell` uses `sh` on Unix. On Windows it uses Git Bash when Git for
 Windows is installed, since models write Unix commands and cmd.exe runs
 none of them; otherwise cmd.exe, and the system prompt names the shell
@@ -130,7 +140,13 @@ address can speak two (Ollama answers both). An address typed by hand gets
 `ApiProtocol::detect`, which recognises only hosts that speak one protocol
 and takes anything else as OpenAI-compatible. What a model supports (context
 window, tool use, vision, thinking presets) is read from the server; the
-thinking profile is re-read when the model changes.
+thinking profile is re-read when the model changes. A model without tool
+support (Ollama's without the `tools` capability, Gemma on the Gemini API),
+or one that refuses them, gets its tools described in the system prompt
+instead (`llm::text_tools`), its earlier calls and results written back as
+Hermes markup, and the loop's text-call parser reads its calls out of the
+reply. Gemma also refuses a system instruction; it then opens the first
+user message.
 
 **Providers.** `config.json` keeps a list of providers (`ProviderProfile`
 in `core::config`: name, protocol, address, key, model) and the name of the
@@ -158,10 +174,11 @@ saved for the provider is taken up if the server lists it, else the loaded
 or first one. The context window, thinking profile, vision, effort bias,
 model list, system prompt and welcome card follow the model, and the new
 server's prompt cache is warmed. The history is protocol-neutral, so the
-conversation carries on. A switch is refused while a turn runs. Discovery
-settles its answer into whatever endpoint the client has when it ends, so a
-switch waits for a look already under way, and of two quick switches only
-the later one changes the client.
+conversation carries on. A switch is refused while a turn runs. The
+endpoint changes on the UI thread, so quick switches reach the client in
+order. The client counts endpoint changes: a look at a server reads the
+count before it asks, and its answer is dropped if the count moved, so a
+look at the old server that ends after the switch changes nothing.
 
 A local server reuses the part of a request it has already read, so each
 request keeps its opening fixed: system prompt, voice example, history, and
@@ -281,6 +298,6 @@ new version runs on the next start.
   it, and reads the screen.
 
 CI runs `cargo test --workspace` and `cargo clippy --all-targets
--D warnings` on Linux, Windows and macOS, and the same run gates every
-release. The tests that need the internet run nightly
+-D warnings` on Linux, Windows and macOS, checks that the workspace builds
+on Rust 1.88, and the same run gates every release. The tests that need the internet run nightly
 (`.github/workflows/web-tools.yml`).

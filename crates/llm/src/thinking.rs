@@ -132,6 +132,14 @@ pub struct ServerDiscovery {
     pub kind: ServerKind,
 }
 
+impl ServerDiscovery {
+    /// What the server said about `id`. Some servers leave the model they have
+    /// loaded out of their list, so the active one is looked at too.
+    pub fn model(&self, id: &str) -> Option<&DiscoveredModel> {
+        self.models.iter().chain(&self.active_model).find(|m| m.id == id)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThinkingProfile {
     pub presets: Vec<String>,
@@ -1096,6 +1104,24 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loaded_model_left_out_of_the_list_is_still_found() {
+        let model = |id: &str| DiscoveredModel {
+            id: id.into(),
+            display_name: None,
+            is_loaded: false,
+            context_length: Some(8192),
+            max_context_length: None,
+            thinking: ThinkingProfile::unreported(),
+            supports_tools: true,
+            supports_vision: false,
+        };
+        let disc = ServerDiscovery { models: vec![model("listed")], active_model: Some(model("loaded")), ..Default::default() };
+        assert_eq!(disc.model("listed").map(|m| m.id.as_str()), Some("listed"));
+        assert_eq!(disc.model("loaded").map(|m| m.id.as_str()), Some("loaded"));
+        assert!(disc.model("absent").is_none());
+    }
 
     #[test]
     fn gemini_models_bring_their_context_and_thinking_levels() {

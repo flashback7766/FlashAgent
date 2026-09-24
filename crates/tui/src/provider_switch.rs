@@ -18,9 +18,7 @@ pub(crate) struct ProviderSwitch {
 /// The window assumed for a model no server has described.
 const UNKNOWN_CONTEXT: usize = 131_072;
 
-/// Counts switches, so of two waiting for the client only the later one
-/// changes it: the earlier could otherwise win the race and leave the client
-/// on the server the user left.
+/// Counts switches, so only the latest one reports its server's answer.
 static SWITCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl App {
@@ -92,23 +90,19 @@ impl App {
             self.background = None;
         }
         self.notice(format!("Connecting to {} \u{b7} {}\u{2026}", profile.name, endpoint.url));
+        // Here, not in the task, so quick switches reach the client in order. A
+        // look at the old server still under way is dropped by the client.
+        cx.source.0.set_endpoint(endpoint.clone());
+        cx.source.0.set_model(&profile.model);
         let (source, tx, busy) = (cx.source.clone(), cx.tx.clone(), cx.is_discovering.clone());
         let this_switch = SWITCHES.fetch_add(1, Ordering::SeqCst) + 1;
         tokio::spawn(async move {
-            // A look at the old server still under way would settle its models into
-            // the new one, so it finishes first; none starts until this one ends.
-            while busy.swap(true, Ordering::SeqCst) {
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-            if SWITCHES.load(Ordering::SeqCst) != this_switch {
-                busy.store(false, Ordering::SeqCst);
-                return;
-            }
-            source.0.set_endpoint(endpoint.clone());
-            source.0.set_model(&profile.model);
+            busy.store(true, Ordering::SeqCst);
             let discovery = source.discover_server().await;
             busy.store(false, Ordering::SeqCst);
-            let _ = tx.send(UiEvent::ProviderReady { url: endpoint.url, discovery });
+            if SWITCHES.load(Ordering::SeqCst) == this_switch {
+                let _ = tx.send(UiEvent::ProviderReady { url: endpoint.url, discovery });
+            }
         });
     }
 

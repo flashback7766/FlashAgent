@@ -1,6 +1,7 @@
 //! Terminal client: wires backend, loop, tools and permissions in-process and
 //! renders through `flashagent_tui`.
 
+use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -20,7 +21,7 @@ use flashagent_tui::goal::{commit_goal_milestone, format_plan, GoalBudgets, Goal
 use flashagent_tui::MascotMood;
 use flashagent_tui::{
     clip_ansi, pad_box_row, render_session_saved_card, restore_line_color,
-    visible_width, welcome_card, WelcomeCard, AutocompletePopup, ChatView, ConfirmChoice, ConfirmSelect,
+    visible_width, welcome_card, AutocompletePopup, ChatView, ConfirmChoice, ConfirmSelect,
     ContextModal, LineKind, McpModal, McpModalAction, McpViewTab, PrefillTracker, ReasoningExpansion,
     RenderLine, SamplingAction, SamplingView, SelectItem, SelectMenu, SettingsAction, SettingsView,
     TuiGate, TuiQuestionGate, UiEvent,
@@ -48,6 +49,7 @@ mod memory_summary;
 mod warm;
 mod provider_switch;
 mod tasks;
+mod events;
 use render::*;
 use overlay::Overlay;
 use tokens::*;
@@ -72,10 +74,7 @@ struct QuestionUiState {
     selected_indices: std::collections::BTreeSet<usize>,
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> Result<()> {
-    flashagent_svc::updater::remove_stale_backups_beside_exe();
-    let mut config = AppConfig::load();
+async fn cli_start(config: &mut AppConfig) -> Result<Option<(bool, bool, SessionStart)>> {
     let mut force_setup = false;
     let mut skip_trust = false;
     let mut session_start = SessionStart::New;
@@ -88,7 +87,7 @@ async fn main() -> Result<()> {
             "--model" => cli_model = args.next(),
             "-v" | "--version" => {
                 println!("FlashAgent {}", flashagent_svc::updater::current_version());
-                return Ok(());
+                return Ok(None);
             }
             "--resume" | "-r" => {
                 // Without an id: pick from this folder's sessions.
@@ -105,13 +104,13 @@ async fn main() -> Result<()> {
                     eprintln!("Uninstall stopped: {e}");
                     std::process::exit(1);
                 }
-                return Ok(());
+                return Ok(None);
             }
             "--update" => {
                 if flashagent_svc::updater::is_dev_mode() {
                     println!("In-app updater is disabled in development mode (running from source repository or cargo target build).");
                     println!("To update your dev build, pull latest git commits and run `cargo build --release`.");
-                    return Ok(());
+                    return Ok(None);
                 }
                 println!("Checking for updates on {} channel...", config.update_channel.label());
                 match flashagent_svc::updater::check_for_updates(config.update_channel, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
@@ -128,7 +127,7 @@ async fn main() -> Result<()> {
                         eprintln!("Update check failed: {e}");
                     }
                 }
-                return Ok(());
+                return Ok(None);
             }
             "--channel" => {
                 if let Some(val) = args.next() {
@@ -139,10 +138,10 @@ async fn main() -> Result<()> {
                     }
                     let _ = config.save();
                     println!("Release channel set to {}", config.update_channel.label());
-                    return Ok(());
+                    return Ok(None);
                 } else {
                     println!("Current channel: {}", config.update_channel.label());
-                    return Ok(());
+                    return Ok(None);
                 }
             }
             "--tool-test" => tool_test = Some(false),
@@ -151,7 +150,7 @@ async fn main() -> Result<()> {
             "-y" | "--yes" => skip_trust = true,
             "-h" | "--help" => {
                 println!("FlashAgent TUI\n\nUsage: flashagent [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Model to use, saved for the provider in use\n  --url <endpoint>     Talk to this server for this run only (saved providers: /provider)\n  --setup              Run first-time setup wizard\n  --tool-test [--all-models]  Check whether the model can drive tools\n  -r, --resume [id]    Resume a saved session (without an id: pick one from this folder)\n  -c, --continue       Continue the latest session in this folder\n  -y, --yes            Skip directory trust confirmation\n  --uninstall [-y]     Remove FlashAgent; asks what data to delete (-y: take the defaults)\n  -h, --help           Show this help message");
-                return Ok(());
+                return Ok(None);
             }
             other => anyhow::bail!("usage: flashagent [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--tool-test [--all-models]] [--setup] [-r|--resume [id]] [-c|--continue] [-y|--yes] (got {other})"),
         }
@@ -167,23 +166,25 @@ async fn main() -> Result<()> {
     }
 
     if let Some(all_models) = tool_test {
-        let code = run_tool_check_cli(&config, all_models).await;
+        let code = run_tool_check_cli(config, all_models).await;
         std::process::exit(code);
     }
 
-    use std::io::IsTerminal;
+    Ok(Some((force_setup, skip_trust, session_start)))
+}
+
+async fn startup_screens(config: &mut AppConfig, force_setup: bool) -> Option<bool> {
     // The screens before the chat (setup, release notes, trust) wear the chosen
     // look too.
     flashagent_tui::theme::set(config.color_theme);
     flashagent_tui::anim::set_enabled(config.animations);
     // Carried into the first conversation: the screen it was printed on is about
     // to be cleared.
-    let mut first_run_verdict: Option<String> = None;
     let mut ran_setup = false;
     if (!config.setup_completed || force_setup) && std::io::stdout().is_terminal() {
-        let completed = flashagent_tui::run_wizard(&mut config).await.unwrap_or(false);
+        let completed = flashagent_tui::run_wizard(config).await.unwrap_or(false);
         if !completed {
-            return Ok(());
+            return None;
         }
         // Nothing new to show: stamp the version so the next update has a baseline.
         config.last_seen_version = Some(flashagent_svc::updater::current_version().to_string());
@@ -211,6 +212,36 @@ async fn main() -> Result<()> {
         }
     }
 
+    Some(ran_setup)
+}
+
+struct BackendStartup {
+    source: Arc<BackendSource>,
+    model: String,
+    context_display: Option<String>,
+    context_capacity: usize,
+    cwd_display: String,
+    cwd: std::path::PathBuf,
+    initial_effort: String,
+    available_models: Vec<String>,
+    first_run_verdict: Option<String>,
+    pending_discovery: Option<tokio::task::JoinHandle<Option<flashagent_llm::ServerDiscovery>>>,
+}
+
+fn display_cwd(cwd: &std::path::Path) -> String {
+    let home_str = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    if !home_str.is_empty() {
+        cwd.strip_prefix(&home_str).map(|rel| {
+            let s = rel.to_string_lossy();
+            if s.is_empty() { "~".to_string() } else { format!("~/{}", s.trim_start_matches('/')) }
+        }).unwrap_or_else(|_| cwd.display().to_string())
+    } else {
+        cwd.display().to_string()
+    }
+}
+
+async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup: bool) -> Result<Option<BackendStartup>> {
+    let mut first_run_verdict: Option<String> = None;
     let endpoint = config.endpoint();
     let url = endpoint.url.clone();
     let mut model = config.active_profile().model.clone();
@@ -236,7 +267,7 @@ async fn main() -> Result<()> {
         let action = flashagent_tui::startup::run_trust_screen(&mut cwd).await?;
         if action == flashagent_tui::StartupAction::Quit {
             discovery_task.abort();
-            return Ok(());
+            return Ok(None);
         }
         config.trust_directory(&cwd);
         let _ = config.save();
@@ -246,14 +277,14 @@ async fn main() -> Result<()> {
         // Whether the model can drive tools decides whether anything works. Asked
         // after the trust question, which is instant, so nobody waits for a check
         // before being asked where they are.
-        first_run_verdict = first_run_tool_check(&config).await;
+        first_run_verdict = first_run_tool_check(config).await;
     }
 
     // Leaked once so the spawned loop can hold &'static references; the process
     // is the session.
     let backend = flashagent_llm::Client::new(endpoint, &model);
     backend.set_max_retries(config.network_retries);
-    flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(&config));
+    flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(config));
     backend.set_user_sampling(config.sampling_preset == flashagent_core::config::SamplingPreset::Custom);
 
     let startup_timeout = if model.is_empty() {
@@ -287,9 +318,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    let active_model_info = discovery.as_ref().and_then(|d| {
-        d.models.iter().find(|m| m.id == model).cloned()
-    });
+    let active_model_info = discovery.as_ref().and_then(|d| d.model(&model).cloned());
 
     let context_display = active_model_info.as_ref().and_then(|m| m.context_display());
     let context_capacity = active_model_info
@@ -318,21 +347,54 @@ async fn main() -> Result<()> {
         "auto".to_string()
     };
     let source: Arc<BackendSource> = Arc::new(BackendSource(backend));
-    let home_str = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
-    let cwd_display = if !home_str.is_empty() {
-        cwd.strip_prefix(&home_str)
-            .map(|rel| {
-                let s = rel.to_string_lossy();
-                if s.is_empty() {
-                    "~".to_string()
-                } else {
-                    format!("~/{}", s.trim_start_matches('/'))
-                }
+    let cwd_display = display_cwd(&cwd);
+
+    Ok(Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, initial_effort, available_models, first_run_verdict, pending_discovery }))
+}
+
+fn install_crash_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::cursor::Show,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen,
+        );
+        let _ = crossterm::terminal::disable_raw_mode();
+        let log_content = format!(
+            "FlashAgent Crash Report\nVersion: {}\nTime: {:?}\nPanic: {}\nBacktrace:\n{:?}\n\nPlease report this issue at: https://github.com/flashback7766/FlashAgent/issues\n",
+            flashagent_svc::updater::current_version(),
+            std::time::SystemTime::now(),
+            info,
+            std::backtrace::Backtrace::capture()
+        );
+        // Never into the user's project directory.
+        let log_path = flashagent_home_dir()
+            .map(|d| {
+                let _ = std::fs::create_dir_all(&d);
+                d.join("crash.log")
             })
-            .unwrap_or_else(|_| cwd.display().to_string())
-    } else {
-        cwd.display().to_string()
-    };
+            .unwrap_or_else(|| std::env::temp_dir().join("flashagent-crash.log"));
+        let _ = std::fs::write(&log_path, log_content);
+        eprintln!("\x1b[1;38;2;245;120;120mFlashAgent encountered an unexpected crash.\x1b[0m");
+        eprintln!("Crash report written to {}. Please submit an issue at: https://github.com/flashback7766/FlashAgent/issues", log_path.display());
+        default_hook(info);
+    }));
+
+}
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+async fn main() -> Result<()> {
+    flashagent_svc::updater::remove_stale_backups_beside_exe();
+    let mut config = AppConfig::load();
+    let Some((force_setup, skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
+
+    let Some(ran_setup) = startup_screens(&mut config, force_setup).await else { return Ok(()) };
+    let Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, initial_effort, available_models, first_run_verdict, pending_discovery }) =
+        prepare_backend(&mut config, skip_trust, ran_setup).await? else { return Ok(()) };
 
     let gate = TuiGate::new();
     let question_gate = TuiQuestionGate::new();
@@ -390,45 +452,9 @@ async fn main() -> Result<()> {
     let memory_block = flashagent_core::injection_block(&docs, config.token_budget);
     let memory_docs = docs.len();
 
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::cursor::Show,
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            LeaveAlternateScreen,
-        );
-        let _ = crossterm::terminal::disable_raw_mode();
-        let log_content = format!(
-            "FlashAgent Crash Report\nVersion: {}\nTime: {:?}\nPanic: {}\nBacktrace:\n{:?}\n\nPlease report this issue at: https://github.com/flashback7766/FlashAgent/issues\n",
-            flashagent_svc::updater::current_version(),
-            std::time::SystemTime::now(),
-            info,
-            std::backtrace::Backtrace::capture()
-        );
-        // Never into the user's project directory.
-        let log_path = flashagent_home_dir()
-            .map(|d| {
-                let _ = std::fs::create_dir_all(&d);
-                d.join("crash.log")
-            })
-            .unwrap_or_else(|| std::env::temp_dir().join("flashagent-crash.log"));
-        let _ = std::fs::write(&log_path, log_content);
-        eprintln!("\x1b[1;38;2;245;120;120mFlashAgent encountered an unexpected crash.\x1b[0m");
-        eprintln!("Crash report written to {}. Please submit an issue at: https://github.com/flashback7766/FlashAgent/issues", log_path.display());
-        default_hook(info);
-    }));
+    install_crash_hook();
 
-    enable_raw_mode()?;
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        EnterAlternateScreen,
-        EnableBracketedPaste,
-        EnableMouseCapture,
-    );
-    let result = run_app(AppContext {
+    run_terminal(AppContext {
         config,
         source,
         perm,
@@ -447,8 +473,19 @@ async fn main() -> Result<()> {
         cwd: cwd.clone(),
         first_run_verdict,
         pending_discovery,
-    })
-    .await;
+    }).await
+}
+
+async fn run_terminal(ctx: AppContext) -> Result<()> {
+    enable_raw_mode()?;
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture,
+    );
+    let result = run_app(ctx).await;
+
     flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
     // The frame may have hidden the cursor (a menu was open); the shell needs it back.
     let _ = crossterm::execute!(
@@ -524,6 +561,8 @@ struct LoopCtx<'a> {
     tools_arc: &'a Arc<BuiltinTools>,
     memory_block: &'a String,
     cwd_display: &'a String,
+    /// Where the file tools write.
+    cwd: &'a std::path::Path,
     cancel: &'a Arc<AtomicBool>,
     tx: &'a tokio::sync::mpsc::UnboundedSender<UiEvent>,
     rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
@@ -537,6 +576,8 @@ struct LoopCtx<'a> {
     is_discovering: &'a Arc<AtomicBool>,
     session_id: &'a String,
     mascot_mood: MascotMood,
+    /// For the welcome card's reveal.
+    started_at: std::time::Instant,
     /// Already laid out.
     tip_lines: &'a Vec<String>,
 }
@@ -866,30 +907,7 @@ fn open_snapshots(perm: &PermissionedTools, session_id: &str, cwd: &std::path::P
 /// `None`: nothing worth saving; `Ok(id)`: saved; `Err(why)`: not saved.
 type SaveOutcome = Option<std::result::Result<String, String>>;
 
-async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
-    let AppContext {
-        config: app_config,
-        source,
-        perm,
-        gate,
-        question_gate,
-        tools_arc,
-        memory_block,
-        memory_docs,
-        model,
-        context_display,
-        context_capacity,
-        cwd_display,
-        initial_effort,
-        available_models,
-        session_start,
-        cwd,
-        first_run_verdict,
-        pending_discovery,
-    } = ctx;
-    let cancel = Arc::new(AtomicBool::new(false));
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
-
+fn start_event_sources(tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>, tools_arc: &Arc<BuiltinTools>, pending_discovery: Option<tokio::task::JoinHandle<Option<flashagent_llm::ServerDiscovery>>>) {
     {
         let mut ended = tools_arc.shells().subscribe();
         let tx = tx.clone();
@@ -975,20 +993,9 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         });
     }
 
-    let system_prompt_config = SystemPromptConfig::new()
-        .with_cwd(&cwd_display)
-        .with_platform(flashagent_tools::shell::platform())
-        .with_model(&model)
-        .with_effort(&initial_effort);
-    let system_prompt_text =
-        build_system_prompt(&system_prompt_config.clone().with_personality(&app_config.personality));
+}
 
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(80));
-    // Startup has just asked the server; the first poll is not due yet.
-    let mut check_interval =
-        tokio::time::interval_at(tokio::time::Instant::now() + SERVER_POLL_INTERVAL, SERVER_POLL_INTERVAL);
-    check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let is_discovering = Arc::new(AtomicBool::new(false));
+fn resolve_session_start(session_start: SessionStart, cwd_display: &str) -> (Option<String>, bool, Option<String>) {
     // --continue opens the newest session; --resume without an id opens the list.
     let mut open_session_picker = false;
     let mut session_note: Option<String> = None;
@@ -1004,27 +1011,18 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
             None
         }
         SessionStart::Continue => {
-            let newest = sessions_dir().and_then(|dir| sessions_in(&dir, &cwd_display).into_iter().next());
+            let newest = sessions_dir().and_then(|dir| sessions_in(&dir, cwd_display).into_iter().next());
             if newest.is_none() {
                 session_note = Some("No saved session in this folder yet; starting a new one.".to_string());
             }
             newest.map(|s| s.id)
         }
     };
-    let mut session_id = resume_session_id.clone().unwrap_or_else(new_session_id);
-    open_snapshots(perm, &session_id, &cwd);
+    (resume_session_id, open_session_picker, session_note)
+}
 
-    let effort_memory = flashagent_core::EffortMemory::load();
-    source.set_effort_bias(effort_memory.steps(&model));
-    tools_arc.set_vision_supported(model_sees_images(&source, &model));
-    let (channel_probe_tx, mut channel_probe_rx) =
-        tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
-    let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
-    let (channel_watch_tx, mut channel_watch_rx) = tokio::sync::watch::channel(app_config.update_channel);
-    // The background updater and Ctrl+U both claim this, so they never download
-    // over each other.
-    let update_busy = Arc::new(AtomicBool::new(false));
-    if app_config.auto_check_updates && !flashagent_svc::updater::is_dev_mode() {
+fn start_background_updates(auto_check_updates: bool, mut channel_watch_rx: tokio::sync::watch::Receiver<flashagent_core::config::UpdateChannel>, update_tx: tokio::sync::mpsc::UnboundedSender<UpdateNotice>, update_busy: Arc<AtomicBool>) {
+    if auto_check_updates && !flashagent_svc::updater::is_dev_mode() {
         let update_tx_clone = update_tx.clone();
         let busy = update_busy.clone();
         tokio::spawn(async move {
@@ -1070,10 +1068,25 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         });
     }
 
-    let started_at = std::time::Instant::now();
-    const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
-    let mut last_draw = started_at;
-    let mut app = App {
+}
+
+struct InitialApp {
+    app_config: AppConfig,
+    model: String,
+    context_display: Option<String>,
+    context_capacity: usize,
+    cwd_display: String,
+    initial_effort: String,
+    available_models: Vec<String>,
+    system_prompt_text: String,
+    system_prompt_config: SystemPromptConfig,
+    memory_docs: usize,
+    effort_memory: flashagent_core::EffortMemory,
+}
+
+fn initial_app(init: InitialApp) -> App {
+    let InitialApp { app_config, model, context_display, context_capacity, cwd_display, initial_effort, available_models, system_prompt_text, system_prompt_config, memory_docs, effort_memory } = init;
+    App {
         question_ui_state: QuestionUiState::default(),
         history: vec![ChatMessage::system(system_prompt_text)],
         input: flashagent_tui::Composer::new(),
@@ -1145,680 +1158,237 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         config: app_config,
         available_models,
         provider_switch: None,
-    };
-    update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
+    }
+}
 
-    let (term_w, term_h) = app.last_term_size;
-    let thinking_summary = if let Some(ref p) = source.profile() {
-        if p.supported && !p.presets.is_empty() {
-            format!("{} [{}]", app.current_effort, p.presets.join(", "))
-        } else if !p.supported && !p.is_unreported() {
-            "disabled (unsupported)".to_string()
-        } else {
-            app.current_effort.clone()
+/// What the handlers share for the whole run; [`LoopCtx`] borrows it per frame.
+struct Wiring {
+    source: Arc<BackendSource>,
+    perm: &'static PermissionedTools,
+    gate: Arc<TuiGate>,
+    question_gate: Arc<TuiQuestionGate>,
+    tools_arc: Arc<BuiltinTools>,
+    memory_block: String,
+    cwd_display: String,
+    cwd: std::path::PathBuf,
+    cancel: Arc<AtomicBool>,
+    tx: tokio::sync::mpsc::UnboundedSender<UiEvent>,
+    update_tx: tokio::sync::mpsc::UnboundedSender<UpdateNotice>,
+    channel_watch_tx: tokio::sync::watch::Sender<flashagent_core::config::UpdateChannel>,
+    channel_probe_tx: tokio::sync::mpsc::UnboundedSender<ChannelTarget>,
+    update_busy: Arc<AtomicBool>,
+    is_discovering: Arc<AtomicBool>,
+    started_at: std::time::Instant,
+}
+
+impl Wiring {
+    fn cx<'a>(
+        &'a self,
+        rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
+        session_id: &'a String,
+        mascot_mood: MascotMood,
+        tip_lines: &'a Vec<String>,
+    ) -> LoopCtx<'a> {
+        LoopCtx {
+            source: &self.source,
+            perm: self.perm,
+            gate: &self.gate,
+            question_gate: &self.question_gate,
+            tools_arc: &self.tools_arc,
+            memory_block: &self.memory_block,
+            cwd_display: &self.cwd_display,
+            cwd: &self.cwd,
+            cancel: &self.cancel,
+            tx: &self.tx,
+            rx,
+            update_tx: &self.update_tx,
+            channel_watch_tx: &self.channel_watch_tx,
+            channel_probe_tx: &self.channel_probe_tx,
+            update_busy: &self.update_busy,
+            is_discovering: &self.is_discovering,
+            session_id,
+            mascot_mood,
+            started_at: self.started_at,
+            tip_lines,
         }
-    } else {
-        app.current_effort.clone()
+    }
+}
+
+/// The receiving ends the event loop waits on.
+struct Inbox {
+    events: tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
+    updates: tokio::sync::mpsc::UnboundedReceiver<UpdateNotice>,
+    channel_probes: tokio::sync::mpsc::UnboundedReceiver<ChannelTarget>,
+}
+
+async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
+    let (tx, events) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
+    start_event_sources(&tx, &ctx.tools_arc, ctx.pending_discovery);
+    let (channel_probe_tx, channel_probes) = tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
+    let (update_tx, updates) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
+    let (channel_watch_tx, channel_watch_rx) = tokio::sync::watch::channel(ctx.config.update_channel);
+    // The background updater and Ctrl+U both claim this, so they never download
+    // over each other.
+    let update_busy = Arc::new(AtomicBool::new(false));
+    start_background_updates(ctx.config.auto_check_updates, channel_watch_rx, update_tx.clone(), update_busy.clone());
+    let w = Wiring {
+        source: ctx.source,
+        perm: ctx.perm,
+        gate: ctx.gate,
+        question_gate: ctx.question_gate,
+        tools_arc: ctx.tools_arc,
+        memory_block: ctx.memory_block,
+        cwd_display: ctx.cwd_display,
+        cwd: ctx.cwd,
+        cancel: Arc::new(AtomicBool::new(false)),
+        tx,
+        update_tx,
+        channel_watch_tx,
+        channel_probe_tx,
+        update_busy,
+        is_discovering: Arc::new(AtomicBool::new(false)),
+        started_at: std::time::Instant::now(),
     };
-    let initial_card = welcome_card(&WelcomeCard {
-        model: &app.current_model,
-        provider: Some(&app.config.active_profile().name),
-        cwd: &cwd_display,
-        memory_docs,
-        thinking: Some(&thinking_summary),
-        context_window: app.current_context.as_deref(),
-        width: term_w as usize,
-        height: term_h as usize,
-        show_mascot: app.config.show_mascot,
-        ..WelcomeCard::default()
+
+    let system_prompt_config = SystemPromptConfig::new()
+        .with_cwd(&w.cwd_display)
+        .with_platform(flashagent_tools::shell::platform())
+        .with_model(&ctx.model)
+        .with_effort(&ctx.initial_effort);
+    let system_prompt_text =
+        build_system_prompt(&system_prompt_config.clone().with_personality(&ctx.config.personality));
+    let (resume_session_id, open_session_picker, session_note) = resolve_session_start(ctx.session_start, &w.cwd_display);
+    let mut session_id = resume_session_id.clone().unwrap_or_else(new_session_id);
+    open_snapshots(w.perm, &session_id, &w.cwd);
+
+    let effort_memory = flashagent_core::EffortMemory::load();
+    w.source.set_effort_bias(effort_memory.steps(&ctx.model));
+    w.tools_arc.set_vision_supported(model_sees_images(&w.source, &ctx.model));
+    let mut app = initial_app(InitialApp {
+        app_config: ctx.config,
+        model: ctx.model,
+        context_display: ctx.context_display,
+        context_capacity: ctx.context_capacity,
+        cwd_display: w.cwd_display.clone(),
+        initial_effort: ctx.initial_effort,
+        available_models: ctx.available_models,
+        system_prompt_text,
+        system_prompt_config,
+        memory_docs: ctx.memory_docs,
+        effort_memory,
     });
+    update_context_usage(&mut app.context_usage, &app.history, &w.memory_block, &app.chat, w.perm);
+
     // Before anything is drawn. A resumed session's card is drawn whole: the
     // reveal stops once the transcript has a user message.
     flashagent_tui::anim::set_enabled(app.config.animations);
-    app.chat.update_welcome_card(opening_card(initial_card, resume_session_id.is_none() && app.config.animations));
-    if let Some(verdict) = first_run_verdict {
+    let reveal = resume_session_id.is_none() && app.config.animations;
+    app.animate_welcome(&w.source, MascotMood::Checking, None, reveal.then_some(1));
+    if let Some(verdict) = ctx.first_run_verdict {
         app.chat.push_system(&verdict);
     }
-
-    if let Some(ref resume_id) = resume_session_id {
-        match sessions_dir()
-            .ok_or_else(|| "No home directory to read sessions from; starting fresh.".to_string())
-            .and_then(|dir| read_session(&dir, resume_id))
-        {
-            Ok(saved) => {
-                let restored = restore_session(saved, &mut app.chat, &mut app.history);
-                update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
-                app.notice(format!("Resumed session {resume_id} · {}", flashagent_tui::plural(restored, "message", "messages")));
-            }
-            Err(why) => {
-                // The unreadable file keeps its name: saving over it would destroy what may
-                // still be recoverable by hand.
-                session_id = new_session_id();
-                open_snapshots(perm, &session_id, &cwd);
-                app.chat.push_line(LineKind::ToolError, why);
-            }
-        }
+    // The unreadable file keeps its name: saving over it would destroy what may
+    // still be recoverable by hand.
+    if resume_session_id.as_deref().is_some_and(|id| !app.resume_at_start(id, &w.memory_block, w.perm)) {
+        session_id = new_session_id();
+        open_snapshots(w.perm, &session_id, &w.cwd);
     }
     if let Some(note) = session_note {
         app.notice(note);
     }
     if open_session_picker {
-        app.open_session_picker(&cwd_display, &session_id);
+        app.open_session_picker(&w.cwd_display, &session_id);
     }
+    app.warm_prompt_cache(&w.source, w.perm, &w.memory_block);
 
-    app.warm_prompt_cache(&source, perm, &memory_block);
+    event_loop(&mut app, &w, Inbox { events, updates, channel_probes }, &mut session_id).await;
 
-    macro_rules! finish {
-        () => {
-            if app.config.auto_save_sessions && worth_saving(&app.history) {
-                Some(save_on_exit(&session_id, &app.current_model, &cwd_display, &app.history))
-            } else {
-                None
-            }
-        };
-    }
+    w.tools_arc.shells().stop_all();
+    let saved = app.config.auto_save_sessions && worth_saving(&app.history);
+    Ok(saved.then(|| save_on_exit(&session_id, &app.current_model, &w.cwd_display, &app.history)))
+}
 
-    'main_loop: loop {
-        // The open session is saved first, then the picked one replaces it on
-        // screen, in the history and in the snapshot store.
-        if let Some(id) = app.pending_resume.take().filter(|id| *id != session_id) {
-            if app.config.auto_save_sessions && worth_saving(&app.history) {
-                if let Err(why) = save_session_file(&session_id, &app.current_model, &cwd_display, &app.history) {
-                    // Switching away would drop the only copy, the one in memory.
-                    app.notice(format!("Not switching: this session could not be saved ({why})"));
-                    continue;
-                }
-            }
-            match sessions_dir()
-                .ok_or_else(|| "No home directory to read sessions from".to_string())
-                .and_then(|dir| read_session(&dir, &id))
-            {
-                Ok(saved) => {
-                    let base_system = app
-                        .history
-                        .first()
-                        .map(|m| m.content.split(COMPACTED_MARK).next().unwrap_or_default().to_string())
-                        .unwrap_or_default();
-                    app.history = vec![ChatMessage::system(base_system)];
-                    app.chat.clear();
-                    let restored = restore_session(saved, &mut app.chat, &mut app.history);
-                    session_id = id;
-                    open_snapshots(perm, &session_id, &cwd);
-                    app.latest_suggestion = None;
-                    update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
-                    app.notice(format!("Resumed session {session_id} · {}", flashagent_tui::plural(restored, "message", "messages")));
-                    app.warm_prompt_cache(&source, perm, &memory_block);
-                }
-                Err(why) => app.notice(why),
+/// Draws, waits for the next event and hands it to its handler, until one
+/// quits.
+async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mut String) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(80));
+    // Startup has just asked the server; the first poll is not due yet.
+    let mut check_interval =
+        tokio::time::interval_at(tokio::time::Instant::now() + SERVER_POLL_INTERVAL, SERVER_POLL_INTERVAL);
+    check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+    let mut last_draw = w.started_at;
+    loop {
+        // Switched here, where the session id and the snapshot store live.
+        if let Some(id) = app.pending_resume.take().filter(|id| id != session_id) {
+            if app.switch_session(session_id, &id, &w.memory_block, w.perm) {
+                *session_id = id;
+                open_snapshots(w.perm, session_id, &w.cwd);
+                app.warm_prompt_cache(&w.source, w.perm, &w.memory_block);
             }
         }
-        // The face shows whether the model server answered. Discovery reruns,
-        // so starting the server later turns it around on its own.
-        let mascot_mood = if app.provider_switch.is_some() {
-            MascotMood::Checking
-        } else if source.discovery().is_some() {
-            MascotMood::Happy
-        } else if started_at.elapsed() < std::time::Duration::from_secs(5) {
-            MascotMood::Checking
-        } else {
-            MascotMood::Offline
-        };
-        let autocomplete = if !app.running
-            && app.input.starts_with('/')
-            && app.overlay.is_none()
-            && gate.pending().is_none()
-            && question_gate.pending().is_none()
-        {
-            AutocompletePopup::for_input(&app.input, std::path::Path::new("."), app.autocomplete_idx)
-        } else {
-            None
-        };
+        let mascot_mood = app.server_mood(&w.source, w.started_at);
+        let autocomplete = app.autocomplete_popup(&w.gate, &w.question_gate);
 
         let (term_w, term_h) = crossterm::terminal::size().unwrap_or((100, 24));
         if (term_w, term_h) != app.last_term_size {
             app.last_term_size = (term_w, term_h);
             if !app.chat.has_user_message() {
-                app.animate_welcome(&source, mascot_mood, Some(term_w as usize), None);
+                app.animate_welcome(&w.source, mascot_mood, Some(term_w as usize), None);
             }
         }
         // Two tip rows only when the window can spare them.
         let tip_rows = if term_h >= 20 { 2 } else { 1 };
+        app.tip_animator.fit_to(term_w as usize, tip_rows);
         let tip_lines = app.tip_animator.render_lines(term_w as usize, tip_rows);
-        // A macro, not a function: it borrows this frame's own values.
-        macro_rules! loop_ctx {
-            () => {
-                LoopCtx {
-                    source: &source,
-                    perm,
-                    gate: &gate,
-                    question_gate: &question_gate,
-                    tools_arc: &tools_arc,
-                    memory_block: &memory_block,
-                    cwd_display: &cwd_display,
-                    cancel: &cancel,
-                    tx: &tx,
-                    rx: &mut rx,
-                    update_tx: &update_tx,
-                    channel_watch_tx: &channel_watch_tx,
-                    channel_probe_tx: &channel_probe_tx,
-                    update_busy: &update_busy,
-                    is_discovering: &is_discovering,
-                    session_id: &session_id,
-                    mascot_mood,
-                    tip_lines: &tip_lines,
-                }
-            };
-        }
 
-        if let Some((_, instant)) = app.copy_toast {
-            if instant.elapsed().as_secs_f32() >= 2.5 {
-                app.copy_toast = None;
-            }
+        if app.copy_toast.as_ref().is_some_and(|(_, shown)| shown.elapsed().as_secs_f32() >= 2.5) {
+            app.copy_toast = None;
         }
-        // An unreachable server is announced once, and taken back when it answers.
-        if mascot_mood != app.announced_mood {
-            let previous = std::mem::replace(&mut app.announced_mood, mascot_mood);
-            match mascot_mood {
-                MascotMood::Offline => {
-                    app.background = Some(
-                        BackgroundNotice::sticky(format!(
-                            "{OFFLINE_NOTICE} {} \u{b7} start it, or /provider switches to another",
-                            source.0.base_url()
-                        ))
-                        .warning(),
-                    );
-                }
-                MascotMood::Happy if previous == MascotMood::Offline => {
-                    app.background = Some(BackgroundNotice::fading(
-                        format!("Model server is answering \u{b7} {}", app.current_model),
-                        5,
-                    ));
-                }
-                _ => {}
-            }
-        }
+        app.announce_mood(mascot_mood, &w.source);
 
         // A burst of events (a fast stream, a key held down) is drawn once rather
         // than once per event, or the screen falls behind what it shows; never
         // more than a frame late.
-        {
-            let cx = loop_ctx!();
-            app.tasks_tick(&cx);
-        }
-        if rx.is_empty() || last_draw.elapsed() >= FRAME {
-            let cx = loop_ctx!();
-            app.draw(&cx, autocomplete.as_ref());
+        app.tasks_tick(&w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines));
+        if inbox.events.is_empty() || last_draw.elapsed() >= FRAME {
+            app.draw(&w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines), autocomplete.as_ref());
             last_draw = std::time::Instant::now();
         }
 
         let ev = tokio::select! {
-            Some(target) = channel_probe_rx.recv() => {
-                if let Some(sw) = app.channel_switch.as_mut() {
-                    sw.target = target;
-                    app.renderer.request_reprint();
-                }
+            Some(target) = inbox.channel_probes.recv() => {
+                app.on_channel_target(target);
                 continue;
             }
-            Some(notice) = update_rx.recv() => {
-                match notice {
-                    UpdateNotice::Available { version, asset_name, download_url, checksums_url } => {
-                        app.pending_update = Some((version.clone(), asset_name, download_url, checksums_url));
-                        app.background = Some(BackgroundNotice::sticky(format!(
-                            "Update available: {version} · press Ctrl+U to install"
-                        )));
-                        if let Some(s) = app.settings_view_mut() {
-                            s.update_check_status = Some(format!("Available: {version} (Press Ctrl+U)"));
-                        }
-                    }
-                    UpdateNotice::Progress { version, stage } => {
-                        // Kept either way, so Ctrl+U can show a download that started unasked.
-                        if app.update_watched {
-                            BackgroundNotice::update_sticky(&mut app.background, update_progress_line(&version, stage));
-                        }
-                        app.update_progress = Some((version, stage));
-                    }
-                    UpdateNotice::Ready { version } => {
-                        app.pending_update = None;
-                        app.update_progress = None;
-                        app.update_watched = false;
-                        app.background = Some(BackgroundNotice::sticky(format!(
-                            "Updated to {version} \u{b7} restart FlashAgent to use it"
-                        )));
-                        if let Some(s) = app.settings_view_mut() {
-                            s.update_check_status = Some(format!("Ready: {version} (restart to apply)"));
-                        }
-                    }
-                    UpdateNotice::UpToDate { version } => {
-                        if let Some(s) = app.settings_view_mut() {
-                            s.update_check_status = Some(format!("Up to date ({version})"));
-                        }
-                        if std::mem::take(&mut app.update_watched) {
-                            app.background = Some(BackgroundNotice::fading(
-                                format!("FlashAgent {version} is up to date"),
-                                6,
-                            ));
-                        }
-                    }
-                    UpdateNotice::Failed { error } => {
-                        app.update_progress = None;
-                        if let Some(s) = app.settings_view_mut() {
-                            s.update_check_status = Some(format!("Error: {error}"));
-                        }
-                        if std::mem::take(&mut app.update_watched) {
-                            app.background = Some(
-                                BackgroundNotice::fading(
-                                    format!("Update failed: {}", flashagent_tui::truncate_middle(&error, 90)),
-                                    10,
-                                )
-                                .warning(),
-                            );
-                        }
-                    }
-                }
-                app.renderer.request_reprint();
+            Some(notice) = inbox.updates.recv() => {
+                app.on_update_notice(notice);
                 continue;
             }
             // Animations run on the clock alone; counting events made spinners race.
-            Some(ev) = rx.recv() => ev,
+            Some(ev) = inbox.events.recv() => ev,
             // While something moves, frames come every 16 ms instead of the idle tick.
             _ = tokio::time::sleep(std::time::Duration::from_millis(16)),
-                if app.animating() || (welcome_reveal_rows(started_at).is_some() && !app.chat.has_user_message()) =>
+                if app.animating() || (welcome_reveal_rows(w.started_at).is_some() && !app.chat.has_user_message()) =>
             {
-                if let Some(rows) = welcome_reveal_rows(started_at).filter(|_| !app.running) {
-                    app.animate_welcome(&source, mascot_mood, None, Some(rows));
+                if let Some(rows) = welcome_reveal_rows(w.started_at).filter(|_| !app.running) {
+                    app.animate_welcome(&w.source, mascot_mood, None, Some(rows));
                 }
                 continue;
             }
             _ = tick.tick() => {
-                app.tick_n += 1;
-                app.tip_animator.tick();
-                app.start_recap_if_due(&source, &tx);
-                // A question that timed out (a /goal one after 120 s) goes without a
-                // key; its selection and half-written answer must not open the next.
-                if question_gate.pending().is_none() {
-                    app.question_ui_state = QuestionUiState::default();
-                }
-                if app.background.as_ref().is_some_and(BackgroundNotice::expired) {
-                    app.background = None;
-                    app.renderer.request_reprint();
-                }
-                // The loop did not wind down in time (a tool ignoring cancellation). History
-                // keeps the prompt but not the partial turn, and the user is told.
-                if app.running && app.cancel_requested.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(3)) {
-                    if let Some(handle) = app.active_turn_handle.take() {
-                        handle.abort();
-                    }
-                    app.running = false;
-                    app.turn_started = None;
-                    app.cancel_requested = None;
-                    app.aborted_turn = Some(app.turn_counter);
-                    close_dangling_user(&mut app.history, "[turn aborted by the user]");
-                    app.task_inbox.turn_aborted();
-                    app.flush_task_lines();
-                    app.token_tracker.on_finished();
-                    if let Some(saved) = app.goal_state.take() {
-                        tools_arc.set_goal_mode(false);
-                        perm.state().set_goal_active(false);
-                        perm.state().set_mode(saved.mode);
-                        app.current_effort = saved.effort.clone();
-                        app.max_steps = saved.max_steps;
-                        if let Some(ledger) = app.goal_ledger.take() {
-                            push_goal_report(&mut app.chat, &ledger, DoneReason::Cancelled);
-                        }
-                    }
-                    app.chat.on_event(&flashagent_core::LoopEvent::Done(flashagent_core::DoneReason::Cancelled));
-                    app.flash_turn_end(Some(DoneReason::Cancelled));
-                    app.custom_placeholder = Some("Turn aborted; its partial output was not kept in the model context".to_string());
-                    app.renderer.request_reprint();
-                }
-                let current_term_size = crossterm::terminal::size().unwrap_or((100, 24));
-                let term_resized = current_term_size != app.last_term_size;
-                if term_resized {
-                    app.last_term_size = current_term_size;
-                }
-                // Rebuilt only on ticks where the card actually looks different.
-                let reveal_rows = welcome_reveal_rows(started_at);
-                let mood_changed = mascot_mood != app.last_mascot_mood;
-                app.last_mascot_mood = mascot_mood;
-                if !app.running
-                    && !app.chat.has_user_message()
-                    && (term_resized
-                        || mood_changed
-                        || reveal_rows.is_some()
-                        || flashagent_tui::mascot_needs_repaint(app.tick_n))
-                {
-                    app.animate_welcome(&source, mascot_mood, Some(current_term_size.0 as usize), reveal_rows);
-                }
-                if term_resized {
-                    app.renderer.request_reprint();
-                }
+                app.on_tick(&w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines));
                 continue;
             }
             _ = check_interval.tick() => {
-                app.warm_prompt_cache(&source, perm, &memory_block);
-                if should_poll_server(app.running, source.0.requests_in_flight(), is_discovering.load(Ordering::Relaxed)) {
-                    is_discovering.store(true, Ordering::Relaxed);
-                    let source_bg = source.clone();
-                    let tx_bg = tx.clone();
-                    let flag = is_discovering.clone();
-                    tokio::spawn(async move {
-                        if let Some(disc) = source_bg.discover_server().await {
-                            let _ = tx_bg.send(UiEvent::ServerDiscovered(disc));
-                        }
-                        flag.store(false, Ordering::Relaxed);
-                    });
-                }
+                app.poll_server(&w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines));
                 continue;
             }
         };
-
-        match ev {
-            UiEvent::BackgroundRecap { turn_id, recap, suggestion } => {
-                let formatted = format!("  \x1b[38;2;155;165;180mrecap:\x1b[0m \x1b[38;2;225;230;240m{recap}\x1b[0m");
-                // The ordinal of the user message the recap is about; regenerate and steering
-                // make turn_counter drift.
-                let current_turn = app.chat.user_turn_count() as u64;
-                if turn_id == current_turn {
-                    app.chat.update_or_push_turn_system("recap:", &formatted);
-                    app.latest_suggestion = suggestion.clone();
-                    app.custom_placeholder = None;
-                    if app.input.is_empty() && app.active_turn_handle.is_none() {
-                        app.suggested_prompt = suggestion;
-                    }
-                    app.renderer.request_reprint();
-                } else if turn_id < current_turn {
-                    app.chat.attach_turn_recap(turn_id, &formatted);
-                    app.renderer.request_reprint();
-                }
-            }
-            UiEvent::MemorySummary(result) => {
-                if let Ok(summary) = &result {
-                    save_summary(summary);
-                }
-                if let Some(Overlay::Memory(modal)) = app.overlay.as_mut() {
-                    modal.summary = match result {
-                        Ok(summary) => flashagent_tui::memory_view::SummaryState::Ready(summary),
-                        Err(why) => flashagent_tui::memory_view::SummaryState::Failed(why),
-                    };
-                }
-                app.renderer.request_reprint();
-            }
-            UiEvent::ImageCost { model, per_pixel, fixed } => {
-                app.image_costs.set(&model, flashagent_tui::image_cost::ImageCost { per_pixel, fixed });
-                app.image_costs.save();
-                app.image_cost_probe = None;
-                app.renderer.request_reprint();
-            }
-            UiEvent::ToolTestResult(verdict) => {
-                match app.settings_view_mut() {
-                    Some(s) => s.tool_test_status = Some(verdict),
-                    None => app.notice(format!("Tool test: {verdict}")),
-                }
-                app.renderer.request_reprint();
-            }
-            UiEvent::ProviderReady { url, discovery } => {
-                let cx = loop_ctx!();
-                app.provider_ready(&cx, &url, discovery);
-                continue;
-            }
-            // From a server the client has since left (a provider switch after
-            // startup's first look), or overtaken by a switch under way.
-            UiEvent::ServerDiscovered(disc) if app.provider_switch.is_some() || disc.base_url != source.0.base_url() => {}
-            UiEvent::ServerDiscovered(disc) => {
-                app.available_models = flashagent_tui::providers::offered_models(&disc);
-                if let Some(active) = disc.active_model {
-                    let new_ctx_len = active.context_length.or(active.max_context_length).unwrap_or(131_072);
-                    let new_ctx_disp = active.context_display();
-                    let model_changed = active.id != app.current_model;
-                    let ctx_changed = app.context_usage.total_capacity != new_ctx_len || app.current_context != new_ctx_disp;
-
-                    if model_changed || ctx_changed {
-                        let old_m = app.current_model.clone();
-                        let old_ctx_len = app.context_usage.total_capacity;
-                        app.current_model = active.id.clone();
-                        app.current_context = new_ctx_disp;
-                        app.context_usage.total_capacity = new_ctx_len.max(1024);
-                        tools_arc.set_context_window(Some(new_ctx_len));
-                        source.set_model(&app.current_model);
-                        source.set_effort_bias(app.effort_memory.steps(&app.current_model));
-                        tools_arc.set_vision_supported(model_sees_images(&source, &app.current_model));
-                        update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
-
-                        // Only for the provider the client talks to: another's model
-                        // must not be written beside it.
-                        if model_changed && app.on_active_provider(&source) {
-                            app.config.active_profile_mut().model = app.current_model.clone();
-                            app.save_config();
-                        }
-                        if model_changed {
-                            // The effort is the user's choice. A non-reasoning model just gets no
-                            // thinking fields; turning "auto" into "off" here lost it for later models.
-                            if app.current_effort.is_empty() {
-                                app.current_effort = "auto".to_string();
-                            }
-                        }
-
-                        app.refresh_welcome(&source, mascot_mood);
-                        let ctx_tag = app.current_context.clone().unwrap_or_default();
-
-                        if model_changed {
-                            let msg = format!(
-                                "Server active model switched: {old_m} -> {}", app.current_model
-                            );
-                            app.custom_placeholder = Some(msg);
-                            app.suggested_prompt = None;
-                        } else if ctx_changed {
-                            let old_formatted = ContextUsage::format_tokens(old_ctx_len);
-                            let new_formatted = ContextUsage::format_tokens(new_ctx_len);
-                            let msg = format!(
-                                "Model context capacity: {old_formatted} -> {new_formatted} ({ctx_tag})"
-                            );
-                            app.custom_placeholder = Some(msg);
-                            app.suggested_prompt = None;
-                        }
-                        app.renderer.request_reprint();
-                    }
-                }
-                app.warm_prompt_cache(&source, perm, &memory_block);
-            }
-            UiEvent::Loop { turn_id, event: e } => {
-                // Late events of an aborted or superseded turn.
-                if turn_id != app.turn_counter || app.aborted_turn == Some(turn_id) {
-                    continue;
-                }
-                match &e {
-                    LoopEvent::TurnDelta(text) => {
-                        app.token_tracker.on_delta(text);
-                        app.turn_outcome.answer_chars += text.chars().count();
-                        app.turn_phase = TurnPhase::Writing;
-                    }
-                    LoopEvent::ReasoningDelta(text) => {
-                        app.token_tracker.on_delta(text);
-                        app.turn_outcome.reasoning_chars += text.chars().count();
-                        app.turn_phase = TurnPhase::Thinking;
-                    }
-                    LoopEvent::ToolStarted { name, args_json, .. } => {
-                        app.last_tool_name = Some(name.clone());
-                        app.turn_outcome.tool_calls += 1;
-                        app.token_tracker.on_delta(name);
-                        app.token_tracker.on_delta(args_json);
-                        app.turn_phase = TurnPhase::Tool;
-                    }
-                    LoopEvent::ToolFinished { is_error, result, .. } => {
-                        if *is_error {
-                            app.turn_outcome.failed_tools += 1;
-                        }
-                        // Memory is written unasked, so it is announced, on the line under the input.
-                        let wrote_memory = app.last_tool_name
-                            .as_deref()
-                            .is_some_and(|n| matches!(n, "memory_create" | "memory_update" | "memory_remove"));
-                        if wrote_memory && !*is_error {
-                            if let Some(said) = result.as_deref().and_then(|r| r.lines().next()) {
-                                app.background = Some(BackgroundNotice::fading(
-                                    format!("{said}  ·  /memory to see or change it"),
-                                    10,
-                                ));
-                            }
-                        }
-                        app.turn_phase = TurnPhase::AfterTool;
-                    }
-                    LoopEvent::StepStarted { step, .. } if *step > 1 => {
-                        app.turn_phase = TurnPhase::AfterTool;
-                    }
-                    LoopEvent::Usage(u) => {
-                        app.token_tracker.on_usage(u);
-                    }
-                    LoopEvent::SteeringInjected(directive) if app.task_inbox.injected(directive) => {
-                        app.flush_task_lines();
-                        app.renderer.request_reprint();
-                    }
-                    LoopEvent::SteeringInjected(directive) => {
-                        if let Some(pos) = app.pending_steers.iter().position(|s| s == directive) {
-                            app.pending_steers.remove(pos);
-                        } else if !app.pending_steers.is_empty() {
-                            app.pending_steers.remove(0);
-                        }
-                        app.renderer.request_reprint();
-                    }
-                    _ => {}
-                }
-                if let Some(ledger) = app.goal_ledger.as_mut() {
-                    let plan_changed = ledger.on_event(&e);
-                    if plan_changed {
-                        let block = format_plan(ledger.plan());
-                        app.chat.update_or_push_turn_system("plan:", &block);
-                        app.renderer.request_reprint();
-                    }
-                    if let LoopEvent::StepStarted { step, .. } = &e {
-                        app.renderer.request_reprint();
-                        let completed = step.saturating_sub(1);
-                        if completed > 0 && completed % MILESTONE_COMMIT_INTERVAL == 0 {
-                            if let Some(note) = commit_goal_milestone(ledger, &cwd, completed) {
-                                app.chat.push_system(&note);
-                                app.renderer.request_reprint();
-                            }
-                        }
-                    }
-                }
-                app.chat.on_event(&e);
-                if app.chat.take_needs_reprint() {
-                    app.renderer.request_reprint();
-                }
-                update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
-            }
-            UiEvent::Finished { turn_id, result: res } => {
-                let mut cx = loop_ctx!();
-                match app.finish_turn(&mut cx, turn_id, res).await {
-                    Flow::Continue => continue,
-                    Flow::Quit => break 'main_loop,
-                    Flow::Next => {}
-                }
-            }
-            UiEvent::Resize(cols, rows) => {
-                let term_resized = (cols, rows) != app.last_term_size;
-                app.last_term_size = (cols, rows);
-                if !app.chat.has_user_message() && term_resized {
-                    app.animate_welcome(&source, mascot_mood, Some(cols as usize), None);
-                }
-                app.renderer.request_reprint();
-            }
-            UiEvent::Mouse(m) => {
-                if let Some(menu) = app.overlay.as_mut().and_then(Overlay::select_menu_mut) {
-                    match m.kind {
-                        MouseEventKind::ScrollUp => menu.up(),
-                        MouseEventKind::ScrollDown => menu.down(),
-                        _ => {}
-                    }
-                    app.renderer.request_reprint();
-                } else if app.overlay.is_some() {
-                    // A screen that is not a list: the wheel must not scroll the transcript behind it.
-                } else {
-                    match m.kind {
-                        MouseEventKind::ScrollUp => {
-                            app.renderer.scroll_up(3);
-                        }
-                        MouseEventKind::ScrollDown => {
-                            app.renderer.scroll_down(3);
-                        }
-                        // A click on a thought or a tool call opens or folds that one alone.
-                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                            let expansion = ReasoningExpansion { all: app.all_expanded, last: app.last_expanded };
-                            if let Some(row) = app.renderer.chat_row_at(m.row) {
-                                app.chat.toggle_row(row, expansion);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            UiEvent::Paste(pasted) => {
-                // A paste goes to whatever has the keyboard first: a path pasted as a
-                // question's answer must not become an attachment.
-                let one_line = || pasted.replace("\r\n", " ").replace(['\n', '\r'], " ");
-                if let Some(req) = question_gate.pending() {
-                    // As typing does: the card turns to the answer of one's own.
-                    let state = &mut app.question_ui_state;
-                    if let Some(opts) = req.options.as_ref().filter(|_| !state.is_writing) {
-                        state.selected_index = opts.len();
-                        state.is_writing = true;
-                        state.write_in_text.clear();
-                    }
-                    state.write_in_text.push_str(&one_line());
-                } else if let Some(Overlay::Sampling(sm)) = app.overlay.as_mut() {
-                    for ch in one_line().chars() {
-                        sm.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);
-                    }
-                } else if let Some(Overlay::Providers(view)) = app.overlay.as_mut() {
-                    view.handle_paste(&pasted);
-                } else if let Some(menu) = app.overlay.as_mut().and_then(Overlay::select_menu_mut) {
-                    // A menu's filter (F3, Ctrl+K) takes the paste as typing.
-                    for ch in one_line().chars() {
-                        menu.push_filter_char(ch);
-                    }
-                } else if app.history_search.is_some() {
-                    // Ctrl+F: into the search, not the hidden prompt under it.
-                    for ch in one_line().chars() {
-                        app.history_search_key(KeyCode::Char(ch), KeyModifiers::NONE);
-                    }
-                } else if app.overlay.is_some() || gate.pending().is_some() {
-                    // Nothing there takes text.
-                } else if let Some(att) = Attachment::from_dropped_path(&pasted) {
-                    // A dropped picture's path means the picture.
-                    let label = att.label();
-                    app.attachments.push(att);
-                    app.suggested_prompt = None;
-                    app.background = Some(BackgroundNotice::fading(format!("{label} attached · Ctrl+Z removes it"), 8));
-                } else if !pasted.is_empty() {
-                    // Pasted code or logs keep their line breaks.
-                    app.input.insert_str(&pasted);
-                    app.history_index = None;
-                    app.autocomplete_idx = 0;
-                }
-                app.renderer.request_reprint();
-            }
-            UiEvent::TaskEnded(notice) => {
-                let cx = loop_ctx!();
-                app.on_task_ended(&cx, notice);
-            }
-            UiEvent::Key(code, mods) => {
-                app.postpone_recap();
-                let mut cx = loop_ctx!();
-                let flow = match app.handle_overlay_key(&mut cx, code, mods).await {
-                    Flow::Next => app.handle_key(&mut cx, code, mods).await,
-                    claimed => claimed,
-                };
-                match flow {
-                    Flow::Continue => continue,
-                    Flow::Quit if !app.quit_confirmed(&cx) => continue,
-                    Flow::Quit => break 'main_loop,
-                    Flow::Next => {}
-                }
-            }
+        if let Flow::Quit = app.on_ui_event(&mut w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines), ev).await {
+            return;
         }
     }
-
-    tools_arc.shells().stop_all();
-    Ok(finish!())
 }
 
 fn update_context_usage(
@@ -2530,8 +2100,8 @@ mod tests {
             ..Default::default()
         });
         assert!(card.len() > 1);
-        assert_eq!(opening_card(card.clone(), false).len(), card.len(), "resume draws it whole");
-        let opening = opening_card(card.clone(), true);
+        // A resumed session passes no reveal rows and gets the card as it is.
+        let opening = revealed(card.clone(), 1);
         assert_eq!(opening.len(), card.len(), "the card holds its height while it appears");
         assert_eq!(opening[0], card[0], "a fresh start animates it in from the top");
         assert!(opening[1..].iter().all(|(_, text)| text.trim().is_empty()));

@@ -98,7 +98,7 @@ pub(crate) fn model_sees_images(source: &BackendSource, model: &str) -> bool {
 /// error is better than a wrong warning.
 pub(crate) fn sees_images(discovery: Option<&flashagent_llm::ServerDiscovery>, model: &str) -> bool {
     discovery
-        .and_then(|d| d.models.iter().find(|m| m.id == model))
+        .and_then(|d| d.model(model))
         .map(|m| m.supports_vision)
         .unwrap_or(true)
 }

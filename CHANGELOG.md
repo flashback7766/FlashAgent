@@ -7,13 +7,13 @@
 
 ## b398 — an audit of the whole program, and what it found
 
-Five reviewers went through every part of FlashAgent looking for bugs; about ninety came back, and a second review checked the fixes. Update if you run b388: it has security and crash fixes.
+About ninety bugs across the whole program are fixed here. Update if you run b388: it has security and crash fixes.
 
 - **Planning mode and "Always" rules can no longer be talked past.** A command could hide a second one behind a `#` comment, quotes inside a word (`-de''lete`), an abbreviated option (`git grep --op=rm`, `sort --comp=sh`), brace expansion (`{~,x}/.ssh`) or, on Windows without Git Bash, cmd.exe's own quoting. Rules now read a command the way the shell that runs it will. An "Always" for `git branch -a` no longer covers `git branch -D`, and the always-asked list knows other spellings: `git -C . push --force`, `push +main`, `--har`, `command rm -rf`.
 - **An example is never run as a tool call.** A code fence that arrived in pieces could leave an example call outside it; a bare call split across pieces was missed.
 - **Crashes fixed:** a web page with Cyrillic or CJK text next to `&amp;`, an API key typed on a Russian layout in the setup wizard, a server sending `Retry-After: -1`, a one-column window.
 - **The setup wizard reaches every provider.** b388 added presets the wizard could not select, and OpenAI opened as a custom URL. Rows are picked with 1–9, 0 and c.
-- **Compaction really frees the context.** The gauge counted the transcript still on screen, so every turn after the first compaction compacted again. Project instructions come back after compaction, and the summary never mistakes a tool's picture for your prompt.
+- **Compaction frees the context.** The gauge counted the transcript still on screen, so every turn after the first compaction compacted again. Project instructions come back after compaction, and the summary never mistakes a tool's picture for your prompt.
 - **Cloud providers:** a context overflow no longer strips sampling fields from every later request; discovery keeps the model you named instead of a longer similar one; OpenRouter is no longer taken for LM Studio.
 - **Editing files:** `edit_file` keeps a CRLF file in CRLF and a BOM where it is, and counts a block found twice instead of calling it missing. A file named twice in one batch is shown as it will be written: the approval card used to hide the second part. `patch_file` puts a hunk after an insertion on the right line.
 - **MCP on Windows:** `npx` servers start; an entry FlashAgent cannot run no longer drops the whole `.mcp.json`, and adding a server edits the file instead of replacing it.
@@ -30,7 +30,7 @@ Five reviewers went through every part of FlashAgent looking for bugs; about nin
 
 ## b383 — fixes to b378, one of them for your files' safety
 
-An independent review of b378 found these; update if you run b378.
+Fixes to b378; update if you run it.
 
 - **An edit's error no longer quotes a file outside the project.** b378 answered an edit that could not apply with the file's closest line, to save you an approval that would only fail. The check that the file was inside the project read the path as text, so `~/.aws/credentials` passed, and a prompt-injected model could read a line of it without asking. It now uses the same rule as the permissions (`~`, `..` and symlinks resolved), and any batch reaching outside the project goes to the approval card as before.
 - **Git Bash runs commands exactly as written.** Every `\\` in a command reached bash as `\`, which silently changed `sed` patterns, `printf` output, JSON and Windows paths.
@@ -40,7 +40,7 @@ An independent review of b378 found these; update if you run b378.
 
 ## b378 — one look everywhere, and a shell that works on Windows
 
-A large release, so the number jumps by 25, as the scale in `packaging/bump.sh` counts it: a milestone plus a big fix.
+A large release: the build number goes up by 25.
 
 - **Shell commands work on Windows.** They ran through cmd.exe, which knows none of the Unix commands models write, so `ls`, `cat` and `grep` failed wherever Git had not put its tools on PATH (the default). They now run in Git Bash when Git for Windows is installed; without it cmd.exe runs them, now with their quotes intact, and the model is told which shell it has. Output in the console's own code page, such as cmd's errors on a Russian system, reaches the model as text instead of mojibake, and a timeout or Esc stops the whole process tree.
 - **A model that says "I'll do X" does X.** Small models often end a turn on the announcement and stop, so a `/goal` run could finish having changed nothing. When the last sentence of a reply says what the model is about to do and no call came, it is asked once to make that call.
@@ -51,7 +51,7 @@ A large release, so the number jumps by 25, as the scale in `packaging/bump.sh` 
 - **Approval cards ask a question.** "Run this command?" or "Change this file?" instead of "Confirm: edit_file", three buttons you can move between with the arrows (Always used to be unreachable), and the keys listed once, under the card. A diff preview no longer shows hunk headers or invented line numbers.
 - **Every key hint reads the same.** The key, then what it does, a dot between: `Enter send · Esc cancel`, with the way out last. Four different styles are gone, along with bracketed notices, `...` next to `…`, and counts like "1 models".
 - **Bad news looks like bad news.** A server that does not answer, a failed update and a model that cannot see an attached picture are announced in amber, not in the green of good news.
-- **A first start without a server is honest.** The welcome card no longer invents a 128k context, the wizard says no server answered and how to go on instead of "auto-detected model: default", the tool check is skipped rather than failing every scenario and blaming the model, the prompt no longer shows a prefill estimate for a server that is not there, and a failed turn is explained once instead of twice. The folder question says what trusting a folder means.
+- **A first start without a server says so.** The welcome card no longer invents a 128k context, the wizard says no server answered and how to go on instead of "auto-detected model: default", the tool check is skipped rather than failing every scenario and blaming the model, the prompt no longer shows a prefill estimate for a server that is not there, and a failed turn is explained once instead of twice. The folder question says what trusting a folder means.
 - **Code in answers is coloured.** Keywords, strings, comments, numbers, types, calls and macros, for Rust, Python, JavaScript and TypeScript, Go, the C family, shell, PowerShell, SQL, Lua, Ruby, data files and diffs.
 - **A light theme.** Settings → UI → Color theme → Light background; a terminal that reports a white background through `COLORFGBG` gets it without asking.
 - **Questions from the model wrap.** A long question or option used to be cut at the card's edge; both now wrap, and the hint gives the real number range.
@@ -115,7 +115,7 @@ b350 was tagged with these changes and stopped by a test that tripped over a ran
 - **The system prompt no longer quotes sample sentences.** Phrases such as "Hello! How can I help you with the project today?" and "Checking workspace structure..." were being repeated word for word by small models. The rules are now stated without examples to copy, and the model is told not to talk about its instructions. A voice that uses emoji no longer meets a rule against them.
 - **Colour Theme can be selected in settings.** The UI tab drew seven rows but counted six, so ↓ on Animations jumped back to the top. The count now comes from the rows themselves, and a test walks every tab to its last row.
 
-## b328 — a prompt you can edit, sessions that are never lost, and honest settings
+## b328 — a prompt you can edit, sessions that are never lost, and settings that do what they say
 
 - **Edit the prompt anywhere in it.** ←/→ move the cursor, Home/End go to the line and then the text, Ctrl or Alt with an arrow jumps by words, Delete, Ctrl+W, Ctrl+K and Ctrl+A work as in a shell, and all of them work with the Russian layout too. The cursor steps over what a person sees as one character, so an accented letter, a flag or a family emoji is one press of an arrow and one Backspace.
 - **Prompts of several lines.** Alt+Enter, Ctrl+J or a `\` before Enter start a new line. A paste keeps its lines instead of joining them with spaces, so pasted code arrives as code. The box grows with the text up to a third of the screen, then scrolls around the cursor.
@@ -549,8 +549,8 @@ Two things you might notice, one fix, and the rest is internal.
   LM Studio lists the reasoning settings of every model that has them, and a
   model the server says nothing about is left to its own default — thinking
   is not switched off for it, and no settings are invented for it. The
-  thinking menu for such a model offers Auto and Off, the only two things
-  that can honestly be offered.
+  thinking menu for such a model offers Auto and Off, the only two it is
+  known to take.
 - With llama.cpp's `llama-server`, the context window shown and used is the
   one the server runs with, read from its model list, instead of an assumed
   128k.
@@ -761,7 +761,7 @@ gets it, and fixed what that turned up.
   context...* becomes *Context compacted · 12K saved · the conversation so far
   is now a summary*. It changes what the model remembers, so it is part of the
   conversation and not a notice that fades.
-- **Compaction was quietly failing on any model worth using.** The summary had
+- **Compaction was quietly failing on larger local models.** The summary had
   twelve seconds to arrive and five between chunks; a 35B writing at ten tokens
   a second never finished, so every compaction fell back to a list of truncated
   snippets. The budget now fits a real model, and the summary is asked for by
@@ -787,8 +787,8 @@ gets it, and fixed what that turned up.
 
 - `view_image` — the model can open a picture in the project itself: a diagram
   in `docs/`, a screenshot in a bug report, a mockup to build from. The picture
-  comes back as a picture, in a message of its own, because a tool result is
-  text on every server worth supporting. Offered only to models that can see,
+  comes back as a picture, in a message of its own, because most servers take
+  only text in a tool result. Offered only to models that can see,
   refuses anything outside the working directory, and refuses a file too large
   to send with its size rather than failing the turn. Verified: qwen3.6-35b
   opened a diagram and described the two boxes and the arrow between them.

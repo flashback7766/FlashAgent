@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="packaging/desktop/flashagent.svg" width="96" height="96" alt="FlashAgent logo">
+<img src="docs/mascot.svg" width="128" height="96" alt="FlashAgent mascot">
 
 # FlashAgent
 
@@ -44,7 +44,7 @@
 ## Why FlashAgent
 
 - **Built for local models.** It reads the loaded model, its context window and its reasoning presets from LM Studio, Ollama, llama.cpp or vLLM. Cloud APIs work too (Anthropic and Gemini through their own protocols, the rest through OpenAI-compatible ones), and `/provider` moves the conversation between a local server and a cloud one without a restart.
-- **Tool calling that does not depend on luck.** Native tool calls, a recovery parser for calls written as text, JSON repair, and a [test](docs/tool-calling.md) that shows which models keep up.
+- **Tool calls that work.** Native tool calls, a recovery parser for calls written as text, JSON repair, and a [test](docs/tool-calling.md) that shows which models keep up.
 - **Small, and you stay in control.** One ~16 MB binary, ~10 MB of memory when idle ([measured](docs/numbers.md)), four permission modes, and approval cards that show the exact command or diff.
 
 <table>
@@ -66,8 +66,8 @@
 
 ## Will your model actually drive tools?
 
-An agent is only as good as the model's willingness to call a tool instead of
-describing one — and that failure is quiet, so FlashAgent ships the check:
+A model that describes a tool call instead of making one gets nothing done,
+and nothing says so. FlashAgent has a check for it:
 
 ```bash
 flashagent --tool-test               # the model you have configured
@@ -84,12 +84,11 @@ on one machine, LM Studio, one model resident at a time:
 | `gemma4-overlooked.thinker.uncensored-e2b` | 7/8 | 8s | recovering from a failed call |
 | `gemma-4-e2b-it-qat@q4_k_xl` | 6/8 | 9s | recovering from a failed call; two files in one turn |
 
-The interesting number is not the score, it is *which* scenario fails. Three of
-these four, handed a tool result that says `error: no such file: src/confg.rs
-(did you mean src/config.rs?)`, explain the problem in prose instead of calling
-the tool again with the corrected path. Tools fail constantly in real work — a
-wrong path, a build error, a missing dependency — and a model that turns each
-one into a paragraph makes you the one driving.
+Which scenario fails tells more than the score. Three of these four, handed a
+tool result that says `error: no such file: src/confg.rs (did you mean
+src/config.rs?)`, explain the problem in prose instead of calling the tool
+again with the corrected path. Tools fail all the time in real work, and a
+model that answers each failure with a paragraph leaves the next step to you.
 
 [Method, raw results, and how to run it on your own models →](docs/tool-calling.md)
 
@@ -309,7 +308,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Contributing
 
-Contributions are very welcome — FlashAgent is a solo project and every bug report helps.
+FlashAgent has one maintainer, so bug reports help a lot.
 
 1. Read [PHILOSOPHY.md](PHILOSOPHY.md) for the design principles.
 2. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow.
@@ -317,7 +316,7 @@ Contributions are very welcome — FlashAgent is a solo project and every bug re
 
 Questions, and models that work well for you, go to [Discussions](https://github.com/flashback7766/FlashAgent/discussions).
 
-If you want the most stable experience, use the `stable` channel once `v1.0.0` ships (`flashagent --channel stable`); until then everything is beta and bugs are expected.
+Until `v1.0.0` ships everything is beta, and bugs are expected. After that, `flashagent --channel stable` gets stable releases only.
 
 ## License
 
