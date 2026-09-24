@@ -2550,7 +2550,7 @@ fn user_messages(request: &support::mock_server::Request) -> Vec<String> {
 
 #[test]
 fn a_background_command_that_ends_wakes_the_agent_with_a_notice() {
-    let command = if cfg!(windows) { "ping -n 2 127.0.0.1 >NUL & echo bg-finished-marker" } else { "sleep 1; echo bg-finished-marker" };
+    let command = if cfg!(windows) { "ping -n 2 127.0.0.1 >NUL && echo bg-finished-marker" } else { "sleep 1; echo bg-finished-marker" };
     let server = MockServer::start(vec![
         Reply::ToolCall {
             name: "run_shell".into(),
@@ -2581,9 +2581,9 @@ fn a_background_command_that_ends_wakes_the_agent_with_a_notice() {
 #[test]
 fn ctrl_b_moves_a_running_command_to_the_background() {
     let command = if cfg!(windows) {
-        "echo detach-before & ping -n 4 127.0.0.1 >NUL & echo detach-after"
+        "echo detach-before && ping -n 7 127.0.0.1 >NUL && echo detach-after"
     } else {
-        "echo detach-before; sleep 3; echo detach-after"
+        "echo detach-before; sleep 6; echo detach-after"
     };
     let server = MockServer::start(vec![
         Reply::ToolCall {
@@ -2665,8 +2665,8 @@ fn quitting_says_how_many_background_tasks_it_stops() {
 
 #[test]
 fn a_notice_waits_while_the_user_is_typing() {
-    // Long enough to be typing before it ends.
-    let command = if cfg!(windows) { "ping -n 4 127.0.0.1 >NUL" } else { "sleep 3" };
+    // Long enough to be typing before it ends, on a slow runner too.
+    let command = if cfg!(windows) { "ping -n 9 127.0.0.1 >NUL" } else { "sleep 8" };
     let server = MockServer::start(vec![
         Reply::ToolCall {
             name: "run_shell".into(),

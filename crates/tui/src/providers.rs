@@ -316,11 +316,11 @@ impl ProvidersView {
                     }
                     form.typing = None;
                 }
-                KeyCode::Char(c) if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                    // A key never has a space in it; one pasted as keys brings them along.
-                    if !(field == Field::Key && c.is_whitespace()) {
-                        typing.push(c);
-                    }
+                // A key never has a space in it; one pasted as keys brings them along.
+                KeyCode::Char(c)
+                    if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && (field != Field::Key || !c.is_whitespace()) =>
+                {
+                    typing.push(c);
                 }
                 _ => {}
             }
