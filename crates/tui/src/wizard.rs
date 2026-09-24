@@ -792,15 +792,24 @@ impl SetupWizard {
                 if start > 0 {
                     lines.push(pad_row(&format!("  \x1b[38;2;135;130;125m▲ {start} more above\x1b[0m")));
                 }
+                // Names in one column when the window has room for the longest; the
+                // address gives way, from its middle, to the "saved" mark.
+                let longest = presets.iter().map(|p| p.name.chars().count()).max().unwrap_or(12);
+                let name_w = if inner_w >= 60 { longest } else { 12 };
                 for (i, p) in presets.iter().enumerate().take(end).skip(start) {
                     let is_sel = i == self.preset_idx;
                     let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
                     let key = Self::row_key(i).map_or_else(|| "  ".to_string(), |k| format!("{k}."));
-                    let saved = if self.is_saved(&ProviderProfile::from_preset(p)) { "  \x1b[38;2;135;130;125msaved\x1b[0m" } else { "" };
+                    let is_saved = self.is_saved(&ProviderProfile::from_preset(p));
+                    let saved = if is_saved { "  \x1b[38;2;135;130;125msaved\x1b[0m" } else { "" };
+                    let url_room = inner_w
+                        .saturating_sub(2 + 5 + name_w.max(p.name.chars().count()) + 1 + if is_saved { 7 } else { 0 })
+                        .max(12);
+                    let url = crate::truncate_middle(p.url, url_room);
                     let row = if is_sel {
-                        format!("{ptr} \x1b[1;38;2;240;235;225m{key} {:<12}\x1b[0m \x1b[38;2;225;175;95m{}\x1b[0m{saved}", p.name, p.url)
+                        format!("{ptr} \x1b[1;38;2;240;235;225m{key} {:<name_w$}\x1b[0m \x1b[38;2;225;175;95m{url}\x1b[0m{saved}", p.name)
                     } else {
-                        format!("{ptr} \x1b[38;2;160;155;145m{key} {:<12}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m{saved}", p.name, p.url)
+                        format!("{ptr} \x1b[38;2;160;155;145m{key} {:<name_w$}\x1b[0m \x1b[38;2;135;130;125m{url}\x1b[0m{saved}", p.name)
                     };
                     lines.push(pad_row(&row));
                 }
@@ -815,9 +824,9 @@ impl SetupWizard {
                 let placeholder_text = "type its URL";
                 let custom_row = if self.custom_url.is_empty() {
                     if is_custom_sel {
-                        format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<12}\x1b[0m \x1b[7m \x1b[27m{placeholder_color}{placeholder_text}\x1b[0m", "Custom")
+                        format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<name_w$}\x1b[0m \x1b[7m \x1b[27m{placeholder_color}{placeholder_text}\x1b[0m", "Custom")
                     } else {
-                        format!("{ptr} \x1b[38;2;160;155;145mc. {:<12}\x1b[0m {placeholder_color}{placeholder_text}\x1b[0m", "Custom")
+                        format!("{ptr} \x1b[38;2;160;155;145mc. {:<name_w$}\x1b[0m {placeholder_color}{placeholder_text}\x1b[0m", "Custom")
                     }
                 } else if is_custom_sel {
                     let (before, at_and_after) = if self.custom_cursor < self.custom_url.len() {
@@ -829,9 +838,9 @@ impl SetupWizard {
                     } else {
                         (&self.custom_url[..], "\x1b[7m \x1b[27m".to_string())
                     };
-                    format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<12}\x1b[0m \x1b[1;38;2;225;175;95m{before}{at_and_after}\x1b[0m", "Custom")
+                    format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<name_w$}\x1b[0m \x1b[1;38;2;225;175;95m{before}{at_and_after}\x1b[0m", "Custom")
                 } else {
-                    format!("{ptr} \x1b[38;2;160;155;145mc. {:<12}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", "Custom", self.custom_url)
+                    format!("{ptr} \x1b[38;2;160;155;145mc. {:<name_w$}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", "Custom", self.custom_url)
                 };
                 lines.push(pad_row(&custom_row));
                 lines.push(pad_row(""));

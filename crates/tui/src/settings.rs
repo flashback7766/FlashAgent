@@ -155,7 +155,7 @@ impl SettingsView {
         SettingsTab::General => vec![
             ("Provider", {
                 let p = self.config.active_profile();
-                format!("{} \u{b7} {} \u{b7} {}", p.name, p.protocol.label(), p.url)
+                format!("{} \u{b7} {}", p.name, p.url)
             }),
             ("Active model", {
                 let model = &self.config.active_profile().model;
@@ -164,7 +164,7 @@ impl SettingsView {
             ("Permission mode", self.config.permission_mode.label().to_string()),
             ("Auto-save sessions", if self.config.auto_save_sessions { "Enabled (auto-resume)".into() } else { "Disabled".into() }),
             ("External editor", self.config.external_editor.clone()),
-            ("Setup wizard", "Run the first-start setup again, for this or a new provider".into()),
+            ("Setup wizard", "Run the setup again; a new server is added".into()),
         ],
         SettingsTab::Updates => vec![
             ("Auto-update *", if self.config.auto_check_updates { "On (installs in the background)".into() } else { "Off (Ctrl+U or /update only)".into() }),
@@ -845,7 +845,7 @@ mod tests {
     fn the_provider_row_shows_the_one_in_use_and_the_arrows_go_through_the_saved_ones() {
         let mut view = SettingsView::new(with_providers(), vec!["model-a".into(), "model-b".into()]);
         let shown = |v: &SettingsView| v.render(120).iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
-        assert!(shown(&view).contains("Home · OpenAI-compatible · http://localhost:1234/v1"), "{}", shown(&view));
+        assert!(shown(&view).contains("Home · http://localhost:1234/v1"), "{}", shown(&view));
         assert!(!shown(&view).contains("restart"), "a provider applies at once: {}", shown(&view));
         view.handle_key(KeyCode::Right, KeyModifiers::empty());
         assert_eq!(view.config.active_profile().name, "Claude");
