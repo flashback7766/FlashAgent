@@ -1067,66 +1067,23 @@ fn start_background_updates(auto_check_updates: bool, mut channel_watch_rx: toki
 
 }
 
-async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
-    let AppContext {
-        config: app_config,
-        source,
-        perm,
-        gate,
-        question_gate,
-        tools_arc,
-        memory_block,
-        memory_docs,
-        model,
-        context_display,
-        context_capacity,
-        cwd_display,
-        initial_effort,
-        available_models,
-        session_start,
-        cwd,
-        first_run_verdict,
-        pending_discovery,
-    } = ctx;
-    let cancel = Arc::new(AtomicBool::new(false));
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
+struct InitialApp {
+    app_config: AppConfig,
+    model: String,
+    context_display: Option<String>,
+    context_capacity: usize,
+    cwd_display: String,
+    initial_effort: String,
+    available_models: Vec<String>,
+    system_prompt_text: String,
+    system_prompt_config: SystemPromptConfig,
+    memory_docs: usize,
+    effort_memory: flashagent_core::EffortMemory,
+}
 
-    start_event_sources(&tx, &tools_arc, pending_discovery);
-
-    let system_prompt_config = SystemPromptConfig::new()
-        .with_cwd(&cwd_display)
-        .with_platform(flashagent_tools::shell::platform())
-        .with_model(&model)
-        .with_effort(&initial_effort);
-    let system_prompt_text =
-        build_system_prompt(&system_prompt_config.clone().with_personality(&app_config.personality));
-
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(80));
-    // Startup has just asked the server; the first poll is not due yet.
-    let mut check_interval =
-        tokio::time::interval_at(tokio::time::Instant::now() + SERVER_POLL_INTERVAL, SERVER_POLL_INTERVAL);
-    check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let is_discovering = Arc::new(AtomicBool::new(false));
-    let (resume_session_id, open_session_picker, session_note) = resolve_session_start(session_start, &cwd_display);
-    let mut session_id = resume_session_id.clone().unwrap_or_else(new_session_id);
-    open_snapshots(perm, &session_id, &cwd);
-
-    let effort_memory = flashagent_core::EffortMemory::load();
-    source.set_effort_bias(effort_memory.steps(&model));
-    tools_arc.set_vision_supported(model_sees_images(&source, &model));
-    let (channel_probe_tx, mut channel_probe_rx) =
-        tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
-    let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
-    let (channel_watch_tx, channel_watch_rx) = tokio::sync::watch::channel(app_config.update_channel);
-    // The background updater and Ctrl+U both claim this, so they never download
-    // over each other.
-    let update_busy = Arc::new(AtomicBool::new(false));
-    start_background_updates(app_config.auto_check_updates, channel_watch_rx, update_tx.clone(), update_busy.clone());
-
-    let started_at = std::time::Instant::now();
-    const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
-    let mut last_draw = started_at;
-    let mut app = App {
+fn initial_app(init: InitialApp) -> App {
+    let InitialApp { app_config, model, context_display, context_capacity, cwd_display, initial_effort, available_models, system_prompt_text, system_prompt_config, memory_docs, effort_memory } = init;
+    App {
         question_ui_state: QuestionUiState::default(),
         history: vec![ChatMessage::system(system_prompt_text)],
         input: flashagent_tui::Composer::new(),
@@ -1198,7 +1155,69 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         config: app_config,
         available_models,
         provider_switch: None,
-    };
+    }
+}
+
+async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
+    let AppContext {
+        config: app_config,
+        source,
+        perm,
+        gate,
+        question_gate,
+        tools_arc,
+        memory_block,
+        memory_docs,
+        model,
+        context_display,
+        context_capacity,
+        cwd_display,
+        initial_effort,
+        available_models,
+        session_start,
+        cwd,
+        first_run_verdict,
+        pending_discovery,
+    } = ctx;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
+
+    start_event_sources(&tx, &tools_arc, pending_discovery);
+
+    let system_prompt_config = SystemPromptConfig::new()
+        .with_cwd(&cwd_display)
+        .with_platform(flashagent_tools::shell::platform())
+        .with_model(&model)
+        .with_effort(&initial_effort);
+    let system_prompt_text =
+        build_system_prompt(&system_prompt_config.clone().with_personality(&app_config.personality));
+
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(80));
+    // Startup has just asked the server; the first poll is not due yet.
+    let mut check_interval =
+        tokio::time::interval_at(tokio::time::Instant::now() + SERVER_POLL_INTERVAL, SERVER_POLL_INTERVAL);
+    check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let is_discovering = Arc::new(AtomicBool::new(false));
+    let (resume_session_id, open_session_picker, session_note) = resolve_session_start(session_start, &cwd_display);
+    let mut session_id = resume_session_id.clone().unwrap_or_else(new_session_id);
+    open_snapshots(perm, &session_id, &cwd);
+
+    let effort_memory = flashagent_core::EffortMemory::load();
+    source.set_effort_bias(effort_memory.steps(&model));
+    tools_arc.set_vision_supported(model_sees_images(&source, &model));
+    let (channel_probe_tx, mut channel_probe_rx) =
+        tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
+    let (channel_watch_tx, channel_watch_rx) = tokio::sync::watch::channel(app_config.update_channel);
+    // The background updater and Ctrl+U both claim this, so they never download
+    // over each other.
+    let update_busy = Arc::new(AtomicBool::new(false));
+    start_background_updates(app_config.auto_check_updates, channel_watch_rx, update_tx.clone(), update_busy.clone());
+
+    let started_at = std::time::Instant::now();
+    const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+    let mut last_draw = started_at;
+    let mut app = initial_app(InitialApp { app_config, model, context_display, context_capacity, cwd_display: cwd_display.clone(), initial_effort, available_models, system_prompt_text, system_prompt_config, memory_docs, effort_memory });
     update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
 
     let (term_w, term_h) = app.last_term_size;

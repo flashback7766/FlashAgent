@@ -262,21 +262,22 @@ fn the_recap_waits_until_the_user_has_gone_quiet() {
     let server = MockServer::start(vec![Reply::Text("First answer.".into())]);
     let home = Home::new();
     home.set_up(&server.url);
-    // Five seconds of quiet, keys under one apart: a busy runner that reads a key
-    // late still sees one well inside the window.
+    // Keep typing for longer than the quiet period, waiting until each key is
+    // visible so the test measures what the app received.
     let term = Term::start_with_env(&home, &["-y"], COLS, ROWS, &[("FLASHAGENT_RECAP_IDLE_SECS", "5")]);
     term.wait_for(PROMPT, WAIT);
     let recaps = || server.requests().iter().filter(|r| !r.is_turn() && r.body.to_string().contains("conversation analyzer")).count();
 
     ask(&term, "first question", "First answer.");
     // Typing keeps it back: the model stays free for the next question.
-    for _ in 0..6 {
-        std::thread::sleep(Duration::from_millis(900));
-        term.send("x");
-        term.send("\x7f");
+    for count in 1..=8 {
+        term.send("z");
+        term.wait_for(&format!("› {}", "z".repeat(count)), WAIT);
+        std::thread::sleep(Duration::from_millis(800));
     }
     assert_eq!(recaps(), 0, "the recap was asked for while the user was typing");
 
+    term.send(ESC);
     let deadline = std::time::Instant::now() + WAIT;
     while recaps() == 0 {
         assert!(std::time::Instant::now() < deadline, "no recap once the user went quiet");
