@@ -784,13 +784,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: dir,
-            brave_api_key: None,
-            question_gate: None,
-            is_goal_mode: None,
-            toolset_profile: None,
-            web_enabled: None,
-            context_window: None,
-            mcp_manager: None,
+            ..Default::default()
         })
         .unwrap();
 
