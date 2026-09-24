@@ -586,10 +586,12 @@ const TOOL_PICTURE_OPENING: &str = "[Image opened by ";
 const TOOL_PICTURE_NOTE: &str = "it is the result of that call, not a new request.]";
 
 /// Something the user said, not the user-role message that carries a tool's
-/// picture: finding "the last prompt" must skip those, or Ctrl+R answers a
-/// picture and a rewind takes back a turn too many.
+/// picture or a background task's notice: finding "the last prompt" must skip
+/// those, or Ctrl+R answers a picture and a rewind takes back a turn too many.
 pub fn is_prompt(msg: &ChatMessage) -> bool {
-    msg.role == Role::User && !(msg.content.starts_with(TOOL_PICTURE_OPENING) && msg.content.contains(TOOL_PICTURE_NOTE))
+    msg.role == Role::User
+        && !(msg.content.starts_with(TOOL_PICTURE_OPENING) && msg.content.contains(TOOL_PICTURE_NOTE))
+        && !crate::task_notices::is_task_notice(&msg.content)
 }
 
 /// 9 alphanumeric characters (Mistral chat templates insist on it), unique for
@@ -1914,5 +1916,44 @@ mod tests {
         assert_eq!(history[3].content, "Do not run tests after that");
         assert_eq!(history[4].role, Role::Assistant);
         assert_eq!(history[4].content, "Action adjusted.");
+    }
+
+    #[test]
+    fn a_notice_arriving_during_a_turn_is_injected_once() {
+        let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![tool_turn("shell", "call_1"), text_turn("The build finished; all good.")]),
+        };
+        let tools = MockTools::new();
+        let l = AgentLoop::with_steering(LoopConfig::default(), Arc::new(AtomicBool::new(false)), steer_rx);
+        let notice = format!(
+            "{}4 exited with code 0 after 3s. {}\ncommand: cargo build",
+            crate::TASK_NOTICE_OPENING,
+            crate::TASK_NOTICE_NOTE
+        );
+        let inbox = std::sync::Mutex::new(crate::NoticeInbox::default());
+        inbox.lock().unwrap().push(notice.clone());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (history, done) = rt
+            .block_on(l.run(&llm, &tools, vec![ChatMessage::user("Build it in the background")], |e| match e {
+                // The task ends while the turn is running a tool.
+                LoopEvent::ToolStarted { .. } => {
+                    for n in inbox.lock().unwrap().send_into_turn() {
+                        let _ = steer_tx.send(n);
+                    }
+                }
+                LoopEvent::SteeringInjected(text) => assert!(inbox.lock().unwrap().injected(&text), "injected twice: {text}"),
+                _ => {}
+            }))
+            .unwrap();
+        assert_eq!(done, DoneReason::Completed);
+        let delivered: Vec<&ChatMessage> = history.iter().filter(|m| m.content == notice).collect();
+        assert_eq!(delivered.len(), 1, "{history:?}");
+        assert!(!is_prompt(delivered[0]), "a notice is not something the user said");
+        assert_eq!(history.iter().filter(|m| is_prompt(m)).count(), 1);
+        assert_protocol_valid(&history);
+        let mut inbox = inbox.into_inner().unwrap();
+        inbox.turn_ended(false);
+        assert_eq!(inbox.wake(false), None, "a delivered notice woke another turn");
     }
 }

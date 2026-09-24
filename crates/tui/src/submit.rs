@@ -18,6 +18,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/export [md|html|jsonl]", "write the conversation to a file"),
     ("/editor, Ctrl+E", "write the prompt in an external editor"),
     ("/mcp [list|market|test|add|reload]", "Model Context Protocol servers"),
+    ("/tasks", "background commands: their output, and stopping one"),
     ("/sampling", "sampling parameters (advanced)"),
     ("/skill:<name>", "run a skill from .agents/skills/"),
     ("/update, Ctrl+U", "check for, download and install an update"),
@@ -34,6 +35,7 @@ const HELP_KEYS: &[(&str, &str)] = &[
     ("Ctrl+F", "search the prompts sent before"),
     ("Ctrl+V", "paste a screenshot (Ctrl+Z takes it back); dropping an image works too"),
     ("Ctrl+K", "every command and menu, searchable"),
+    ("Ctrl+B", "move the running shell command to the background"),
     ("Click", "open or fold one thought or tool call"),
     ("Ctrl+D, Ctrl+C twice", "quit"),
     ("Esc", "close, dismiss or interrupt; it never quits"),
@@ -160,6 +162,7 @@ impl App {
             }
             "channel" => self.channel_command(cx, arg),
             "mcp" => self.mcp_command(cx, arg).await,
+            "tasks" | "bg" => self.open_tasks(cx),
             "compact" => self.compact_command(cx, arg).await,
             "verbose" | "expand" | "think" | "o" => self.verbose_command(arg),
             "exit" | "quit" | "q" => return Some(Flow::Quit),

@@ -62,6 +62,7 @@ impl App {
                     }
                 }
                 Overlay::Mcp(modal) => self.mcp_key(cx, modal, code, mods).await,
+                Overlay::Tasks(modal) => self.tasks_key(cx, modal, code, mods),
                 Overlay::Sessions(menu) => self.session_menu_key(menu, code, mods),
                 Overlay::Model(menu) => self.model_menu_key(cx, menu, code, mods),
                 Overlay::Provider(menu) => self.provider_menu_key(cx, menu, code, mods).await,

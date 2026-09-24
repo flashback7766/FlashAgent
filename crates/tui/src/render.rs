@@ -70,6 +70,10 @@ pub(crate) struct FrameState<'a> {
     pub(crate) prompt_title: &'a str,
     pub(crate) context_warn_threshold: usize,
     pub(crate) pending_steers: &'a [String],
+    /// Background commands still running.
+    pub(crate) background_tasks: usize,
+    /// A foreground shell command Ctrl+B can move to the background.
+    pub(crate) shell_running: bool,
     /// The colour of how the last turn ended, and how far (0..=1) it has faded.
     pub(crate) composer_flash: Option<(Rgb, f32)>,
 }
@@ -135,6 +139,17 @@ impl Renderer {
         let (first, count) = self.chat_view;
         ((y as usize) < count).then_some(first + y as usize)
     }
+}
+
+/// On the status line while background commands run; a narrow window drops it whole.
+fn tasks_status(running: usize) -> String {
+    if running == 0 {
+        return String::new();
+    }
+    format!(
+        " \x1b[38;2;100;95;90m\u{b7}\x1b[0m \x1b[38;2;168;199;250m\u{25cf} {}\x1b[0m",
+        flashagent_tui::plural(running, "task", "tasks")
+    )
 }
 
 /// The mode, and what the turn waits on when that is not the model: the phase
@@ -697,7 +712,14 @@ impl Renderer {
                 Some(text) => format!("{live}{dot}{}", st.background_style.paint(text)),
                 None => live.clone(),
             };
-            let hints: Vec<&str> = if st.background.is_some() { vec![&esc, ""] } else { vec![&steer, &esc, ""] };
+            let detach = key_hints(&[("Ctrl+B", "background"), ("Esc", esc_does)], width);
+            let detach_steer = key_hints(&[("Ctrl+B", "background"), ("Enter", "steer"), ("Esc", esc_does)], width);
+            let hints: Vec<&str> = match (st.shell_running, st.background.is_some()) {
+                (true, true) => vec![&detach, &esc, ""],
+                (true, false) => vec![&detach_steer, &detach, &esc, ""],
+                (false, true) => vec![&esc, ""],
+                (false, false) => vec![&steer, &esc, ""],
+            };
             // The longest hint that fits, never cut mid-word.
             hints
                 .into_iter()
@@ -792,7 +814,7 @@ impl Renderer {
             gate.pending().is_some() || question_gate.pending().is_some(),
             st.goal_progress,
             st.mode.label(),
-            expand_status,
+            &format!("{}{expand_status}", tasks_status(st.background_tasks)),
         );
         left_telemetry.push_str(&format_provider(st.provider.0, st.provider.1));
 
@@ -974,6 +996,8 @@ impl App {
                 background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                 context_warn_threshold: config.context_warn_threshold,
                 pending_steers: &self.pending_steers,
+                background_tasks: cx.tools_arc.shells().running_count(),
+                shell_running: self.running && cx.tools_arc.shells().foreground_running(),
                 composer_flash,
             },
         );

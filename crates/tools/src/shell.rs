@@ -7,15 +7,16 @@
 //! commands, and cmd.exe runs none of them. Without it, cmd.exe runs them and
 //! the system prompt says so.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::ToolError;
 
@@ -264,23 +265,28 @@ fn shell_command(cmd: &str) -> tokio::process::Command {
     c
 }
 
-fn kill_tree(child: &mut Child) {
+/// A process group, or on Windows the process and its children.
+fn kill_pid_tree(pid: u32) {
     #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        // SAFETY: plain syscall on a pid we spawned; a stale pid only yields ESRCH.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
+    // SAFETY: plain syscall on a pid we spawned; a stale pid only yields ESRCH.
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
     }
     // Before the shell dies: taskkill finds the children through their parent.
     #[cfg(windows)]
-    if let Some(pid) = child.id() {
+    {
         let _ = std::process::Command::new("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+    }
+}
+
+fn kill_tree(child: &mut Child) {
+    if let Some(pid) = child.id() {
+        kill_pid_tree(pid);
     }
     let _ = child.start_kill();
 }
@@ -309,6 +315,22 @@ async fn drain_pumps(p1: tokio::task::JoinHandle<()>, p2: tokio::task::JoinHandl
 
 /// A non-zero exit is an error whose text still carries the output.
 pub async fn run_foreground(cmd: &str, timeout: Duration) -> Result<String, ToolError> {
+    run(cmd, timeout, None).await
+}
+
+/// Resolves when the user asks to move the command to the background; never
+/// for a command that cannot be moved.
+async fn detach_requested(slot: Option<&mut ForegroundSlot>) {
+    if let Some(slot) = slot {
+        if (&mut slot.rx).await.is_ok() {
+            return;
+        }
+    }
+    std::future::pending::<()>().await
+}
+
+async fn run(cmd: &str, timeout: Duration, registry: Option<&ShellRegistry>) -> Result<String, ToolError> {
+    let started = Instant::now();
     let mut child =
         shell_command(cmd).spawn().map_err(|e| ToolError::Other(format!("spawn: {e}")))?;
     let stdout = child.stdout.take();
@@ -317,10 +339,35 @@ pub async fn run_foreground(cmd: &str, timeout: Duration) -> Result<String, Tool
     let p1 = tokio::spawn(pump(stdout, buffer.clone()));
     let p2 = tokio::spawn(pump(stderr, buffer.clone()));
     let mut guard = TreeGuard(Some(child));
+    let mut slot = registry.map(ShellRegistry::foreground_slot);
 
+    // Biased to the exit: a command that ended as the key was pressed is
+    // reported as ended. Dropping the wait is safe; the child keeps its status.
     let waited = match guard.0.as_mut() {
-        Some(child) => tokio::time::timeout(timeout, child.wait()).await,
+        Some(child) => tokio::select! {
+            biased;
+            res = tokio::time::timeout(timeout, child.wait()) => Some(res),
+            _ = detach_requested(slot.as_mut()) => None,
+        },
         None => return Err(ToolError::Other("spawn: lost child handle".into())),
+    };
+    drop(slot);
+    let waited = match (waited, registry) {
+        (Some(waited), _) => waited,
+        (None, Some(registry)) => {
+            let Some(child) = guard.0.take() else {
+                return Err(ToolError::Other("spawn: lost child handle".into()));
+            };
+            let so_far = tail_noted(&buffer.lock(), 4000).into_owned();
+            let id = registry.adopt(child, cmd, buffer, [p1, p2], started, true);
+            return Ok(format!(
+                "The user moved this command to the background; it keeps running as background task {id}. \
+                 A notice will arrive when it exits, so there is no need to poll it; {{\"task_id\":{id},\"kill\":true}} stops it.\n\
+                 output so far:\n{}",
+                if so_far.trim().is_empty() { "(no output yet)" } else { &so_far }
+            ));
+        }
+        (None, None) => return Err(ToolError::Other("spawn: lost child handle".into())),
     };
     let status = match waited {
         Ok(res) => {
@@ -359,26 +406,185 @@ pub async fn run_foreground(cmd: &str, timeout: Duration) -> Result<String, Tool
     }
 }
 
+/// How a background task ended, or that it has not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TaskState {
+    Running,
+    /// `None`: ended by a signal.
+    Exited(Option<i32>),
+    /// Stopped by the model, the user, or FlashAgent quitting.
+    Killed,
+}
+
+impl TaskState {
+    pub fn describe(&self) -> String {
+        match self {
+            TaskState::Running => "running".into(),
+            TaskState::Exited(Some(code)) => format!("exited with code {code}"),
+            TaskState::Exited(None) => "was ended by a signal".into(),
+            TaskState::Killed => "was stopped".into(),
+        }
+    }
+}
+
+/// `4s`, `2m 05s`, `1h 03m`.
+pub fn format_elapsed(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m {:02}s", s / 60, s % 60),
+        _ => format!("{}h {:02}m", s / 3600, s % 3600 / 60),
+    }
+}
+
+/// A background task, for the task list.
+#[derive(Clone, Debug)]
+pub struct TaskInfo {
+    pub id: u32,
+    pub command: String,
+    pub state: TaskState,
+    /// Running so far, or how long it ran.
+    pub elapsed: Duration,
+    pub last_line: String,
+    /// Moved to the background by the user, not started there by the model.
+    pub detached: bool,
+}
+
+/// Sent once for each background task, when it ends.
+#[derive(Clone, Debug)]
+pub struct TaskNotice {
+    pub id: u32,
+    pub command: String,
+    pub state: TaskState,
+    pub elapsed: Duration,
+    /// The end of its output, a few lines.
+    pub tail: String,
+}
+
+const NOTICE_LINES: usize = 20;
+const NOTICE_BYTES: usize = 1500;
+
+impl TaskNotice {
+    /// Stopped on purpose: nobody needs waking about it.
+    pub fn killed(&self) -> bool {
+        self.state == TaskState::Killed
+    }
+
+    /// What the model reads: data from a tool, worded as such.
+    pub fn message(&self) -> String {
+        use flashagent_core::{TASK_NOTICE_NOTE, TASK_NOTICE_OPENING};
+        let command: String = self.command.chars().take(300).collect();
+        let output = if self.tail.trim().is_empty() { "(no output)".to_string() } else { format!("last output:\n{}", self.tail) };
+        format!(
+            "{TASK_NOTICE_OPENING}{} {} after {}. {TASK_NOTICE_NOTE}\ncommand: {command}\n{output}",
+            self.id,
+            self.state.describe(),
+            format_elapsed(self.elapsed)
+        )
+    }
+}
+
+/// The last `lines` lines, at most `bytes` long.
+fn last_lines(text: &str, lines: usize, bytes: usize) -> String {
+    let tail = tail_str(text.trim_end(), bytes);
+    let kept: Vec<&str> = tail.lines().collect();
+    kept[kept.len().saturating_sub(lines)..].join("\n")
+}
+
+/// What a finished task keeps of its output: enough to read its end.
+const FINISHED_KEEP: usize = 16_000;
+
 struct ShellTask {
-    child: Child,
+    command: String,
+    started: Instant,
+    ended: Option<Instant>,
+    state: TaskState,
     buffer: Arc<Mutex<String>>,
+    /// While it runs, to stop it without its handle (quitting).
+    pid: Option<u32>,
+    stop: Option<oneshot::Sender<()>>,
+    /// An exit racing the kill still counts as stopped, with no wake-up.
+    kill_requested: bool,
+    detached: bool,
+}
+
+#[derive(Default)]
+struct Shared {
+    next_id: AtomicU32,
+    tasks: Mutex<BTreeMap<u32, ShellTask>>,
+    notices: Mutex<Option<mpsc::UnboundedSender<TaskNotice>>>,
+    next_foreground: AtomicU64,
+    /// Foreground commands that can be moved to the background.
+    foreground: Mutex<HashMap<u64, oneshot::Sender<()>>>,
+}
+
+/// A foreground command's claim on the detach key, given up when it ends.
+struct ForegroundSlot {
+    key: u64,
+    rx: oneshot::Receiver<()>,
+    shared: Arc<Shared>,
+}
+
+impl Drop for ForegroundSlot {
+    fn drop(&mut self) {
+        self.shared.foreground.lock().remove(&self.key);
+    }
 }
 
 #[derive(Default)]
 pub struct ShellRegistry {
-    next_id: AtomicU32,
-    tasks: Mutex<HashMap<u32, ShellTask>>,
+    shared: Arc<Shared>,
 }
 
 /// A dev server started in the background must not outlive FlashAgent and
 /// keep holding its port.
 impl Drop for ShellRegistry {
     fn drop(&mut self) {
-        for task in self.tasks.get_mut().values_mut() {
-            if matches!(task.child.try_wait(), Ok(None)) {
-                kill_tree(&mut task.child);
+        self.stop_all();
+    }
+}
+
+/// Owns the child until it exits, then records how and sends the one notice.
+async fn watch(shared: Arc<Shared>, id: u32, child: Child, stop: oneshot::Receiver<()>, pumps: [tokio::task::JoinHandle<()>; 2]) {
+    // Dropped with the runtime, it still takes the process tree down.
+    let mut guard = TreeGuard(Some(child));
+    let code = match guard.0.as_mut() {
+        Some(child) => tokio::select! {
+            biased;
+            status = child.wait() => status.ok().and_then(|s| s.code()),
+            Ok(()) = stop => {
+                kill_tree(child);
+                child.wait().await.ok().and_then(|s| s.code())
             }
+        },
+        None => return,
+    };
+    guard.0 = None;
+    let [p1, p2] = pumps;
+    drain_pumps(p1, p2).await;
+    let notice = {
+        let mut tasks = shared.tasks.lock();
+        let Some(task) = tasks.get_mut(&id) else { return };
+        task.state = if task.kill_requested { TaskState::Killed } else { TaskState::Exited(code) };
+        let ended = Instant::now();
+        task.ended = Some(ended);
+        task.pid = None;
+        task.stop = None;
+        let mut buf = task.buffer.lock();
+        if buf.len() > FINISHED_KEEP {
+            let cut = buf.len() - tail_str(&buf, FINISHED_KEEP).len();
+            buf.drain(..cut);
         }
+        TaskNotice {
+            id,
+            command: task.command.clone(),
+            state: task.state.clone(),
+            elapsed: ended.duration_since(task.started),
+            tail: last_lines(&buf, NOTICE_LINES, NOTICE_BYTES),
+        }
+    };
+    if let Some(tx) = shared.notices.lock().as_ref() {
+        let _ = tx.send(notice);
     }
 }
 
@@ -387,29 +593,90 @@ impl ShellRegistry {
         Self::default()
     }
 
+    /// Each background task's end, once. A second call takes the notices
+    /// from the first.
+    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<TaskNotice> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        *self.shared.notices.lock() = Some(tx);
+        rx
+    }
+
+    fn foreground_slot(&self) -> ForegroundSlot {
+        let key = self.shared.next_foreground.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.shared.foreground.lock().insert(key, tx);
+        ForegroundSlot { key, rx, shared: self.shared.clone() }
+    }
+
+    /// Runs `cmd` until it exits or times out, or until
+    /// [`Self::detach_foreground`] makes it a background task.
+    pub async fn run_foreground(&self, cmd: &str, timeout: Duration) -> Result<String, ToolError> {
+        run(cmd, timeout, Some(self)).await
+    }
+
+    /// While true, [`Self::detach_foreground`] has something to move.
+    pub fn foreground_running(&self) -> bool {
+        !self.shared.foreground.lock().is_empty()
+    }
+
+    /// Moves every running foreground command to the background. False when
+    /// none was running.
+    pub fn detach_foreground(&self) -> bool {
+        let waiting: Vec<oneshot::Sender<()>> = self.shared.foreground.lock().drain().map(|(_, tx)| tx).collect();
+        let mut any = false;
+        for tx in waiting {
+            any |= tx.send(()).is_ok();
+        }
+        any
+    }
+
+    fn adopt(
+        &self,
+        child: Child,
+        cmd: &str,
+        buffer: Arc<Mutex<String>>,
+        pumps: [tokio::task::JoinHandle<()>; 2],
+        started: Instant,
+        detached: bool,
+    ) -> u32 {
+        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task = ShellTask {
+            command: cmd.to_string(),
+            started,
+            ended: None,
+            state: TaskState::Running,
+            buffer,
+            pid: child.id(),
+            stop: Some(stop_tx),
+            kill_requested: false,
+            detached,
+        };
+        self.shared.tasks.lock().insert(id, task);
+        tokio::spawn(watch(self.shared.clone(), id, child, stop_rx, pumps));
+        id
+    }
+
     pub fn spawn_background(&self, cmd: &str) -> Result<String, ToolError> {
         let mut child =
             shell_command(cmd).spawn().map_err(|e| ToolError::Other(format!("spawn: {e}")))?;
         let buffer = Arc::new(Mutex::new(String::new()));
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        tokio::spawn(pump(stdout, buffer.clone()));
-        tokio::spawn(pump(stderr, buffer.clone()));
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        self.tasks.lock().insert(id, ShellTask { child, buffer });
-        Ok(format!("started background task {id}; poll with {{\"task_id\":{id}}}"))
+        let p1 = tokio::spawn(pump(stdout, buffer.clone()));
+        let p2 = tokio::spawn(pump(stderr, buffer.clone()));
+        let id = self.adopt(child, cmd, buffer, [p1, p2], Instant::now(), false);
+        Ok(format!(
+            "started background task {id}. A notice arrives when it exits; {{\"task_id\":{id}}} shows its output so far, adding \"kill\":true stops it."
+        ))
     }
 
     pub fn status(&self, id: u32) -> Result<String, ToolError> {
-        let mut tasks = self.tasks.lock();
-        let task = tasks
-            .get_mut(&id)
-            .ok_or_else(|| ToolError::Other(format!("no such background task: {id}")))?;
-        let state = match task.child.try_wait() {
-            Ok(Some(status)) if status.success() => "finished, exit code 0".to_string(),
-            Ok(Some(status)) => format!("finished, exit code {}", status.code().unwrap_or(-1)),
-            Ok(None) => "running".to_string(),
-            Err(e) => format!("wait error: {e}"),
+        let tasks = self.shared.tasks.lock();
+        let task = tasks.get(&id).ok_or_else(|| ToolError::Other(format!("no such background task: {id}")))?;
+        let state = match task.state {
+            TaskState::Running => format!("running for {}", format_elapsed(task.started.elapsed())),
+            ref ended => ended.describe(),
         };
         let guard = task.buffer.lock();
         let output = tail_noted(&guard, 4000);
@@ -419,19 +686,85 @@ impl ShellRegistry {
         ))
     }
 
-    pub fn kill(&self, id: u32) -> Result<String, ToolError> {
-        let mut tasks = self.tasks.lock();
-        let mut task = tasks
-            .remove(&id)
-            .ok_or_else(|| ToolError::Other(format!("no such background task: {id}")))?;
-        kill_tree(&mut task.child);
-        let _ = task.child.try_wait();
-        let guard = task.buffer.lock();
-        let output = tail_str(&guard, 4000);
+    /// Asks the task's watcher to kill it and returns at once. False when it
+    /// is not running.
+    pub fn stop(&self, id: u32) -> bool {
+        let mut tasks = self.shared.tasks.lock();
+        let Some(task) = tasks.get_mut(&id).filter(|t| t.state == TaskState::Running) else {
+            return false;
+        };
+        task.kill_requested = true;
+        if let Some(stop) = task.stop.take() {
+            let _ = stop.send(());
+        }
+        true
+    }
+
+    /// Waits a moment for the process to be gone, so what is reported is final.
+    pub async fn kill(&self, id: u32) -> Result<String, ToolError> {
+        if !self.stop(id) {
+            let state = self.state(id).ok_or_else(|| ToolError::Other(format!("no such background task: {id}")))?;
+            return Ok(format!("task {id} had already ended: it {}", state.describe()));
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while self.state(id) == Some(TaskState::Running) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let output = self.output(id).unwrap_or_default();
         Ok(format!(
             "task {id} killed. output:\n{}",
-            if output.trim().is_empty() { "(no output)" } else { output }
+            if output.trim().is_empty() { "(no output)" } else { &output }
         ))
+    }
+
+    /// Kills every running task at once, without waiting. How many there were.
+    pub fn stop_all(&self) -> usize {
+        let mut tasks = self.shared.tasks.lock();
+        let mut stopped = 0;
+        for task in tasks.values_mut().filter(|t| t.state == TaskState::Running && !t.kill_requested) {
+            task.kill_requested = true;
+            if let Some(pid) = task.pid {
+                kill_pid_tree(pid);
+            }
+            if let Some(stop) = task.stop.take() {
+                let _ = stop.send(());
+            }
+            stopped += 1;
+        }
+        stopped
+    }
+
+    pub fn state(&self, id: u32) -> Option<TaskState> {
+        self.shared.tasks.lock().get(&id).map(|t| t.state.clone())
+    }
+
+    pub fn running_count(&self) -> usize {
+        self.shared.tasks.lock().values().filter(|t| t.state == TaskState::Running).count()
+    }
+
+    /// Oldest first.
+    pub fn tasks(&self) -> Vec<TaskInfo> {
+        self.shared
+            .tasks
+            .lock()
+            .iter()
+            .map(|(id, t)| TaskInfo {
+                id: *id,
+                command: t.command.clone(),
+                state: t.state.clone(),
+                elapsed: t.ended.unwrap_or_else(Instant::now).duration_since(t.started),
+                last_line: t.buffer.lock().lines().rev().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string(),
+                detached: t.detached,
+            })
+            .collect()
+    }
+
+    /// The end of a task's output, marked when the start was cut.
+    pub fn output(&self, id: u32) -> Option<String> {
+        let tasks = self.shared.tasks.lock();
+        let task = tasks.get(&id)?;
+        let out = tail_noted(&task.buffer.lock(), 4000).into_owned();
+        Some(out)
     }
 }
 
@@ -608,8 +941,130 @@ mod tests {
         }
         assert!(saw_output, "background output never appeared");
 
-        let killed = registry.kill(1).unwrap();
-        assert!(killed.contains("task 1 killed"));
-        assert!(registry.status(1).is_err());
+        let killed = registry.kill(1).await.unwrap();
+        assert!(killed.contains("task 1 killed"), "{killed}");
+        assert!(registry.status(1).unwrap().contains("was stopped"));
+        assert!(registry.status(2).is_err());
+    }
+
+    /// The next notice, or `None` after `wait`.
+    async fn next_notice(rx: &mut mpsc::UnboundedReceiver<TaskNotice>, wait: Duration) -> Option<TaskNotice> {
+        tokio::time::timeout(wait, rx.recv()).await.ok().flatten()
+    }
+
+    #[tokio::test]
+    async fn a_finished_background_task_is_announced_once() {
+        let registry = ShellRegistry::new();
+        let mut notices = registry.subscribe();
+        #[cfg(windows)]
+        let cmd = "echo done-marker & exit 3";
+        #[cfg(not(windows))]
+        let cmd = "echo done-marker; exit 3";
+        registry.spawn_background(cmd).unwrap();
+        let notice = next_notice(&mut notices, Duration::from_secs(10)).await.expect("no notice of the exit");
+        assert_eq!(notice.id, 1);
+        assert_eq!(notice.state, TaskState::Exited(Some(3)));
+        assert!(!notice.killed());
+        assert!(notice.tail.contains("done-marker"), "{notice:?}");
+        assert!(flashagent_core::is_task_notice(&notice.message()), "{}", notice.message());
+        assert!(next_notice(&mut notices, Duration::from_millis(300)).await.is_none(), "announced twice");
+        assert_eq!(registry.running_count(), 0);
+        assert!(registry.status(1).unwrap().contains("exited with code 3"));
+    }
+
+    #[tokio::test]
+    async fn a_killed_task_is_announced_as_stopped() {
+        let registry = ShellRegistry::new();
+        let mut notices = registry.subscribe();
+        registry.spawn_background("sleep 30").unwrap();
+        assert_eq!(registry.running_count(), 1);
+        registry.kill(1).await.unwrap();
+        let notice = next_notice(&mut notices, Duration::from_secs(5)).await.expect("no notice of the kill");
+        assert!(notice.killed(), "{notice:?}");
+        assert!(next_notice(&mut notices, Duration::from_millis(300)).await.is_none(), "announced twice");
+        assert!(registry.kill(1).await.unwrap().contains("already ended"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_moved_to_the_background_keeps_running_and_its_output() {
+        let registry = Arc::new(ShellRegistry::new());
+        let mut notices = registry.subscribe();
+        assert!(!registry.detach_foreground(), "nothing was running");
+        let reg = registry.clone();
+        // A timeout shorter than the command: it no longer applies once detached.
+        let call = tokio::spawn(async move { reg.run_foreground("echo before; sleep 1; echo after", Duration::from_millis(600)).await });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !registry.foreground_running() {
+            assert!(Instant::now() < deadline, "the command never started");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(registry.detach_foreground());
+        let result = tokio::time::timeout(Duration::from_secs(2), call).await.expect("the call did not return").unwrap().unwrap();
+        assert!(result.contains("moved this command to the background"), "{result}");
+        assert!(result.contains("background task 1"), "{result}");
+        assert!(result.contains("before"), "{result}");
+        assert!(!registry.foreground_running());
+        assert_eq!(registry.state(1), Some(TaskState::Running));
+        assert!(registry.tasks()[0].detached);
+
+        let notice = next_notice(&mut notices, Duration::from_secs(10)).await.expect("no notice of the exit");
+        assert_eq!(notice.state, TaskState::Exited(Some(0)), "{notice:?}");
+        assert!(notice.tail.contains("before") && notice.tail.contains("after"), "output was lost: {notice:?}");
+        assert!(next_notice(&mut notices, Duration::from_millis(300)).await.is_none(), "announced twice");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_tasks_die_with_the_registry() {
+        let marker = std::env::temp_dir().join(format!("fa-shell-quit-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let registry = ShellRegistry::new();
+        registry.spawn_background(&format!("sleep 1; touch {}", marker.display())).unwrap();
+        registry.spawn_background("sleep 30").unwrap();
+        assert_eq!(registry.stop_all(), 2);
+        assert_eq!(registry.stop_all(), 0, "a stopped task counted again");
+        drop(registry);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!marker.exists(), "a background task outlived FlashAgent");
+    }
+
+    #[tokio::test]
+    async fn a_command_that_ends_is_not_moved() {
+        let registry = ShellRegistry::new();
+        let out = registry.run_foreground("echo quick", Duration::from_secs(10)).await.unwrap();
+        assert!(out.contains("exit code: 0"), "{out}");
+        assert!(!registry.foreground_running());
+        assert!(!registry.detach_foreground());
+        assert!(registry.tasks().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_output_kept_for_a_task_is_capped() {
+        use tokio::io::AsyncReadExt as _;
+        let buffer = Arc::new(Mutex::new(String::new()));
+        pump(Some(tokio::io::repeat(b'x').take(1_000_000)), buffer.clone()).await;
+        let kept = buffer.lock().len();
+        assert!((BUFFER_CAP / 2..=BUFFER_CAP).contains(&kept), "{kept}");
+    }
+
+    #[test]
+    fn a_notice_carries_the_command_how_it_ended_and_the_end_of_its_output() {
+        let output: String = (1..=50).map(|i| format!("line-{i}\n")).collect();
+        let notice = TaskNotice {
+            id: 7,
+            command: "npm run build".into(),
+            state: TaskState::Exited(Some(1)),
+            elapsed: Duration::from_secs(125),
+            tail: last_lines(&output, NOTICE_LINES, NOTICE_BYTES),
+        };
+        let text = notice.message();
+        assert!(text.starts_with("[Background task 7 exited with code 1 after 2m 05s."), "{text}");
+        assert!(text.contains("command: npm run build"), "{text}");
+        assert!(text.contains("line-50") && text.contains("line-31") && !text.contains("line-30\n"), "{text}");
+        let quiet = TaskNotice { tail: String::new(), ..notice };
+        assert!(quiet.message().ends_with("(no output)"));
+        assert!(last_lines(&"y".repeat(10_000), 20, NOTICE_BYTES).len() <= NOTICE_BYTES);
     }
 }
