@@ -422,7 +422,14 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
 
 use rayon::prelude::*;
 
-/// Returns `path:line:text`, up to 200 matches. Parallel with Rayon.
+const MAX_GREP_HITS: usize = 200;
+const MAX_GREP_HITS_PER_FILE: usize = 50;
+/// Searched in parallel, one chunk at a time, so a search with many hits
+/// stops early.
+const GREP_CHUNK: usize = 256;
+
+/// Returns `path:line:text`, up to 200 matches, in path and line order: the
+/// same search always gives the same answer.
 pub(crate) fn grep(
     cwd: &Path,
     pattern: &str,
@@ -437,57 +444,49 @@ pub(crate) fn grep(
         .transpose()
         .map_err(|e| ToolError::Other(format!("bad glob: {e}")))?;
 
-    let mut all_files = Vec::new();
-    walk(cwd, &mut all_files, 0);
+    let mut files = Vec::new();
+    walk(cwd, &mut files, 0);
+    if let Some(m) = &matcher {
+        files.retain(|file| {
+            let rel = file.strip_prefix(cwd).unwrap_or(file);
+            m.matches(&rel.to_string_lossy()) || file.file_name().is_some_and(|n| m.matches(&n.to_string_lossy()))
+        });
+    }
+    files.sort();
 
-    let candidate_files: Vec<PathBuf> = all_files
-        .into_iter()
-        .filter(|file| {
-            if let Some(m) = &matcher {
-                let rel = file.strip_prefix(cwd).unwrap_or(file);
-                let rel_match = m.matches(&rel.to_string_lossy());
-                let name_match = file
-                    .file_name()
-                    .is_some_and(|n| m.matches(&n.to_string_lossy()));
-                if !rel_match && !name_match {
-                    return false;
-                }
+    let mut hits: Vec<String> = Vec::new();
+    'chunks: for chunk in files.chunks(GREP_CHUNK) {
+        let found: Vec<Vec<String>> = chunk.par_iter().map(|file| grep_file(cwd, file, &re)).collect();
+        for hit in found.into_iter().flatten() {
+            hits.push(hit);
+            if hits.len() >= MAX_GREP_HITS {
+                break 'chunks;
             }
-            if let Ok(meta) = file.metadata() {
-                if meta.len() > 10 * 1024 * 1024 {
-                    return false; // Skip huge binary / data files over 10MB
-                }
-            }
-            true
-        })
-        .collect();
-
-    let hits: Vec<String> = candidate_files
-        .par_iter()
-        .flat_map(|file| {
-            let Ok(bytes) = std::fs::read(file) else { return Vec::new() };
-            let check_len = bytes.len().min(1024);
-            if bytes[..check_len].contains(&0) {
-                return Vec::new();
-            }
-            let Ok(text) = std::str::from_utf8(&bytes) else { return Vec::new() };
-            let mut file_hits = Vec::new();
-            for (i, line) in text.lines().enumerate() {
-                if re.is_match(line) {
-                    let rel = file.strip_prefix(cwd).unwrap_or(file);
-                    let rel_norm = rel.to_string_lossy().replace('\\', "/");
-                    file_hits.push(format!("{rel_norm}:{}:{}", i + 1, line.trim()));
-                    if file_hits.len() >= 50 {
-                        break;
-                    }
-                }
-            }
-            file_hits
-        })
-        .take_any(200)
-        .collect();
-
+        }
+    }
     Ok(if hits.is_empty() { "no matches".into() } else { hits.join("\n") })
+}
+
+/// Files over 10 MB and binary files are data, not something to search.
+fn grep_file(cwd: &Path, file: &Path, re: &regex::Regex) -> Vec<String> {
+    if std::fs::metadata(file).is_ok_and(|meta| meta.len() > 10 * 1024 * 1024) {
+        return Vec::new();
+    }
+    let Ok(bytes) = std::fs::read(file) else { return Vec::new() };
+    if bytes[..bytes.len().min(1024)].contains(&0) {
+        return Vec::new();
+    }
+    let Ok(text) = std::str::from_utf8(&bytes) else { return Vec::new() };
+    let mut shown: Option<String> = None;
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| re.is_match(line))
+        .take(MAX_GREP_HITS_PER_FILE)
+        .map(|(i, line)| {
+            let path = shown.get_or_insert_with(|| file.strip_prefix(cwd).unwrap_or(file).to_string_lossy().replace('\\', "/"));
+            format!("{path}:{}:{}", i + 1, line.trim())
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -686,6 +685,24 @@ mod tests {
 
         let hits = grep(&dir, "NEEDLE", Some("*.txt"), true).unwrap();
         assert!(hits.contains("top.txt:1"));
+    }
+
+    #[test]
+    fn grep_answers_in_path_and_line_order_and_keeps_the_first_hits() {
+        let dir = tempdir();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        let hits = |n: usize| (1..=n).map(|i| format!("hit {i}\nmiss\n")).collect::<String>();
+        for (name, n) in [("c.txt", 2), ("a.txt", 2), ("b/z.txt", 60), ("b/a.txt", 60), ("d.txt", 60), ("e.txt", 60)] {
+            std::fs::write(dir.join(name), hits(n)).unwrap();
+        }
+        let out = grep(&dir, "^hit", None, false).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), MAX_GREP_HITS);
+        assert_eq!(&lines[..3], ["a.txt:1:hit 1", "a.txt:3:hit 2", "b/a.txt:1:hit 1"]);
+        // Fifty per file at most, and the cap falls inside the last file.
+        assert_eq!(lines.iter().filter(|l| l.starts_with("b/z.txt:")).count(), MAX_GREP_HITS_PER_FILE);
+        assert_eq!(lines[MAX_GREP_HITS - 1], "e.txt:91:hit 46");
+        assert_eq!(grep(&dir, "^hit", None, false).unwrap(), out, "the same search gave another answer");
     }
 
     #[test]
