@@ -1,5 +1,5 @@
 //! Backend failures in words a person can act on. Deliberately shallow: a few
-//! cases cover nearly every failure with a local model, and anything unknown
+//! cases cover nearly every failure, local or hosted, and anything unknown
 //! keeps its original text.
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,6 +14,18 @@ pub struct Explained {
 pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
     let lower = raw.to_lowercase();
     let base = url.trim_end_matches('/');
+    // Advice differs: a local server is started and its log read; a hosted one is reached.
+    let local = flashagent_core::url_host(base).is_some_and(|host| flashagent_core::is_local_host(&host));
+
+    // A provider's own filters withheld the answer (`LlmError::Forbidden`); its
+    // message already says why.
+    if let Some(why) = raw.split_once("forbidden: ").map(|(_, why)| why.trim()).filter(|why| !why.is_empty()) {
+        return Explained {
+            headline: why.to_string(),
+            hint: Some("Rephrase the request, or switch to another provider with /provider.".to_string()),
+            raw: raw.to_string(),
+        };
+    }
 
     // The most common: the server is not started, or is on another port.
     if lower.contains("connection refused")
@@ -22,15 +34,12 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         || lower.contains("dns error")
         || lower.contains("failed to lookup")
     {
-        return Explained {
-            headline: format!("No model server answered at {base}"),
-            hint: Some(
-                "Start your server (LM Studio, llama.cpp, Ollama), or switch to another \
-                 provider with /provider."
-                    .to_string(),
-            ),
-            raw: raw.to_string(),
+        let hint = if local {
+            "Start your server (LM Studio, llama.cpp, Ollama), or switch to another provider with /provider."
+        } else {
+            "Check the network connection and the address, or switch to another provider with /provider."
         };
+        return Explained { headline: format!("No model server answered at {base}"), hint: Some(hint.to_string()), raw: raw.to_string() };
     }
 
     if lower.contains("model_not_found")
@@ -60,10 +69,22 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
 
     if lower.contains("401") || lower.contains("403") || lower.contains("unauthorized")
         || lower.contains("invalid api key") || lower.contains("incorrect api key")
+        // Gemini answers a bad key with a 400.
+        || lower.contains("api key not valid") || lower.contains("api_key_invalid")
+        || lower.contains("invalid x-api-key") || lower.contains("authentication_error")
     {
         return Explained {
             headline: format!("{base} rejected the API key"),
             hint: Some("Set its key in /provider → Edit providers, or in the provider's environment variable.".to_string()),
+            raw: raw.to_string(),
+        };
+    }
+
+    // Anthropic's 529 and in-stream `overloaded_error`: busy, not broken.
+    if lower.contains("overloaded") || lower.contains("returned 529") {
+        return Explained {
+            headline: format!("{base} is overloaded right now"),
+            hint: Some("Wait a moment and press Ctrl+R, or switch provider with /provider.".to_string()),
             raw: raw.to_string(),
         };
     }
@@ -92,15 +113,12 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
     if lower.contains("stream interrupted") || lower.contains("connection reset")
         || lower.contains("incomplete message") || lower.contains("body stream")
     {
-        return Explained {
-            headline: "The answer stopped mid-stream".to_string(),
-            hint: Some(
-                "The server dropped the connection — often it ran out of memory. Its log will \
-                 say. Ctrl+R retries."
-                    .to_string(),
-            ),
-            raw: raw.to_string(),
+        let hint = if local {
+            "The server dropped the connection \u{2014} often it ran out of memory. Its log will say. Ctrl+R retries."
+        } else {
+            "The provider ended the answer with the error below. Ctrl+R retries."
         };
+        return Explained { headline: "The answer stopped mid-stream".to_string(), hint: Some(hint.to_string()), raw: raw.to_string() };
     }
 
     if lower.contains("500") || lower.contains("502") || lower.contains("503") {
@@ -170,8 +188,27 @@ mod tests {
     #[test]
     fn something_unrecognised_keeps_its_own_words() {
         // Better a strange message than a confident wrong one.
-        let e = explain("llm: forbidden: tool use disabled by policy", URL, "m");
-        assert_eq!(e.headline, "llm: forbidden: tool use disabled by policy");
+        let e = explain("llm: tool use disabled by policy", URL, "m");
+        assert_eq!(e.headline, "llm: tool use disabled by policy");
         assert_eq!(e.hint, None);
+    }
+
+    #[test]
+    fn a_withheld_answer_says_why_in_the_provider_s_words() {
+        let e = explain("llm: forbidden: Gemini refused the request (SAFETY) because its safety filters flagged it", "https://generativelanguage.googleapis.com/v1beta", "gemini-3-pro");
+        assert_eq!(e.headline, "Gemini refused the request (SAFETY) because its safety filters flagged it");
+        assert!(e.hint.unwrap().contains("Rephrase"));
+    }
+
+    #[test]
+    fn a_hosted_provider_gets_hosted_advice() {
+        let cloud = "https://api.anthropic.com";
+        let dropped = explain("llm: stream interrupted: {\"type\":\"api_error\"}", cloud, "m");
+        assert!(!dropped.hint.as_deref().unwrap().contains("memory"), "a hosted API did not run out of memory");
+        assert!(explain("llm: stream interrupted: connection reset", URL, "m").hint.unwrap().contains("memory"));
+        assert!(explain("llm: http: error sending request for url (https://api.anthropic.com/v1/messages)", cloud, "m").hint.unwrap().contains("network"));
+        assert!(explain("llm: stream interrupted: Overloaded", cloud, "m").headline.contains("overloaded"));
+        let gemini_key = r#"llm: backend returned 400: {"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}"#;
+        assert!(explain(gemini_key, "https://generativelanguage.googleapis.com/v1beta", "m").headline.contains("rejected the API key"));
     }
 }
