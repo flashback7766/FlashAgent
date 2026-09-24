@@ -110,6 +110,14 @@ pub fn model_after_switch(saved: &str, disc: Option<&ServerDiscovery>) -> String
         .map_or_else(|| saved.to_string(), |m| m.id.clone())
 }
 
+/// The same model under the name the server lists it by, when the saved one
+/// differs only by Google's `models/` prefix. For a listing that arrives
+/// after start-up: it may rename the model, never pick another.
+pub fn listed_name(model: &str, disc: &ServerDiscovery) -> Option<String> {
+    let bare = model.strip_prefix("models/")?;
+    disc.models.iter().find(|m| m.id.eq_ignore_ascii_case(bare)).map(|m| m.id.clone())
+}
+
 /// What F3 and Settings offer: on LM Studio only the loaded models when any
 /// are, since the rest would first have to load.
 pub fn offered_models(disc: &ServerDiscovery) -> Vec<String> {
@@ -524,6 +532,14 @@ mod tests {
 
     fn text(lines: &[RenderLine]) -> String {
         lines.iter().map(|(_, l)| crate::strip_ansi(l)).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn a_late_listing_renames_a_prefixed_model_and_never_picks_another() {
+        let disc = discovery(vec![model("gemini-3.5-flash", false), model("gemini-3.5-flash-lite", false)], None);
+        assert_eq!(listed_name("models/gemini-3.5-flash-lite", &disc).as_deref(), Some("gemini-3.5-flash-lite"));
+        assert_eq!(listed_name("gemini-3.5-flash-lite", &disc), None, "already the listed name");
+        assert_eq!(listed_name("models/gemini-9-pro", &disc), None, "not listed: kept, not replaced");
     }
 
     #[test]
