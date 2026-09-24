@@ -12,6 +12,8 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use thiserror::Error;
 
+use crate::repetition::{clean_repetition_loop, RepetitionWatch};
+
 /// Implemented over `LlmBackend` by the service layer; tests use scripted mocks.
 #[async_trait]
 pub trait LlmSource: Send + Sync {
@@ -39,10 +41,6 @@ pub struct ToolOutput {
     /// `data:` URLs. A tool message carries only text on every server worth
     /// supporting, so the loop sends these in a message of their own right after.
     pub images: Vec<String>,
-}
-
-fn pending_images_from(images: Vec<String>) -> Vec<String> {
-    images
 }
 
 #[async_trait]
@@ -283,6 +281,11 @@ impl AgentLoop {
             // held back until that is known.
             let prefix = if continuing { history.last().map(|m| m.content.clone()).unwrap_or_default() } else { String::new() };
             let mut held: Option<String> = continuing.then(String::new);
+            let mut text_watch = RepetitionWatch::default();
+            let mut reasoning_watch = RepetitionWatch::default();
+            // One watcher for the whole stream, not a new timer per delta.
+            let cancelled = wait_cancel(&self.cancel);
+            tokio::pin!(cancelled);
 
             loop {
                 let item = tokio::select! {
@@ -290,7 +293,7 @@ impl AgentLoop {
                         Some(item) => item,
                         None => break,
                     },
-                    _ = wait_cancel(&self.cancel) => {
+                    _ = &mut cancelled => {
                         // Keep what the user already saw; half-streamed tool calls are dropped unrun.
                         keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
                         events(LoopEvent::Done(DoneReason::Cancelled));
@@ -320,7 +323,7 @@ impl AgentLoop {
                         for ev in scanner.feed(&t) {
                             absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
                         }
-                        if detect_repetition_loop(&assistant_text) {
+                        if text_watch.is_looping(&assistant_text) {
                             clean_repetition_loop(&mut assistant_text);
                             break;
                         }
@@ -328,7 +331,7 @@ impl AgentLoop {
                     LlmEvent::ReasoningDelta(t) => {
                         assistant_reasoning.push_str(&t);
                         events(LoopEvent::ReasoningDelta(t));
-                        if detect_repetition_loop(&assistant_reasoning) {
+                        if reasoning_watch.is_looping(&assistant_reasoning) {
                             clean_repetition_loop(&mut assistant_reasoning);
                             break;
                         }
@@ -342,7 +345,7 @@ impl AgentLoop {
                             calls[index].id = id;
                         }
                         if let Some(name) = name {
-                            calls[index].name = name.clone();
+                            calls[index].name = name;
                         }
                         open_args[index].push_str(&args_delta);
                     }
@@ -364,8 +367,8 @@ impl AgentLoop {
                 absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
             }
 
-            for (i, call) in calls.iter_mut().enumerate() {
-                call.args_json = open_args[i].clone();
+            for (call, args) in calls.iter_mut().zip(open_args) {
+                call.args_json = args;
             }
             // A nameless call cannot be dispatched and would poison the history.
             calls.retain(|c| !c.name.trim().is_empty());
@@ -424,11 +427,11 @@ impl AgentLoop {
                 }
 
                 // Cut off by the output limit: ask for the rest.
-                let answer_so_far = history.last().filter(|m| m.role == Role::Assistant).map(|m| m.content.clone()).unwrap_or_default();
+                let answer_so_far = history.last().filter(|m| m.role == Role::Assistant).map_or("", |m| m.content.as_str());
                 if truncated
                     && continuations < MAX_CONTINUATIONS
                     && !answer_so_far.trim().is_empty()
-                    && !is_pure_thinking_scratchpad(&answer_so_far)
+                    && !is_pure_thinking_scratchpad(answer_so_far)
                 {
                     continuations += 1;
                     continuing = true;
@@ -537,14 +540,13 @@ impl AgentLoop {
                         return Ok((history, DoneReason::Cancelled));
                     }
                 };
-                let result_text = out.content.clone();
                 events(LoopEvent::ToolFinished {
                     id: call.id.clone(),
                     is_error: out.is_error,
-                    result_len: result_text.chars().count(),
-                    result: Some(result_text),
+                    result_len: out.content.chars().count(),
+                    result: Some(out.content.clone()),
                 });
-                let images = std::mem::take(&mut pending_images_from(out.images));
+                let images = out.images;
                 history.push(ChatMessage::tool_result(call.id.clone(), out.content));
                 if !images.is_empty() {
                     // A separate message, since a tool result is text only. It is marked so the
@@ -620,7 +622,7 @@ const PROMISE_NUDGE: &str = "You said what you would do next but did not do it. 
 /// Whether a reply ends by saying what the model is about to do, rather than
 /// with an answer: its last sentence is "I'll ..." or "Let me ...", in English
 /// or Russian. Closings like "let me know" and questions are not promises.
-pub fn announces_a_tool_call(text: &str) -> bool {
+fn announces_a_tool_call(text: &str) -> bool {
     let text = text.trim();
     if text.is_empty() {
         return false;
@@ -668,9 +670,9 @@ const MIN_OVERLAP: usize = 8;
 fn strip_repeated_tail<'a>(prev: &str, next: &'a str) -> &'a str {
     let mut cut = 0;
     let ends = next.char_indices().map(|(i, _)| i).skip(1).chain(std::iter::once(next.len()));
-    for end in ends.take_while(|end| *end <= 2000) {
-        let head = &next[..end];
-        if head.chars().count() >= MIN_OVERLAP && prev.ends_with(head) {
+    // The n-th end closes the n-th character.
+    for (chars, end) in (1..).zip(ends.take_while(|end| *end <= 2000)) {
+        if chars >= MIN_OVERLAP && prev.ends_with(&next[..end]) {
             cut = end;
         }
     }
@@ -745,7 +747,7 @@ fn absorb_scanned(
 }
 
 /// True when `text` is empty or only thinking, with no answer to the user.
-pub fn is_pure_thinking_scratchpad(text: &str) -> bool {
+fn is_pure_thinking_scratchpad(text: &str) -> bool {
     let t = text.trim();
     if t.is_empty() {
         return true;
@@ -794,7 +796,7 @@ fn is_reasoning_step_line(line: &str) -> bool {
 }
 
 /// A draft step in the scratchpad, used as a fallback answer.
-pub fn extract_draft_from_steps(text: &str) -> Option<String> {
+fn extract_draft_from_steps(text: &str) -> Option<String> {
     let prefixes = [
         "Construct the Response:",
         "Response construction:",
@@ -815,128 +817,6 @@ pub fn extract_draft_from_steps(text: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Degenerate repetition: 3+ identical consecutive lines, a repeating window,
-/// or a substantial phrase repeated 3+ times across lines.
-pub fn detect_repetition_loop(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    if bytes.len() < 24 {
-        return false;
-    }
-
-    // Code repeats itself legitimately (closing tags, one decorator on two
-    // functions, `if __name__` in two examples), so only prose is judged by lines.
-    let mut in_fence = false;
-    let lines: Vec<&str> = text
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| {
-            if l.starts_with("```") {
-                in_fence = !in_fence;
-                return false;
-            }
-            !in_fence && !l.is_empty()
-        })
-        .collect();
-
-    if lines.len() >= 3 {
-        let last = lines[lines.len() - 1];
-        // Short lines (braces, markdown markers) repeat legitimately.
-        if last.len() >= 6 && lines[lines.len() - 2] == last && lines[lines.len() - 3] == last {
-            return true;
-        }
-        // A B A B A B
-        if lines.len() >= 6 {
-            let n = lines.len();
-            if lines[n - 1] == lines[n - 3]
-                && lines[n - 3] == lines[n - 5]
-                && lines[n - 2] == lines[n - 4]
-                && lines[n - 4] == lines[n - 6]
-                && (lines[n - 1].len() >= 6 || lines[n - 2].len() >= 6)
-            {
-                return true;
-            }
-        }
-    }
-
-    // Repetition without newlines: four times over, at least 48 bytes. A table
-    // rule (`|---|---|`) or a line of `=` is decoration, not a loop.
-    let len = bytes.len();
-    for w in 8..=80 {
-        if len >= w * 4 && w * 4 >= 48 {
-            let c1 = &bytes[len - w..];
-            let repeats = (2..=4).all(|k| &bytes[len - w * k..len - w * (k - 1)] == c1);
-            if repeats && !c1.iter().all(|&b| b == c1[0]) && !c1.iter().all(|b| b"|-:=*#_~. \n".contains(b)) {
-                return true;
-            }
-        }
-    }
-
-    // A phrase of 25+ chars repeated 3+ times anywhere: an overthinking loop.
-    // Each clause counts once per line; a line without a stop is its own clause.
-    if lines.len() >= 4 {
-        let mut clause_counts = std::collections::HashMap::new();
-        for line in &lines {
-            let mut clauses: Vec<&str> = line.split(&['.', '!', '?', ';'][..]).map(str::trim).filter(|s| s.len() >= 25).collect();
-            clauses.dedup();
-            for clause in clauses {
-                let count = clause_counts.entry(clause).or_insert(0);
-                *count += 1;
-                if *count >= 3 {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}
-
-/// Keeps a single instance of the repeated pattern.
-pub fn clean_repetition_loop(text: &mut String) {
-    let trimmed = text.trim_end();
-    if let Some(last_line) = trimmed.lines().rev().find(|l| !l.trim().is_empty()) {
-        let pattern = last_line.trim();
-        if pattern.len() >= 6 {
-            let mut lines: Vec<&str> = text.lines().collect();
-            // The trailing run of the pattern, blank lines between allowed.
-            let mut repeat_count = 0;
-            let mut first = lines.len();
-            for (i, l) in lines.iter().enumerate().rev() {
-                if l.trim() == pattern {
-                    repeat_count += 1;
-                    first = i;
-                } else if !l.trim().is_empty() {
-                    break;
-                }
-            }
-            if repeat_count > 1 {
-                lines.truncate(first + 1);
-                *text = lines.join("\n");
-                return;
-            }
-        }
-    }
-
-    let bytes = text.as_bytes();
-    let len = bytes.len();
-    for w in 8..=80 {
-        if len >= w * 3 {
-            let c1 = &bytes[len - w..];
-            let c2 = &bytes[len - w * 2..len - w];
-            let c3 = &bytes[len - w * 3..len - w * 2];
-            if c1 == c2 && c2 == c3 && !c1.iter().all(|&b| b == c1[0]) {
-                // A byte period can start inside a Cyrillic letter.
-                let mut cut_pos = len - w * 2;
-                while !text.is_char_boundary(cut_pos) {
-                    cut_pos -= 1;
-                }
-                text.truncate(cut_pos);
-                return;
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1099,6 +979,29 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(l.run(&llm, &tools, vec![ChatMessage::user("x")], |_| {}));
         assert!(result.is_err(), "stream break must surface as LoopError, not silence");
+    }
+
+    #[test]
+    fn a_reply_stuck_repeating_itself_is_cut_short_and_kept_once() {
+        let line = "The answer is forty two, as before.\n";
+        let stuck = |event: fn(String) -> LlmEvent| MockTurn {
+            events: (0..200).map(|_| Ok(event(line.to_string()))).chain([Ok(LlmEvent::Done(FinishReason::Stop))]).collect(),
+        };
+        let llm = MockLlm { turns: std::sync::Mutex::new(vec![stuck(LlmEvent::TextDelta)]) };
+        let (history, done) = run_loop(&AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false))), &llm, &MockTools::new(), |_| {});
+        assert_eq!(done, DoneReason::Completed);
+        assert_eq!(history[1].content, line.trim_end());
+
+        // Thinking stuck the same way ends the stream too; with no answer written,
+        // the model is asked for one.
+        let llm = MockLlm { turns: std::sync::Mutex::new(vec![stuck(LlmEvent::ReasoningDelta), text_turn("Forty two.")]) };
+        let mut reasoning_deltas = 0;
+        let (history, done) = run_loop(&AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false))), &llm, &MockTools::new(), |e| {
+            reasoning_deltas += usize::from(matches!(e, LoopEvent::ReasoningDelta(_)));
+        });
+        assert!(reasoning_deltas < 10, "the stream was read on after the loop was plain: {reasoning_deltas} deltas");
+        assert_eq!(done, DoneReason::Completed);
+        assert_eq!(history.last().unwrap().content, "Forty two.");
     }
 
     #[test]
@@ -1865,61 +1768,6 @@ mod tests {
         assert_ne!(ids[0], ids[1]);
         assert!(ids.iter().all(|id| !id.is_empty()));
         assert_protocol_valid(&history);
-    }
-
-    #[test]
-    fn test_detect_repetition_loop_catches_identical_lines() {
-        let text = "*Wait, I'll call list_dir.*\n*Wait, I'll call list_dir.*\n*Wait, I'll call list_dir.*\n";
-        assert!(detect_repetition_loop(text));
-
-        let normal = "First line of answer.\nSecond line with different content.\nThird line.";
-        assert!(!detect_repetition_loop(normal));
-    }
-
-    #[test]
-    fn ordinary_answers_are_not_taken_for_a_loop() {
-        for text in [
-            "Two examples:\n```python\nif __name__ == \"__main__\":\n    main()\n```\nand\n```python\nif __name__ == \"__main__\":\n    run()\n```\nBoth work.",
-            "```rust\n#[derive(Debug, Clone, PartialEq)]\nstruct A;\n#[derive(Debug, Clone, PartialEq)]\nstruct B;\n```",
-            "```html\n<div><div><div>\n</div>\n</div>\n</div>\n```",
-            "| a | b | c | d | e | f |\n|---|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 | 6 |",
-            "The configuration file is read at startup\nThe configuration file is read at startup, then cached.\nDone.\nOk.",
-        ] {
-            assert!(!detect_repetition_loop(text), "{text}");
-        }
-    }
-
-    #[test]
-    fn a_loop_in_cyrillic_is_trimmed_without_a_panic() {
-        let mut text = format!("Ответ: {}", "повторяю снова ".repeat(8));
-        text.pop();
-        text.push('ё');
-        let mut cyr = format!("x{}", "ёжик ёлка ".repeat(10));
-        clean_repetition_loop(&mut text);
-        clean_repetition_loop(&mut cyr);
-    }
-
-    #[test]
-    fn test_clean_repetition_loop_removes_duplicates() {
-        let mut text = "Here is the plan:\n*Wait, I'll call list_dir.*\n*Wait, I'll call list_dir.*\n*Wait, I'll call list_dir.*".to_string();
-        clean_repetition_loop(&mut text);
-        assert_eq!(text, "Here is the plan:\n*Wait, I'll call list_dir.*");
-        let mut spaced = "Plan:\nI'll check the file now.\n\nI'll check the file now.\nI'll check the file now.\n".to_string();
-        clean_repetition_loop(&mut spaced);
-        assert_eq!(spaced, "Plan:\nI'll check the file now.");
-    }
-
-    #[test]
-    fn test_detect_repetition_loop_catches_non_consecutive_phrases() {
-        let text = "Response construction:\n\
-                    Turn it over. Then the sealed top becomes the bottom, and the open bottom becomes the top.\n\
-                    Wait, if I am an AI assistant for coding, should I even answer riddles?\n\
-                    Final decision:\n\
-                    Turn it over. Then the sealed top becomes the bottom, and the open bottom becomes the top.\n\
-                    Wait, I don't need to translate my thought process into Russian.\n\
-                    \"Turn it over. Then the sealed top becomes the bottom, and the open bottom becomes the top.\"\n\
-                    Wait, I'll check if there are any other interpretations.";
-        assert!(detect_repetition_loop(text));
     }
 
     #[test]

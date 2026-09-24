@@ -12,6 +12,7 @@ pub mod paths;
 pub mod permissions;
 pub mod personality;
 pub mod prompt;
+mod repetition;
 pub mod snapshots;
 pub mod subagents;
 pub mod toolcheck;
