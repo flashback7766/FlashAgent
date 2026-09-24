@@ -443,7 +443,14 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         ];
 
         let model_val = truncate_middle(model, w2.saturating_sub(13));
-        let provider_val = truncate_middle(provider.unwrap_or("not chosen yet"), w2.saturating_sub(25).max(8));
+        // The name first; how to switch only where both fit.
+        let provider_name = provider.unwrap_or("not chosen yet");
+        let provider_hint = if provider_name.chars().count() + 12 <= w2.saturating_sub(13) {
+            format!(" {M3_MUT}(/provider){RESET}")
+        } else {
+            String::new()
+        };
+        let provider_val = truncate_middle(provider_name, w2.saturating_sub(13));
         let ctx_val = truncate_middle(context_window.unwrap_or("not known yet"), w2.saturating_sub(13));
         let memory_val = match memory_docs {
             0 => format!("{M3_MUT}no rule files yet{RESET}"),
@@ -453,7 +460,7 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
 
         let right_top = [
             format!(" {M3_MUT}Model:   {RESET} {M3_TXT_B}{model_val}{RESET}"),
-            format!(" {M3_MUT}Provider:{RESET} {M3_LGT}{provider_val}{RESET} {M3_MUT}(/provider){RESET}"),
+            format!(" {M3_MUT}Provider:{RESET} {M3_LGT}{provider_val}{RESET}{provider_hint}"),
             format!(" {M3_MUT}Context: {RESET} {M3_ICE}{ctx_val}{RESET}"),
             // The mode is on the status line under the prompt.
             format!(" {M3_MUT}Effort:  {RESET} {M3_LGT}{th_short}{RESET} {M3_MUT}(F4){RESET}"),

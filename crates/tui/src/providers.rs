@@ -411,9 +411,9 @@ impl ProvidersView {
                             let in_use = p.name == self.active;
                             let mark = if in_use { format!("{GOLD}\u{25cf}{OFF}") } else { format!("{DIM}\u{25cb}{OFF}") };
                             let name_style = if current { BRIGHT } else { TEXT };
-                            let tag = if in_use { format!("  {DIM}in use{OFF}") } else { String::new() };
-                            push(pad_row(&format!("{cursor} {mark} {name_style}{}{OFF}{tag}", p.name)));
-                            push(pad_row(&format!("      {DIM}{} \u{b7} {}{OFF}", describe(p), key_status(p))));
+                            let tag = if in_use { "in use \u{b7} " } else { "" };
+                            push(pad_row(&format!("{cursor} {mark} {name_style}{}{OFF}  {DIM}{tag}{}{OFF}", p.name, key_status(p))));
+                            push(pad_row(&format!("      {DIM}{}{OFF}", describe(p))));
                         }
                         None => {
                             let style = if current { BRIGHT } else { TEXT };
