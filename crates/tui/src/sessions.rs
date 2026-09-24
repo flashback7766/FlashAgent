@@ -263,6 +263,60 @@ impl App {
         }
     }
 
+    /// `--resume <id>` before the first frame. False, with the reason in the
+    /// transcript, when the session could not be read.
+    pub(crate) fn resume_at_start(&mut self, id: &str, memory_block: &str, perm: &PermissionedTools) -> bool {
+        match sessions_dir()
+            .ok_or_else(|| "No home directory to read sessions from; starting fresh.".to_string())
+            .and_then(|dir| read_session(&dir, id))
+        {
+            Ok(saved) => {
+                let restored = restore_session(saved, &mut self.chat, &mut self.history);
+                update_context_usage(&mut self.context_usage, &self.history, memory_block, &self.chat, perm);
+                self.notice(format!("Resumed session {id} · {}", flashagent_tui::plural(restored, "message", "messages")));
+                true
+            }
+            Err(why) => {
+                self.chat.push_line(LineKind::ToolError, why);
+                false
+            }
+        }
+    }
+
+    /// A session picked from the list replaces the open one on screen and in
+    /// the history, which is saved first. False if nothing was switched.
+    pub(crate) fn switch_session(&mut self, current: &str, id: &str, memory_block: &str, perm: &PermissionedTools) -> bool {
+        if self.config.auto_save_sessions && worth_saving(&self.history) {
+            if let Err(why) = save_session_file(current, &self.current_model, &self.cwd_display, &self.history) {
+                // Switching away would drop the only copy, the one in memory.
+                self.notice(format!("Not switching: this session could not be saved ({why})"));
+                return false;
+            }
+        }
+        let saved = match sessions_dir()
+            .ok_or_else(|| "No home directory to read sessions from".to_string())
+            .and_then(|dir| read_session(&dir, id))
+        {
+            Ok(saved) => saved,
+            Err(why) => {
+                self.notice(why);
+                return false;
+            }
+        };
+        let base_system = self
+            .history
+            .first()
+            .map(|m| m.content.split(COMPACTED_MARK).next().unwrap_or_default().to_string())
+            .unwrap_or_default();
+        self.history = vec![ChatMessage::system(base_system)];
+        self.chat.clear();
+        let restored = restore_session(saved, &mut self.chat, &mut self.history);
+        self.latest_suggestion = None;
+        update_context_usage(&mut self.context_usage, &self.history, memory_block, &self.chat, perm);
+        self.notice(format!("Resumed session {id} · {}", flashagent_tui::plural(restored, "message", "messages")));
+        true
+    }
+
     /// Leaves out the one already open.
     pub(crate) fn open_session_picker(&mut self, cwd_display: &str, current_session: &str) {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
