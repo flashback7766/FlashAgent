@@ -449,6 +449,93 @@ pub struct TextToolScanner {
     buf: String,
     fence_open: bool,
     mid_line: bool,
+    /// A call block the buffer starts with and that has not closed yet.
+    open: Option<OpenBlock>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlockKind {
+    Hermes,
+    Mistral,
+    Bare,
+}
+
+/// How far an open call block has been read, so each delta is checked for
+/// its close from there. Read from its start every time, a long call (a
+/// file written through `write_file`) cost time quadratic in its length.
+struct OpenBlock {
+    kind: BlockKind,
+    scanned: usize,
+    balance: Balance,
+}
+
+impl OpenBlock {
+    fn new(kind: BlockKind, buf: &str) -> Self {
+        let mut block = OpenBlock { kind, scanned: 0, balance: Balance::default() };
+        let from = if kind == BlockKind::Mistral { START_MISTRAL.len() } else { 0 };
+        block.scanned = from.min(buf.len());
+        block.closes(buf);
+        block
+    }
+
+    /// Whether what `buf` gained since the last look closes the block.
+    fn closes(&mut self, buf: &str) -> bool {
+        let closed = match self.kind {
+            BlockKind::Hermes => {
+                let mut from = self.scanned.saturating_sub(END_HERMES.len() - 1).max(START_HERMES.len()).min(buf.len());
+                while !buf.is_char_boundary(from) {
+                    from -= 1;
+                }
+                buf[from..].contains(END_HERMES)
+            }
+            BlockKind::Mistral | BlockKind::Bare => self.balance.advance(&buf[self.scanned..]),
+        };
+        self.scanned = buf.len();
+        closed
+    }
+}
+
+/// `balanced_len` a piece at a time, from the first bracket on.
+#[derive(Default)]
+struct Balance {
+    started: bool,
+    depth: i32,
+    in_str: bool,
+    esc: bool,
+}
+
+impl Balance {
+    /// True once the value that opened first has closed.
+    fn advance(&mut self, text: &str) -> bool {
+        for c in text.chars() {
+            if !self.started {
+                if !matches!(c, '{' | '[') {
+                    continue;
+                }
+                self.started = true;
+            }
+            if self.in_str {
+                match c {
+                    '\\' if !self.esc => self.esc = true,
+                    '"' if !self.esc => self.in_str = false,
+                    _ => self.esc = false,
+                }
+                continue;
+            }
+            match c {
+                '"' => self.in_str = true,
+                '{' | '[' => self.depth += 1,
+                '}' | ']' => {
+                    self.depth -= 1;
+                    if self.depth == 0 {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
 }
 
 const START_HERMES: &str = "<tool_call>";
@@ -458,6 +545,12 @@ const START_MISTRAL: &str = "[TOOL_CALLS]";
 impl TextToolScanner {
     pub fn feed(&mut self, delta: &str) -> Vec<ScannerEvent> {
         self.buf.push_str(delta);
+        if let Some(open) = self.open.as_mut() {
+            if !open.closes(&self.buf) {
+                return Vec::new();
+            }
+            self.open = None;
+        }
         let mut out = Vec::new();
         loop {
             if let Some(text) = self.take_leading_text() {
@@ -477,6 +570,10 @@ impl TextToolScanner {
             }
             break;
         }
+        if let Some(kind) = self.open_block() {
+            self.open = Some(OpenBlock::new(kind, &self.buf));
+            return out;
+        }
         let keep = self.hold_back();
         let flush_len = self.buf.len() - keep;
         if flush_len > 0 {
@@ -490,6 +587,7 @@ impl TextToolScanner {
     /// a body cut off mid-arguments would be "completed" by repair into something
     /// the model never wrote. Everything else is returned as text.
     pub fn finish(&mut self) -> Vec<ScannerEvent> {
+        self.open = None;
         let rest = std::mem::take(&mut self.buf);
         if rest.is_empty() {
             return Vec::new();
@@ -608,15 +706,29 @@ impl TextToolScanner {
         None
     }
 
-    /// While a tool-call block is open the whole buffer is held; otherwise only
-    /// a suffix that may be the start of a marker.
-    fn hold_back(&self) -> usize {
+    /// A call block begun and not closed. Text before the first marker has
+    /// been let go by now, so the block starts the buffer.
+    /// Its kind is what starts the buffer: a marker further on may sit inside
+    /// the block, in a file the call writes.
+    fn open_block(&self) -> Option<BlockKind> {
         let hermes_open = self.find_outside_fence(START_HERMES).is_some() && self.find_hermes().is_none();
         let mistral_open = self.find_outside_fence(START_MISTRAL).is_some() && self.find_mistral().is_none();
         let bare_open = self.find_bare_start().is_some() && self.find_bare().is_none();
-        if hermes_open || mistral_open || bare_open {
-            return self.buf.len();
+        if !(hermes_open || mistral_open || bare_open) {
+            return None;
         }
+        Some(if self.buf.starts_with(START_HERMES) {
+            BlockKind::Hermes
+        } else if self.buf.starts_with(START_MISTRAL) {
+            BlockKind::Mistral
+        } else {
+            BlockKind::Bare
+        })
+    }
+
+    /// While a tool-call block is open the whole buffer is held (see
+    /// `open_block`); otherwise only a suffix that may start a marker.
+    fn hold_back(&self) -> usize {
         let markers = [START_HERMES, END_HERMES, START_MISTRAL, "\"name\"", "\"ask_user\""];
         let mut hold = 0usize;
         for m in markers {
@@ -1238,6 +1350,30 @@ mod tests {
         (text, calls)
     }
 
+    /// `text` cut into pieces of `n` characters.
+    fn pieces(text: &str, n: usize) -> Vec<String> {
+        text.chars().collect::<Vec<_>>().chunks(n).map(|c| c.iter().collect()).collect()
+    }
+
+    #[test]
+    fn a_call_read_a_piece_at_a_time_is_the_call_read_whole() {
+        let file = "a <tool_call> in the text, [TOOL_CALLS] too, and a } or ] in a string";
+        let inputs = [
+            format!("Writing it.\n<tool_call>{{\"name\":\"write_file\",\"arguments\":{{\"path\":\"a.md\",\"content\":\"{file}\"}}}}</tool_call>\nDone."),
+            format!("[TOOL_CALLS][{{\"name\":\"write_file\",\"arguments\":{{\"content\":\"{file}\"}}}}] after"),
+            format!("Now.\n{{\"name\": \"write_file\", \"arguments\": {{\"content\": \"{file} ü\"}}}}\nDone."),
+        ];
+        for input in &inputs {
+            let whole = scan(&[input.as_str()]);
+            assert_eq!(whole.1.len(), 1, "{input}: {whole:?}");
+            for n in [1, 7] {
+                let cut = pieces(input, n);
+                let refs: Vec<&str> = cut.iter().map(String::as_str).collect();
+                assert_eq!(scan(&refs), whole, "{input} in pieces of {n}");
+            }
+        }
+    }
+
     #[test]
     fn fenced_examples_are_never_calls_even_when_streamed_in_pieces() {
         let example = "{\"name\": \"write_file\", \"arguments\": {\"path\": \"README.md\", \"content\": \"\"}}";
@@ -1431,4 +1567,5 @@ mod tests {
         assert!((mtp.acceptance_rate() - 81.25).abs() < 0.01);
     }
 }
+
 
