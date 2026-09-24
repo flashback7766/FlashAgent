@@ -70,7 +70,8 @@ fn the_wizard_sets_up_a_custom_server_and_opens_the_app() {
     assert_eq!(provider["protocol"], "openai", "{config}");
     assert_eq!(provider["model"], MODEL, "{config}");
     assert_eq!(config["active_provider"], provider["name"], "{config}");
-    assert!(config.get("backend_url").is_none(), "one place for the server: {config}");
+    // Written for an older build to read, never read back.
+    assert_eq!(config["backend_url"], server.url.as_str(), "{config}");
 
     quit(&mut term);
 }

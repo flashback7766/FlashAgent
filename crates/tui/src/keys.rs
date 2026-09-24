@@ -14,6 +14,7 @@ impl App {
     /// A failure is shown: a setting that silently does not stick is found out
     /// only on the next launch.
     pub(crate) fn save_config(&mut self) {
+        flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(&self.config));
         if let Err(e) = self.config.save() {
             self.notice(format!("Settings not saved: {e}"));
         }

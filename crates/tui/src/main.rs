@@ -252,6 +252,7 @@ async fn main() -> Result<()> {
     // is the session.
     let backend = flashagent_llm::Client::new(endpoint, &model);
     backend.set_max_retries(config.network_retries);
+    flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(&config));
     backend.set_user_sampling(config.sampling_preset == flashagent_core::config::SamplingPreset::Custom);
 
     let startup_timeout = if model.is_empty() {
@@ -264,21 +265,8 @@ async fn main() -> Result<()> {
         Err(_) => (None, Some(discovery_task)),
     };
 
-    // No model given: the loaded one, else the first available.
-    if model.is_empty() {
-        if let Some(ref disc) = discovery {
-            if let Some(ref active) = disc.active_model {
-                model = active.id.clone();
-            } else if let Some(first) = disc.models.first() {
-                model = first.id.clone();
-            }
-        }
-    } else if let Some(ref disc) = discovery {
-        // A partial model name is matched to its full id.
-        if let Some(matched) = disc.models.iter().find(|m| m.id == model || m.id.contains(&model) || model.contains(&m.id)) {
-            model = matched.id.clone();
-        }
-    }
+    // No model given: the loaded one, else the first; a partial name is matched to its full id.
+    model = flashagent_tui::providers::model_after_switch(&model, discovery.as_ref());
     backend.set_model(&model);
     // Startup discovered through another backend; this one sends the turns and
     // must know the result from its first request.
