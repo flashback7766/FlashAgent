@@ -2661,3 +2661,29 @@ fn quitting_says_how_many_background_tasks_it_stops() {
     assert!(term.wait_exit(Duration::from_millis(500)).is_none(), "quit without saying a task would be stopped");
     quit(&mut term);
 }
+
+#[test]
+fn a_notice_waits_while_the_user_is_typing() {
+    // Long enough to be typing before it ends.
+    let command = if cfg!(windows) { "ping -n 4 127.0.0.1 >NUL" } else { "sleep 3" };
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "header": "Wait a second", "command": command, "background": true }),
+        },
+        Reply::Text("Waiting on it.".into()),
+        Reply::Text("It is done.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+    ask(&term, "wait a second", "Waiting on it.");
+    term.type_text("half a thought");
+    term.wait_for("Background task 1 exited", WAIT);
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(server.turns().len(), 2, "a turn started under the user's draft");
+
+    // An emptied prompt lets it go.
+    term.send(ESC);
+    term.wait_for("It is done.", WAIT);
+    assert_eq!(server.turns().len(), 3);
+}
