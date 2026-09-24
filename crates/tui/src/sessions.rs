@@ -354,6 +354,12 @@ pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history:
     for saved_msg in saved.messages {
         let msg: ChatMessage = saved_msg.into();
         match msg.role {
+            flashagent_llm::Role::User if flashagent_core::is_task_notice(&msg.content) => {
+                for line in crate::tasks::notice_lines(&msg.content) {
+                    chat.push_system(&line);
+                }
+                history.push(msg);
+            }
             // A tool's picture has no line of its own; its tool line stands for it.
             flashagent_llm::Role::User if !flashagent_core::is_prompt(&msg) => history.push(msg),
             flashagent_llm::Role::User => {
