@@ -1,6 +1,6 @@
 //! Server lifecycles, tool discovery and call routing for MCP.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,7 +49,9 @@ pub struct McpTestReport {
 pub struct McpManager {
     cwd: PathBuf,
     configs: RwLock<HashMap<String, McpServerConfig>>,
-    clients: RwLock<HashMap<String, Arc<McpClient>>>,
+    /// By name, so their tools are offered in the same order on every run: the
+    /// tool list is part of the prompt the server keeps cached.
+    clients: RwLock<BTreeMap<String, Arc<McpClient>>>,
     /// Shown instead of a misleading "Disabled" for enabled but broken servers.
     start_errors: RwLock<HashMap<String, String>>,
     loaded_paths: RwLock<Vec<PathBuf>>,
@@ -61,7 +63,7 @@ impl McpManager {
         Arc::new(Self {
             cwd,
             configs: RwLock::new(configs),
-            clients: RwLock::new(HashMap::new()),
+            clients: RwLock::new(BTreeMap::new()),
             start_errors: RwLock::new(HashMap::new()),
             loaded_paths: RwLock::new(loaded_paths),
         })
@@ -137,8 +139,8 @@ impl McpManager {
     }
 
     pub async fn reload(&self) -> Result<(), String> {
-        let running: Vec<Arc<McpClient>> = { self.clients.write().drain().map(|(_, c)| c).collect() };
-        for c in running {
+        let running = std::mem::take(&mut *self.clients.write());
+        for c in running.into_values() {
             c.kill().await;
         }
 
@@ -334,6 +336,37 @@ mod tests {
         assert!(mgr.is_tool_read_only("mcp__mock_db__read_query"));
         assert!(!mgr.is_tool_read_only("mcp__mock_db__write_query"));
         assert!(!mgr.is_tool_read_only("unknown_tool"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_tools_of_several_servers_are_offered_in_the_same_order_every_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = McpManager::new(dir.path().to_path_buf());
+        let names = ["zeta", "alpha", "mid"];
+        for name in names {
+            // In a file: arguments in the config have their `$VAR`s expanded.
+            let script = dir.path().join(format!("{name}.sh"));
+            std::fs::write(
+                &script,
+                format!(
+                    r#"while IFS= read -r line; do case "$line" in
+                    *initialize*) echo '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","serverInfo":{{"name":"{name}"}}}}}}';;
+                    *tools/list*) echo '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"look","inputSchema":{{"type":"object"}}}}]}}}}';;
+                    esac; done"#
+                ),
+            )
+            .unwrap();
+            let args = vec![script.to_string_lossy().to_string()];
+            mgr.configs.write().insert(name.to_string(), McpServerConfig::new("bash", args));
+            mgr.start_server(name).await.expect("mock server starts");
+        }
+        let offered: Vec<String> = mgr.get_all_tool_specs().into_iter().map(|s| s.name).collect();
+        assert_eq!(offered, ["mcp__alpha__look", "mcp__mid__look", "mcp__zeta__look"]);
+        let clients: Vec<Arc<McpClient>> = mgr.clients.read().values().cloned().collect();
+        for client in clients {
+            client.kill().await;
+        }
     }
 
     #[tokio::test]
