@@ -270,6 +270,7 @@ impl AgentLoop {
             turn_opts = self.config.base_turn_options.clone();
             let mut assistant_text = String::new();
             let mut assistant_reasoning = String::new();
+            let mut replay: Option<serde_json::Value> = None;
             let mut calls: Vec<ToolCall> = Vec::new();
             let mut open_args: Vec<String> = Vec::new();
             // Tool calls written as text because the server did not parse them natively.
@@ -350,6 +351,7 @@ impl AgentLoop {
                         output_tokens += u.completion.unwrap_or(0);
                         events(LoopEvent::Usage(u));
                     }
+                    LlmEvent::Replay(state) => replay = Some(state),
                     LlmEvent::Done(reason) => truncated |= reason == flashagent_llm::FinishReason::Length,
                 }
             }
@@ -388,6 +390,7 @@ impl AgentLoop {
                 tool_call_id: None,
                 tool_calls: calls.clone(),
                 images: Vec::new(),
+                replay,
             };
             let was_continuation = std::mem::take(&mut continuing);
             let merge = was_continuation && history.last().is_some_and(|m| m.role == Role::Assistant);
@@ -401,6 +404,9 @@ impl AgentLoop {
                         });
                     }
                     last.tool_calls = assistant_msg.tool_calls;
+                    if assistant_msg.replay.is_some() {
+                        last.replay = assistant_msg.replay;
+                    }
                 }
             } else {
                 history.push(assistant_msg);
@@ -710,6 +716,7 @@ fn push_partial_assistant(history: &mut Vec<ChatMessage>, text: String, reasonin
         tool_call_id: None,
         tool_calls: Vec::new(),
         images: Vec::new(),
+        replay: None,
     });
 }
 

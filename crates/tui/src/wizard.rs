@@ -958,7 +958,7 @@ pub async fn run_wizard_channel(
 
     let mut wizard = SetupWizard::new(config.clone());
 
-    let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
+    let backend = flashagent_llm::Client::new(wizard.config.endpoint(), "");
     if let Some(disc) = backend.discover_server().await {
         wizard.apply_discovered_models(disc);
     }
@@ -982,7 +982,7 @@ pub async fn run_wizard_channel(
                             wizard.connection_status = Some(format!("Connecting to {}\u{2026}", wizard.config.backend_url.trim_end_matches('/')));
                             let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
                             crate::screen::paint_page(&mut painter, &wizard.render(term_w as usize), true);
-                            let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
+                            let backend = flashagent_llm::Client::new(wizard.config.endpoint(), "");
                             if let Some(disc) = backend.discover_server().await {
                                 wizard.apply_discovered_models(disc);
                             } else {
@@ -1026,7 +1026,7 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
 
     let mut wizard = SetupWizard::new(config.clone());
 
-    let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
+    let backend = flashagent_llm::Client::new(wizard.config.endpoint(), "");
     if let Some(disc) = backend.discover_server().await {
         wizard.apply_discovered_models(disc);
     }
@@ -1049,7 +1049,7 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
                         wizard.connection_status = Some(format!("Connecting to {}\u{2026}", wizard.config.backend_url.trim_end_matches('/')));
                         let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
                         crate::screen::paint_page(&mut painter, &wizard.render(term_w as usize), true);
-                        let backend = flashagent_llm::OpenAiCompat::new(&wizard.config.backend_url, "", wizard.config.api_key.clone());
+                        let backend = flashagent_llm::Client::new(wizard.config.endpoint(), "");
                         if let Some(disc) = backend.discover_server().await {
                             wizard.apply_discovered_models(disc);
                         } else {

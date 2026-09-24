@@ -1,0 +1,467 @@
+//! One model client for every protocol. It keeps what outlives a request (the
+//! endpoint, the model, what the server was found to support and refuse) and
+//! hands each request to the module for the protocol its endpoint speaks.
+
+use std::sync::atomic::{AtomicI8, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use futures::stream::BoxStream;
+use futures::StreamExt;
+use parking_lot::RwLock;
+use tokio::sync::mpsc;
+
+use crate::protocol::{ApiProtocol, Endpoint};
+use crate::thinking::{DiscoveredModel, ServerDiscovery, ServerKind, ThinkingProfile};
+use crate::types::{ChatMessage, FinishReason, LlmError, LlmEvent, ThinkingEffort, ToolSpec, TurnOptions};
+
+pub type EventStream = BoxStream<'static, Result<LlmEvent, LlmError>>;
+
+pub struct Client {
+    endpoint: RwLock<Endpoint>,
+    model: RwLock<String>,
+    pub(crate) http: reqwest::Client,
+    profile: RwLock<Option<ThinkingProfile>>,
+    discovery: RwLock<Option<ServerDiscovery>>,
+    /// The model list that answered last, where a server has several.
+    pub(crate) working_models_url: RwLock<Option<String>>,
+    /// Retries after a connection failure only. HTTP errors and mid-stream drops
+    /// are not retried: the request may already have had effects.
+    max_retries: AtomicUsize,
+    /// Auto effort shift in presets, learned from this model's past turns.
+    effort_bias: AtomicI8,
+    /// Model requests not yet finished, streams included. Background polling
+    /// (the model list) waits for zero instead of competing with them.
+    in_flight: Arc<AtomicUsize>,
+    /// What this server rejected, kept for the model: without it every turn
+    /// on a strict cloud API paid for a refused request first.
+    pub(crate) learned: RwLock<crate::openai::Learned>,
+}
+
+/// Counts a request as running until dropped; a stream holds it to its last byte.
+pub(crate) struct Busy(Arc<AtomicUsize>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Turns a response body into events. One per request; bytes arrive in order.
+pub(crate) trait WireDecoder: Send + 'static {
+    fn feed(&mut self, bytes: &[u8]) -> Vec<Result<LlmEvent, LlmError>>;
+
+    /// The body has ended: whatever is still buffered.
+    fn finish(&mut self) -> Vec<Result<LlmEvent, LlmError>> {
+        Vec::new()
+    }
+}
+
+impl Client {
+    pub fn new(endpoint: Endpoint, model: impl Into<String>) -> Self {
+        Self {
+            endpoint: RwLock::new(endpoint),
+            model: RwLock::new(model.into()),
+            // No total timeout: a slow local model can stream for many minutes. The idle
+            // read timeout catches a server that stopped sending.
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(3))
+                .read_timeout(Duration::from_secs(300))
+                .build()
+                .unwrap_or_default(),
+            profile: RwLock::new(None),
+            discovery: RwLock::new(None),
+            working_models_url: RwLock::new(None),
+            max_retries: AtomicUsize::new(0),
+            effort_bias: AtomicI8::new(0),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            learned: RwLock::default(),
+        }
+    }
+
+    pub fn endpoint(&self) -> Endpoint {
+        self.endpoint.read().clone()
+    }
+
+    pub fn protocol(&self) -> ApiProtocol {
+        self.endpoint.read().protocol
+    }
+
+    pub fn base_url(&self) -> String {
+        self.endpoint.read().url.clone()
+    }
+
+    pub fn api_key(&self) -> Option<String> {
+        self.endpoint.read().api_key.clone()
+    }
+
+    /// Another server, or the same one under another key or protocol. What
+    /// was learned about the old one (its models, their thinking presets,
+    /// the fields it refused) does not carry over. The model is kept: the
+    /// caller picks one from the new server's list.
+    pub fn set_endpoint(&self, endpoint: Endpoint) {
+        {
+            let mut current = self.endpoint.write();
+            if *current == endpoint {
+                return;
+            }
+            *current = endpoint;
+        }
+        *self.discovery.write() = None;
+        *self.working_models_url.write() = None;
+        *self.profile.write() = None;
+        *self.learned.write() = Default::default();
+    }
+
+    pub fn requests_in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn busy(&self) -> Busy {
+        self.in_flight.fetch_add(1, Ordering::Relaxed);
+        Busy(self.in_flight.clone())
+    }
+
+    pub fn set_max_retries(&self, retries: usize) {
+        self.max_retries.store(retries, Ordering::Relaxed);
+    }
+
+    /// Only auto is affected; a preset the user picked by hand stays as is.
+    pub fn set_effort_bias(&self, steps: i8) {
+        self.effort_bias.store(steps.clamp(-1, 1), Ordering::Relaxed);
+    }
+
+    pub fn effort_bias(&self) -> i8 {
+        self.effort_bias.load(Ordering::Relaxed)
+    }
+
+    pub fn model(&self) -> String {
+        self.model.read().clone()
+    }
+
+    pub fn set_model(&self, model: impl Into<String>) {
+        let model = model.into();
+        {
+            let mut current = self.model.write();
+            if *current == model {
+                return;
+            }
+            *current = model.clone();
+        }
+        // A thinking profile belongs to the model, so the old one is dropped;
+        // otherwise a non-reasoning model gets asked for a reasoning effort.
+        let derived = self
+            .discovery
+            .read()
+            .as_ref()
+            .and_then(|disc| disc.models.iter().find(|m| m.id == model).map(|m| m.thinking.clone()));
+        *self.profile.write() = derived;
+        *self.learned.write() = Default::default();
+    }
+
+    pub fn discovery(&self) -> Option<ServerDiscovery> {
+        self.discovery.read().clone()
+    }
+
+    /// Also checks `active_model`: some servers do not list the loaded model in
+    /// `models`, and without the fallback no profile was adopted.
+    pub fn adopt_discovery(&self, disc: &ServerDiscovery) {
+        let model = self.model();
+        let thinking = disc
+            .models
+            .iter()
+            .find(|m| m.id == model)
+            .or_else(|| disc.active_model.as_ref().filter(|m| m.id == model))
+            .map(|m| m.thinking.clone());
+        *self.discovery.write() = Some(disc.clone());
+        if let Some(thinking) = thinking {
+            *self.profile.write() = Some(thinking);
+        }
+    }
+
+    pub(crate) fn server_kind(&self) -> ServerKind {
+        self.discovery.read().as_ref().map(|d| d.kind).unwrap_or_default()
+    }
+
+    pub fn with_profile(self, profile: ThinkingProfile) -> Self {
+        *self.profile.write() = Some(profile);
+        self
+    }
+
+    pub fn profile(&self) -> Option<ThinkingProfile> {
+        self.profile.read().clone()
+    }
+
+    pub(crate) fn set_profile(&self, profile: ThinkingProfile) {
+        *self.profile.write() = Some(profile);
+    }
+
+    /// The models a server listed, whatever its protocol: picks the active
+    /// one, adopts its thinking profile and keeps the list.
+    pub(crate) fn settle_discovery(&self, models: Vec<DiscoveredModel>, kind: ServerKind) -> Option<ServerDiscovery> {
+        if models.is_empty() {
+            return None;
+        }
+        let current = self.model();
+        // The exact name before a similar one: `gpt-4o` must not become
+        // `gpt-4o-audio-preview` because the list happens to name that first.
+        let exact = |m: &DiscoveredModel| !current.is_empty() && m.id == current;
+        let similar = |m: &DiscoveredModel| !current.is_empty() && (m.id.contains(&current) || current.contains(&m.id));
+        let active = models
+            .iter()
+            .find(|m| m.is_loaded && exact(m))
+            .or_else(|| models.iter().find(|m| m.is_loaded && similar(m)))
+            .or_else(|| models.iter().find(|m| m.is_loaded))
+            .or_else(|| models.iter().find(|m| exact(m)))
+            .or_else(|| models.iter().find(|m| similar(m)))
+            .or_else(|| models.first())
+            .cloned();
+
+        if let Some(ref active) = active {
+            self.set_model(&active.id);
+            let mut lock = self.profile.write();
+            // A listing that says nothing about reasoning keeps what an error taught.
+            if active.thinking.supported || lock.is_none() {
+                *lock = Some(active.thinking.clone());
+            }
+        }
+
+        let disc = ServerDiscovery { base_url: self.base_url(), models, active_model: active, kind };
+        *self.discovery.write() = Some(disc.clone());
+        Some(disc)
+    }
+
+    /// The effort this request asks for, as a preset name, or `None` for the
+    /// model's own default.
+    pub(crate) fn resolve_effort(&self, messages: &[ChatMessage], options: &TurnOptions) -> Option<String> {
+        // Unknown abilities default to nothing: a guessed preset puts fields in the
+        // request that the server warns about.
+        let profile = self.profile().unwrap_or_default();
+        if let Some(effort) = &options.custom_effort {
+            return Some(effort.clone());
+        }
+        match options.thinking {
+            ThinkingEffort::Off => Some(profile.resolve_effort(options.thinking).unwrap_or("off").to_string()),
+            ThinkingEffort::Auto => profile.resolve_dynamic_biased(messages, self.effort_bias()).map(String::from),
+            ThinkingEffort::Default => profile.default_preset.clone(),
+            _ => profile.resolve_effort(options.thinking).map(String::from),
+        }
+    }
+
+    /// POSTs `body`. Rate limits and an overloaded gateway are waited out when
+    /// the server's wait is short; a connection that never opened is retried
+    /// as configured. Anything else is returned as it came.
+    pub(crate) async fn post(
+        &self,
+        url: &str,
+        headers: &reqwest::header::HeaderMap,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response, LlmError> {
+        let retries = self.max_retries.load(Ordering::Relaxed);
+        let mut attempt = 0usize;
+        loop {
+            let req = self.http.post(url).headers(headers.clone()).json(body);
+            match req.send().await {
+                // Nothing was generated: rate limits and an overloaded gateway
+                // are worth waiting for, as long as the server's wait is short.
+                Ok(resp) if attempt < retries.max(2) && matches!(resp.status().as_u16(), 429 | 502 | 503 | 504 | 529) => {
+                    attempt += 1;
+                    let wait = resp
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.trim().parse::<f64>().ok())
+                        // Negative, NaN or infinite would panic in `from_secs_f64`.
+                        .and_then(|s| Duration::try_from_secs_f64(s).ok())
+                        .unwrap_or(Duration::from_secs(2u64.pow(attempt as u32)));
+                    if wait > Duration::from_secs(30) {
+                        return Ok(resp);
+                    }
+                    tokio::time::sleep(wait).await;
+                }
+                Ok(resp) => return Ok(resp),
+                // Connect errors only: after connecting, the server may already be generating.
+                Err(e) if attempt < retries && e.is_connect() => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    /// A GET that answers JSON within `timeout`, or `None`.
+    pub(crate) async fn get_json(
+        &self,
+        url: &str,
+        headers: &reqwest::header::HeaderMap,
+        timeout: Duration,
+    ) -> Option<serde_json::Value> {
+        let resp = self.http.get(url).headers(headers.clone()).timeout(timeout).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        resp.json().await.ok()
+    }
+
+    /// Asks the server what it runs: the models, their context windows,
+    /// whether they reason, see images and call tools.
+    pub async fn discover_server(&self) -> Option<ServerDiscovery> {
+        match self.protocol() {
+            ApiProtocol::OpenAi => crate::openai::discover(self).await,
+            ApiProtocol::Anthropic => crate::anthropic::discover(self).await,
+            ApiProtocol::Gemini => crate::gemini::discover(self).await,
+            ApiProtocol::Ollama => crate::ollama::discover(self).await,
+        }
+    }
+
+    /// Measured, not guessed: Qwen-VL charges by area, Gemma a flat rate per
+    /// image. Returns `(per_pixel, fixed)`, or `None` where the protocol
+    /// cannot tell.
+    pub async fn measure_image_cost(&self, probe_png: &[u8], width: u32, height: u32) -> Option<(f32, f32)> {
+        match self.protocol() {
+            ApiProtocol::OpenAi => crate::openai::measure_image_cost(self, probe_png, width, height).await,
+            _ => None,
+        }
+    }
+}
+
+/// Streams a successful response through `decoder`. The request counts as
+/// running until the last byte, and a stream that ends without saying why
+/// ends with [`FinishReason::Stop`].
+pub(crate) fn pump(resp: reqwest::Response, busy: Busy, mut decoder: impl WireDecoder) -> EventStream {
+    let (tx, rx) = mpsc::channel::<Result<LlmEvent, LlmError>>(256);
+    tokio::spawn(async move {
+        // The server keeps generating while this task reads.
+        let _busy = busy;
+        let mut done_sent = false;
+        let mut body = resp.bytes_stream();
+        while let Some(chunk) = body.next().await {
+            let items = match chunk {
+                Ok(bytes) => decoder.feed(&bytes),
+                Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
+            };
+            if !forward(&tx, items, &mut done_sent).await {
+                return;
+            }
+        }
+        if forward(&tx, decoder.finish(), &mut done_sent).await && !done_sent {
+            let _ = tx.send(Ok(LlmEvent::Done(FinishReason::Stop))).await;
+        }
+    });
+    Box::pin(futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) }))
+}
+
+/// False once the reader is gone or an error has been passed on: an error ends the stream.
+async fn forward(
+    tx: &mpsc::Sender<Result<LlmEvent, LlmError>>,
+    items: Vec<Result<LlmEvent, LlmError>>,
+    done_sent: &mut bool,
+) -> bool {
+    for item in items {
+        let failed = item.is_err();
+        *done_sent |= matches!(item, Ok(LlmEvent::Done(_)));
+        if tx.send(item).await.is_err() || failed {
+            return false;
+        }
+    }
+    true
+}
+
+#[async_trait]
+impl crate::LlmBackend for Client {
+    fn name(&self) -> &str {
+        self.protocol().id()
+    }
+
+    async fn stream(&self, messages: &[ChatMessage], tools: &[ToolSpec]) -> Result<EventStream, LlmError> {
+        self.stream_with_options(messages, tools, &TurnOptions::default()).await
+    }
+
+    async fn stream_with_options(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        options: &TurnOptions,
+    ) -> Result<EventStream, LlmError> {
+        match self.protocol() {
+            ApiProtocol::OpenAi => crate::openai::stream(self, messages, tools, options).await,
+            ApiProtocol::Anthropic => crate::anthropic::stream(self, messages, tools, options).await,
+            ApiProtocol::Gemini => crate::gemini::stream(self, messages, tools, options).await,
+            ApiProtocol::Ollama => crate::ollama::stream(self, messages, tools, options).await,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client(model: &str) -> Client {
+        Client::new(Endpoint::new(ApiProtocol::OpenAi, "http://localhost:1234/v1", None), model)
+    }
+
+    #[test]
+    fn switching_models_does_not_keep_the_old_model_s_thinking_profile() {
+        // Regression: the previous model's profile was kept after a model switch.
+        let llm = client("thinker").with_profile(ThinkingProfile {
+            presets: vec!["off".into(), "on".into()],
+            protocol: crate::thinking::ThinkingProtocol::LmStudio,
+            supported: true,
+            default_preset: Some("on".into()),
+        });
+        assert!(llm.profile().is_some_and(|p| p.supported));
+        llm.set_model("a-model-that-cannot-reason");
+        assert!(llm.profile().is_none(), "an unknown model inherits nothing from the one before it");
+        llm.set_model("a-model-that-cannot-reason");
+        assert!(llm.profile().is_none(), "setting the same model again changes nothing");
+    }
+
+    #[test]
+    fn the_learned_effort_correction_is_never_more_than_one_step() {
+        // Clamped, so a bad streak cannot pin the model at "off".
+        let llm = client("m");
+        assert_eq!(llm.effort_bias(), 0, "nothing learned yet");
+        llm.set_effort_bias(-7);
+        assert_eq!(llm.effort_bias(), -1);
+        llm.set_effort_bias(7);
+        assert_eq!(llm.effort_bias(), 1);
+        llm.set_effort_bias(0);
+        assert_eq!(llm.effort_bias(), 0);
+    }
+
+    #[test]
+    fn another_server_starts_with_nothing_learned_about_the_last_one() {
+        let llm = client("m").with_profile(ThinkingProfile {
+            presets: vec!["low".into(), "high".into()],
+            protocol: crate::thinking::ThinkingProtocol::ReasoningEffort,
+            supported: true,
+            default_preset: None,
+        });
+        llm.settle_discovery(
+            vec![DiscoveredModel {
+                id: "m".into(),
+                display_name: None,
+                is_loaded: true,
+                context_length: Some(8192),
+                max_context_length: None,
+                thinking: ThinkingProfile::unreported(),
+                supports_tools: true,
+                supports_vision: false,
+            }],
+            ServerKind::LmStudio,
+        );
+        assert!(llm.discovery().is_some());
+
+        llm.set_endpoint(Endpoint::new(ApiProtocol::OpenAi, "http://localhost:1234/v1/", None));
+        assert!(llm.discovery().is_some(), "the same endpoint, written differently, is not a change");
+
+        llm.set_endpoint(Endpoint::new(ApiProtocol::Anthropic, "https://api.anthropic.com", Some("k".into())));
+        assert_eq!(llm.protocol(), ApiProtocol::Anthropic);
+        assert_eq!(llm.base_url(), "https://api.anthropic.com");
+        assert!(llm.discovery().is_none() && llm.profile().is_none());
+        assert_eq!(llm.model(), "m", "the caller picks the next model");
+        assert_eq!(crate::LlmBackend::name(&llm), "anthropic");
+    }
+}

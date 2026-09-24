@@ -265,8 +265,7 @@ impl App {
                 self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
                 self.save_config();
                 // Probe the URL just typed, not the connected one.
-                let key = settings.config.api_key.clone().or_else(|| std::env::var("FLASHAGENT_API_KEY").ok());
-                let probe = flashagent_llm::OpenAiCompat::new(&settings.config.backend_url, "", key);
+                let probe = flashagent_llm::Client::new(settings.config.endpoint(), "");
                 settings.available_models = match probe.discover_server().await {
                     Some(disc) => disc.models.into_iter().map(|m| m.id).collect(),
                     None => Vec::new(),

@@ -18,6 +18,10 @@ pub(crate) struct SavedMessage {
     /// cannot see.
     #[serde(default)]
     pub(crate) images: Vec<String>,
+    /// Signed thinking and the like, which the provider wants back verbatim
+    /// when a resumed session goes on (see `ChatMessage::replay`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) replay: Option<serde_json::Value>,
 }
 
 impl From<&ChatMessage> for SavedMessage {
@@ -37,6 +41,7 @@ impl From<&ChatMessage> for SavedMessage {
                 })
                 .collect(),
             images: m.images.clone(),
+            replay: m.replay.clone(),
         }
     }
 }
@@ -64,6 +69,7 @@ impl From<SavedMessage> for ChatMessage {
                 })
                 .collect(),
             images: m.images,
+            replay: m.replay,
         }
     }
 }

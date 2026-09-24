@@ -489,6 +489,13 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// The server turns go to and how to talk to it. The key falls back to
+    /// `FLASHAGENT_API_KEY`.
+    pub fn endpoint(&self) -> flashagent_llm::Endpoint {
+        let key = self.api_key.clone().or_else(|| std::env::var("FLASHAGENT_API_KEY").ok());
+        flashagent_llm::Endpoint::detect(&self.backend_url, key)
+    }
+
     pub fn default_path() -> Option<PathBuf> {
         if let Ok(custom) = std::env::var("FLASHAGENT_CONFIG_PATH") {
             if !custom.trim().is_empty() {

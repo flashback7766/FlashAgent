@@ -21,8 +21,15 @@ pub enum ThinkingProtocol {
     /// Google's OpenAI-compatible endpoint: `extra_body.google.thinking_config`
     /// with a level (Gemini 3) or a token budget (2.5), and `include_thoughts`,
     /// without which the thinking is never shown. It cannot go with
-    /// `reasoning_effort`, so that is not sent.
+    /// `reasoning_effort`, so that is not sent. The native Gemini protocol
+    /// sends the same `thinkingConfig` in its own shape.
     Gemini,
+    /// Anthropic's Messages API: `thinking` with a token budget, or adaptive
+    /// thinking with an effort. Built by the `anthropic` module.
+    Anthropic,
+    /// Ollama's own API: `think: true|false|"low"|"medium"|"high"`. Built by
+    /// the `ollama` module.
+    Ollama,
 }
 
 /// Decided by the API that answered, not by the address.
@@ -31,6 +38,11 @@ pub enum ServerKind {
     LmStudio,
     /// Its model list says `owned_by: llamacpp`.
     LlamaCpp,
+    /// Ollama through its own API.
+    Ollama,
+    Anthropic,
+    /// Google's own API, not its OpenAI-compatible gateway.
+    Gemini,
     #[default]
     Other,
 }
@@ -38,7 +50,7 @@ pub enum ServerKind {
 impl ServerKind {
     /// Keeps a prompt cache and reads the thinking switches in the chat template.
     pub fn runs_local_models(self) -> bool {
-        matches!(self, ServerKind::LmStudio | ServerKind::LlamaCpp)
+        matches!(self, ServerKind::LmStudio | ServerKind::LlamaCpp | ServerKind::Ollama)
     }
 }
 
@@ -307,7 +319,8 @@ impl ThinkingProfile {
     pub fn apply_to_request(&self, body: &mut serde_json::Value, effort: &str) {
         let is_off = effort == "off" || effort == "disabled" || effort == "none" || effort == "false" || effort == "0";
         match self.protocol {
-            ThinkingProtocol::Unreported => {}
+            // Their own modules build these requests.
+            ThinkingProtocol::Unreported | ThinkingProtocol::Anthropic | ThinkingProtocol::Ollama => {}
             ThinkingProtocol::Gemini => {
                 let model = body["model"].as_str().unwrap_or_default().to_string();
                 body["extra_body"] = serde_json::json!({ "google": { "thinking_config": gemini_thinking_config(&model, effort) } });
@@ -1470,6 +1483,7 @@ mod tests {
             tool_call_id: Some("1".into()),
             tool_calls: vec![],
             images: Vec::new(),
+            replay: None,
         };
         let task = ChatMessage::user("Read src/parser.rs and describe it");
         let base = ThinkingProfile::analyze_turn_complexity(std::slice::from_ref(&task));
@@ -1510,6 +1524,7 @@ mod tests {
             tool_call_id: Some("2".into()),
             tool_calls: vec![],
             images: Vec::new(),
+            replay: None,
         });
         assert_eq!(
             ThinkingProfile::analyze_turn_complexity(&deep),

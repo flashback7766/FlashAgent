@@ -26,7 +26,7 @@ impl App {
 
     /// Once due, with no turn running.
     pub(crate) fn start_recap_if_due(&mut self, source: &Arc<BackendSource>, tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>) {
-        if self.running || !self.recap_due.is_some_and(|due| std::time::Instant::now() >= due) {
+        if self.running || self.recap_due.is_none_or(|due| std::time::Instant::now() < due) {
             return;
         }
         self.recap_due = None;

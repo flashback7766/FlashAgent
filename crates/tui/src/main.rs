@@ -207,8 +207,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    let api_key = config.api_key.clone().or_else(|| std::env::var("FLASHAGENT_API_KEY").ok());
-    let url = config.backend_url.clone();
+    let endpoint = config.endpoint();
+    let url = endpoint.url.clone();
     let mut model = config.model.clone();
 
     if std::env::var("FLASHAGENT_TRUST_DIR").is_ok() {
@@ -217,7 +217,7 @@ async fn main() -> Result<()> {
 
     // Discovery starts now, so models, context window and presets are known by
     // the time the startup screen is done.
-    let backend_initial = flashagent_llm::OpenAiCompat::new(&url, &model, api_key.clone());
+    let backend_initial = flashagent_llm::Client::new(endpoint.clone(), &model);
     let mut discovery_task = tokio::spawn(async move {
         backend_initial.discover_server().await
     });
@@ -247,7 +247,7 @@ async fn main() -> Result<()> {
 
     // Leaked once so the spawned loop can hold &'static references; the process
     // is the session.
-    let backend = flashagent_llm::OpenAiCompat::new(&url, &model, api_key);
+    let backend = flashagent_llm::Client::new(endpoint, &model);
     backend.set_max_retries(config.network_retries);
 
     let startup_timeout = if model.is_empty() {
@@ -1921,7 +1921,7 @@ mod tests {
 
     fn offline_source() -> BackendSource {
         // Nothing listens on port 9; a failed compaction must preserve history.
-        BackendSource(flashagent_llm::OpenAiCompat::new("http://127.0.0.1:9/v1", "m", None))
+        BackendSource(flashagent_llm::Client::new(flashagent_llm::Endpoint::detect("http://127.0.0.1:9/v1", None), "m"))
     }
 
     struct ScriptedCompaction(flashagent_llm::FinishReason);
