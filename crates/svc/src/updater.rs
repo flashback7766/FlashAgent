@@ -485,24 +485,7 @@ pub async fn download_and_apply_with_progress(
         .user_agent(format!("FlashAgent-Updater/{}", current_version()))
         .build()?;
 
-    let mut resp = client.get(download_url).send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("Failed downloading asset {}: HTTP {}", asset_name, resp.status());
-    }
-
-    // Streamed, so the caller can show progress.
-    let total = resp.content_length();
-    let mut payload: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
-    let mut last_report = std::time::Instant::now();
-    on_progress(UpdateProgress::Downloading { received: 0, total });
-    while let Some(chunk) = resp.chunk().await? {
-        payload.extend_from_slice(&chunk);
-        if last_report.elapsed() >= PROGRESS_INTERVAL {
-            last_report = std::time::Instant::now();
-            on_progress(UpdateProgress::Downloading { received: payload.len() as u64, total });
-        }
-    }
-    on_progress(UpdateProgress::Downloading { received: payload.len() as u64, total });
+    let payload = download(&client, download_url, asset_name, &mut on_progress).await?;
 
     on_progress(UpdateProgress::Verifying);
     verify_checksum(&client, checksums_url, asset_name, &payload).await?;
@@ -514,6 +497,36 @@ pub async fn download_and_apply_with_progress(
     atomic_replace_executable(&target_path, &binary_bytes)?;
 
     Ok(target_path)
+}
+
+/// The size a server declares reserves memory only up to this: a wrong
+/// Content-Length must not ask for more than the machine has.
+const MAX_RESERVED_DOWNLOAD: u64 = 64 * 1024 * 1024;
+
+/// Streamed, so the caller can show progress.
+async fn download(
+    client: &reqwest::Client,
+    url: &str,
+    asset_name: &str,
+    on_progress: &mut impl FnMut(UpdateProgress),
+) -> anyhow::Result<Vec<u8>> {
+    let mut resp = client.get(url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Failed downloading asset {}: HTTP {}", asset_name, resp.status());
+    }
+    let total = resp.content_length();
+    let mut payload: Vec<u8> = Vec::with_capacity(total.unwrap_or(0).min(MAX_RESERVED_DOWNLOAD) as usize);
+    let mut last_report = std::time::Instant::now();
+    on_progress(UpdateProgress::Downloading { received: 0, total });
+    while let Some(chunk) = resp.chunk().await? {
+        payload.extend_from_slice(&chunk);
+        if last_report.elapsed() >= PROGRESS_INTERVAL {
+            last_report = std::time::Instant::now();
+            on_progress(UpdateProgress::Downloading { received: payload.len() as u64, total });
+        }
+    }
+    on_progress(UpdateProgress::Downloading { received: payload.len() as u64, total });
+    Ok(payload)
 }
 
 /// Returns the installed version on success, and reports it with each stage,
@@ -779,6 +792,45 @@ mod tests {
         assert_eq!(read_back, b"version-new");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Answers one request with `head`, then `body`, then hangs up.
+    async fn serve_once(head: &'static str, body: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/asset", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = sock.read(&mut request).await;
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(body).await;
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_download_declaring_a_terabyte_reserves_no_terabyte() {
+        // Reserving what the header claimed took down the whole app.
+        let url = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 1099511627776\r\n\r\n", b"abc").await;
+        let mut declared = None;
+        let result = download(&reqwest::Client::new(), &url, "flashagent", &mut |p| {
+            if let UpdateProgress::Downloading { total, .. } = p {
+                declared = total;
+            }
+        })
+        .await;
+        assert!(result.is_err(), "the body ended far short of its length");
+        assert_eq!(declared, Some(1 << 40));
+    }
+
+    #[tokio::test]
+    async fn a_download_reports_what_arrived() {
+        let url = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", b"hello").await;
+        let mut last = None;
+        let payload = download(&reqwest::Client::new(), &url, "flashagent", &mut |p| last = Some(p)).await.unwrap();
+        assert_eq!(payload, b"hello");
+        assert_eq!(last, Some(UpdateProgress::Downloading { received: 5, total: Some(5) }));
     }
 
     #[test]

@@ -411,6 +411,7 @@ dependencies = [
  "serde",
  "tar",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
