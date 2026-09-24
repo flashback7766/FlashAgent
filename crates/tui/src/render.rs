@@ -192,6 +192,189 @@ pub(crate) fn format_provider(provider: &str, model: &str) -> String {
     out
 }
 
+struct FooterVisibility {
+    approval: bool,
+    question: bool,
+    overlay: bool,
+    autocomplete: bool,
+}
+
+fn footer_hint(chat: &ChatView, shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u64) -> String {
+    let left_hint = if let Some(toast) = st.copy_toast {
+        format!("  \x1b[1;38;2;135;215;165m{toast}\x1b[0m")
+    } else if st.history_search.is_some() {
+        format!("  {}", key_hints(&[("Ctrl+F", "older"), ("Enter", "use"), ("Esc", "cancel")], width.saturating_sub(2)))
+    } else if shown.approval {
+        let hints = [("Enter", "confirm"), ("←/→", "choose"), ("a", "always"), ("Esc", "deny")];
+        format!("  {}", flashagent_tui::key_hints(&hints, width.saturating_sub(2)))
+    } else if shown.question {
+        // The card lists its own keys, which differ for a choice and a written answer.
+        st.background.map(|text| format!("  {}", st.background_style.paint(text))).unwrap_or_default()
+    } else if st.channel_prompt.is_some() && st.prompt_title == UNINSTALL_TITLE {
+        format!("  {}", key_hints(&[("y/Enter", "close and uninstall"), ("n/Esc", "keep FlashAgent")], width.saturating_sub(2)))
+    } else if st.channel_prompt.is_some() {
+        format!("  {}", key_hints(&[("y/Enter", "switch"), ("n/Esc", "keep the current channel")], width.saturating_sub(2)))
+    } else if shown.overlay {
+        // Panels draw their own keys inside their box; only an unprompted notice
+        // still gets the line.
+        st.background.map(|text| format!("  {}", st.background_style.paint(text))).unwrap_or_default()
+    } else if shown.autocomplete {
+        let hints = [("Tab", "complete"), ("↑/↓", "select"), ("Enter", "run"), ("Esc", "close")];
+        format!("  {}", key_hints(&hints, width.saturating_sub(2)))
+    } else if st.running {
+        // The spinner says it is alive; then only how fast it writes and how fast it
+        // read the prompt. A speed of 0 before the first token reads as a stall, so
+        // it waits for one.
+        let dot = " \x1b[38;2;75;99;130m·\x1b[0m ";
+        let mut live = format!("  {}", anim::spinner(t));
+        if let Some(speed) = st.tokens_per_sec.filter(|s| *s > 0.0) {
+            live.push_str(&format!(" \x1b[38;2;194;231;255m{speed:.1} t/s\x1b[0m"));
+        }
+        if let Some(draft) = st.draft_acceptance {
+            live.push_str(&format!("{dot}{draft}"));
+        }
+        if let Some(prefill) = st.ttft_display {
+            live.push_str(&format!("{dot}{prefill}"));
+        }
+        // The counters show the model is alive and the notice must not be missed;
+        // the key hints give way when both do not fit.
+        let esc_does = if st.input.is_empty() { "interrupt" } else { "clear" };
+        let esc = key_hints(&[("Esc", esc_does)], width);
+        let steer = key_hints(&[("Enter", "steer"), ("Esc", esc_does)], width);
+        let head = match st.background {
+            Some(text) => format!("{live}{dot}{}", st.background_style.paint(text)),
+            None => live.clone(),
+        };
+        let detach = key_hints(&[("Ctrl+B", "background"), ("Esc", esc_does)], width);
+        let detach_steer = key_hints(&[("Ctrl+B", "background"), ("Enter", "steer"), ("Esc", esc_does)], width);
+        let hints: Vec<&str> = match (st.shell_running, st.background.is_some()) {
+            (true, true) => vec![&detach, &esc, ""],
+            (true, false) => vec![&detach_steer, &detach, &esc, ""],
+            (false, true) => vec![&esc, ""],
+            (false, false) => vec![&steer, &esc, ""],
+        };
+        // The longest hint that fits, never cut mid-word.
+        hints
+            .into_iter()
+            .map(|hint| if hint.is_empty() { head.clone() } else { format!("{head}{dot}{hint}") })
+            .find(|line| visible_width(line) <= width)
+            .unwrap_or(head)
+    } else if let Some(text) = st.background {
+        format!("  {}", st.background_style.paint(text))
+    } else if !st.input.is_empty() {
+        let hints = [("Enter", "send"), ("Alt+Enter", "new line"), ("Ctrl+W", "delete word"), ("Ctrl+F", "history"), ("Esc", "clear")];
+        format!("  {}", key_hints(&hints, width.saturating_sub(2)))
+    } else if chat.has_user_message() {
+        // The welcome card lists the keys; once it has scrolled away, the one key
+        // that finds every other.
+        format!("  {}", key_hints(&[("Ctrl+K", "commands"), ("/help", ""), ("Ctrl+D", "quit")], width.saturating_sub(2)))
+    } else {
+        String::new()
+    };
+    left_hint
+}
+
+fn append_tip_rows(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize, height: u16) {
+    if let Some(lines) = st.tip_lines {
+        for line in lines {
+            let tip_row = clip_ansi(line, width.saturating_sub(2));
+            tail.push((LineKind::System, tip_row));
+        }
+    } else if let Some(anim) = st.tip_animated {
+        let raw_tip = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m {anim}");
+        let tip_row = clip_ansi(&raw_tip, width.saturating_sub(2));
+        tail.push((LineKind::System, tip_row));
+    } else if let Some(tip_content) = st.tip {
+        let avail1 = width.saturating_sub(8);
+        // A second tip row only in a tall window.
+        let room_for_two = height >= 20;
+        if room_for_two && width >= 30 && tip_content.chars().count() > avail1 {
+            let (l1, l2) = flashagent_tui::tips::split_tip_at_word_boundary(tip_content, avail1);
+            let row1 = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{l1}\x1b[0m");
+            // A tip needing three lines ends the second on a word.
+            let room = width.saturating_sub(9);
+            let l2 = if l2.chars().count() > room {
+                let head: String = l2.chars().take(room.saturating_sub(1)).collect();
+                let cut = match head.rfind(' ') {
+                    Some(i) if i >= room / 3 => head[..i].to_string(),
+                    _ => head,
+                };
+                format!("{cut}\u{2026}")
+            } else {
+                l2.to_string()
+            };
+            let row2 = format!("       \x1b[38;2;175;170;160m{l2}\x1b[0m");
+            tail.push((LineKind::System, clip_ansi(&row1, width.saturating_sub(2))));
+            tail.push((LineKind::System, clip_ansi(&row2, width.saturating_sub(2))));
+        } else {
+            let raw_tip = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{tip_content}\x1b[0m");
+            let tip_row = clip_ansi(&raw_tip, width.saturating_sub(2));
+            tail.push((LineKind::System, tip_row));
+        }
+    }
+}
+
+fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>, awaiting_user: bool) -> String {
+    let mode_room = 2 + visible_width(st.mode.label()) + 2 + 1;
+    let percent = context_usage.percentage().clamp(0.0, 100.0);
+    // Nearly full, it says what to do about it instead of drawing the bar.
+    let gauges = if st.context_warn_threshold > 0 && percent >= st.context_warn_threshold as f32 {
+        let amber = |s: String| format!("\x1b[1;38;2;245;160;80m{s}\x1b[0m");
+        [
+            amber(format!("context {percent:.0}% full \u{b7} /compact frees it")),
+            amber(format!("{percent:.0}% full \u{b7} /compact")),
+            amber(format!("{percent:.0}%")),
+        ]
+    } else {
+        [
+            context_usage.format_compact_gauge(10),
+            context_usage.format_compact_gauge(4),
+            format!("\x1b[38;2;135;215;165m{percent:.0}%\x1b[0m"),
+        ]
+    };
+    let gauge_str = gauges.into_iter().find(|g| mode_room + visible_width(g) + 3 <= width).unwrap_or_default();
+    let expand_status = if st.reasoning_expand.all {
+        " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: all]\x1b[0m"
+    } else if st.reasoning_expand.last {
+        " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: last]\x1b[0m"
+    } else {
+        ""
+    };
+    let left_telemetry = format_status_left(
+        st.running,
+        st.is_goal_active,
+        awaiting_user,
+        st.goal_progress,
+        st.mode.label(),
+        &format!("{}{expand_status}", tasks_status(st.background_tasks)),
+    );
+    fit_status_row(width, &left_telemetry, &format_provider(st.provider.0, st.provider.1), &gauge_str)
+}
+
+fn fit_status_row(width: usize, left: &str, provider: &str, gauge_str: &str) -> String {
+    let left = format!("{left}{provider}");
+    let gauge_vis = visible_width(gauge_str);
+    let left_vis = visible_width(&left);
+    let status_row = if left_vis + gauge_vis + 3 <= width {
+        let pad = " ".repeat(width.saturating_sub(left_vis + gauge_vis + 1));
+        format!("{left}{pad}{gauge_str}")
+    } else {
+        // Whole parts go first, from the end; only a lone remaining part is clipped.
+        let clip_budget = width.saturating_sub(gauge_vis + 3);
+        let mut left = left.clone();
+        while visible_width(&left) > clip_budget {
+            match left.rfind(" \x1b[38;2;100;95;90m·") {
+                Some(cut) => left = format!("{}\x1b[0m", &left[..cut]),
+                None => break,
+            }
+        }
+        let clipped_left = clip_ansi(&left, clip_budget);
+        let pad = " ".repeat(width.saturating_sub(visible_width(&clipped_left) + gauge_vis + 1));
+        format!("{clipped_left}{pad}{gauge_str}")
+    };
+    status_row
+}
+
 impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn frame(
@@ -666,177 +849,18 @@ impl Renderer {
             tail.extend(ac.render(width));
         }
 
-        // Three footer lines. Line 1: hints.
-        let left_hint = if let Some(toast) = st.copy_toast {
-            format!("  \x1b[1;38;2;135;215;165m{toast}\x1b[0m")
-        } else if st.history_search.is_some() {
-            format!("  {}", key_hints(&[("Ctrl+F", "older"), ("Enter", "use"), ("Esc", "cancel")], width.saturating_sub(2)))
-        } else if gate.pending().is_some() {
-            let hints = [("Enter", "confirm"), ("←/→", "choose"), ("a", "always"), ("Esc", "deny")];
-            format!("  {}", flashagent_tui::key_hints(&hints, width.saturating_sub(2)))
-        } else if question_gate.pending().is_some() {
-            // The card lists its own keys, which differ for a choice and a written answer.
-            st.background.map(|text| format!("  {}", st.background_style.paint(text))).unwrap_or_default()
-        } else if st.channel_prompt.is_some() && st.prompt_title == UNINSTALL_TITLE {
-            format!("  {}", key_hints(&[("y/Enter", "close and uninstall"), ("n/Esc", "keep FlashAgent")], width.saturating_sub(2)))
-        } else if st.channel_prompt.is_some() {
-            format!("  {}", key_hints(&[("y/Enter", "switch"), ("n/Esc", "keep the current channel")], width.saturating_sub(2)))
-        } else if overlay.is_some() {
-            // Panels draw their own keys inside their box; only an unprompted notice
-            // still gets the line.
-            st.background.map(|text| format!("  {}", st.background_style.paint(text))).unwrap_or_default()
-        } else if autocomplete.is_some() {
-            let hints = [("Tab", "complete"), ("↑/↓", "select"), ("Enter", "run"), ("Esc", "close")];
-            format!("  {}", key_hints(&hints, width.saturating_sub(2)))
-        } else if st.running {
-            // The spinner says it is alive; then only how fast it writes and how fast it
-            // read the prompt. A speed of 0 before the first token reads as a stall, so
-            // it waits for one.
-            let dot = " \x1b[38;2;75;99;130m·\x1b[0m ";
-            let mut live = format!("  {}", anim::spinner(t));
-            if let Some(speed) = st.tokens_per_sec.filter(|s| *s > 0.0) {
-                live.push_str(&format!(" \x1b[38;2;194;231;255m{speed:.1} t/s\x1b[0m"));
-            }
-            if let Some(draft) = st.draft_acceptance {
-                live.push_str(&format!("{dot}{draft}"));
-            }
-            if let Some(prefill) = st.ttft_display {
-                live.push_str(&format!("{dot}{prefill}"));
-            }
-            // The counters show the model is alive and the notice must not be missed;
-            // the key hints give way when both do not fit.
-            let esc_does = if st.input.is_empty() { "interrupt" } else { "clear" };
-            let esc = key_hints(&[("Esc", esc_does)], width);
-            let steer = key_hints(&[("Enter", "steer"), ("Esc", esc_does)], width);
-            let head = match st.background {
-                Some(text) => format!("{live}{dot}{}", st.background_style.paint(text)),
-                None => live.clone(),
-            };
-            let detach = key_hints(&[("Ctrl+B", "background"), ("Esc", esc_does)], width);
-            let detach_steer = key_hints(&[("Ctrl+B", "background"), ("Enter", "steer"), ("Esc", esc_does)], width);
-            let hints: Vec<&str> = match (st.shell_running, st.background.is_some()) {
-                (true, true) => vec![&detach, &esc, ""],
-                (true, false) => vec![&detach_steer, &detach, &esc, ""],
-                (false, true) => vec![&esc, ""],
-                (false, false) => vec![&steer, &esc, ""],
-            };
-            // The longest hint that fits, never cut mid-word.
-            hints
-                .into_iter()
-                .map(|hint| if hint.is_empty() { head.clone() } else { format!("{head}{dot}{hint}") })
-                .find(|line| visible_width(line) <= width)
-                .unwrap_or(head)
-        } else if let Some(text) = st.background {
-            format!("  {}", st.background_style.paint(text))
-        } else if !st.input.is_empty() {
-            let hints = [("Enter", "send"), ("Alt+Enter", "new line"), ("Ctrl+W", "delete word"), ("Ctrl+F", "history"), ("Esc", "clear")];
-            format!("  {}", key_hints(&hints, width.saturating_sub(2)))
-        } else if chat.has_user_message() {
-            // The welcome card lists the keys; once it has scrolled away, the one key
-            // that finds every other.
-            format!("  {}", key_hints(&[("Ctrl+K", "commands"), ("/help", ""), ("Ctrl+D", "quit")], width.saturating_sub(2)))
-        } else {
-            String::new()
+        // Three footer lines: hints, tip, and context status.
+        let shown = FooterVisibility {
+            approval: gate.pending().is_some(),
+            question: question_gate.pending().is_some(),
+            overlay: overlay.is_some(),
+            autocomplete: autocomplete.is_some(),
         };
-        tail.push((LineKind::System, left_hint));
+        tail.push((LineKind::System, footer_hint(chat, shown, &st, width, t)));
+        append_tip_rows(&mut tail, &st, width, height);
+        let awaiting_user = gate.pending().is_some() || question_gate.pending().is_some();
+        tail.push((LineKind::System, footer_status(width, context_usage, &st, awaiting_user)));
 
-        // Line 2: the tip, on two lines in narrow terminals.
-        if let Some(lines) = st.tip_lines {
-            for line in lines {
-                let tip_row = clip_ansi(line, width.saturating_sub(2));
-                tail.push((LineKind::System, tip_row));
-            }
-        } else if let Some(anim) = st.tip_animated {
-            let raw_tip = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m {anim}");
-            let tip_row = clip_ansi(&raw_tip, width.saturating_sub(2));
-            tail.push((LineKind::System, tip_row));
-        } else if let Some(tip_content) = st.tip {
-            let avail1 = width.saturating_sub(8);
-            // A second tip row only in a tall window.
-            let room_for_two = height >= 20;
-            if room_for_two && width >= 30 && tip_content.chars().count() > avail1 {
-                let (l1, l2) = flashagent_tui::tips::split_tip_at_word_boundary(tip_content, avail1);
-                let row1 = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{l1}\x1b[0m");
-                // A tip needing three lines ends the second on a word.
-                let room = width.saturating_sub(9);
-                let l2 = if l2.chars().count() > room {
-                    let head: String = l2.chars().take(room.saturating_sub(1)).collect();
-                    let cut = match head.rfind(' ') {
-                        Some(i) if i >= room / 3 => head[..i].to_string(),
-                        _ => head,
-                    };
-                    format!("{cut}\u{2026}")
-                } else {
-                    l2.to_string()
-                };
-                let row2 = format!("       \x1b[38;2;175;170;160m{l2}\x1b[0m");
-                tail.push((LineKind::System, clip_ansi(&row1, width.saturating_sub(2))));
-                tail.push((LineKind::System, clip_ansi(&row2, width.saturating_sub(2))));
-            } else {
-                let raw_tip = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{tip_content}\x1b[0m");
-                let tip_row = clip_ansi(&raw_tip, width.saturating_sub(2));
-                tail.push((LineKind::System, tip_row));
-            }
-        }
-
-        // Line 3: turn stats on the left, context gauge on the right. The mode is
-        // never cut; the gauge shrinks first, down to the percentage.
-        let mode_room = 2 + visible_width(st.mode.label()) + 2 + 1;
-        let percent = context_usage.percentage().clamp(0.0, 100.0);
-        // Nearly full, it says what to do about it instead of drawing the bar.
-        let gauges = if st.context_warn_threshold > 0 && percent >= st.context_warn_threshold as f32 {
-            let amber = |s: String| format!("\x1b[1;38;2;245;160;80m{s}\x1b[0m");
-            [
-                amber(format!("context {percent:.0}% full \u{b7} /compact frees it")),
-                amber(format!("{percent:.0}% full \u{b7} /compact")),
-                amber(format!("{percent:.0}%")),
-            ]
-        } else {
-            [
-                context_usage.format_compact_gauge(10),
-                context_usage.format_compact_gauge(4),
-                format!("\x1b[38;2;135;215;165m{percent:.0}%\x1b[0m"),
-            ]
-        };
-        let gauge_str = gauges.into_iter().find(|g| mode_room + visible_width(g) + 3 <= width).unwrap_or_default();
-        let gauge_vis = visible_width(&gauge_str);
-
-        let expand_status = if st.reasoning_expand.all {
-            " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: all]\x1b[0m"
-        } else if st.reasoning_expand.last {
-            " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: last]\x1b[0m"
-        } else {
-            ""
-        };
-        let mut left_telemetry = format_status_left(
-            st.running,
-            st.is_goal_active,
-            gate.pending().is_some() || question_gate.pending().is_some(),
-            st.goal_progress,
-            st.mode.label(),
-            &format!("{}{expand_status}", tasks_status(st.background_tasks)),
-        );
-        left_telemetry.push_str(&format_provider(st.provider.0, st.provider.1));
-
-        let left_vis = visible_width(&left_telemetry);
-        let status_row = if left_vis + gauge_vis + 3 <= width {
-            let pad = " ".repeat(width.saturating_sub(left_vis + gauge_vis + 1));
-            format!("{left_telemetry}{pad}{gauge_str}")
-        } else {
-            // Whole parts go first, from the end; only a lone remaining part is clipped.
-            let clip_budget = width.saturating_sub(gauge_vis + 3);
-            let mut left = left_telemetry.clone();
-            while visible_width(&left) > clip_budget {
-                match left.rfind(" \x1b[38;2;100;95;90m·") {
-                    Some(cut) => left = format!("{}\x1b[0m", &left[..cut]),
-                    None => break,
-                }
-            }
-            let clipped_left = clip_ansi(&left, clip_budget);
-            let pad = " ".repeat(width.saturating_sub(visible_width(&clipped_left) + gauge_vis + 1));
-            format!("{clipped_left}{pad}{gauge_str}")
-        };
-        tail.push((LineKind::System, status_row));
 
         // The conversation scrolls; the composer and the footer under it stay where
         // they are, so a reply can be written while reading back.
@@ -1051,4 +1075,35 @@ impl App {
 /// Drops from the middle, keeping the last hint, which is the way out.
 fn key_hints(pairs: &[(&str, &str)], width: usize) -> String {
     flashagent_tui::key_hints(pairs, width)
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::*;
+
+    #[test]
+    fn the_status_row_never_exceeds_the_window() {
+        let left = format_status_left(false, false, false, None, "Manual", "");
+        let provider = format_provider("Anthropic", "claude-opus-5-5");
+        for width in 1..120 {
+            let row = fit_status_row(width, &left, &provider, "");
+            assert!(visible_width(&row) <= width, "width {width}: {row:?}");
+        }
+    }
+
+    #[test]
+    fn the_status_row_drops_the_model_then_the_provider() {
+        let left = format_status_left(false, false, false, None, "Manual", "");
+        let provider_only = format_provider("Anthropic", "");
+        let provider = format_provider("Anthropic", "claude-opus-5-5");
+        let with_provider = fit_status_row(visible_width(&left) + visible_width(&provider_only) + 4, &left, &provider, "");
+        let with_provider = flashagent_tui::strip_ansi(&with_provider);
+        assert!(with_provider.contains("Anthropic"));
+        assert!(!with_provider.contains("claude-opus-5-5"));
+
+        let without_provider = fit_status_row(visible_width(&left) + 4, &left, &provider, "");
+        let without_provider = flashagent_tui::strip_ansi(&without_provider);
+        assert!(without_provider.contains("[Manual]"));
+        assert!(!without_provider.contains("Anthropic"));
+    }
 }

@@ -2648,8 +2648,8 @@ fn a_task_stopped_from_the_task_list_wakes_nobody() {
 
     term.type_text("/tasks");
     term.send(ENTER);
-    // Its last row: the card unfolds as it opens.
-    let list = term.wait_for("Esc close", WAIT);
+    // The autocomplete popup also says "Esc close" before Enter opens this card.
+    let list = term.wait_for("#1", WAIT);
     assert!(list.contains("#1") && list.contains("running"), "{list}");
     term.send("k");
     term.wait_for("stopped", WAIT);
