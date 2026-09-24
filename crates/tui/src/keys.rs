@@ -159,6 +159,14 @@ impl App {
             self.history_search_key(code, mods);
             return Flow::Next;
         }
+        if let Some(flow) = self.handle_view_key(cx, code, mods) { return flow; }
+        if let Some(flow) = self.handle_clipboard_key(cx, code, mods) { return flow; }
+        if let Some(flow) = self.handle_navigation_key(cx, code, mods) { return flow; }
+        if let Some(flow) = self.handle_editing_key(cx, code, mods).await { return flow; }
+        Flow::Next
+    }
+
+    fn handle_view_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Option<Flow> {
         match code {
             KeyCode::Esc => {
                 // A steering draft goes first: a turn stopped to clear two words is lost work.
@@ -187,96 +195,6 @@ impl App {
             KeyCode::F(1) => {
                 self.open_overlay(Overlay::Context(ContextModal::new(self.context_usage.clone())));
             }
-
-            // Letter keys also match their Russian-layout counterparts.
-            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('\u{0441}') | KeyCode::Char('\u{0421}')
-                if mods.contains(KeyModifiers::CONTROL) =>
-            {
-                if self.running {
-                    self.interrupt(cx);
-                } else {
-                    let now = std::time::Instant::now();
-                    let is_double_tap = self.last_ctrl_c.map(|t| now.duration_since(t).as_millis() < 1200).unwrap_or(false);
-                    self.last_ctrl_c = Some(now);
-
-                    if !self.input.is_empty() {
-                        flashagent_tui::clipboard::set_clipboard_text(&self.input);
-                        self.copy_toast = Some(("Copied input to clipboard".to_string(), now));
-                        self.renderer.request_reprint();
-                    } else if let Some(text) = self.chat.last_assistant_text() {
-                        if is_double_tap {
-                            return Flow::Quit;
-                        }
-                        flashagent_tui::clipboard::set_clipboard_text(&text);
-                        self.copy_toast = Some(("Copied assistant response (press Ctrl+C again to exit)".to_string(), now));
-                        self.renderer.request_reprint();
-                    } else {
-                        return Flow::Quit;
-                    }
-                }
-            }
-
-            KeyCode::Char('v') | KeyCode::Char('V') | KeyCode::Char('\u{043c}') | KeyCode::Char('\u{041c}')
-                if mods.contains(KeyModifiers::CONTROL) =>
-            {
-                // A screenshot on the clipboard is meant far more often than a path, so it
-                // is looked for first.
-                if let Some(image) = flashagent_tui::clipboard::get_clipboard_image() {
-                    maybe_measure_image_cost(
-                        &self.image_costs,
-                        &mut self.image_cost_probe,
-                        &self.current_model,
-                        cx.source,
-                        cx.tx,
-                    );
-                    let att = Attachment::from_clipboard(image);
-                    let label = att.label();
-                    self.attachments.push(att);
-                    self.suggested_prompt = None;
-                    if !model_sees_images(cx.source, &self.current_model) {
-                        self.background = Some(
-                            BackgroundNotice::sticky(format!(
-                                "{label} attached · {} cannot see images — press F3 for one that can",
-                                self.current_model
-                            ))
-                            .warning(),
-                        );
-                    } else {
-                        self.background = Some(BackgroundNotice::fading(
-                            format!("{label} attached · Ctrl+Z removes it"),
-                            8,
-                        ));
-                    }
-                    self.renderer.request_reprint();
-                } else if let Some(text) = flashagent_tui::clipboard::get_clipboard_text() {
-                    if !text.is_empty() {
-                        self.input.insert_str(&text);
-                        self.history_index = None;
-                        self.autocomplete_idx = 0;
-                        self.renderer.request_reprint();
-                    }
-                }
-            }
-
-            // Ctrl+Z: remove the last attached picture.
-            KeyCode::Char('z') | KeyCode::Char('Z') | KeyCode::Char('\u{044f}') | KeyCode::Char('\u{042f}')
-                if mods.contains(KeyModifiers::CONTROL) && !self.attachments.is_empty() =>
-            {
-                if let Some(removed) = self.attachments.pop() {
-                    self.background = Some(BackgroundNotice::fading(
-                        format!("{} removed", removed.label()),
-                        5,
-                    ));
-                }
-                self.renderer.request_reprint();
-            }
-
-            KeyCode::Char('d') | KeyCode::Char('D')
-                if mods.contains(KeyModifiers::CONTROL) && self.input.is_empty() && !self.running =>
-            {
-                return Flow::Quit;
-            }
-
             KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('\u{043a}') | KeyCode::Char('\u{041a}')
                 if mods.contains(KeyModifiers::CONTROL) =>
             {
@@ -363,7 +281,108 @@ impl App {
             {
                 self.open_model_menu(cx.source);
             }
+            _ => return None,
+        }
+        Some(Flow::Next)
+    }
 
+    fn handle_clipboard_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Option<Flow> {
+        match code {
+            // Letter keys also match their Russian-layout counterparts.
+            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('\u{0441}') | KeyCode::Char('\u{0421}')
+                if mods.contains(KeyModifiers::CONTROL) =>
+            {
+                if self.running {
+                    self.interrupt(cx);
+                } else {
+                    let now = std::time::Instant::now();
+                    let is_double_tap = self.last_ctrl_c.map(|t| now.duration_since(t).as_millis() < 1200).unwrap_or(false);
+                    self.last_ctrl_c = Some(now);
+
+                    if !self.input.is_empty() {
+                        flashagent_tui::clipboard::set_clipboard_text(&self.input);
+                        self.copy_toast = Some(("Copied input to clipboard".to_string(), now));
+                        self.renderer.request_reprint();
+                    } else if let Some(text) = self.chat.last_assistant_text() {
+                        if is_double_tap {
+                            return Some(Flow::Quit);
+                        }
+                        flashagent_tui::clipboard::set_clipboard_text(&text);
+                        self.copy_toast = Some(("Copied assistant response (press Ctrl+C again to exit)".to_string(), now));
+                        self.renderer.request_reprint();
+                    } else {
+                        return Some(Flow::Quit);
+                    }
+                }
+            }
+
+            KeyCode::Char('v') | KeyCode::Char('V') | KeyCode::Char('\u{043c}') | KeyCode::Char('\u{041c}')
+                if mods.contains(KeyModifiers::CONTROL) =>
+            {
+                // A screenshot on the clipboard is meant far more often than a path, so it
+                // is looked for first.
+                if let Some(image) = flashagent_tui::clipboard::get_clipboard_image() {
+                    maybe_measure_image_cost(
+                        &self.image_costs,
+                        &mut self.image_cost_probe,
+                        &self.current_model,
+                        cx.source,
+                        cx.tx,
+                    );
+                    let att = Attachment::from_clipboard(image);
+                    let label = att.label();
+                    self.attachments.push(att);
+                    self.suggested_prompt = None;
+                    if !model_sees_images(cx.source, &self.current_model) {
+                        self.background = Some(
+                            BackgroundNotice::sticky(format!(
+                                "{label} attached · {} cannot see images — press F3 for one that can",
+                                self.current_model
+                            ))
+                            .warning(),
+                        );
+                    } else {
+                        self.background = Some(BackgroundNotice::fading(
+                            format!("{label} attached · Ctrl+Z removes it"),
+                            8,
+                        ));
+                    }
+                    self.renderer.request_reprint();
+                } else if let Some(text) = flashagent_tui::clipboard::get_clipboard_text() {
+                    if !text.is_empty() {
+                        self.input.insert_str(&text);
+                        self.history_index = None;
+                        self.autocomplete_idx = 0;
+                        self.renderer.request_reprint();
+                    }
+                }
+            }
+
+            // Ctrl+Z: remove the last attached picture.
+            KeyCode::Char('z') | KeyCode::Char('Z') | KeyCode::Char('\u{044f}') | KeyCode::Char('\u{042f}')
+                if mods.contains(KeyModifiers::CONTROL) && !self.attachments.is_empty() =>
+            {
+                if let Some(removed) = self.attachments.pop() {
+                    self.background = Some(BackgroundNotice::fading(
+                        format!("{} removed", removed.label()),
+                        5,
+                    ));
+                }
+                self.renderer.request_reprint();
+            }
+
+            KeyCode::Char('d') | KeyCode::Char('D')
+                if mods.contains(KeyModifiers::CONTROL) && self.input.is_empty() && !self.running =>
+            {
+                return Some(Flow::Quit);
+            }
+            _ => return None,
+        }
+        Some(Flow::Next)
+    }
+
+    fn handle_navigation_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Option<Flow> {
+        match code {
             // Shift+Tab arrives as BackTab or as Tab with Shift.
             KeyCode::BackTab | KeyCode::Tab if matches!(code, KeyCode::BackTab) || mods.contains(KeyModifiers::SHIFT) => {
                 let next_mode = cx.perm.state().mode().next();
@@ -465,6 +484,13 @@ impl App {
                     }
                 }
             }
+            _ => return None,
+        }
+        Some(Flow::Next)
+    }
+
+    async fn handle_editing_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Option<Flow> {
+        match code {
             // Ctrl+Backspace arrives as Ctrl+H in many terminals, Alt+Backspace as
             // Backspace with Alt: both delete a word.
             KeyCode::Backspace if cx.gate.pending().is_none() && word_mods(mods) => {
@@ -531,14 +557,14 @@ impl App {
                             self.autocomplete_idx = 0;
                             if flashagent_tui::autocomplete::needs_argument(&trigger) {
                                 self.input.set(format!("{trigger} "));
-                                return Flow::Next;
+                                return Some(Flow::Next);
                             }
                             self.input.set(trigger);
                         }
                     }
                     match self.submit_input(cx).await {
-                        Flow::Continue => return Flow::Continue,
-                        Flow::Quit => return Flow::Quit,
+                        Flow::Continue => return Some(Flow::Continue),
+                        Flow::Quit => return Some(Flow::Quit),
                         Flow::Next => {}
                     }
                 }
@@ -590,9 +616,9 @@ impl App {
                 }
                 _ => {}
             },
-            _ => {}
+            _ => return None,
         }
-        Flow::Next
+        Some(Flow::Next)
     }
 }
 
