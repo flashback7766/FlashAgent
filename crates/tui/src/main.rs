@@ -47,6 +47,7 @@ mod overlay;
 mod memory_summary;
 mod warm;
 mod provider_switch;
+mod tasks;
 use render::*;
 use overlay::Overlay;
 use tokens::*;
@@ -549,6 +550,13 @@ struct App {
     active_turn_handle: Option<tokio::task::JoinHandle<()>>,
     active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     pending_steers: Vec<String>,
+    /// Notices of background tasks that ended, on their way to the model.
+    task_inbox: flashagent_core::NoticeInbox,
+    /// Transcript lines of tasks that ended while a turn was writing.
+    task_lines: Vec<String>,
+    tasks_refreshed: std::time::Instant,
+    /// A quit refused because background tasks run; another soon after quits.
+    quit_armed: Option<std::time::Instant>,
     /// The loop is asked to stop cooperatively so it hands back a consistent
     /// history; a hard abort is the fallback.
     cancel_requested: Option<std::time::Instant>,
@@ -873,6 +881,16 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     let cancel = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
 
+    {
+        let mut ended = tools_arc.shells().subscribe();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            while let Some(notice) = ended.recv().await {
+                let _ = tx.send(UiEvent::TaskEnded(notice));
+            }
+        });
+    }
+
     if let Some(task) = pending_discovery {
         let tx_disc = tx.clone();
         tokio::spawn(async move {
@@ -1064,6 +1082,10 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         active_turn_handle: None,
         active_steer_tx: None,
         pending_steers: Vec::new(),
+        task_inbox: flashagent_core::NoticeInbox::default(),
+        task_lines: Vec::new(),
+        tasks_refreshed: std::time::Instant::now(),
+        quit_armed: None,
         cancel_requested: None,
         aborted_turn: None,
         turn_counter: 0,
@@ -1310,6 +1332,10 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         // A burst of events (a fast stream, a key held down) is drawn once rather
         // than once per event, or the screen falls behind what it shows; never
         // more than a frame late.
+        {
+            let cx = loop_ctx!();
+            app.tasks_tick(&cx);
+        }
         if rx.is_empty() || last_draw.elapsed() >= FRAME {
             let cx = loop_ctx!();
             app.draw(&cx, autocomplete.as_ref());
@@ -1418,6 +1444,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                     app.cancel_requested = None;
                     app.aborted_turn = Some(app.turn_counter);
                     close_dangling_user(&mut app.history, "[turn aborted by the user]");
+                    app.task_inbox.turn_aborted();
+                    app.flush_task_lines();
                     app.token_tracker.on_finished();
                     if let Some(saved) = app.goal_state.take() {
                         tools_arc.set_goal_mode(false);
@@ -1631,6 +1659,10 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                     LoopEvent::Usage(u) => {
                         app.token_tracker.on_usage(u);
                     }
+                    LoopEvent::SteeringInjected(directive) if app.task_inbox.injected(directive) => {
+                        app.flush_task_lines();
+                        app.renderer.request_reprint();
+                    }
                     LoopEvent::SteeringInjected(directive) => {
                         if let Some(pos) = app.pending_steers.iter().position(|s| s == directive) {
                             app.pending_steers.remove(pos);
@@ -1755,6 +1787,10 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 }
                 app.renderer.request_reprint();
             }
+            UiEvent::TaskEnded(notice) => {
+                let cx = loop_ctx!();
+                app.on_task_ended(&cx, notice);
+            }
             UiEvent::Key(code, mods) => {
                 app.postpone_recap();
                 let mut cx = loop_ctx!();
@@ -1764,6 +1800,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
                 };
                 match flow {
                     Flow::Continue => continue,
+                    Flow::Quit if !app.quit_confirmed(&cx) => continue,
                     Flow::Quit => break 'main_loop,
                     Flow::Next => {}
                 }
@@ -1771,6 +1808,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         }
     }
 
+    tools_arc.shells().stop_all();
     Ok(finish!())
 }
 

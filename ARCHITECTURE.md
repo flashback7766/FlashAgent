@@ -70,6 +70,15 @@ The loop runs on its own task. The UI never waits on it: events arrive
 through a channel and are drawn when they come. Enter while a turn runs
 sends a steering message down another channel into the same turn.
 
+`run_shell` with `background: true`, or a foreground command the user moves
+there with Ctrl+B, becomes a task in `tools::shell::ShellRegistry`, whose
+watcher sends one notice when it exits. The app hands the notice to the
+model (`core::NoticeInbox` makes sure it arrives once): down the steering
+channel into a running turn, or as a follow-up turn when the app is idle
+and no approval, question or typed draft is open, and not after the user
+stopped a turn with Esc. A task killed on purpose wakes nobody. `/tasks`
+lists them; quitting stops them.
+
 ## Agent loop
 
 `core::loop_` streams a turn from the model, collects tool calls (native, or

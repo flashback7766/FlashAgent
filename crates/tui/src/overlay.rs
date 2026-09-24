@@ -20,6 +20,8 @@ pub(crate) enum Overlay {
     Context(ContextModal),
     Memory(MemoryModal),
     Mcp(McpModal),
+    /// /tasks: background commands.
+    Tasks(flashagent_tui::TasksModal),
     /// Ctrl+K: every command, searched by typing.
     Palette(SelectMenu<String>),
 }
@@ -45,6 +47,7 @@ impl Overlay {
             Overlay::Context(modal) => modal.render(width),
             Overlay::Memory(modal) => modal.render(width),
             Overlay::Mcp(modal) => modal.render(width),
+            Overlay::Tasks(modal) => modal.render(width),
         }
     }
 }

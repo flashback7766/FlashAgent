@@ -24,6 +24,7 @@ pub mod screen;
 pub mod select;
 pub mod settings;
 pub mod startup;
+pub mod tasks_view;
 pub mod theme;
 mod tool_cards;
 pub mod tips;
@@ -52,6 +53,7 @@ pub use sampling::{SamplingAction, SamplingView};
 pub use select::{ConfirmChoice, ConfirmSelect, SelectItem, SelectMenu};
 pub use settings::{SettingsAction, SettingsView};
 pub use startup::{StartupAction, TrustScreen, TrustScreenMode};
+pub use tasks_view::{TasksAction, TasksModal};
 pub use tips::{split_tip_at_word_boundary, TipAnimator};
 pub use wizard::{run_wizard, run_wizard_channel, SetupWizard};
 pub use ReasoningExpansion as VerboseMode;
@@ -87,6 +89,8 @@ pub enum UiEvent {
         recap: String,
         suggestion: Option<String>,
     },
+    /// A background command of this session ended.
+    TaskEnded(flashagent_tools::TaskNotice),
 }
 
 /// Drives terminal colours.
@@ -630,6 +634,8 @@ impl ChatView {
                 self.tool_finished(*is_error, *result_len, result.as_deref())
             }
             LoopEvent::Usage(_) => {}
+            // Its own line was drawn when the task ended.
+            LoopEvent::SteeringInjected(directive) if flashagent_core::is_task_notice(directive) => {}
             LoopEvent::SteeringInjected(directive) => {
                 self.streaming = None;
                 if let Some(i) = self.streaming_reasoning.take() {
