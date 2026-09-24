@@ -35,7 +35,10 @@ impl App {
                 self.renderer.request_reprint();
             }
             UiEvent::Mouse(m) => self.on_mouse(m),
-            UiEvent::Paste(pasted) => self.on_paste(cx, &pasted),
+            UiEvent::Paste(pasted) => {
+                self.postpone_recap();
+                self.on_paste(cx, &pasted);
+            }
             UiEvent::TaskEnded(notice) => self.on_task_ended(cx, notice),
             UiEvent::Key(code, mods) => {
                 self.postpone_recap();

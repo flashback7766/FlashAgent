@@ -263,15 +263,23 @@ fn the_recap_waits_until_the_user_has_gone_quiet() {
     let home = Home::new();
     home.set_up(&server.url);
     // Keep typing for longer than the quiet period, waiting until each key is
-    // visible so the test measures what the app received.
-    let term = Term::start_with_env(&home, &["-y"], COLS, ROWS, &[("FLASHAGENT_RECAP_IDLE_SECS", "5")]);
+    // visible so the test measures what the app received. The period is long
+    // beside the pause between keys: a runner busy with other terminals can
+    // take seconds to show one.
+    let term = Term::start_with_env(&home, &["-y"], COLS, ROWS, &[("FLASHAGENT_RECAP_IDLE_SECS", "8")]);
     term.wait_for(PROMPT, WAIT);
     let recaps = || server.requests().iter().filter(|r| !r.is_turn() && r.body.to_string().contains("conversation analyzer")).count();
 
     ask(&term, "first question", "First answer.");
-    // Typing keeps it back: the model stays free for the next question.
-    for count in 1..=8 {
-        term.send("z");
+    // Typing keeps it back, and so does pasting, each for longer than the
+    // period: the model stays free for the next question. A Windows console
+    // turns a paste into keys.
+    for count in 1..=20 {
+        if cfg!(unix) && count > 10 {
+            term.send("\x1b[200~z\x1b[201~");
+        } else {
+            term.send("z");
+        }
         term.wait_for(&format!("› {}", "z".repeat(count)), WAIT);
         std::thread::sleep(Duration::from_millis(800));
     }
