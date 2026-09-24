@@ -51,14 +51,17 @@ fn parse_args<T: DeserializeOwned>(json: &str, tool: &str) -> Result<T, ToolErro
     serde_json::from_value(value).map_err(|e| ToolError::Other(format!("bad arguments: {e}")))
 }
 
+/// Cut in place, looking no further than the cut: a diff or a log can be
+/// megabytes.
 fn truncate_output(mut text: String) -> String {
-    if text.chars().count() > MAX_OUTPUT_CHARS {
-        text = text.chars().take(MAX_OUTPUT_CHARS).collect();
+    if let Some((cut, _)) = text.char_indices().nth(MAX_OUTPUT_CHARS) {
+        text.truncate(cut);
         text.push_str(&format!("\n...[truncated at {MAX_OUTPUT_CHARS} chars]"));
     }
     text
 }
 
+#[derive(Default)]
 pub struct BuiltinToolsConfig {
     /// For all filesystem tools and the shell.
     pub cwd: PathBuf,
@@ -173,18 +176,14 @@ impl BuiltinTools {
                 // parts make of it, as edit_files writes it: previewing each part
                 // on its own hid the second one.
                 let mut files: Vec<(std::path::PathBuf, String, String, Option<String>)> = Vec::new();
+                let edited = |path: &str, text: String, edits: &[fs_tools::EditChunk]| fs_tools::apply_edits(path, text, edits).ok().map(|(new, _)| new);
                 for (path, edits) in args.targets() {
                     let key = fs_tools::same_file_key(&self.cwd, &path);
-                    let at = files.iter().position(|f| f.0 == key);
-                    let current = match at {
-                        Some(i) => files[i].3.clone(),
-                        None => fs_tools::read_raw(&self.cwd, &path),
-                    };
-                    let new = current.clone().and_then(|text| fs_tools::apply_edits(text, &edits).ok());
-                    match at {
-                        Some(i) => files[i].3 = new,
+                    match files.iter_mut().find(|f| f.0 == key) {
+                        Some(earlier) => earlier.3 = earlier.3.take().and_then(|text| edited(&path, text, &edits)),
                         None => {
-                            if let Some(old) = current {
+                            if let Some(old) = fs_tools::read_raw(&self.cwd, &path) {
+                                let new = edited(&path, old.clone(), &edits);
                                 files.push((key, path, old, new));
                             }
                         }
@@ -209,27 +208,25 @@ impl BuiltinTools {
         }
     }
 
+    /// Reads that can walk a whole tree, read a big file or wait on a process
+    /// run on the blocking pool: the async workers stay free, and the loop
+    /// still sees a cancel while one runs. Writes stay inline, so a cancelled
+    /// turn never reports a change as not made while it lands anyway.
+    async fn off_runtime<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&std::path::Path) -> Result<T, ToolError> + Send + 'static,
+    ) -> Result<T, ToolError> {
+        let cwd = self.cwd.clone();
+        tokio::task::spawn_blocking(move || work(&cwd))
+            .await
+            .map_err(|e| ToolError::Other(format!("the tool stopped unexpectedly: {e}")))?
+    }
+
     async fn dispatch(&self, call: &ToolCall) -> Result<String, ToolError> {
         match call.name.as_str() {
             "read_file" => {
                 let a: ReadArgs = parse_args(&call.args_json, &call.name)?;
-                if a.files.is_empty() {
-                    if a.path.trim().is_empty() {
-                        return Err(ToolError::Other("read_file needs a path, or files to read several".into()));
-                    }
-                    return fs_tools::read_file(&self.cwd, &a.path, a.offset.unwrap_or(0), a.limit.unwrap_or(2000));
-                }
-                let mut items: Vec<(String, Option<usize>, Option<usize>)> = Vec::new();
-                if !a.path.trim().is_empty() {
-                    items.push((a.path, a.offset, a.limit));
-                }
-                items.extend(a.files.into_iter().map(|f| (f.path, f.offset, f.limit)));
-                // The usual 2000 lines are shared out, so the output limit does not cut the
-                // last file away.
-                let share = (2000 / items.len().max(1)).max(200);
-                let items: Vec<(String, usize, usize)> =
-                    items.into_iter().map(|(p, o, l)| (p, o.unwrap_or(0), l.unwrap_or(share))).collect();
-                fs_tools::read_files(&self.cwd, &items)
+                self.off_runtime(move |cwd| a.read(cwd)).await
             }
             "write_file" => {
                 let a: WriteArgs = parse_args(&call.args_json, &call.name)?;
@@ -251,35 +248,33 @@ impl BuiltinTools {
             }
             "list_dir" => {
                 let a: ListArgs = parse_args(&call.args_json, &call.name)?;
-                fs_tools::list_dir(&self.cwd, a.path.as_deref().unwrap_or("."))
+                self.off_runtime(move |cwd| fs_tools::list_dir(cwd, a.path.as_deref().unwrap_or("."))).await
             }
             "glob" => {
                 let a: GlobArgs = parse_args(&call.args_json, &call.name)?;
-                fs_tools::glob_files(&self.cwd, &a.pattern)
+                self.off_runtime(move |cwd| fs_tools::glob_files(cwd, &a.pattern)).await
             }
             "grep" => {
                 let a: GrepArgs = parse_args(&call.args_json, &call.name)?;
-                fs_tools::grep(&self.cwd, &a.pattern, a.glob.as_deref(), a.case_insensitive)
+                self.off_runtime(move |cwd| fs_tools::grep(cwd, &a.pattern, a.glob.as_deref(), a.case_insensitive)).await
             }
             "outline_file" => {
                 let a: OutlineArgs = parse_args(&call.args_json, &call.name)?;
-                outline::outline_file(&self.cwd, &a.path)
+                self.off_runtime(move |cwd| outline::outline_file(cwd, &a.path)).await
             }
             "git_status" => {
                 let a: GitStatusArgs = parse_args(&call.args_json, &call.name)?;
-                git::git_status(&self.cwd, a.path.as_deref())
+                self.off_runtime(move |cwd| git::git_status(cwd, a.path.as_deref())).await
             }
             "git_diff" => {
                 let a: GitDiffArgs = parse_args(&call.args_json, &call.name)?;
-                git::git_diff(&self.cwd, a.staged.unwrap_or(false), a.path.as_deref())
+                self.off_runtime(move |cwd| git::git_diff(cwd, a.staged.unwrap_or(false), a.path.as_deref())).await
             }
             "run_shell" => {
                 let a: ShellArgs = parse_args(&call.args_json, &call.name)?;
                 self.run_shell(a).await
             }
-            "env_info" => {
-                env_tools::env_info(&self.cwd)
-            }
+            "env_info" => self.off_runtime(env_tools::env_info).await,
             "ask_user" => {
                 let a: ask_user::AskUserArgs = parse_args(&call.args_json, &call.name)?;
                 ask_user::run_ask_user(self.question_gate.as_ref(), &self.is_goal_mode, a).await
@@ -287,7 +282,7 @@ impl BuiltinTools {
             "update_plan" => plan_tool::run_update_plan(&self.is_goal_mode, &call.args_json),
             "memory_read" => {
                 let a: memory_tools::MemoryReadArgs = parse_args(&call.args_json, &call.name)?;
-                memory_tools::memory_read(&self.cwd, a)
+                self.off_runtime(move |cwd| memory_tools::memory_read(cwd, a)).await
             }
             "memory_create" => {
                 let a: memory_tools::MemoryWriteArgs = parse_args(&call.args_json, &call.name)?;
@@ -377,10 +372,10 @@ impl WritePreview for BuiltinTools {
                 Some(text) => text,
                 None => fs_tools::read_raw(&self.cwd, &path)?,
             };
-            if let Err(e) = fs_tools::check_edits(&path, &text, &edits) {
-                return Some(format!("error: {e}"));
-            }
-            texts.insert(key, fs_tools::apply_edits(text, &edits).ok()?);
+            match fs_tools::apply_edits(&path, text, &edits) {
+                Ok((edited, _)) => texts.insert(key, edited),
+                Err(e) => return Some(format!("error: {e}")),
+            };
         }
         None
     }
@@ -391,7 +386,10 @@ impl ToolExec for BuiltinTools {
     async fn execute(&self, call: &ToolCall) -> ToolOutput {
         // The only tool whose result is a picture, not text.
         if call.name == "view_image" {
-            return image_tool::view_image(&self.cwd, &call.args_json, self.vision_supported());
+            let args = call.args_json.clone();
+            let vision = self.vision_supported();
+            let opened = self.off_runtime(move |cwd| Ok(image_tool::view_image(cwd, &args, vision))).await;
+            return opened.unwrap_or_else(|e| ToolOutput { content: format!("error: {e}"), is_error: true, images: Vec::new() });
         }
         match self.dispatch(call).await {
             Ok(text) => ToolOutput { content: truncate_output(text), is_error: false, images: Vec::new() },
@@ -567,6 +565,27 @@ struct ReadItem {
     limit: Option<usize>,
 }
 
+impl ReadArgs {
+    fn read(self, cwd: &std::path::Path) -> Result<String, ToolError> {
+        if self.files.is_empty() {
+            if self.path.trim().is_empty() {
+                return Err(ToolError::Other("read_file needs a path, or files to read several".into()));
+            }
+            return fs_tools::read_file(cwd, &self.path, self.offset.unwrap_or(0), self.limit.unwrap_or(2000));
+        }
+        let mut items: Vec<(String, Option<usize>, Option<usize>)> = Vec::new();
+        if !self.path.trim().is_empty() {
+            items.push((self.path, self.offset, self.limit));
+        }
+        items.extend(self.files.into_iter().map(|f| (f.path, f.offset, f.limit)));
+        // The usual 2000 lines are shared out, so the output limit does not cut the
+        // last file away.
+        let share = (2000 / items.len().max(1)).max(200);
+        let items: Vec<(String, usize, usize)> = items.into_iter().map(|(p, o, l)| (p, o.unwrap_or(0), l.unwrap_or(share))).collect();
+        fs_tools::read_files(cwd, &items)
+    }
+}
+
 #[derive(Deserialize)]
 struct WriteArgs {
     path: String,
@@ -690,13 +709,7 @@ mod tests {
         std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: dir.clone(),
-            brave_api_key: None,
-            question_gate: None,
-            is_goal_mode: None,
-            toolset_profile: None,
-            web_enabled: None,
-            context_window: None,
-            mcp_manager: None,
+            ..Default::default()
         })
         .expect("tools");
         let abs = dir.join("main.rs").to_string_lossy().to_string();
@@ -718,13 +731,7 @@ mod tests {
 
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: dir.clone(),
-            brave_api_key: None,
-            question_gate: None,
-            is_goal_mode: None,
-            toolset_profile: None,
-            web_enabled: None,
-            context_window: None,
-            mcp_manager: None,
+            ..Default::default()
         })
         .unwrap();
         let call = ToolCall {
@@ -747,13 +754,7 @@ mod tests {
         }
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: dir.clone(),
-            brave_api_key: None,
-            question_gate: None,
-            is_goal_mode: None,
-            toolset_profile: None,
-            web_enabled: None,
-            context_window: None,
-            mcp_manager: None,
+            ..Default::default()
         })
         .unwrap();
         (dir, tools)
@@ -867,13 +868,7 @@ mod tests {
     async fn hostile_args_become_errors_not_panics() {
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
-            brave_api_key: None,
-            question_gate: None,
-            is_goal_mode: None,
-            toolset_profile: None,
-            web_enabled: None,
-            context_window: None,
-            mcp_manager: None,
+            ..Default::default()
         })
         .unwrap();
         for args in ["{ not json", "", r#"{"path": 42}"#] {
@@ -889,17 +884,44 @@ mod tests {
         assert!(out.content.contains("unknown tool"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_read_that_waits_leaves_the_runtime_free() {
+        // Opening a named pipe waits until something writes to it: a stand-in for
+        // a grep over a huge tree or a slow disk.
+        let dir = testing::tempdir();
+        let pipe = dir.join("pipe");
+        let c_path = std::ffi::CString::new(pipe.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path; mkfifo only creates the file.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0, "mkfifo failed");
+        let writer = {
+            let pipe = pipe.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                std::fs::write(pipe, "written late\n")
+            })
+        };
+        let tools = BuiltinTools::new(BuiltinToolsConfig { cwd: dir, ..Default::default() }).unwrap();
+        let call = ToolCall { id: "t".into(), name: "read_file".into(), args_json: r#"{"path":"pipe"}"#.into() };
+        let read = tools.execute(&call);
+        tokio::pin!(read);
+        // A single-threaded runtime: a read done inline would hold it until the
+        // writer came, and the read would finish first.
+        tokio::select! {
+            biased;
+            _ = &mut read => panic!("the read held the runtime until it finished"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        let out = read.await;
+        writer.join().unwrap().unwrap();
+        assert!(out.content.contains("written late"), "{}", out.content);
+    }
+
     #[tokio::test]
     async fn missing_file_is_tool_error() {
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
-            brave_api_key: None,
-            question_gate: None,
-            is_goal_mode: None,
-            toolset_profile: None,
-            web_enabled: None,
-            context_window: None,
-            mcp_manager: None,
+            ..Default::default()
         })
         .unwrap();
         let out = tools
@@ -917,13 +939,8 @@ mod tests {
     fn specs_include_tools_by_profile() {
         let tools_auto = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
-            brave_api_key: None,
-            question_gate: None,
-            is_goal_mode: None,
             toolset_profile: Some(ToolsetProfile::Auto),
-            web_enabled: None,
-            context_window: None,
-            mcp_manager: None,
+            ..Default::default()
         })
         .unwrap();
         let specs_auto = tools_auto.specs();
@@ -942,13 +959,8 @@ mod tests {
 
         let tools_compact = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
-            brave_api_key: None,
-            question_gate: None,
-            is_goal_mode: None,
             toolset_profile: Some(ToolsetProfile::Compact),
-            web_enabled: None,
-            context_window: None,
-            mcp_manager: None,
+            ..Default::default()
         })
         .unwrap();
         let specs_compact = tools_compact.specs();
@@ -962,13 +974,8 @@ mod tests {
     async fn update_plan_is_always_offered_and_only_works_during_a_goal_run() {
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
-            brave_api_key: None,
-            question_gate: None,
-            is_goal_mode: None,
             toolset_profile: Some(ToolsetProfile::Auto),
-            web_enabled: None,
-            context_window: None,
-            mcp_manager: None,
+            ..Default::default()
         })
         .unwrap();
         let before = tools.specs();
@@ -991,13 +998,9 @@ mod tests {
     async fn web_tools_turned_off_in_settings_are_neither_offered_nor_run() {
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
-            brave_api_key: None,
-            question_gate: None,
-            is_goal_mode: None,
             toolset_profile: Some(ToolsetProfile::Auto),
             web_enabled: Some(false),
-            context_window: None,
-            mcp_manager: None,
+            ..Default::default()
         })
         .unwrap();
         let out = tools.execute(&ToolCall {
@@ -1020,13 +1023,10 @@ mod tests {
     fn adaptive_toolset_per_context_window() {
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
-            brave_api_key: None,
-            question_gate: None,
-            is_goal_mode: None,
             toolset_profile: Some(ToolsetProfile::Auto),
             web_enabled: Some(false),
             context_window: Some(32_000), // ~32k ultra-minimum -> compact
-            mcp_manager: None,
+            ..Default::default()
         })
         .unwrap();
         let specs = tools.specs();
@@ -1045,6 +1045,10 @@ mod tests {
         let out = truncate_output(long);
         assert!(out.contains("[truncated"));
         assert_eq!(out.chars().count(), MAX_OUTPUT_CHARS + "\n...[truncated at 32000 chars]".len());
+        let exact = "ё".repeat(MAX_OUTPUT_CHARS);
+        assert_eq!(truncate_output(exact.clone()), exact, "a text exactly at the cap is whole");
+        let over = truncate_output("ё".repeat(MAX_OUTPUT_CHARS + 1));
+        assert!(over.starts_with(&exact) && over[exact.len()..].starts_with("\n...[truncated"), "cut by characters, not bytes");
     }
 
     #[test]

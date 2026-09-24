@@ -155,22 +155,24 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
             .turn_with_options(messages, &tools, &opts())
             .await
             .map_err(|e| e.to_string())?;
-        // Deltas arrive interleaved by index, as in the agent loop.
-        let mut parts: Vec<(String, String)> = Vec::new();
+        // Deltas arrive interleaved by index, as in the agent loop, and the index
+        // is only a label: sorted by it, not stored at it.
+        let mut parts: Vec<(usize, String, String)> = Vec::new();
         let mut text = String::new();
         while let Some(ev) = stream.next().await {
             match ev.map_err(|e| e.to_string())? {
                 LlmEvent::ToolCallDelta { index, name, args_delta, .. } => {
-                    if parts.len() <= index {
-                        parts.resize(index + 1, (String::new(), String::new()));
-                    }
-                    let slot = &mut parts[index];
+                    let at = parts.binary_search_by_key(&index, |p| p.0).unwrap_or_else(|at| {
+                        parts.insert(at, (index, String::new(), String::new()));
+                        at
+                    });
+                    let slot = &mut parts[at];
                     if let Some(n) = name {
-                        if slot.0.is_empty() {
-                            slot.0 = n;
+                        if slot.1.is_empty() {
+                            slot.1 = n;
                         }
                     }
-                    slot.1.push_str(&args_delta);
+                    slot.2.push_str(&args_delta);
                 }
                 LlmEvent::TextDelta(t) => text.push_str(&t),
                 _ => {}
@@ -196,8 +198,8 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
             let secs = started.elapsed().as_secs_f32();
             let mut calls: Vec<(String, String, CallStyle)> = parts
                 .into_iter()
-                .filter(|(name, _)| !name.is_empty())
-                .map(|(name, args)| (name, args, CallStyle::Native))
+                .filter(|(_, name, _)| !name.is_empty())
+                .map(|(_, name, args)| (name, args, CallStyle::Native))
                 .collect();
             if calls.is_empty() {
                 // The same recovery as the agent loop, so the score reflects a real run.
@@ -657,6 +659,23 @@ mod tests {
         assert_eq!(report.score(), (8, 8), "{:?}", report.results);
         assert_eq!(report.verdict(), "drives tools reliably");
         assert!(!report.needed_recovery());
+    }
+
+    #[test]
+    fn calls_numbered_far_apart_are_still_two_calls() {
+        let read = |index: usize, args: &str| LlmEvent::ToolCallDelta {
+            index,
+            id: Some(format!("c{index}")),
+            name: Some("read_lines".into()),
+            args_delta: args.into(),
+        };
+        let mut turns = perfect();
+        turns[7] = vec![
+            read(3, r#"{"path":"Cargo.toml","count":10}"#),
+            read(u32::MAX as usize, r#"{"path":"README.md","count":10}"#),
+            LlmEvent::Done(FinishReason::ToolUse),
+        ];
+        assert_eq!(run(turns).score(), (8, 8));
     }
 
     #[test]

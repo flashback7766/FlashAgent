@@ -120,7 +120,6 @@ impl BuiltinSubagentFactory {
     }
 }
 
-#[async_trait]
 impl SubagentToolFactory for BuiltinSubagentFactory {
     fn build(&self, _role: &AgentRole, tools: &[String]) -> Arc<dyn ToolExec> {
         let subset = ToolSubset::new(self.tools.clone(), tools);

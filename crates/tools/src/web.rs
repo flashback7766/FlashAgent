@@ -333,7 +333,8 @@ fn tag_text(html: &str, tag: usize) -> Option<&str> {
 /// Either kind of quotes. Entities are left as written.
 fn attribute(html: &str, tag: usize, name: &str) -> Option<String> {
     let text = tag_text(html, tag)?;
-    let lower = text.to_lowercase();
+    // ASCII only, as in parse_duckduckgo_html: offsets in `lower` slice `text`.
+    let lower = text.to_ascii_lowercase();
     let mut from = 0;
     while let Some(found) = lower[from..].find(name) {
         let at = from + found;
@@ -642,6 +643,17 @@ mod tests {
         assert_eq!(html_to_text("<p>&laquo;Ёлка&raquo; 東京&amp;大阪</p>"), "«Ёлка» 東京&大阪");
         let page = r#"<a class="result__a" href="https://example.com/">Q&amp;привет мир</a>"#;
         assert_eq!(parse_duckduckgo_html(page, 5)[0].title, "Q&привет мир");
+    }
+
+    #[test]
+    fn an_attribute_after_one_with_letters_that_change_length_is_still_read() {
+        // Lowercased, `İ` takes three bytes instead of two: every offset after it
+        // pointed one byte too far into the tag, and the link was lost.
+        let page = r#"<a title="İİ İstanbul" class="result__a" href="https://example.com/">Title</a><a class="result__snippet">The snippet</a>"#;
+        let results = parse_duckduckgo_html(page, 5);
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert_eq!(results[0].url, "https://example.com/");
+        assert_eq!(attribute(r#"<a data-x="ǅİ" HREF='/l/?uddg=x'>"#, 0, "href").as_deref(), Some("/l/?uddg=x"));
     }
 
     #[test]
