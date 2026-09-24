@@ -1163,192 +1163,233 @@ fn initial_app(init: InitialApp) -> App {
     }
 }
 
+/// What the handlers share for the whole run; [`LoopCtx`] borrows it per frame.
+struct Wiring {
+    source: Arc<BackendSource>,
+    perm: &'static PermissionedTools,
+    gate: Arc<TuiGate>,
+    question_gate: Arc<TuiQuestionGate>,
+    tools_arc: Arc<BuiltinTools>,
+    memory_block: String,
+    cwd_display: String,
+    cwd: std::path::PathBuf,
+    cancel: Arc<AtomicBool>,
+    tx: tokio::sync::mpsc::UnboundedSender<UiEvent>,
+    update_tx: tokio::sync::mpsc::UnboundedSender<UpdateNotice>,
+    channel_watch_tx: tokio::sync::watch::Sender<flashagent_core::config::UpdateChannel>,
+    channel_probe_tx: tokio::sync::mpsc::UnboundedSender<ChannelTarget>,
+    update_busy: Arc<AtomicBool>,
+    is_discovering: Arc<AtomicBool>,
+    started_at: std::time::Instant,
+}
+
+impl Wiring {
+    fn cx<'a>(
+        &'a self,
+        rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
+        session_id: &'a String,
+        mascot_mood: MascotMood,
+        tip_lines: &'a Vec<String>,
+    ) -> LoopCtx<'a> {
+        LoopCtx {
+            source: &self.source,
+            perm: self.perm,
+            gate: &self.gate,
+            question_gate: &self.question_gate,
+            tools_arc: &self.tools_arc,
+            memory_block: &self.memory_block,
+            cwd_display: &self.cwd_display,
+            cwd: &self.cwd,
+            cancel: &self.cancel,
+            tx: &self.tx,
+            rx,
+            update_tx: &self.update_tx,
+            channel_watch_tx: &self.channel_watch_tx,
+            channel_probe_tx: &self.channel_probe_tx,
+            update_busy: &self.update_busy,
+            is_discovering: &self.is_discovering,
+            session_id,
+            mascot_mood,
+            started_at: self.started_at,
+            tip_lines,
+        }
+    }
+}
+
+/// The receiving ends the event loop waits on.
+struct Inbox {
+    events: tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
+    updates: tokio::sync::mpsc::UnboundedReceiver<UpdateNotice>,
+    channel_probes: tokio::sync::mpsc::UnboundedReceiver<ChannelTarget>,
+}
+
 async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
-    let AppContext {
-        config: app_config,
-        source,
-        perm,
-        gate,
-        question_gate,
-        tools_arc,
-        memory_block,
-        memory_docs,
-        model,
-        context_display,
-        context_capacity,
-        cwd_display,
-        initial_effort,
-        available_models,
-        session_start,
-        cwd,
-        first_run_verdict,
-        pending_discovery,
-    } = ctx;
-    let cancel = Arc::new(AtomicBool::new(false));
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
-
-    start_event_sources(&tx, &tools_arc, pending_discovery);
-
-    let system_prompt_config = SystemPromptConfig::new()
-        .with_cwd(&cwd_display)
-        .with_platform(flashagent_tools::shell::platform())
-        .with_model(&model)
-        .with_effort(&initial_effort);
-    let system_prompt_text =
-        build_system_prompt(&system_prompt_config.clone().with_personality(&app_config.personality));
-
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(80));
-    // Startup has just asked the server; the first poll is not due yet.
-    let mut check_interval =
-        tokio::time::interval_at(tokio::time::Instant::now() + SERVER_POLL_INTERVAL, SERVER_POLL_INTERVAL);
-    check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let is_discovering = Arc::new(AtomicBool::new(false));
-    let (resume_session_id, open_session_picker, session_note) = resolve_session_start(session_start, &cwd_display);
-    let mut session_id = resume_session_id.clone().unwrap_or_else(new_session_id);
-    open_snapshots(perm, &session_id, &cwd);
-
-    let effort_memory = flashagent_core::EffortMemory::load();
-    source.set_effort_bias(effort_memory.steps(&model));
-    tools_arc.set_vision_supported(model_sees_images(&source, &model));
-    let (channel_probe_tx, mut channel_probe_rx) =
-        tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
-    let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
-    let (channel_watch_tx, channel_watch_rx) = tokio::sync::watch::channel(app_config.update_channel);
+    let (tx, events) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
+    start_event_sources(&tx, &ctx.tools_arc, ctx.pending_discovery);
+    let (channel_probe_tx, channel_probes) = tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
+    let (update_tx, updates) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
+    let (channel_watch_tx, channel_watch_rx) = tokio::sync::watch::channel(ctx.config.update_channel);
     // The background updater and Ctrl+U both claim this, so they never download
     // over each other.
     let update_busy = Arc::new(AtomicBool::new(false));
-    start_background_updates(app_config.auto_check_updates, channel_watch_rx, update_tx.clone(), update_busy.clone());
+    start_background_updates(ctx.config.auto_check_updates, channel_watch_rx, update_tx.clone(), update_busy.clone());
+    let w = Wiring {
+        source: ctx.source,
+        perm: ctx.perm,
+        gate: ctx.gate,
+        question_gate: ctx.question_gate,
+        tools_arc: ctx.tools_arc,
+        memory_block: ctx.memory_block,
+        cwd_display: ctx.cwd_display,
+        cwd: ctx.cwd,
+        cancel: Arc::new(AtomicBool::new(false)),
+        tx,
+        update_tx,
+        channel_watch_tx,
+        channel_probe_tx,
+        update_busy,
+        is_discovering: Arc::new(AtomicBool::new(false)),
+        started_at: std::time::Instant::now(),
+    };
 
-    let started_at = std::time::Instant::now();
-    const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
-    let mut last_draw = started_at;
-    let mut app = initial_app(InitialApp { app_config, model, context_display, context_capacity, cwd_display: cwd_display.clone(), initial_effort, available_models, system_prompt_text, system_prompt_config, memory_docs, effort_memory });
-    update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
+    let system_prompt_config = SystemPromptConfig::new()
+        .with_cwd(&w.cwd_display)
+        .with_platform(flashagent_tools::shell::platform())
+        .with_model(&ctx.model)
+        .with_effort(&ctx.initial_effort);
+    let system_prompt_text =
+        build_system_prompt(&system_prompt_config.clone().with_personality(&ctx.config.personality));
+    let (resume_session_id, open_session_picker, session_note) = resolve_session_start(ctx.session_start, &w.cwd_display);
+    let mut session_id = resume_session_id.clone().unwrap_or_else(new_session_id);
+    open_snapshots(w.perm, &session_id, &w.cwd);
+
+    let effort_memory = flashagent_core::EffortMemory::load();
+    w.source.set_effort_bias(effort_memory.steps(&ctx.model));
+    w.tools_arc.set_vision_supported(model_sees_images(&w.source, &ctx.model));
+    let mut app = initial_app(InitialApp {
+        app_config: ctx.config,
+        model: ctx.model,
+        context_display: ctx.context_display,
+        context_capacity: ctx.context_capacity,
+        cwd_display: w.cwd_display.clone(),
+        initial_effort: ctx.initial_effort,
+        available_models: ctx.available_models,
+        system_prompt_text,
+        system_prompt_config,
+        memory_docs: ctx.memory_docs,
+        effort_memory,
+    });
+    update_context_usage(&mut app.context_usage, &app.history, &w.memory_block, &app.chat, w.perm);
 
     // Before anything is drawn. A resumed session's card is drawn whole: the
     // reveal stops once the transcript has a user message.
     flashagent_tui::anim::set_enabled(app.config.animations);
     let reveal = resume_session_id.is_none() && app.config.animations;
-    app.animate_welcome(&source, MascotMood::Checking, None, reveal.then_some(1));
-    if let Some(verdict) = first_run_verdict {
+    app.animate_welcome(&w.source, MascotMood::Checking, None, reveal.then_some(1));
+    if let Some(verdict) = ctx.first_run_verdict {
         app.chat.push_system(&verdict);
     }
     // The unreadable file keeps its name: saving over it would destroy what may
     // still be recoverable by hand.
-    if resume_session_id.as_deref().is_some_and(|id| !app.resume_at_start(id, &memory_block, perm)) {
+    if resume_session_id.as_deref().is_some_and(|id| !app.resume_at_start(id, &w.memory_block, w.perm)) {
         session_id = new_session_id();
-        open_snapshots(perm, &session_id, &cwd);
+        open_snapshots(w.perm, &session_id, &w.cwd);
     }
     if let Some(note) = session_note {
         app.notice(note);
     }
     if open_session_picker {
-        app.open_session_picker(&cwd_display, &session_id);
+        app.open_session_picker(&w.cwd_display, &session_id);
     }
+    app.warm_prompt_cache(&w.source, w.perm, &w.memory_block);
 
-    app.warm_prompt_cache(&source, perm, &memory_block);
+    event_loop(&mut app, &w, Inbox { events, updates, channel_probes }, &mut session_id).await;
 
+    w.tools_arc.shells().stop_all();
+    let saved = app.config.auto_save_sessions && worth_saving(&app.history);
+    Ok(saved.then(|| save_on_exit(&session_id, &app.current_model, &w.cwd_display, &app.history)))
+}
+
+/// Draws, waits for the next event and hands it to its handler, until one
+/// quits.
+async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mut String) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(80));
+    // Startup has just asked the server; the first poll is not due yet.
+    let mut check_interval =
+        tokio::time::interval_at(tokio::time::Instant::now() + SERVER_POLL_INTERVAL, SERVER_POLL_INTERVAL);
+    check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+    let mut last_draw = w.started_at;
     loop {
         // Switched here, where the session id and the snapshot store live.
-        if let Some(id) = app.pending_resume.take().filter(|id| *id != session_id) {
-            if app.switch_session(&session_id, &id, &memory_block, perm) {
-                session_id = id;
-                open_snapshots(perm, &session_id, &cwd);
-                app.warm_prompt_cache(&source, perm, &memory_block);
+        if let Some(id) = app.pending_resume.take().filter(|id| id != session_id) {
+            if app.switch_session(session_id, &id, &w.memory_block, w.perm) {
+                *session_id = id;
+                open_snapshots(w.perm, session_id, &w.cwd);
+                app.warm_prompt_cache(&w.source, w.perm, &w.memory_block);
             }
         }
-        let mascot_mood = app.server_mood(&source, started_at);
-        let autocomplete = app.autocomplete_popup(&gate, &question_gate);
+        let mascot_mood = app.server_mood(&w.source, w.started_at);
+        let autocomplete = app.autocomplete_popup(&w.gate, &w.question_gate);
 
         let (term_w, term_h) = crossterm::terminal::size().unwrap_or((100, 24));
         if (term_w, term_h) != app.last_term_size {
             app.last_term_size = (term_w, term_h);
             if !app.chat.has_user_message() {
-                app.animate_welcome(&source, mascot_mood, Some(term_w as usize), None);
+                app.animate_welcome(&w.source, mascot_mood, Some(term_w as usize), None);
             }
         }
         // Two tip rows only when the window can spare them.
         let tip_rows = if term_h >= 20 { 2 } else { 1 };
         let tip_lines = app.tip_animator.render_lines(term_w as usize, tip_rows);
-        // A macro, not a function: it borrows this frame's own values.
-        macro_rules! loop_ctx {
-            () => {
-                LoopCtx {
-                    source: &source,
-                    perm,
-                    gate: &gate,
-                    question_gate: &question_gate,
-                    tools_arc: &tools_arc,
-                    memory_block: &memory_block,
-                    cwd_display: &cwd_display,
-                    cwd: &cwd,
-                    cancel: &cancel,
-                    tx: &tx,
-                    rx: &mut rx,
-                    update_tx: &update_tx,
-                    channel_watch_tx: &channel_watch_tx,
-                    channel_probe_tx: &channel_probe_tx,
-                    update_busy: &update_busy,
-                    is_discovering: &is_discovering,
-                    session_id: &session_id,
-                    mascot_mood,
-                    started_at,
-                    tip_lines: &tip_lines,
-                }
-            };
-        }
 
         if app.copy_toast.as_ref().is_some_and(|(_, shown)| shown.elapsed().as_secs_f32() >= 2.5) {
             app.copy_toast = None;
         }
-        app.announce_mood(mascot_mood, &source);
+        app.announce_mood(mascot_mood, &w.source);
 
         // A burst of events (a fast stream, a key held down) is drawn once rather
         // than once per event, or the screen falls behind what it shows; never
         // more than a frame late.
-        app.tasks_tick(&loop_ctx!());
-        if rx.is_empty() || last_draw.elapsed() >= FRAME {
-            app.draw(&loop_ctx!(), autocomplete.as_ref());
+        app.tasks_tick(&w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines));
+        if inbox.events.is_empty() || last_draw.elapsed() >= FRAME {
+            app.draw(&w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines), autocomplete.as_ref());
             last_draw = std::time::Instant::now();
         }
 
         let ev = tokio::select! {
-            Some(target) = channel_probe_rx.recv() => {
+            Some(target) = inbox.channel_probes.recv() => {
                 app.on_channel_target(target);
                 continue;
             }
-            Some(notice) = update_rx.recv() => {
+            Some(notice) = inbox.updates.recv() => {
                 app.on_update_notice(notice);
                 continue;
             }
             // Animations run on the clock alone; counting events made spinners race.
-            Some(ev) = rx.recv() => ev,
+            Some(ev) = inbox.events.recv() => ev,
             // While something moves, frames come every 16 ms instead of the idle tick.
             _ = tokio::time::sleep(std::time::Duration::from_millis(16)),
-                if app.animating() || (welcome_reveal_rows(started_at).is_some() && !app.chat.has_user_message()) =>
+                if app.animating() || (welcome_reveal_rows(w.started_at).is_some() && !app.chat.has_user_message()) =>
             {
-                if let Some(rows) = welcome_reveal_rows(started_at).filter(|_| !app.running) {
-                    app.animate_welcome(&source, mascot_mood, None, Some(rows));
+                if let Some(rows) = welcome_reveal_rows(w.started_at).filter(|_| !app.running) {
+                    app.animate_welcome(&w.source, mascot_mood, None, Some(rows));
                 }
                 continue;
             }
             _ = tick.tick() => {
-                app.on_tick(&loop_ctx!());
+                app.on_tick(&w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines));
                 continue;
             }
             _ = check_interval.tick() => {
-                app.poll_server(&loop_ctx!());
+                app.poll_server(&w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines));
                 continue;
             }
         };
-        if let Flow::Quit = app.on_ui_event(&mut loop_ctx!(), ev).await {
-            break;
+        if let Flow::Quit = app.on_ui_event(&mut w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines), ev).await {
+            return;
         }
     }
-
-    tools_arc.shells().stop_all();
-    let saved = app.config.auto_save_sessions && worth_saving(&app.history);
-    Ok(saved.then(|| save_on_exit(&session_id, &app.current_model, &cwd_display, &app.history)))
 }
 
 fn update_context_usage(
