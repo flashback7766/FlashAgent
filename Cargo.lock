@@ -390,6 +390,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
@@ -410,6 +411,7 @@ dependencies = [
  "serde",
  "tar",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -419,6 +421,7 @@ dependencies = [
  "async-trait",
  "flashagent-core",
  "flashagent-llm",
+ "futures",
  "glob",
  "libc",
  "parking_lot",

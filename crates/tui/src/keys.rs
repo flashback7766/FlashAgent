@@ -14,6 +14,7 @@ impl App {
     /// A failure is shown: a setting that silently does not stick is found out
     /// only on the next launch.
     pub(crate) fn save_config(&mut self) {
+        flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(&self.config));
         if let Err(e) = self.config.save() {
             self.notice(format!("Settings not saved: {e}"));
         }
@@ -491,9 +492,22 @@ impl App {
                 self.custom_placeholder = None;
                 self.suggested_prompt = None;
                 self.latest_suggestion = None;
+                let typed_provider = self.input.line_count() == 1
+                    && matches!(self.input.split_whitespace().next(), Some("/provider" | "/providers"));
                 if cx.gate.pending().is_some() {
                     cx.gate.respond(self.confirm_select.decision());
                     self.confirm_select = ConfirmSelect::new();
+                } else if typed_provider && self.running {
+                    // Not steering for the model: it stays typed for when the answer is done.
+                    self.refuse_switch_while_busy();
+                } else if let Some(switch) = self.provider_switch.as_ref().filter(|_| !self.input.starts_with('/') && !self.running) {
+                    // It would go to whichever server the client has at that moment.
+                    let name = switch.name.clone();
+                    self.background = Some(BackgroundNotice::fading(format!("Still connecting to {name} \u{b7} send it once it answers"), 5).warning());
+                } else if self.running && matches!(self.input.trim(), "/tasks" | "/bg") {
+                    // Not steering: a task may need stopping while the turn runs.
+                    self.input.clear();
+                    self.open_tasks(cx);
                 } else if !self.input.is_empty() && self.running {
                     if let Some(steer_tx) = self.active_steer_tx.clone() {
                         let text = self.input.take();
@@ -545,6 +559,8 @@ impl App {
                     self.renderer.request_reprint();
                 }
                 'k' => self.open_palette(),
+                // Claude Code's key: the running shell command goes on in the background.
+                'b' if self.running => self.detach_shell(cx),
                 'a' => self.input.home(),
                 'j' => {
                     self.input.insert_char('\n');

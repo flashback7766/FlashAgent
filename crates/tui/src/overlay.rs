@@ -7,6 +7,10 @@ use flashagent_tui::memory_view::MemoryModal;
 pub(crate) enum Overlay {
     Effort(SelectMenu<String>),
     Model(SelectMenu<String>),
+    /// /provider: switch, add or edit.
+    Provider(SelectMenu<String>),
+    /// Settings -> Providers.
+    Providers(Box<flashagent_tui::ProvidersView>),
     /// /resume
     Sessions(SelectMenu<String>),
     Rewind(RewindConfirm),
@@ -16,6 +20,8 @@ pub(crate) enum Overlay {
     Context(ContextModal),
     Memory(MemoryModal),
     Mcp(McpModal),
+    /// /tasks: background commands.
+    Tasks(flashagent_tui::TasksModal),
     /// Ctrl+K: every command, searched by typing.
     Palette(SelectMenu<String>),
 }
@@ -24,20 +30,24 @@ impl Overlay {
     /// For mouse-wheel scrolling.
     pub(crate) fn select_menu_mut(&mut self) -> Option<&mut SelectMenu<String>> {
         match self {
-            Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Sessions(menu) | Overlay::Palette(menu) => Some(menu),
+            Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Provider(menu) | Overlay::Sessions(menu) | Overlay::Palette(menu) => Some(menu),
             _ => None,
         }
     }
 
     pub(crate) fn render(&self, width: usize) -> Vec<RenderLine> {
         match self {
-            Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Sessions(menu) | Overlay::Palette(menu) => menu.render(width),
+            Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Provider(menu) | Overlay::Sessions(menu) | Overlay::Palette(menu) => {
+                menu.render(width)
+            }
+            Overlay::Providers(view) => view.render(width),
             Overlay::Rewind(card) => card.render(width),
             Overlay::Settings(view) => view.render(width),
             Overlay::Sampling(view) => view.render(width),
             Overlay::Context(modal) => modal.render(width),
             Overlay::Memory(modal) => modal.render(width),
             Overlay::Mcp(modal) => modal.render(width),
+            Overlay::Tasks(modal) => modal.render(width),
         }
     }
 }

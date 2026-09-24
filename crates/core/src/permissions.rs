@@ -145,10 +145,10 @@ impl ApprovalGate for DenyAllGate {
     }
 }
 
-/// For tests.
-#[derive(Default)]
-pub struct AllowAllGate;
+#[cfg(test)]
+struct AllowAllGate;
 
+#[cfg(test)]
 #[async_trait]
 impl ApprovalGate for AllowAllGate {
     async fn approve(&self, _req: &ApprovalRequest) -> Decision {
@@ -160,7 +160,6 @@ impl ApprovalGate for AllowAllGate {
 #[derive(Debug, Default, Clone)]
 pub struct RuleSet {
     pub always_allow_tools: Vec<String>,
-    pub denied_tools: Vec<String>,
     /// Narrow: `npm test` covers `npm test --watch`, never `npm publish`.
     pub shell_prefixes: Vec<String>,
     /// Allowed only verbatim, with no extra arguments.
@@ -289,7 +288,7 @@ fn smuggles_in(cmd: &str, dialect: ShellDialect) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ShellRule {
+enum ShellRule {
     /// `npm test` covering `npm test --watch`, never `npm publish`.
     Prefix(String),
     /// Verbatim: `rm -rf build` never grows into `rm -rf build ~`.
@@ -298,7 +297,7 @@ pub enum ShellRule {
 
 /// Only `program subcommand [--flags...]` becomes a prefix rule; any
 /// positional argument pins the rule to the verbatim segment.
-pub fn always_rule(segment: &str) -> ShellRule {
+fn always_rule(segment: &str) -> ShellRule {
     let segment = segment.trim();
     let words: Vec<&str> = segment.split_whitespace().collect();
     let is_word = |w: &str| !w.starts_with('-') && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':');
@@ -544,7 +543,7 @@ fn read_only_segment(segment: &str) -> bool {
     if args.iter().any(|a| reaches_outside(a)) {
         return false;
     }
-    let has = |bad: &[&str]| args.iter().any(|a| bad.iter().any(|b| a == b || a.starts_with(&format!("{b}="))));
+    let has = |bad: &[&str]| args.iter().any(|a| bad.iter().any(|b| a.strip_prefix(b).is_some_and(|rest| rest.is_empty() || rest.starts_with('='))));
     match prog.as_str() {
         "ls" | "cat" | "head" | "tail" | "wc" | "pwd" | "echo" | "stat" | "du" | "df" | "which" | "whoami"
         | "uname" | "basename" | "dirname" | "realpath" | "readlink" | "grep" | "egrep" | "fgrep" | "diff"
@@ -730,7 +729,7 @@ impl PermissionState {
     /// A refusal in Planning and during `/goal`, a card in Manual and Accept
     /// Edits. Accept All lets it through: the shell there already reaches any
     /// file unasked, so a card for the file tools only got in the way.
-    fn outside_project_verdict(&self, call: &ToolCall, diff: Option<String>) -> Option<Verdict> {
+    fn outside_project_verdict(&self, call: &ToolCall, diff: &mut dyn FnMut() -> Option<String>) -> Option<Verdict> {
         let root = self.project_root.lock().expect("root lock").clone()?;
         let category = self.category(&call.name);
         if !matches!(category, Category::Read | Category::Write) {
@@ -752,10 +751,11 @@ impl PermissionState {
             return None;
         }
         let note = format!("outside the project: {outside}");
+        let diff = if category == Category::Write { diff() } else { None };
         Some(Verdict::NeedApproval {
             diff: Some(match diff {
-                Some(d) if category == Category::Write => format!("{note}\n{d}"),
-                _ => note,
+                Some(d) => format!("{note}\n{d}"),
+                None => note,
             }),
         })
     }
@@ -844,20 +844,17 @@ impl PermissionState {
         }
     }
 
-    pub fn deny_tool(&self, tool: &str) {
-        self.rules.lock().expect("rules lock").denied_tools.push(tool.to_string());
-    }
-
-    /// `diff` is the write preview, computed by the caller.
-    pub fn decide(&self, call: &ToolCall, diff: Option<String>) -> Verdict {
+    /// `preview` makes the write diff. It reads the file and compares it
+    /// whole, so it runs only when a card will show it: most writes are allowed
+    /// outright.
+    pub fn decide(&self, call: &ToolCall, preview: impl FnOnce() -> Option<String>) -> Verdict {
+        let mut preview = Some(preview);
+        let mut diff = move || preview.take().and_then(|p| p());
         let rules = self.rules.lock().expect("rules lock");
-        if rules.denied_tools.iter().any(|t| t == &call.name) {
-            return Verdict::Deny("tool is on the session blacklist".into());
-        }
         let always = rules.always_allow_tools.iter().any(|t| t == &call.name);
         drop(rules);
         // Before any "Always": allowing a tool for the project must not reach ~/.ssh.
-        if let Some(verdict) = self.outside_project_verdict(call, diff.clone()).or_else(|| self.local_network_verdict(call)) {
+        if let Some(verdict) = self.outside_project_verdict(call, &mut diff).or_else(|| self.local_network_verdict(call)) {
             return verdict;
         }
         if always {
@@ -871,7 +868,7 @@ impl PermissionState {
                 PermissionMode::Planning => {
                     Verdict::Deny("planning mode is read-only".into())
                 }
-                PermissionMode::Manual => Verdict::NeedApproval { diff },
+                PermissionMode::Manual => Verdict::NeedApproval { diff: diff() },
             },
             Category::Shell => {
                 let cmd = shell_command(&call.args_json);
@@ -959,8 +956,7 @@ impl ToolExec for PermissionedTools {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolOutput {
-        let diff = self.preview.as_deref().and_then(|p| p.write_preview(call));
-        match self.state.decide(call, diff) {
+        match self.state.decide(call, || self.preview.as_deref().and_then(|p| p.write_preview(call))) {
             Verdict::Allow => self.run_allowed(call).await,
             Verdict::Deny(reason) => ToolOutput {
                 content: format!("denied by permissions: {reason}"),
@@ -1100,9 +1096,9 @@ mod tests {
             diff: None,
         };
         state.allow_always(&req);
-        assert_eq!(state.decide(&call("run_shell", r#"{"command":"git push --force"}"#), None), Verdict::Allow, "Always sticks");
+        assert_eq!(state.decide(&call("run_shell", r#"{"command":"git push --force"}"#), || None), Verdict::Allow, "Always sticks");
         assert!(matches!(
-            state.decide(&call("run_shell", r#"{"command":"git push --force origin other"}"#), None),
+            state.decide(&call("run_shell", r#"{"command":"git push --force origin other"}"#), || None),
             Verdict::NeedApproval { .. }
         ));
     }
@@ -1128,9 +1124,9 @@ mod tests {
             let state = PermissionState::new(mode, Arc::new(DenyAllGate));
             state.allow_shell_prefix("git branch");
             state.allow_shell_prefix("git push");
-            assert_eq!(state.decide(&call("run_shell", r#"{"command":"git branch -a"}"#), None), Verdict::Allow);
+            assert_eq!(state.decide(&call("run_shell", r#"{"command":"git branch -a"}"#), || None), Verdict::Allow);
             for cmd in ["git branch -D main", "git push --force origin main"] {
-                let verdict = state.decide(&call("run_shell", &serde_json::json!({ "command": cmd }).to_string()), None);
+                let verdict = state.decide(&call("run_shell", &serde_json::json!({ "command": cmd }).to_string()), || None);
                 assert!(matches!(verdict, Verdict::NeedApproval { .. }), "{mode:?} {cmd}: {verdict:?}");
             }
         }
@@ -1147,18 +1143,18 @@ mod tests {
         };
         let added = state.allow_always(&req("cargo test --release && cargo build"));
         assert_eq!(added, vec!["cargo test ...".to_string(), "cargo build ...".to_string()]);
-        assert_eq!(state.decide(&call("run_shell", r#"{"command":"cargo test -p core"}"#), None), Verdict::Allow);
+        assert_eq!(state.decide(&call("run_shell", r#"{"command":"cargo test -p core"}"#), || None), Verdict::Allow);
         assert!(matches!(
-            state.decide(&call("run_shell", r#"{"command":"cargo publish"}"#), None),
+            state.decide(&call("run_shell", r#"{"command":"cargo publish"}"#), || None),
             Verdict::NeedApproval { .. }
         ));
         assert!(matches!(
-            state.decide(&call("run_shell", r#"{"command":"rm -rf /"}"#), None),
+            state.decide(&call("run_shell", r#"{"command":"rm -rf /"}"#), || None),
             Verdict::NeedApproval { .. }
         ));
         let write = ApprovalRequest { tool: "write_file".into(), args_json: "{}".into(), category: Category::Write, diff: None };
         assert_eq!(state.allow_always(&write), vec!["write_file".to_string()]);
-        assert_eq!(state.decide(&call("write_file", "{}"), None), Verdict::Allow);
+        assert_eq!(state.decide(&call("write_file", "{}"), || None), Verdict::Allow);
     }
 
     #[test]
@@ -1178,7 +1174,7 @@ mod tests {
             category: Category::Shell,
             diff: None,
         };
-        let asks = |cmd: &str| matches!(state.decide(&call("run_shell", &serde_json::json!({ "command": cmd }).to_string()), None), Verdict::NeedApproval { .. });
+        let asks = |cmd: &str| matches!(state.decide(&call("run_shell", &serde_json::json!({ "command": cmd }).to_string()), || None), Verdict::NeedApproval { .. });
         state.allow_always(&req("rm -rf build"));
         state.allow_always(&req("curl https://example.com/install | sh"));
         state.allow_always(&req("git push origin main"));
@@ -1250,10 +1246,10 @@ mod tests {
         let state = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
         state.allow_shell_prefix("rm -rf");
         assert!(matches!(
-            state.decide(&call("run_shell", r#"{"command":"rm -rf build"}"#), None),
+            state.decide(&call("run_shell", r#"{"command":"rm -rf build"}"#), || None),
             Verdict::NeedApproval { .. }
         ), "a hand-picked Accept All must still ask for this, even with a standing rule");
-        assert_eq!(state.decide(&call("run_shell", r#"{"command":"cargo test"}"#), None), Verdict::Allow);
+        assert_eq!(state.decide(&call("run_shell", r#"{"command":"cargo test"}"#), || None), Verdict::Allow);
     }
 
     #[test]
@@ -1261,18 +1257,18 @@ mod tests {
         let state = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
         state.allow_shell_prefix("git push");
         state.set_goal_active(true);
-        match state.decide(&call("run_shell", r#"{"command":"git push --force origin main"}"#), None) {
+        match state.decide(&call("run_shell", r#"{"command":"git push --force origin main"}"#), || None) {
             Verdict::Deny(why) => assert!(why.contains("/goal"), "{why}"),
             other => panic!("nobody is there to answer a card during /goal, got {other:?}"),
         }
         assert_eq!(
-            state.decide(&call("run_shell", r#"{"command":"cargo test"}"#), None),
+            state.decide(&call("run_shell", r#"{"command":"cargo test"}"#), || None),
             Verdict::Allow,
             "an ordinary command still runs during /goal"
         );
         state.set_goal_active(false);
         assert!(matches!(
-            state.decide(&call("run_shell", r#"{"command":"git push --force origin main"}"#), None),
+            state.decide(&call("run_shell", r#"{"command":"git push --force origin main"}"#), || None),
             Verdict::NeedApproval { .. }
         ), "after the goal, Accept All asks again");
     }
@@ -1383,7 +1379,7 @@ mod tests {
         let read = call("read_file", r#"{"path":"link/../secret.txt"}"#);
         let permissions = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
         permissions.set_project_root(project.path().to_path_buf());
-        assert!(matches!(permissions.decide(&read, None), Verdict::Deny(_)));
+        assert!(matches!(permissions.decide(&read, || None), Verdict::Deny(_)));
     }
 
     #[cfg(unix)]
@@ -1414,12 +1410,12 @@ mod tests {
         let read_out = call("read_file", &serde_json::json!({ "file_path": outside_file }).to_string());
         let accept_all = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
         accept_all.set_project_root(dir.path().to_path_buf());
-        assert_eq!(accept_all.decide(&write_out, None), Verdict::Allow, "Accept All writes outside the project");
-        assert_eq!(accept_all.decide(&read_out, None), Verdict::Allow, "Accept All reads outside the project");
+        assert_eq!(accept_all.decide(&write_out, || None), Verdict::Allow, "Accept All writes outside the project");
+        assert_eq!(accept_all.decide(&read_out, || None), Verdict::Allow, "Accept All reads outside the project");
         for mode in [PermissionMode::Manual, PermissionMode::AcceptEdits] {
             let state = PermissionState::new(mode, Arc::new(DenyAllGate));
             state.set_project_root(dir.path().to_path_buf());
-            match state.decide(&write_out, Some("+x".into())) {
+            match state.decide(&write_out, || Some("+x".into())) {
                 Verdict::NeedApproval { diff: Some(d) } => {
                     assert!(d.contains("outside the project"), "{d}");
                     assert!(d.contains("+x"), "the diff is still shown: {d}");
@@ -1427,11 +1423,11 @@ mod tests {
                 other => panic!("{mode:?}: a write outside the project must ask, got {other:?}"),
             }
             assert!(
-                matches!(state.decide(&read_out, None), Verdict::NeedApproval { .. }),
+                matches!(state.decide(&read_out, || None), Verdict::NeedApproval { .. }),
                 "{mode:?}: a read outside the project must ask"
             );
             assert_eq!(
-                state.decide(&call("read_file", r#"{"path":"src/main.rs"}"#), None),
+                state.decide(&call("read_file", r#"{"path":"src/main.rs"}"#), || None),
                 Verdict::Allow,
                 "{mode:?}: reads inside the project are untouched"
             );
@@ -1445,18 +1441,18 @@ mod tests {
 
         let planning = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
         planning.set_project_root(dir.path().to_path_buf());
-        assert!(matches!(planning.decide(&read_out, None), Verdict::Deny(_)));
+        assert!(matches!(planning.decide(&read_out, || None), Verdict::Deny(_)));
 
         let goal = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
         goal.set_project_root(dir.path().to_path_buf());
         goal.set_goal_active(true);
-        match goal.decide(&call("edit_file", r#"{"files":[{"path":"src/main.rs"},{"path":"../../x.rs"}]}"#), None) {
+        match goal.decide(&call("edit_file", r#"{"files":[{"path":"src/main.rs"},{"path":"../../x.rs"}]}"#), || None) {
             Verdict::Deny(why) => assert!(why.contains("/goal") && why.contains("../../x.rs"), "{why}"),
             other => panic!("one file of a batch edit outside the project must refuse the call, got {other:?}"),
         }
-        assert!(matches!(goal.decide(&read_out, None), Verdict::Deny(_)));
-        assert!(matches!(goal.decide(&call("glob", r#"{"pattern":"/etc/*.conf"}"#), None), Verdict::Deny(_)));
-        assert_eq!(goal.decide(&call("glob", r#"{"pattern":"src/**/*.rs"}"#), None), Verdict::Allow);
+        assert!(matches!(goal.decide(&read_out, || None), Verdict::Deny(_)));
+        assert!(matches!(goal.decide(&call("glob", r#"{"pattern":"/etc/*.conf"}"#), || None), Verdict::Deny(_)));
+        assert_eq!(goal.decide(&call("glob", r#"{"pattern":"src/**/*.rs"}"#), || None), Verdict::Allow);
     }
 
     #[test]
@@ -1484,18 +1480,18 @@ mod tests {
         for mode in [PermissionMode::Manual, PermissionMode::AcceptEdits, PermissionMode::Bypass] {
             let state = PermissionState::new(mode, Arc::new(DenyAllGate));
             state.allow_tool_always("web_fetch");
-            match state.decide(&router, None) {
+            match state.decide(&router, || None) {
                 Verdict::NeedApproval { diff: Some(d) } => assert!(d.contains("192.168.1.1"), "{d}"),
                 other => panic!("{mode:?}: a local address must ask, even with web_fetch always allowed; got {other:?}"),
             }
-            assert_eq!(state.decide(&public, None), Verdict::Allow, "{mode:?}: the internet needs no card");
+            assert_eq!(state.decide(&public, || None), Verdict::Allow, "{mode:?}: the internet needs no card");
         }
         let planning = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
-        assert!(matches!(planning.decide(&router, None), Verdict::Deny(_)));
-        assert_eq!(planning.decide(&public, None), Verdict::Allow);
+        assert!(matches!(planning.decide(&router, || None), Verdict::Deny(_)));
+        assert_eq!(planning.decide(&public, || None), Verdict::Allow);
         let goal = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
         goal.set_goal_active(true);
-        assert!(matches!(goal.decide(&call("web_fetch", r#"{"url":"http://localhost:1234/v1/models"}"#), None), Verdict::Deny(_)));
+        assert!(matches!(goal.decide(&call("web_fetch", r#"{"url":"http://localhost:1234/v1/models"}"#), || None), Verdict::Deny(_)));
     }
 
     #[test]
@@ -1504,9 +1500,9 @@ mod tests {
         let state = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
         state.set_project_root(dir.path().to_path_buf());
         state.allow_tool_always("write_file");
-        assert_eq!(state.decide(&call("write_file", r#"{"path":"src/new.rs","content":"x"}"#), None), Verdict::Allow);
+        assert_eq!(state.decide(&call("write_file", r#"{"path":"src/new.rs","content":"x"}"#), || None), Verdict::Allow);
         assert!(matches!(
-            state.decide(&call("write_file", r#"{"path":"../../.bashrc","content":"x"}"#), None),
+            state.decide(&call("write_file", r#"{"path":"../../.bashrc","content":"x"}"#), || None),
             Verdict::NeedApproval { .. }
         ));
     }
@@ -1515,7 +1511,7 @@ mod tests {
     fn planning_mode_still_denies_a_blacklisted_command_outright() {
         let state = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
         assert!(matches!(
-            state.decide(&call("run_shell", r#"{"command":"rm -rf build"}"#), None),
+            state.decide(&call("run_shell", r#"{"command":"rm -rf build"}"#), || None),
             Verdict::Deny(_)
         ), "planning mode has no path to running it at all, blacklisted or not");
     }
@@ -1529,7 +1525,7 @@ mod tests {
         let smuggled = r#"{"command":"echo SAFE","timeout_ms":"soon","arguments":{"command":"echo PWNED"}}"#;
         assert_eq!(shell_command(smuggled).as_deref(), Some("echo SAFE"));
         let wrapped = r#"{"arguments":{"command":"rm -rf ~"}}"#;
-        assert!(matches!(state.decide(&call("run_shell", wrapped), None), Verdict::NeedApproval { .. }));
+        assert!(matches!(state.decide(&call("run_shell", wrapped), || None), Verdict::NeedApproval { .. }));
     }
 
     #[test]
@@ -1538,11 +1534,11 @@ mod tests {
         let state = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
         state.allow_shell_prefix("echo SAFE");
         assert_eq!(shell_command(r#"{"cmd":"echo SAFE"}"#).as_deref(), Some("echo SAFE"));
-        assert_eq!(state.decide(&call("run_shell", r#"{"cmd":"echo SAFE now"}"#), None), Verdict::Allow);
-        assert!(matches!(state.decide(&call("run_shell", r#"{"cmd":"rm -rf ~"}"#), None), Verdict::NeedApproval { .. }));
+        assert_eq!(state.decide(&call("run_shell", r#"{"cmd":"echo SAFE now"}"#), || None), Verdict::Allow);
+        assert!(matches!(state.decide(&call("run_shell", r#"{"cmd":"rm -rf ~"}"#), || None), Verdict::NeedApproval { .. }));
         assert_eq!(shell_command(r#"{"command":"rm -rf ~","cmd":"echo SAFE"}"#).as_deref(), Some("rm -rf ~"));
         assert!(matches!(
-            state.decide(&call("run_shell", r#"{"command":"rm -rf ~","cmd":"echo SAFE"}"#), None),
+            state.decide(&call("run_shell", r#"{"command":"rm -rf ~","cmd":"echo SAFE"}"#), || None),
             Verdict::NeedApproval { .. }
         ));
     }
@@ -1551,31 +1547,31 @@ mod tests {
     fn read_only_hint_reclassifies_external_tools_only() {
         let state = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
         let mutating = call("mcp__db__execute_mutation", "{}");
-        assert!(matches!(state.decide(&mutating, None), Verdict::Deny(_)));
+        assert!(matches!(state.decide(&mutating, || None), Verdict::Deny(_)));
         state.set_read_only_hint(Arc::new(|name: &str| name == "mcp__db__execute_mutation" || name == "run_shell"));
-        assert_eq!(state.decide(&mutating, None), Verdict::Allow);
+        assert_eq!(state.decide(&mutating, || None), Verdict::Allow);
         // A hint can never make a built-in category read-only.
-        assert!(matches!(state.decide(&call("run_shell", r#"{"command":"cargo build"}"#), None), Verdict::Deny(_)));
+        assert!(matches!(state.decide(&call("run_shell", r#"{"command":"cargo build"}"#), || None), Verdict::Deny(_)));
     }
 
     #[test]
     fn spawn_agent_is_not_an_external_tool() {
         let state = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
-        assert_eq!(state.decide(&call("spawn_agent", r#"{"task":"research"}"#), None), Verdict::Allow);
+        assert_eq!(state.decide(&call("spawn_agent", r#"{"task":"research"}"#), || None), Verdict::Allow);
     }
 
     #[test]
     fn read_and_net_always_pass_all_modes() {
         for mode in [PermissionMode::Planning, PermissionMode::Manual, PermissionMode::AcceptEdits, PermissionMode::Bypass] {
             let state = PermissionState::new(mode, Arc::new(DenyAllGate));
-            assert_eq!(state.decide(&call("read_file", r#"{"path":"a"}"#), None), Verdict::Allow);
+            assert_eq!(state.decide(&call("read_file", r#"{"path":"a"}"#), || None), Verdict::Allow);
         assert_eq!(
-            state.decide(&call("view_image", r#"{"path":"d.png"}"#), None),
+            state.decide(&call("view_image", r#"{"path":"d.png"}"#), || None),
             Verdict::Allow,
             "opening a picture in the project is a read, not a change"
         );
-            assert_eq!(state.decide(&call("grep", r#"{"pattern":"x"}"#), None), Verdict::Allow);
-            assert_eq!(state.decide(&call("web_fetch", r#"{"url":"https://example.com"}"#), None), Verdict::Allow);
+            assert_eq!(state.decide(&call("grep", r#"{"pattern":"x"}"#), || None), Verdict::Allow);
+            assert_eq!(state.decide(&call("web_fetch", r#"{"url":"https://example.com"}"#), || None), Verdict::Allow);
         }
     }
 
@@ -1584,28 +1580,28 @@ mod tests {
         let args = r#"{"path":"a.txt","content":"hi"}"#;
         let state = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
         assert_eq!(
-            state.decide(&call("write_file", args), Some("diff".into())),
+            state.decide(&call("write_file", args), || Some("diff".into())),
             Verdict::NeedApproval { diff: Some("diff".into()) }
         );
 
         let state = PermissionState::new(PermissionMode::Planning, Arc::new(AllowAllGate));
-        assert!(matches!(state.decide(&call("write_file", args), None), Verdict::Deny(_)));
+        assert!(matches!(state.decide(&call("write_file", args), || None), Verdict::Deny(_)));
 
         let state = PermissionState::new(PermissionMode::AcceptEdits, Arc::new(DenyAllGate));
-        assert_eq!(state.decide(&call("write_file", args), None), Verdict::Allow);
+        assert_eq!(state.decide(&call("write_file", args), || None), Verdict::Allow);
 
         let state = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
-        assert_eq!(state.decide(&call("write_file", args), None), Verdict::Allow);
+        assert_eq!(state.decide(&call("write_file", args), || None), Verdict::Allow);
     }
 
     #[test]
     fn accept_edits_allows_writes_but_gates_shell() {
         let state = PermissionState::new(PermissionMode::AcceptEdits, Arc::new(DenyAllGate));
         let write = call("write_file", r#"{"path":"test.rs","content":"fn main() {}"}"#);
-        assert_eq!(state.decide(&write, None), Verdict::Allow);
+        assert_eq!(state.decide(&write, || None), Verdict::Allow);
 
         let shell = call("run_shell", r#"{"command":"cargo build"}"#);
-        assert!(matches!(state.decide(&shell, None), Verdict::NeedApproval { .. }));
+        assert!(matches!(state.decide(&shell, || None), Verdict::NeedApproval { .. }));
     }
 
     #[test]
@@ -1613,27 +1609,20 @@ mod tests {
         let state = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
         let ok = call("run_shell", r#"{"command":"cargo test"}"#);
         let bad = call("run_shell", r#"{"command":"cargo publish"}"#);
-        assert!(matches!(state.decide(&ok.clone(), None), Verdict::NeedApproval { .. }));
+        assert!(matches!(state.decide(&ok.clone(), || None), Verdict::NeedApproval { .. }));
         state.allow_shell_prefix("cargo test");
-        assert_eq!(state.decide(&ok, None), Verdict::Allow);
-        assert!(matches!(state.decide(&bad, None), Verdict::NeedApproval { .. }));
+        assert_eq!(state.decide(&ok, || None), Verdict::Allow);
+        assert!(matches!(state.decide(&bad, || None), Verdict::NeedApproval { .. }));
     }
 
     #[test]
     fn planning_denies_unlisted_shell_but_allows_listed() {
         let state = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
         let build = call("run_shell", r#"{"command":"cargo build --release"}"#);
-        assert!(matches!(state.decide(&build, None), Verdict::Deny(_)));
+        assert!(matches!(state.decide(&build, || None), Verdict::Deny(_)));
         state.allow_shell_prefix("cargo build");
-        assert_eq!(state.decide(&build, None), Verdict::Allow);
-        assert_eq!(state.decide(&call("run_shell", r#"{"command":"ls -la"}"#), None), Verdict::Allow);
-    }
-
-    #[test]
-    fn blacklist_beats_everything() {
-        let state = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
-        state.deny_tool("rm_tool");
-        assert!(matches!(state.decide(&call("rm_tool", "{}"), None), Verdict::Deny(_)));
+        assert_eq!(state.decide(&build, || None), Verdict::Allow);
+        assert_eq!(state.decide(&call("run_shell", r#"{"command":"ls -la"}"#), || None), Verdict::Allow);
     }
 
     #[test]
@@ -1641,7 +1630,7 @@ mod tests {
         let state = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
         state.allow_tool_always("write_file");
         assert_eq!(
-            state.decide(&call("write_file", r#"{"path":"a"}"#), None),
+            state.decide(&call("write_file", r#"{"path":"a"}"#), || None),
             Verdict::Allow
         );
     }
@@ -1688,12 +1677,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn denied_tool_short_circuits_before_gate() {
-        struct Exploding;
+    async fn a_write_is_diffed_only_when_someone_will_see_the_diff() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Written;
         #[async_trait]
-        impl ToolExec for Exploding {
+        impl ToolExec for Written {
             async fn execute(&self, _call: &ToolCall) -> ToolOutput {
-                panic!("must not be called");
+                ToolOutput { content: "wrote".into(), is_error: false, images: Vec::new() }
             }
             fn specs(&self) -> Vec<ToolSpec> {
                 vec![]
@@ -1702,16 +1693,22 @@ mod tests {
                 self
             }
         }
-        let inner = Exploding;
-        let state = Arc::new(PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate)));
-        state.deny_tool("danger");
-        let wrapped = PermissionedTools::new(
-            Arc::new(inner),
-            None::<Arc<dyn crate::loop_::WritePreview>>,
-            state,
-        );
-        let out = wrapped.execute(&call("danger", "{}")).await;
-        assert!(out.is_error && out.content.contains("blacklist"));
+        struct CountingPreview(AtomicUsize);
+        impl crate::loop_::WritePreview for CountingPreview {
+            fn write_preview(&self, _call: &ToolCall) -> Option<String> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Some("+x".into())
+            }
+        }
+
+        let write = call("write_file", r#"{"path":"a.txt","content":"x"}"#);
+        for (mode, diffed) in [(PermissionMode::AcceptEdits, 0), (PermissionMode::Bypass, 0), (PermissionMode::Manual, 1)] {
+            let preview = Arc::new(CountingPreview(AtomicUsize::new(0)));
+            let state = Arc::new(PermissionState::new(mode, Arc::new(AllowAllGate)));
+            let tools = PermissionedTools::new(Arc::new(Written), Some(preview.clone()), state);
+            assert!(!tools.execute(&write).await.is_error);
+            assert_eq!(preview.0.load(Ordering::Relaxed), diffed, "{mode:?}");
+        }
     }
 
     #[test]
@@ -1740,16 +1737,16 @@ mod tests {
         assert_eq!(Category::from_tool("memory_remove"), Category::Write);
 
         let state_planning = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
-        assert_eq!(state_planning.decide(&call("ask_user", "{}"), None), Verdict::Allow);
-        assert_eq!(state_planning.decide(&call("outline_file", "{}"), None), Verdict::Allow);
+        assert_eq!(state_planning.decide(&call("ask_user", "{}"), || None), Verdict::Allow);
+        assert_eq!(state_planning.decide(&call("outline_file", "{}"), || None), Verdict::Allow);
         assert_eq!(
-            state_planning.decide(&call("patch_file", "{}"), None),
+            state_planning.decide(&call("patch_file", "{}"), || None),
             Verdict::Deny("planning mode is read-only".into())
         );
 
         let state_accept_edits = PermissionState::new(PermissionMode::AcceptEdits, Arc::new(DenyAllGate));
-        assert_eq!(state_accept_edits.decide(&call("patch_file", "{}"), None), Verdict::Allow);
-        assert_eq!(state_accept_edits.decide(&call("memory_create", "{}"), None), Verdict::Allow);
+        assert_eq!(state_accept_edits.decide(&call("patch_file", "{}"), || None), Verdict::Allow);
+        assert_eq!(state_accept_edits.decide(&call("memory_create", "{}"), || None), Verdict::Allow);
     }
 
     #[test]
@@ -1760,18 +1757,18 @@ mod tests {
         assert_eq!(Category::from_tool("mcp__docker__restart_container"), Category::Mcp);
 
         let state_plan = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
-        assert!(matches!(state_plan.decide(&call("mcp__sqlite__read_query", "{}"), None), Verdict::Deny(_)));
+        assert!(matches!(state_plan.decide(&call("mcp__sqlite__read_query", "{}"), || None), Verdict::Deny(_)));
         state_plan.set_read_only_hint(Arc::new(|name: &str| name == "mcp__sqlite__read_query"));
-        assert_eq!(state_plan.decide(&call("mcp__sqlite__read_query", "{}"), None), Verdict::Allow);
-        assert!(matches!(state_plan.decide(&call("mcp__sqlite__execute_mutation", "{}"), None), Verdict::Deny(_)));
+        assert_eq!(state_plan.decide(&call("mcp__sqlite__read_query", "{}"), || None), Verdict::Allow);
+        assert!(matches!(state_plan.decide(&call("mcp__sqlite__execute_mutation", "{}"), || None), Verdict::Deny(_)));
 
         for mode in [PermissionMode::Manual, PermissionMode::AcceptEdits] {
             let state = PermissionState::new(mode, Arc::new(DenyAllGate));
-            assert_eq!(state.decide(&call("mcp__github__get_issue", "{}"), None), Verdict::NeedApproval { diff: None });
+            assert_eq!(state.decide(&call("mcp__github__get_issue", "{}"), || None), Verdict::NeedApproval { diff: None });
         }
 
         let state_bypass = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
-        assert_eq!(state_bypass.decide(&call("mcp__docker__restart_container", "{}"), None), Verdict::Allow);
+        assert_eq!(state_bypass.decide(&call("mcp__docker__restart_container", "{}"), || None), Verdict::Allow);
     }
 
 }

@@ -182,7 +182,7 @@ pub(crate) fn highlight_line(lang_name: &str, line: &str, carry: &mut Carry) -> 
             && c == '\''
             && chars.get(i + 1).is_some_and(|n| n.is_alphabetic() || *n == '_')
             && chars.get(i + 2) != Some(&'\'')
-            && !(chars.get(i + 1) == Some(&'\\'));
+            && chars.get(i + 1) != Some(&'\\');
         if (c == '"' || c == '\'' || c == '`') && !is_lifetime {
             let start = i;
             i += 1;

@@ -1,6 +1,7 @@
 use super::*;
 
-pub(crate) fn build_model_menu(source: &BackendSource) -> Option<SelectMenu<String>> {
+/// Titled with the provider, so a switch shows whose models these are.
+pub(crate) fn build_model_menu(source: &BackendSource, provider: &str) -> Option<SelectMenu<String>> {
     let disc = source.discovery()?;
     if disc.models.is_empty() {
         return None;
@@ -20,7 +21,7 @@ pub(crate) fn build_model_menu(source: &BackendSource) -> Option<SelectMenu<Stri
         let desc = format!("{load_tag} · {summary}");
         items.push(SelectItem::with_description(m.id.clone(), desc, m.id.clone()));
     }
-    Some(SelectMenu::new("Select model", items).with_noun("models"))
+    Some(SelectMenu::new(format!("Select model \u{b7} {provider}"), items).with_noun("models"))
 }
 
 pub(crate) fn build_effort_menu(
@@ -109,7 +110,9 @@ pub(crate) fn settings_for_runtime(
     let mut cfg = config.clone();
     cfg.permission_mode = mode;
     cfg.thinking_effort = effort.to_string();
-    cfg.model = model.to_string();
+    if !model.is_empty() {
+        cfg.active_profile_mut().model = model.to_string();
+    }
     let mut view = SettingsView::new(cfg, models.to_vec());
     view.context_capacity = context_capacity;
     view

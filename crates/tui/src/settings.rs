@@ -1,6 +1,6 @@
 //! Settings screen (`/settings`, or Tab on empty input).
 
-use flashagent_core::{AppConfig, BackendPreset, PersonalityTrait};
+use flashagent_core::{AppConfig, PersonalityTrait};
 use crossterm::event::{KeyCode, KeyModifiers};
 use crate::{LineKind, RenderLine};
 
@@ -8,7 +8,8 @@ use crate::{LineKind, RenderLine};
 pub enum SettingsAction {
     None,
     Close,
-    DiscoverModels,
+    /// Settings -> Providers: add, edit and delete them.
+    OpenProviders,
     RunToolTest,
     /// The F3 model menu.
     OpenModelMenu,
@@ -124,28 +125,27 @@ pub struct SettingsView {
     pub selected_index: usize,
     pub tool_test_status: Option<String>,
     pub update_check_status: Option<String>,
-    pub editing_url: bool,
-    pub url_input: String,
     pub available_models: Vec<String>,
     pub is_dirty: bool,
     /// So an automatic threshold can show what it works out to.
     pub context_capacity: usize,
+    /// The provider in use when Settings opened.
+    opened_on: Option<String>,
 }
 
 impl SettingsView {
     pub fn new(config: AppConfig, available_models: Vec<String>) -> Self {
-        let url_input = config.backend_url.clone();
+        let opened_on = Some(config.active_profile().name.clone());
         Self {
             config,
             active_tab: SettingsTab::General,
             selected_index: 0,
             tool_test_status: None,
             update_check_status: None,
-            editing_url: false,
-            url_input,
             available_models,
             is_dirty: false,
             context_capacity: 0,
+            opened_on,
         }
     }
 
@@ -153,12 +153,18 @@ impl SettingsView {
     fn items(&self) -> Vec<(&'static str, String)> {
     match self.active_tab {
         SettingsTab::General => vec![
-            ("Backend URL *", if self.editing_url { format!("{}█", self.url_input) } else { self.config.backend_url.clone() }),
-            ("Active model", if self.config.model.is_empty() { "(auto-detected)".to_string() } else { self.config.model.clone() }),
+            ("Provider", {
+                let p = self.config.active_profile();
+                format!("{} \u{b7} {}", p.name, p.url)
+            }),
+            ("Active model", {
+                let model = &self.config.active_profile().model;
+                if model.is_empty() { "(auto-detected)".to_string() } else { model.clone() }
+            }),
             ("Permission mode", self.config.permission_mode.label().to_string()),
             ("Auto-save sessions", if self.config.auto_save_sessions { "Enabled (auto-resume)".into() } else { "Disabled".into() }),
             ("External editor", self.config.external_editor.clone()),
-            ("Setup wizard", "Run the first-start setup again".into()),
+            ("Setup wizard", "Run the setup again; a new server is added".into()),
         ],
         SettingsTab::Updates => vec![
             ("Auto-update *", if self.config.auto_check_updates { "On (installs in the background)".into() } else { "Off (Ctrl+U or /update only)".into() }),
@@ -187,7 +193,15 @@ impl SettingsView {
             ("Web tools", if self.config.web_tools { "Enabled (web_fetch, web_search)".into() } else { "Disabled".into() }),
             ("Network retries", format!("{} on connection failure", crate::plural(self.config.network_retries, "retry", "retries"))),
             // Last, and for those who know what the numbers do.
-            ("Sampling (advanced)", format!("{} · temperature {:.2}", self.config.sampling_preset.label(), self.config.temperature)),
+            ("Sampling (advanced)", {
+                // Mirrors `Client::set_user_sampling`: the presets are tuned for local models.
+                let maker_tuned = matches!(self.config.active_profile().protocol, flashagent_llm::ApiProtocol::Anthropic | flashagent_llm::ApiProtocol::Gemini);
+                if maker_tuned && self.config.sampling_preset != flashagent_core::SamplingPreset::Custom {
+                    format!("{} · {} chooses its own", self.config.sampling_preset.label(), self.config.active_profile().protocol.label())
+                } else {
+                    format!("{} · temperature {:.2}", self.config.sampling_preset.label(), self.config.temperature)
+                }
+            }),
         ],
         SettingsTab::Goal => vec![
             ("Step limit", match self.config.goal_max_steps {
@@ -222,35 +236,7 @@ impl SettingsView {
         self.items().len()
     }
 
-    pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> SettingsAction {
-        if self.editing_url {
-            match code {
-                KeyCode::Esc => {
-                    self.editing_url = false;
-                    self.url_input = self.config.backend_url.clone();
-                    return SettingsAction::None;
-                }
-                KeyCode::Backspace => {
-                    self.url_input.pop();
-                    return SettingsAction::None;
-                }
-                KeyCode::Enter => {
-                    let trimmed = self.url_input.trim().to_string();
-                    if !trimmed.is_empty() {
-                        self.config.backend_url = trimmed;
-                        self.is_dirty = true;
-                    }
-                    self.editing_url = false;
-                    return SettingsAction::DiscoverModels;
-                }
-                KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
-                    self.url_input.push(c);
-                    return SettingsAction::None;
-                }
-                _ => return SettingsAction::None,
-            }
-        }
-
+    pub fn handle_key(&mut self, code: KeyCode, _mods: KeyModifiers) -> SettingsAction {
         match code {
             // Saving is the caller's job: live mode and effort must not become defaults
             // unasked.
@@ -328,7 +314,7 @@ impl SettingsView {
     fn trigger_action(&mut self) -> SettingsAction {
         match self.active_tab {
             SettingsTab::General => match self.selected_index {
-                0 => SettingsAction::OpenWizard,
+                0 => SettingsAction::OpenProviders,
                 1 => SettingsAction::OpenModelMenu,
                 2 => {
                     self.config.permission_mode = self.config.permission_mode.next();
@@ -454,7 +440,7 @@ impl SettingsView {
                 }
             }
             SettingsTab::General => match self.selected_index {
-                0 => self.cycle_backend_preset(),
+                0 => self.cycle_provider(delta),
                 1 => self.cycle_model(),
                 2 => self.config.permission_mode = self.config.permission_mode.next(),
                 3 => self.config.auto_save_sessions = !self.config.auto_save_sessions,
@@ -503,27 +489,39 @@ impl SettingsView {
         self.is_dirty = true;
     }
 
-    fn cycle_backend_preset(&mut self) {
-        let presets = BackendPreset::all();
-        let cur_url = &self.config.backend_url;
-        let next_idx = presets.iter().position(|p| p.url == *cur_url)
-            .map(|i| (i + 1) % presets.len())
-            .unwrap_or(0);
-        self.config.backend_url = presets[next_idx].url.to_string();
-        self.url_input = self.config.backend_url.clone();
+    /// Among the saved providers; the switch happens when Settings closes.
+    fn cycle_provider(&mut self, delta: i32) {
+        let names: Vec<String> = self.config.providers.iter().map(|p| p.name.clone()).collect();
+        if names.is_empty() {
+            return;
+        }
+        let n = names.len();
+        let next = match names.iter().position(|name| *name == self.config.active_profile().name) {
+            Some(i) if delta < 0 => (i + n - 1) % n,
+            Some(i) => (i + 1) % n,
+            None => 0,
+        };
+        self.config.activate(&names[next]);
         self.is_dirty = true;
     }
 
+    /// The models of the server in use; not while another provider is picked
+    /// above, whose models are not known yet.
     fn cycle_model(&mut self) {
-        if self.available_models.is_empty() {
+        if self.available_models.is_empty() || self.provider_picked() {
             return;
         }
-        let cur = &self.config.model;
-        let next_idx = self.available_models.iter().position(|m| m == cur)
+        let cur = self.config.active_profile().model.clone();
+        let next_idx = self.available_models.iter().position(|m| *m == cur)
             .map(|i| (i + 1) % self.available_models.len())
             .unwrap_or(0);
-        self.config.model = self.available_models[next_idx].clone();
+        self.config.active_profile_mut().model = self.available_models[next_idx].clone();
         self.is_dirty = true;
+    }
+
+    /// Another provider than the one Settings opened on.
+    fn provider_picked(&self) -> bool {
+        self.opened_on.as_deref().is_some_and(|name| name != self.config.active_profile().name)
     }
 
     fn cycle_editor(&mut self) {
@@ -653,7 +651,8 @@ impl SettingsView {
         }
 
         let note = match self.active_tab {
-            SettingsTab::General | SettingsTab::Updates => "\x1b[38;2;225;175;95m* Takes effect after a restart\x1b[0m",
+            SettingsTab::Updates => "\x1b[38;2;225;175;95m* Takes effect after a restart\x1b[0m",
+            SettingsTab::General => "\x1b[38;2;135;130;125m\u{2190}/\u{2192} on Provider switches between the saved ones; Enter edits them.\x1b[0m",
             SettingsTab::Style => {
                 "\x1b[38;2;135;130;125mTone only — tools and code are unaffected. Applies from your next message.\x1b[0m"
             }
@@ -666,11 +665,7 @@ impl SettingsView {
             lines.push((LineKind::System, pad_row("")));
         }
 
-        let hints: &[(&str, &str)] = if self.editing_url {
-            &[("Enter", "save"), ("Esc", "cancel")]
-        } else {
-            &[("Tab/1-7", "switch tab"), ("↑/↓", "move"), ("Enter/←/→", "change"), ("Esc", "save and close")]
-        };
+        let hints: &[(&str, &str)] = &[("Tab/1-7", "switch tab"), ("↑/↓", "move"), ("Enter/←/→", "change"), ("Esc", "save and close")];
         lines.push((LineKind::System, pad_row(&crate::key_hints(hints, inner_text_w.saturating_sub(1)))));
 
         lines.push((
@@ -842,8 +837,43 @@ mod tests {
         };
         assert!(last_hint(&view).contains("Tab/1-7 switch tab"), "{}", last_hint(&view));
         assert!(last_hint(&view).trim_end_matches(['│', ' ']).ends_with("Esc save and close"), "{}", last_hint(&view));
-        view.editing_url = true;
-        assert!(last_hint(&view).trim_end_matches(['│', ' ']).ends_with("Enter save · Esc cancel"), "{}", last_hint(&view));
+        view.handle_key(KeyCode::Char('2'), KeyModifiers::empty());
+        assert!(last_hint(&view).trim_end_matches(['│', ' ']).ends_with("Esc save and close"), "{}", last_hint(&view));
+    }
+
+    fn with_providers() -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.save_provider(flashagent_core::config::ProviderProfile::new("Home", flashagent_llm::ApiProtocol::OpenAi, "http://localhost:1234/v1"));
+        cfg.save_provider(flashagent_core::config::ProviderProfile::new("Claude", flashagent_llm::ApiProtocol::Anthropic, "https://api.anthropic.com"));
+        cfg.activate("Home");
+        cfg
+    }
+
+    #[test]
+    fn the_provider_row_shows_the_one_in_use_and_the_arrows_go_through_the_saved_ones() {
+        let mut view = SettingsView::new(with_providers(), vec!["model-a".into(), "model-b".into()]);
+        let shown = |v: &SettingsView| v.render(120).iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(shown(&view).contains("Home · http://localhost:1234/v1"), "{}", shown(&view));
+        assert!(!shown(&view).contains("restart"), "a provider applies at once: {}", shown(&view));
+        view.handle_key(KeyCode::Right, KeyModifiers::empty());
+        assert_eq!(view.config.active_profile().name, "Claude");
+        view.handle_key(KeyCode::Right, KeyModifiers::empty());
+        assert_eq!(view.config.active_profile().name, "Home", "round again");
+        view.handle_key(KeyCode::Left, KeyModifiers::empty());
+        assert_eq!(view.config.active_profile().name, "Claude");
+
+        // The model list belongs to the server Settings opened on.
+        view.handle_key(KeyCode::Down, KeyModifiers::empty());
+        view.handle_key(KeyCode::Right, KeyModifiers::empty());
+        assert_eq!(view.config.active_profile().model, "", "{:?}", view.config.active_profile());
+        view.handle_key(KeyCode::Up, KeyModifiers::empty());
+        view.handle_key(KeyCode::Right, KeyModifiers::empty());
+        view.handle_key(KeyCode::Down, KeyModifiers::empty());
+        view.handle_key(KeyCode::Right, KeyModifiers::empty());
+        assert_eq!(view.config.active_profile().model, "model-a");
+
+        view.handle_key(KeyCode::Up, KeyModifiers::empty());
+        assert_eq!(view.handle_key(KeyCode::Enter, KeyModifiers::empty()), SettingsAction::OpenProviders);
     }
 
     #[test]

@@ -12,6 +12,7 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
+parking_lot = { workspace = true }
 tokio = { workspace = true }
 tiktoken-rs = "0.12.0"
 

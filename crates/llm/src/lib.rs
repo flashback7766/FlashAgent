@@ -1,18 +1,25 @@
-//! Backend trait and protocol adapters. Every tool-call wire format (native,
-//! Hermes XML, `[TOOL_CALLS]`, bare JSON) is normalized into one [`ToolCall`];
-//! JSON repair runs before parsing.
+//! The model client and its protocols: OpenAI-compatible, Anthropic, Gemini
+//! and Ollama. Every tool-call wire format (native, Hermes XML, `[TOOL_CALLS]`,
+//! bare JSON) is normalized into one [`ToolCall`]; JSON repair runs before
+//! parsing.
 
 pub mod encoding;
+pub mod protocol;
 pub mod repair;
 pub mod types;
 pub mod thinking;
 pub mod tokenizer;
 
-mod parse;
+mod anthropic;
+mod client;
+mod gemini;
+mod ollama;
 mod openai;
+mod parse;
 
+pub use client::{Client, EventStream};
 pub use encoding::base64_encode;
-pub use openai::OpenAiCompat;
+pub use protocol::{ApiProtocol, Endpoint};
 pub use parse::{ChunkParser, SseDecoder, TextToolScanner, ScannerEvent};
 pub use repair::{effective_args, repair_json};
 pub use thinking::{DiscoveredModel, ServerDiscovery, TaskComplexity, ThinkingProfile, ThinkingProtocol};

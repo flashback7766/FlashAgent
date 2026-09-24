@@ -15,7 +15,7 @@ flashagent-llm = { path = "../llm" }
 flashagent-tools = { path = "../tools" }
 flashagent-svc = { path = "../svc" }
 futures = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
