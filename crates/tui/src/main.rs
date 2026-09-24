@@ -1,6 +1,7 @@
 //! Terminal client: wires backend, loop, tools and permissions in-process and
 //! renders through `flashagent_tui`.
 
+use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -171,25 +172,18 @@ async fn cli_start(config: &mut AppConfig) -> Result<Option<(bool, bool, Session
     Ok(Some((force_setup, skip_trust, session_start)))
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> Result<()> {
-    flashagent_svc::updater::remove_stale_backups_beside_exe();
-    let mut config = AppConfig::load();
-    let Some((force_setup, mut skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
-
-    use std::io::IsTerminal;
+async fn startup_screens(config: &mut AppConfig, force_setup: bool) -> Option<bool> {
     // The screens before the chat (setup, release notes, trust) wear the chosen
     // look too.
     flashagent_tui::theme::set(config.color_theme);
     flashagent_tui::anim::set_enabled(config.animations);
     // Carried into the first conversation: the screen it was printed on is about
     // to be cleared.
-    let mut first_run_verdict: Option<String> = None;
     let mut ran_setup = false;
     if (!config.setup_completed || force_setup) && std::io::stdout().is_terminal() {
-        let completed = flashagent_tui::run_wizard(&mut config).await.unwrap_or(false);
+        let completed = flashagent_tui::run_wizard(config).await.unwrap_or(false);
         if !completed {
-            return Ok(());
+            return None;
         }
         // Nothing new to show: stamp the version so the next update has a baseline.
         config.last_seen_version = Some(flashagent_svc::updater::current_version().to_string());
@@ -216,6 +210,18 @@ async fn main() -> Result<()> {
             let _ = flashagent_tui::whatsnew::run(news, now).await;
         }
     }
+
+    Some(ran_setup)
+}
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+async fn main() -> Result<()> {
+    flashagent_svc::updater::remove_stale_backups_beside_exe();
+    let mut config = AppConfig::load();
+    let Some((force_setup, mut skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
+
+    let Some(ran_setup) = startup_screens(&mut config, force_setup).await else { return Ok(()) };
+    let mut first_run_verdict: Option<String> = None;
 
     let endpoint = config.endpoint();
     let url = endpoint.url.clone();
