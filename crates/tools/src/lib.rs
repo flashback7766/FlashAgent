@@ -25,7 +25,7 @@ use flashagent_core::{ToolExec, ToolOutput, ToolsetProfile, WritePreview};
 use flashagent_llm::{ToolCall, ToolSpec};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use shell::ShellRegistry;
+pub use shell::{ShellRegistry, TaskInfo, TaskNotice, TaskState};
 
 pub use ask_user::{QuestionGate, GOAL_QUESTION_TIMEOUT};
 pub use subagents::{agent_tools, BuiltinSubagentFactory, CompositeTools, ToolSubset};
@@ -115,6 +115,11 @@ impl BuiltinTools {
             vision_supported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_manager,
         })
+    }
+
+    /// Background commands, and the foreground one the user can move there.
+    pub fn shells(&self) -> &ShellRegistry {
+        &self.shells
     }
 
     pub fn mcp_manager(&self) -> Arc<mcp::McpManager> {
@@ -331,7 +336,7 @@ impl BuiltinTools {
 
     async fn run_shell(&self, a: ShellArgs) -> Result<String, ToolError> {
         if let Some(id) = a.task_id {
-            return if a.kill { self.shells.kill(id) } else { self.shells.status(id) };
+            return if a.kill { self.shells.kill(id).await } else { self.shells.status(id) };
         }
         let cmd = a
             .command
@@ -340,7 +345,7 @@ impl BuiltinTools {
             self.shells.spawn_background(&cmd)
         } else {
             let timeout = Duration::from_millis(a.timeout_ms.unwrap_or(120_000));
-            shell::run_foreground(&cmd, timeout).await
+            self.shells.run_foreground(&cmd, timeout).await
         }
     }
 }
@@ -431,8 +436,8 @@ impl ToolExec for BuiltinTools {
             },
             ToolSpec {
                 name: "run_shell".into(),
-                description: "Run a shell command (timeout_ms, default 120000). background:true returns a task_id; call again with task_id to poll, add kill:true to stop it".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "command": {"type": "string"}, "background": {"type": "boolean"}, "timeout_ms": {"type": "integer"}, "task_id": {"type": "integer", "description": "Poll or kill a background task"}, "kill": {"type": "boolean", "description": "With task_id: kill the task"}}, "required": ["header"]}"#.into(),
+                description: "Run a shell command (timeout_ms, default 120000). background:true for servers, watchers and long builds: returns a task_id at once, and a notice arrives when the task exits, so do not poll in a loop. task_id alone shows its output so far; with kill:true stops it".into(),
+                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "command": {"type": "string"}, "background": {"type": "boolean"}, "timeout_ms": {"type": "integer"}, "task_id": {"type": "integer", "description": "A background task: its output so far, or with kill stop it"}, "kill": {"type": "boolean", "description": "With task_id: kill the task"}}, "required": ["header"]}"#.into(),
             },
             ToolSpec {
                 name: "ask_user".into(),
