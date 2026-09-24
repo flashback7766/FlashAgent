@@ -457,6 +457,7 @@ pub struct TextToolScanner {
 enum BlockKind {
     Hermes,
     Mistral,
+    CallFence,
     Bare,
 }
 
@@ -472,7 +473,11 @@ struct OpenBlock {
 impl OpenBlock {
     fn new(kind: BlockKind, buf: &str) -> Self {
         let mut block = OpenBlock { kind, scanned: 0, balance: Balance::default() };
-        let from = if kind == BlockKind::Mistral { START_MISTRAL.len() } else { 0 };
+        let from = match kind {
+            BlockKind::Mistral => START_MISTRAL.len(),
+            BlockKind::CallFence => START_CALL_FENCE.len(),
+            BlockKind::Hermes | BlockKind::Bare => 0,
+        };
         block.scanned = from.min(buf.len());
         block.closes(buf);
         block
@@ -488,6 +493,13 @@ impl OpenBlock {
                 }
                 buf[from..].contains(END_HERMES)
             }
+            BlockKind::CallFence => {
+                let mut from = self.scanned.saturating_sub(CALL_FENCE_END.len() - 1).max(START_CALL_FENCE.len()).min(buf.len());
+                while !buf.is_char_boundary(from) {
+                    from -= 1;
+                }
+                self.balance.advance(&buf[self.scanned..]) || buf[from..].contains(CALL_FENCE_END)
+            }
             BlockKind::Mistral | BlockKind::Bare => self.balance.advance(&buf[self.scanned..]),
         };
         self.scanned = buf.len();
@@ -502,11 +514,15 @@ struct Balance {
     depth: i32,
     in_str: bool,
     esc: bool,
+    closed: bool,
 }
 
 impl Balance {
-    /// True once the value that opened first has closed.
+    /// True once the value that opened first has closed, and from then on.
     fn advance(&mut self, text: &str) -> bool {
+        if self.closed {
+            return true;
+        }
         for c in text.chars() {
             if !self.started {
                 if !matches!(c, '{' | '[') {
@@ -528,6 +544,7 @@ impl Balance {
                 '}' | ']' => {
                     self.depth -= 1;
                     if self.depth == 0 {
+                        self.closed = true;
                         return true;
                     }
                 }
@@ -541,6 +558,13 @@ impl Balance {
 const START_HERMES: &str = "<tool_call>";
 const END_HERMES: &str = "</tool_call>";
 const START_MISTRAL: &str = "[TOOL_CALLS]";
+/// A fence tagged as a call around its JSON: what Gemma writes when told to
+/// use `<tool_call>`. Unlike a ```json fence, which may hold an example, the
+/// tag says it is meant to run.
+const START_CALL_FENCE: &str = "```tool_call";
+/// Its closing fence, on a line of its own. A JSON string holds no raw line
+/// break, so a fence inside the call's content is never taken for it.
+const CALL_FENCE_END: &str = "\n```";
 
 impl TextToolScanner {
     pub fn feed(&mut self, delta: &str) -> Vec<ScannerEvent> {
@@ -557,7 +581,7 @@ impl TextToolScanner {
                 self.emit_text(text, &mut out);
                 continue;
             }
-            let found = self.find_hermes().or_else(|| self.find_mistral()).or_else(|| self.find_bare());
+            let found = self.find_hermes().or_else(|| self.find_mistral()).or_else(|| self.find_call_fence()).or_else(|| self.find_bare());
             if let Some((body, consumed)) = found {
                 let raw: String = self.buf.drain(..consumed).collect();
                 for ev in self.calls_or_text(&body, raw) {
@@ -594,9 +618,14 @@ impl TextToolScanner {
         }
         let trimmed = rest.trim_start();
         let body = (!self.fence_open)
-            .then(|| trimmed.strip_prefix(START_HERMES).or_else(|| trimmed.strip_prefix(START_MISTRAL)))
+            .then(|| {
+                trimmed
+                    .strip_prefix(START_HERMES)
+                    .or_else(|| trimmed.strip_prefix(START_MISTRAL))
+                    .map(strip_partial_close)
+                    .or_else(|| trimmed.strip_prefix(START_CALL_FENCE).map(|b| b.trim_end().trim_end_matches('`')))
+            })
             .flatten()
-            .map(strip_partial_close)
             .filter(|b| is_complete_json(b));
         let mut out = Vec::new();
         match body {
@@ -662,7 +691,7 @@ impl TextToolScanner {
     }
 
     fn take_leading_text(&mut self) -> Option<String> {
-        let markers = [START_HERMES, START_MISTRAL];
+        let markers = [START_HERMES, START_MISTRAL, START_CALL_FENCE];
         let cut = markers
             .iter()
             .filter_map(|m| self.find_outside_fence(m))
@@ -713,14 +742,17 @@ impl TextToolScanner {
     fn open_block(&self) -> Option<BlockKind> {
         let hermes_open = self.find_outside_fence(START_HERMES).is_some() && self.find_hermes().is_none();
         let mistral_open = self.find_outside_fence(START_MISTRAL).is_some() && self.find_mistral().is_none();
+        let fence_open = self.find_outside_fence(START_CALL_FENCE).is_some() && self.find_call_fence().is_none();
         let bare_open = self.find_bare_start().is_some() && self.find_bare().is_none();
-        if !(hermes_open || mistral_open || bare_open) {
+        if !(hermes_open || mistral_open || fence_open || bare_open) {
             return None;
         }
         Some(if self.buf.starts_with(START_HERMES) {
             BlockKind::Hermes
         } else if self.buf.starts_with(START_MISTRAL) {
             BlockKind::Mistral
+        } else if self.buf.starts_with(START_CALL_FENCE) {
+            BlockKind::CallFence
         } else {
             BlockKind::Bare
         })
@@ -729,7 +761,7 @@ impl TextToolScanner {
     /// While a tool-call block is open the whole buffer is held (see
     /// `open_block`); otherwise only a suffix that may start a marker.
     fn hold_back(&self) -> usize {
-        let markers = [START_HERMES, END_HERMES, START_MISTRAL, "\"name\"", "\"ask_user\""];
+        let markers = [START_HERMES, END_HERMES, START_MISTRAL, START_CALL_FENCE, "\"name\"", "\"ask_user\""];
         let mut hold = 0usize;
         for m in markers {
             for skip in 1..m.len() {
@@ -780,6 +812,33 @@ impl TextToolScanner {
         let open = rest.find(['[', '{'])?;
         let len = balanced_len(&rest[open..])?;
         Some((rest[open..open + len].to_string(), START_MISTRAL.len() + open + len))
+    }
+
+    /// The call once the fence has closed, or once its JSON has and the text
+    /// after it shows no fence is coming: a closing fence let out as text
+    /// would read as one opening, and hide every later call. Between closed
+    /// fences the body is repaired like a Hermes block's.
+    fn find_call_fence(&self) -> Option<(String, usize)> {
+        let start = self.find_outside_fence(START_CALL_FENCE)?;
+        if start != 0 {
+            return None;
+        }
+        let rest = &self.buf[START_CALL_FENCE.len()..];
+        if let Some(end) = rest.find(CALL_FENCE_END) {
+            return Some((rest[..end].trim().to_string(), START_CALL_FENCE.len() + end + CALL_FENCE_END.len()));
+        }
+        let open = rest.find(['[', '{'])?;
+        let len = balanced_len(&rest[open..])?;
+        let after = &rest[open + len..];
+        let next = after.trim_start();
+        let close = if next.starts_with("```") {
+            after.len() - next.len() + 3
+        } else if next.is_empty() || "```".starts_with(next) {
+            return None;
+        } else {
+            0
+        };
+        Some((rest[open..open + len].to_string(), START_CALL_FENCE.len() + open + len + close))
     }
 
     fn find_bare(&self) -> Option<(String, usize)> {
@@ -1362,6 +1421,7 @@ mod tests {
             format!("Writing it.\n<tool_call>{{\"name\":\"write_file\",\"arguments\":{{\"path\":\"a.md\",\"content\":\"{file}\"}}}}</tool_call>\nDone."),
             format!("[TOOL_CALLS][{{\"name\":\"write_file\",\"arguments\":{{\"content\":\"{file}\"}}}}] after"),
             format!("Now.\n{{\"name\": \"write_file\", \"arguments\": {{\"content\": \"{file} ü\"}}}}\nDone."),
+            format!("Now.\n```tool_call\n{{\"name\": \"write_file\", \"arguments\": {{\"content\": \"{file}\"}}}}\n```\nDone."),
         ];
         for input in &inputs {
             let whole = scan(&[input.as_str()]);
@@ -1372,6 +1432,29 @@ mod tests {
                 assert_eq!(scan(&refs), whole, "{input} in pieces of {n}");
             }
         }
+    }
+
+    #[test]
+    fn a_fence_tagged_as_a_call_is_one_and_leaves_no_fence_open() {
+        let fenced = "```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a.rs\"}}\n```";
+        let then = "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"b.rs\"}}</tool_call>";
+        let input = format!("Reading both.\n{fenced}\n{then}");
+        for n in [1, 5, input.len()] {
+            let cut = pieces(&input, n);
+            let refs: Vec<&str> = cut.iter().map(String::as_str).collect();
+            let (text, calls) = scan(&refs);
+            assert_eq!(calls, ["read_file", "read_file"], "the call after it was hidden: {text:?}");
+            assert!(!text.contains("```"), "{text:?}");
+        }
+        // Between closed fences a brace the model forgot is put back, as in a Hermes block.
+        let (_, calls) = scan(&pieces("```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a\"}\n```\nok", 3).iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(calls, ["read_file"]);
+        // The stream may end on the JSON, before the fence closes.
+        let (_, calls) = scan(&["```tool_call\n{\"name\": \"read_file\", \"arguments\": {}}"]);
+        assert_eq!(calls, ["read_file"]);
+        // A ```json fence may be an example and stays text.
+        let (_, calls) = scan(&["Example:\n```json\n", "{\"name\": \"read_file\", \"arguments\": {}}", "\n```"]);
+        assert!(calls.is_empty());
     }
 
     #[test]

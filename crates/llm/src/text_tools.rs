@@ -13,7 +13,7 @@ pub(crate) fn instructions(tools: &[ToolSpec]) -> String {
         "# Tools\n\n\
          You can call the tools below. To call one, write the call on a line of its own, and nothing after it:\n\
          <tool_call>{\"name\": \"<tool name>\", \"arguments\": {<arguments as a JSON object>}}</tool_call>\n\
-         For several calls, one line each. Every <tool_call> you write is run, so never write one as an example. \
+         Write it as it is, not in a code block. For several calls, one line each. Every <tool_call> you write is run, so never write one as an example. \
          The results come back in the next message, each between <tool_response> and </tool_response>.\n",
     );
     for tool in tools {
