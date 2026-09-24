@@ -3,7 +3,9 @@
 //! scratch (34 s for 8.3k tokens on LM Studio with Gemma 4 E2B, 0.9 s once
 //! cached). So the prefix is sent with a one-token answer while the user types:
 //! at start, after `--resume`, after a switch of model, provider or voice. It is assembled
-//! the way the agent loop assembles a turn, so the cached tokens match.
+//! the way the agent loop assembles a turn, so the cached tokens match. Only
+//! for a server on this machine or network: a hosted API bills the warm-up and
+//! reads a prompt in a second anyway.
 
 use super::*;
 use flashagent_core::ToolExec as _;
@@ -27,6 +29,19 @@ pub(crate) fn warm_messages(history: &[ChatMessage], prelude: &[ChatMessage], me
     };
     messages.push(ChatMessage::user(opening));
     messages
+}
+
+/// A model server on this machine or the local network. Anthropic and Gemini
+/// are never local; an OpenAI-compatible server is local by what it runs
+/// (LM Studio, llama.cpp) or by its address (vLLM on a LAN box).
+pub(crate) fn worth_warming(endpoint: &flashagent_llm::Endpoint, kind: Option<flashagent_llm::thinking::ServerKind>) -> bool {
+    use flashagent_llm::ApiProtocol;
+    let local_address = || flashagent_core::url_host(&endpoint.url).is_some_and(|host| flashagent_core::is_local_host(&host));
+    match endpoint.protocol {
+        ApiProtocol::Anthropic | ApiProtocol::Gemini => false,
+        ApiProtocol::Ollama => true,
+        ApiProtocol::OpenAi => kind.is_some_and(|k| k.runs_local_models()) || local_address(),
+    }
 }
 
 /// So the same prefix is not sent twice to the same server: after a switch
@@ -59,7 +74,7 @@ impl App {
 
     /// Skipped when already sent or a turn has just read it.
     pub(crate) fn warm_prompt_cache(&mut self, source: &Arc<BackendSource>, perm: &'static PermissionedTools, memory_block: &str) {
-        if self.running || self.current_model.is_empty() {
+        if self.running || self.current_model.is_empty() || !worth_warming(&source.0.endpoint(), source.discovery().map(|d| d.kind)) {
             return;
         }
         if let Some((_, task)) = self.warm_task.as_mut() {
@@ -111,6 +126,20 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_server_nearby_is_warmed() {
+        use flashagent_llm::{ApiProtocol, Endpoint};
+        let warm = |protocol, url: &str| worth_warming(&Endpoint::new(protocol, url, None), None);
+        assert!(warm(ApiProtocol::OpenAi, "http://localhost:1234/v1"));
+        assert!(warm(ApiProtocol::OpenAi, "http://192.168.1.20:8000/v1"), "vLLM on a LAN box");
+        assert!(warm(ApiProtocol::Ollama, "http://gpu-box:11434"));
+        assert!(!warm(ApiProtocol::OpenAi, "https://openrouter.ai/api/v1"), "billed, and fast anyway");
+        assert!(!warm(ApiProtocol::Anthropic, "https://api.anthropic.com"));
+        assert!(!warm(ApiProtocol::Gemini, "http://localhost:8080"), "a tunnel to Google is still Google");
+        let tunnelled = Endpoint::new(ApiProtocol::OpenAi, "https://llm.example.com/v1", None);
+        assert!(worth_warming(&tunnelled, Some(flashagent_llm::thinking::ServerKind::LmStudio)), "LM Studio behind a proxy caches all the same");
+    }
 
     #[test]
     fn a_fresh_session_warms_the_system_prompt_voice_and_memory_block() {
