@@ -630,6 +630,115 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
     input_line_idx
 }
 
+fn append_composer(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize, height: u16, t: u64, border_color: &str) -> (usize, Option<u16>) {
+    let inner_w = width.saturating_sub(2);
+    let reset = "\x1b[0m";
+    tail.push((
+        LineKind::System,
+        format!("{border_color}╭{}╮{reset}", "─".repeat(inner_w)),
+    ));
+
+    // Attachments go above the line they go with.
+    if !st.attachments.is_empty() {
+        let listed = st.attachments.join("  ");
+        let row = format!(
+            " \x1b[38;2;145;205;140mattached\x1b[0m \x1b[38;2;160;165;180m{listed}\x1b[0m \x1b[38;2;100;95;90m· ctrl+z removes\x1b[0m"
+        );
+        tail.push((LineKind::System, pad_box_row(&row, width)));
+    }
+
+    let mut input_line_idx = tail.len();
+    let mut text_cursor = Some(4);
+    let cycle = if anim::enabled() { (st.tick_n % 28) as f32 / 28.0 } else { 0.25 };
+    let phase = (cycle * std::f32::consts::PI * 2.0).sin() * 0.5 + 0.5;
+    let r = (210.0 + phase * 45.0) as u8;
+    let g = (150.0 + phase * 55.0) as u8;
+    let b = (75.0 + phase * 40.0) as u8;
+    let prompt_styled = format!("\x1b[1;38;2;{r};{g};{b}m›\x1b[0m");
+    let input_rows: Vec<String> = if let Some((query, found)) = st.history_search {
+        // The found prompt stands in the input, the search above it.
+        let found_line = found.map_or_else(
+            || "\x1b[38;2;200;120;110mno match\x1b[0m".to_string(),
+            |f| format!("\x1b[38;2;155;160;175m{}\x1b[0m", f.lines().next().unwrap_or_default()),
+        );
+        let label = "\x1b[38;2;135;130;125mfind in history:\x1b[0m";
+        text_cursor = Some((visible_width(query) + 21).min(width.saturating_sub(2)) as u16);
+        vec![format!(" {prompt_styled} {label} \x1b[1;38;2;240;235;225m{query}\x1b[0m"), format!("   {found_line}")]
+    } else if let (true, Some(custom)) = (st.input.is_empty() && st.prefill_status.is_none() && !st.running && st.suggested_prompt.is_none(), st.custom_placeholder) {
+        // Up to three rows: a notice cut at the edge loses its advice.
+        wrap_plain(custom, width.saturating_sub(8).max(10))
+            .into_iter()
+            .take(3)
+            .enumerate()
+            .map(|(i, row)| {
+                let lead = if i == 0 { format!(" {prompt_styled}  ") } else { "    ".to_string() };
+                format!("{lead}\x1b[38;2;135;140;155m{row}\x1b[0m")
+            })
+            .collect()
+    } else if st.input.is_empty() {
+        vec![if let Some(prefill) = st.prefill_status {
+            format!(" {prompt_styled}  {prefill}")
+        } else if st.running {
+            let what = st.turn_phase.map_or_else(|| "Working on task".to_string(), TurnPhase::label);
+            let glow = if matches!(st.turn_phase, Some(TurnPhase::Stopping)) { Rgb(235, 150, 120) } else { Rgb(235, 225, 205) };
+            format!(" {prompt_styled} {}", anim::shimmer(&format!("{what}…"), t, 2000, Rgb(135, 130, 125), glow))
+        } else if let Some(sug) = st.suggested_prompt {
+            format!(" {prompt_styled}  \x1b[38;2;155;160;175m{sug}\x1b[0m  {}", key_hints(&[("→", "use")], width))
+        } else if !st.attachments.is_empty() {
+            let prompt_text = if width >= 60 {
+                "Press Enter to send the image, or type a message\u{2026}"
+            } else if width >= 40 {
+                "Enter sends the image\u{2026}"
+            } else {
+                "Enter to send\u{2026}"
+            };
+            format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
+        } else {
+            // The long form when it fits.
+            let prompt_text = if width >= 60 {
+                "Ask FlashAgent to do anything\u{2026}"
+            } else if width >= 40 {
+                "Ask FlashAgent\u{2026}"
+            } else {
+                "Ask\u{2026}"
+            };
+            format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
+        }]
+    } else {
+        // A long prompt grows the box to a third of the screen, then scrolls inside
+        // it keeping the cursor row in view.
+        let max_rows = (height as usize / 3).clamp(1, 10);
+        let layout = st.input.layout(width.saturating_sub(6).max(1), max_rows);
+        input_line_idx += layout.cursor_row;
+        text_cursor = Some((layout.cursor_col + 4).min(width.saturating_sub(2)) as u16);
+        let dim = |s: &str| format!("\x1b[38;2;100;95;90m{s}\x1b[0m");
+        let last = layout.rows.len() - 1;
+        layout
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let lead = match i {
+                    0 if layout.hidden_above > 0 => format!(" {} ", dim("↑")),
+                    0 => format!(" {prompt_styled} "),
+                    _ if i == last && layout.hidden_below > 0 => format!(" {} ", dim("↓")),
+                    _ => "   ".to_string(),
+                };
+                format!("{lead}{row}")
+            })
+            .collect()
+    };
+    for row in &input_rows {
+        tail.push((LineKind::User, pad_box_row(row, width)));
+    }
+
+    tail.push((
+        LineKind::System,
+        format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
+    ));
+    (input_line_idx, text_cursor)
+}
+
 impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn frame(
@@ -685,7 +794,6 @@ impl Renderer {
             _ => BORDER,
         };
         let border_color = border_rgb.fg();
-        let reset = "\x1b[0m";
         // A blank row between the conversation and the composer or card under it.
         let last_row = tail.last().or_else(|| settled.last()).map(|(_, text)| text.as_str());
         if last_row.is_some_and(|text| !flashagent_tui::strip_ansi(text).trim().is_empty()) {
@@ -733,109 +841,9 @@ impl Renderer {
             tail.extend(overlay.render(width));
             input_line_idx = tail.len().saturating_sub(1);
         } else {
-            tail.push((
-                LineKind::System,
-                format!("{border_color}╭{}╮{reset}", "─".repeat(inner_w)),
-            ));
-
-            // Attachments go above the line they go with.
-            if !st.attachments.is_empty() {
-                let listed = st.attachments.join("  ");
-                let row = format!(
-                    " \x1b[38;2;145;205;140mattached\x1b[0m \x1b[38;2;160;165;180m{listed}\x1b[0m \x1b[38;2;100;95;90m· ctrl+z removes\x1b[0m"
-                );
-                tail.push((LineKind::System, pad_box_row(&row, width)));
-            }
-
-            input_line_idx = tail.len();
-            text_cursor = Some(4);
-            let cycle = if anim::enabled() { (st.tick_n % 28) as f32 / 28.0 } else { 0.25 };
-            let phase = (cycle * std::f32::consts::PI * 2.0).sin() * 0.5 + 0.5;
-            let r = (210.0 + phase * 45.0) as u8;
-            let g = (150.0 + phase * 55.0) as u8;
-            let b = (75.0 + phase * 40.0) as u8;
-            let prompt_styled = format!("\x1b[1;38;2;{r};{g};{b}m›\x1b[0m");
-            let input_rows: Vec<String> = if let Some((query, found)) = st.history_search {
-                // The found prompt stands in the input, the search above it.
-                let found_line = found.map_or_else(
-                    || "\x1b[38;2;200;120;110mno match\x1b[0m".to_string(),
-                    |f| format!("\x1b[38;2;155;160;175m{}\x1b[0m", f.lines().next().unwrap_or_default()),
-                );
-                let label = "\x1b[38;2;135;130;125mfind in history:\x1b[0m";
-                text_cursor = Some((visible_width(query) + 21).min(width.saturating_sub(2)) as u16);
-                vec![format!(" {prompt_styled} {label} \x1b[1;38;2;240;235;225m{query}\x1b[0m"), format!("   {found_line}")]
-            } else if let (true, Some(custom)) = (st.input.is_empty() && st.prefill_status.is_none() && !st.running && st.suggested_prompt.is_none(), st.custom_placeholder) {
-                // Up to three rows: a notice cut at the edge loses its advice.
-                wrap_plain(custom, width.saturating_sub(8).max(10))
-                    .into_iter()
-                    .take(3)
-                    .enumerate()
-                    .map(|(i, row)| {
-                        let lead = if i == 0 { format!(" {prompt_styled}  ") } else { "    ".to_string() };
-                        format!("{lead}\x1b[38;2;135;140;155m{row}\x1b[0m")
-                    })
-                    .collect()
-            } else if st.input.is_empty() {
-                vec![if let Some(prefill) = st.prefill_status {
-                    format!(" {prompt_styled}  {prefill}")
-                } else if st.running {
-                    let what = st.turn_phase.map_or_else(|| "Working on task".to_string(), TurnPhase::label);
-                    let glow = if matches!(st.turn_phase, Some(TurnPhase::Stopping)) { Rgb(235, 150, 120) } else { Rgb(235, 225, 205) };
-                    format!(" {prompt_styled} {}", anim::shimmer(&format!("{what}…"), t, 2000, Rgb(135, 130, 125), glow))
-                } else if let Some(sug) = st.suggested_prompt {
-                    format!(" {prompt_styled}  \x1b[38;2;155;160;175m{sug}\x1b[0m  {}", key_hints(&[("→", "use")], width))
-                } else if !st.attachments.is_empty() {
-                    let prompt_text = if width >= 60 {
-                        "Press Enter to send the image, or type a message\u{2026}"
-                    } else if width >= 40 {
-                        "Enter sends the image\u{2026}"
-                    } else {
-                        "Enter to send\u{2026}"
-                    };
-                    format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
-                } else {
-                    // The long form when it fits.
-                    let prompt_text = if width >= 60 {
-                        "Ask FlashAgent to do anything\u{2026}"
-                    } else if width >= 40 {
-                        "Ask FlashAgent\u{2026}"
-                    } else {
-                        "Ask\u{2026}"
-                    };
-                    format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
-                }]
-            } else {
-                // A long prompt grows the box to a third of the screen, then scrolls inside
-                // it keeping the cursor row in view.
-                let max_rows = (height as usize / 3).clamp(1, 10);
-                let layout = st.input.layout(width.saturating_sub(6).max(1), max_rows);
-                input_line_idx += layout.cursor_row;
-                text_cursor = Some((layout.cursor_col + 4).min(width.saturating_sub(2)) as u16);
-                let dim = |s: &str| format!("\x1b[38;2;100;95;90m{s}\x1b[0m");
-                let last = layout.rows.len() - 1;
-                layout
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .map(|(i, row)| {
-                        let lead = match i {
-                            0 if layout.hidden_above > 0 => format!(" {} ", dim("↑")),
-                            0 => format!(" {prompt_styled} "),
-                            _ if i == last && layout.hidden_below > 0 => format!(" {} ", dim("↓")),
-                            _ => "   ".to_string(),
-                        };
-                        format!("{lead}{row}")
-                    })
-                    .collect()
-            };
-            for row in &input_rows {
-                tail.push((LineKind::User, pad_box_row(row, width)));
-            }
-
-            tail.push((
-                LineKind::System,
-                format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
-            ));
+            let composer = append_composer(&mut tail, &st, width, height, t, &border_color);
+            input_line_idx = composer.0;
+            text_cursor = composer.1;
         }
 
         // The sides of a boxed card match its top and bottom.
