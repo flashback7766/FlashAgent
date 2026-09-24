@@ -245,7 +245,7 @@ FlashAgent starts in the mode you left it in. Reads inside the project and web t
 
 <img src="docs/screenshots/gifs/goal-budget.gif" width="100%" alt="A goal run ending with its report card">
 
-<sub>The card is built from what the loop saw, not from what the model says: here one file created and one edited, and no shell command run, so the <code>cargo check</code> the task asked for is plainly missing.</sub>
+<sub>The card is built from what the loop saw, not from what the model says: here the step limit stopped the run after one edit, so neither <code>NOTES.md</code> nor the <code>cargo check</code> the task asked for appears in it.</sub>
 
 **Updates** — installed in the background: a new release is downloaded, verified against the release checksums and installed on its own, and the status line tells you to restart once it is in. <kbd>Ctrl</kbd>+<kbd>U</kbd> (or `/update`) shows the progress of a download that is already under way, or checks and installs right away when nothing is running; `flashagent --update` does the same from the shell. Background updates can be turned off in Settings; `--channel stable|beta` or `/channel` switches channels.
 

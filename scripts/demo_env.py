@@ -60,7 +60,7 @@ class Demo:
             "permission_mode": "AcceptEdits",
             "thinking_effort": "auto",
             "auto_check_updates": False,
-            "last_seen_version": os.environ.get("FLASHAGENT_VERSION", "b330"),
+            "last_seen_version": os.environ.get("FLASHAGENT_VERSION", "b425"),
             "trusted_directories": [],
         }
         self.config.update(config)
@@ -130,7 +130,7 @@ class Demo:
         deadline = time.time() + timeout
         while time.time() < deadline:
             s = self.screen()
-            if "esc to interrupt" not in s.lower() and "Interrupting" not in s:
+            if "esc interrupt" not in s.lower() and "esc to interrupt" not in s.lower() and "Interrupting" not in s:
                 return True
             time.sleep(0.4)
         return False
