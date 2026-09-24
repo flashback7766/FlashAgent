@@ -432,6 +432,24 @@ fn planning_mode_runs_a_command_that_only_reads_without_asking() {
 }
 
 #[test]
+fn the_tool_test_asks_the_server_about_the_model_first_as_the_app_does() {
+    // A model that takes no tools met its first scenario with a refusal the
+    // app never sends it: the check did not know what the server said.
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    home.set_up(&server.url);
+    let term = Term::start(&home, &["--tool-test"], COLS, ROWS);
+    term.wait_for("makes a tool call at all", WAIT);
+    let requests = server.requests();
+    let first_turn = requests.iter().position(|r| r.is_turn()).expect("the check sent a turn");
+    assert!(
+        requests[..first_turn].iter().any(|r| r.method == "GET" && r.path.ends_with("/models")),
+        "the first scenario went out before the model list was read: {:?}",
+        requests.iter().map(|r| format!("{} {}", r.method, r.path)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn the_first_turn_after_startup_already_knows_the_server_said_reasoning_is_off() {
     // b263 regression: the first turn went out before discovery was handed to
     // the sending backend, so it carried no reasoning setting even when the user
