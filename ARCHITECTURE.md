@@ -130,7 +130,17 @@ one in use; `AppConfig::endpoint()` is that one's. The presets
 is looked for in. A provider with no saved key uses the first of those that
 is set, then `FLASHAGENT_API_KEY`. A config from before providers
 (`backend_url`, `api_key`, `model`) is read as one provider named after its
-server's preset. `--url` is a provider for the one run, never saved.
+server's preset; saving writes those three fields too, from a provider the
+OpenAI protocol reaches, so an older build still finds a server, but they
+are never read back while `providers` exists. `--url` is a provider for the
+one run, never saved. An Ollama provider can set the context window it runs
+with (`num_ctx`); otherwise FlashAgent picks it once per model and keeps it,
+since a change makes Ollama load the model again.
+
+**Sampling.** The presets (Coding, Gemma, ...) are tuned for local models.
+Anthropic and Gemini get none of them unless the user set sampling by hand
+(Custom): their makers tune their own models, and Gemini 3 loops below
+temperature 1.0. `Client::set_user_sampling` applies this to every request.
 
 **Switching.** `/provider`, Settings and the setup wizard change the provider
 while the app runs (`provider_switch.rs`): `Client::set_endpoint` drops what
@@ -150,7 +160,9 @@ only then anything temporary. The first message would still start cold, so
 `warm.rs` sends that opening ahead, with a one-token answer, while the user
 types: at start, after `--resume`, after a change of model, provider or
 voice. It is skipped when a turn has just read the same prefix from the
-same server.
+same server, and for a hosted API, which bills it and reads a prompt in a
+second anyway: only Ollama, a server that runs local models, or one at a
+local address is warmed.
 
 ## Memory
 
