@@ -23,6 +23,7 @@ impl App {
         let th_sum = thinking_summary_str(source, &self.current_effort);
         let card = welcome_card(&WelcomeCard {
             model: &self.current_model,
+            provider: Some(&self.config.active_profile().name),
             cwd: &self.cwd_display,
             memory_docs: self.memory_docs,
             thinking: Some(&th_sum),

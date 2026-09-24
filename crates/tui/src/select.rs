@@ -124,6 +124,8 @@ pub struct SelectMenu<T> {
     pub selected: usize,
     pub filter: String,
     pub page_size: usize,
+    /// Items at the end that are actions ("Add a provider"), left out of the count.
+    pub uncounted: usize,
 }
 
 impl<T> SelectMenu<T> {
@@ -135,6 +137,7 @@ impl<T> SelectMenu<T> {
             selected: 0,
             filter: String::new(),
             page_size: 10,
+            uncounted: 0,
         }
     }
 
@@ -259,12 +262,12 @@ impl<T> SelectMenu<T> {
             }
         });
 
+        let counted = self.items.len().saturating_sub(self.uncounted);
         let count_str = if self.filter.is_empty() {
-            let count = self.items.len();
-            let noun = if count == 1 { item_noun.strip_suffix('s').unwrap_or(item_noun) } else { item_noun };
-            format!("({count} {noun})")
+            let noun = if counted == 1 { item_noun.strip_suffix('s').unwrap_or(item_noun) } else { item_noun };
+            format!("({counted} {noun})")
         } else {
-            format!("({total_matches}/{} · \"{}\")", self.items.len(), self.filter)
+            format!("({}/{counted} · \"{}\")", matches.iter().filter(|&&i| i < counted).count(), self.filter)
         };
         let title_styled = crate::tool_views::clip_ellipsis(
             &format!(" \x1b[1;38;2;225;175;95m{}\x1b[0m \x1b[38;2;160;155;145m{count_str}\x1b[0m ", self.title),

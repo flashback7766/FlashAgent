@@ -31,7 +31,7 @@
    irm https://raw.githubusercontent.com/flashback7766/FlashAgent/main/install.ps1 | iex
    ```
 
-2. **Start a model server**: [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com) or [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server --jinja`), with a model that calls tools. Qwen3.6 and Gemma 4 models scored 6/8 to 8/8 in [the tool-calling test](docs/tool-calling.md).
+2. **Start a model server**: [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com) or [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server --jinja`), with a model that calls tools. Qwen3.6 and Gemma 4 models scored 6/8 to 8/8 in [the tool-calling test](docs/tool-calling.md). No machine for it? A cloud API works too: Anthropic, OpenAI, Gemini, OpenRouter and [more](#connecting-a-model).
 
 3. **Run it in your project:**
 
@@ -39,11 +39,11 @@
    cd your-project && flashagent
    ```
 
-   The first launch opens a setup wizard: pick your server from the list and it connects and finds the models it serves. To check a model before you rely on it, run `flashagent --tool-test`.
+   The first launch opens a setup wizard: pick your server from the list and it connects and finds the models it serves. Save as many providers as you like and switch between them mid-conversation with `/provider`. To check a model before you rely on it, run `flashagent --tool-test`.
 
 ## Why FlashAgent
 
-- **Built for local models.** It reads the loaded model, its context window and its reasoning presets from LM Studio, Ollama, llama.cpp or vLLM; OpenAI-compatible cloud APIs work too.
+- **Built for local models.** It reads the loaded model, its context window and its reasoning presets from LM Studio, Ollama, llama.cpp or vLLM. Cloud APIs work too (Anthropic and Gemini through their own protocols, the rest through OpenAI-compatible ones), and `/provider` moves the conversation between a local server and a cloud one without a restart.
 - **Tool calling that does not depend on luck.** Native tool calls, a recovery parser for calls written as text, JSON repair, and a [test](docs/tool-calling.md) that shows which models keep up.
 - **Small, and you stay in control.** One ~16 MB binary, ~10 MB of memory when idle ([measured](docs/numbers.md)), four permission modes, and approval cards that show the exact command or diff.
 
@@ -146,21 +146,52 @@ Or install straight from the repository: `cargo install --git https://github.com
 
 ## Connecting a model
 
-Start your server, then run `flashagent` in your project directory. The first launch opens a setup wizard; `flashagent --setup` reopens it later.
+Start your server, then run `flashagent` in your project directory. The first launch opens a setup wizard: pick a server from the list, or type any address as Custom. `flashagent --setup` runs it again, and whatever you pick there is saved as another provider beside the ones you have, or updates the one for that server.
 
-| Server | Endpoint | Notes |
-| :--- | :--- | :--- |
-| **LM Studio** (default) | `http://localhost:1234/v1` | Loaded model, context size and reasoning presets are auto-discovered |
-| **Ollama** | `http://localhost:11434/v1` | `ollama run qwen2.5-coder:32b` |
-| **llama.cpp** | `http://localhost:8080/v1` | `llama-server -m model.gguf --jinja` |
-| **vLLM** | `http://localhost:8000/v1` | |
-| **OpenRouter / any OpenAI-compatible API** | e.g. `https://openrouter.ai/api/v1` | API key via the wizard or `FLASHAGENT_API_KEY` |
+| Provider | Address | Protocol | Key |
+| :--- | :--- | :--- | :--- |
+| **LM Studio** | `http://localhost:1234/v1` | OpenAI-compatible | none; loaded model, context size and reasoning presets are read from it |
+| **Ollama** | `http://localhost:11434` | Ollama | none; `ollama pull qwen3-coder` first |
+| **llama.cpp** | `http://localhost:8080/v1` | OpenAI-compatible | none; `llama-server -m model.gguf --jinja` |
+| **vLLM** | `http://localhost:8000/v1` | OpenAI-compatible | none |
+| **Jan** | `http://localhost:1337/v1` | OpenAI-compatible | none |
+| **KoboldCpp** | `http://localhost:5001/v1` | OpenAI-compatible | none |
+| **text-generation-webui** | `http://localhost:5000/v1` | OpenAI-compatible | none; start it with `--api` |
+| **LocalAI** | `http://localhost:8080/v1` | OpenAI-compatible | none |
+| **Anthropic** | `https://api.anthropic.com` | Anthropic | `ANTHROPIC_API_KEY` |
+| **OpenAI** | `https://api.openai.com/v1` | OpenAI-compatible | `OPENAI_API_KEY` |
+| **Gemini** | `https://generativelanguage.googleapis.com/v1beta` | Gemini | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
+| **OpenRouter** | `https://openrouter.ai/api/v1` | OpenAI-compatible | `OPENROUTER_API_KEY` |
+| **DeepSeek** | `https://api.deepseek.com/v1` | OpenAI-compatible | `DEEPSEEK_API_KEY` |
+| **Mistral** | `https://api.mistral.ai/v1` | OpenAI-compatible | `MISTRAL_API_KEY` |
+| **Groq** | `https://api.groq.com/openai/v1` | OpenAI-compatible | `GROQ_API_KEY` |
+| **xAI** | `https://api.x.ai/v1` | OpenAI-compatible | `XAI_API_KEY` |
+| **Together** | `https://api.together.xyz/v1` | OpenAI-compatible | `TOGETHER_API_KEY` |
+| **Fireworks** | `https://api.fireworks.ai/inference/v1` | OpenAI-compatible | `FIREWORKS_API_KEY` |
+| **Cerebras** | `https://api.cerebras.ai/v1` | OpenAI-compatible | `CEREBRAS_API_KEY` |
+| **Custom** | any address | read from the address; <kbd>Tab</kbd> in the wizard changes it | optional |
 
-```bash
-flashagent --url http://localhost:11434/v1 --model qwen2.5-coder:32b
+**Providers.** Each saved provider has a name, a protocol, an address, a key (optional) and the model to start with there. `/provider` lists them, the one in use marked, and switches to another without a restart: FlashAgent asks the new server what it runs, takes up the model you last used there (or the one it has loaded), and the conversation carries on where it was. `/provider <name>` switches straight to one. The same menu adds a provider (the wizard's steps, without the rest of the setup) and edits them: name, protocol, address, key and model, or deletes one. <kbd>Tab</kbd> → General → Provider does the same from Settings. A switch waits until the model has finished answering. Changing the model with <kbd>F3</kbd> saves it for the provider in use.
+
+**Keys.** A key typed in the wizard or the provider editor is saved with that provider in the config file and shown masked. A provider without a saved key uses its usual environment variable (the Key column), then `FLASHAGENT_API_KEY`; the wizard says when it has found one.
+
+In `config.json` the providers look like this; `protocol` is `openai`, `anthropic`, `gemini` or `ollama`, and an empty `model` means the one the server has loaded, else its first. A config from an older build, with `backend_url`, `api_key` and `model`, is read as one provider.
+
+```json
+{
+  "providers": [
+    { "name": "LM Studio", "protocol": "openai", "url": "http://localhost:1234/v1", "model": "qwen3-coder-30b" },
+    { "name": "Anthropic", "protocol": "anthropic", "url": "https://api.anthropic.com", "model": "" }
+  ],
+  "active_provider": "LM Studio"
+}
 ```
 
-`--url` applies to this run only; the saved server stays as it was. `--model` switches the model and saves it as the one to start with next time.
+```bash
+flashagent --url http://localhost:11434 --model qwen3-coder
+```
+
+`--url` talks to that server for this run only and saves nothing about it; a saved provider at the same address lends its key and model. `--model` switches the model and saves it for the provider in use as the one to start with next time.
 
 ### Configuration
 
@@ -168,7 +199,8 @@ Settings live in `~/.flashagent/config.json` (`%USERPROFILE%\.flashagent\config.
 
 | Variable | Effect |
 | :--- | :--- |
-| `FLASHAGENT_API_KEY` | API key for the server, used when the config has none |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, ... | Key for the provider they belong to (see [Connecting a model](#connecting-a-model)), used when it has none saved |
+| `FLASHAGENT_API_KEY` | Key for any provider that has none saved and none in its own variable |
 | `FLASHAGENT_CONFIG_PATH` | Use this config file instead of `~/.flashagent/config.json` |
 | `FLASHAGENT_TRUST_DIR` | Set to anything: skip the folder trust question, like `--yes` |
 | `BRAVE_API_KEY` | `web_search` uses Brave Search instead of DuckDuckGo |
@@ -220,7 +252,7 @@ FlashAgent starts in the mode you left it in. Reads inside the project and web t
 
 <img src="docs/screenshots/gifs/update-progress.gif" width="100%" alt="Ctrl+U checking, downloading and installing an update">
 
-**What leaves your machine** — requests to the model server you configure; update checks against GitHub Releases (on by default, off with Settings → Updates → Auto-update); `web_fetch` requests to the pages the model asks for and `web_search` queries to DuckDuckGo, or Brave Search with `BRAVE_API_KEY` (on by default, off with Settings → LLM → Web tools); and whatever the MCP servers you add do. There is no telemetry.
+**What leaves your machine** — requests to the provider in use; update checks against GitHub Releases (on by default, off with Settings → Updates → Auto-update); `web_fetch` requests to the pages the model asks for and `web_search` queries to DuckDuckGo, or Brave Search with `BRAVE_API_KEY` (on by default, off with Settings → LLM → Web tools); and whatever the MCP servers you add do. There is no telemetry.
 
 ---
 
@@ -250,7 +282,7 @@ FlashAgent starts in the mode you left it in. Reads inside the project and web t
 | <kbd>→</kbd> | Accept the suggested follow-up prompt |
 | <kbd>PgUp</kbd> / <kbd>PgDn</kbd> · <kbd>Shift</kbd>+<kbd>↑</kbd> / <kbd>Shift</kbd>+<kbd>↓</kbd> · mouse wheel | Scroll the conversation; the prompt stays where it is · <kbd>End</kbd> or <kbd>Esc</kbd> returns to the bottom |
 
-Type `/help` for every slash command: `/goal`, `/mode`, `/model`, `/effort`, `/context`, `/compact`, `/rewind`, `/resume`, `/mcp`, `/skills`, `/diff`, `/commit`, `/export`, `/update`, `/channel`, `/exit` and more.
+Type `/help` for every slash command: `/goal`, `/mode`, `/model`, `/provider`, `/effort`, `/context`, `/compact`, `/rewind`, `/resume`, `/mcp`, `/skills`, `/diff`, `/commit`, `/export`, `/update`, `/channel`, `/exit` and more.
 
 ---
 
@@ -260,7 +292,7 @@ A Cargo workspace; the terminal client runs the whole stack in-process today.
 
 ```
 crates/core    agent loop, steering, permissions, subagents, memory, system prompt
-crates/llm     OpenAI-compatible streaming, reasoning-preset discovery, text tool-call parser, JSON repair
+crates/llm     one model client, four protocols (OpenAI-compatible, Anthropic, Gemini, Ollama), reasoning-preset discovery, text tool-call parser, JSON repair
 crates/tools   built-in tools, shell runner (timeouts that kill the whole process tree, background tasks), patching, MCP client/manager/marketplace
 crates/tui     crossterm terminal UI (the product today)
 crates/svc     self-updater

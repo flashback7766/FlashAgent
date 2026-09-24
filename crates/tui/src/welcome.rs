@@ -15,6 +15,8 @@ pub fn been_here_before() -> bool {
 #[derive(Debug, Clone)]
 pub struct WelcomeCard<'a> {
     pub model: &'a str,
+    /// The provider the model is on, by its saved name.
+    pub provider: Option<&'a str>,
     /// Already shortened for display.
     pub cwd: &'a str,
     /// Loaded into the prompt.
@@ -37,6 +39,7 @@ impl Default for WelcomeCard<'_> {
     fn default() -> Self {
         Self {
             model: "",
+            provider: None,
             cwd: "",
             memory_docs: 0,
             thinking: None,
@@ -336,6 +339,7 @@ fn with_gap(mut lines: Vec<RenderLine>, budget: usize) -> Vec<RenderLine> {
 fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
     let &WelcomeCard {
         model,
+        provider,
         cwd,
         memory_docs,
         thinking,
@@ -439,6 +443,14 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         ];
 
         let model_val = truncate_middle(model, w2.saturating_sub(13));
+        // The name first; how to switch only where both fit.
+        let provider_name = provider.unwrap_or("not chosen yet");
+        let provider_hint = if provider_name.chars().count() + 12 <= w2.saturating_sub(13) {
+            format!(" {M3_MUT}(/provider){RESET}")
+        } else {
+            String::new()
+        };
+        let provider_val = truncate_middle(provider_name, w2.saturating_sub(13));
         let ctx_val = truncate_middle(context_window.unwrap_or("not known yet"), w2.saturating_sub(13));
         let memory_val = match memory_docs {
             0 => format!("{M3_MUT}no rule files yet{RESET}"),
@@ -448,11 +460,11 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
 
         let right_top = [
             format!(" {M3_MUT}Model:   {RESET} {M3_TXT_B}{model_val}{RESET}"),
+            format!(" {M3_MUT}Provider:{RESET} {M3_LGT}{provider_val}{RESET}{provider_hint}"),
             format!(" {M3_MUT}Context: {RESET} {M3_ICE}{ctx_val}{RESET}"),
             // The mode is on the status line under the prompt.
             format!(" {M3_MUT}Effort:  {RESET} {M3_LGT}{th_short}{RESET} {M3_MUT}(F4){RESET}"),
             format!(" {M3_MUT}Memory:  {RESET} {memory_val}"),
-            format!(" {M3_MUT}Config:  {RESET} {M3_ICE}Tab{RESET} {M3_MUT}settings{RESET}"),
         ];
 
         // A narrow card drops whole hints rather than cutting one mid-word.
@@ -463,7 +475,7 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
             format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}for autonomy{RESET}"),
             fit(&[key("Ctrl+K", "commands"), key("Ctrl+D", "quit")]),
             fit(&[key("F1", "context"), key("F2", "verbose"), key("F3", "model")]),
-            fit(&[key("F4", "effort"), key("Ctrl+V", "paste image")]),
+            fit(&[key("F4", "effort"), key("Tab", "settings"), key("Ctrl+V", "paste image")]),
             fit(&[key("Ctrl+R", "regen"), key("/help", "for more")]),
         ];
 
@@ -494,8 +506,10 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
 
         // Whatever no longer fits is dropped whole.
         let model_meta = truncate_middle(model, inner_w.saturating_sub(4).min(28));
+        let provider_meta = truncate_middle(provider.unwrap_or_default(), 20);
         let parts: Vec<(String, String)> = [
             (model_meta.clone(), format!("{M3_PRI}{model_meta}{RESET}")),
+            (provider_meta.clone(), format!("{M3_LGT}{provider_meta}{RESET}")),
             (th_str.to_string(), format!("{M3_LGT}{th_str}{RESET}")),
             (ctx_short.to_string(), format!("{M3_ICE}{ctx_short}{RESET}")),
         ]

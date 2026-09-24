@@ -1,6 +1,9 @@
-//! First-run setup wizard: backend, API key, model, behaviour, sampling.
+//! First-run setup wizard: provider, API key, model, behaviour, sampling. Run
+//! again, it adds a provider or updates the one for the same server.
 
+use flashagent_core::config::{KeySource, ProviderProfile};
 use flashagent_core::{AppConfig, BackendPreset, PermissionMode};
+use flashagent_llm::ApiProtocol;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 
 /// First characters and the last 4, when long enough.
@@ -25,12 +28,22 @@ pub fn mask_api_key(key: &str) -> String {
     format!("{prefix}••••••••{suffix}")
 }
 
+/// Preset rows shown at once; the list scrolls past them.
+const PRESET_WINDOW: usize = 10;
+
 pub struct SetupWizard {
     pub config: AppConfig,
-    pub step: usize, // 0: Backend, 1: API Key, 2: Model, 3: Language & Behavior, 4: Sampling & Finish
+    /// The provider being set up. Saved into `config` when the wizard ends,
+    /// over the one for the same server if there is one.
+    pub profile: ProviderProfile,
+    pub step: usize, // 0: Provider, 1: API Key, 2: Model, 3: Permissions, 4: Sampling & Finish
+    /// Only the provider's steps: permissions and sampling are left as they are.
+    pub provider_only: bool,
     pub preset_idx: usize,
     pub custom_url: String,
     pub custom_cursor: usize,
+    /// Tab on the custom row; `None` reads it from the address.
+    pub custom_protocol: Option<ApiProtocol>,
     pub api_key_input: String,
     pub api_key_cursor: usize,
     pub model_idx: usize,
@@ -45,31 +58,32 @@ pub struct SetupWizard {
 }
 
 impl SetupWizard {
+    /// Opens on the provider in use, its key and model filled in.
     pub fn new(config: AppConfig) -> Self {
+        let profile = config.active_profile().clone();
         let presets = BackendPreset::all();
-        let is_preset = presets.iter().position(|p| p.url == config.backend_url);
-        let (preset_idx, custom_url) = match is_preset {
-            Some(idx) => (idx, String::new()),
+        let preset_row = presets.iter().position(|p| ProviderProfile::from_preset(p).same_server(&profile));
+        let (preset_idx, custom_url, custom_protocol) = match preset_row {
+            Some(idx) => (idx, String::new(), None),
             None => {
-                let url = if config.backend_url.is_empty() {
-                    String::new()
-                } else {
-                    config.backend_url.clone()
-                };
-                (Self::custom_idx(), url)
+                let protocol = (profile.protocol != ApiProtocol::detect(&profile.url)).then_some(profile.protocol);
+                (Self::custom_idx(), profile.url.clone(), protocol)
             }
         };
         let custom_cursor = custom_url.len();
-        let api_key_input = config.api_key.clone().unwrap_or_default();
+        let api_key_input = profile.api_key.clone().unwrap_or_default();
         let api_key_cursor = api_key_input.len();
         let sampling = crate::sampling::SamplingView::new(&config);
 
         Self {
             config,
+            profile,
             step: 0,
+            provider_only: false,
             preset_idx,
             custom_url,
             custom_cursor,
+            custom_protocol,
             api_key_input,
             api_key_cursor,
             model_idx: 0,
@@ -82,6 +96,16 @@ impl SetupWizard {
         }
     }
 
+    /// Another provider beside the saved ones: server, key and model only.
+    pub fn adding(config: AppConfig) -> Self {
+        let mut wizard = Self::new(config);
+        wizard.provider_only = true;
+        wizard.custom_url.clear();
+        wizard.custom_protocol = None;
+        wizard.select_row(0);
+        wizard
+    }
+
     /// Custom is the row after the presets, however many there are.
     fn custom_idx() -> usize {
         BackendPreset::all().len()
@@ -89,6 +113,10 @@ impl SetupWizard {
 
     fn is_custom(&self) -> bool {
         self.preset_idx == Self::custom_idx()
+    }
+
+    fn preset(&self) -> Option<&'static BackendPreset> {
+        BackendPreset::all().get(self.preset_idx)
     }
 
     /// The key that picks a row: 1–9, then 0, and c for Custom.
@@ -101,22 +129,110 @@ impl SetupWizard {
         }
     }
 
-    pub fn total_steps(&self) -> usize {
-        5 // 0: Backend, 1: API Key, 2: Model, 3: Language & Behavior, 4: Sampling & Finish
+    /// Where the typed address goes, and how it is spoken to.
+    fn custom_profile(&self) -> ProviderProfile {
+        let mut profile = ProviderProfile::from_url(&self.custom_url);
+        if let Some(protocol) = self.custom_protocol {
+            profile.protocol = protocol;
+        }
+        profile
     }
 
+    /// The provider a row stands for: the one saved for that server, with its
+    /// key and model, or a new one.
+    fn select_row(&mut self, row: usize) {
+        self.preset_idx = row.min(Self::custom_idx());
+        let fresh = match self.preset() {
+            Some(p) => ProviderProfile::from_preset(p),
+            None => {
+                self.custom_cursor = self.custom_url.len();
+                self.custom_profile()
+            }
+        };
+        self.profile = self.config.providers.iter().find(|p| p.same_server(&fresh)).cloned().unwrap_or(fresh);
+        self.api_key_input = self.profile.api_key.clone().unwrap_or_default();
+        self.api_key_cursor = self.api_key_input.len();
+    }
+
+    /// An address typed to a saved server brings that provider's key; typed
+    /// on past it, the key is dropped rather than sent to another server.
+    fn sync_custom(&mut self) {
+        let typed = self.custom_profile();
+        match self.config.providers.iter().find(|p| p.same_server(&typed)).cloned() {
+            Some(saved) => {
+                self.api_key_input = saved.api_key.clone().unwrap_or_default();
+                self.api_key_cursor = self.api_key_input.len();
+                self.profile = saved;
+            }
+            None => {
+                if self.is_saved(&self.profile) {
+                    self.api_key_input.clear();
+                    self.api_key_cursor = 0;
+                }
+                self.profile = typed;
+                self.sync_api_key();
+            }
+        }
+    }
+
+    /// The steps this run shows, in order: no key for a server on this
+    /// computer, no permissions or sampling when only adding a provider.
+    fn shown_steps(&self) -> Vec<usize> {
+        let mut steps = vec![0];
+        if self.needs_key_step() {
+            steps.push(1);
+        }
+        steps.push(2);
+        if !self.provider_only {
+            steps.extend([3, 4]);
+        }
+        steps
+    }
+
+    /// 1-based, as shown.
+    fn step_number(&self, step: usize) -> usize {
+        let steps = self.shown_steps();
+        steps.iter().position(|s| *s == step).map_or(step + 1, |i| i + 1)
+    }
+
+    pub fn total_steps(&self) -> usize {
+        self.shown_steps().len()
+    }
+
+    /// A preset for a server on this computer needs no key and skips the
+    /// step; an address typed by hand may still want one.
+    pub fn needs_key_step(&self) -> bool {
+        self.preset().is_none_or(|p| !p.is_local())
+    }
+
+    /// A cloud preset, or a typed address reached over https: a cloud API is
+    /// never plain http, and a server on this computer or network rarely https.
     pub fn is_cloud_backend(&self) -> bool {
-        let url = self.config.backend_url.to_lowercase();
-        if url.contains("openrouter.ai") {
-            return true;
+        match self.preset() {
+            Some(p) => !p.is_local(),
+            None => self.profile.url.to_lowercase().starts_with("https://"),
         }
-        if url.starts_with("https://") {
-            return true;
+    }
+
+    /// Only a cloud preset cannot go on without a key: a typed address may be a
+    /// server that takes none, wherever it is.
+    fn key_required(&self) -> bool {
+        self.preset().is_some_and(|p| !p.is_local())
+    }
+
+    /// The environment variable a key would be read from if none is typed.
+    pub fn env_key(&self) -> Option<&'static str> {
+        let mut keyless = self.profile.clone();
+        keyless.api_key = None;
+        match keyless.key_source() {
+            KeySource::Env(var) => Some(var),
+            _ => None,
         }
-        if url.contains("localhost") || url.contains("127.0.0.1") || url.contains("0.0.0.0") || url.contains("[::1]") {
-            return false;
-        }
-        true
+    }
+
+    /// A cloud provider with no key typed and none in the environment.
+    fn key_missing(&self) -> bool {
+        self.key_required() && self.api_key_input.trim().is_empty() && self.env_key().is_none()
     }
 
     /// The server's own answer once discovery has run; before that, a guess from
@@ -125,11 +241,12 @@ impl SetupWizard {
         if let Some(kind) = self.discovered_kind {
             return kind == flashagent_llm::thinking::ServerKind::LmStudio;
         }
-        let url = self.config.backend_url.to_lowercase();
+        let url = self.profile.url.to_lowercase();
         self.preset_idx == 0 || url.contains("1234") || url.contains("lmstudio")
     }
 
-    /// Keeps only loaded models when the server is LM Studio.
+    /// Keeps only loaded models when the server is LM Studio. The model saved
+    /// for this provider stays chosen when the server has it.
     pub fn apply_discovered_models(&mut self, disc: flashagent_llm::ServerDiscovery) {
         self.discovered_kind = Some(disc.kind);
         let models = disc.models;
@@ -152,9 +269,10 @@ impl SetupWizard {
             format!("Connected ({n} {} found)", if n == 1 { "model" } else { "models" })
         };
         self.connection_status = Some(status);
-        if let Some(first) = self.available_models.first() {
-            self.model_idx = 0;
-            self.config.model = first.clone();
+        let saved = self.available_models.iter().position(|m| *m == self.profile.model);
+        if let Some(idx) = saved.or((!self.available_models.is_empty()).then_some(0)) {
+            self.model_idx = idx;
+            self.profile.model = self.available_models[idx].clone();
         }
     }
 
@@ -185,7 +303,7 @@ impl SetupWizard {
         }
         self.custom_url.insert(self.custom_cursor, c);
         self.custom_cursor += c.len_utf8();
-        self.config.backend_url = self.custom_url.clone();
+        self.sync_custom();
     }
 
     fn backspace_custom_char(&mut self) {
@@ -197,7 +315,7 @@ impl SetupWizard {
                 .unwrap_or(0);
             self.custom_url.drain(prev_boundary..self.custom_cursor);
             self.custom_cursor = prev_boundary;
-            self.config.backend_url = self.custom_url.clone();
+            self.sync_custom();
         }
     }
 
@@ -209,7 +327,7 @@ impl SetupWizard {
                 .map(|c| self.custom_cursor + c.len_utf8())
                 .unwrap_or(self.custom_url.len());
             self.custom_url.drain(self.custom_cursor..next_boundary);
-            self.config.backend_url = self.custom_url.clone();
+            self.sync_custom();
         }
     }
 
@@ -236,7 +354,7 @@ impl SetupWizard {
 
     fn sync_api_key(&mut self) {
         let trimmed = self.api_key_input.trim().to_string();
-        self.config.api_key = if trimmed.is_empty() { None } else { Some(trimmed) };
+        self.profile.api_key = if trimmed.is_empty() { None } else { Some(trimmed) };
     }
 
     fn insert_api_key_char(&mut self, c: char) {
@@ -293,12 +411,35 @@ impl SetupWizard {
                     if !new_filtered.is_empty() && !new_filtered.contains(&self.model_idx) {
                         let chosen_idx = new_filtered[0];
                         self.model_idx = chosen_idx;
-                        self.config.model = self.available_models[chosen_idx].clone();
+                        self.profile.model = self.available_models[chosen_idx].clone();
                     }
                 }
                 _ => {}
             }
         }
+    }
+
+    /// Past the provider's row: to the key, or straight to its models.
+    fn leave_provider_step(&mut self) {
+        self.connection_status = None;
+        self.step = if self.needs_key_step() { 1 } else { 2 };
+    }
+
+    /// The setup is saved: the provider over the one for its server or beside
+    /// the others, and made the one in use.
+    fn finish(&mut self) -> Option<bool> {
+        self.config.save_provider(self.profile.clone());
+        if !self.provider_only {
+            self.sampling.apply_to_config(&mut self.config);
+            self.config.setup_completed = true;
+        }
+        let _ = self.config.save();
+        Some(true)
+    }
+
+    fn choose_model(&mut self, idx: usize) {
+        self.model_idx = idx;
+        self.profile.model = self.available_models[idx].clone();
     }
 
     pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<bool> {
@@ -329,7 +470,7 @@ impl SetupWizard {
                     if self.is_custom() && !self.custom_url.is_empty() {
                         self.custom_url.clear();
                         self.custom_cursor = 0;
-                        self.config.backend_url.clear();
+                        self.sync_custom();
                         self.connection_status = None;
                         return None;
                     }
@@ -339,6 +480,7 @@ impl SetupWizard {
                     if !self.api_key_input.is_empty() {
                         self.api_key_input.clear();
                         self.api_key_cursor = 0;
+                        self.sync_api_key();
                         self.connection_status = None;
                         return None;
                     }
@@ -351,7 +493,7 @@ impl SetupWizard {
                         self.model_search.clear();
                         return None;
                     }
-                    self.step = 1;
+                    self.step = if self.needs_key_step() { 1 } else { 0 };
                     return None;
                 }
                 3 => {
@@ -373,7 +515,7 @@ impl SetupWizard {
             }
         }
 
-        // Step 0 with Custom selected: typing edits the URL.
+        // Step 0 with Custom selected: typing edits the URL, Tab the protocol.
         if self.step == 0 && self.is_custom() {
             match code {
                 KeyCode::Enter => {
@@ -385,23 +527,26 @@ impl SetupWizard {
                     if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
                         trimmed = format!("http://{trimmed}");
                     }
-                    self.custom_url = trimmed.clone();
+                    self.custom_url = trimmed;
                     self.custom_cursor = self.custom_url.len();
-                    self.config.backend_url = trimmed;
-                    self.connection_status = None;
-                    self.step = 1; // Move to API Key Configuration
+                    self.sync_custom();
+                    self.leave_provider_step();
+                    return None;
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    let all = ApiProtocol::ALL;
+                    let current = all.iter().position(|p| *p == self.custom_profile().protocol).unwrap_or(0);
+                    let next = if code == KeyCode::Tab { (current + 1) % all.len() } else { (current + all.len() - 1) % all.len() };
+                    self.custom_protocol = Some(all[next]);
+                    self.sync_custom();
                     return None;
                 }
                 KeyCode::Up => {
-                    let presets = BackendPreset::all();
-                    self.preset_idx = presets.len() - 1;
-                    self.config.backend_url = presets[self.preset_idx].url.clone();
+                    self.select_row(Self::custom_idx() - 1);
                     return None;
                 }
                 KeyCode::Down => {
-                    let presets = BackendPreset::all();
-                    self.preset_idx = 0;
-                    self.config.backend_url = presets[self.preset_idx].url.clone();
+                    self.select_row(0);
                     return None;
                 }
                 KeyCode::Left => {
@@ -440,12 +585,11 @@ impl SetupWizard {
         if self.step == 1 {
             match code {
                 KeyCode::Enter => {
-                    let trimmed = self.api_key_input.trim().to_string();
-                    if self.is_cloud_backend() && trimmed.is_empty() {
+                    if self.key_missing() {
                         self.connection_status = Some("API key is required for cloud providers. Please paste your key.".to_string());
                         return None;
                     }
-                    self.config.api_key = if trimmed.is_empty() { None } else { Some(trimmed) };
+                    self.sync_api_key();
                     self.connection_status = None;
                     self.step = 2; // Move to Model selection
                     return None;
@@ -494,82 +638,43 @@ impl SetupWizard {
         // Step 2: model, a 10-item window with live search.
         if self.step == 2 {
             let filtered = self.filtered_indices();
+            let pos = filtered.iter().position(|&idx| idx == self.model_idx).unwrap_or(0);
             match code {
                 KeyCode::Enter => {
                     if !filtered.is_empty() {
-                        let sel_pos = filtered.iter().position(|&orig_idx| orig_idx == self.model_idx).unwrap_or(0);
-                        let chosen_idx = filtered[sel_pos];
-                        self.config.model = self.available_models[chosen_idx].clone();
+                        self.choose_model(filtered[pos]);
                     }
-                    self.step = 3; // Move to Language & Behavior
+                    if self.provider_only {
+                        return self.finish();
+                    }
+                    self.step = 3; // Move to Permissions
                     return None;
                 }
-                KeyCode::Up => {
-                    if !filtered.is_empty() {
-                        let pos = filtered.iter().position(|&idx| idx == self.model_idx).unwrap_or(0);
-                        let new_pos = if pos == 0 { filtered.len() - 1 } else { pos - 1 };
-                        let chosen_idx = filtered[new_pos];
-                        self.model_idx = chosen_idx;
-                        self.config.model = self.available_models[chosen_idx].clone();
-                    }
-                    return None;
+                KeyCode::Up if !filtered.is_empty() => {
+                    self.choose_model(filtered[if pos == 0 { filtered.len() - 1 } else { pos - 1 }]);
                 }
-                KeyCode::Down => {
-                    if !filtered.is_empty() {
-                        let pos = filtered.iter().position(|&idx| idx == self.model_idx).unwrap_or(0);
-                        let new_pos = (pos + 1) % filtered.len();
-                        let chosen_idx = filtered[new_pos];
-                        self.model_idx = chosen_idx;
-                        self.config.model = self.available_models[chosen_idx].clone();
+                KeyCode::Down if !filtered.is_empty() => self.choose_model(filtered[(pos + 1) % filtered.len()]),
+                KeyCode::PageUp if !filtered.is_empty() => self.choose_model(filtered[pos.saturating_sub(10)]),
+                KeyCode::PageDown if !filtered.is_empty() => self.choose_model(filtered[(pos + 10).min(filtered.len() - 1)]),
+                KeyCode::Backspace | KeyCode::Char(_) => {
+                    match code {
+                        KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
+                            self.model_search.push(c)
+                        }
+                        KeyCode::Backspace => {
+                            self.model_search.pop();
+                        }
+                        _ => return None,
                     }
-                    return None;
-                }
-                KeyCode::PageUp => {
-                    if !filtered.is_empty() {
-                        let pos = filtered.iter().position(|&idx| idx == self.model_idx).unwrap_or(0);
-                        let new_pos = pos.saturating_sub(10);
-                        let chosen_idx = filtered[new_pos];
-                        self.model_idx = chosen_idx;
-                        self.config.model = self.available_models[chosen_idx].clone();
-                    }
-                    return None;
-                }
-                KeyCode::PageDown => {
-                    if !filtered.is_empty() {
-                        let pos = filtered.iter().position(|&idx| idx == self.model_idx).unwrap_or(0);
-                        let new_pos = (pos + 10).min(filtered.len() - 1);
-                        let chosen_idx = filtered[new_pos];
-                        self.model_idx = chosen_idx;
-                        self.config.model = self.available_models[chosen_idx].clone();
-                    }
-                    return None;
-                }
-                KeyCode::Backspace => {
-                    self.model_search.pop();
                     let new_filtered = self.filtered_indices();
                     if !new_filtered.is_empty() && !new_filtered.contains(&self.model_idx) {
-                        let chosen_idx = new_filtered[0];
-                        self.model_idx = chosen_idx;
-                        self.config.model = self.available_models[chosen_idx].clone();
+                        self.choose_model(new_filtered[0]);
                     }
-                    return None;
                 }
-                KeyCode::Left => {
-                    self.step = 1;
-                    return None;
-                }
-                KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
-                    self.model_search.push(c);
-                    let new_filtered = self.filtered_indices();
-                    if !new_filtered.is_empty() && !new_filtered.contains(&self.model_idx) {
-                        let chosen_idx = new_filtered[0];
-                        self.model_idx = chosen_idx;
-                        self.config.model = self.available_models[chosen_idx].clone();
-                    }
-                    return None;
-                }
-                _ => return None,
+                KeyCode::Left => self.step = if self.needs_key_step() { 1 } else { 0 },
+                _ => {}
             }
+            return None;
         }
 
         // Step 4: a sampling preset and launch. The numbers behind a preset are for
@@ -577,12 +682,7 @@ impl SetupWizard {
         if self.step == 4 {
             match code {
                 KeyCode::Esc => self.step = 3,
-                KeyCode::Enter => {
-                    self.sampling.apply_to_config(&mut self.config);
-                    self.config.setup_completed = true;
-                    let _ = self.config.save();
-                    return Some(true);
-                }
+                KeyCode::Enter => return self.finish(),
                 KeyCode::Left | KeyCode::Right => {
                     self.sampling.selected_index = 0;
                     let _ = self.sampling.handle_key(code, mods);
@@ -595,15 +695,12 @@ impl SetupWizard {
         // Step 0 (presets) and step 3 (behaviour).
         match code {
             KeyCode::Enter => {
-                if self.step + 1 < self.total_steps() {
-                    self.step += 1;
-                    None
-                } else {
-                    self.sampling.apply_to_config(&mut self.config);
-                    self.config.setup_completed = true;
-                    let _ = self.config.save();
-                    Some(true) // completed
+                match self.step {
+                    0 => self.leave_provider_step(),
+                    3 => self.step = 4,
+                    _ => {}
                 }
+                None
             }
             KeyCode::Left | KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('h') => {
                 self.prev_option();
@@ -622,55 +719,25 @@ impl SetupWizard {
     }
 
     fn next_option(&mut self) {
-        let presets = BackendPreset::all();
         match self.step {
-            0 => {
-                self.preset_idx = (self.preset_idx + 1) % (presets.len() + 1);
-                if self.preset_idx < presets.len() {
-                    self.config.backend_url = presets[self.preset_idx].url.clone();
-                } else {
-                    self.custom_cursor = self.custom_url.len();
-                    self.config.backend_url = self.custom_url.clone();
-                }
-            }
-            3 => {
-                self.config.permission_mode = self.config.permission_mode.next();
-            }
+            0 => self.select_row((self.preset_idx + 1) % (Self::custom_idx() + 1)),
+            3 => self.config.permission_mode = self.config.permission_mode.next(),
             _ => {}
         }
     }
 
     fn prev_option(&mut self) {
-        let presets = BackendPreset::all();
         match self.step {
-            0 => {
-                self.preset_idx = (self.preset_idx + presets.len()) % (presets.len() + 1);
-                if self.preset_idx < presets.len() {
-                    self.config.backend_url = presets[self.preset_idx].url.clone();
-                } else {
-                    self.custom_cursor = self.custom_url.len();
-                    self.config.backend_url = self.custom_url.clone();
-                }
-            }
-            3 => {
-                self.config.permission_mode = self.config.permission_mode.prev();
-            }
+            0 => self.select_row((self.preset_idx + Self::custom_idx()) % (Self::custom_idx() + 1)),
+            3 => self.config.permission_mode = self.config.permission_mode.prev(),
             _ => {}
         }
     }
 
     fn pick_key(&mut self, key: char) {
-        let presets = BackendPreset::all();
         if self.step == 0 {
-            let Some(row) = (0..=presets.len()).find(|&i| Self::row_key(i) == Some(key.to_ascii_lowercase())) else {
-                return;
-            };
-            self.preset_idx = row;
-            if row < presets.len() {
-                self.config.backend_url = presets[row].url.clone();
-            } else {
-                self.custom_cursor = self.custom_url.len();
-                self.config.backend_url = self.custom_url.clone();
+            if let Some(row) = (0..=Self::custom_idx()).find(|&i| Self::row_key(i) == Some(key.to_ascii_lowercase())) {
+                self.select_row(row);
             }
         } else if self.step == 3 {
             match key {
@@ -683,13 +750,19 @@ impl SetupWizard {
         }
     }
 
+    /// A row stands for a provider already saved for that server.
+    fn is_saved(&self, profile: &ProviderProfile) -> bool {
+        self.config.providers.iter().any(|p| p.same_server(profile))
+    }
+
     pub fn render(&self, width: usize) -> Vec<String> {
         let mut lines = Vec::new();
         let border_color = "\x1b[38;2;100;95;90m";
         let reset = "\x1b[0m";
         let inner_w = width.saturating_sub(6).clamp(20, 110);
 
-        let title = format!(" FlashAgent setup \u{b7} step {} of 5 ", self.step + 1);
+        let what = if self.provider_only { "Add a provider" } else { "FlashAgent setup" };
+        let title = format!(" {what} \u{b7} step {} of {} ", self.step_number(self.step), self.total_steps());
         let dash_count = inner_w.saturating_sub(title.chars().count() + 1);
         lines.push(format!("  {border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)));
 
@@ -705,24 +778,44 @@ impl SetupWizard {
             let pad = " ".repeat(max_w.saturating_sub(clipped_vis));
             format!("  {border_color}│{reset} {clipped}{pad} {border_color}│{reset}")
         };
+        let heading = |step: usize, text: &str| format!("\x1b[1;38;2;240;235;225mStep {}: {text}\x1b[0m", self.step_number(step));
 
         match self.step {
             0 => {
-                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 1: Choose your model server\x1b[0m"));
+                lines.push(pad_row(&heading(0, "Choose your model server")));
                 lines.push(pad_row("\x1b[38;2;160;155;145mWhere does your model run? A local server needs no key.\x1b[0m"));
                 lines.push(pad_row(""));
 
                 let presets = BackendPreset::all();
-                for (i, p) in presets.iter().enumerate() {
+                let rows = presets.len() + 1;
+                let start = (self.preset_idx + 1).saturating_sub(PRESET_WINDOW).min(rows.saturating_sub(PRESET_WINDOW + 1));
+                let end = (start + PRESET_WINDOW).min(presets.len());
+                if start > 0 {
+                    lines.push(pad_row(&format!("  \x1b[38;2;135;130;125m▲ {start} more above\x1b[0m")));
+                }
+                // Names in one column when the window has room for the longest; the
+                // address gives way, from its middle, to the "saved" mark.
+                let longest = presets.iter().map(|p| p.name.chars().count()).max().unwrap_or(12);
+                let name_w = if inner_w >= 60 { longest } else { 12 };
+                for (i, p) in presets.iter().enumerate().take(end).skip(start) {
                     let is_sel = i == self.preset_idx;
                     let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
                     let key = Self::row_key(i).map_or_else(|| "  ".to_string(), |k| format!("{k}."));
+                    let is_saved = self.is_saved(&ProviderProfile::from_preset(p));
+                    let saved = if is_saved { "  \x1b[38;2;135;130;125msaved\x1b[0m" } else { "" };
+                    let url_room = inner_w
+                        .saturating_sub(2 + 5 + name_w.max(p.name.chars().count()) + 1 + if is_saved { 7 } else { 0 })
+                        .max(12);
+                    let url = crate::truncate_middle(p.url, url_room);
                     let row = if is_sel {
-                        format!("{ptr} \x1b[1;38;2;240;235;225m{key} {:<12}\x1b[0m \x1b[38;2;225;175;95m{}\x1b[0m", p.name, p.url)
+                        format!("{ptr} \x1b[1;38;2;240;235;225m{key} {:<name_w$}\x1b[0m \x1b[38;2;225;175;95m{url}\x1b[0m{saved}", p.name)
                     } else {
-                        format!("{ptr} \x1b[38;2;160;155;145m{key} {:<12}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", p.name, p.url)
+                        format!("{ptr} \x1b[38;2;160;155;145m{key} {:<name_w$}\x1b[0m \x1b[38;2;135;130;125m{url}\x1b[0m{saved}", p.name)
                     };
                     lines.push(pad_row(&row));
+                }
+                if end < presets.len() {
+                    lines.push(pad_row(&format!("  \x1b[38;2;135;130;125m▼ {} more below\x1b[0m", presets.len() - end)));
                 }
 
                 // Custom backend, with an editable field and a dim placeholder.
@@ -732,9 +825,9 @@ impl SetupWizard {
                 let placeholder_text = "type its URL";
                 let custom_row = if self.custom_url.is_empty() {
                     if is_custom_sel {
-                        format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<12}\x1b[0m \x1b[7m \x1b[27m{placeholder_color}{placeholder_text}\x1b[0m", "Custom")
+                        format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<name_w$}\x1b[0m \x1b[7m \x1b[27m{placeholder_color}{placeholder_text}\x1b[0m", "Custom")
                     } else {
-                        format!("{ptr} \x1b[38;2;160;155;145mc. {:<12}\x1b[0m {placeholder_color}{placeholder_text}\x1b[0m", "Custom")
+                        format!("{ptr} \x1b[38;2;160;155;145mc. {:<name_w$}\x1b[0m {placeholder_color}{placeholder_text}\x1b[0m", "Custom")
                     }
                 } else if is_custom_sel {
                     let (before, at_and_after) = if self.custom_cursor < self.custom_url.len() {
@@ -746,13 +839,20 @@ impl SetupWizard {
                     } else {
                         (&self.custom_url[..], "\x1b[7m \x1b[27m".to_string())
                     };
-                    format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<12}\x1b[0m \x1b[1;38;2;225;175;95m{before}{at_and_after}\x1b[0m", "Custom")
+                    format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<name_w$}\x1b[0m \x1b[1;38;2;225;175;95m{before}{at_and_after}\x1b[0m", "Custom")
                 } else {
-                    format!("{ptr} \x1b[38;2;160;155;145mc. {:<12}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", "Custom", self.custom_url)
+                    format!("{ptr} \x1b[38;2;160;155;145mc. {:<name_w$}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", "Custom", self.custom_url)
                 };
                 lines.push(pad_row(&custom_row));
-                if is_custom_sel {
-                    lines.push(pad_row("    \x1b[38;2;135;130;125man OpenAI-compatible URL, e.g. http://localhost:8080/v1\x1b[0m"));
+                lines.push(pad_row(""));
+                // What the chosen row is, and how it will be spoken to.
+                let about = match self.preset() {
+                    Some(p) => format!("{} \u{b7} {}", p.description, p.protocol.label()),
+                    None if self.custom_url.is_empty() => "Any server's address, e.g. http://localhost:8080/v1".to_string(),
+                    None => format!("Spoken to as {} \u{b7} Tab changes it", self.profile.protocol.label()),
+                };
+                for row in crate::wrap_styled(&format!("\x1b[38;2;135;130;125m{about}\x1b[0m"), inner_w.saturating_sub(6).max(1)) {
+                    lines.push(pad_row(&format!("  {row}")));
                 }
 
                 if let Some(ref st) = self.connection_status {
@@ -761,12 +861,17 @@ impl SetupWizard {
                 }
             }
             1 => {
-                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 2: API key\x1b[0m"));
-                if self.is_cloud_backend() {
+                lines.push(pad_row(&heading(1, "API key")));
+                let env_key = self.env_key();
+                if let Some(var) = env_key {
+                    lines.push(pad_row(&format!("\x1b[38;2;145;205;140mFound {var} in your environment.\x1b[0m")));
+                    lines.push(pad_row(""));
+                    lines.push(pad_row("  \x1b[38;2;160;155;145mPress Enter to use it, or paste a key to save one for this provider.\x1b[0m"));
+                } else if self.key_required() {
                     lines.push(pad_row("\x1b[38;2;225;175;95mThis provider needs an API key.\x1b[0m"));
                     lines.push(pad_row(""));
                     lines.push(pad_row("  \x1b[38;2;160;155;145mHow to get your API key:\x1b[0m"));
-                    if self.config.backend_url.contains("openrouter.ai") {
+                    if self.profile.url.contains("openrouter.ai") {
                         lines.push(pad_row("    1. Open \x1b[1;38;2;145;205;140mhttps://openrouter.ai/keys\x1b[0m in your browser"));
                         lines.push(pad_row("    2. Create a key and copy it (format: \x1b[38;2;175;170;225msk-or-v1-...\x1b[0m)"));
                         lines.push(pad_row("    3. Paste or type your key below:"));
@@ -775,18 +880,27 @@ impl SetupWizard {
                         lines.push(pad_row("    2. Copy your Secret / Bearer API token"));
                         lines.push(pad_row("    3. Paste or type your key below:"));
                     }
-                } else {
-                    lines.push(pad_row("\x1b[38;2;145;205;140mLocal inference engine detected (zero mandatory cloud keys).\x1b[0m"));
+                    if let Some(var) = self.profile.key_env().first() {
+                        lines.push(pad_row(&format!("  \x1b[38;2;135;130;125mOr set {var}: FlashAgent reads it when no key is saved.\x1b[0m")));
+                    }
+                } else if self.is_cloud_backend() {
+                    lines.push(pad_row("\x1b[38;2;225;175;95mA server on the internet usually wants a key.\x1b[0m"));
                     lines.push(pad_row(""));
-                    lines.push(pad_row("  \x1b[38;2;160;155;145mIf your local server uses Bearer auth, enter it below.\x1b[0m"));
+                    lines.push(pad_row("  \x1b[38;2;160;155;145mPaste it below, or press Enter if this one takes none.\x1b[0m"));
+                } else {
+                    lines.push(pad_row("\x1b[38;2;145;205;140mA server on your network usually needs no key.\x1b[0m"));
+                    lines.push(pad_row(""));
+                    lines.push(pad_row("  \x1b[38;2;160;155;145mIf your server uses Bearer auth, enter it below.\x1b[0m"));
                     lines.push(pad_row("  \x1b[38;2;135;130;125mOtherwise, leave empty and press Enter to continue.\x1b[0m"));
                 }
                 lines.push(pad_row(""));
 
                 let placeholder_color = "\x1b[38;2;68;65;62m";
                 let key_display = if self.api_key_input.is_empty() {
-                    let placeholder = if self.is_cloud_backend() {
-                        "Paste API key here (sk-or-...)"
+                    let placeholder = if env_key.is_some() {
+                        "Enter uses the environment's key"
+                    } else if self.key_required() {
+                        "Paste API key here"
                     } else {
                         "Enter API key here (Enter to skip)"
                     };
@@ -809,7 +923,7 @@ impl SetupWizard {
                 let total_models = self.available_models.len();
                 let total_matches = filtered.len();
 
-                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 3: Choose the model\x1b[0m"));
+                lines.push(pad_row(&heading(2, "Choose the model")));
                 let count_info = if self.is_lm_studio() && self.discovered_models.iter().any(|m| m.is_loaded) {
                     format!("({total_models} loaded in LM Studio)")
                 } else if self.model_search.is_empty() {
@@ -822,7 +936,7 @@ impl SetupWizard {
 
                 if self.available_models.is_empty() {
                     // Said plainly: a missing server is the usual first-run problem.
-                    let url = self.config.backend_url.trim_end_matches('/');
+                    let url = self.profile.url.trim_end_matches('/');
                     let (said, next) = match self.connection_status.as_deref() {
                         Some(status) if status.starts_with("Connecting") => (status.to_string(), String::new()),
                         Some(status) if !status.starts_with("Connected") => (
@@ -882,7 +996,7 @@ impl SetupWizard {
                 }
             }
             3 => {
-                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 4: Permissions\x1b[0m"));
+                lines.push(pad_row(&heading(3, "Permissions")));
                 lines.push(pad_row("\x1b[38;2;160;155;145mWhat may the agent do without asking? Shift+Tab changes it any time.\x1b[0m"));
                 lines.push(pad_row(""));
                 let modes = [
@@ -903,7 +1017,7 @@ impl SetupWizard {
                 }
             }
             4 => {
-                lines.push(pad_row("\x1b[1;38;2;240;235;225mStep 5: Sampling and launch\x1b[0m"));
+                lines.push(pad_row(&heading(4, "Sampling and launch")));
                 lines.push(pad_row("\x1b[38;2;160;155;145mHow the model samples. The preset suits most models; its numbers are in /sampling.\x1b[0m"));
                 lines.push(pad_row(""));
 
@@ -921,18 +1035,19 @@ impl SetupWizard {
 
         lines.push(pad_row(""));
         let hint_w = inner_w.saturating_sub(2);
-        let hints: &[(&str, &str)] = match self.step {
-            0 if self.is_custom() => &[("type", "the URL"), ("\u{2191}/\u{2193}", "presets"), ("Enter", "next"), ("Esc", "clear or quit")],
-            0 => &[("\u{2191}/\u{2193}", "move"), ("0-9 c", "pick"), ("Enter", "next"), ("Esc", "quit")],
-            1 if self.is_cloud_backend() => &[("paste", "the key"), ("Enter", "check it"), ("Esc", "clear or back")],
-            1 => &[("Enter", "skip"), ("Esc", "back")],
-            2 => &[("\u{2191}/\u{2193}", "move"), ("type", "to filter"), ("Enter", "choose"), ("Esc", "clear or back")],
-            3 => &[("\u{2191}/\u{2193}", "move"), ("1-4", "pick"), ("Enter", "next"), ("Esc", "back")],
-            4 => &[("\u{2190}/\u{2192}", "preset"), ("Enter", "launch"), ("Esc", "back")],
-            _ => &[],
+        let model_enter = if self.provider_only { "save" } else { "choose" };
+        let hints: Vec<(&str, &str)> = match self.step {
+            0 if self.is_custom() => vec![("type", "the URL"), ("Tab", "protocol"), ("\u{2191}/\u{2193}", "presets"), ("Enter", "next"), ("Esc", "clear or quit")],
+            0 => vec![("\u{2191}/\u{2193}", "move"), ("0-9 c", "pick"), ("Enter", "next"), ("Esc", "quit")],
+            1 if self.key_required() => vec![("paste", "the key"), ("Enter", "check it"), ("Esc", "clear or back")],
+            1 => vec![("Enter", "skip"), ("Esc", "back")],
+            2 => vec![("\u{2191}/\u{2193}", "move"), ("type", "to filter"), ("Enter", model_enter), ("Esc", "clear or back")],
+            3 => vec![("\u{2191}/\u{2193}", "move"), ("1-4", "pick"), ("Enter", "next"), ("Esc", "back")],
+            4 => vec![("\u{2190}/\u{2192}", "preset"), ("Enter", "launch"), ("Esc", "back")],
+            _ => Vec::new(),
         };
         if !hints.is_empty() {
-            lines.push(pad_row(&crate::key_hints(hints, hint_w)));
+            lines.push(pad_row(&crate::key_hints(&hints, hint_w)));
         }
 
         lines.push(format!("  {border_color}╰{}╯{reset}", "─".repeat(inner_w)));
@@ -940,12 +1055,39 @@ impl SetupWizard {
     }
 }
 
+/// Discovery with the provider as set up so far: its address, protocol and
+/// key, typed or from the environment.
+async fn probe_server(wizard: &mut SetupWizard) {
+    let backend = flashagent_llm::Client::new(wizard.profile.endpoint(), "");
+    if let Some(disc) = backend.discover_server().await {
+        wizard.apply_discovered_models(disc);
+    } else {
+        wizard.available_models.clear();
+        wizard.discovered_models.clear();
+        wizard.connection_status = Some("No server answered".to_string());
+    }
+}
+
+/// On arriving at the model step from before it: the server is asked with
+/// what the steps before gave.
+async fn after_key(wizard: &mut SetupWizard, prev_step: usize, painter: &mut crate::screen::Screen) {
+    if prev_step < 2 && wizard.step == 2 {
+        wizard.available_models.clear();
+        wizard.connection_status = Some(format!("Connecting to {}\u{2026}", wizard.profile.url.trim_end_matches('/')));
+        let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
+        crate::screen::paint_page(painter, &wizard.render(term_w as usize), true);
+        probe_server(wizard).await;
+    }
+}
+
 /// Inside the running app: reads keys from the event channel, so it does not
 /// compete with the main reader for stdin. Everything else on `rx` (turn
 /// events, discovery, recap) goes into `deferred` in order; dropping it left a
-/// turn that finished meanwhile running forever.
+/// turn that finished meanwhile running forever. `adding` asks only for a
+/// provider, beside the saved ones.
 pub async fn run_wizard_channel(
     config: &mut AppConfig,
+    adding: bool,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::UiEvent>,
     deferred: &mut Vec<crate::UiEvent>,
 ) -> anyhow::Result<bool> {
@@ -956,11 +1098,12 @@ pub async fn run_wizard_channel(
     let mut stdout = std::io::stdout();
     let _ = execute!(stdout, cursor::Hide);
 
-    let mut wizard = SetupWizard::new(config.clone());
-
-    let backend = flashagent_llm::Client::new(wizard.config.endpoint(), "");
-    if let Some(disc) = backend.discover_server().await {
-        wizard.apply_discovered_models(disc);
+    let mut wizard = if adding { SetupWizard::adding(config.clone()) } else { SetupWizard::new(config.clone()) };
+    if !adding {
+        let backend = flashagent_llm::Client::new(wizard.profile.endpoint(), "");
+        if let Some(disc) = backend.discover_server().await {
+            wizard.apply_discovered_models(disc);
+        }
     }
 
     let mut painter = crate::screen::Screen::new();
@@ -976,21 +1119,7 @@ pub async fn run_wizard_channel(
                         if let Some(finished) = wizard.handle_key(code, mods) {
                             break finished;
                         }
-                        // Leaving the API key step: probe the server with the key.
-                        if prev_step == 1 && wizard.step == 2 {
-                            wizard.available_models.clear();
-                            wizard.connection_status = Some(format!("Connecting to {}\u{2026}", wizard.config.backend_url.trim_end_matches('/')));
-                            let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
-                            crate::screen::paint_page(&mut painter, &wizard.render(term_w as usize), true);
-                            let backend = flashagent_llm::Client::new(wizard.config.endpoint(), "");
-                            if let Some(disc) = backend.discover_server().await {
-                                wizard.apply_discovered_models(disc);
-                            } else {
-                                wizard.available_models.clear();
-                                wizard.discovered_models.clear();
-                                wizard.connection_status = Some("No server answered".to_string());
-                            }
-                        }
+                        after_key(&mut wizard, prev_step, &mut painter).await;
                     }
                     crate::UiEvent::Paste(text) => {
                         wizard.handle_paste(&text);
@@ -1026,7 +1155,7 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
 
     let mut wizard = SetupWizard::new(config.clone());
 
-    let backend = flashagent_llm::Client::new(wizard.config.endpoint(), "");
+    let backend = flashagent_llm::Client::new(wizard.profile.endpoint(), "");
     if let Some(disc) = backend.discover_server().await {
         wizard.apply_discovered_models(disc);
     }
@@ -1043,21 +1172,7 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
                     if let Some(finished) = wizard.handle_key(key.code, key.modifiers) {
                         break finished;
                     }
-                    // Leaving the API key step: probe the server with the key.
-                    if prev_step == 1 && wizard.step == 2 {
-                        wizard.available_models.clear();
-                        wizard.connection_status = Some(format!("Connecting to {}\u{2026}", wizard.config.backend_url.trim_end_matches('/')));
-                        let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
-                        crate::screen::paint_page(&mut painter, &wizard.render(term_w as usize), true);
-                        let backend = flashagent_llm::Client::new(wizard.config.endpoint(), "");
-                        if let Some(disc) = backend.discover_server().await {
-                            wizard.apply_discovered_models(disc);
-                        } else {
-                            wizard.available_models.clear();
-                            wizard.discovered_models.clear();
-                            wizard.connection_status = Some("No server answered".to_string());
-                        }
-                    }
+                    after_key(&mut wizard, prev_step, &mut painter).await;
                 }
                 Event::Paste(text) => {
                     wizard.handle_paste(&text);
@@ -1081,6 +1196,16 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
 mod tests {
     use super::*;
 
+    fn with_provider(url: &str) -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.save_provider(ProviderProfile::from_url(url));
+        cfg
+    }
+
+    fn preset_row(name: &str) -> usize {
+        BackendPreset::all().iter().position(|p| p.name == name).unwrap()
+    }
+
     #[test]
     fn test_wizard_steps_and_navigation() {
         let cfg = AppConfig::default();
@@ -1090,12 +1215,11 @@ mod tests {
         wizard.next_option();
         assert_eq!(wizard.preset_idx, 1);
 
-        wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
-        assert_eq!(wizard.step, 1);
-
-        // A local backend allows an empty key.
+        // Ollama runs on this computer: no key to ask for.
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 2);
+        assert!(wizard.render(80).join("\n").contains("Step 2: Choose the model"));
+        assert_eq!(wizard.total_steps(), 4);
 
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 3);
@@ -1115,10 +1239,7 @@ mod tests {
         assert_eq!(wizard.step, 2);
 
         wizard.handle_key(KeyCode::Esc, KeyModifiers::empty());
-        assert_eq!(wizard.step, 1);
-
-        wizard.handle_key(KeyCode::Esc, KeyModifiers::empty());
-        assert_eq!(wizard.step, 0);
+        assert_eq!(wizard.step, 0, "back past the key step it never showed");
 
         // On step 0, Esc exits.
         let res = wizard.handle_key(KeyCode::Esc, KeyModifiers::empty());
@@ -1127,16 +1248,18 @@ mod tests {
 
     #[test]
     fn test_wizard_cloud_mandatory_api_key() {
-        let cfg = AppConfig { backend_url: "https://openrouter.ai/api/v1".to_string(), ..AppConfig::default() };
-        let mut wizard = SetupWizard::new(cfg);
+        let mut wizard = SetupWizard::new(with_provider("https://openrouter.ai/api/v1"));
         wizard.step = 1; // On API key step
 
         assert!(wizard.is_cloud_backend());
 
-        // An empty key must not advance.
+        // An empty key must not advance, unless the environment has one.
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
-        assert_eq!(wizard.step, 1);
-        assert!(wizard.connection_status.as_ref().unwrap().contains("API key is required"));
+        if wizard.env_key().is_none() {
+            assert_eq!(wizard.step, 1);
+            assert!(wizard.connection_status.as_ref().unwrap().contains("API key is required"));
+        }
+        wizard.step = 1;
 
         for c in "sk-or-v1-abcdef123456".chars() {
             wizard.handle_key(KeyCode::Char(c), KeyModifiers::empty());
@@ -1145,10 +1268,11 @@ mod tests {
 
         let rendered = wizard.render(80).join("\n");
         assert!(rendered.contains("sk-or-••••••••3456"));
+        assert!(!rendered.contains("abcdef"), "the key is masked");
 
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 2);
-        assert_eq!(wizard.config.api_key.as_deref(), Some("sk-or-v1-abcdef123456"));
+        assert_eq!(wizard.profile.api_key.as_deref(), Some("sk-or-v1-abcdef123456"));
     }
 
     #[test]
@@ -1192,7 +1316,7 @@ mod tests {
         assert!(wizard.is_custom());
         let selected_render = wizard.render(80).join("\n");
         assert!(selected_render.contains("type its URL"));
-        assert!(selected_render.contains("OpenAI-compatible URL"));
+        assert!(selected_render.contains("Any server's address"));
 
         // Enter on an empty URL does not advance and shows a warning.
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
@@ -1209,7 +1333,7 @@ mod tests {
             wizard.handle_key(KeyCode::Char(c), KeyModifiers::empty());
         }
         assert_eq!(wizard.custom_url, "http://192.168.1.50:5000/v1");
-        assert_eq!(wizard.config.backend_url, "http://192.168.1.50:5000/v1");
+        assert_eq!(wizard.profile.url, "http://192.168.1.50:5000/v1");
 
         while !wizard.custom_url.is_empty() {
             wizard.handle_key(KeyCode::Backspace, KeyModifiers::empty());
@@ -1222,8 +1346,44 @@ mod tests {
             wizard.handle_key(KeyCode::Char(c), KeyModifiers::empty());
         }
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(wizard.step, 1, "an address typed by hand may still want a key");
+        assert_eq!(wizard.profile.url, "http://192.168.1.50:5000/v1");
+        assert_eq!(wizard.profile.name, "192.168.1.50:5000");
+    }
+
+    #[test]
+    fn a_typed_address_never_insists_on_a_key() {
+        for url in ["http://192.168.1.50:8000/v1", "https://llm.example.org/v1"] {
+            let mut wizard = SetupWizard::new(AppConfig::default());
+            wizard.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
+            wizard.handle_paste(url);
+            wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
+            assert_eq!(wizard.step, 1, "{url}");
+            wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
+            assert_eq!(wizard.step, 2, "{url}: an empty key was refused");
+        }
+        let mut wizard = SetupWizard::new(AppConfig::default());
+        wizard.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
+        wizard.handle_paste("http://192.168.1.50:8000/v1");
+        assert!(!wizard.is_cloud_backend(), "plain http is a server on the network");
+    }
+
+    #[test]
+    fn a_custom_address_takes_the_protocol_it_implies_and_tab_changes_it() {
+        let mut wizard = SetupWizard::new(AppConfig::default());
+        wizard.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
+        wizard.handle_paste("http://gpu-box:11434");
+        assert_eq!(wizard.profile.protocol, ApiProtocol::Ollama, "read from the address");
+        assert!(crate::strip_ansi(&wizard.render(100).join("\n")).contains("Spoken to as Ollama \u{b7} Tab changes it"));
+        wizard.handle_key(KeyCode::Tab, KeyModifiers::empty());
+        assert_eq!(wizard.profile.protocol, ApiProtocol::OpenAi, "Tab goes round to the first");
+        wizard.handle_key(KeyCode::Tab, KeyModifiers::empty());
+        assert_eq!(wizard.profile.protocol, ApiProtocol::Anthropic);
+        wizard.handle_key(KeyCode::Char('/'), KeyModifiers::empty());
+        assert_eq!(wizard.profile.protocol, ApiProtocol::Anthropic, "typing keeps the chosen protocol");
+        wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 1);
-        assert_eq!(wizard.config.backend_url, "http://192.168.1.50:5000/v1");
+        assert_eq!(wizard.profile.url, "http://gpu-box:11434");
     }
 
     #[test]
@@ -1237,35 +1397,100 @@ mod tests {
         let presets = BackendPreset::all();
         wizard.handle_key(KeyCode::Up, KeyModifiers::empty());
         assert_eq!(wizard.preset_idx, presets.len() - 1);
-        assert_eq!(wizard.config.backend_url, presets[presets.len() - 1].url);
+        assert_eq!(wizard.profile.url, presets[presets.len() - 1].url);
 
         wizard.handle_key(KeyCode::Down, KeyModifiers::empty());
         assert!(wizard.is_custom());
     }
 
     #[test]
-    fn every_preset_can_be_picked_and_none_is_mistaken_for_custom() {
+    fn every_preset_can_be_reached_and_none_is_mistaken_for_custom() {
         let presets = BackendPreset::all();
         let mut wizard = SetupWizard::new(AppConfig::default());
-        for (i, preset) in presets.iter().enumerate() {
-            let key = SetupWizard::row_key(i).expect("every preset has a key");
+        // The first ten have a key of their own.
+        for (i, preset) in presets.iter().enumerate().take(10) {
+            let key = SetupWizard::row_key(i).expect("the first ten have a key");
             wizard.handle_key(KeyCode::Char(key), KeyModifiers::empty());
             assert_eq!(wizard.preset_idx, i, "{}", preset.name);
             assert!(!wizard.is_custom());
-            assert_eq!(wizard.config.backend_url, preset.url);
+            assert_eq!((wizard.profile.url.as_str(), wizard.profile.protocol), (preset.url, preset.protocol));
         }
-        // The arrows reach every row and come back round.
+        // The arrows reach every row, show it, and come back round.
         let mut wizard = SetupWizard::new(AppConfig::default());
-        for _ in 0..=presets.len() {
+        for preset in presets.iter().skip(1) {
             wizard.handle_key(KeyCode::Down, KeyModifiers::empty());
+            assert_eq!(wizard.profile.name, preset.name);
+            let shown = crate::strip_ansi(&wizard.render(100).join("\n"));
+            assert!(shown.contains(preset.url), "{} is selected but not shown:\n{shown}", preset.name);
         }
+        wizard.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert!(wizard.is_custom());
+        wizard.handle_key(KeyCode::Down, KeyModifiers::empty());
         assert_eq!(wizard.preset_idx, 0);
         // A saved cloud preset opens on its own row.
-        let saved = AppConfig { backend_url: presets[presets.len() - 1].url.clone(), ..AppConfig::default() };
-        assert_eq!(SetupWizard::new(saved).preset_idx, presets.len() - 1);
+        let last = presets.len() - 1;
+        let saved = with_provider(presets[last].url);
+        assert_eq!(SetupWizard::new(saved).preset_idx, last);
         let rendered = SetupWizard::new(AppConfig::default()).render(100).join("\n");
         assert_eq!(rendered.matches("c. Custom").count(), 1, "{rendered}");
-        assert!(rendered.contains("0. Gemini"), "{rendered}");
+        assert!(rendered.contains("0. OpenAI"), "{rendered}");
+        assert!(rendered.contains("more below"), "{rendered}");
+    }
+
+    #[test]
+    fn the_preset_list_fits_a_small_terminal() {
+        for row in [0, 9, 14, BackendPreset::all().len()] {
+            let mut wizard = SetupWizard::new(AppConfig::default());
+            wizard.select_row(row);
+            let rows = wizard.render(80);
+            assert!(rows.len() < 24, "{} rows and the blank one above them at 80x24 with row {row} chosen", rows.len());
+            assert!(rows.iter().all(|r| crate::visible_width(r) <= 80));
+        }
+    }
+
+    #[test]
+    fn a_local_preset_skips_the_key_and_a_cloud_one_notices_its_environment_variable() {
+        let mut wizard = SetupWizard::new(AppConfig::default());
+        wizard.select_row(preset_row("llama.cpp"));
+        assert!(!wizard.needs_key_step());
+        wizard.select_row(preset_row("Anthropic"));
+        assert!(wizard.needs_key_step());
+        assert_eq!(wizard.total_steps(), 5);
+        wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(wizard.step, 1);
+        let shown = crate::strip_ansi(&wizard.render(100).join("\n"));
+        match wizard.env_key() {
+            Some(var) => assert!(shown.contains(&format!("Found {var} in your environment.")), "{shown}"),
+            None => assert!(shown.contains("Or set ANTHROPIC_API_KEY: FlashAgent reads it when no key is saved."), "{shown}"),
+        }
+    }
+
+    #[test]
+    fn running_again_adds_a_provider_and_keeps_the_saved_ones() {
+        let mut cfg = with_provider("http://localhost:1234/v1");
+        cfg.active_profile_mut().model = "local-model".into();
+        cfg.setup_completed = true;
+
+        let mut wizard = SetupWizard::adding(cfg.clone());
+        assert_eq!(wizard.total_steps(), 2, "a local server: server and model");
+        wizard.select_row(preset_row("vLLM"));
+        wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        wizard.available_models = vec!["served-model".into()];
+        assert_eq!(wizard.handle_key(KeyCode::Enter, KeyModifiers::empty()), Some(true), "the model step ends it");
+        let names: Vec<&str> = wizard.config.providers.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["LM Studio", "vLLM"]);
+        assert_eq!(wizard.config.active_profile().name, "vLLM");
+        assert_eq!(wizard.config.active_profile().model, "served-model");
+
+        // The same server again updates it instead of adding a twin, and keeps its key.
+        let mut again = SetupWizard::adding(wizard.config.clone());
+        again.select_row(0);
+        assert_eq!(again.profile.model, "local-model", "the saved provider for that row is loaded");
+        again.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        again.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(again.config.providers.len(), 2);
+        assert_eq!(again.config.active_profile().name, "LM Studio");
+        assert!(crate::strip_ansi(&SetupWizard::adding(again.config.clone()).render(100).join("\n")).contains("saved"));
     }
 
     #[test]
@@ -1300,14 +1525,13 @@ mod tests {
 
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 1);
-        assert_eq!(wizard.config.backend_url, "http://localhost:8000/v1");
+        assert_eq!(wizard.profile.url, "http://localhost:8000/v1");
+        assert_eq!(wizard.profile.name, "vLLM", "named after the server at that address");
     }
 
     #[test]
     fn test_wizard_preserves_existing_custom_url() {
-        let cfg = AppConfig { backend_url: "http://10.0.0.5:1234/v1".to_string(), ..AppConfig::default() };
-
-        let wizard = SetupWizard::new(cfg);
+        let wizard = SetupWizard::new(with_provider("http://10.0.0.5:1234/v1"));
         assert!(wizard.is_custom());
         assert_eq!(wizard.custom_url, "http://10.0.0.5:1234/v1");
         assert_eq!(wizard.custom_cursor, "http://10.0.0.5:1234/v1".len());
@@ -1318,9 +1542,7 @@ mod tests {
 
     #[test]
     fn test_wizard_lm_studio_loaded_models_filtering_and_capabilities() {
-        let cfg = AppConfig { backend_url: "http://127.0.0.1:1234/v1".to_string(), ..AppConfig::default() };
-
-        let mut wizard = SetupWizard::new(cfg);
+        let mut wizard = SetupWizard::new(with_provider("http://127.0.0.1:1234/v1"));
         assert!(wizard.is_lm_studio());
 
         let models = vec![
@@ -1362,7 +1584,7 @@ mod tests {
         ];
 
         wizard.apply_discovered_models(flashagent_llm::ServerDiscovery {
-            base_url: wizard.config.backend_url.clone(),
+            base_url: wizard.profile.url.clone(),
             models,
             active_model: None,
             kind: flashagent_llm::thinking::ServerKind::LmStudio,
@@ -1371,7 +1593,7 @@ mod tests {
         // Only the loaded model is kept.
         assert_eq!(wizard.available_models.len(), 1);
         assert_eq!(wizard.available_models[0], "deepseek-r1-distill-qwen-14b");
-        assert_eq!(wizard.config.model, "deepseek-r1-distill-qwen-14b");
+        assert_eq!(wizard.profile.model, "deepseek-r1-distill-qwen-14b");
 
         wizard.step = 2;
         let rendered = wizard.render(80).join("\n");
@@ -1383,16 +1605,16 @@ mod tests {
     #[test]
     fn test_wizard_handle_paste_instantly_updates_fields() {
         let mut wizard = SetupWizard::new(AppConfig::default());
-        wizard.preset_idx = SetupWizard::custom_idx();
+        wizard.select_row(SetupWizard::custom_idx());
 
         wizard.handle_paste("http://192.168.1.50:8000/v1\r\n");
         assert_eq!(wizard.custom_url, "http://192.168.1.50:8000/v1");
-        assert_eq!(wizard.config.backend_url, "http://192.168.1.50:8000/v1");
+        assert_eq!(wizard.profile.url, "http://192.168.1.50:8000/v1");
 
         wizard.step = 1;
         wizard.handle_paste("sk-paste-token-xyz");
         assert_eq!(wizard.api_key_input, "sk-paste-token-xyz");
-        assert_eq!(wizard.config.api_key.as_deref(), Some("sk-paste-token-xyz"));
+        assert_eq!(wizard.profile.api_key.as_deref(), Some("sk-paste-token-xyz"));
 
         wizard.step = 2;
         wizard.available_models = vec![
@@ -1402,6 +1624,6 @@ mod tests {
         ];
         wizard.handle_paste("coder");
         assert_eq!(wizard.model_search, "coder");
-        assert_eq!(wizard.config.model, "deepseek-coder-v2");
+        assert_eq!(wizard.profile.model, "deepseek-coder-v2");
     }
 }

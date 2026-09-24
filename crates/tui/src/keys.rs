@@ -491,9 +491,18 @@ impl App {
                 self.custom_placeholder = None;
                 self.suggested_prompt = None;
                 self.latest_suggestion = None;
+                let typed_provider = self.input.line_count() == 1
+                    && matches!(self.input.split_whitespace().next(), Some("/provider" | "/providers"));
                 if cx.gate.pending().is_some() {
                     cx.gate.respond(self.confirm_select.decision());
                     self.confirm_select = ConfirmSelect::new();
+                } else if typed_provider && self.running {
+                    // Not steering for the model: it stays typed for when the answer is done.
+                    self.refuse_switch_while_busy();
+                } else if let Some(switch) = self.provider_switch.as_ref().filter(|_| !self.input.starts_with('/') && !self.running) {
+                    // It would go to whichever server the client has at that moment.
+                    let name = switch.name.clone();
+                    self.background = Some(BackgroundNotice::fading(format!("Still connecting to {name} \u{b7} send it once it answers"), 5).warning());
                 } else if !self.input.is_empty() && self.running {
                     if let Some(steer_tx) = self.active_steer_tx.clone() {
                         let text = self.input.take();
