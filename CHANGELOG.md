@@ -1,5 +1,10 @@
 # Changelog
 
+## b399 — pasting an API key on Windows
+
+- **The setup wizard takes a pasted API key on Windows.** The classic Windows console hands Ctrl+V to the program as a key instead of pasting, and the wizard ignored it, so a key could not be pasted at all. Ctrl+V (Ctrl+М on a Russian layout) and Shift+Insert now read the clipboard in the key, server address and model search fields.
+- Spaces and line breaks copied along with a key are dropped, and the key's length is shown beside the mask, so you can see that the paste landed, and that it landed once.
+
 ## b398 — an audit of the whole program, and what it found
 
 Five reviewers went through every part of FlashAgent looking for bugs; about ninety came back, and a second review checked the fixes. Update if you run b388: it has security and crash fixes.
