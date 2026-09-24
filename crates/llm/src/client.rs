@@ -193,7 +193,7 @@ impl Client {
             .discovery
             .read()
             .as_ref()
-            .and_then(|disc| disc.models.iter().find(|m| m.id == model).map(|m| m.thinking.clone()));
+            .and_then(|disc| disc.model(&model).map(|m| m.thinking.clone()));
         *self.profile.write() = derived;
         *self.learned.write() = Default::default();
     }
@@ -206,12 +206,7 @@ impl Client {
     /// `models`, and without the fallback no profile was adopted.
     pub fn adopt_discovery(&self, disc: &ServerDiscovery) {
         let model = self.model();
-        let thinking = disc
-            .models
-            .iter()
-            .find(|m| m.id == model)
-            .or_else(|| disc.active_model.as_ref().filter(|m| m.id == model))
-            .map(|m| m.thinking.clone());
+        let thinking = disc.model(&model).map(|m| m.thinking.clone());
         *self.discovery.write() = Some(disc.clone());
         if let Some(thinking) = thinking {
             *self.profile.write() = Some(thinking);

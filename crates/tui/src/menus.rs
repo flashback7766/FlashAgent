@@ -37,7 +37,7 @@ pub(crate) fn build_effort_menu(
         Some(p) => p.supported || p.is_unreported(),
         None => source
             .discovery()
-            .and_then(|d| d.models.iter().find(|m| m.id == model).map(|m| m.thinking.supported || m.thinking.is_unreported()))
+            .and_then(|d| d.model(model).map(|m| m.thinking.supported || m.thinking.is_unreported()))
             .unwrap_or(true),
     };
     let auto_desc = if !can_think {
