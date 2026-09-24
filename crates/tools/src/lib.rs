@@ -173,18 +173,14 @@ impl BuiltinTools {
                 // parts make of it, as edit_files writes it: previewing each part
                 // on its own hid the second one.
                 let mut files: Vec<(std::path::PathBuf, String, String, Option<String>)> = Vec::new();
+                let edited = |path: &str, text: String, edits: &[fs_tools::EditChunk]| fs_tools::apply_edits(path, text, edits).ok().map(|(new, _)| new);
                 for (path, edits) in args.targets() {
                     let key = fs_tools::same_file_key(&self.cwd, &path);
-                    let at = files.iter().position(|f| f.0 == key);
-                    let current = match at {
-                        Some(i) => files[i].3.clone(),
-                        None => fs_tools::read_raw(&self.cwd, &path),
-                    };
-                    let new = current.clone().and_then(|text| fs_tools::apply_edits(text, &edits).ok());
-                    match at {
-                        Some(i) => files[i].3 = new,
+                    match files.iter_mut().find(|f| f.0 == key) {
+                        Some(earlier) => earlier.3 = earlier.3.take().and_then(|text| edited(&path, text, &edits)),
                         None => {
-                            if let Some(old) = current {
+                            if let Some(old) = fs_tools::read_raw(&self.cwd, &path) {
+                                let new = edited(&path, old.clone(), &edits);
                                 files.push((key, path, old, new));
                             }
                         }
@@ -377,10 +373,10 @@ impl WritePreview for BuiltinTools {
                 Some(text) => text,
                 None => fs_tools::read_raw(&self.cwd, &path)?,
             };
-            if let Err(e) = fs_tools::check_edits(&path, &text, &edits) {
-                return Some(format!("error: {e}"));
-            }
-            texts.insert(key, fs_tools::apply_edits(text, &edits).ok()?);
+            match fs_tools::apply_edits(&path, text, &edits) {
+                Ok((edited, _)) => texts.insert(key, edited),
+                Err(e) => return Some(format!("error: {e}")),
+            };
         }
         None
     }

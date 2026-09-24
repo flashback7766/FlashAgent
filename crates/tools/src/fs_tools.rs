@@ -87,7 +87,7 @@ fn normalize_line(s: &str) -> String {
 /// Tolerates CRLF/LF, curly quotes and trailing whitespace differences, and
 /// the line numbers read_file puts in front of each line when a model copies
 /// them into old_string.
-pub(crate) fn find_actual_string(text: &str, needle: &str) -> Option<String> {
+fn find_actual_string(text: &str, needle: &str) -> Option<String> {
     if text.contains(needle) {
         return Some(needle.to_string());
     }
@@ -204,87 +204,47 @@ fn not_found(path: &str, text: &str, needle: &str) -> ToolError {
     ToolError::Other(message)
 }
 
-/// Ambiguity is an error, not a guess. Shared by [`edit_file`] and the diff preview.
-pub(crate) fn apply_edits(mut text: String, edits: &[EditChunk]) -> Result<String, ToolError> {
-    for edit in edits {
-        if edit.old_string.is_empty() {
-            return Err(ToolError::Other("edit: old_string must not be empty".into()));
-        }
-        let target_string = if text.contains(&edit.old_string) {
-            edit.old_string.clone()
-        } else if let Some(actual) = find_actual_string(&text, &edit.old_string) {
-            actual
-        } else {
-            return Err(ToolError::Other("edit: old_string not found".into()));
-        };
-
-        let count = text.matches(&target_string).count();
-        if count == 0 {
-            return Err(ToolError::Other("edit: old_string not found".into()));
-        }
-        if count > 1 && !edit.replace_all {
-            return Err(ToolError::Other(format!(
-                "edit: old_string matches {count} times; add more context or set replace_all"
-            )));
-        }
-        let new_string = in_line_endings_of(&text, &edit.new_string).into_owned();
-        text = if edit.replace_all {
-            text.replace(&target_string, &new_string)
-        } else {
-            text.replacen(&target_string, &new_string, 1)
-        };
-    }
-    Ok(text)
-}
-
-pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<String, ToolError> {
-    let file = resolve(cwd, path);
-    let text = std::fs::read_to_string(&file)
-        .map_err(|e| ToolError::Other(format!("read {path}: {e}")))?;
-    let applied = check_edits(path, &text, edits)?;
-    let text = apply_edits(text, edits)?;
-    std::fs::write(&file, &text)?;
-    Ok(format!("applied {applied} edit(s) to {path}"))
-}
-
-/// What edit_file would do to `text`, without writing: how many replacements,
-/// or the error it would fail with.
-pub(crate) fn check_edits(path: &str, text: &str, edits: &[EditChunk]) -> Result<usize, ToolError> {
-    let mut checked = text.to_string();
+/// The text with every edit applied in order, and how many replacements that
+/// made; `path` only names the file in errors. Ambiguity is an error, not a
+/// guess. Shared by the edit tools, the diff preview and the check made before
+/// anyone is asked to approve an edit.
+pub(crate) fn apply_edits(path: &str, mut text: String, edits: &[EditChunk]) -> Result<(String, usize), ToolError> {
     let mut applied = 0usize;
     for edit in edits {
         if edit.old_string.is_empty() {
             return Err(ToolError::Other("edit: old_string must not be empty".into()));
         }
-        let target_string = if checked.contains(&edit.old_string) {
-            edit.old_string.clone()
-        } else if let Some(actual) = find_actual_string(&checked, &edit.old_string) {
-            actual
-        } else {
-            return Err(not_found(path, &checked, &edit.old_string));
+        let Some(target) = find_actual_string(&text, &edit.old_string) else {
+            return Err(not_found(path, &text, &edit.old_string));
         };
-        let count = checked.matches(&target_string).count();
-        if count == 0 {
-            return Err(not_found(path, &checked, &edit.old_string));
-        }
+        let count = text.matches(target.as_str()).count();
         if count > 1 && !edit.replace_all {
             return Err(ToolError::Other(format!(
                 "edit: old_string matches {count} times in {path}; add more context or set replace_all"
             )));
         }
         applied += if edit.replace_all { count } else { 1 };
-        let new_string = in_line_endings_of(&checked, &edit.new_string).into_owned();
-        checked = if edit.replace_all {
-            checked.replace(&target_string, &new_string)
+        let new_string = in_line_endings_of(&text, &edit.new_string);
+        text = if edit.replace_all {
+            text.replace(target.as_str(), &new_string)
         } else {
-            checked.replacen(&target_string, &new_string, 1)
+            text.replacen(target.as_str(), &new_string, 1)
         };
     }
-    Ok(applied)
+    Ok((text, applied))
+}
+
+pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<String, ToolError> {
+    let file = resolve(cwd, path);
+    let text = std::fs::read_to_string(&file)
+        .map_err(|e| ToolError::Other(format!("read {path}: {e}")))?;
+    let (text, applied) = apply_edits(path, text, edits)?;
+    std::fs::write(&file, &text)?;
+    Ok(format!("applied {applied} edit(s) to {path}"))
 }
 
 /// A batch is for a handful of related files, not the whole project.
-pub(crate) const MAX_BATCH_FILES: usize = 20;
+const MAX_BATCH_FILES: usize = 20;
 
 /// An unreadable file is reported in its place; only a call where none could
 /// be read is an error.
@@ -321,15 +281,27 @@ pub(crate) fn read_files(cwd: &Path, files: &[(String, usize, usize)]) -> Result
 /// All edits are applied in memory first; if any does not fit, no file is
 /// written. A half-made change across files is worse than none.
 pub(crate) fn edit_files(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Result<String, ToolError> {
+    write_planned(&plan_edits(cwd, files)?)
+}
+
+/// One file of a batch edit, changed in memory and not yet written.
+struct PlannedFile {
+    /// As the call named it.
+    path: String,
+    file: PathBuf,
+    original: String,
+    new: String,
+    edits: usize,
+}
+
+fn plan_edits(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Result<Vec<PlannedFile>, ToolError> {
     if files.is_empty() {
         return Err(ToolError::Other("edit_file: files is empty".into()));
     }
     if files.len() > MAX_BATCH_FILES {
         return Err(ToolError::Other(format!("edit_file: at most {MAX_BATCH_FILES} files per call, got {}", files.len())));
     }
-    // (as named, resolved, new text, edits applied)
-    let mut changed: Vec<(String, PathBuf, String, usize)> = Vec::new();
-    let mut originals: Vec<String> = Vec::new();
+    let mut planned: Vec<PlannedFile> = Vec::new();
     for (path, edits) in files {
         if edits.is_empty() {
             return Err(ToolError::Other(format!("nothing was changed: {path} has no edits")));
@@ -337,47 +309,45 @@ pub(crate) fn edit_files(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Resu
         let file = resolve(cwd, path)
             .canonicalize()
             .map_err(|e| ToolError::Other(format!("nothing was changed: read {path}: {e}")))?;
+        let nothing_changed = |e: ToolError| ToolError::Other(format!("nothing was changed: {path}: {e}"));
         // The same file twice: the second edits apply to the first's result.
-        let at = changed.iter().position(|(_, f, _, _)| *f == file);
-        let text = match at {
-            Some(i) => changed[i].2.clone(),
-            None => std::fs::read_to_string(&file)
-                .map_err(|e| ToolError::Other(format!("nothing was changed: read {path}: {e}")))?,
-        };
-        let original = at.is_none().then(|| text.clone());
-        let new = apply_edits(text, edits).map_err(|e| ToolError::Other(format!("nothing was changed: {path}: {e}")))?;
-        match at {
-            Some(i) => {
-                changed[i].2 = new;
-                changed[i].3 += edits.len();
+        match planned.iter_mut().find(|p| p.file == file) {
+            Some(earlier) => {
+                let text = std::mem::take(&mut earlier.new);
+                earlier.new = apply_edits(path, text, edits).map_err(nothing_changed)?.0;
+                earlier.edits += edits.len();
             }
             None => {
-                originals.push(original.expect("a new target has its original text"));
-                changed.push((path.clone(), file, new, edits.len()));
+                let original = std::fs::read_to_string(&file)
+                    .map_err(|e| ToolError::Other(format!("nothing was changed: read {path}: {e}")))?;
+                let new = apply_edits(path, original.clone(), edits).map_err(nothing_changed)?.0;
+                planned.push(PlannedFile { path: path.clone(), file, original, new, edits: edits.len() });
             }
         }
     }
-    let mut written: Vec<String> = Vec::new();
-    for (path, file, text, _) in &changed {
-        if let Err(e) = std::fs::write(file, text) {
-            let mut rollback_failed = Vec::new();
-            for i in (0..written.len()).rev() {
-                if let Err(rollback_error) = std::fs::write(&changed[i].1, &originals[i]) {
-                    rollback_failed.push(format!("{}: {rollback_error}", changed[i].0));
-                }
-            }
+    Ok(planned)
+}
+
+/// A write that fails puts back every file written before it.
+fn write_planned(planned: &[PlannedFile]) -> Result<String, ToolError> {
+    for (i, target) in planned.iter().enumerate() {
+        if let Err(e) = std::fs::write(&target.file, &target.new) {
+            let rollback_failed: Vec<String> = planned[..i]
+                .iter()
+                .rev()
+                .filter_map(|done| std::fs::write(&done.file, &done.original).err().map(|err| format!("{}: {err}", done.path)))
+                .collect();
             let done = if rollback_failed.is_empty() {
-                format!("rolled back {} earlier file(s)", written.len())
+                format!("rolled back {i} earlier file(s)")
             } else {
                 format!("rollback failed for {}", rollback_failed.join(", "))
             };
-            return Err(ToolError::Other(format!("write {path}: {e}; {done}")));
+            return Err(ToolError::Other(format!("write {}: {e}; {done}", target.path)));
         }
-        written.push(path.clone());
     }
-    let total: usize = changed.iter().map(|c| c.3).sum();
-    let list = changed.iter().map(|(p, _, _, n)| format!("{p} ({n})")).collect::<Vec<_>>().join(", ");
-    Ok(format!("applied {total} edit(s) to {} file(s): {list}", changed.len()))
+    let total: usize = planned.iter().map(|p| p.edits).sum();
+    let list = planned.iter().map(|p| format!("{} ({})", p.path, p.edits)).collect::<Vec<_>>().join(", ");
+    Ok(format!("applied {total} edit(s) to {} file(s): {list}", planned.len()))
 }
 
 /// Directories are suffixed with `/`.
@@ -622,35 +592,58 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn batch_edit_rolls_back_files_written_before_a_later_write_fails() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempdir();
         let first = dir.join("first.txt");
         let blocked = dir.join("blocked.txt");
         std::fs::write(&first, "old first\n").unwrap();
         std::fs::write(&blocked, "old blocked\n").unwrap();
-        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o444)).unwrap();
 
-        let result = edit_files(
+        let planned = plan_edits(
             &dir,
             &[
-                (
-                    "first.txt".into(),
-                    vec![EditChunk { old_string: "old first".into(), new_string: "new first".into(), replace_all: false }],
-                ),
-                (
-                    "blocked.txt".into(),
-                    vec![EditChunk { old_string: "old blocked".into(), new_string: "new blocked".into(), replace_all: false }],
-                ),
+                ("first.txt".into(), vec![chunk("old first", "new first", false)]),
+                ("blocked.txt".into(), vec![chunk("old blocked", "new blocked", false)]),
             ],
-        );
+        )
+        .unwrap();
+        // A folder where the second file was read: no write gets through that, not
+        // even as root, which a read-only file does not stop.
+        std::fs::remove_file(&blocked).unwrap();
+        std::fs::create_dir(&blocked).unwrap();
+        let err = write_planned(&planned).unwrap_err().to_string();
 
-        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(result.is_err());
+        assert!(err.contains("blocked.txt") && err.contains("rolled back 1 earlier file(s)"), "{err}");
         assert_eq!(std::fs::read_to_string(&first).unwrap(), "old first\n");
-        assert_eq!(std::fs::read_to_string(&blocked).unwrap(), "old blocked\n");
+        assert!(blocked.is_dir(), "nothing was written in place of the folder");
+    }
+
+    #[test]
+    fn a_batch_edit_that_does_not_fit_says_where_the_text_is_closest() {
+        let dir = tempdir();
+        write_file(&dir, "a.rs", "fn one() {}\n").unwrap();
+        write_file(&dir, "b.rs", "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n").unwrap();
+        let err = edit_files(
+            &dir,
+            &[
+                ("a.rs".into(), vec![chunk("fn one() {}", "fn uno() {}", false)]),
+                ("b.rs".into(), vec![chunk("pub fn add(a: u32, b: u32) -> u32 {", "x", false)]),
+            ],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.starts_with("nothing was changed: b.rs"), "{err}");
+        assert!(err.contains("closest line is 1"), "{err}");
+        assert_eq!(std::fs::read_to_string(dir.join("a.rs")).unwrap(), "fn one() {}\n");
+    }
+
+    #[test]
+    fn replacements_are_counted_as_made() {
+        let (text, applied) = apply_edits("f", "a a b".into(), &[chunk("a", "x", true), chunk("b", "y", false)]).unwrap();
+        assert_eq!((text.as_str(), applied), ("x x y", 3));
+        let err = apply_edits("f.txt", "a a".into(), &[chunk("a", "x", false)]).unwrap_err().to_string();
+        assert!(err.contains("2 times in f.txt"), "{err}");
+        assert!(apply_edits("f", "a".into(), &[chunk("", "x", false)]).is_err());
     }
 
     #[test]
@@ -736,20 +729,10 @@ mod tests {
 
     #[test]
     fn apply_edits_is_pure_and_validates() {
-        let out = apply_edits("one\ntwo\n".into(), &[EditChunk {
-            old_string: "two".into(),
-            new_string: "dos".into(),
-            replace_all: false,
-        }])
-        .unwrap();
+        let (out, _) = apply_edits("f", "one\ntwo\n".into(), &[chunk("two", "dos", false)]).unwrap();
         assert_eq!(out, "one\ndos\n");
-        assert!(apply_edits("abc".into(), &[EditChunk {
-            old_string: "zzz".into(),
-            new_string: "y".into(),
-            replace_all: false,
-        }])
-        .is_err());
-        assert_eq!(apply_edits("a".repeat(10), &[]).unwrap(), "a".repeat(10));
+        assert!(apply_edits("f", "abc".into(), &[chunk("zzz", "y", false)]).is_err());
+        assert_eq!(apply_edits("f", "a".repeat(10), &[]).unwrap(), ("a".repeat(10), 0));
     }
 
     #[test]
@@ -859,7 +842,7 @@ mod tests {
             new_string: "fn hello() {\n    println!(\"FlashAgent\");\n}".into(),
             replace_all: false,
         };
-        let res = apply_edits(text.to_string(), &[edit]).unwrap();
+        let (res, _) = apply_edits("f", text.to_string(), &[edit]).unwrap();
         assert!(res.contains("FlashAgent"));
     }
 }
