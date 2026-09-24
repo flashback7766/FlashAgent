@@ -1023,15 +1023,19 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim();
-        if id.is_empty() || is_embedding(m) {
+        // Mistral lists its embedding and OCR models beside the chat ones.
+        if id.is_empty() || is_embedding(m) || m.pointer("/capabilities/completion_chat").and_then(|v| v.as_bool()) == Some(false) {
             continue;
         }
 
         let is_loaded = m.get("state").and_then(|v| v.as_str()).map(|s| s == "loaded").unwrap_or(false);
         // llama-server: `meta` has both the running and the trained context.
+        // vLLM serves exactly `max_model_len`; Groq calls it `context_window`.
         let meta = m.get("meta");
         let context_length = m.get("loaded_context_length")
             .or_else(|| m.get("context_length"))
+            .or_else(|| m.get("max_model_len"))
+            .or_else(|| m.get("context_window"))
             .or_else(|| meta.and_then(|x| x.get("n_ctx")))
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
@@ -1056,7 +1060,9 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 supports_tools = arr.iter().any(|v| v.as_str() == Some("tool_use"));
                 supports_vision |= arr.iter().any(|v| matches!(v.as_str(), Some("vision") | Some("image_input")));
             } else if let Some(obj) = caps.as_object() {
-                supports_tools = obj.get("trained_for_tool_use").and_then(|v| v.as_bool()).unwrap_or(false);
+                // Mistral: `function_calling` and `vision`.
+                supports_tools = obj.get("trained_for_tool_use").or_else(|| obj.get("function_calling")).and_then(|v| v.as_bool()).unwrap_or(false);
+                supports_vision |= obj.get("vision").and_then(|v| v.as_bool()).unwrap_or(false);
                 if let Some(levels) = obj.get("reasoning_effort_levels").or_else(|| obj.get("reasoning_efforts")).and_then(|v| v.as_array()) {
                     let presets: Vec<String> = levels.iter().filter_map(|v| v.as_str().map(|s| s.to_lowercase())).collect();
                     if !presets.is_empty() {
@@ -1070,6 +1076,24 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 }
             }
         }
+
+        // OpenRouter: the request fields each model accepts, and what it reads.
+        if let Some(params) = m.get("supported_parameters").and_then(|v| v.as_array()) {
+            let accepts = |name: &str| params.iter().any(|p| p.as_str() == Some(name));
+            supports_tools |= accepts("tools");
+            if accepts("reasoning") && !thinking.supported {
+                thinking = ThinkingProfile {
+                    presets: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+                    protocol: ThinkingProtocol::ReasoningObject,
+                    supported: true,
+                    default_preset: None,
+                };
+            }
+        }
+        supports_vision |= m
+            .pointer("/architecture/input_modalities")
+            .and_then(|v| v.as_array())
+            .is_some_and(|inputs| inputs.iter().any(|i| i.as_str() == Some("image")));
 
         discovered.push(DiscoveredModel {
             id: id.to_string(),
