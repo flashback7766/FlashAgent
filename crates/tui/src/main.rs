@@ -359,6 +359,26 @@ async fn main() -> Result<()> {
         context_window: Some(context_capacity),
         mcp_manager: Some(mcp_manager.clone()),
     })?);
+    // A closed terminal window (SIGHUP) or a kill (SIGTERM) skips the normal
+    // exit; the background tasks run in their own process groups and would
+    // outlive FlashAgent, holding their ports.
+    #[cfg(unix)]
+    {
+        let tools = tools_arc.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let (Ok(mut hup), Ok(mut term)) = (signal(SignalKind::hangup()), signal(SignalKind::terminate())) else { return };
+            let code = tokio::select! {
+                _ = hup.recv() => 129,
+                _ = term.recv() => 143,
+            };
+            tools.shells().stop_all();
+            // After SIGTERM the terminal is still there, in raw mode on the alternate screen.
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show, DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen);
+            let _ = crossterm::terminal::disable_raw_mode();
+            std::process::exit(code);
+        });
+    }
     // The built-in toolset plus `spawn_agent`.
     let composite = flashagent_tools::agent_tools(tools_arc.clone(), source.clone(), state.clone());
     let perm: &'static PermissionedTools =
