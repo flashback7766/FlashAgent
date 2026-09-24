@@ -1,5 +1,10 @@
 # Changelog
 
+## b425 — Gemini's thinking stays in its box
+
+- **Gemini's `<thought>` tags are never shown.** A model such as gemini-3.5-flash-lite could open a `<thought>` tag in its thinking and close it at the start of its answer, and both tags were on screen. They are now removed wherever they appear, and a tag that is never closed cannot pull the answer into the thinking box.
+- **The status line shows a Gemini model by its short name.** A model saved as `models/gemini-…` kept that name when Google's model list arrived after start-up; it now takes the name the list gives it.
+
 ## b424 — any provider, local or cloud, and commands that run in the background
 
 - **Save several providers and switch between them mid-conversation.** `/provider` lists them and switches without a restart; the conversation carries on with the new model. Each provider keeps its protocol, address, key and model, and a provider without a saved key uses its usual environment variable (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, ...). The status line shows the provider and model in use. A config from an older build is read as one provider, and an older build can still read the new one.
