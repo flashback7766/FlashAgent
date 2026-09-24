@@ -151,8 +151,8 @@ fn decode_complete(bytes: &mut Vec<u8>) -> String {
             }
         }
     }
-    let keep = rest.to_vec();
-    *bytes = keep;
+    let consumed = bytes.len() - rest.len();
+    bytes.drain(..consumed);
     out
 }
 
