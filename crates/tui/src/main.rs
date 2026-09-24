@@ -353,6 +353,40 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
     Ok(Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, initial_effort, available_models, first_run_verdict, pending_discovery }))
 }
 
+fn install_crash_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::cursor::Show,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen,
+        );
+        let _ = crossterm::terminal::disable_raw_mode();
+        let log_content = format!(
+            "FlashAgent Crash Report\nVersion: {}\nTime: {:?}\nPanic: {}\nBacktrace:\n{:?}\n\nPlease report this issue at: https://github.com/flashback7766/FlashAgent/issues\n",
+            flashagent_svc::updater::current_version(),
+            std::time::SystemTime::now(),
+            info,
+            std::backtrace::Backtrace::capture()
+        );
+        // Never into the user's project directory.
+        let log_path = flashagent_home_dir()
+            .map(|d| {
+                let _ = std::fs::create_dir_all(&d);
+                d.join("crash.log")
+            })
+            .unwrap_or_else(|| std::env::temp_dir().join("flashagent-crash.log"));
+        let _ = std::fs::write(&log_path, log_content);
+        eprintln!("\x1b[1;38;2;245;120;120mFlashAgent encountered an unexpected crash.\x1b[0m");
+        eprintln!("Crash report written to {}. Please submit an issue at: https://github.com/flashback7766/FlashAgent/issues", log_path.display());
+        default_hook(info);
+    }));
+
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     flashagent_svc::updater::remove_stale_backups_beside_exe();
@@ -419,45 +453,9 @@ async fn main() -> Result<()> {
     let memory_block = flashagent_core::injection_block(&docs, config.token_budget);
     let memory_docs = docs.len();
 
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::cursor::Show,
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            LeaveAlternateScreen,
-        );
-        let _ = crossterm::terminal::disable_raw_mode();
-        let log_content = format!(
-            "FlashAgent Crash Report\nVersion: {}\nTime: {:?}\nPanic: {}\nBacktrace:\n{:?}\n\nPlease report this issue at: https://github.com/flashback7766/FlashAgent/issues\n",
-            flashagent_svc::updater::current_version(),
-            std::time::SystemTime::now(),
-            info,
-            std::backtrace::Backtrace::capture()
-        );
-        // Never into the user's project directory.
-        let log_path = flashagent_home_dir()
-            .map(|d| {
-                let _ = std::fs::create_dir_all(&d);
-                d.join("crash.log")
-            })
-            .unwrap_or_else(|| std::env::temp_dir().join("flashagent-crash.log"));
-        let _ = std::fs::write(&log_path, log_content);
-        eprintln!("\x1b[1;38;2;245;120;120mFlashAgent encountered an unexpected crash.\x1b[0m");
-        eprintln!("Crash report written to {}. Please submit an issue at: https://github.com/flashback7766/FlashAgent/issues", log_path.display());
-        default_hook(info);
-    }));
+    install_crash_hook();
 
-    enable_raw_mode()?;
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        EnterAlternateScreen,
-        EnableBracketedPaste,
-        EnableMouseCapture,
-    );
-    let result = run_app(AppContext {
+    run_terminal(AppContext {
         config,
         source,
         perm,
@@ -476,8 +474,19 @@ async fn main() -> Result<()> {
         cwd: cwd.clone(),
         first_run_verdict,
         pending_discovery,
-    })
-    .await;
+    }).await
+}
+
+async fn run_terminal(ctx: AppContext) -> Result<()> {
+    enable_raw_mode()?;
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture,
+    );
+    let result = run_app(ctx).await;
+
     flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
     // The frame may have hidden the cursor (a menu was open); the shell needs it back.
     let _ = crossterm::execute!(
