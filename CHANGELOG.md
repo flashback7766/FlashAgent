@@ -1,5 +1,17 @@
 # Changelog
 
+## b424 — any provider, local or cloud, and commands that run in the background
+
+- **Save several providers and switch between them mid-conversation.** `/provider` lists them and switches without a restart; the conversation carries on with the new model. Each provider keeps its protocol, address, key and model, and a provider without a saved key uses its usual environment variable (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, ...). The status line shows the provider and model in use. A config from an older build is read as one provider, and an older build can still read the new one.
+- **Anthropic, Gemini and Ollama are spoken to in their own APIs.** Claude keeps its signed thinking from turn to turn and caches the prompt; Gemini gets its own thinking levels and keeps the signatures its tool calls need; Ollama runs each model with a context window that holds the agent's prompt, 32k unless you set another for the provider, and keeps it loaded for 30 minutes. Anything else that speaks `/chat/completions` works too, including servers that answer without streaming or refuse a field.
+- **Models without tool support can use tools.** Gemma 3, LLaVA, Phi and other Ollama models without the tools capability, and Gemma on the Gemini API, used to fail every request. Their tools are now described in the prompt and their calls read from the reply.
+- **Anthropic and Gemini choose their own sampling.** The presets are tuned for local models, so cloud models that tune themselves get none of them unless you set sampling by hand (Custom).
+- **Commands can run in the background.** The agent can start a long command (a dev server, a build) in the background and is told when it ends; Ctrl+B moves a command that is already running there, and `/tasks` lists them. They stop when FlashAgent exits or its window closes.
+- **Tips are shown whole.** They no longer type themselves out letter by letter with a second cursor, a tip too long for the window is passed over instead of cut mid-word, and the row under an empty prompt shows the keys instead of staying blank.
+- **The model says what it is about to do less often, and in your language.** One short sentence when a task starts or its plan changes, not before every tool call in English.
+- **A long tool call written as text is read in one pass.** It was read from its start on every new piece, so a 100 KB file write from a local model took a third of a second of CPU; it now takes 3 ms.
+- **Fixes:** a switch of provider could get the old server's model list; a paste did not hold the recap back the way typing does; a hosted API was billed for the prompt warm-up meant for local servers; an update download larger than 512 MB is refused; the setup wizard asks for a key only for a cloud provider; `--tool-test` checks a model with what the server says about it, as the app does; `/export md` no longer shows the loop's own messages as yours.
+
 ## b399 — pasting an API key on Windows
 
 - **The setup wizard takes a pasted API key on Windows.** The classic Windows console hands Ctrl+V to the program as a key instead of pasting, and the wizard ignored it, so a key could not be pasted at all. Ctrl+V (Ctrl+М on a Russian layout) and Shift+Insert now read the clipboard in the key, server address and model search fields.
