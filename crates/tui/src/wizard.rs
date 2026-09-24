@@ -205,18 +205,19 @@ impl SetupWizard {
         self.preset().is_none_or(|p| !p.is_local())
     }
 
+    /// A cloud preset, or a typed address reached over https: a cloud API is
+    /// never plain http, and a server on this computer or network rarely https.
     pub fn is_cloud_backend(&self) -> bool {
-        if let Some(p) = self.preset() {
-            return !p.is_local();
+        match self.preset() {
+            Some(p) => !p.is_local(),
+            None => self.profile.url.to_lowercase().starts_with("https://"),
         }
-        let url = self.profile.url.to_lowercase();
-        if url.starts_with("https://") {
-            return true;
-        }
-        if url.contains("localhost") || url.contains("127.0.0.1") || url.contains("0.0.0.0") || url.contains("[::1]") {
-            return false;
-        }
-        true
+    }
+
+    /// Only a cloud preset cannot go on without a key: a typed address may be a
+    /// server that takes none, wherever it is.
+    fn key_required(&self) -> bool {
+        self.preset().is_some_and(|p| !p.is_local())
     }
 
     /// The environment variable a key would be read from if none is typed.
@@ -231,7 +232,7 @@ impl SetupWizard {
 
     /// A cloud provider with no key typed and none in the environment.
     fn key_missing(&self) -> bool {
-        self.is_cloud_backend() && self.api_key_input.trim().is_empty() && self.env_key().is_none()
+        self.key_required() && self.api_key_input.trim().is_empty() && self.env_key().is_none()
     }
 
     /// The server's own answer once discovery has run; before that, a guess from
@@ -866,7 +867,7 @@ impl SetupWizard {
                     lines.push(pad_row(&format!("\x1b[38;2;145;205;140mFound {var} in your environment.\x1b[0m")));
                     lines.push(pad_row(""));
                     lines.push(pad_row("  \x1b[38;2;160;155;145mPress Enter to use it, or paste a key to save one for this provider.\x1b[0m"));
-                } else if self.is_cloud_backend() {
+                } else if self.key_required() {
                     lines.push(pad_row("\x1b[38;2;225;175;95mThis provider needs an API key.\x1b[0m"));
                     lines.push(pad_row(""));
                     lines.push(pad_row("  \x1b[38;2;160;155;145mHow to get your API key:\x1b[0m"));
@@ -880,8 +881,12 @@ impl SetupWizard {
                         lines.push(pad_row("    3. Paste or type your key below:"));
                     }
                     if let Some(var) = self.profile.key_env().first() {
-                        lines.push(pad_row(&format!("  \x1b[38;2;135;130;125mOr leave it empty here and set {var}.\x1b[0m")));
+                        lines.push(pad_row(&format!("  \x1b[38;2;135;130;125mOr set {var}: FlashAgent reads it when no key is saved.\x1b[0m")));
                     }
+                } else if self.is_cloud_backend() {
+                    lines.push(pad_row("\x1b[38;2;225;175;95mA server on the internet usually wants a key.\x1b[0m"));
+                    lines.push(pad_row(""));
+                    lines.push(pad_row("  \x1b[38;2;160;155;145mPaste it below, or press Enter if this one takes none.\x1b[0m"));
                 } else {
                     lines.push(pad_row("\x1b[38;2;145;205;140mA server on your network usually needs no key.\x1b[0m"));
                     lines.push(pad_row(""));
@@ -894,8 +899,8 @@ impl SetupWizard {
                 let key_display = if self.api_key_input.is_empty() {
                     let placeholder = if env_key.is_some() {
                         "Enter uses the environment's key"
-                    } else if self.is_cloud_backend() {
-                        "Paste API key here (sk-or-...)"
+                    } else if self.key_required() {
+                        "Paste API key here"
                     } else {
                         "Enter API key here (Enter to skip)"
                     };
@@ -1034,7 +1039,7 @@ impl SetupWizard {
         let hints: Vec<(&str, &str)> = match self.step {
             0 if self.is_custom() => vec![("type", "the URL"), ("Tab", "protocol"), ("\u{2191}/\u{2193}", "presets"), ("Enter", "next"), ("Esc", "clear or quit")],
             0 => vec![("\u{2191}/\u{2193}", "move"), ("0-9 c", "pick"), ("Enter", "next"), ("Esc", "quit")],
-            1 if self.is_cloud_backend() => vec![("paste", "the key"), ("Enter", "check it"), ("Esc", "clear or back")],
+            1 if self.key_required() => vec![("paste", "the key"), ("Enter", "check it"), ("Esc", "clear or back")],
             1 => vec![("Enter", "skip"), ("Esc", "back")],
             2 => vec![("\u{2191}/\u{2193}", "move"), ("type", "to filter"), ("Enter", model_enter), ("Esc", "clear or back")],
             3 => vec![("\u{2191}/\u{2193}", "move"), ("1-4", "pick"), ("Enter", "next"), ("Esc", "back")],
@@ -1347,6 +1352,23 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_address_never_insists_on_a_key() {
+        for url in ["http://192.168.1.50:8000/v1", "https://llm.example.org/v1"] {
+            let mut wizard = SetupWizard::new(AppConfig::default());
+            wizard.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
+            wizard.handle_paste(url);
+            wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
+            assert_eq!(wizard.step, 1, "{url}");
+            wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
+            assert_eq!(wizard.step, 2, "{url}: an empty key was refused");
+        }
+        let mut wizard = SetupWizard::new(AppConfig::default());
+        wizard.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
+        wizard.handle_paste("http://192.168.1.50:8000/v1");
+        assert!(!wizard.is_cloud_backend(), "plain http is a server on the network");
+    }
+
+    #[test]
     fn a_custom_address_takes_the_protocol_it_implies_and_tab_changes_it() {
         let mut wizard = SetupWizard::new(AppConfig::default());
         wizard.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
@@ -1439,7 +1461,7 @@ mod tests {
         let shown = crate::strip_ansi(&wizard.render(100).join("\n"));
         match wizard.env_key() {
             Some(var) => assert!(shown.contains(&format!("Found {var} in your environment.")), "{shown}"),
-            None => assert!(shown.contains("Or leave it empty here and set ANTHROPIC_API_KEY."), "{shown}"),
+            None => assert!(shown.contains("Or set ANTHROPIC_API_KEY: FlashAgent reads it when no key is saved."), "{shown}"),
         }
     }
 
