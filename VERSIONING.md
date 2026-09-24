@@ -42,7 +42,7 @@ backwards.
 
 - **Stable channel**: stable releases only.
 - **Beta channel**: betas *and* stable releases. The newest wins, so a beta
-  user also moves to a stable release built after their beta.
+  install also moves to a stable release built after the beta it runs.
 
 **Switching channel** (Settings → Updates, or `/channel`) asks first. The card
 compares the running version with the newest release on the target channel,
