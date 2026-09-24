@@ -1,5 +1,20 @@
 # Changelog
 
+## b398 — an audit of the whole program, and what it found
+
+Five reviewers went through every part of FlashAgent looking for bugs; about ninety came back, and a second review checked the fixes. Update if you run b388: it has security and crash fixes.
+
+- **Planning mode and "Always" rules can no longer be talked past.** A command could hide a second one behind a `#` comment, quotes inside a word (`-de''lete`), an abbreviated option (`git grep --op=rm`, `sort --comp=sh`), brace expansion (`{~,x}/.ssh`) or, on Windows without Git Bash, cmd.exe's own quoting. Rules now read a command the way the shell that runs it will. An "Always" for `git branch -a` no longer covers `git branch -D`, and the always-asked list knows other spellings: `git -C . push --force`, `push +main`, `--har`, `command rm -rf`.
+- **An example is never run as a tool call.** A code fence that arrived in pieces could leave an example call outside it; a bare call split across pieces was missed.
+- **Crashes fixed:** a web page with Cyrillic or CJK text next to `&amp;`, an API key typed on a Russian layout in the setup wizard, a server sending `Retry-After: -1`, a one-column window.
+- **The setup wizard reaches every provider.** b388 added presets the wizard could not select, and OpenAI opened as a custom URL. Rows are picked with 1–9, 0 and c.
+- **Compaction really frees the context.** The gauge counted the transcript still on screen, so every turn after the first compaction compacted again. Project instructions come back after compaction, and the summary never mistakes a tool's picture for your prompt.
+- **Cloud providers:** a context overflow no longer strips sampling fields from every later request; discovery keeps the model you named instead of a longer similar one; OpenRouter is no longer taken for LM Studio.
+- **Editing files:** `edit_file` keeps a CRLF file in CRLF and a BOM where it is, and counts a block found twice instead of calling it missing. A file named twice in one batch is shown as it will be written: the approval card used to hide the second part. `patch_file` puts a hunk after an insertion on the right line.
+- **MCP on Windows:** `npx` servers start; an entry FlashAgent cannot run no longer drops the whole `.mcp.json`, and adding a server edits the file instead of replacing it.
+- **Only text and colour reach the screen.** Escape codes in a command's output no longer clear the screen or move the cursor; tabs no longer leave old text showing; long highlighted code wraps without printing bits of colour codes and keeps its indent; wide characters no longer hide part of a command in the approval card; a card taller than the window keeps its title.
+- **And more:** `/mode` no longer opens `/model`; Ctrl+E finds your editor and keeps line breaks; code pasted with tabs on Windows stays one paste; messages sent during a turn come back after Esc; the 16-colour theme stays readable on a white terminal; background tasks stop when FlashAgent exits; an update no longer leaves old copies of the program behind.
+
 ## b388 — compaction that keeps the thread, and any OpenAI-compatible provider
 
 - **After compaction the model knows where it was.** The summary now follows a fixed handoff: your request and every instruction you gave, the files in play, errors and their fixes, your messages in order, what is pending and what was being done. It sees the tool calls with their arguments, not only their results.
