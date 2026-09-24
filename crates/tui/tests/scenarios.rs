@@ -262,13 +262,15 @@ fn the_recap_waits_until_the_user_has_gone_quiet() {
     let server = MockServer::start(vec![Reply::Text("First answer.".into())]);
     let home = Home::new();
     home.set_up(&server.url);
-    let term = Term::start_with_env(&home, &["-y"], COLS, ROWS, &[("FLASHAGENT_RECAP_IDLE_SECS", "3")]);
+    // Five seconds of quiet, keys under one apart: a busy runner that reads a key
+    // late still sees one well inside the window.
+    let term = Term::start_with_env(&home, &["-y"], COLS, ROWS, &[("FLASHAGENT_RECAP_IDLE_SECS", "5")]);
     term.wait_for(PROMPT, WAIT);
     let recaps = || server.requests().iter().filter(|r| !r.is_turn() && r.body.to_string().contains("conversation analyzer")).count();
 
     ask(&term, "first question", "First answer.");
     // Typing keeps it back: the model stays free for the next question.
-    for _ in 0..4 {
+    for _ in 0..6 {
         std::thread::sleep(Duration::from_millis(900));
         term.send("x");
         term.send("\x7f");
@@ -2172,24 +2174,32 @@ fn show_composer() {
     println!("{}", term.screen());
 }
 
-/// Two looks at an idle screen `apart`.
-fn idle_screens(animations: bool, apart: Duration) -> (String, String) {
+/// A look at an idle screen, and whether it changed within `watch`.
+fn idle_screen_moves(animations: bool, watch: Duration) -> (String, Option<String>) {
     let server = MockServer::start(Vec::new());
     let home = Home::new();
     let term = ready_with(&home, &server, serde_json::json!({ "animations": animations }));
     std::thread::sleep(Duration::from_millis(300));
     let first = term.screen();
-    std::thread::sleep(apart);
-    (first, term.screen())
+    let deadline = std::time::Instant::now() + watch;
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        let now = term.screen();
+        if now != first {
+            return (first, Some(now));
+        }
+    }
+    (first, None)
 }
 
 #[test]
 fn with_animations_off_an_idle_screen_holds_still() {
     // With motion off, nothing may change while nobody does anything.
-    let (first, later) = idle_screens(false, Duration::from_millis(1500));
-    assert_eq!(first, later, "the screen moved with animations off");
-    let (first, later) = idle_screens(true, Duration::from_millis(1500));
-    assert_ne!(first, later, "this test cannot tell: nothing moves with animations on either");
+    let (first, moved) = idle_screen_moves(false, Duration::from_millis(1500));
+    assert_eq!(moved, None, "the screen moved with animations off; it was:\n{first}");
+    // The tip pauses between its moves: watched long enough to see one on a slow runner.
+    let (_, moved) = idle_screen_moves(true, Duration::from_secs(10));
+    assert!(moved.is_some(), "this test cannot tell: nothing moves with animations on either");
 }
 
 #[test]
