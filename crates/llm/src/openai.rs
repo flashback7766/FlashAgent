@@ -325,8 +325,32 @@ impl OpenAiCompat {
         Some(disc)
     }
 
+    /// Google's own list beside the compatible endpoint
+    /// (`…/v1beta/openai` → `…/v1beta/models`), asked with Google's key header:
+    /// it is the one that knows each model's context and whether it thinks.
+    async fn discover_gemini(&self) -> Option<crate::thinking::ServerDiscovery> {
+        let root = self.base_url.strip_suffix("/openai")?;
+        if !root.contains("generativelanguage.googleapis.com") {
+            return None;
+        }
+        let url = format!("{root}/models?pageSize=1000");
+        let mut req = self.client.get(&url).timeout(Duration::from_secs(5));
+        if let Some(key) = &self.api_key {
+            req = req.header("x-goog-api-key", key);
+        }
+        let resp = req.send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let val: serde_json::Value = resp.json().await.ok()?;
+        self.apply_discovery(&url, &val, None)
+    }
+
     /// Tries LM Studio `/api/v1/models`, `/api/v0/models` and standard `/v1/models`.
     pub async fn discover_server(&self) -> Option<crate::thinking::ServerDiscovery> {
+        if let Some(disc) = self.discover_gemini().await {
+            return Some(disc);
+        }
         let root = self.base_url.strip_suffix("/v1").unwrap_or(&self.base_url);
         let cached_url = self.working_models_url.read().ok().and_then(|u| u.clone());
 
@@ -548,6 +572,10 @@ impl OpenAiCompat {
             }
         }
 
+        // Gemini shows its thinking only when asked to, effort or not.
+        if resolved_effort.is_none() && current_profile.protocol == crate::thinking::ThinkingProtocol::Gemini {
+            current_profile.apply_to_request(&mut body, "auto");
+        }
         if let Some(ref effort_str) = resolved_effort {
             let is_off = effort_str == "off" || effort_str == "disabled" || effort_str == "none" || effort_str == "false" || effort_str == "0";
             if current_profile.supported {
