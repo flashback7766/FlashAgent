@@ -11,10 +11,14 @@ use crate::thinking::{ServerDiscovery, ServerKind, ThinkingProfile, ThinkingProt
 use crate::types::{ChatMessage, LlmError, LlmEvent, Role, ToolSpec, TurnOptions};
 
 /// Request fields that are not in every OpenAI-compatible API. A server that
-/// names one in a 400/422 gets requests without it from then on.
-const OPTIONAL_FIELDS: [&str; 10] = [
+/// names one in a 400/422 gets requests without it from then on. The thinking
+/// switches are here too: a server that refuses one by name (Groq's
+/// "`reasoning_effort` is not supported with this model") keeps its sampling
+/// settings instead of losing them all to the fallback.
+const OPTIONAL_FIELDS: [&str; 16] = [
     "temperature", "top_p", "top_k", "repeat_penalty", "repetition_penalty", "presence_penalty", "min_p",
     "stream_options", "cache_prompt", "prompt_cache",
+    "reasoning_effort", "reasoning", "enable_thinking", "chat_template_kwargs", "chat_template_config", "thinking",
 ];
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -23,20 +27,28 @@ pub(crate) struct Learned {
     dropped: Vec<&'static str>,
     /// Newer OpenAI models take `max_completion_tokens` and refuse `max_tokens`.
     completion_tokens: bool,
+    /// DeepSeek's reasoner refuses a history that carries its earlier reasoning.
+    no_reasoning_replay: bool,
 }
 
 impl Learned {
-    /// From the server's error text; false when it named nothing we can drop.
-    fn learn(&mut self, error: &str) -> bool {
+    /// From the server's error text about the request it refused; false when
+    /// it named nothing that request carried and we can drop.
+    fn learn(&mut self, error: &str, sent: &serde_json::Value) -> bool {
         let error = error.to_lowercase();
         if !self.completion_tokens && error.contains("max_completion_tokens") {
             self.completion_tokens = true;
             return true;
         }
+        let replayed = || sent["messages"].as_array().is_some_and(|m| m.iter().any(|m| m.get("reasoning_content").is_some()));
+        if !self.no_reasoning_replay && mentions(&error, "reasoning_content") && replayed() {
+            self.no_reasoning_replay = true;
+            return true;
+        }
         let named: Vec<&'static str> = OPTIONAL_FIELDS
             .iter()
             .copied()
-            .filter(|f| !self.dropped.contains(f) && mentions(&error, f))
+            .filter(|f| !self.dropped.contains(f) && sent.get(*f).is_some() && mentions(&error, f))
             .collect();
         self.dropped.extend(&named);
         !named.is_empty()
@@ -51,6 +63,28 @@ impl Learned {
             if let Some(n) = map.remove("max_tokens") {
                 map.insert("max_completion_tokens".into(), n);
             }
+        }
+        if self.no_reasoning_replay {
+            for message in map.get_mut("messages").and_then(|m| m.as_array_mut()).into_iter().flatten() {
+                if let Some(message) = message.as_object_mut() {
+                    message.remove("reasoning_content");
+                }
+            }
+        }
+    }
+
+    /// Merged, not replaced: a request running alongside (a subagent) may
+    /// have learned something else meanwhile.
+    fn merge_into(self, into: &mut Learned) {
+        for field in self.dropped {
+            if !into.dropped.contains(&field) {
+                into.dropped.push(field);
+            }
+        }
+        into.completion_tokens |= self.completion_tokens;
+        into.no_reasoning_replay |= self.no_reasoning_replay;
+        if self.fields.is_some() {
+            into.fields = self.fields;
         }
     }
 }
@@ -82,7 +116,17 @@ impl Fields {
     }
 }
 
-fn headers(client: &Client) -> reqwest::header::HeaderMap {
+/// Where the API lives. A bare `http://host:port` means its `/v1`: that is
+/// where every local server that copies OpenAI serves it (LM Studio, vLLM,
+/// llama.cpp, Ollama, LocalAI, …), and several serve nothing at the root.
+/// A URL with a path is taken as written.
+pub(crate) fn api_base(client: &Client) -> String {
+    let base = client.base_url();
+    let has_path = base.split_once("://").map_or(base.as_str(), |(_, rest)| rest).contains('/');
+    if has_path { base } else { format!("{base}/v1") }
+}
+
+pub(crate) fn headers(client: &Client) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     if let Some(key) = client.api_key() {
         if let Ok(value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
@@ -102,30 +146,20 @@ pub(crate) async fn stream(
     // MAX_ADAPTIVE_RETRIES times: learn the preset list if the error names one,
     // else drop fields (All -> NoExtraSampling -> Standard).
     let busy = client.busy();
-    let url = format!("{}/chat/completions", client.base_url());
+    let url = format!("{}/chat/completions", api_base(client));
     let headers = headers(client);
     let mut learned = client.learned.read().clone();
     let known = learned.clone();
     let mut fields = learned.fields.unwrap_or(Fields::All);
     let mut adaptive_retries = 0u8;
     let resp = loop {
-        let resp = client.post(&url, &headers, &body_at(client, messages, tools, options, fields, &learned)).await?;
+        let body = body_at(client, messages, tools, options, fields, &learned);
+        let resp = client.post(&url, &headers, &body).await?;
         if resp.status().is_success() {
             // Kept only once a request without those fields went through: a
             // context overflow names no field and must not strip every request.
-            // Merged, not replaced: a request running alongside (a subagent)
-            // may have learned something else meanwhile.
             if learned != known {
-                let mut lock = client.learned.write();
-                for field in learned.dropped {
-                    if !lock.dropped.contains(&field) {
-                        lock.dropped.push(field);
-                    }
-                }
-                lock.completion_tokens |= learned.completion_tokens;
-                if learned.fields.is_some() {
-                    lock.fields = learned.fields;
-                }
+                learned.merge_into(&mut client.learned.write());
             }
             break resp;
         }
@@ -139,7 +173,7 @@ pub(crate) async fn stream(
         match ThinkingProfile::parse_api_error(&body_text) {
             Some(taught) if fields == Fields::All && Some(&taught) != client.profile().as_ref() => client.set_profile(taught),
             _ => {
-                if !learned.learn(&body_text) {
+                if !learned.learn(&body_text, &body) {
                     if fields == Fields::Standard {
                         return Err(LlmError::Status { status, body: body_text });
                     }
@@ -156,19 +190,69 @@ pub(crate) async fn stream(
 struct Decoder {
     sse: SseDecoder,
     parser: ChunkParser,
+    /// Unknown until the first byte that is not blank: `{` is a server that
+    /// ignored `stream: true` and answered with one JSON reply.
+    whole_reply: Option<bool>,
+    reply: Vec<u8>,
+    failed: bool,
 }
 
-impl WireDecoder for Decoder {
-    fn feed(&mut self, bytes: &[u8]) -> Vec<Result<LlmEvent, LlmError>> {
-        let mut out = Vec::new();
-        for payload in self.sse.feed(bytes) {
+impl Decoder {
+    fn payloads(&mut self, payloads: Vec<String>) -> Vec<Result<LlmEvent, LlmError>> {
+        let mut events = Vec::new();
+        for payload in payloads {
+            if self.failed {
+                break;
+            }
+            if payload.trim() == "[DONE]" {
+                self.parser.end(&mut events);
+                continue;
+            }
+            // Parsed once, for the error check and the events both.
+            let Ok(chunk) = serde_json::from_str::<serde_json::Value>(&payload) else { continue };
             // Failures after the 200 (context overflow, crash) arrive in-stream.
-            if let Some(msg) = stream_error(&payload) {
+            if let Some(msg) = stream_error(&chunk) {
+                self.failed = true;
+                let mut out: Vec<_> = events.into_iter().map(Ok).collect();
                 out.push(Err(LlmError::Stream(msg)));
                 return out;
             }
             // Tool calls written as text are caught by the loop's scanner, not here.
-            out.extend(self.parser.feed(&payload).into_iter().map(Ok));
+            self.parser.feed_value(chunk, &mut events);
+        }
+        events.into_iter().map(Ok).collect()
+    }
+}
+
+impl WireDecoder for Decoder {
+    fn feed(&mut self, bytes: &[u8]) -> Vec<Result<LlmEvent, LlmError>> {
+        if self.whole_reply.is_none() {
+            let first = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes).iter().find(|b| !b.is_ascii_whitespace());
+            self.whole_reply = first.map(|&b| b == b'{');
+        }
+        if self.whole_reply == Some(true) {
+            self.reply.extend_from_slice(bytes);
+            return Vec::new();
+        }
+        let payloads = self.sse.feed(bytes);
+        self.payloads(payloads)
+    }
+
+    fn finish(&mut self) -> Vec<Result<LlmEvent, LlmError>> {
+        let payloads = if self.whole_reply == Some(true) {
+            let reply = String::from_utf8_lossy(&self.reply).into_owned();
+            // One reply, or one chunk per line from a server that streams without SSE.
+            if serde_json::from_str::<serde::de::IgnoredAny>(&reply).is_ok() {
+                vec![reply]
+            } else {
+                reply.lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect()
+            }
+        } else {
+            self.sse.finish()
+        };
+        let mut out = self.payloads(payloads);
+        if !self.failed {
+            out.extend(self.parser.finish().into_iter().map(Ok));
         }
         out
     }
@@ -333,24 +417,29 @@ fn finish(mut body: serde_json::Value, tools: &[ToolSpec], learned: &Learned) ->
 
 fn with_tools(mut body: serde_json::Value, tools: &[ToolSpec]) -> serde_json::Value {
     if !tools.is_empty() {
-        body["tools"] = serde_json::Value::Array(
-            tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": serde_json::from_str::<serde_json::Value>(&t.parameters_json)
-                                .unwrap_or(serde_json::json!({})),
-                        },
-                    })
-                })
-                .collect(),
-        );
+        body["tools"] = tools_json(tools);
     }
     body
+}
+
+/// The function-tool list, which Ollama's own API takes as it is.
+pub(crate) fn tools_json(tools: &[ToolSpec]) -> serde_json::Value {
+    serde_json::Value::Array(
+        tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": serde_json::from_str::<serde_json::Value>(&t.parameters_json)
+                            .unwrap_or(serde_json::json!({})),
+                    },
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Google's own list beside its compatible endpoint
@@ -376,7 +465,7 @@ pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
     if let Some(disc) = discover_gemini(client).await {
         return Some(disc);
     }
-    let base = client.base_url();
+    let base = api_base(client);
     let root = base.strip_suffix("/v1").unwrap_or(&base).to_string();
     let headers = headers(client);
     let probe = |url: String| {
@@ -462,7 +551,7 @@ pub(crate) async fn measure_image_cost(
 client: &Client,
 probe_png: &[u8], width: u32, height: u32) -> Option<(f32, f32)> {
     let _busy = client.busy();
-    let url = format!("{}/chat/completions", client.base_url());
+    let url = format!("{}/chat/completions", api_base(client));
     let headers = headers(client);
     let ask = |images: Vec<String>| {
         let mut msg = ChatMessage::user("x");
@@ -509,8 +598,7 @@ probe_png: &[u8], width: u32, height: u32) -> Option<(f32, f32)> {
     Some((per_pixel, tiny.max(0.0)))
 }
 
-fn stream_error(payload: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+pub(crate) fn stream_error(v: &serde_json::Value) -> Option<String> {
     let err = v.get("error").filter(|e| !e.is_null())?;
     Some(match err {
         serde_json::Value::String(s) => s.clone(),
@@ -522,10 +610,94 @@ fn stream_error(payload: &str) -> Option<String> {
     })
 }
 
+/// A local server for tests that answers every request from a script and
+/// keeps what it was sent.
+#[cfg(test)]
+pub(crate) mod test_server {
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct Request {
+        pub method: String,
+        pub path: String,
+        pub body: String,
+    }
+
+    impl Request {
+        pub fn json(&self) -> serde_json::Value {
+            serde_json::from_str(&self.body).unwrap_or_default()
+        }
+    }
+
+    pub(crate) type Log = Arc<Mutex<Vec<Request>>>;
+
+    /// `answer` gives the status line, the content type and the body. The
+    /// address has no path.
+    pub(crate) async fn serve<F>(answer: F) -> (String, Log)
+    where
+        F: Fn(&Request) -> (&'static str, &'static str, String) + Send + Sync + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log: Log = Arc::default();
+        let seen = log.clone();
+        let answer = Arc::new(answer);
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let (seen, answer) = (seen.clone(), answer.clone());
+                tokio::spawn(async move {
+                    let Some(req) = read_request(&mut sock).await else { return };
+                    seen.lock().unwrap().push(req.clone());
+                    let (status, content_type, body) = answer(&req);
+                    let head = format!("HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len());
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(body.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://{addr}"), log)
+    }
+
+    async fn read_request(sock: &mut tokio::net::TcpStream) -> Option<Request> {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 16384];
+        let head_end = loop {
+            let n = sock.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at + 4;
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        let length = head
+            .lines()
+            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()))
+            .unwrap_or(0);
+        while buf.len() < head_end + length {
+            let n = sock.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let mut first = head.lines().next()?.split_whitespace();
+        Some(Request {
+            method: first.next()?.to_string(),
+            path: first.next()?.to_string(),
+            body: String::from_utf8_lossy(&buf[head_end..]).to_string(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::{ApiProtocol, Endpoint};
+    use crate::types::FinishReason;
     use crate::LlmBackend;
     use futures::StreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -940,5 +1112,164 @@ mod tests {
         );
         assert_eq!(body_custom["reasoning_effort"], "xhigh");
     }
-}
 
+    async fn collect(stream: EventStream) -> Vec<LlmEvent> {
+        stream.map(|e| e.expect("no stream error")).collect().await
+    }
+
+    fn text_of(events: &[LlmEvent]) -> String {
+        events.iter().filter_map(|e| match e { LlmEvent::TextDelta(t) => Some(t.as_str()), _ => None }).collect()
+    }
+
+    fn sse(body: &str) -> (&'static str, &'static str, String) {
+        ("200 OK", "text/event-stream", body.to_string())
+    }
+
+    #[tokio::test]
+    async fn an_address_typed_without_v1_still_reaches_the_api() {
+        // vLLM and LM Studio serve nothing at the root: `http://localhost:8000` means its `/v1`.
+        let (url, log) = test_server::serve(|req| match req.path.as_str() {
+            "/v1/models" => ("200 OK", "application/json", r#"{"object":"list","data":[{"id":"Qwen/Qwen3-8B","owned_by":"vllm","max_model_len":40960}]}"#.into()),
+            "/v1/chat/completions" => sse("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+            _ => ("404 Not Found", "text/plain", "not found".into()),
+        })
+        .await;
+        let b = client(&url, "");
+        let disc = b.discover_server().await.expect("the list under /v1 was found");
+        assert_eq!(b.model(), "Qwen/Qwen3-8B");
+        assert_eq!(disc.models[0].context_length, Some(40960), "vLLM's max_model_len is the window it serves");
+        let events = collect(b.stream(&[ChatMessage::user("hi")], &[]).await.unwrap()).await;
+        assert_eq!(text_of(&events), "ok");
+        assert!(log.lock().unwrap().iter().any(|r| r.method == "POST" && r.path == "/v1/chat/completions"));
+        // A URL with a path is used as written.
+        assert_eq!(api_base(&client("https://openrouter.ai/api/v1", "m")), "https://openrouter.ai/api/v1");
+        assert_eq!(api_base(&client("http://localhost:8080", "m")), "http://localhost:8080/v1");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_ignores_streaming_is_read_from_its_one_reply() {
+        let reply = r#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Reading it.","reasoning_content":"plan","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.rs\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":50,"completion_tokens":9}}"#;
+        let (url, _) = test_server::serve(move |_| ("200 OK", "application/json", reply.to_string())).await;
+        let events = collect(client(format!("{url}/v1"), "m").stream(&[ChatMessage::user("hi")], &[]).await.unwrap()).await;
+        assert!(events.contains(&LlmEvent::ReasoningDelta("plan".into())));
+        assert_eq!(text_of(&events), "Reading it.");
+        assert!(events.iter().any(|e| matches!(e, LlmEvent::ToolCallDelta { name: Some(n), args_delta, .. } if n == "read_file" && args_delta == r#"{"path":"a.rs"}"#)));
+        assert!(events.iter().any(|e| matches!(e, LlmEvent::Usage(u) if u.prompt == Some(50))));
+        assert!(events.contains(&LlmEvent::Done(FinishReason::ToolUse)));
+    }
+
+    #[tokio::test]
+    async fn the_last_event_of_a_body_without_a_closing_blank_line_is_read() {
+        // Without it the reason was lost and the pump said Stop for an answer cut at the limit.
+        let (url, _) = test_server::serve(|_| sse("data: {\"choices\":[{\"delta\":{\"content\":\"par\"}}]}\r\n\r\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}")).await;
+        let events = collect(client(format!("{url}/v1"), "m").stream(&[ChatMessage::user("hi")], &[]).await.unwrap()).await;
+        assert_eq!(events, vec![LlmEvent::TextDelta("par".into()), LlmEvent::Done(FinishReason::Length)]);
+    }
+
+    #[tokio::test]
+    async fn an_error_after_some_text_keeps_the_text_and_ends_the_stream() {
+        let (url, _) = test_server::serve(|_| sse("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\ndata: {\"error\":{\"message\":\"upstream died\"}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"c\"}}]}\n\n")).await;
+        let items: Vec<_> = client(format!("{url}/v1"), "m").stream(&[ChatMessage::user("hi")], &[]).await.unwrap().collect().await;
+        assert!(matches!(&items[..], [Ok(LlmEvent::TextDelta(a)), Ok(LlmEvent::TextDelta(b)), Err(LlmError::Stream(e))] if a == "a" && b == "b" && e == "upstream died"), "{items:?}");
+    }
+
+    #[tokio::test]
+    async fn reasoning_the_server_refuses_to_be_sent_back_is_left_out_from_then_on() {
+        let (url, log) = test_server::serve(|req| {
+            if req.body.contains("\"reasoning_content\"") {
+                ("400 Bad Request", "application/json", r#"{"error":{"message":"The reasoning_content field is not allowed in input messages","type":"invalid_request_error"}}"#.into())
+            } else {
+                sse("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+            }
+        })
+        .await;
+        let b = client(format!("{url}/v1"), "deepseek-reasoner");
+        let mut earlier = ChatMessage::assistant("4");
+        earlier.reasoning = Some("2+2 is 4".into());
+        let history = [ChatMessage::user("2+2?"), earlier, ChatMessage::user("and 3+3?")];
+        let opts = TurnOptions { top_p: Some(0.9), ..Default::default() };
+        for _ in 0..2 {
+            assert_eq!(text_of(&collect(b.stream_with_options(&history, &[], &opts).await.unwrap()).await), "ok");
+        }
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 3, "one refusal, then never again");
+        assert!(log[2].json()["top_p"].is_number(), "nothing else was given up: {}", log[2].body);
+    }
+
+    #[tokio::test]
+    async fn a_thinking_switch_refused_by_name_is_dropped_without_the_sampling_settings() {
+        let (url, log) = test_server::serve(|req| {
+            if req.body.contains("\"reasoning_effort\"") {
+                ("400 Bad Request", "application/json", r#"{"error":{"message":"`reasoning_effort` is not supported with this model","type":"invalid_request_error"}}"#.into())
+            } else {
+                sse("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+            }
+        })
+        .await;
+        let b = client(format!("{url}/v1"), "llama-3.3-70b-versatile").with_profile(ThinkingProfile {
+            presets: vec!["low".into(), "medium".into(), "high".into()],
+            protocol: ThinkingProtocol::ReasoningEffort,
+            supported: true,
+            default_preset: None,
+        });
+        let opts = TurnOptions { thinking: crate::types::ThinkingEffort::High, top_p: Some(0.9), top_k: Some(20), ..Default::default() };
+        assert_eq!(text_of(&collect(b.stream_with_options(&[ChatMessage::user("hi")], &[], &opts).await.unwrap()).await), "ok");
+        let log = log.lock().unwrap();
+        let last = log.last().unwrap().json();
+        assert!(last.get("reasoning_effort").is_none() && last["top_p"].is_number() && last["top_k"].is_number(), "{last}");
+    }
+
+    #[test]
+    fn cloud_model_lists_say_what_each_model_takes() {
+        let b = client("https://openrouter.ai/api/v1", "deepseek/deepseek-r1");
+        let openrouter = serde_json::json!({ "data": [
+            { "id": "deepseek/deepseek-r1", "context_length": 163840, "architecture": { "input_modalities": ["text"] },
+              "supported_parameters": ["max_tokens", "reasoning", "include_reasoning", "tools", "tool_choice"] },
+            { "id": "openai/gpt-4o", "context_length": 128000, "architecture": { "input_modalities": ["text", "image"] },
+              "supported_parameters": ["max_tokens", "tools"] }
+        ] });
+        let disc = apply_listing(&b, "https://openrouter.ai/api/v1/models", &openrouter, None).unwrap();
+        let r1 = &disc.models[0];
+        assert!(r1.supports_tools && !r1.supports_vision && r1.context_length == Some(163840));
+        assert_eq!(r1.thinking.protocol, ThinkingProtocol::ReasoningObject);
+        assert!(r1.thinking.supported);
+        let gpt = &disc.models[1];
+        assert!(gpt.supports_vision && gpt.thinking.is_unreported(), "no reasoning parameter: nothing claimed");
+
+        let groq = serde_json::json!({ "object": "list", "data": [ { "id": "llama-3.3-70b-versatile", "owned_by": "Meta", "context_window": 131072, "active": true } ] });
+        let disc = apply_listing(&client("https://api.groq.com/openai/v1", "m"), "https://api.groq.com/openai/v1/models", &groq, None).unwrap();
+        assert_eq!(disc.models[0].context_length, Some(131072));
+
+        let mistral = serde_json::json!({ "object": "list", "data": [
+            { "id": "mistral-embed", "capabilities": { "completion_chat": false, "function_calling": false }, "max_context_length": 8192 },
+            { "id": "pixtral-large-latest", "capabilities": { "completion_chat": true, "function_calling": true, "vision": true }, "max_context_length": 131072 }
+        ] });
+        let disc = apply_listing(&client("https://api.mistral.ai/v1", "m"), "https://api.mistral.ai/v1/models", &mistral, None).unwrap();
+        assert_eq!(disc.models.len(), 1, "the embedding model is not offered for chat");
+        assert!(disc.models[0].supports_tools && disc.models[0].supports_vision);
+        assert_eq!(disc.models[0].max_context_length, Some(131072));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_naming_a_field_the_request_did_not_carry_wastes_no_retry() {
+        // The error says "thinking", but no `thinking` field was sent: dropping it would
+        // change nothing and spend one of the few retries.
+        let (url, log) = test_server::serve(|req| {
+            if req.body.contains("\"enable_thinking\"") {
+                ("400 Bad Request", "application/json", r#"{"error":"thinking is not supported by this model"}"#.into())
+            } else {
+                sse("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+            }
+        })
+        .await;
+        let b = client(format!("{url}/v1"), "m").with_profile(ThinkingProfile {
+            presets: vec!["off".into(), "on".into()],
+            protocol: ThinkingProtocol::LmStudio,
+            supported: true,
+            default_preset: Some("on".into()),
+        });
+        let opts = TurnOptions { thinking: crate::types::ThinkingEffort::Off, ..Default::default() };
+        assert_eq!(text_of(&collect(b.stream_with_options(&[ChatMessage::user("hi")], &[], &opts).await.unwrap()).await), "ok");
+        assert_eq!(log.lock().unwrap().len(), 3, "all fields, fewer, standard");
+    }
+}
