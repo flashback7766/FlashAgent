@@ -616,6 +616,7 @@ const SCREENS: &[(&str, &str, &str)] = &[
     ("/settings", "Settings", "Esc save and close"),
     ("/memory", "remembers", "Esc close"),
     ("/mcp", "MCP", "Esc close"),
+    ("/tasks", "Background tasks", "Esc close"),
     ("/provider", "Switch provider", "Esc cancel"),
     // Printed into the transcript, so the marker is its last line; the first has
     // scrolled away in a short terminal.
@@ -2537,4 +2538,153 @@ mod never_half_drawn {
         assert!(seen.reads > 50, "too little was drawn to judge: {seen:?}");
         assert_eq!(seen.half_drawn, 0, "the screen was seen half drawn: {seen:?}");
     }
+}
+
+/// The user-role messages of a request.
+fn user_messages(request: &support::mock_server::Request) -> Vec<String> {
+    request.body["messages"]
+        .as_array()
+        .map(|m| m.iter().filter(|m| m["role"] == "user").map(|m| m["content"].to_string()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_background_command_that_ends_wakes_the_agent_with_a_notice() {
+    let command = if cfg!(windows) { "ping -n 2 127.0.0.1 >NUL & echo bg-finished-marker" } else { "sleep 1; echo bg-finished-marker" };
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "header": "Build in the background", "command": command, "background": true }),
+        },
+        Reply::Text("Started it in the background.".into()),
+        Reply::Text("The background build is done.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+
+    ask(&term, "build it in the background", "Started it in the background.");
+    // Nobody types: the task's end starts a turn of its own.
+    let screen = term.wait_for("The background build is done.", WAIT);
+    assert!(screen.contains("Background task 1 exited with code 0"), "no line for the task:\n{screen}");
+    term.wait_gone(RUNNING_HINT, WAIT);
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let turns = server.turns();
+    assert_eq!(turns.len(), 3, "the notice woke the agent more or less than once");
+    assert!(sent(&turns[1]).contains("A notice arrives when it exits"), "{}", sent(&turns[1]));
+    let told: Vec<String> = user_messages(&turns[2]).into_iter().filter(|m| m.contains("[Background task 1 ")).collect();
+    assert_eq!(told.len(), 1, "the notice was delivered {} times", told.len());
+    assert!(told[0].contains("exited with code 0") && told[0].contains("bg-finished-marker"), "{}", told[0]);
+    assert!(told[0].contains("not a message from the user"), "{}", told[0]);
+}
+
+#[test]
+fn ctrl_b_moves_a_running_command_to_the_background() {
+    let command = if cfg!(windows) {
+        "echo detach-before & ping -n 4 127.0.0.1 >NUL & echo detach-after"
+    } else {
+        "echo detach-before; sleep 3; echo detach-after"
+    };
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "header": "Run the slow step", "command": command }),
+        },
+        Reply::Text("Carrying on while it runs.".into()),
+        Reply::Text("It has finished now.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+
+    term.type_text("run the slow step");
+    term.send(ENTER);
+    // The key is offered only while a command runs.
+    term.wait_for("Ctrl+B background", WAIT);
+    term.send("\x02");
+    term.wait_for("Carrying on while it runs.", WAIT);
+
+    let turns = server.turns();
+    let messages = turns[1].body["messages"].as_array().cloned().unwrap_or_default();
+    let result = messages.iter().find(|m| m["role"] == "tool").map(|m| m["content"].to_string()).unwrap_or_default();
+    assert!(result.contains("moved this command to the background") && result.contains("background task 1"), "{result}");
+    assert!(result.contains("detach-before"), "the output so far was lost: {result}");
+    assert!(!result.contains("detach-after"), "the call waited for the command to end: {result}");
+
+    // It kept running, and its end reaches the agent.
+    let screen = term.wait_for("It has finished now.", WAIT);
+    assert!(screen.contains("Background task 1 exited with code 0"), "{screen}");
+    let told = user_messages(&server.turns()[2]).join("\n");
+    assert!(told.contains("detach-after"), "the output after the move was lost: {told}");
+}
+
+fn background_sleep() -> Vec<Reply> {
+    let command = if cfg!(windows) { "ping -n 60 127.0.0.1" } else { "sleep 60" };
+    vec![
+        Reply::ToolCall {
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "header": "Start the server", "command": command, "background": true }),
+        },
+        Reply::Text("The server is starting.".into()),
+    ]
+}
+
+#[test]
+fn a_task_stopped_from_the_task_list_wakes_nobody() {
+    let server = MockServer::start(background_sleep());
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+    ask(&term, "start the server", "The server is starting.");
+    term.wait_for("1 task", WAIT);
+
+    term.type_text("/tasks");
+    term.send(ENTER);
+    // Its last row: the card unfolds as it opens.
+    let list = term.wait_for("Esc close", WAIT);
+    assert!(list.contains("#1") && list.contains("running"), "{list}");
+    term.send("k");
+    term.wait_for("stopped", WAIT);
+    term.send(ESC);
+    term.wait_for("Background task 1 was stopped", WAIT);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(server.turns().len(), 2, "a task the user stopped woke the agent");
+    assert!(!term.screen().contains("1 task"), "the footer still counts a stopped task");
+}
+
+#[test]
+fn quitting_says_how_many_background_tasks_it_stops() {
+    let server = MockServer::start(background_sleep());
+    let home = Home::new();
+    let mut term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+    ask(&term, "start the server", "The server is starting.");
+
+    term.send(CTRL_D);
+    term.wait_for("1 background task running", WAIT);
+    assert!(term.wait_exit(Duration::from_millis(500)).is_none(), "quit without saying a task would be stopped");
+    quit(&mut term);
+}
+
+#[test]
+fn a_notice_waits_while_the_user_is_typing() {
+    // Long enough to be typing before it ends.
+    let command = if cfg!(windows) { "ping -n 4 127.0.0.1 >NUL" } else { "sleep 3" };
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "header": "Wait a second", "command": command, "background": true }),
+        },
+        Reply::Text("Waiting on it.".into()),
+        Reply::Text("It is done.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+    ask(&term, "wait a second", "Waiting on it.");
+    term.type_text("half a thought");
+    term.wait_for("Background task 1 exited", WAIT);
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(server.turns().len(), 2, "a turn started under the user's draft");
+
+    // An emptied prompt lets it go.
+    term.send(ESC);
+    term.wait_for("It is done.", WAIT);
+    assert_eq!(server.turns().len(), 3);
 }

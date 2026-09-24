@@ -105,8 +105,13 @@ impl App {
         self.turn_outcome = flashagent_core::TurnOutcome::default();
         self.turn_flash = None;
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
-        self.active_steer_tx = Some(steer_tx);
         self.pending_steers.clear();
+        // Notices that waited (a draft, an Esc) ride along with this turn.
+        self.task_inbox.turn_started();
+        for notice in self.task_inbox.send_into_turn() {
+            let _ = steer_tx.send(notice);
+        }
+        self.active_steer_tx = Some(steer_tx);
         self.cancel_recap();
         self.active_turn_handle = Some(spawn_turn(
             cx.cancel.clone(),
@@ -167,6 +172,8 @@ impl App {
         self.turn_started = None;
         self.active_turn_handle = None;
         self.active_steer_tx = None;
+        self.task_inbox.turn_ended(matches!(res, Ok((_, DoneReason::Cancelled))));
+        self.flush_task_lines();
         // A steer typed as the turn ended never reached the model; it goes back into
         // the prompt.
         let unsent = std::mem::take(&mut self.pending_steers);
@@ -329,6 +336,8 @@ impl App {
                 self.notice("Ctrl+R retries the last prompt");
             }
         }
+        // Notices that came as the turn ended.
+        self.deliver_task_notices(cx);
 
         Flow::Next
     }
