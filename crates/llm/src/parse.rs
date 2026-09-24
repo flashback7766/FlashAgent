@@ -105,10 +105,7 @@ impl SseDecoder {
 pub struct ChunkParser {
     tool_ids: Vec<Option<String>>,
     tool_names: Vec<Option<String>>,
-    /// Inside Gemini's `<thought>…</thought>` in the content.
-    in_thought: bool,
-    /// A tag cut between two chunks, waiting for the rest.
-    tag_carry: String,
+    thought: ThoughtTags,
     /// Readers stop at the first `Done`, so there is only one: a finish
     /// reason followed by `[DONE]` must not end the stream twice.
     done: bool,
@@ -117,53 +114,92 @@ pub struct ChunkParser {
 const THOUGHT_OPEN: &str = "<thought>";
 const THOUGHT_CLOSE: &str = "</thought>";
 
-impl ChunkParser {
-    /// Gemini sends its thought summaries in the content, between `<thought>`
-    /// tags (or marks a whole chunk as thought): they are reasoning, shown as
-    /// such and kept out of the answer.
-    fn split_thought(&mut self, text: &str, events: &mut Vec<LlmEvent>) {
-        let joined;
-        let mut rest = if self.tag_carry.is_empty() {
-            text
-        } else {
-            joined = std::mem::take(&mut self.tag_carry) + text;
-            joined.as_str()
-        };
+/// Gemini writes thought summaries into the text between `<thought>` and
+/// `</thought>`, besides or instead of marking them as thought. The tags are
+/// never shown, and what is between them is reasoning. Text marked as thought
+/// is reasoning whole, but its tags still count: a model may open one there
+/// and close it at the start of its answer. Such a tag only ends at its
+/// close, and the unmarked text before that is still the answer, so a close
+/// that never comes cannot swallow it.
+#[derive(Default)]
+pub(crate) struct ThoughtTags {
+    state: Tagged,
+    /// A tag cut between two pieces, waiting for the rest, and whether it
+    /// came in marked text.
+    carry: String,
+    carry_marked: bool,
+}
+
+#[derive(Default, Clone, Copy, PartialEq)]
+enum Tagged {
+    #[default]
+    Answer,
+    Thought,
+    /// Opened in text marked as thought.
+    OpenedInThought,
+}
+
+impl ThoughtTags {
+    pub(crate) fn split(&mut self, text: String, marked: bool, events: &mut Vec<LlmEvent>) {
+        if text.is_empty() {
+            return;
+        }
+        if self.state == Tagged::Answer && self.carry.is_empty() && !text.contains('<') {
+            events.push(if marked { LlmEvent::ReasoningDelta(text) } else { LlmEvent::TextDelta(text) });
+            return;
+        }
+        if marked != self.carry_marked {
+            self.flush(events);
+        }
+        let joined = std::mem::take(&mut self.carry) + &text;
+        let mut rest = joined.as_str();
         loop {
-            let tag = if self.in_thought { THOUGHT_CLOSE } else { THOUGHT_OPEN };
+            let tag = if self.state == Tagged::Answer { THOUGHT_OPEN } else { THOUGHT_CLOSE };
             match rest.find(tag) {
                 Some(at) => {
-                    self.emit_piece(&rest[..at], events);
-                    self.in_thought = !self.in_thought;
+                    self.emit(&rest[..at], marked, events);
+                    self.state = match (self.state, marked) {
+                        (Tagged::Answer, true) => Tagged::OpenedInThought,
+                        (Tagged::Answer, false) => Tagged::Thought,
+                        _ => Tagged::Answer,
+                    };
                     rest = &rest[at + tag.len()..];
                 }
                 None => {
                     // Hold what may be the start of the tag.
                     let keep = (1..tag.len()).rev().find(|&n| rest.ends_with(&tag[..n])).unwrap_or(0);
                     let cut = rest.len() - keep;
-                    self.emit_piece(&rest[..cut], events);
-                    self.tag_carry = rest[cut..].to_string();
+                    self.emit(&rest[..cut], marked, events);
+                    self.carry = rest[cut..].to_string();
+                    self.carry_marked = marked;
                     return;
                 }
             }
         }
     }
 
-    /// At the end, a held `<` was just text.
-    fn flush_carry(&mut self, events: &mut Vec<LlmEvent>) {
-        let carry = std::mem::take(&mut self.tag_carry);
-        self.emit_piece(&carry, events);
+    /// Before whatever comes next, and at the end: a held `<` was just text.
+    pub(crate) fn flush(&mut self, events: &mut Vec<LlmEvent>) {
+        let carry = std::mem::take(&mut self.carry);
+        self.emit(&carry, self.carry_marked, events);
     }
 
-    fn emit_piece(&self, piece: &str, events: &mut Vec<LlmEvent>) {
+    fn emit(&self, piece: &str, marked: bool, events: &mut Vec<LlmEvent>) {
         if piece.is_empty() {
             return;
         }
-        events.push(if self.in_thought {
+        events.push(if marked || self.state == Tagged::Thought {
             LlmEvent::ReasoningDelta(piece.to_string())
         } else {
             LlmEvent::TextDelta(piece.to_string())
         });
+    }
+}
+
+impl ChunkParser {
+    /// At the end, a held `<` was just text.
+    fn flush_carry(&mut self, events: &mut Vec<LlmEvent>) {
+        self.thought.flush(events);
     }
 
     pub fn feed(&mut self, payload: &str) -> Vec<LlmEvent> {
@@ -354,16 +390,7 @@ impl ChunkParser {
     }
 
     fn content(&mut self, text: String, marked_thought: bool, events: &mut Vec<LlmEvent>) {
-        if text.is_empty() {
-            return;
-        }
-        if marked_thought {
-            events.push(LlmEvent::ReasoningDelta(text));
-        } else if self.in_thought || !self.tag_carry.is_empty() || text.contains('<') {
-            self.split_thought(&text, events);
-        } else {
-            events.push(LlmEvent::TextDelta(text));
-        }
+        self.thought.split(text, marked_thought, events);
     }
 
     fn tool_call(&mut self, mut call: Value, events: &mut Vec<LlmEvent>) {
@@ -1052,6 +1079,19 @@ mod tests {
         let (text, calls) = scan(&["Here:\n", "{", "\"id\": 1}\n"]);
         assert!(calls.is_empty());
         assert_eq!(text, "Here:\n{\"id\": 1}\n");
+    }
+
+    #[test]
+    fn a_thought_tag_opened_in_a_marked_chunk_and_closed_in_the_answer_is_never_shown() {
+        let mut p = ChunkParser::default();
+        let marked = |t: &str| serde_json::json!({ "choices": [ { "delta": { "content": t, "extra_content": { "google": { "thought": true } } } } ] }).to_string();
+        let plain = |t: &str| serde_json::json!({ "choices": [ { "delta": { "content": t } } ] }).to_string();
+        let mut events = p.feed(&marked("<thought>Acknowledge"));
+        events.extend(p.feed(&plain("</thought>Hello!")));
+        events.extend(p.feed("[DONE]"));
+        let reasoning: String = events.iter().filter_map(|e| match e { LlmEvent::ReasoningDelta(t) => Some(t.as_str()), _ => None }).collect();
+        let text: String = events.iter().filter_map(|e| match e { LlmEvent::TextDelta(t) => Some(t.as_str()), _ => None }).collect();
+        assert_eq!((reasoning.as_str(), text.as_str()), ("Acknowledge", "Hello!"));
     }
 
     #[test]
