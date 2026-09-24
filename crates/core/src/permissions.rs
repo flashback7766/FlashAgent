@@ -160,7 +160,6 @@ impl ApprovalGate for AllowAllGate {
 #[derive(Debug, Default, Clone)]
 pub struct RuleSet {
     pub always_allow_tools: Vec<String>,
-    pub denied_tools: Vec<String>,
     /// Narrow: `npm test` covers `npm test --watch`, never `npm publish`.
     pub shell_prefixes: Vec<String>,
     /// Allowed only verbatim, with no extra arguments.
@@ -845,10 +844,6 @@ impl PermissionState {
         }
     }
 
-    pub fn deny_tool(&self, tool: &str) {
-        self.rules.lock().expect("rules lock").denied_tools.push(tool.to_string());
-    }
-
     /// `preview` makes the write diff. It reads the file and compares it
     /// whole, so it runs only when a card will show it: most writes are allowed
     /// outright.
@@ -856,9 +851,6 @@ impl PermissionState {
         let mut preview = Some(preview);
         let mut diff = move || preview.take().and_then(|p| p());
         let rules = self.rules.lock().expect("rules lock");
-        if rules.denied_tools.iter().any(|t| t == &call.name) {
-            return Verdict::Deny("tool is on the session blacklist".into());
-        }
         let always = rules.always_allow_tools.iter().any(|t| t == &call.name);
         drop(rules);
         // Before any "Always": allowing a tool for the project must not reach ~/.ssh.
@@ -1634,13 +1626,6 @@ mod tests {
     }
 
     #[test]
-    fn blacklist_beats_everything() {
-        let state = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
-        state.deny_tool("rm_tool");
-        assert!(matches!(state.decide(&call("rm_tool", "{}"), || None), Verdict::Deny(_)));
-    }
-
-    #[test]
     fn always_allow_beats_manual_mode() {
         let state = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
         state.allow_tool_always("write_file");
@@ -1724,33 +1709,6 @@ mod tests {
             assert!(!tools.execute(&write).await.is_error);
             assert_eq!(preview.0.load(Ordering::Relaxed), diffed, "{mode:?}");
         }
-    }
-
-    #[tokio::test]
-    async fn denied_tool_short_circuits_before_gate() {
-        struct Exploding;
-        #[async_trait]
-        impl ToolExec for Exploding {
-            async fn execute(&self, _call: &ToolCall) -> ToolOutput {
-                panic!("must not be called");
-            }
-            fn specs(&self) -> Vec<ToolSpec> {
-                vec![]
-            }
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
-        }
-        let inner = Exploding;
-        let state = Arc::new(PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate)));
-        state.deny_tool("danger");
-        let wrapped = PermissionedTools::new(
-            Arc::new(inner),
-            None::<Arc<dyn crate::loop_::WritePreview>>,
-            state,
-        );
-        let out = wrapped.execute(&call("danger", "{}")).await;
-        assert!(out.is_error && out.content.contains("blacklist"));
     }
 
     #[test]

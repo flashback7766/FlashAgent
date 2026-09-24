@@ -211,7 +211,8 @@ impl Client {
         self.discovery.read().as_ref().map(|d| d.kind).unwrap_or_default()
     }
 
-    pub fn with_profile(self, profile: ThinkingProfile) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_profile(self, profile: ThinkingProfile) -> Self {
         *self.profile.write() = Some(profile);
         self
     }

@@ -265,10 +265,6 @@ impl ThinkingProfile {
         }
     }
 
-    pub fn resolve_dynamic(&self, messages: &[crate::types::ChatMessage]) -> Option<&str> {
-        self.resolve_dynamic_biased(messages, 0)
-    }
-
     /// `bias` -1 thinks one preset less, +1 one more.
     pub fn resolve_dynamic_biased(
         &self,
@@ -613,19 +609,6 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
     }
 }
 
-
-    /// From a `/v1/models` or `/v1/models/{model}` response.
-    pub fn parse_model_metadata(data: &serde_json::Value, model_name: &str) -> Option<Self> {
-        let models = parse_server_models(data);
-        for m in models {
-            if (m.id == model_name || m.id.contains(model_name) || model_name.contains(&m.id))
-                && m.thinking.supported
-            {
-                return Some(m.thinking);
-            }
-        }
-        None
-    }
 
     /// Learns supported presets from an API error.
     pub fn parse_api_error(error_body: &str) -> Option<Self> {
@@ -1268,7 +1251,7 @@ mod tests {
         let turned_down = profile.resolve_dynamic_biased(&ask, -1).map(str::to_string);
         assert_eq!(neutral.as_deref(), Some("high"), "a big task asks for the most thinking");
         assert_eq!(turned_down.as_deref(), Some("medium"), "the learned step is actually applied");
-        assert_eq!(profile.resolve_dynamic(&ask).map(str::to_string), neutral, "no bias, no change");
+        assert_eq!(profile.resolve_dynamic_biased(&ask, 0).map(str::to_string), neutral, "no bias, no change");
     }
 
     #[test]
@@ -1443,9 +1426,6 @@ mod tests {
         assert_eq!(m.thinking.presets, vec!["off", "on"]);
         assert_eq!(m.thinking.protocol, ThinkingProtocol::LmStudio);
         assert_eq!(m.thinking.default_preset.as_deref(), Some("on"));
-
-        let prof = ThinkingProfile::parse_model_metadata(&json, "gemma-4").expect("found profile");
-        assert_eq!(prof.presets, vec!["off", "on"]);
     }
 
     #[test]
@@ -1694,10 +1674,10 @@ mod tests {
         };
 
         let hello = vec![ChatMessage::user("Hello")];
-        assert_eq!(binary_prof.resolve_dynamic(&hello), Some("off"));
+        assert_eq!(binary_prof.resolve_dynamic_biased(&hello, 0), Some("off"));
 
         let code = vec![ChatMessage::user("Fix compilation error in main.rs")];
-        assert_eq!(binary_prof.resolve_dynamic(&code), Some("on"));
+        assert_eq!(binary_prof.resolve_dynamic_biased(&code, 0), Some("on"));
 
         let tiered_prof = ThinkingProfile {
             presets: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
@@ -1706,7 +1686,7 @@ mod tests {
             default_preset: Some("medium".to_string()),
         };
 
-        assert_eq!(tiered_prof.resolve_dynamic(&hello), Some("low"));
-        assert_eq!(tiered_prof.resolve_dynamic(&code), Some("high"));
+        assert_eq!(tiered_prof.resolve_dynamic_biased(&hello, 0), Some("low"));
+        assert_eq!(tiered_prof.resolve_dynamic_biased(&code, 0), Some("high"));
     }
 }

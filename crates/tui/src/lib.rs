@@ -683,6 +683,7 @@ impl ReasoningExpansion {
         Self { all: true, last: false }
     }
 
+    #[cfg(test)]
     pub fn last_only() -> Self {
         Self { all: false, last: true }
     }
@@ -1291,12 +1292,6 @@ pub type RenderLine = (LineKind, String);
 pub const SPINNER: &[&str] = anim::SPINNER;
 
 pub const GLYPH_PROMPT: &str = "›";
-
-/// Diamonds, not circles or checks.
-pub const GLYPH_RUN: &str = "◊"; // tool call in flight
-pub const GLYPH_OK: &str = "♦"; // tool finished
-pub const GLYPH_ERR: &str = "×"; // tool failed (hollow = broken)
-pub const GLYPH_SUB: &str = "└"; // sub-result hanging under a call
 
 #[cfg(test)]
 mod tests {
