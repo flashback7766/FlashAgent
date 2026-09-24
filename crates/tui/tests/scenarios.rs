@@ -2181,11 +2181,11 @@ fn idle_screen_moves(animations: bool, watch: Duration) -> (String, Option<Strin
     let home = Home::new();
     let term = ready_with(&home, &server, serde_json::json!({ "animations": animations }));
     std::thread::sleep(Duration::from_millis(300));
-    let first = term.screen();
+    let first = term.screen_colours();
     let deadline = std::time::Instant::now() + watch;
     while std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
-        let now = term.screen();
+        let now = term.screen_colours();
         if now != first {
             return (first, Some(now));
         }
@@ -2198,7 +2198,7 @@ fn with_animations_off_an_idle_screen_holds_still() {
     // With motion off, nothing may change while nobody does anything.
     let (first, moved) = idle_screen_moves(false, Duration::from_millis(1500));
     assert_eq!(moved, None, "the screen moved with animations off; it was:\n{first}");
-    // The tip pauses between its moves: watched long enough to see one on a slow runner.
+    // The mascot breathes in colour alone, so the screen is compared with its colours.
     let (_, moved) = idle_screen_moves(true, Duration::from_secs(10));
     assert!(moved.is_some(), "this test cannot tell: nothing moves with animations on either");
 }

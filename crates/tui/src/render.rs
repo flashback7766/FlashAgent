@@ -44,8 +44,7 @@ pub(crate) struct FrameState<'a> {
     pub(crate) mode: PermissionMode,
     pub(crate) is_goal_active: bool,
     pub(crate) goal_progress: Option<&'a str>,
-    pub(crate) tip: Option<&'a str>,
-    pub(crate) tip_animated: Option<&'a str>,
+    /// Laid out by `TipAnimator::render_lines`; `None` with tips off.
     pub(crate) tip_lines: Option<&'a [String]>,
     pub(crate) reasoning_expand: ReasoningExpansion,
     pub(crate) tick_n: usize,
@@ -199,7 +198,7 @@ struct FooterVisibility {
     autocomplete: bool,
 }
 
-fn footer_hint(chat: &ChatView, shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u64) -> String {
+fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u64) -> String {
     let left_hint = if let Some(toast) = st.copy_toast {
         format!("  \x1b[1;38;2;135;215;165m{toast}\x1b[0m")
     } else if st.history_search.is_some() {
@@ -264,53 +263,17 @@ fn footer_hint(chat: &ChatView, shown: FooterVisibility, st: &FrameState<'_>, wi
     } else if !st.input.is_empty() {
         let hints = [("Enter", "send"), ("Alt+Enter", "new line"), ("Ctrl+W", "delete word"), ("Ctrl+F", "history"), ("Esc", "clear")];
         format!("  {}", key_hints(&hints, width.saturating_sub(2)))
-    } else if chat.has_user_message() {
-        // The welcome card lists the keys; once it has scrolled away, the one key
-        // that finds every other.
-        format!("  {}", key_hints(&[("Ctrl+K", "commands"), ("/help", ""), ("Ctrl+D", "quit")], width.saturating_sub(2)))
     } else {
-        String::new()
+        // The one key that finds every other. The welcome card lists more, but
+        // an empty row under the prompt read as a line that failed to draw.
+        format!("  {}", key_hints(&[("Ctrl+K", "commands"), ("/help", ""), ("Ctrl+D", "quit")], width.saturating_sub(2)))
     };
     left_hint
 }
 
-fn append_tip_rows(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize, height: u16) {
-    if let Some(lines) = st.tip_lines {
-        for line in lines {
-            let tip_row = clip_ansi(line, width.saturating_sub(2));
-            tail.push((LineKind::System, tip_row));
-        }
-    } else if let Some(anim) = st.tip_animated {
-        let raw_tip = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m {anim}");
-        let tip_row = clip_ansi(&raw_tip, width.saturating_sub(2));
-        tail.push((LineKind::System, tip_row));
-    } else if let Some(tip_content) = st.tip {
-        let avail1 = width.saturating_sub(8);
-        // A second tip row only in a tall window.
-        let room_for_two = height >= 20;
-        if room_for_two && width >= 30 && tip_content.chars().count() > avail1 {
-            let (l1, l2) = flashagent_tui::tips::split_tip_at_word_boundary(tip_content, avail1);
-            let row1 = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{l1}\x1b[0m");
-            // A tip needing three lines ends the second on a word.
-            let room = width.saturating_sub(9);
-            let l2 = if l2.chars().count() > room {
-                let head: String = l2.chars().take(room.saturating_sub(1)).collect();
-                let cut = match head.rfind(' ') {
-                    Some(i) if i >= room / 3 => head[..i].to_string(),
-                    _ => head,
-                };
-                format!("{cut}\u{2026}")
-            } else {
-                l2.to_string()
-            };
-            let row2 = format!("       \x1b[38;2;175;170;160m{l2}\x1b[0m");
-            tail.push((LineKind::System, clip_ansi(&row1, width.saturating_sub(2))));
-            tail.push((LineKind::System, clip_ansi(&row2, width.saturating_sub(2))));
-        } else {
-            let raw_tip = format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{tip_content}\x1b[0m");
-            let tip_row = clip_ansi(&raw_tip, width.saturating_sub(2));
-            tail.push((LineKind::System, tip_row));
-        }
+fn append_tip_rows(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize) {
+    for line in st.tip_lines.unwrap_or_default() {
+        tail.push((LineKind::System, clip_ansi(line, width.saturating_sub(2))));
     }
 }
 
@@ -894,8 +857,8 @@ impl Renderer {
             overlay: overlay.is_some(),
             autocomplete: autocomplete.is_some(),
         };
-        tail.push((LineKind::System, footer_hint(chat, shown, &st, width, t)));
-        append_tip_rows(&mut tail, &st, width, height);
+        tail.push((LineKind::System, footer_hint(shown, &st, width, t)));
+        append_tip_rows(&mut tail, &st, width);
         let awaiting_user = gate.pending().is_some() || question_gate.pending().is_some();
         tail.push((LineKind::System, footer_status(width, context_usage, &st, awaiting_user)));
 
@@ -1041,8 +1004,6 @@ impl App {
                 mode: cx.perm.state().mode(),
                 is_goal_active: self.goal_state.is_some(),
                 goal_progress: goal_progress.as_deref(),
-                tip: config.show_tips.then_some(self.tip_animator.tip_text),
-                tip_animated: None,
                 tip_lines: config.show_tips.then_some(cx.tip_lines.as_slice()),
                 reasoning_expand: ReasoningExpansion { all: self.all_expanded, last: self.last_expanded },
                 tick_n: self.tick_n,

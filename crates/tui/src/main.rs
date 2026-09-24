@@ -1341,6 +1341,7 @@ async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mu
         }
         // Two tip rows only when the window can spare them.
         let tip_rows = if term_h >= 20 { 2 } else { 1 };
+        app.tip_animator.fit_to(term_w as usize, tip_rows);
         let tip_lines = app.tip_animator.render_lines(term_w as usize, tip_rows);
 
         if app.copy_toast.as_ref().is_some_and(|(_, shown)| shown.elapsed().as_secs_f32() >= 2.5) {

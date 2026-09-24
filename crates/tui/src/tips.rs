@@ -1,4 +1,4 @@
-//! Tips shown in the footer with a typewriter animation.
+//! Tips shown in the footer, one at a time.
 
 pub static TIPS_POOL: &[&str] = &[
     "Shift+Tab cycles the permission mode: Planning, Manual, Accept Edits, Accept All.",
@@ -53,25 +53,31 @@ fn shuffle_deck(deck: &mut [usize], seed: &mut u64) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TipPhase {
-    Typing,
-    Holding,
-    Erasing,
-    Pause,
-}
+/// How long a tip stays: 10 s at the 80 ms tick.
+const HOLD_TICKS: usize = 125;
+/// How long a new tip takes to fade in, with motion on.
+const FADE_TICKS: usize = 5;
+/// "  Tip: " before the text, and the columns the footer leaves free on the right.
+const LABEL_COLS: usize = 7;
+const RIGHT_MARGIN: usize = 2;
+const TEXT_RGB: (u8, u8, u8) = (175, 170, 160);
+/// Where the fade starts: close to the background, not black.
+const FADED_RGB: (u8, u8, u8) = (70, 68, 64);
 
+/// The tip under the prompt. Each is shown whole and replaced whole: a tip
+/// typed out and erased letter by letter left half words and a second,
+/// orange cursor on screen, and a bare "Tip:" between two tips.
 #[derive(Debug, Clone)]
 pub struct TipAnimator {
     pub tip_text: &'static str,
-    pub char_count: usize,
-    pub total_chars: usize,
-    pub phase: TipPhase,
-    pub hold_ticks: usize,
-    pub pause_ticks: usize,
-    pub deck: Vec<usize>,
-    pub deck_idx: usize,
-    pub seed: u64,
+    /// Ticks since this tip appeared.
+    age: usize,
+    deck: Vec<usize>,
+    deck_idx: usize,
+    seed: u64,
+    /// Width and rows the footer has for tips, once known: a tip that does
+    /// not fit them is passed over rather than cut.
+    room: Option<(usize, usize)>,
 }
 
 impl Default for TipAnimator {
@@ -88,162 +94,115 @@ impl TipAnimator {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x9e3779b97f4a7c15);
         let mut seed = nanos ^ 0xbf58476d1ce4e5b9;
-
         let mut deck: Vec<usize> = (0..TIPS_POOL.len()).collect();
         shuffle_deck(&mut deck, &mut seed);
-
-        let initial_idx = deck[0];
-        let tip_text = TIPS_POOL[initial_idx];
-        let total_chars = tip_text.chars().count();
-
-        Self {
-            tip_text,
-            char_count: 0,
-            total_chars,
-            phase: TipPhase::Typing,
-            hold_ticks: 0,
-            pause_ticks: 0,
-            deck,
-            deck_idx: 0,
-            seed,
-        }
+        Self { tip_text: TIPS_POOL[deck[0]], age: 0, deck, deck_idx: 0, seed, room: None }
     }
 
-    /// One tick is 80 ms. With motion off a tip appears whole, then the next one.
+    /// One tick is 80 ms. Tips change with motion off too; only the fade goes.
     pub fn tick(&mut self) {
-        if !crate::anim::enabled() {
-            match self.phase {
-                TipPhase::Typing => self.char_count = self.total_chars,
-                TipPhase::Erasing => {
-                    self.char_count = 0;
-                    self.phase = TipPhase::Pause;
-                    self.pause_ticks = 0;
-                }
-                _ => {}
-            }
-        }
-        match self.phase {
-            TipPhase::Typing => {
-                // 8 characters per tick, ~100 chars/sec.
-                self.char_count = (self.char_count + 8).min(self.total_chars);
-                if self.char_count >= self.total_chars {
-                    self.phase = TipPhase::Holding;
-                    self.hold_ticks = 125; // 10s hold
-                }
-            }
-            TipPhase::Holding => {
-                if self.hold_ticks > 0 {
-                    self.hold_ticks -= 1;
-                } else {
-                    self.phase = TipPhase::Erasing;
-                }
-            }
-            TipPhase::Erasing => {
-                // 12 characters per tick, ~150 chars/sec.
-                self.char_count = self.char_count.saturating_sub(12);
-                if self.char_count == 0 {
-                    self.phase = TipPhase::Pause;
-                    self.pause_ticks = 4;
-                }
-            }
-            TipPhase::Pause => {
-                if self.pause_ticks > 0 {
-                    self.pause_ticks -= 1;
-                } else {
-                    self.deck_idx += 1;
-                    if self.deck_idx >= self.deck.len() {
-                        self.deck_idx = 0;
-                        shuffle_deck(&mut self.deck, &mut self.seed);
-                        if self.deck.len() > 1 && TIPS_POOL[self.deck[0]] == self.tip_text {
-                            self.deck.swap(0, 1);
-                        }
-                    }
-                    let next = TIPS_POOL[self.deck[self.deck_idx]];
-                    self.tip_text = next;
-                    self.total_chars = next.chars().count();
-                    self.char_count = 0;
-                    self.phase = TipPhase::Typing;
-                }
-            }
+        self.age += 1;
+        if self.age >= HOLD_TICKS {
+            self.advance();
         }
     }
 
-    /// Visible text and whether the caret shows: only while the text moves, so
-    /// a tip at rest is not a second blinking cursor beside the real one.
-    pub fn render_state(&self) -> (String, bool) {
-        let visible: String = self.tip_text.chars().take(self.char_count).collect();
-        let caret = matches!(self.phase, TipPhase::Typing | TipPhase::Erasing) && crate::anim::enabled();
-        (visible, caret)
+    /// The footer's room for tips. A tip that no longer fits gives way at once.
+    pub fn fit_to(&mut self, width: usize, rows: usize) {
+        if self.room == Some((width, rows)) {
+            return;
+        }
+        self.room = Some((width, rows));
+        if self.passes_over() && !fits(self.tip_text, width, rows) {
+            self.advance();
+        }
     }
 
-    pub fn render_line(&self, max_w: usize) -> String {
-        let (visible, caret_on) = self.render_state();
-        let clipped = if max_w > 1 {
-            let limit = max_w.saturating_sub(1);
-            if visible.chars().count() > limit {
-                visible.chars().take(limit).collect::<String>()
-            } else {
-                visible
+    /// Whether tips that do not fit are skipped: only while at least two fit.
+    /// One tip for good is no tip at all, so a narrower footer shows every
+    /// tip, shortened at a word where it must be.
+    fn passes_over(&self) -> bool {
+        self.room.is_some_and(|(width, rows)| TIPS_POOL.iter().filter(|t| fits(t, width, rows)).nth(1).is_some())
+    }
+
+    /// The next tip, passing over those that do not fit (see `passes_over`).
+    fn advance(&mut self) {
+        let pass_over = self.passes_over();
+        for _ in 0..self.deck.len() {
+            self.deck_idx += 1;
+            if self.deck_idx >= self.deck.len() {
+                self.deck_idx = 0;
+                shuffle_deck(&mut self.deck, &mut self.seed);
+                if self.deck.len() > 1 && TIPS_POOL[self.deck[0]] == self.tip_text {
+                    self.deck.swap(0, 1);
+                }
             }
-        } else {
-            visible
-        };
-        let caret = if caret_on {
-            "\x1b[1;38;2;225;175;95m▌\x1b[0m"
-        } else {
-            " "
-        };
-        format!("\x1b[38;2;175;170;160m{clipped}\x1b[0m{caret}")
+            if !pass_over || self.room.is_none_or(|(width, rows)| fits(TIPS_POOL[self.deck[self.deck_idx]], width, rows)) {
+                break;
+            }
+        }
+        self.tip_text = TIPS_POOL[self.deck[self.deck_idx]];
+        self.age = 0;
     }
 
-    /// At most `max_lines` rows, and as many for every tip at a given width: a
-    /// footer that grew by a row while a long tip typed out, and shrank when it
-    /// was erased, moved the whole conversation above it up and down. Extra rows
-    /// in a short window belong to the conversation.
+    fn text_color(&self) -> String {
+        let (r, g, b) = if crate::anim::enabled() && self.age < FADE_TICKS {
+            let k = (self.age + 1) as f32 / (FADE_TICKS + 1) as f32;
+            let mix = |from: u8, to: u8| (from as f32 + (to as f32 - from as f32) * k).round() as u8;
+            (mix(FADED_RGB.0, TEXT_RGB.0), mix(FADED_RGB.1, TEXT_RGB.1), mix(FADED_RGB.2, TEXT_RGB.2))
+        } else {
+            TEXT_RGB
+        };
+        format!("\x1b[38;2;{r};{g};{b}m")
+    }
+
+    /// At most `max_lines` rows, each at most `width - 2` columns, and as many
+    /// rows for every tip at a given width: a footer that grew and shrank with
+    /// the tip moved the whole conversation above it. Extra rows in a short
+    /// window belong to the conversation.
     pub fn render_lines(&self, width: usize, max_lines: usize) -> Vec<String> {
-        let avail1 = width.saturating_sub(8); // "  Tip: " is 7 chars + 1 char margin
-        let avail2 = width.saturating_sub(8); // "       " is 7 chars indent + 1 char margin
-        let longest = TIPS_POOL.iter().map(|t| t.chars().count()).max().unwrap_or(0).max(self.total_chars);
-
-        if max_lines <= 1 || width < 30 || longest <= avail1 {
-            let single = self.render_line(avail1);
-            return vec![format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m {single}")];
+        let room = text_room(width);
+        let color = self.text_color();
+        let label = "  \x1b[1;38;2;225;175;95mTip:\x1b[0m ";
+        if !two_rows(width, max_lines) {
+            return vec![format!("{label}{color}{}\x1b[0m", shorten(self.tip_text, room))];
         }
-
-        let (line1_full, line2_full) = split_tip_at_word_boundary(self.tip_text, avail1);
-        let l1_char_count = line1_full.chars().count();
-        let (visible_total, caret_on) = self.render_state();
-        let caret = if caret_on {
-            "\x1b[1;38;2;225;175;95m▌\x1b[0m"
-        } else {
-            " "
-        };
-
-        if self.char_count <= l1_char_count {
-            let typed1 = visible_total;
-            vec![format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{typed1}\x1b[0m{caret}"), String::new()]
-        } else {
-            let l2_start_char = self.tip_text.chars().count().saturating_sub(line2_full.chars().count());
-            let l2_typed_chars = self.char_count.saturating_sub(l2_start_char);
-            let typed2: String = line2_full.chars().take(l2_typed_chars).collect();
-            // Cut at a word and marked, not mid-word ("...to configur").
-            let clipped2 = if typed2.chars().count() > avail2 {
-                let room = avail2.saturating_sub(1);
-                let head: String = typed2.chars().take(room).collect();
-                let cut = match head.rfind(' ') {
-                    Some(i) if i >= room / 2 => head[..i].to_string(),
-                    _ => head,
-                };
-                format!("{cut}\u{2026}")
-            } else {
-                typed2
-            };
-            vec![
-                format!("  \x1b[1;38;2;225;175;95mTip:\x1b[0m \x1b[38;2;175;170;160m{line1_full}\x1b[0m"),
-                format!("       \x1b[38;2;175;170;160m{clipped2}\x1b[0m{caret}"),
-            ]
-        }
+        let (line1, line2) = split_tip_at_word_boundary(self.tip_text, room);
+        let second = if line2.is_empty() { String::new() } else { format!("{}{color}{}\x1b[0m", " ".repeat(LABEL_COLS), shorten(line2, room)) };
+        vec![format!("{label}{color}{line1}\x1b[0m"), second]
     }
+}
+
+/// Characters of tip text a row holds.
+fn text_room(width: usize) -> usize {
+    width.saturating_sub(LABEL_COLS + RIGHT_MARGIN)
+}
+
+/// Two rows at this width if any tip needs them and the window has them.
+fn two_rows(width: usize, max_lines: usize) -> bool {
+    let longest = TIPS_POOL.iter().map(|t| t.chars().count()).max().unwrap_or(0);
+    max_lines >= 2 && width >= 30 && longest > text_room(width)
+}
+
+fn fits(tip: &str, width: usize, rows: usize) -> bool {
+    let room = text_room(width);
+    if !two_rows(width, rows) {
+        return tip.chars().count() <= room;
+    }
+    split_tip_at_word_boundary(tip, room).1.chars().count() <= room
+}
+
+/// Ended at a word and marked, never cut mid-word ("...to configur").
+fn shorten(text: &str, room: usize) -> String {
+    if text.chars().count() <= room {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(room.saturating_sub(1)).collect();
+    let cut = match head.rfind(' ') {
+        Some(i) if i >= room / 2 => head[..i].trim_end_matches([',', ';', ':']).to_string(),
+        _ => head,
+    };
+    format!("{cut}\u{2026}")
 }
 
 /// Line 1 gets at most `budget1` visible chars.
@@ -301,41 +260,22 @@ mod tests {
     }
 
 
+    fn visible(line: &str) -> String {
+        crate::text::strip_ansi(line)
+    }
+
     #[test]
-    fn test_tip_animator_cycle() {
+    fn a_tip_is_shown_whole_and_replaced_whole() {
         let mut anim = TipAnimator::new();
-        assert_eq!(anim.phase, TipPhase::Typing);
-        assert_eq!(anim.char_count, 0);
-
-        for _ in 0..anim.total_chars {
-            if anim.phase != TipPhase::Typing {
-                break;
-            }
+        let first = anim.tip_text;
+        for _ in 1..HOLD_TICKS {
             anim.tick();
+            assert_eq!(anim.tip_text, first, "the tip changed before its time was up");
+            let row = visible(&anim.render_lines(200, 2).concat());
+            assert_eq!(row, format!("  Tip: {first}"), "a tip is never shown in part");
         }
-        assert_eq!(anim.phase, TipPhase::Holding);
-        assert_eq!(anim.char_count, anim.total_chars);
-
-        for _ in 0..126 {
-            anim.tick();
-        }
-        assert_eq!(anim.phase, TipPhase::Erasing);
-
-        for _ in 0..anim.total_chars {
-            if anim.phase != TipPhase::Erasing {
-                break;
-            }
-            anim.tick();
-        }
-        assert_eq!(anim.phase, TipPhase::Pause);
-
-        for _ in 0..5 {
-            anim.tick();
-        }
-        assert_eq!(anim.phase, TipPhase::Typing);
-
-        let rendered = anim.render_line(80);
-        assert!(!rendered.is_empty());
+        anim.tick();
+        assert_ne!(anim.tip_text, first);
     }
 
     #[test]
@@ -346,9 +286,7 @@ mod tests {
 
         // A shuffled deck shows every tip once before any repeats.
         for _ in 1..TIPS_POOL.len() {
-            anim.phase = TipPhase::Pause;
-            anim.pause_ticks = 0;
-            anim.tick();
+            anim.advance();
             assert!(seen.insert(anim.tip_text), "tip repeated before the deck ran out: {}", anim.tip_text);
         }
         assert_eq!(seen.len(), TIPS_POOL.len());
@@ -382,42 +320,76 @@ mod tests {
     }
 
     #[test]
-    fn test_tip_animator_render_lines_compact_multiline() {
+    fn a_long_tip_takes_a_second_row_indented_under_the_first() {
         let mut anim = TipAnimator::new();
         anim.tip_text = "Document file storage helpers the non-obvious design constraints and invariants in code comments.";
-        anim.total_chars = anim.tip_text.chars().count();
-        anim.phase = TipPhase::Typing;
+        let wide = anim.render_lines(200, 2);
+        assert_eq!(wide.len(), 1);
+        let rows = anim.render_lines(70, 2);
+        assert_eq!(rows.len(), 2);
+        assert!(visible(&rows[0]).starts_with("  Tip: Document"));
+        assert!(visible(&rows[1]).starts_with("       "));
+        assert_eq!(format!("{} {}", visible(&rows[0])["  Tip: ".len()..].trim_end(), visible(&rows[1]).trim()), anim.tip_text);
+    }
 
-        let lines_wide = anim.render_lines(160, 2);
-        assert_eq!(lines_wide.len(), 1);
-        assert!(lines_wide[0].contains("Tip:"));
+    #[test]
+    fn no_row_is_wider_than_the_footer_leaves_room_for() {
+        let mut anim = TipAnimator::new();
+        for width in [30, 44, 60, 70, 80, 100, 200] {
+            for rows in [1, 2] {
+                for tip in TIPS_POOL {
+                    anim.tip_text = tip;
+                    for line in anim.render_lines(width, rows) {
+                        let shown = visible(&line);
+                        assert!(shown.chars().count() <= width - RIGHT_MARGIN, "{width}x{rows}: {shown:?}");
+                        assert!(!shown.contains('▌'), "a caret beside the real one");
+                    }
+                }
+            }
+        }
+    }
 
-        // 70 columns: the tip needs two lines once typed out, and holds both rows
-        // from the first character to the last, so the footer never changes height.
-        anim.char_count = 0;
-        let lines_c0 = anim.render_lines(70, 2);
-        assert_eq!(lines_c0.len(), 2);
-        assert_eq!(lines_c0[1], "");
+    #[test]
+    fn a_tip_too_long_for_the_room_is_passed_over_not_cut() {
+        let mut anim = TipAnimator::new();
+        anim.fit_to(80, 1);
+        for _ in 0..TIPS_POOL.len() * 2 {
+            let row = visible(&anim.render_lines(80, 1)[0]);
+            assert!(!row.contains('\u{2026}'), "cut instead of passed over: {row:?}");
+            assert!(row.ends_with(anim.tip_text), "{row:?}");
+            anim.advance();
+        }
+        // Too narrow for more than one tip: every tip comes round, ended at a word and marked.
+        anim.fit_to(60, 1);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..TIPS_POOL.len() {
+            let row = visible(&anim.render_lines(60, 1)[0]);
+            if row.ends_with('\u{2026}') {
+                let before = row.trim_end_matches('\u{2026}');
+                assert!(anim.tip_text.starts_with(before.trim_start_matches("  Tip: ")), "{row:?}");
+                assert!(anim.tip_text[before.len() - "  Tip: ".len()..].starts_with([' ', ',', ';', ':']), "cut mid-word: {row:?}");
+            }
+            seen.insert(anim.tip_text);
+            anim.advance();
+        }
+        assert!(seen.len() > 1, "one tip for good");
+    }
 
-        anim.char_count = 20;
-        let lines_c20 = anim.render_lines(70, 2);
-        assert_eq!(lines_c20.len(), 2);
-        assert!(lines_c20[0].contains('▌'), "the caret follows the typing");
-
-        anim.char_count = anim.total_chars;
-        anim.phase = TipPhase::Holding;
-        let lines_holding = anim.render_lines(70, 2);
-        assert_eq!(lines_holding.len(), 2);
-        assert!(lines_holding[0].contains("Tip:"));
-        assert!(lines_holding[1].starts_with("       ")); // 7 space indent
-        assert!(!lines_holding.concat().contains('▌'), "a tip at rest has no caret");
-
-        // Line 2 erases first, and its row stays.
-        anim.phase = TipPhase::Erasing;
-        anim.char_count = 20; // erased down into line 1
-        let lines_erasing = anim.render_lines(70, 2);
-        assert_eq!(lines_erasing.len(), 2);
-        assert_eq!(lines_erasing[1], "");
+    #[test]
+    fn a_new_tip_fades_in_and_then_holds_its_colour() {
+        let mut anim = TipAnimator::new();
+        anim.advance();
+        let fading = anim.render_lines(200, 1)[0].clone();
+        for _ in 0..FADE_TICKS {
+            anim.tick();
+        }
+        let settled = anim.render_lines(200, 1)[0].clone();
+        assert_eq!(visible(&fading), visible(&settled), "only the colour changes");
+        if crate::anim::enabled() {
+            assert_ne!(fading, settled);
+        }
+        anim.tick();
+        assert_eq!(anim.render_lines(200, 1)[0], settled);
     }
 
     #[test]
@@ -426,13 +398,9 @@ mod tests {
         for width in [40, 70, 100, 200] {
             let rows: std::collections::HashSet<usize> = TIPS_POOL
                 .iter()
-                .flat_map(|tip| {
-                    anim.tip_text = *tip;
-                    anim.total_chars = tip.chars().count();
-                    (0..=anim.total_chars).map(|n| {
-                        anim.char_count = n;
-                        anim.render_lines(width, 2).len()
-                    }).collect::<Vec<_>>()
+                .map(|tip| {
+                    anim.tip_text = tip;
+                    anim.render_lines(width, 2).len()
                 })
                 .collect();
             assert_eq!(rows.len(), 1, "at {width} columns the footer changes height: {rows:?}");
