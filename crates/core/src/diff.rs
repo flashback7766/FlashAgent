@@ -77,10 +77,10 @@ pub fn unified(old: Option<&str>, new: &str, path: &str, context: usize) -> Stri
         hunks.push((start, end));
     }
 
+    // Line numbers where the next hunk starts, carried from hunk to hunk.
+    let (mut old_pos, mut new_pos, mut counted) = (1, 1, 0);
     for (hstart, hend) in hunks {
-        let mut old_pos = 1;
-        let mut new_pos = 1;
-        for op in &ops[..hstart] {
+        for op in &ops[counted..hstart] {
             match op {
                 Op::Same(_) => {
                     old_pos += 1;
@@ -90,6 +90,7 @@ pub fn unified(old: Option<&str>, new: &str, path: &str, context: usize) -> Stri
                 Op::Add(_) => new_pos += 1,
             }
         }
+        counted = hstart;
         let (os, ns) = (old_pos, new_pos);
         let mut old_cnt = 0;
         let mut new_cnt = 0;
@@ -190,6 +191,17 @@ mod tests {
         let d = unified(Some(&old), &new, "n.txt", 1);
         assert!(d.contains("@@ -2,3 +2,3 @@\n 2\n-3\n+three\n 4\n"), "{d}");
         assert!(d.contains("@@ -16,3 +16,3 @@\n 16\n-17\n+seventeen\n 18\n"), "{d}");
+    }
+
+    #[test]
+    fn every_hunk_of_a_long_file_names_its_own_lines() {
+        let old: String = (1..=1000).map(|i| format!("{i}\n")).collect();
+        let new = (100..=900).step_by(100).fold(old.clone(), |text, i| text.replace(&format!("\n{i}\n"), &format!("\n{i}\nadded after {i}\n")));
+        let d = unified(Some(&old), &new, "n.txt", 1);
+        for (k, i) in (100..=900).step_by(100).enumerate() {
+            // Each earlier hunk added one line on the new side.
+            assert!(d.contains(&format!("@@ -{i},2 +{},3 @@\n {i}\n+added after {i}\n {}\n", i + k, i + 1)), "{i}: {d}");
+        }
     }
 
     #[test]

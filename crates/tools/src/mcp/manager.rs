@@ -1,6 +1,6 @@
 //! Server lifecycles, tool discovery and call routing for MCP.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,7 +49,9 @@ pub struct McpTestReport {
 pub struct McpManager {
     cwd: PathBuf,
     configs: RwLock<HashMap<String, McpServerConfig>>,
-    clients: RwLock<HashMap<String, Arc<McpClient>>>,
+    /// By name, so their tools are offered in the same order on every run: the
+    /// tool list is part of the prompt the server keeps cached.
+    clients: RwLock<BTreeMap<String, Arc<McpClient>>>,
     /// Shown instead of a misleading "Disabled" for enabled but broken servers.
     start_errors: RwLock<HashMap<String, String>>,
     loaded_paths: RwLock<Vec<PathBuf>>,
@@ -61,7 +63,7 @@ impl McpManager {
         Arc::new(Self {
             cwd,
             configs: RwLock::new(configs),
-            clients: RwLock::new(HashMap::new()),
+            clients: RwLock::new(BTreeMap::new()),
             start_errors: RwLock::new(HashMap::new()),
             loaded_paths: RwLock::new(loaded_paths),
         })
@@ -71,22 +73,13 @@ impl McpManager {
         self.loaded_paths.read().clone()
     }
 
+    /// All at once: a server started through npx or uvx can take seconds to
+    /// answer, and one slow server must not hold up the others.
     pub async fn start_enabled_servers(&self) -> Vec<(String, Result<usize, String>)> {
-        let enabled: Vec<(String, McpServerConfig)> = {
-            let configs = self.configs.read();
-            configs
-                .iter()
-                .filter(|(_, cfg)| !cfg.disabled)
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        };
-
-        let mut results = Vec::new();
-        for (name, _) in enabled {
-            let res = self.start_server(&name).await.map(|c| c.tools().len());
-            results.push((name, res));
-        }
-        results
+        let mut enabled: Vec<String> = self.configs.read().iter().filter(|(_, cfg)| !cfg.disabled).map(|(name, _)| name.clone()).collect();
+        enabled.sort();
+        let started = futures::future::join_all(enabled.iter().map(|name| self.start_server(name))).await;
+        enabled.into_iter().zip(started).map(|(name, res)| (name, res.map(|c| c.tools().len()))).collect()
     }
 
     pub async fn start_server(&self, name: &str) -> Result<Arc<McpClient>, String> {
@@ -137,8 +130,8 @@ impl McpManager {
     }
 
     pub async fn reload(&self) -> Result<(), String> {
-        let running: Vec<Arc<McpClient>> = { self.clients.write().drain().map(|(_, c)| c).collect() };
-        for c in running {
+        let running = std::mem::take(&mut *self.clients.write());
+        for c in running.into_values() {
             c.kill().await;
         }
 
@@ -334,6 +327,69 @@ mod tests {
         assert!(mgr.is_tool_read_only("mcp__mock_db__read_query"));
         assert!(!mgr.is_tool_read_only("mcp__mock_db__write_query"));
         assert!(!mgr.is_tool_read_only("unknown_tool"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slow_servers_start_side_by_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = McpManager::new(dir.path().to_path_buf());
+        let mut configs = HashMap::new();
+        for name in ["one", "two", "three"] {
+            let script = dir.path().join(format!("{name}.sh"));
+            std::fs::write(
+                &script,
+                r#"while IFS= read -r line; do case "$line" in
+                *'"initialize"'*) sleep 1; echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"slow"}}}';;
+                *tools/list*) echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}';;
+                esac; done"#,
+            )
+            .unwrap();
+            configs.insert(name.to_string(), McpServerConfig::new("bash", vec![script.to_string_lossy().to_string()]));
+        }
+        // Only these: the user's own global servers must not start in a test.
+        *mgr.configs.write() = configs;
+        let started = std::time::Instant::now();
+        let results = mgr.start_enabled_servers().await;
+        let took = started.elapsed();
+        assert!(results.iter().all(|(_, r)| r.is_ok()), "{results:?}");
+        assert_eq!(results.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["one", "three", "two"]);
+        assert!(took < Duration::from_millis(2500), "three one-second starts took {took:?}: one after another");
+        let clients: Vec<Arc<McpClient>> = mgr.clients.read().values().cloned().collect();
+        for client in clients {
+            client.kill().await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_tools_of_several_servers_are_offered_in_the_same_order_every_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = McpManager::new(dir.path().to_path_buf());
+        let names = ["zeta", "alpha", "mid"];
+        for name in names {
+            // In a file: arguments in the config have their `$VAR`s expanded.
+            let script = dir.path().join(format!("{name}.sh"));
+            std::fs::write(
+                &script,
+                format!(
+                    r#"while IFS= read -r line; do case "$line" in
+                    *initialize*) echo '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","serverInfo":{{"name":"{name}"}}}}}}';;
+                    *tools/list*) echo '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"look","inputSchema":{{"type":"object"}}}}]}}}}';;
+                    esac; done"#
+                ),
+            )
+            .unwrap();
+            let args = vec![script.to_string_lossy().to_string()];
+            mgr.configs.write().insert(name.to_string(), McpServerConfig::new("bash", args));
+            mgr.start_server(name).await.expect("mock server starts");
+        }
+        let offered: Vec<String> = mgr.get_all_tool_specs().into_iter().map(|s| s.name).collect();
+        assert_eq!(offered, ["mcp__alpha__look", "mcp__mid__look", "mcp__zeta__look"]);
+        let clients: Vec<Arc<McpClient>> = mgr.clients.read().values().cloned().collect();
+        for client in clients {
+            client.kill().await;
+        }
     }
 
     #[tokio::test]

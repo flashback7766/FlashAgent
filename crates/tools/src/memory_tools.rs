@@ -218,21 +218,15 @@ pub fn memory_remove(
     args: MemoryRemoveArgs,
 ) -> Result<String, ToolError> {
     check_goal_mutation(is_goal_mode, "memory_remove")?;
-    let (scope, removed) = match locate(cwd, args.scope.as_deref(), &args.title)? {
-        Some((scope, store, _)) => {
-            (scope, store.remove(&args.title).map_err(|e| ToolError::Other(format!("failed to update memory: {e}")))?)
-        }
-        None => (Scope::parse(args.scope.as_deref()), false),
+    let Some((scope, store, entry)) = locate(cwd, args.scope.as_deref(), &args.title)? else {
+        let scope = Scope::parse(args.scope.as_deref());
+        return Err(ToolError::Other(format!("no memory named '{}' in {} memory", slugify(&args.title), scope.label())));
     };
-    if removed {
-        Ok(format!("Forgot '{}' from {} memory.", slugify(&args.title), scope.label()))
-    } else {
-        Err(ToolError::Other(format!(
-            "no memory named '{}' in {} memory",
-            slugify(&args.title),
-            scope.label()
-        )))
+    if !store.remove(&args.title).map_err(|e| ToolError::Other(format!("failed to update memory: {e}")))? {
+        return Err(ToolError::Other(format!("no memory named '{}' in {} memory", entry.name, scope.label())));
     }
+    // By the name it had: a hand-written `Build Notes.md` is not `build-notes`.
+    Ok(format!("Forgot '{}' from {} memory.", entry.name, scope.label()))
 }
 
 #[cfg(test)]
@@ -278,6 +272,18 @@ mod tests {
         );
         let msg = format!("{:?}", again.unwrap_err());
         assert!(msg.contains("memory_update"), "it must point at the existing one: {msg}");
+    }
+
+    #[test]
+    fn forgetting_a_hand_written_memory_names_it_as_it_was_called() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(store.dir().join("Build Notes.md"), "Run just build.").unwrap();
+        let args = MemoryRemoveArgs { title: "Build Notes".into(), scope: Some("project".into()) };
+        let said = memory_remove(dir.path(), &goal_off(), args).unwrap();
+        assert_eq!(said, "Forgot 'Build Notes' from project memory.");
+        assert!(store.list().is_empty());
     }
 
     #[test]

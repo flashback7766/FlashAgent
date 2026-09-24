@@ -2,25 +2,23 @@
 //! platform binary, verifies it and replaces the executable in place.
 
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 pub use flashagent_core::config::UpdateChannel;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReleaseAsset {
-    pub name: String,
-    pub browser_download_url: String,
-    pub size: u64,
+#[derive(Debug, Clone, Deserialize)]
+struct ReleaseAsset {
+    name: String,
+    browser_download_url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitHubRelease {
-    pub tag_name: String,
-    pub name: Option<String>,
-    pub prerelease: bool,
-    pub published_at: Option<String>,
-    pub body: Option<String>,
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    name: Option<String>,
+    prerelease: bool,
+    body: Option<String>,
     #[serde(default)]
-    pub assets: Vec<ReleaseAsset>,
+    assets: Vec<ReleaseAsset>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +38,7 @@ pub enum UpdateStatus {
     },
 }
 
-pub const CHECKSUMS_ASSET: &str = "SHA256SUMS";
+const CHECKSUMS_ASSET: &str = "SHA256SUMS";
 
 pub const DEFAULT_RELEASES_API: &str = "https://api.github.com/repos/flashback7766/FlashAgent/releases";
 
@@ -72,46 +70,25 @@ fn in_source_tree(path: &Path) -> bool {
 /// Running from a source checkout or a cargo build: auto-update is off so it
 /// does not overwrite dev binaries.
 pub fn is_dev_mode() -> bool {
-    if std::env::var("FLASHAGENT_DEV")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
+    if std::env::var("FLASHAGENT_DEV").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
         return true;
     }
-
     if std::env::var_os("CARGO").is_some() || std::env::var_os("CARGO_MANIFEST_DIR").is_some() {
         return true;
     }
-
-    // Running out of a cargo target directory.
     if let Ok(exe) = std::env::current_exe() {
-        let path_str = exe.to_string_lossy();
-        if path_str.contains("/target/debug/")
-            || path_str.contains("/target/release/")
-            || path_str.contains("\\target\\debug\\")
-            || path_str.contains("\\target\\release\\")
-            || path_str.contains("/target/")
-            || path_str.contains("\\target\\")
-        {
+        // Running out of a cargo target directory.
+        let path = exe.to_string_lossy();
+        if path.contains("/target/") || path.contains("\\target\\") {
             return true;
         }
-    }
-
-    // Decided by where the executable is, not the cwd: an installed `flashagent`
-    // must keep updating while the user works in the repository.
-    if let Ok(exe) = std::env::current_exe() {
+        // Decided by where the executable is, not the cwd: an installed
+        // `flashagent` must keep updating while the user works in the repository.
         if in_source_tree(&exe) {
             return true;
         }
     }
-
-    #[cfg(debug_assertions)]
-    {
-        true
-    }
-
-    #[cfg(not(debug_assertions))]
-    false
+    cfg!(debug_assertions)
 }
 
 /// Stable: stable releases only (`vX.Y.Z`, or the rolling `stable`/`release`).
@@ -133,7 +110,7 @@ fn on_channel(rel: &GitHubRelease, channel: UpdateChannel) -> bool {
 
 /// By version, not list position: GitHub lists by creation date, and a
 /// rolling release edited in place keeps its old date.
-pub fn find_target_release(releases: &[GitHubRelease], channel: UpdateChannel) -> Option<&GitHubRelease> {
+fn find_target_release(releases: &[GitHubRelease], channel: UpdateChannel) -> Option<&GitHubRelease> {
     let candidates: Vec<&GitHubRelease> = releases.iter().filter(|r| on_channel(r, channel)).collect();
     candidates
         .iter()
@@ -147,7 +124,7 @@ pub fn find_target_release(releases: &[GitHubRelease], channel: UpdateChannel) -
 /// Rolling releases are tagged by channel, so the version is looked for in the
 /// title, tag, asset names and notes, in that order. None found gives the
 /// running version, so it never reads as an update.
-pub fn extract_release_version(rel: &GitHubRelease) -> String {
+fn extract_release_version(rel: &GitHubRelease) -> String {
     use crate::Version;
     rel.name
         .as_deref()
@@ -160,7 +137,7 @@ pub fn extract_release_version(rel: &GitHubRelease) -> String {
 }
 
 /// For the current OS and architecture.
-pub fn find_platform_asset(assets: &[ReleaseAsset]) -> Option<&ReleaseAsset> {
+fn find_platform_asset(assets: &[ReleaseAsset]) -> Option<&ReleaseAsset> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
         if let Some(a) = assets.iter().find(|a| a.name.contains("flashagent") && a.name.contains("linux-x86_64") && !a.name.ends_with(".tar.gz") && !a.name.ends_with(".zst") && !a.name.ends_with(".deb")) {
@@ -204,7 +181,7 @@ pub fn find_platform_asset(assets: &[ReleaseAsset]) -> Option<&ReleaseAsset> {
 }
 
 /// By [`crate::version`] ordering. Unparseable versions are never a downgrade.
-pub fn is_downgrade(current: &str, target: &str) -> bool {
+fn is_downgrade(current: &str, target: &str) -> bool {
     match (crate::Version::parse(current), crate::Version::parse(target)) {
         (Some(c), Some(t)) => t < c,
         _ => false,
@@ -217,30 +194,24 @@ pub async fn newest_on_channel(
     channel: UpdateChannel,
     api_url: &str,
 ) -> anyhow::Result<Option<String>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .user_agent(format!("FlashAgent-Updater/{}", current_version()))
-        .build()?;
-    let resp = client.get(api_url).send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("GitHub API returned HTTP {}", resp.status());
-    }
-    let releases: Vec<GitHubRelease> = resp.json().await?;
+    let releases = fetch_releases(api_url).await?;
     Ok(find_target_release(&releases, channel).map(extract_release_version))
 }
 
-pub async fn check_for_updates(channel: UpdateChannel, api_url: &str) -> anyhow::Result<UpdateStatus> {
+async fn fetch_releases(api_url: &str) -> anyhow::Result<Vec<GitHubRelease>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .user_agent(format!("FlashAgent-Updater/{}", current_version()))
         .build()?;
-
     let resp = client.get(api_url).send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("GitHub API returned HTTP {}", resp.status());
     }
+    Ok(resp.json().await?)
+}
 
-    let releases: Vec<GitHubRelease> = resp.json().await?;
+pub async fn check_for_updates(channel: UpdateChannel, api_url: &str) -> anyhow::Result<UpdateStatus> {
+    let releases = fetch_releases(api_url).await?;
     let cur = current_version();
 
     if let Some(target_rel) = find_target_release(&releases, channel) {
@@ -277,7 +248,7 @@ pub async fn check_for_updates(channel: UpdateChannel, api_url: &str) -> anyhow:
 }
 
 /// Handles tar.gz or a bare binary.
-pub fn extract_binary_bytes(asset_name: &str, payload: &[u8]) -> anyhow::Result<Vec<u8>> {
+fn extract_binary_bytes(asset_name: &str, payload: &[u8]) -> anyhow::Result<Vec<u8>> {
     if asset_name.ends_with(".tar.gz") {
         use flate2::read::GzDecoder;
         use tar::Archive;
@@ -319,7 +290,7 @@ pub fn extract_binary_bytes(asset_name: &str, payload: &[u8]) -> anyhow::Result<
 /// In `sha256sum` format. The manifest is written before upload and GitHub
 /// renames characters such as the `+` of a stable build (`v1.0.0+b290`), so
 /// names are compared with those characters made alike.
-pub fn expected_checksum(manifest: &str, asset_name: &str) -> Option<String> {
+fn expected_checksum(manifest: &str, asset_name: &str) -> Option<String> {
     let alike = |name: &str| -> String {
         name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '.' }).collect()
     };
@@ -341,7 +312,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Releases older than the manifest pass. A manifest that lacks or
 /// contradicts the asset is a hard failure.
-pub async fn verify_checksum(
+async fn verify_checksum(
     client: &reqwest::Client,
     checksums_url: Option<&str>,
     asset_name: &str,
@@ -367,7 +338,7 @@ pub async fn verify_checksum(
 /// Checks the folder, since replacing is a rename into it. A running
 /// executable cannot be opened for writing on Linux ("text file busy"), which
 /// used to send every update to `~/.local/bin`.
-pub fn is_writable(path: &Path) -> bool {
+fn is_writable(path: &Path) -> bool {
     let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
         return false;
     };
@@ -388,7 +359,7 @@ pub fn is_writable(path: &Path) -> bool {
 /// install location: `~/.local/bin/flashagent`, or on Windows where
 /// install.ps1 puts it. Never a bare name, which would land in whatever
 /// folder FlashAgent was started from.
-pub fn resolve_install_target() -> anyhow::Result<PathBuf> {
+fn resolve_install_target() -> anyhow::Result<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         let real_path = std::fs::canonicalize(&exe).unwrap_or(exe);
         if is_writable(&real_path) {
@@ -430,7 +401,7 @@ pub fn remove_stale_backups_beside_exe() {
     }
 }
 
-pub fn atomic_replace_executable(target: &Path, new_binary_bytes: &[u8]) -> anyhow::Result<()> {
+fn atomic_replace_executable(target: &Path, new_binary_bytes: &[u8]) -> anyhow::Result<()> {
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     let temp_file = parent.join(format!(".flashagent-update.{}.tmp", std::process::id()));
 
@@ -514,24 +485,7 @@ pub async fn download_and_apply_with_progress(
         .user_agent(format!("FlashAgent-Updater/{}", current_version()))
         .build()?;
 
-    let mut resp = client.get(download_url).send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("Failed downloading asset {}: HTTP {}", asset_name, resp.status());
-    }
-
-    // Streamed, so the caller can show progress.
-    let total = resp.content_length();
-    let mut payload: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
-    let mut last_report = std::time::Instant::now();
-    on_progress(UpdateProgress::Downloading { received: 0, total });
-    while let Some(chunk) = resp.chunk().await? {
-        payload.extend_from_slice(&chunk);
-        if last_report.elapsed() >= PROGRESS_INTERVAL {
-            last_report = std::time::Instant::now();
-            on_progress(UpdateProgress::Downloading { received: payload.len() as u64, total });
-        }
-    }
-    on_progress(UpdateProgress::Downloading { received: payload.len() as u64, total });
+    let payload = download(&client, download_url, asset_name, &mut on_progress).await?;
 
     on_progress(UpdateProgress::Verifying);
     verify_checksum(&client, checksums_url, asset_name, &payload).await?;
@@ -545,13 +499,38 @@ pub async fn download_and_apply_with_progress(
     Ok(target_path)
 }
 
-/// Returns the installed version on success.
-pub async fn check_and_apply_background(channel: UpdateChannel) -> anyhow::Result<Option<String>> {
-    check_and_apply_background_with_progress(channel, |_, _| {}).await
+/// The size a server declares reserves memory only up to this: a wrong
+/// Content-Length must not ask for more than the machine has.
+const MAX_RESERVED_DOWNLOAD: u64 = 64 * 1024 * 1024;
+
+/// Streamed, so the caller can show progress.
+async fn download(
+    client: &reqwest::Client,
+    url: &str,
+    asset_name: &str,
+    on_progress: &mut impl FnMut(UpdateProgress),
+) -> anyhow::Result<Vec<u8>> {
+    let mut resp = client.get(url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Failed downloading asset {}: HTTP {}", asset_name, resp.status());
+    }
+    let total = resp.content_length();
+    let mut payload: Vec<u8> = Vec::with_capacity(total.unwrap_or(0).min(MAX_RESERVED_DOWNLOAD) as usize);
+    let mut last_report = std::time::Instant::now();
+    on_progress(UpdateProgress::Downloading { received: 0, total });
+    while let Some(chunk) = resp.chunk().await? {
+        payload.extend_from_slice(&chunk);
+        if last_report.elapsed() >= PROGRESS_INTERVAL {
+            last_report = std::time::Instant::now();
+            on_progress(UpdateProgress::Downloading { received: payload.len() as u64, total });
+        }
+    }
+    on_progress(UpdateProgress::Downloading { received: payload.len() as u64, total });
+    Ok(payload)
 }
 
-/// Reports the version being installed with each stage, so a download already
-/// under way can be watched.
+/// Returns the installed version on success, and reports it with each stage,
+/// so a download already under way can be watched.
 pub async fn check_and_apply_background_with_progress(
     channel: UpdateChannel,
     mut on_progress: impl FnMut(&str, UpdateProgress),
@@ -648,24 +627,20 @@ mod tests {
                 tag_name: "b190".into(),
                 name: Some("FlashAgent Beta b190".into()),
                 prerelease: true,
-                published_at: None,
                 body: None,
                 assets: vec![ReleaseAsset {
                     name: "flashagent-linux-x86_64".into(),
                     browser_download_url: "https://example.com/b190".into(),
-                    size: 1000,
                 }],
             },
             GitHubRelease {
                 tag_name: "v0.1.0".into(),
                 name: Some("FlashAgent v0.1.0+b180".into()),
                 prerelease: false,
-                published_at: None,
                 body: None,
                 assets: vec![ReleaseAsset {
                     name: "flashagent-linux-x86_64".into(),
                     browser_download_url: "https://example.com/v0.1.0".into(),
-                    size: 1000,
                 }],
             },
         ];
@@ -685,7 +660,6 @@ mod tests {
                 tag_name: "beta".into(),
                 name: Some("FlashAgent b200".into()),
                 prerelease: true,
-                published_at: None,
                 body: None,
                 assets: vec![],
             },
@@ -693,7 +667,6 @@ mod tests {
                 tag_name: "release".into(),
                 name: Some("FlashAgent v1.0.0".into()),
                 prerelease: false,
-                published_at: None,
                 body: None,
                 assets: vec![],
             },
@@ -715,7 +688,6 @@ mod tests {
             tag_name: tag.into(),
             name: Some(name.into()),
             prerelease: pre,
-            published_at: None,
             body: None,
             assets: vec![],
         };
@@ -733,7 +705,7 @@ mod tests {
             .into_iter()
             .map(|tag| GitHubRelease {
                 tag_name: tag.into(), name: None, prerelease: false,
-                published_at: None, body: None, assets: vec![],
+                body: None, assets: vec![],
             })
             .collect();
         for channel in [UpdateChannel::Stable, UpdateChannel::Beta] {
@@ -820,6 +792,45 @@ mod tests {
         assert_eq!(read_back, b"version-new");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Answers one request with `head`, then `body`, then hangs up.
+    async fn serve_once(head: &'static str, body: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/asset", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = sock.read(&mut request).await;
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(body).await;
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_download_declaring_a_terabyte_reserves_no_terabyte() {
+        // Reserving what the header claimed took down the whole app.
+        let url = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 1099511627776\r\n\r\n", b"abc").await;
+        let mut declared = None;
+        let result = download(&reqwest::Client::new(), &url, "flashagent", &mut |p| {
+            if let UpdateProgress::Downloading { total, .. } = p {
+                declared = total;
+            }
+        })
+        .await;
+        assert!(result.is_err(), "the body ended far short of its length");
+        assert_eq!(declared, Some(1 << 40));
+    }
+
+    #[tokio::test]
+    async fn a_download_reports_what_arrived() {
+        let url = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", b"hello").await;
+        let mut last = None;
+        let payload = download(&reqwest::Client::new(), &url, "flashagent", &mut |p| last = Some(p)).await.unwrap();
+        assert_eq!(payload, b"hello");
+        assert_eq!(last, Some(UpdateProgress::Downloading { received: 5, total: Some(5) }));
     }
 
     #[test]
