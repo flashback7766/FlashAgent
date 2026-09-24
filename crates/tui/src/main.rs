@@ -1158,6 +1158,66 @@ fn initial_app(init: InitialApp) -> App {
     }
 }
 
+impl App {
+    fn on_server_discovered(&mut self, cx: &LoopCtx<'_>, disc: flashagent_llm::ServerDiscovery) {
+        self.available_models = flashagent_tui::providers::offered_models(&disc);
+        if let Some(active) = disc.active_model {
+            let new_ctx_len = active.context_length.or(active.max_context_length).unwrap_or(131_072);
+            let new_ctx_disp = active.context_display();
+            let model_changed = active.id != self.current_model;
+            let ctx_changed = self.context_usage.total_capacity != new_ctx_len || self.current_context != new_ctx_disp;
+
+            if model_changed || ctx_changed {
+                let old_m = self.current_model.clone();
+                let old_ctx_len = self.context_usage.total_capacity;
+                self.current_model = active.id.clone();
+                self.current_context = new_ctx_disp;
+                self.context_usage.total_capacity = new_ctx_len.max(1024);
+                cx.tools_arc.set_context_window(Some(new_ctx_len));
+                cx.source.set_model(&self.current_model);
+                cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
+                cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
+                update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+
+                // Only for the provider the client talks to: another's model
+                // must not be written beside it.
+                if model_changed && self.on_active_provider(cx.source) {
+                    self.config.active_profile_mut().model = self.current_model.clone();
+                    self.save_config();
+                }
+                if model_changed {
+                    // The effort is the user's choice. A non-reasoning model just gets no
+                    // thinking fields; turning "auto" into "off" here lost it for later models.
+                    if self.current_effort.is_empty() {
+                        self.current_effort = "auto".to_string();
+                    }
+                }
+
+                self.refresh_welcome(cx.source, cx.mascot_mood);
+                let ctx_tag = self.current_context.clone().unwrap_or_default();
+
+                if model_changed {
+                    let msg = format!(
+                        "Server active model switched: {old_m} -> {}", self.current_model
+                    );
+                    self.custom_placeholder = Some(msg);
+                    self.suggested_prompt = None;
+                } else if ctx_changed {
+                    let old_formatted = ContextUsage::format_tokens(old_ctx_len);
+                    let new_formatted = ContextUsage::format_tokens(new_ctx_len);
+                    let msg = format!(
+                        "Model context capacity: {old_formatted} -> {new_formatted} ({ctx_tag})"
+                    );
+                    self.custom_placeholder = Some(msg);
+                    self.suggested_prompt = None;
+                }
+                self.renderer.request_reprint();
+            }
+        }
+        self.warm_prompt_cache(cx.source, cx.perm, cx.memory_block);
+    }
+}
+
 async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     let AppContext {
         config: app_config,
@@ -1637,61 +1697,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
             // startup's first look), or overtaken by a switch under way.
             UiEvent::ServerDiscovered(disc) if app.provider_switch.is_some() || disc.base_url != source.0.base_url() => {}
             UiEvent::ServerDiscovered(disc) => {
-                app.available_models = flashagent_tui::providers::offered_models(&disc);
-                if let Some(active) = disc.active_model {
-                    let new_ctx_len = active.context_length.or(active.max_context_length).unwrap_or(131_072);
-                    let new_ctx_disp = active.context_display();
-                    let model_changed = active.id != app.current_model;
-                    let ctx_changed = app.context_usage.total_capacity != new_ctx_len || app.current_context != new_ctx_disp;
-
-                    if model_changed || ctx_changed {
-                        let old_m = app.current_model.clone();
-                        let old_ctx_len = app.context_usage.total_capacity;
-                        app.current_model = active.id.clone();
-                        app.current_context = new_ctx_disp;
-                        app.context_usage.total_capacity = new_ctx_len.max(1024);
-                        tools_arc.set_context_window(Some(new_ctx_len));
-                        source.set_model(&app.current_model);
-                        source.set_effort_bias(app.effort_memory.steps(&app.current_model));
-                        tools_arc.set_vision_supported(model_sees_images(&source, &app.current_model));
-                        update_context_usage(&mut app.context_usage, &app.history, &memory_block, &app.chat, perm);
-
-                        // Only for the provider the client talks to: another's model
-                        // must not be written beside it.
-                        if model_changed && app.on_active_provider(&source) {
-                            app.config.active_profile_mut().model = app.current_model.clone();
-                            app.save_config();
-                        }
-                        if model_changed {
-                            // The effort is the user's choice. A non-reasoning model just gets no
-                            // thinking fields; turning "auto" into "off" here lost it for later models.
-                            if app.current_effort.is_empty() {
-                                app.current_effort = "auto".to_string();
-                            }
-                        }
-
-                        app.refresh_welcome(&source, mascot_mood);
-                        let ctx_tag = app.current_context.clone().unwrap_or_default();
-
-                        if model_changed {
-                            let msg = format!(
-                                "Server active model switched: {old_m} -> {}", app.current_model
-                            );
-                            app.custom_placeholder = Some(msg);
-                            app.suggested_prompt = None;
-                        } else if ctx_changed {
-                            let old_formatted = ContextUsage::format_tokens(old_ctx_len);
-                            let new_formatted = ContextUsage::format_tokens(new_ctx_len);
-                            let msg = format!(
-                                "Model context capacity: {old_formatted} -> {new_formatted} ({ctx_tag})"
-                            );
-                            app.custom_placeholder = Some(msg);
-                            app.suggested_prompt = None;
-                        }
-                        app.renderer.request_reprint();
-                    }
-                }
-                app.warm_prompt_cache(&source, perm, &memory_block);
+                let cx = loop_ctx!();
+                app.on_server_discovered(&cx, disc);
             }
             UiEvent::Loop { turn_id, event: e } => {
                 // Late events of an aborted or superseded turn.
