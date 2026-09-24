@@ -72,10 +72,7 @@ struct QuestionUiState {
     selected_indices: std::collections::BTreeSet<usize>,
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> Result<()> {
-    flashagent_svc::updater::remove_stale_backups_beside_exe();
-    let mut config = AppConfig::load();
+async fn cli_start(config: &mut AppConfig) -> Result<Option<(bool, bool, SessionStart)>> {
     let mut force_setup = false;
     let mut skip_trust = false;
     let mut session_start = SessionStart::New;
@@ -88,7 +85,7 @@ async fn main() -> Result<()> {
             "--model" => cli_model = args.next(),
             "-v" | "--version" => {
                 println!("FlashAgent {}", flashagent_svc::updater::current_version());
-                return Ok(());
+                return Ok(None);
             }
             "--resume" | "-r" => {
                 // Without an id: pick from this folder's sessions.
@@ -105,13 +102,13 @@ async fn main() -> Result<()> {
                     eprintln!("Uninstall stopped: {e}");
                     std::process::exit(1);
                 }
-                return Ok(());
+                return Ok(None);
             }
             "--update" => {
                 if flashagent_svc::updater::is_dev_mode() {
                     println!("In-app updater is disabled in development mode (running from source repository or cargo target build).");
                     println!("To update your dev build, pull latest git commits and run `cargo build --release`.");
-                    return Ok(());
+                    return Ok(None);
                 }
                 println!("Checking for updates on {} channel...", config.update_channel.label());
                 match flashagent_svc::updater::check_for_updates(config.update_channel, flashagent_svc::updater::DEFAULT_RELEASES_API).await {
@@ -128,7 +125,7 @@ async fn main() -> Result<()> {
                         eprintln!("Update check failed: {e}");
                     }
                 }
-                return Ok(());
+                return Ok(None);
             }
             "--channel" => {
                 if let Some(val) = args.next() {
@@ -139,10 +136,10 @@ async fn main() -> Result<()> {
                     }
                     let _ = config.save();
                     println!("Release channel set to {}", config.update_channel.label());
-                    return Ok(());
+                    return Ok(None);
                 } else {
                     println!("Current channel: {}", config.update_channel.label());
-                    return Ok(());
+                    return Ok(None);
                 }
             }
             "--tool-test" => tool_test = Some(false),
@@ -151,7 +148,7 @@ async fn main() -> Result<()> {
             "-y" | "--yes" => skip_trust = true,
             "-h" | "--help" => {
                 println!("FlashAgent TUI\n\nUsage: flashagent [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Model to use, saved for the provider in use\n  --url <endpoint>     Talk to this server for this run only (saved providers: /provider)\n  --setup              Run first-time setup wizard\n  --tool-test [--all-models]  Check whether the model can drive tools\n  -r, --resume [id]    Resume a saved session (without an id: pick one from this folder)\n  -c, --continue       Continue the latest session in this folder\n  -y, --yes            Skip directory trust confirmation\n  --uninstall [-y]     Remove FlashAgent; asks what data to delete (-y: take the defaults)\n  -h, --help           Show this help message");
-                return Ok(());
+                return Ok(None);
             }
             other => anyhow::bail!("usage: flashagent [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--tool-test [--all-models]] [--setup] [-r|--resume [id]] [-c|--continue] [-y|--yes] (got {other})"),
         }
@@ -167,9 +164,18 @@ async fn main() -> Result<()> {
     }
 
     if let Some(all_models) = tool_test {
-        let code = run_tool_check_cli(&config, all_models).await;
+        let code = run_tool_check_cli(config, all_models).await;
         std::process::exit(code);
     }
+
+    Ok(Some((force_setup, skip_trust, session_start)))
+}
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+async fn main() -> Result<()> {
+    flashagent_svc::updater::remove_stale_backups_beside_exe();
+    let mut config = AppConfig::load();
+    let Some((force_setup, mut skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
 
     use std::io::IsTerminal;
     // The screens before the chat (setup, release notes, trust) wear the chosen

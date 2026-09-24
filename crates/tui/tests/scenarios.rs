@@ -2675,8 +2675,8 @@ fn quitting_says_how_many_background_tasks_it_stops() {
 
 #[test]
 fn a_notice_waits_while_the_user_is_typing() {
-    // Long enough to be typing before it ends, on a slow runner too.
-    let command = if cfg!(windows) { "ping -n 9 127.0.0.1 >NUL" } else { "sleep 8" };
+    // The task finishes only after the draft is visible, even on a busy runner.
+    let command = "i=0; while [ \"$i\" -lt 300 ] && [ ! -f release-notice ]; do sleep 0.1; i=$((i+1)); done";
     let server = MockServer::start(vec![
         Reply::ToolCall {
             name: "run_shell".into(),
@@ -2689,6 +2689,8 @@ fn a_notice_waits_while_the_user_is_typing() {
     let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
     ask(&term, "wait a second", "Waiting on it.");
     term.type_text("half a thought");
+    term.wait_for("half a thought", WAIT);
+    std::fs::write(home.work().join("release-notice"), "go").unwrap();
     term.wait_for("Background task 1 exited", WAIT);
     std::thread::sleep(Duration::from_millis(1000));
     assert_eq!(server.turns().len(), 2, "a turn started under the user's draft");
