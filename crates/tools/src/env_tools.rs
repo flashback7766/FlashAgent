@@ -37,12 +37,18 @@ pub fn env_info(cwd: &Path) -> Result<String, ToolError> {
         ("clang", "--version"),
     ];
 
-    let mut found_tools = Vec::new();
-    for (name, arg) in tools {
-        if let Some(ver) = check_tool_version(name, arg) {
-            found_tools.push(format!("  - {name}: {ver}"));
-        }
-    }
+    // All at once: each asks a separate program, and `npm --version` alone can
+    // take a second.
+    let found_tools: Vec<String> = std::thread::scope(|scope| {
+        let asked: Vec<_> = tools
+            .iter()
+            .map(|&(name, arg)| (name, scope.spawn(move || check_tool_version(name, arg))))
+            .collect();
+        asked
+            .into_iter()
+            .filter_map(|(name, answer)| answer.join().ok().flatten().map(|ver| format!("  - {name}: {ver}")))
+            .collect()
+    });
 
     if !found_tools.is_empty() {
         report.push("\nInstalled Toolchains:".to_string());
