@@ -269,8 +269,9 @@ impl AgentLoop {
             let mut assistant_text = String::new();
             let mut assistant_reasoning = String::new();
             let mut replay: Option<serde_json::Value> = None;
-            let mut calls: Vec<ToolCall> = Vec::new();
-            let mut open_args: Vec<String> = Vec::new();
+            // Kept by the server's index, which is only a label: a huge one must not
+            // make room for every number below it.
+            let mut indexed_calls: Vec<(usize, ToolCall)> = Vec::new();
             // Tool calls written as text because the server did not parse them natively.
             let mut scanner = TextToolScanner::default();
             let mut text_calls: Vec<ToolCall> = Vec::new();
@@ -337,17 +338,18 @@ impl AgentLoop {
                         }
                     }
                     LlmEvent::ToolCallDelta { index, id, name, args_delta } => {
-                        while open_args.len() <= index {
-                            open_args.push(String::new());
-                            calls.push(ToolCall { id: String::new(), name: String::new(), args_json: String::new() });
-                        }
+                        let at = indexed_calls.binary_search_by_key(&index, |(i, _)| *i).unwrap_or_else(|at| {
+                            indexed_calls.insert(at, (index, ToolCall { id: String::new(), name: String::new(), args_json: String::new() }));
+                            at
+                        });
+                        let call = &mut indexed_calls[at].1;
                         if let Some(id) = id {
-                            calls[index].id = id;
+                            call.id = id;
                         }
                         if let Some(name) = name {
-                            calls[index].name = name;
+                            call.name = name;
                         }
-                        open_args[index].push_str(&args_delta);
+                        call.args_json.push_str(&args_delta);
                     }
                     LlmEvent::Usage(u) => {
                         tokens_used += u.prompt.unwrap_or(0) + u.completion.unwrap_or(0);
@@ -367,11 +369,8 @@ impl AgentLoop {
                 absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
             }
 
-            for (call, args) in calls.iter_mut().zip(open_args) {
-                call.args_json = args;
-            }
             // A nameless call cannot be dispatched and would poison the history.
-            calls.retain(|c| !c.name.trim().is_empty());
+            let mut calls: Vec<ToolCall> = indexed_calls.into_iter().map(|(_, call)| call).filter(|c| !c.name.trim().is_empty()).collect();
             // Native calls win: some servers also echo the markup in the text.
             if calls.is_empty() {
                 calls = text_calls;
@@ -1743,6 +1742,31 @@ mod tests {
         assert_eq!(strip_repeated_tail("привет, мир", "как дела, мир?"), "как дела, мир?", "no overlap, not cut");
         assert_eq!(strip_repeated_tail("очень длинный конец", "длинный конец и дальше"), " и дальше");
         assert_eq!(strip_repeated_tail("abc", ""), "");
+    }
+
+    #[test]
+    fn a_call_index_from_the_server_is_a_label_not_a_size() {
+        // Calls numbered four billion and 7: made room for by position, the first
+        // took all the memory there is.
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![
+                MockTurn {
+                    events: vec![
+                        Ok(LlmEvent::ToolCallDelta { index: u32::MAX as usize, id: Some("b".into()), name: Some("shell".into()), args_delta: "{\"n\":".into() }),
+                        Ok(LlmEvent::ToolCallDelta { index: 7, id: Some("a".into()), name: Some("shell".into()), args_delta: "{}".into() }),
+                        Ok(LlmEvent::ToolCallDelta { index: u32::MAX as usize, id: None, name: None, args_delta: "2}".into() }),
+                        Ok(LlmEvent::Done(FinishReason::ToolUse)),
+                    ],
+                },
+                text_turn("ok"),
+            ]),
+        };
+        let tools = MockTools::new();
+        let (history, done) = run_loop(&AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false))), &llm, &tools, |_| {});
+        assert_eq!(done, DoneReason::Completed);
+        let ran: Vec<(String, String)> = tools.calls.lock().unwrap().iter().map(|c| (c.id.clone(), c.args_json.clone())).collect();
+        assert_eq!(ran, [("a".to_string(), "{}".to_string()), ("b".to_string(), "{\"n\":2}".to_string())], "in index order, arguments joined");
+        assert_protocol_valid(&history);
     }
 
     #[test]
