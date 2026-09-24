@@ -500,6 +500,136 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
     input_line_idx
 }
 
+fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionGate, st: &FrameState<'_>, width: usize, inner_w: usize, border_color: &str) -> usize {
+    let req = question_gate.pending().expect("question card needs a pending request");
+    let reset = "\x1b[0m";
+    // The composer becomes the question card.
+    let title = " Question from FlashAgent ";
+    let vis_title_len = visible_width(title);
+    let dash_w = inner_w.saturating_sub(vis_title_len + 1);
+
+    tail.push((
+        LineKind::System,
+        format!("{border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
+    ));
+
+    // Wrapped: the question is what the user answers, so none of it is cut.
+    // Line by line: a newline kept inside one row would misplace every row after it.
+    for row in req.question.lines().flat_map(|line| wrap_plain(&card_safe(line), inner_w.saturating_sub(3))) {
+        tail.push((LineKind::System, pad_box_row(&format!(" \x1b[1;38;2;240;235;225m{row}\x1b[0m"), width)));
+    }
+    if let Some(deadline) = req.deadline {
+        // During /goal the question will not wait forever; say how long.
+        let left = deadline.saturating_duration_since(std::time::Instant::now()).as_secs();
+        tail.push((
+            LineKind::System,
+            pad_box_row(
+                &format!(
+                    " \x1b[38;2;225;175;95mNo answer in {}:{:02} and the run carries on without one\x1b[0m",
+                    left / 60,
+                    left % 60
+                ),
+                width,
+            ),
+        ));
+    }
+
+    let q_state = st.question_state;
+    let sel_idx = q_state.map(|s| s.selected_index).unwrap_or(0);
+    let is_writing = q_state.map(|s| s.is_writing).unwrap_or(false);
+    let write_text = q_state.map(|s| s.write_in_text.as_str()).unwrap_or("");
+    // The end of the answer, where it is being typed, fitted to the row after
+    // its label: a long answer ran past the border, cursor and all. Pasted
+    // control characters are shown, not sent to the terminal.
+    let answer_in = |label_cells: usize| {
+        flashagent_tui::tail_window(&card_safe(write_text), inner_w.saturating_sub(label_cells + 4)).0
+    };
+    let mut typing_line_idx = None;
+
+    if let Some(ref opts) = req.options {
+        let total_choices = opts.len();
+        for (i, opt) in opts.iter().enumerate() {
+            let num = i + 1;
+            let is_sel = !is_writing && sel_idx == i;
+            let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+            let colour = if is_sel { "\x1b[1;38;2;225;175;95m" } else { "\x1b[38;2;200;195;185m" };
+            let check_box = if !req.multi_select {
+                ""
+            } else if q_state.is_some_and(|s| s.selected_indices.contains(&i)) {
+                "\x1b[1;38;2;145;205;140m[x]\x1b[0m "
+            } else {
+                "\x1b[38;2;135;130;125m[ ]\x1b[0m "
+            };
+            // A long option wraps under its own text, not under its number.
+            let lead = format!("{num}. ");
+            let indent = 4 + if req.multi_select { 4 } else { 0 } + lead.len();
+            let mut rows: Vec<String> = opt
+                .lines()
+                .flat_map(|line| wrap_plain(&card_safe(line), inner_w.saturating_sub(indent + 1).max(10)))
+                .collect();
+            // An empty option still gets its numbered row.
+            if rows.is_empty() {
+                rows.push(String::new());
+            }
+            for (j, row) in rows.iter().enumerate() {
+                let line = if j == 0 {
+                    format!("  {ptr} {check_box}{colour}{lead}{row}\x1b[0m")
+                } else {
+                    format!("{}{colour}{row}\x1b[0m", " ".repeat(indent))
+                };
+                tail.push((LineKind::System, pad_box_row(&line, width)));
+            }
+        }
+
+        let write_num = total_choices + 1;
+        let is_write_sel = is_writing || sel_idx == total_choices;
+        let write_ptr = if is_write_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+        if is_writing {
+            typing_line_idx = Some(tail.len());
+            let label = format!("{write_num}. Your answer: ");
+            let shown = answer_in(4 + label.len());
+            tail.push((
+                LineKind::User,
+                pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. Your answer:\x1b[0m \x1b[1;38;2;240;235;225m{shown}█\x1b[0m"), width),
+            ));
+            let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "back to the choices")], inner_w.saturating_sub(4));
+            tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
+        } else {
+            let colour = if is_write_sel { "\x1b[1;38;2;225;175;95m" } else { "\x1b[38;2;160;155;145m" };
+            tail.push((
+                LineKind::System,
+                pad_box_row(&format!("  {write_ptr} {colour}{write_num}. Something else: just type it\x1b[0m"), width),
+            ));
+            let numbers = format!("1-{write_num}");
+            let hints: Vec<(&str, &str)> = if req.multi_select {
+                vec![("Space", "tick"), ("↑/↓", "move"), (numbers.as_str(), "pick"), ("Enter", "confirm"), ("Esc", "cancel")]
+            } else {
+                vec![("↑/↓", "move"), (numbers.as_str(), "pick"), ("Enter", "confirm"), ("Esc", "cancel")]
+            };
+            let hints = flashagent_tui::key_hints(&hints, inner_w.saturating_sub(4));
+            tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
+        }
+    } else {
+        typing_line_idx = Some(tail.len());
+        let shown = answer_in(4);
+        tail.push((
+            LineKind::User,
+            pad_box_row(&format!("  \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{shown}█\x1b[0m"), width),
+        ));
+        let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "cancel")], inner_w.saturating_sub(4));
+        tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
+    }
+
+    // The answer being written shows its own block cursor.
+    let input_line_idx = typing_line_idx.unwrap_or(tail.len().saturating_sub(1));
+
+    tail.push((
+        LineKind::System,
+        format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
+    ));
+    input_line_idx
+}
+
 impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn frame(
@@ -596,131 +726,8 @@ impl Renderer {
                 LineKind::System,
                 format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
             ));
-        } else if let Some(req) = question_gate.pending() {
-            // The composer becomes the question card.
-            let title = " Question from FlashAgent ";
-            let vis_title_len = visible_width(title);
-            let dash_w = inner_w.saturating_sub(vis_title_len + 1);
-
-            tail.push((
-                LineKind::System,
-                format!("{border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
-            ));
-
-            // Wrapped: the question is what the user answers, so none of it is cut.
-            // Line by line: a newline kept inside one row would misplace every row after it.
-            for row in req.question.lines().flat_map(|line| wrap_plain(&card_safe(line), inner_w.saturating_sub(3))) {
-                tail.push((LineKind::System, pad_box_row(&format!(" \x1b[1;38;2;240;235;225m{row}\x1b[0m"), width)));
-            }
-            if let Some(deadline) = req.deadline {
-                // During /goal the question will not wait forever; say how long.
-                let left = deadline.saturating_duration_since(std::time::Instant::now()).as_secs();
-                tail.push((
-                    LineKind::System,
-                    pad_box_row(
-                        &format!(
-                            " \x1b[38;2;225;175;95mNo answer in {}:{:02} and the run carries on without one\x1b[0m",
-                            left / 60,
-                            left % 60
-                        ),
-                        width,
-                    ),
-                ));
-            }
-
-            let q_state = st.question_state;
-            let sel_idx = q_state.map(|s| s.selected_index).unwrap_or(0);
-            let is_writing = q_state.map(|s| s.is_writing).unwrap_or(false);
-            let write_text = q_state.map(|s| s.write_in_text.as_str()).unwrap_or("");
-            // The end of the answer, where it is being typed, fitted to the row after
-            // its label: a long answer ran past the border, cursor and all. Pasted
-            // control characters are shown, not sent to the terminal.
-            let answer_in = |label_cells: usize| {
-                flashagent_tui::tail_window(&card_safe(write_text), inner_w.saturating_sub(label_cells + 4)).0
-            };
-            let mut typing_line_idx = None;
-
-            if let Some(ref opts) = req.options {
-                let total_choices = opts.len();
-                for (i, opt) in opts.iter().enumerate() {
-                    let num = i + 1;
-                    let is_sel = !is_writing && sel_idx == i;
-                    let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
-                    let colour = if is_sel { "\x1b[1;38;2;225;175;95m" } else { "\x1b[38;2;200;195;185m" };
-                    let check_box = if !req.multi_select {
-                        ""
-                    } else if q_state.is_some_and(|s| s.selected_indices.contains(&i)) {
-                        "\x1b[1;38;2;145;205;140m[x]\x1b[0m "
-                    } else {
-                        "\x1b[38;2;135;130;125m[ ]\x1b[0m "
-                    };
-                    // A long option wraps under its own text, not under its number.
-                    let lead = format!("{num}. ");
-                    let indent = 4 + if req.multi_select { 4 } else { 0 } + lead.len();
-                    let mut rows: Vec<String> = opt
-                        .lines()
-                        .flat_map(|line| wrap_plain(&card_safe(line), inner_w.saturating_sub(indent + 1).max(10)))
-                        .collect();
-                    // An empty option still gets its numbered row.
-                    if rows.is_empty() {
-                        rows.push(String::new());
-                    }
-                    for (j, row) in rows.iter().enumerate() {
-                        let line = if j == 0 {
-                            format!("  {ptr} {check_box}{colour}{lead}{row}\x1b[0m")
-                        } else {
-                            format!("{}{colour}{row}\x1b[0m", " ".repeat(indent))
-                        };
-                        tail.push((LineKind::System, pad_box_row(&line, width)));
-                    }
-                }
-
-                let write_num = total_choices + 1;
-                let is_write_sel = is_writing || sel_idx == total_choices;
-                let write_ptr = if is_write_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
-                if is_writing {
-                    typing_line_idx = Some(tail.len());
-                    let label = format!("{write_num}. Your answer: ");
-                    let shown = answer_in(4 + label.len());
-                    tail.push((
-                        LineKind::User,
-                        pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. Your answer:\x1b[0m \x1b[1;38;2;240;235;225m{shown}█\x1b[0m"), width),
-                    ));
-                    let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "back to the choices")], inner_w.saturating_sub(4));
-                    tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
-                } else {
-                    let colour = if is_write_sel { "\x1b[1;38;2;225;175;95m" } else { "\x1b[38;2;160;155;145m" };
-                    tail.push((
-                        LineKind::System,
-                        pad_box_row(&format!("  {write_ptr} {colour}{write_num}. Something else: just type it\x1b[0m"), width),
-                    ));
-                    let numbers = format!("1-{write_num}");
-                    let hints: Vec<(&str, &str)> = if req.multi_select {
-                        vec![("Space", "tick"), ("↑/↓", "move"), (numbers.as_str(), "pick"), ("Enter", "confirm"), ("Esc", "cancel")]
-                    } else {
-                        vec![("↑/↓", "move"), (numbers.as_str(), "pick"), ("Enter", "confirm"), ("Esc", "cancel")]
-                    };
-                    let hints = flashagent_tui::key_hints(&hints, inner_w.saturating_sub(4));
-                    tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
-                }
-            } else {
-                typing_line_idx = Some(tail.len());
-                let shown = answer_in(4);
-                tail.push((
-                    LineKind::User,
-                    pad_box_row(&format!("  \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{shown}█\x1b[0m"), width),
-                ));
-                let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "cancel")], inner_w.saturating_sub(4));
-                tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
-            }
-
-            // The answer being written shows its own block cursor.
-            input_line_idx = typing_line_idx.unwrap_or(tail.len().saturating_sub(1));
-
-            tail.push((
-                LineKind::System,
-                format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
-            ));
+        } else if question_gate.pending().is_some() {
+            input_line_idx = append_question_card(&mut tail, question_gate, &st, width, inner_w, &border_color);
         } else if let Some(overlay) = overlay {
             // The composer turns into the open menu or screen.
             tail.extend(overlay.render(width));
