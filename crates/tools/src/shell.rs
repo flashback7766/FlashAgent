@@ -686,18 +686,25 @@ impl ShellRegistry {
         ))
     }
 
+    /// Asks the task's watcher to kill it and returns at once. False when it
+    /// is not running.
+    pub fn stop(&self, id: u32) -> bool {
+        let mut tasks = self.shared.tasks.lock();
+        let Some(task) = tasks.get_mut(&id).filter(|t| t.state == TaskState::Running) else {
+            return false;
+        };
+        task.kill_requested = true;
+        if let Some(stop) = task.stop.take() {
+            let _ = stop.send(());
+        }
+        true
+    }
+
     /// Waits a moment for the process to be gone, so what is reported is final.
     pub async fn kill(&self, id: u32) -> Result<String, ToolError> {
-        {
-            let mut tasks = self.shared.tasks.lock();
-            let task = tasks.get_mut(&id).ok_or_else(|| ToolError::Other(format!("no such background task: {id}")))?;
-            if task.state != TaskState::Running {
-                return Ok(format!("task {id} had already ended: it {}", task.state.describe()));
-            }
-            task.kill_requested = true;
-            if let Some(stop) = task.stop.take() {
-                let _ = stop.send(());
-            }
+        if !self.stop(id) {
+            let state = self.state(id).ok_or_else(|| ToolError::Other(format!("no such background task: {id}")))?;
+            return Ok(format!("task {id} had already ended: it {}", state.describe()));
         }
         let deadline = Instant::now() + Duration::from_secs(3);
         while self.state(id) == Some(TaskState::Running) && Instant::now() < deadline {
@@ -1039,7 +1046,7 @@ mod tests {
         let buffer = Arc::new(Mutex::new(String::new()));
         pump(Some(tokio::io::repeat(b'x').take(1_000_000)), buffer.clone()).await;
         let kept = buffer.lock().len();
-        assert!(kept <= BUFFER_CAP && kept >= BUFFER_CAP / 2, "{kept}");
+        assert!((BUFFER_CAP / 2..=BUFFER_CAP).contains(&kept), "{kept}");
     }
 
     #[test]

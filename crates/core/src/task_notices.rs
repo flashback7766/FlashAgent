@@ -18,6 +18,8 @@ pub struct NoticeInbox {
     queued: Vec<String>,
     /// Down a running turn's steering channel, not yet injected by the loop.
     sent: Vec<String>,
+    /// Injected into the running turn: a turn thrown away takes them with it.
+    injected: Vec<String>,
     /// The user stopped the last turn: notices wait for them to send something.
     held: bool,
 }
@@ -45,7 +47,7 @@ impl NoticeInbox {
     pub fn injected(&mut self, text: &str) -> bool {
         match self.sent.iter().position(|s| s == text) {
             Some(pos) => {
-                self.sent.remove(pos);
+                self.injected.push(self.sent.remove(pos));
                 true
             }
             None => false,
@@ -56,6 +58,7 @@ impl NoticeInbox {
     /// turn the user stopped holds the queue until they send something: they
     /// asked for quiet.
     pub fn turn_ended(&mut self, stopped_by_user: bool) {
+        self.injected.clear();
         let mut back = std::mem::take(&mut self.sent);
         back.append(&mut self.queued);
         self.queued = back;
@@ -64,9 +67,20 @@ impl NoticeInbox {
         }
     }
 
+    /// The turn and its history were thrown away (it would not stop when
+    /// asked): what it injected never reached the kept history either.
+    pub fn turn_aborted(&mut self) {
+        let mut back = std::mem::take(&mut self.injected);
+        back.append(&mut self.sent);
+        back.append(&mut self.queued);
+        self.queued = back;
+        self.held = true;
+    }
+
     /// Any turn starting ends a hold; what is queued rides along with it.
     pub fn turn_started(&mut self) {
         self.held = false;
+        self.injected.clear();
     }
 
     /// With the app idle: every queued notice as the message of one follow-up
@@ -140,5 +154,18 @@ mod tests {
         assert_eq!(inbox.wake(false), None, "woke up after Esc");
         inbox.turn_started();
         assert_eq!(inbox.send_into_turn(), vec![notice(1)], "it rides along with the next prompt");
+    }
+
+    #[test]
+    fn a_turn_thrown_away_gives_back_what_it_was_told() {
+        let mut inbox = NoticeInbox::default();
+        inbox.push(notice(1));
+        inbox.push(notice(2));
+        let sent = inbox.send_into_turn();
+        assert!(inbox.injected(&sent[0]));
+        inbox.turn_aborted();
+        assert_eq!(inbox.wake(false), None, "held after the user stopped it");
+        inbox.turn_started();
+        assert_eq!(inbox.send_into_turn(), sent);
     }
 }
