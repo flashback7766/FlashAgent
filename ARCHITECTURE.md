@@ -158,10 +158,11 @@ saved for the provider is taken up if the server lists it, else the loaded
 or first one. The context window, thinking profile, vision, effort bias,
 model list, system prompt and welcome card follow the model, and the new
 server's prompt cache is warmed. The history is protocol-neutral, so the
-conversation carries on. A switch is refused while a turn runs. Discovery
-settles its answer into whatever endpoint the client has when it ends, so a
-switch waits for a look already under way, and of two quick switches only
-the later one changes the client.
+conversation carries on. A switch is refused while a turn runs. The
+endpoint changes on the UI thread, so quick switches reach the client in
+order. The client counts endpoint changes: a look at a server reads the
+count before it asks, and its answer is dropped if the count moved, so a
+look at the old server that ends after the switch changes nothing.
 
 A local server reuses the part of a request it has already read, so each
 request keeps its opening fixed: system prompt, voice example, history, and
@@ -281,6 +282,6 @@ new version runs on the next start.
   it, and reads the screen.
 
 CI runs `cargo test --workspace` and `cargo clippy --all-targets
--D warnings` on Linux, Windows and macOS, and the same run gates every
-release. The tests that need the internet run nightly
+-D warnings` on Linux, Windows and macOS, checks that the workspace builds
+on Rust 1.88, and the same run gates every release. The tests that need the internet run nightly
 (`.github/workflows/web-tools.yml`).

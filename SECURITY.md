@@ -1,8 +1,8 @@
-# Security Policy
+# Security policy
 
-## Supported Versions
+## Supported versions
 
-FlashAgent is under active development. Security updates are applied to the latest release on the `main` branch.
+Fixes go into the next release; only the latest builds get them.
 
 | Version                         | Supported          |
 | ------------------------------- | ------------------ |
@@ -12,12 +12,12 @@ FlashAgent is under active development. Security updates are applied to the late
 
 Release downloads are listed in each release's `SHA256SUMS`; the in-app updater refuses a binary whose checksum does not match.
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
-Security is taken seriously. If you discover a security issue or vulnerability (especially relating to bypasses of the permission modes or approval cards, unauthorized shell command execution, or credential handling):
+Examples: a way past the permission modes or approval cards, a shell command run without approval, a leaked key.
 
-1. **Do NOT disclose the issue publicly** on GitHub issues, discussions, or social media.
-2. Please open a [GitHub Security Advisory](https://github.com/flashback7766/FlashAgent/security/advisories/new) or contact the maintainer directly via Discord (`flashback7766`) or Telegram ([@flashback2k](https://t.me/flashback2k)).
-3. Provide detailed steps to reproduce the vulnerability, including your environment and sample commands/payloads.
+1. **Do not report it publicly** (issues, discussions, social media).
+2. Open a [GitHub security advisory](https://github.com/flashback7766/FlashAgent/security/advisories/new), or write to the maintainer on Discord (`flashback7766`) or Telegram ([@flashback2k](https://t.me/flashback2k)).
+3. Give the steps to reproduce it: your OS, version, and the commands or input used.
 
-The maintainer will acknowledge receipt of your vulnerability report within 48 hours and work with you on a coordinated disclosure and patch.
+You get an answer within 48 hours, and the fix and its disclosure are agreed with you.

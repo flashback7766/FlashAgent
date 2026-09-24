@@ -1,9 +1,8 @@
 # Can your model drive tools?
 
-An agent is only as good as the model's willingness to call a tool instead of
-describing one. That failure is quiet — the transcript looks busy while
-nothing happens on disk — so FlashAgent ships the check rather than leaving
-you to discover it an hour in.
+A model that describes a tool call instead of making one leaves the
+transcript busy and the disk untouched, and nothing says so. FlashAgent has a
+check for it:
 
 ```bash
 flashagent --tool-test               # the model you have configured
@@ -16,9 +15,8 @@ so a published table can be checked instead of believed.
 
 ## What is measured
 
-Eight scenarios, each one a thing the agent loop does on real work. They are
-deliberately small: a model that fails them will fail a real task in the same
-way, only later and more expensively.
+Eight small scenarios, each one something the agent loop does on real work.
+A model that fails one fails a real task the same way, later.
 
 | Scenario | The model is asked to | Why a failure hurts |
 | :--- | :--- | :--- |
@@ -31,11 +29,11 @@ way, only later and more expensively.
 | **recovers from a failed tool call** | after `error: no such file …`, retry with the corrected path | tools fail constantly; a model that cannot adapt stalls on the first one |
 | **asks for two files in one turn** | read two files with two calls in one turn | one call per turn turns a ten-file job into ten round trips |
 
-Sampling is fixed for every model: temperature 0, reasoning off, 1024 output
-tokens, one attempt per scenario, no retries. Scenario fixtures contain no
-ambiguity worth scoring — an earlier revision fed the model a tool result that
-began with a line number, and two models sensibly reported the line number.
-That was the harness being wrong, not the model.
+Sampling is the same for every model: temperature 0, reasoning off, 1024
+output tokens, one attempt per scenario. The fixtures leave nothing open to
+interpretation: an earlier version gave the model a tool result that began
+with a line number, two models reported that number, and the fixture was
+fixed.
 
 A call written as text markup (`<tool_call>`, `[TOOL_CALLS]`, bare JSON)
 counts as a pass, because FlashAgent's scanner recovers those and the loop
@@ -47,10 +45,9 @@ recovery.
 
 Raw per-scenario output: [`docs/tool-calling/results-2026-09-12.json`](tool-calling/results-2026-09-12.json).
 
-Measured on one machine (LM Studio, CUDA, one model resident at a time,
-loaded and unloaded between runs). Time is the total for all eight scenarios —
-it includes prompt processing, so treat it as an order of magnitude, not a
-benchmark of throughput.
+Measured on one machine (LM Studio, CUDA, one model loaded at a time). Time
+is the total for all eight scenarios, prompt processing included, so it is an
+order of magnitude, not a throughput figure.
 
 | Model | Size | Score | Calls | Time | Failed |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -61,32 +58,29 @@ benchmark of throughput.
 
 ### What this run showed
 
-**Every model here emits native tool calls.** None needed the text-markup
-recovery path. That is worth knowing: the recovery parser exists for models
-that do not, and on this sample it was never the thing standing between the
-agent and the work.
+**Every model here makes native tool calls.** None needed the parser for
+calls written as text.
 
 **Three of four stall on the first tool error.** Given a tool result that says
 `error: no such file: src/confg.rs (did you mean src/config.rs?)`, they
 explain the problem in prose instead of calling the tool again with the
-corrected path. Only the 35B model retried. This is the single most useful
-number here: tools fail constantly in real work — a wrong path, a build error,
-a missing dependency — and a model that turns each one into a paragraph makes
-you the one driving.
+corrected path. Only the 35B model retried. Tools fail all the time in real
+work (a wrong path, a build error, a missing dependency), and a model that
+answers each failure with a paragraph leaves the next step to you.
 
-**Batching two calls into one turn is rare at 4B.** The smallest model read one
-file and waited; the others asked for both. It costs turns, not correctness.
+**The smallest model reads one file at a time.** Asked for two, it read one
+and waited; the others asked for both. That costs turns, not correctness.
 
-**Size buys reliability, and you pay in seconds.** The 35B passed everything and
-took five times as long as the 4.6B for the same eight scenarios.
+**The 35B passed everything and took five times as long** as the 4.6B for the
+same eight scenarios.
 
 ## Reading the verdict
 
-- **drives tools reliably** — full marks. Hand it a task.
-- **usable, with one rough edge** — one short. Fine for one-step work; watch it
+- **drives tools reliably**: full marks.
+- **usable, with one rough edge**: one short. Fine for one-step work; watch it
   on longer chains.
-- **unreliable** — half or better, but you will be correcting it every turn.
-- **mostly fails / cannot drive tools** — use it for chat, not for an agent.
+- **unreliable**: half or better, but it needs correcting every turn.
+- **mostly fails / cannot drive tools**: use it for chat, not as an agent.
 
-A score here says nothing about how good the model is at writing code. It
-says whether FlashAgent can hand it a tool and get the work done.
+The score says nothing about how well the model writes code, only whether it
+can do the work through tools.

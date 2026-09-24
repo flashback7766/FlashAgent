@@ -1,75 +1,36 @@
 # Contributing to FlashAgent
 
-First off, thank you for considering contributing to FlashAgent! It's people like you who make open-source tools fast, reliable, and delightful to use.
+Read [PHILOSOPHY.md](PHILOSOPHY.md) first. A feature that goes against it will be declined, however well it is built. In short:
 
-Please take a moment to review this document before submitting contributions.
+1. **Local first.** No telemetry, no cloud lock-in; a session goes only to the provider you chose.
+2. **No Electron or Chromium.** One native Rust binary, about 10 MB of memory when idle ([measured](docs/numbers.md)).
+3. **Tool calling that works every time.** A change that makes calls less reliable is not accepted.
+4. **A finished interface.** Details matter in the terminal as much as in a GUI.
 
----
+## Setup
 
-## Philosophy & Core Principles
+You need Rust 1.88 or newer and Linux, macOS or Windows. For trying changes by hand, a model server ([LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com), [llama.cpp](https://github.com/ggml-org/llama.cpp), [vLLM](https://github.com/vllm-project/vllm)) or a cloud API key. The tests need neither: they run against a scripted mock server.
 
-Before writing code or proposing features, please read **[PHILOSOPHY.md](PHILOSOPHY.md)**.
-FlashAgent adheres strictly to a few inviolable principles:
-1. **Local-first by default**: No telemetry, no cloud lock-in, no session leakage.
-2. **0% Electron / Chromium**: pure native Rust, one binary, about 10 MB of memory when idle ([measured](docs/numbers.md)).
-3. **Rock-solid tool calling**: Tool execution cannot be a lottery. Protocol invariants and self-healing parsing are sacred.
-4. **M3 Expressive craft**: High UX fidelity, rich terminal ergonomics, smooth visual feedback.
-
-If a proposed feature contradicts [PHILOSOPHY.md](PHILOSOPHY.md), it will be politely declined.
-
----
-
-## Development Setup
-
-### Prerequisites
-- **Rust 1.88+** (`rustup update stable`)
-- Linux, macOS, or Windows
-- A local LLM server (e.g. [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com), [llama.cpp](https://github.com/ggml-org/llama.cpp), or [vLLM](https://github.com/vllm-project/vllm)) or an OpenAI-compatible API key.
-
-### Building & Testing
 ```bash
-# Clone the repository
 git clone https://github.com/flashback7766/FlashAgent.git
 cd FlashAgent
-
-# Run the complete test suite
 cargo test --workspace
-
-# Run strict clippy linter (warnings are treated as errors), as CI does
 cargo clippy --workspace --all-targets -- -D warnings
-
-# Build the release binary
 cargo build --release
 ```
 
----
+CI runs clippy from the latest stable Rust, which can have lints an older toolchain lacks, and checks that the workspace builds on 1.88.
 
-## How to Contribute
+## Bugs and ideas
 
-### 1. Reporting Bugs
-- Search existing issues to ensure the bug hasn't already been reported.
-- Use the **[Bug Report Template](.github/ISSUE_TEMPLATE/bug_report.md)**.
-- Include your OS, terminal, FlashAgent commit/version, LLM backend, and active model.
+- **Bug:** search the issues first, then use the [bug report template](.github/ISSUE_TEMPLATE/bug_report.md). Give your OS, terminal, FlashAgent version, server and model.
+- **Feature:** open a [feature request](.github/ISSUE_TEMPLATE/feature_request.md) and agree on it before writing a large pull request.
 
-### 2. Proposing Features
-- Open an issue using the **[Feature Request Template](.github/ISSUE_TEMPLATE/feature_request.md)**.
-- Discuss the idea with maintainers before embarking on a massive pull request.
+## Pull requests
 
-### 3. Submitting Pull Requests
-1. Fork the repo and create your branch from `main`:
-   ```bash
-   git checkout -b feature/my-cool-feature
-   ```
-2. Follow Rust idiomatic conventions:
-   - Format with `cargo fmt`.
-   - Ensure all tests pass: `cargo test --workspace`.
-   - Ensure clippy is happy: `cargo clippy --workspace --all-targets -- -D warnings`.
-3. Keep pull requests focused on a single logical change.
-4. Open a Pull Request referencing any related issues.
+1. Branch from `main`.
+2. Write like the code around you. **Do not run `cargo fmt`**: the code is not rustfmt-formatted, and it would rewrite every file. Comments say why, not what.
+3. `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` must pass. A bug fix comes with a test that fails without it.
+4. One logical change per pull request, linked to its issue.
 
----
-
-## Code of Conduct
-Please note that all participants in this project are expected to adhere to our **[Code of Conduct](CODE_OF_CONDUCT.md)**.
-
-Thank you for helping make FlashAgent better.
+Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
