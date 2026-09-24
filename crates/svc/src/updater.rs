@@ -503,6 +503,10 @@ pub async fn download_and_apply_with_progress(
 /// Content-Length must not ask for more than the machine has.
 const MAX_RESERVED_DOWNLOAD: u64 = 64 * 1024 * 1024;
 
+/// Far above any release (they are about 10 MB): a server that streams without
+/// end, or claims to, is refused rather than read into memory.
+const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
+
 /// Streamed, so the caller can show progress.
 async fn download(
     client: &reqwest::Client,
@@ -510,15 +514,32 @@ async fn download(
     asset_name: &str,
     on_progress: &mut impl FnMut(UpdateProgress),
 ) -> anyhow::Result<Vec<u8>> {
+    download_capped(client, url, asset_name, MAX_DOWNLOAD, on_progress).await
+}
+
+async fn download_capped(
+    client: &reqwest::Client,
+    url: &str,
+    asset_name: &str,
+    limit: u64,
+    on_progress: &mut impl FnMut(UpdateProgress),
+) -> anyhow::Result<Vec<u8>> {
+    let too_big = || anyhow::anyhow!("Refused {asset_name}: larger than {} MB, which no release is", limit / (1024 * 1024));
     let mut resp = client.get(url).send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("Failed downloading asset {}: HTTP {}", asset_name, resp.status());
     }
     let total = resp.content_length();
+    if total.is_some_and(|t| t > limit) {
+        return Err(too_big());
+    }
     let mut payload: Vec<u8> = Vec::with_capacity(total.unwrap_or(0).min(MAX_RESERVED_DOWNLOAD) as usize);
     let mut last_report = std::time::Instant::now();
     on_progress(UpdateProgress::Downloading { received: 0, total });
     while let Some(chunk) = resp.chunk().await? {
+        if (payload.len() + chunk.len()) as u64 > limit {
+            return Err(too_big());
+        }
         payload.extend_from_slice(&chunk);
         if last_report.elapsed() >= PROGRESS_INTERVAL {
             last_report = std::time::Instant::now();
@@ -813,15 +834,21 @@ mod tests {
     async fn a_download_declaring_a_terabyte_reserves_no_terabyte() {
         // Reserving what the header claimed took down the whole app.
         let url = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 1099511627776\r\n\r\n", b"abc").await;
-        let mut declared = None;
-        let result = download(&reqwest::Client::new(), &url, "flashagent", &mut |p| {
-            if let UpdateProgress::Downloading { total, .. } = p {
-                declared = total;
-            }
-        })
-        .await;
-        assert!(result.is_err(), "the body ended far short of its length");
-        assert_eq!(declared, Some(1 << 40));
+        let mut reported = false;
+        let result = download(&reqwest::Client::new(), &url, "flashagent", &mut |_| reported = true).await;
+        let err = result.expect_err("a terabyte is no release").to_string();
+        assert!(err.contains("larger than 512 MB"), "{err}");
+        assert!(!reported, "refused before reading anything");
+    }
+
+    #[tokio::test]
+    async fn a_download_that_does_not_stop_is_cut_off_at_the_limit() {
+        // No length given: only counting what arrives can stop it.
+        let url = serve_once("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", &[b'x'; 4096]).await;
+        let result = download_capped(&reqwest::Client::new(), &url, "flashagent", 1024, &mut |_| {}).await;
+        assert!(result.expect_err("more than the limit arrived").to_string().contains("flashagent"));
+        let url = serve_once("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", &[b'x'; 1000]).await;
+        assert_eq!(download_capped(&reqwest::Client::new(), &url, "flashagent", 1024, &mut |_| {}).await.unwrap().len(), 1000);
     }
 
     #[tokio::test]
