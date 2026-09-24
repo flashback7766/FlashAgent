@@ -904,30 +904,7 @@ fn open_snapshots(perm: &PermissionedTools, session_id: &str, cwd: &std::path::P
 /// `None`: nothing worth saving; `Ok(id)`: saved; `Err(why)`: not saved.
 type SaveOutcome = Option<std::result::Result<String, String>>;
 
-async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
-    let AppContext {
-        config: app_config,
-        source,
-        perm,
-        gate,
-        question_gate,
-        tools_arc,
-        memory_block,
-        memory_docs,
-        model,
-        context_display,
-        context_capacity,
-        cwd_display,
-        initial_effort,
-        available_models,
-        session_start,
-        cwd,
-        first_run_verdict,
-        pending_discovery,
-    } = ctx;
-    let cancel = Arc::new(AtomicBool::new(false));
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
-
+fn start_event_sources(tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>, tools_arc: &Arc<BuiltinTools>, pending_discovery: Option<tokio::task::JoinHandle<Option<flashagent_llm::ServerDiscovery>>>) {
     {
         let mut ended = tools_arc.shells().subscribe();
         let tx = tx.clone();
@@ -1012,6 +989,34 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
             }
         });
     }
+
+}
+
+async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
+    let AppContext {
+        config: app_config,
+        source,
+        perm,
+        gate,
+        question_gate,
+        tools_arc,
+        memory_block,
+        memory_docs,
+        model,
+        context_display,
+        context_capacity,
+        cwd_display,
+        initial_effort,
+        available_models,
+        session_start,
+        cwd,
+        first_run_verdict,
+        pending_discovery,
+    } = ctx;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
+
+    start_event_sources(&tx, &tools_arc, pending_discovery);
 
     let system_prompt_config = SystemPromptConfig::new()
         .with_cwd(&cwd_display)
