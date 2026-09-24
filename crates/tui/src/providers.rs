@@ -125,10 +125,30 @@ enum Field {
     Address,
     Key,
     Model,
+    /// Only where the client picks the window (Ollama's `num_ctx`).
+    Context,
     Save,
 }
 
 const FIELDS: [Field; 6] = [Field::Name, Field::Protocol, Field::Address, Field::Key, Field::Model, Field::Save];
+const FIELDS_WITH_CONTEXT: [Field; 7] = [Field::Name, Field::Protocol, Field::Address, Field::Key, Field::Model, Field::Context, Field::Save];
+
+fn fields(profile: &ProviderProfile) -> &'static [Field] {
+    if profile.protocol == ApiProtocol::Ollama { &FIELDS_WITH_CONTEXT } else { &FIELDS }
+}
+
+/// "32768", "32k", "128K" or "1m"; `None` for empty (FlashAgent's choice) or nonsense.
+fn parse_context(text: &str) -> Option<usize> {
+    let text = text.trim().to_ascii_lowercase().replace(['_', ','], "");
+    let (digits, scale) = match text.strip_suffix('k') {
+        Some(d) => (d, 1024),
+        None => match text.strip_suffix('m') {
+            Some(d) => (d, 1024 * 1024),
+            None => (text.as_str(), 1),
+        },
+    };
+    digits.trim().parse::<usize>().ok().map(|n| n * scale).filter(|&n| n > 0)
+}
 
 #[derive(Debug, Clone)]
 struct Form {
@@ -262,7 +282,7 @@ impl ProvidersView {
 
     fn form_key(&mut self, code: KeyCode, mods: KeyModifiers) -> ProvidersAction {
         let Some(form) = self.form.as_mut() else { return ProvidersAction::None };
-        let field = FIELDS[form.row];
+        let field = fields(&form.draft)[form.row];
         if let Some(typing) = form.typing.as_mut() {
             match code {
                 KeyCode::Esc => form.typing = None,
@@ -278,6 +298,7 @@ impl ProvidersView {
                         }
                         Field::Key => form.draft.api_key = (!text.is_empty()).then_some(text),
                         Field::Model => form.draft.model = text,
+                        Field::Context => form.draft.context_window = parse_context(&text),
                         _ => {}
                     }
                     form.typing = None;
@@ -297,8 +318,11 @@ impl ProvidersView {
                 self.form = None;
                 self.status = None;
             }
-            KeyCode::Up => form.row = (form.row + FIELDS.len() - 1) % FIELDS.len(),
-            KeyCode::Down | KeyCode::Tab => form.row = (form.row + 1) % FIELDS.len(),
+            KeyCode::Up => {
+                let n = fields(&form.draft).len();
+                form.row = (form.row + n - 1) % n;
+            }
+            KeyCode::Down | KeyCode::Tab => form.row = (form.row + 1) % fields(&form.draft).len(),
             KeyCode::Left | KeyCode::Right if field == Field::Protocol => {
                 form.draft.protocol = cycle_protocol(form.draft.protocol, code == KeyCode::Right);
             }
@@ -310,6 +334,7 @@ impl ProvidersView {
                 Field::Name => form.typing = Some(form.draft.name.clone()),
                 Field::Address => form.typing = Some(form.draft.url.clone()),
                 Field::Model => form.typing = Some(form.draft.model.clone()),
+                Field::Context => form.typing = Some(form.draft.context_window.map(|n| n.to_string()).unwrap_or_default()),
                 Field::Key => form.typing = Some(String::new()),
             },
             _ => {}
@@ -344,7 +369,7 @@ impl ProvidersView {
         let hints: Vec<(&str, &str)> = match &self.form {
             Some(form) => {
                 let label_w = 10;
-                for (i, field) in FIELDS.iter().enumerate() {
+                for (i, field) in fields(&form.draft).iter().enumerate() {
                     let current = i == form.row;
                     let ptr = if current { format!("{GOLD}\u{25b8}{OFF}") } else { " ".to_string() };
                     let typed = form.typing.as_deref().filter(|_| current);
@@ -368,6 +393,10 @@ impl ProvidersView {
                         },
                         (Field::Model, None) if form.draft.model.is_empty() => format!("{DIM}the one the server has loaded{OFF}"),
                         (Field::Model, None) => form.draft.model.clone(),
+                        (Field::Context, None) => match form.draft.context_window {
+                            Some(n) => format!("{n} tokens"),
+                            None => format!("{DIM}chosen for the model (32k unless loaded larger){OFF}"),
+                        },
                         (Field::Save, _) => String::new(),
                     };
                     let row = match field {
@@ -383,6 +412,7 @@ impl ProvidersView {
                                 Field::Address => "Address",
                                 Field::Key => "API key",
                                 Field::Model => "Model",
+                                Field::Context => "Context",
                                 Field::Save => "",
                             };
                             let label_style = if current { BRIGHT } else { DIM };
@@ -391,8 +421,9 @@ impl ProvidersView {
                     };
                     push(pad_row(&row));
                 }
-                match (FIELDS[form.row], &form.typing) {
+                match (fields(&form.draft)[form.row], &form.typing) {
                     (Field::Key, Some(_)) => vec![("Enter", "keep it"), ("empty", "use the environment"), ("Esc", "cancel")],
+                    (Field::Context, Some(_)) => vec![("Enter", "keep it, e.g. 65536 or 64k"), ("empty", "automatic"), ("Esc", "cancel")],
                     (_, Some(_)) => vec![("Enter", "keep it"), ("Esc", "cancel")],
                     _ => vec![("\u{2191}/\u{2193}", "move"), ("Enter", "change"), ("Esc", "back without saving")],
                 }
@@ -480,6 +511,27 @@ mod tests {
 
     fn text(lines: &[RenderLine]) -> String {
         lines.iter().map(|(_, l)| crate::strip_ansi(l)).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn a_context_window_is_read_the_way_people_write_it() {
+        assert_eq!(parse_context("65536"), Some(65_536));
+        assert_eq!(parse_context("64k"), Some(65_536));
+        assert_eq!(parse_context(" 128K "), Some(131_072));
+        assert_eq!(parse_context("1m"), Some(1_048_576));
+        assert_eq!(parse_context("32_768"), Some(32_768));
+        assert_eq!(parse_context(""), None, "empty is automatic");
+        assert_eq!(parse_context("0"), None);
+        assert_eq!(parse_context("lots"), None);
+    }
+
+    #[test]
+    fn only_a_server_that_lets_the_client_choose_offers_the_context_field() {
+        let mut p = ProviderProfile::new("Ollama", ApiProtocol::Ollama, "http://localhost:11434");
+        assert!(fields(&p).contains(&Field::Context));
+        p.protocol = ApiProtocol::OpenAi;
+        assert!(!fields(&p).contains(&Field::Context));
+        assert_eq!(fields(&p).last(), Some(&Field::Save));
     }
 
     #[test]
