@@ -3,51 +3,104 @@ use serde_json::Value;
 use crate::repair::repair_json;
 use crate::types::{FinishReason, LlmEvent};
 
-/// `[DONE]` is returned as the payload `"[DONE]"`.
+/// Server-sent events as the standard reads them: a line ends at CRLF, LF or
+/// a lone CR (servers mix them), an empty line ends the event, its `data:`
+/// lines are joined with newlines, and comments (`: OPENROUTER PROCESSING`)
+/// and other fields (`event:`, `id:`) are skipped. `[DONE]` is returned as
+/// the payload `"[DONE]"`. Each byte is looked at once, however the body is
+/// cut into chunks.
 #[derive(Default)]
 pub struct SseDecoder {
-    buf: Vec<u8>,
+    /// An unfinished line.
+    line: Vec<u8>,
+    /// The `data` of the event being read; bytes, so a character cut
+    /// between two chunks is whole again before it is decoded.
+    data: Vec<u8>,
+    has_data: bool,
+    /// The last chunk ended in CR: an LF opening the next one is the same break.
+    after_cr: bool,
+    seen_line: bool,
 }
 
 impl SseDecoder {
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
-        self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
-        while let Some(pos) = find_double_newline(&self.buf) {
-            let line: Vec<u8> = self.buf.drain(..pos.1).collect();
-            if let Some(payload) = extract_data(&line) {
-                out.push(payload);
+        let mut rest = chunk;
+        if std::mem::take(&mut self.after_cr) {
+            if let Some(stripped) = rest.strip_prefix(b"\n") {
+                rest = stripped;
+            } else if rest.is_empty() {
+                self.after_cr = true;
             }
         }
+        while let Some(end) = rest.iter().position(|&b| b == b'\n' || b == b'\r') {
+            if self.line.is_empty() {
+                self.take_line(&rest[..end], &mut out);
+            } else {
+                let mut line = std::mem::take(&mut self.line);
+                line.extend_from_slice(&rest[..end]);
+                self.take_line(&line, &mut out);
+                line.clear();
+                self.line = line;
+            }
+            let cr = rest[end] == b'\r';
+            rest = &rest[end + 1..];
+            if cr {
+                match rest.first() {
+                    Some(b'\n') => rest = &rest[1..],
+                    None => self.after_cr = true,
+                    Some(_) => {}
+                }
+            }
+        }
+        self.line.extend_from_slice(rest);
         out
     }
-}
 
-/// Whichever separator comes first: a server may mix `\r\n\r\n` records
-/// with `\n\n` keep-alive comments.
-fn find_double_newline(buf: &[u8]) -> Option<(usize, usize)> {
-    let lf = buf.windows(2).position(|w| w == b"\n\n").map(|p| (p, p + 2));
-    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| (p, p + 4));
-    match (lf, crlf) {
-        (Some(a), Some(b)) => Some(if b.0 < a.0 { b } else { a }),
-        (a, b) => a.or(b),
+    /// The body has ended: an event the server did not close with an empty
+    /// line is still delivered.
+    pub fn finish(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        let line = std::mem::take(&mut self.line);
+        if !line.is_empty() {
+            self.take_line(&line, &mut out);
+        }
+        self.dispatch(&mut out);
+        out
     }
-}
 
-fn extract_data(record: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(record);
-    let mut payload = String::new();
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("data:") {
-            if !payload.is_empty() {
-                payload.push('\n');
+    fn take_line(&mut self, line: &[u8], out: &mut Vec<String>) {
+        let line = if std::mem::replace(&mut self.seen_line, true) { line } else { line.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(line) };
+        if line.is_empty() {
+            return self.dispatch(out);
+        }
+        let (field, value) = match line.iter().position(|&b| b == b':') {
+            Some(0) => return,
+            Some(colon) => (&line[..colon], &line[colon + 1..]),
+            None => (line, &line[line.len()..]),
+        };
+        if field == b"data" {
+            if self.has_data {
+                self.data.push(b'\n');
             }
-            payload.push_str(rest.trim_start());
+            self.data.extend_from_slice(value.strip_prefix(b" ").unwrap_or(value));
+            self.has_data = true;
         }
     }
-    (!payload.is_empty()).then_some(payload)
+
+    fn dispatch(&mut self, out: &mut Vec<String>) {
+        if !std::mem::take(&mut self.has_data) {
+            return;
+        }
+        let data = std::mem::take(&mut self.data);
+        if !data.is_empty() {
+            out.push(String::from_utf8(data).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()));
+        }
+    }
 }
 
+/// OpenAI stream chunks into events, whatever the server copied them from.
+/// Strings are moved out of the parsed chunk, not copied.
 #[derive(Default)]
 pub struct ChunkParser {
     tool_ids: Vec<Option<String>>,
@@ -56,6 +109,9 @@ pub struct ChunkParser {
     in_thought: bool,
     /// A tag cut between two chunks, waiting for the rest.
     tag_carry: String,
+    /// Readers stop at the first `Done`, so there is only one: a finish
+    /// reason followed by `[DONE]` must not end the stream twice.
+    done: bool,
 }
 
 const THOUGHT_OPEN: &str = "<thought>";
@@ -66,14 +122,20 @@ impl ChunkParser {
     /// tags (or marks a whole chunk as thought): they are reasoning, shown as
     /// such and kept out of the answer.
     fn split_thought(&mut self, text: &str, events: &mut Vec<LlmEvent>) {
-        let mut rest = std::mem::take(&mut self.tag_carry) + text;
+        let joined;
+        let mut rest = if self.tag_carry.is_empty() {
+            text
+        } else {
+            joined = std::mem::take(&mut self.tag_carry) + text;
+            joined.as_str()
+        };
         loop {
             let tag = if self.in_thought { THOUGHT_CLOSE } else { THOUGHT_OPEN };
             match rest.find(tag) {
                 Some(at) => {
                     self.emit_piece(&rest[..at], events);
                     self.in_thought = !self.in_thought;
-                    rest = rest[at + tag.len()..].to_string();
+                    rest = &rest[at + tag.len()..];
                 }
                 None => {
                     // Hold what may be the start of the tag.
@@ -105,17 +167,39 @@ impl ChunkParser {
     }
 
     pub fn feed(&mut self, payload: &str) -> Vec<LlmEvent> {
-        if payload.trim() == "[DONE]" {
-            let mut events = Vec::new();
-            self.flush_carry(&mut events);
-            events.push(LlmEvent::Done(FinishReason::Stop));
-            return events;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(payload) else {
-            return vec![];
-        };
         let mut events = Vec::new();
+        if payload.trim() == "[DONE]" {
+            self.end(&mut events);
+        } else if let Ok(v) = serde_json::from_str::<Value>(payload) {
+            self.feed_value(v, &mut events);
+        }
+        events
+    }
 
+    /// The body ended without `[DONE]` or a finish reason: a held `<` was text.
+    pub fn finish(&mut self) -> Vec<LlmEvent> {
+        let mut events = Vec::new();
+        self.flush_carry(&mut events);
+        events
+    }
+
+    /// `[DONE]`.
+    pub(crate) fn end(&mut self, events: &mut Vec<LlmEvent>) {
+        self.flush_carry(events);
+        self.finish_with(FinishReason::Stop, events);
+    }
+
+    fn finish_with(&mut self, reason: FinishReason, events: &mut Vec<LlmEvent>) {
+        if std::mem::replace(&mut self.done, true) {
+            return;
+        }
+        // Some servers say `stop` after calling tools.
+        let reason = if reason == FinishReason::Stop && self.tool_names.iter().any(Option::is_some) { FinishReason::ToolUse } else { reason };
+        events.push(LlmEvent::Done(reason));
+    }
+
+    /// One chunk, already parsed.
+    pub(crate) fn feed_value(&mut self, mut v: Value, events: &mut Vec<LlmEvent>) {
         let mtp = v.get("stats").or_else(|| v.get("speculative_stats")).and_then(|s| {
             let total = s.get("total_draft_tokens_count")
                 .or_else(|| s.get("total_draft_tokens"))
@@ -143,7 +227,9 @@ impl ChunkParser {
             Some((prompt_n + cache_n, cache_n))
         });
 
-        if let Some(usage) = v.get("usage").filter(|u| u.is_object()) {
+        // Groq puts the usage of its last chunk under `x_groq`.
+        let usage = v.get("usage").filter(|u| u.is_object()).or_else(|| v.pointer("/x_groq/usage").filter(|u| u.is_object()));
+        if let Some(usage) = usage {
             let mut prompt = usage.get("prompt_tokens").and_then(Value::as_i64);
             let completion = usage.get("completion_tokens").and_then(Value::as_i64);
             // Cached tokens by provider: OpenAI, OpenRouter, Gemini, xAI, vLLM use
@@ -196,88 +282,148 @@ impl ChunkParser {
             }));
         }
 
-        let Some(choices) = v.get("choices").and_then(Value::as_array) else {
-            return events;
+        let Some(choices) = v.get_mut("choices").and_then(Value::as_array_mut) else {
+            return;
         };
         for choice in choices {
-            // A last chunk may carry only the finish reason, and `length` must not be lost.
-            let Some(delta) = choice.get("delta") else {
-                if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str).map(finish_reason) {
-                    events.push(LlmEvent::Done(reason));
-                }
-                continue;
-            };
-            // `"reasoning_content": null` beside a real `"reasoning"` is common.
-            if let Some(reasoning) = ["reasoning_content", "reasoning"].iter().find_map(|k| delta.get(*k).and_then(Value::as_str)) {
-                events.push(LlmEvent::ReasoningDelta(reasoning.to_string()));
+            // A reply that was not streamed has a `message` where a chunk has its `delta`.
+            let key = if choice.get("delta").is_some() { "delta" } else { "message" };
+            if let Some(delta) = choice.get_mut(key) {
+                self.delta(delta, events);
             }
-            if let Some(text) = delta.get("content").and_then(Value::as_str) {
-                let marked_thought = delta.pointer("/extra_content/google/thought").and_then(Value::as_bool) == Some(true);
-                if marked_thought {
-                    events.push(LlmEvent::ReasoningDelta(text.to_string()));
-                } else if self.in_thought || !self.tag_carry.is_empty() || text.contains('<') {
-                    self.split_thought(text, &mut events);
-                } else {
-                    events.push(LlmEvent::TextDelta(text.to_string()));
-                }
-            }
-            if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                for call in calls {
-                    // Gemini leaves `index` out: a new id is then a new call.
-                    let index = match call.get("index").and_then(Value::as_u64) {
-                        Some(i) => i as usize,
-                        None => {
-                            let id = call.get("id").and_then(Value::as_str).filter(|id| !id.is_empty());
-                            let last = self.tool_ids.len().checked_sub(1);
-                            match (id, last) {
-                                (Some(id), Some(last)) if self.tool_ids[last].as_deref() != Some(id) => last + 1,
-                                (_, Some(last)) => last,
-                                (_, None) => 0,
-                            }
-                        }
-                    };
-                    while self.tool_ids.len() <= index {
-                        self.tool_ids.push(None);
-                        self.tool_names.push(None);
-                    }
-                    // An empty id or name in a later chunk is absent, not a rename.
-                    let id = call
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .filter(|id| !id.is_empty())
-                        .map(str::to_string)
-                        .or_else(|| self.tool_ids[index].clone());
-                    self.tool_ids[index] = Some(id.clone().unwrap_or_default());
-                    let name = call
-                        .get("function")
-                        .and_then(|f| f.get("name"))
-                        .and_then(Value::as_str)
-                        .filter(|name| !name.is_empty())
-                        .map(str::to_string)
-                        .or_else(|| self.tool_names[index].clone());
-                    self.tool_names[index] = name.clone();
-                    // Ollama and older vLLM send arguments as an object, not a string.
-                    let args_delta = match call.get("function").and_then(|f| f.get("arguments")) {
-                        Some(Value::String(s)) => s.clone(),
-                        Some(Value::Null) | None => String::new(),
-                        Some(other) => other.to_string(),
-                    };
-                    events.push(LlmEvent::ToolCallDelta { index, id, name, args_delta });
-                }
-            }
-            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str).map(finish_reason) {
-                self.flush_carry(&mut events);
-                events.push(LlmEvent::Done(reason));
+            // A last chunk may carry only the finish reason, and `length` must not be
+            // lost. Some gateways send `""` on every chunk until the real one.
+            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str).filter(|r| !r.is_empty()) {
+                self.flush_carry(events);
+                self.finish_with(finish_reason(reason), events);
             }
         }
-        events
     }
+
+    fn delta(&mut self, delta: &mut Value, events: &mut Vec<LlmEvent>) {
+        // `"reasoning_content": null` beside a real `"reasoning"` is common, and
+        // OpenRouter repeats its `reasoning` in `reasoning_details`.
+        let reasoning = ["reasoning_content", "reasoning"]
+            .iter()
+            .find_map(|k| match delta.get_mut(*k) {
+                Some(Value::String(s)) if !s.is_empty() => Some(std::mem::take(s)),
+                _ => None,
+            })
+            .or_else(|| delta.get("reasoning_details").map(reasoning_details_text).filter(|t| !t.is_empty()));
+        if let Some(reasoning) = reasoning {
+            events.push(LlmEvent::ReasoningDelta(reasoning));
+        }
+        let marked_thought = delta.pointer("/extra_content/google/thought").and_then(Value::as_bool) == Some(true);
+        match delta.get_mut("content").map(Value::take) {
+            Some(Value::String(text)) => self.content(text, marked_thought, events),
+            // Mistral's reasoning models send parts: `thinking` ones, then `text`.
+            Some(Value::Array(parts)) => {
+                for mut part in parts {
+                    match part.get_mut("thinking").map(Value::take) {
+                        Some(thinking) => {
+                            let text = match thinking {
+                                Value::String(s) => s,
+                                other => reasoning_details_text(&other),
+                            };
+                            if !text.is_empty() {
+                                events.push(LlmEvent::ReasoningDelta(text));
+                            }
+                        }
+                        None => {
+                            if let Some(Value::String(text)) = part.get_mut("text").map(Value::take) {
+                                self.content(text, marked_thought, events);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(Value::Array(calls)) = delta.get_mut("tool_calls").map(Value::take) {
+            for call in calls {
+                self.tool_call(call, events);
+            }
+        }
+        // The API before tools: one call, no id.
+        if let Some(function) = delta.get_mut("function_call").map(Value::take).filter(Value::is_object) {
+            let mut call = serde_json::Map::new();
+            call.insert("index".into(), Value::from(0));
+            call.insert("function".into(), function);
+            self.tool_call(Value::Object(call), events);
+        }
+    }
+
+    fn content(&mut self, text: String, marked_thought: bool, events: &mut Vec<LlmEvent>) {
+        if text.is_empty() {
+            return;
+        }
+        if marked_thought {
+            events.push(LlmEvent::ReasoningDelta(text));
+        } else if self.in_thought || !self.tag_carry.is_empty() || text.contains('<') {
+            self.split_thought(&text, events);
+        } else {
+            events.push(LlmEvent::TextDelta(text));
+        }
+    }
+
+    fn tool_call(&mut self, mut call: Value, events: &mut Vec<LlmEvent>) {
+        let non_empty = |v: Option<Value>| match v {
+            Some(Value::String(s)) if !s.is_empty() => Some(s),
+            _ => None,
+        };
+        let fresh_id = non_empty(call.get_mut("id").map(Value::take));
+        let mut function = call.get_mut("function").map(Value::take).unwrap_or(Value::Null);
+        let fresh_name = non_empty(function.get_mut("name").map(Value::take));
+        let index = match call.get("index").and_then(Value::as_u64) {
+            // A garbage index must not grow the table without bound.
+            Some(i) => (i as usize).min(self.tool_ids.len() + 64),
+            // Gemini leaves `index` out. A call begins with its name: under a new id,
+            // or without one after a call that already has its name.
+            None => match self.tool_ids.len().checked_sub(1) {
+                None => 0,
+                Some(last) => {
+                    let same_id = fresh_id.is_some() && self.tool_ids[last] == fresh_id;
+                    let begins = fresh_name.is_some() && !same_id && (fresh_id.is_some() || self.tool_names[last].is_some());
+                    last + usize::from(begins)
+                }
+            },
+        };
+        while self.tool_ids.len() <= index {
+            self.tool_ids.push(None);
+            self.tool_names.push(None);
+        }
+        // An empty id or name in a later chunk is absent, not a rename.
+        let id = fresh_id.or_else(|| self.tool_ids[index].clone().filter(|id| !id.is_empty()));
+        self.tool_ids[index] = Some(id.clone().unwrap_or_default());
+        let name = fresh_name.or_else(|| self.tool_names[index].clone());
+        self.tool_names[index].clone_from(&name);
+        // Ollama and older vLLM send arguments as an object, not a string.
+        let args_delta = match function.get_mut("arguments").map(Value::take) {
+            Some(Value::String(s)) => s,
+            Some(Value::Null) | None => String::new(),
+            Some(other) => other.to_string(),
+        };
+        events.push(LlmEvent::ToolCallDelta { index, id, name, args_delta });
+    }
+}
+
+/// OpenRouter's `reasoning_details` and Mistral's thinking parts: a list of
+/// pieces with `text` (or `summary`); encrypted ones have neither.
+fn reasoning_details_text(details: &Value) -> String {
+    let Some(items) = details.as_array() else { return String::new() };
+    let mut text = String::new();
+    for item in items {
+        if let Some(piece) = item.get("text").or_else(|| item.get("summary")).and_then(Value::as_str) {
+            text.push_str(piece);
+        }
+    }
+    text
 }
 
 fn finish_reason(finish: &str) -> FinishReason {
     match finish {
         "tool_calls" | "function_call" | "tool_use" => FinishReason::ToolUse,
-        "length" => FinishReason::Length,
+        "length" | "max_tokens" | "max_output_tokens" | "MAX_TOKENS" => FinishReason::Length,
         _ => FinishReason::Stop,
     }
 }
@@ -779,6 +925,213 @@ mod tests {
         assert!(d.feed(b"data: {\"a\"").is_empty());
         let got = d.feed(b":1}\n\ndata: [DONE]\n\n");
         assert_eq!(got, vec![r#"{"a":1}"#, "[DONE]"]);
+    }
+
+    fn sse_in_pieces(pieces: &[&[u8]]) -> Vec<String> {
+        let mut d = SseDecoder::default();
+        let mut out = Vec::new();
+        for piece in pieces {
+            out.extend(d.feed(piece));
+        }
+        out.extend(d.finish());
+        out
+    }
+
+    #[test]
+    fn an_event_ends_at_an_empty_line_whatever_the_line_endings() {
+        assert_eq!(sse_in_pieces(&[b"data: A\r\rdata: B\r\r"]), vec!["A", "B"], "a lone CR ends a line");
+        assert_eq!(sse_in_pieces(&[b"data: A\n\r\ndata: B\r\n\n"]), vec!["A", "B"], "mixed endings");
+        // A CRLF cut between two chunks is one line break, not two.
+        assert_eq!(sse_in_pieces(&[b"data: A\r", b"\ndata: B\r\n\r\n"]), vec!["A\nB"]);
+        assert_eq!(sse_in_pieces(&[b"data: A\r", b"", b"\n\r", b"\n"]), vec!["A"]);
+    }
+
+    #[test]
+    fn comments_and_other_fields_are_skipped_and_data_lines_are_joined() {
+        let body: &[u8] = b"\xEF\xBB\xBF: OPENROUTER PROCESSING\n\nevent: message\nid: 7\nretry: 100\ndata: {\"a\":\ndata: 1}\n\ndata:{\"b\":2}\n\ndata\n\n:\n\n";
+        assert_eq!(sse_in_pieces(&[body]), vec!["{\"a\":\n1}", "{\"b\":2}"]);
+        // Only one space after the colon belongs to the syntax.
+        assert_eq!(sse_in_pieces(&[b"data:  x\n\n"]), vec![" x"]);
+    }
+
+    #[test]
+    fn a_character_cut_between_chunks_arrives_whole() {
+        let body = "data: {\"t\":\"héllo — 世界\"}\n\n".as_bytes();
+        for cut in 1..body.len() {
+            assert_eq!(sse_in_pieces(&[&body[..cut], &body[cut..]]), vec!["{\"t\":\"héllo — 世界\"}"], "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn the_last_event_is_delivered_even_without_a_closing_empty_line() {
+        let mut d = SseDecoder::default();
+        assert_eq!(d.feed(b"data: {\"a\":1}\n\ndata: [DONE]"), vec![r#"{"a":1}"#]);
+        assert_eq!(d.finish(), vec!["[DONE]"]);
+        assert!(d.finish().is_empty(), "delivered once");
+        assert_eq!(sse_in_pieces(&[b"data: x\n"]), vec!["x"]);
+    }
+
+    #[test]
+    fn a_long_stream_fed_a_byte_at_a_time_is_read_in_linear_time() {
+        // Searching the whole buffer on every chunk made this quadratic: minutes, not milliseconds.
+        let text = "x".repeat(400_000);
+        let body = format!("data: {text}\n\n");
+        let started = std::time::Instant::now();
+        let mut d = SseDecoder::default();
+        let mut out = Vec::new();
+        for byte in body.as_bytes() {
+            out.extend(d.feed(std::slice::from_ref(byte)));
+        }
+        assert_eq!(out, vec![text]);
+        let many: String = (0..20_000).map(|i| format!("data: {i}\n\n")).collect();
+        assert_eq!(SseDecoder::default().feed(many.as_bytes()).len(), 20_000);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+    }
+
+    fn events_of(payloads: &[&str]) -> Vec<LlmEvent> {
+        let mut p = ChunkParser::default();
+        let mut events: Vec<LlmEvent> = payloads.iter().flat_map(|payload| p.feed(payload)).collect();
+        events.extend(p.finish());
+        events
+    }
+
+    fn reasoning_of(events: &[LlmEvent]) -> String {
+        events.iter().filter_map(|e| match e { LlmEvent::ReasoningDelta(t) => Some(t.as_str()), _ => None }).collect()
+    }
+
+    fn text_of(events: &[LlmEvent]) -> String {
+        events.iter().filter_map(|e| match e { LlmEvent::TextDelta(t) => Some(t.as_str()), _ => None }).collect()
+    }
+
+    fn dones(events: &[LlmEvent]) -> Vec<FinishReason> {
+        events.iter().filter_map(|e| match e { LlmEvent::Done(r) => Some(*r), _ => None }).collect()
+    }
+
+    #[test]
+    fn reasoning_is_read_under_every_name_servers_give_it_and_only_once() {
+        let events = events_of(&[
+            r#"{"choices":[{"delta":{"reasoning_content":"a"}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_content":"","reasoning":"b"}}]}"#,
+            // OpenRouter: the same text in `reasoning` and in `reasoning_details`.
+            r#"{"choices":[{"delta":{"reasoning":"c","reasoning_details":[{"type":"reasoning.text","text":"c"}]}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.summary","summary":"d"},{"type":"reasoning.encrypted","data":"zz"}]}}]}"#,
+            // Mistral's reasoning models: content parts.
+            r#"{"choices":[{"delta":{"content":[{"type":"thinking","thinking":[{"type":"text","text":"e"}]}]}}]}"#,
+            r#"{"choices":[{"delta":{"content":[{"type":"text","text":"Answer"}]}}]}"#,
+        ]);
+        assert_eq!(reasoning_of(&events), "abcde");
+        assert_eq!(text_of(&events), "Answer");
+    }
+
+    #[test]
+    fn empty_pieces_are_not_events() {
+        let events = events_of(&[r#"{"choices":[{"delta":{"role":"assistant","content":"","reasoning_content":""}}]}"#, r#"{"choices":[{"delta":{"content":null}}]}"#]);
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn an_empty_finish_reason_does_not_end_the_stream() {
+        // Some gateways send `"finish_reason": ""` on every chunk; readers stop at the first Done.
+        let events = events_of(&[
+            r#"{"choices":[{"delta":{"content":"a"},"finish_reason":""}]}"#,
+            r#"{"choices":[{"delta":{"content":"b"},"finish_reason":null}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+        ]);
+        assert_eq!(events, vec![LlmEvent::TextDelta("a".into()), LlmEvent::TextDelta("b".into()), LlmEvent::Done(FinishReason::Length)]);
+    }
+
+    #[test]
+    fn the_stream_ends_once_and_usage_after_the_finish_reason_still_arrives() {
+        let events = events_of(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#,
+            "[DONE]",
+        ]);
+        assert_eq!(dones(&events), vec![FinishReason::ToolUse]);
+        assert!(matches!(events.last(), Some(LlmEvent::Usage(u)) if u.prompt == Some(10)), "{events:?}");
+    }
+
+    #[test]
+    fn every_way_of_saying_why_the_answer_ended_is_understood() {
+        let reason = |r: &str| dones(&events_of(&[&format!(r#"{{"choices":[{{"delta":{{}},"finish_reason":"{r}"}}]}}"#)]));
+        assert_eq!(reason("stop"), vec![FinishReason::Stop]);
+        assert_eq!(reason("length"), vec![FinishReason::Length]);
+        assert_eq!(reason("max_tokens"), vec![FinishReason::Length]);
+        assert_eq!(reason("content_filter"), vec![FinishReason::Stop]);
+        assert_eq!(reason("tool_calls"), vec![FinishReason::ToolUse]);
+        assert_eq!(reason("function_call"), vec![FinishReason::ToolUse]);
+        // Tool calls, then `stop` (Ollama's /v1 and some vLLM versions) or no reason at all.
+        let call = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"grep","arguments":"{}"}}]}}]}"#;
+        assert_eq!(dones(&events_of(&[call, r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#])), vec![FinishReason::ToolUse]);
+        assert_eq!(dones(&events_of(&[call, "[DONE]"])), vec![FinishReason::ToolUse]);
+    }
+
+    fn calls_of(events: &[LlmEvent]) -> Vec<(usize, Option<String>, Option<String>, String)> {
+        let mut calls: Vec<(usize, Option<String>, Option<String>, String)> = Vec::new();
+        for e in events {
+            if let LlmEvent::ToolCallDelta { index, id, name, args_delta } = e {
+                match calls.iter_mut().find(|c| c.0 == *index) {
+                    Some(c) => {
+                        c.1 = id.clone().or(c.1.take());
+                        c.2 = name.clone().or(c.2.take());
+                        c.3.push_str(args_delta);
+                    }
+                    None => calls.push((*index, id.clone(), name.clone(), args_delta.clone())),
+                }
+            }
+        }
+        calls
+    }
+
+    #[test]
+    fn a_legacy_function_call_is_one_tool_call() {
+        let events = events_of(&[
+            r#"{"choices":[{"delta":{"function_call":{"name":"read_file","arguments":""}}}]}"#,
+            r#"{"choices":[{"delta":{"function_call":{"arguments":"{\"path\":"}}}]}"#,
+            r#"{"choices":[{"delta":{"function_call":{"arguments":"\"a.rs\"}"}}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"function_call"}]}"#,
+        ]);
+        assert_eq!(calls_of(&events), vec![(0, None, Some("read_file".into()), r#"{"path":"a.rs"}"#.into())]);
+        assert_eq!(dones(&events), vec![FinishReason::ToolUse]);
+    }
+
+    #[test]
+    fn calls_without_an_index_or_an_id_are_told_apart_by_their_names() {
+        let events = events_of(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"read_file","arguments":"{\"path\":\"a\"}"}},{"function":{"name":"grep","arguments":"{}"}}]}}]}"#,
+        ]);
+        let calls = calls_of(&events);
+        assert_eq!(calls.iter().map(|c| (c.0, c.2.clone().unwrap())).collect::<Vec<_>>(), vec![(0, "read_file".into()), (1, "grep".into())]);
+        // One call in fragments, the id repeated or changed, the name only first: still one call.
+        let events = events_of(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"id":"x1","function":{"name":"read_file","arguments":"{\"pa"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"id":"x1","function":{"arguments":"th\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"id":"x2","function":{"arguments":"\"a\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":""}}]}}]}"#,
+        ]);
+        let calls = calls_of(&events);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].3, r#"{"path":"a"}"#);
+    }
+
+    #[test]
+    fn a_garbage_index_does_not_grow_the_call_table_without_bound() {
+        let events = events_of(&[r#"{"choices":[{"delta":{"tool_calls":[{"index":18446744073709551615,"id":"c","function":{"name":"grep","arguments":"{}"}}]}}]}"#]);
+        assert!(matches!(events.first(), Some(LlmEvent::ToolCallDelta { index, .. }) if *index <= 64));
+    }
+
+    #[test]
+    fn groq_usage_in_its_own_field_is_read() {
+        let u = usage_of(r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"x_groq":{"id":"req_1","usage":{"prompt_tokens":120,"completion_tokens":8}}}"#);
+        assert_eq!((u.prompt, u.completion), (Some(120), Some(8)));
+    }
+
+    #[test]
+    fn a_held_angle_bracket_is_text_when_the_body_ends_without_done() {
+        let events = events_of(&[r#"{"choices":[{"delta":{"content":"a <"}}]}"#]);
+        assert_eq!(text_of(&events), "a <");
+        assert!(dones(&events).is_empty(), "the pump adds the Done");
     }
 
     #[test]
