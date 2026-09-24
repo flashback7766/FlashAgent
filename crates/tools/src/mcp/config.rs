@@ -55,14 +55,7 @@ impl McpServerConfig {
     }
 }
 
-/// `.mcp.json`
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct McpConfigFile {
-    #[serde(default, rename = "mcpServers", alias = "servers")]
-    pub mcp_servers: HashMap<String, McpServerConfig>,
-}
-
-pub fn expand_env_vars(raw: &str) -> String {
+fn expand_env_vars(raw: &str) -> String {
     let mut result = String::new();
     let mut chars = raw.chars().peekable();
 
@@ -238,9 +231,9 @@ mod tests {
             }
         }"#;
 
-        let parsed: McpConfigFile = serde_json::from_str(raw).expect("parse config");
-        assert!(parsed.mcp_servers.contains_key("sqlite"));
-        let cfg = &parsed.mcp_servers["sqlite"];
+        let parsed = parse_servers(raw).expect("parse config");
+        assert!(parsed.contains_key("sqlite"));
+        let cfg = &parsed["sqlite"];
         assert_eq!(cfg.command, "uvx");
         assert_eq!(cfg.args, vec!["mcp-server-sqlite", "--db-path", "test.db"]);
         assert!(cfg.is_tool_read_only("any_query"));

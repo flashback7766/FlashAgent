@@ -14,6 +14,9 @@ pub(crate) struct TokenTracker {
     pub(crate) last_prefill_speed: Option<f64>,
     pub(crate) prefill_tracker: PrefillTracker,
     pub(crate) is_running: bool,
+    /// Share of draft tokens the model kept, from a server that decodes with a
+    /// draft model or MTP heads (llama.cpp): what the MTP presets are tuned by.
+    pub(crate) draft_acceptance: Option<f64>,
 }
 
 impl TokenTracker {
@@ -30,6 +33,7 @@ impl TokenTracker {
             last_prefill_speed: None,
             prefill_tracker: PrefillTracker::load_or_default(),
             is_running: false,
+            draft_acceptance: None,
         }
     }
 
@@ -38,6 +42,7 @@ impl TokenTracker {
         self.total_model_tokens = 0;
         self.window.clear();
         self.turn_start_time = Some(std::time::Instant::now());
+        self.draft_acceptance = None;
         self.first_token_time = None;
         self.prompt_tokens = if estimated_prompt_tokens > 0 {
             Some(estimated_prompt_tokens)
@@ -73,6 +78,9 @@ impl TokenTracker {
     }
 
     pub(crate) fn on_usage(&mut self, usage: &flashagent_llm::Usage) {
+        if let Some(mtp) = usage.mtp.filter(|m| m.total_draft_tokens > 0) {
+            self.draft_acceptance = Some(mtp.acceptance_rate());
+        }
         if let (Some(c), Some(p)) = (usage.cached, usage.prompt) {
             if p > 0 {
                 self.last_f_keep = Some((c as f64 / p as f64).clamp(0.0, 1.0));
@@ -145,6 +153,12 @@ impl TokenTracker {
         }
     }
 
+    /// E.g. `draft 81%`, while a turn runs on a server that reports it.
+    pub(crate) fn draft_display(&self) -> Option<String> {
+        let rate = self.draft_acceptance.filter(|_| self.is_running)?;
+        Some(format!("\x1b[38;2;175;170;225mdraft {rate:.0}%\x1b[0m"))
+    }
+
     pub(crate) fn ttft_display(&self) -> Option<String> {
         let ttft = self.last_ttft?;
         let spd = self.last_prefill_speed?;
@@ -157,3 +171,22 @@ impl TokenTracker {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_draft_model_s_hit_rate_shows_while_the_turn_runs() {
+        let mut t = TokenTracker::new("m".into());
+        t.on_turn_start("m".into(), 0);
+        assert_eq!(t.draft_display(), None, "a server without a draft model says nothing");
+        let mtp = flashagent_llm::MtpStats { total_draft_tokens: 16, accepted_draft_tokens: 13, rejected_draft_tokens: 3 };
+        t.on_usage(&flashagent_llm::Usage { mtp: Some(mtp), ..Default::default() });
+        assert!(t.draft_display().is_some_and(|d| d.contains("draft 81%")), "{:?}", t.draft_display());
+        t.on_finished();
+        assert_eq!(t.draft_display(), None);
+        t.on_turn_start("m".into(), 0);
+        assert_eq!(t.draft_display(), None, "each turn reports its own");
+    }
+}

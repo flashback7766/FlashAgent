@@ -21,8 +21,15 @@ pub enum ThinkingProtocol {
     /// Google's OpenAI-compatible endpoint: `extra_body.google.thinking_config`
     /// with a level (Gemini 3) or a token budget (2.5), and `include_thoughts`,
     /// without which the thinking is never shown. It cannot go with
-    /// `reasoning_effort`, so that is not sent.
+    /// `reasoning_effort`, so that is not sent. The native Gemini protocol
+    /// sends the same `thinkingConfig` in its own shape.
     Gemini,
+    /// Anthropic's Messages API: `thinking` with a token budget, or adaptive
+    /// thinking with an effort. Built by the `anthropic` module.
+    Anthropic,
+    /// Ollama's own API: `think: true|false|"low"|"medium"|"high"`. Built by
+    /// the `ollama` module.
+    Ollama,
 }
 
 /// Decided by the API that answered, not by the address.
@@ -31,6 +38,11 @@ pub enum ServerKind {
     LmStudio,
     /// Its model list says `owned_by: llamacpp`.
     LlamaCpp,
+    /// Ollama through its own API.
+    Ollama,
+    Anthropic,
+    /// Google's own API, not its OpenAI-compatible gateway.
+    Gemini,
     #[default]
     Other,
 }
@@ -38,7 +50,7 @@ pub enum ServerKind {
 impl ServerKind {
     /// Keeps a prompt cache and reads the thinking switches in the chat template.
     pub fn runs_local_models(self) -> bool {
-        matches!(self, ServerKind::LmStudio | ServerKind::LlamaCpp)
+        matches!(self, ServerKind::LmStudio | ServerKind::LlamaCpp | ServerKind::Ollama)
     }
 }
 
@@ -203,12 +215,22 @@ impl ThinkingProfile {
         if self.protocol == ThinkingProtocol::BooleanFlag || self.protocol == ThinkingProtocol::LmStudio {
             return Some("off");
         }
-        for low in &["low", "minimal", "min", "fast"] {
+        // `minimal` thinks less than `low` (Gemini 3 Flash, GPT-5 offer both).
+        for low in &["minimal", "min", "low", "fast"] {
             if let Some(p) = self.presets.iter().find(|p| p.eq_ignore_ascii_case(low)) {
                 return Some(p.as_str());
             }
         }
         self.presets.first().map(String::as_str)
+    }
+
+    /// `low` itself where it is offered: with `minimal` listed first, the
+    /// first match took the level below the one asked for.
+    fn low_preset(&self) -> Option<&str> {
+        ["low", "minimal", "min", "fast"]
+            .iter()
+            .find_map(|want| self.presets.iter().find(|p| p.eq_ignore_ascii_case(want)))
+            .map(String::as_str)
     }
 
     pub fn max_effort(&self) -> Option<&str> {
@@ -231,13 +253,7 @@ impl ThinkingProfile {
             }
             crate::types::ThinkingEffort::Default => self.default_preset.as_deref(),
             crate::types::ThinkingEffort::Off => self.min_effort(),
-            crate::types::ThinkingEffort::Low => {
-                self.presets
-                    .iter()
-                    .find(|p| p.eq_ignore_ascii_case("low") || p.eq_ignore_ascii_case("minimal") || p.eq_ignore_ascii_case("min") || p.eq_ignore_ascii_case("fast"))
-                    .map(String::as_str)
-                    .or_else(|| self.min_effort())
-            }
+            crate::types::ThinkingEffort::Low => self.low_preset().or_else(|| self.min_effort()),
             crate::types::ThinkingEffort::Medium => {
                 self.presets
                     .iter()
@@ -247,10 +263,6 @@ impl ThinkingProfile {
             }
             crate::types::ThinkingEffort::High => self.max_effort(),
         }
-    }
-
-    pub fn resolve_dynamic(&self, messages: &[crate::types::ChatMessage]) -> Option<&str> {
-        self.resolve_dynamic_biased(messages, 0)
     }
 
     /// `bias` -1 thinks one preset less, +1 one more.
@@ -273,10 +285,7 @@ impl ThinkingProfile {
         match complexity {
             TaskComplexity::Minimal => self.min_effort().or(Some("off")),
             TaskComplexity::Low => {
-                self.presets
-                    .iter()
-                    .find(|p| p.eq_ignore_ascii_case("low") || p.eq_ignore_ascii_case("minimal") || p.eq_ignore_ascii_case("min") || p.eq_ignore_ascii_case("fast"))
-                    .map(String::as_str)
+                self.low_preset()
                     .or_else(|| {
                         // Binary on/off models keep "on": flipping enable_thinking evicts the KV
                         // prefix cache.
@@ -307,7 +316,8 @@ impl ThinkingProfile {
     pub fn apply_to_request(&self, body: &mut serde_json::Value, effort: &str) {
         let is_off = effort == "off" || effort == "disabled" || effort == "none" || effort == "false" || effort == "0";
         match self.protocol {
-            ThinkingProtocol::Unreported => {}
+            // Their own modules build these requests.
+            ThinkingProtocol::Unreported | ThinkingProtocol::Anthropic | ThinkingProtocol::Ollama => {}
             ThinkingProtocol::Gemini => {
                 let model = body["model"].as_str().unwrap_or_default().to_string();
                 body["extra_body"] = serde_json::json!({ "google": { "thinking_config": gemini_thinking_config(&model, effort) } });
@@ -600,19 +610,6 @@ fn user_message_complexity(raw: &str) -> TaskComplexity {
 }
 
 
-    /// From a `/v1/models` or `/v1/models/{model}` response.
-    pub fn parse_model_metadata(data: &serde_json::Value, model_name: &str) -> Option<Self> {
-        let models = parse_server_models(data);
-        for m in models {
-            if (m.id == model_name || m.id.contains(model_name) || model_name.contains(&m.id))
-                && m.thinking.supported
-            {
-                return Some(m.thinking);
-            }
-        }
-        None
-    }
-
     /// Learns supported presets from an API error.
     pub fn parse_api_error(error_body: &str) -> Option<Self> {
         let err = error_body.to_lowercase();
@@ -780,14 +777,31 @@ pub fn merge_server_models(mut primary: Vec<DiscoveredModel>, other: Vec<Discove
     primary
 }
 
-/// LM Studio `/api/v1/models`, `/api/v0/models`, or OpenAI `/v1/models`.
+/// `gemini-3.1-pro-preview` → `(3, 1)`, `models/gemini-3-flash` → `(3, 0)`.
+/// Aliases such as `gemini-flash-latest` name no version.
+pub fn gemini_version(model: &str) -> Option<(u32, u32)> {
+    let rest = &model[model.find("gemini-")? + "gemini-".len()..];
+    let mut numbers = rest.split('-').next()?.split('.');
+    let major = numbers.next()?.parse().ok()?;
+    let minor = match numbers.next() {
+        Some(minor) => minor.parse().ok()?,
+        None => 0,
+    };
+    Some((major, minor))
+}
+
 /// What Gemini takes for a preset. 2.5 counts a budget of tokens (0 is off,
-/// -1 lets the model decide); 3 and later take the level by name.
+/// -1 lets the model decide); 3 and later take a level by name, and a level
+/// the model does not offer is sent as the nearest one it does, since Google
+/// refuses the request otherwise.
 pub fn gemini_thinking_config(model: &str, effort: &str) -> serde_json::Value {
     let effort = effort.to_ascii_lowercase();
+    let off = matches!(effort.as_str(), "none" | "off" | "disabled" | "false" | "0");
     if model.contains("gemini-2.5") {
         let budget: i64 = match effort.as_str() {
-            "none" | "off" | "disabled" | "0" => 0,
+            // 2.5 Pro cannot stop thinking; 128 is the least it takes.
+            _ if off && model.contains("-pro") => 128,
+            _ if off => 0,
             "minimal" | "low" => 1024,
             "medium" => 8192,
             "high" | "max" | "xhigh" => 24576,
@@ -795,25 +809,39 @@ pub fn gemini_thinking_config(model: &str, effort: &str) -> serde_json::Value {
         };
         return serde_json::json!({ "thinking_budget": budget, "include_thoughts": budget != 0 });
     }
-    match effort.as_str() {
-        "minimal" | "low" | "medium" | "high" => serde_json::json!({ "thinking_level": effort, "include_thoughts": true }),
-        _ => serde_json::json!({ "include_thoughts": true }),
+    const LEVELS: [&str; 4] = ["minimal", "low", "medium", "high"];
+    let offered = gemini_profile(model, true).presets;
+    let wanted = match effort.as_str() {
+        _ if off => Some("minimal"),
+        "max" | "xhigh" => Some("high"),
+        other => LEVELS.into_iter().find(|l| *l == other),
+    };
+    // Upwards first: a level below the one asked for would think too little.
+    let level = wanted.and_then(|wanted| {
+        let from = LEVELS.iter().position(|l| *l == wanted)?;
+        LEVELS[from..].iter().chain(LEVELS[..from].iter().rev()).find(|l| offered.iter().any(|o| o == *l))
+    });
+    match level {
+        Some(level) => serde_json::json!({ "thinking_level": level, "include_thoughts": true }),
+        None => serde_json::json!({ "include_thoughts": true }),
     }
 }
 
-/// The levels each Gemini family takes, from Google's compatibility notes:
-/// only 2.5 Flash and Flash-Lite can turn thinking off, and 3.x Pro has no
-/// `minimal`.
+/// The levels each Gemini family takes, from Google's thinking guide
+/// (2026-09): only 2.5 Flash and Flash-Lite can turn thinking off; `minimal`
+/// is refused by 3.x Pro and by Flash from 3.7 on; 3 Pro has no `medium`. A
+/// family not known yet is offered the three levels every current model takes.
 pub fn gemini_profile(model: &str, thinks: bool) -> ThinkingProfile {
     if !thinks {
         return ThinkingProfile::unsupported();
     }
-    let presets: &[&str] = if model.contains("gemini-2.5") {
-        if model.contains("pro") { &["low", "medium", "high"] } else { &["none", "low", "medium", "high"] }
-    } else if model.contains("pro") {
-        &["low", "medium", "high"]
-    } else {
-        &["minimal", "low", "medium", "high"]
+    let pro = model.contains("-pro");
+    let presets: &[&str] = match gemini_version(model) {
+        Some((2, 5)) if pro => &["low", "medium", "high"],
+        Some((2, 5)) => &["none", "low", "medium", "high"],
+        Some((3, 0)) if pro => &["low", "high"],
+        Some((3, minor)) if !pro && (model.contains("flash-lite") || minor <= 6) => &["minimal", "low", "medium", "high"],
+        _ => &["low", "medium", "high"],
     };
     ThinkingProfile {
         presets: presets.iter().map(|p| p.to_string()).collect(),
@@ -852,6 +880,7 @@ pub fn parse_gemini_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
         .collect()
 }
 
+/// LM Studio `/api/v1/models`, `/api/v0/models`, or OpenAI `/v1/models`.
 pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
     let mut discovered = Vec::new();
 
@@ -977,15 +1006,19 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim();
-        if id.is_empty() || is_embedding(m) {
+        // Mistral lists its embedding and OCR models beside the chat ones.
+        if id.is_empty() || is_embedding(m) || m.pointer("/capabilities/completion_chat").and_then(|v| v.as_bool()) == Some(false) {
             continue;
         }
 
         let is_loaded = m.get("state").and_then(|v| v.as_str()).map(|s| s == "loaded").unwrap_or(false);
         // llama-server: `meta` has both the running and the trained context.
+        // vLLM serves exactly `max_model_len`; Groq calls it `context_window`.
         let meta = m.get("meta");
         let context_length = m.get("loaded_context_length")
             .or_else(|| m.get("context_length"))
+            .or_else(|| m.get("max_model_len"))
+            .or_else(|| m.get("context_window"))
             .or_else(|| meta.and_then(|x| x.get("n_ctx")))
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
@@ -1010,7 +1043,9 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 supports_tools = arr.iter().any(|v| v.as_str() == Some("tool_use"));
                 supports_vision |= arr.iter().any(|v| matches!(v.as_str(), Some("vision") | Some("image_input")));
             } else if let Some(obj) = caps.as_object() {
-                supports_tools = obj.get("trained_for_tool_use").and_then(|v| v.as_bool()).unwrap_or(false);
+                // Mistral: `function_calling` and `vision`.
+                supports_tools = obj.get("trained_for_tool_use").or_else(|| obj.get("function_calling")).and_then(|v| v.as_bool()).unwrap_or(false);
+                supports_vision |= obj.get("vision").and_then(|v| v.as_bool()).unwrap_or(false);
                 if let Some(levels) = obj.get("reasoning_effort_levels").or_else(|| obj.get("reasoning_efforts")).and_then(|v| v.as_array()) {
                     let presets: Vec<String> = levels.iter().filter_map(|v| v.as_str().map(|s| s.to_lowercase())).collect();
                     if !presets.is_empty() {
@@ -1024,6 +1059,24 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 }
             }
         }
+
+        // OpenRouter: the request fields each model accepts, and what it reads.
+        if let Some(params) = m.get("supported_parameters").and_then(|v| v.as_array()) {
+            let accepts = |name: &str| params.iter().any(|p| p.as_str() == Some(name));
+            supports_tools |= accepts("tools");
+            if accepts("reasoning") && !thinking.supported {
+                thinking = ThinkingProfile {
+                    presets: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+                    protocol: ThinkingProtocol::ReasoningObject,
+                    supported: true,
+                    default_preset: None,
+                };
+            }
+        }
+        supports_vision |= m
+            .pointer("/architecture/input_modalities")
+            .and_then(|v| v.as_array())
+            .is_some_and(|inputs| inputs.iter().any(|i| i.as_str() == Some("image")));
 
         discovered.push(DiscoveredModel {
             id: id.to_string(),
@@ -1070,6 +1123,40 @@ mod tests {
         models[2].thinking.apply_to_request(&mut body, "high");
         assert_eq!(body["extra_body"]["google"]["thinking_config"]["thinking_level"], "high");
         assert!(body.get("reasoning_effort").is_none(), "it cannot go together with thinking_config");
+    }
+
+    #[test]
+    fn each_gemini_family_is_offered_only_the_levels_it_takes() {
+        let levels = |m: &str| gemini_profile(m, true).presets;
+        assert_eq!(levels("gemini-3.8-flash"), vec!["low", "medium", "high"], "Flash from 3.7 on refuses minimal");
+        assert_eq!(levels("gemini-3.6-flash"), vec!["minimal", "low", "medium", "high"]);
+        assert_eq!(levels("gemini-3.5-flash-lite"), vec!["minimal", "low", "medium", "high"]);
+        assert_eq!(levels("models/gemini-3-pro-preview"), vec!["low", "high"]);
+        assert_eq!(levels("gemini-3.1-pro-preview"), vec!["low", "medium", "high"]);
+        assert_eq!(levels("gemini-2.5-flash-lite"), vec!["none", "low", "medium", "high"]);
+        assert_eq!(levels("gemini-flash-latest"), vec!["low", "medium", "high"], "an alias is offered what every model takes");
+        assert!(!gemini_profile("gemini-2.0-flash", false).supported);
+
+        assert_eq!(gemini_version("models/gemini-3.1-pro-preview"), Some((3, 1)));
+        assert_eq!(gemini_version("gemini-3-flash"), Some((3, 0)));
+        assert_eq!(gemini_version("gemini-flash-latest"), None);
+        assert_eq!(gemini_version("gemma-3-27b-it"), None);
+
+        assert_eq!(gemini_thinking_config("gemini-3.8-flash", "minimal")["thinking_level"], "low", "the nearest level it takes");
+        assert_eq!(gemini_thinking_config("gemini-3-pro-preview", "medium")["thinking_level"], "high");
+        assert_eq!(gemini_thinking_config("gemini-3-pro-preview", "off")["thinking_level"], "low", "3 Pro cannot stop thinking");
+        assert_eq!(gemini_thinking_config("gemini-3-flash", "off")["thinking_level"], "minimal");
+        assert_eq!(gemini_thinking_config("gemini-2.5-pro", "off")["thinking_budget"], 128, "2.5 Pro cannot stop thinking");
+        assert_eq!(gemini_thinking_config("gemini-3-flash", "auto"), serde_json::json!({ "include_thoughts": true }), "the model's own default");
+    }
+
+    #[test]
+    fn off_takes_the_least_thinking_and_low_takes_low_when_both_are_offered() {
+        let p = gemini_profile("gemini-3-flash", true);
+        assert_eq!(p.min_effort(), Some("minimal"));
+        assert_eq!(p.resolve_effort(crate::types::ThinkingEffort::Low), Some("low"));
+        assert_eq!(p.resolve_for_complexity(TaskComplexity::Low), Some("low"));
+        assert_eq!(p.resolve_for_complexity(TaskComplexity::Minimal), Some("minimal"));
     }
 
     #[test]
@@ -1164,7 +1251,7 @@ mod tests {
         let turned_down = profile.resolve_dynamic_biased(&ask, -1).map(str::to_string);
         assert_eq!(neutral.as_deref(), Some("high"), "a big task asks for the most thinking");
         assert_eq!(turned_down.as_deref(), Some("medium"), "the learned step is actually applied");
-        assert_eq!(profile.resolve_dynamic(&ask).map(str::to_string), neutral, "no bias, no change");
+        assert_eq!(profile.resolve_dynamic_biased(&ask, 0).map(str::to_string), neutral, "no bias, no change");
     }
 
     #[test]
@@ -1339,9 +1426,6 @@ mod tests {
         assert_eq!(m.thinking.presets, vec!["off", "on"]);
         assert_eq!(m.thinking.protocol, ThinkingProtocol::LmStudio);
         assert_eq!(m.thinking.default_preset.as_deref(), Some("on"));
-
-        let prof = ThinkingProfile::parse_model_metadata(&json, "gemma-4").expect("found profile");
-        assert_eq!(prof.presets, vec!["off", "on"]);
     }
 
     #[test]
@@ -1470,6 +1554,7 @@ mod tests {
             tool_call_id: Some("1".into()),
             tool_calls: vec![],
             images: Vec::new(),
+            replay: None,
         };
         let task = ChatMessage::user("Read src/parser.rs and describe it");
         let base = ThinkingProfile::analyze_turn_complexity(std::slice::from_ref(&task));
@@ -1510,6 +1595,7 @@ mod tests {
             tool_call_id: Some("2".into()),
             tool_calls: vec![],
             images: Vec::new(),
+            replay: None,
         });
         assert_eq!(
             ThinkingProfile::analyze_turn_complexity(&deep),
@@ -1588,10 +1674,10 @@ mod tests {
         };
 
         let hello = vec![ChatMessage::user("Hello")];
-        assert_eq!(binary_prof.resolve_dynamic(&hello), Some("off"));
+        assert_eq!(binary_prof.resolve_dynamic_biased(&hello, 0), Some("off"));
 
         let code = vec![ChatMessage::user("Fix compilation error in main.rs")];
-        assert_eq!(binary_prof.resolve_dynamic(&code), Some("on"));
+        assert_eq!(binary_prof.resolve_dynamic_biased(&code, 0), Some("on"));
 
         let tiered_prof = ThinkingProfile {
             presets: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
@@ -1600,7 +1686,7 @@ mod tests {
             default_preset: Some("medium".to_string()),
         };
 
-        assert_eq!(tiered_prof.resolve_dynamic(&hello), Some("low"));
-        assert_eq!(tiered_prof.resolve_dynamic(&code), Some("high"));
+        assert_eq!(tiered_prof.resolve_dynamic_biased(&hello, 0), Some("low"));
+        assert_eq!(tiered_prof.resolve_dynamic_biased(&code, 0), Some("high"));
     }
 }

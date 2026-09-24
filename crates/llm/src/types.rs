@@ -43,6 +43,11 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCall>,
     /// `data:` URLs. A model that cannot see images never receives them.
     pub images: Vec<String>,
+    /// What the API wants back verbatim with this message on the next request
+    /// (Anthropic's signed thinking blocks, Gemini's thought signatures). A JSON
+    /// object whose `protocol` key names the protocol that wrote it; every other
+    /// protocol ignores it, so a change of provider mid-session is harmless.
+    pub replay: Option<serde_json::Value>,
 }
 
 impl ChatMessage {
@@ -54,6 +59,7 @@ impl ChatMessage {
             tool_call_id: None,
             tool_calls: Vec::new(),
             images: Vec::new(),
+            replay: None,
         }
     }
 
@@ -65,6 +71,7 @@ impl ChatMessage {
             tool_call_id: None,
             tool_calls: Vec::new(),
             images: Vec::new(),
+            replay: None,
         }
     }
 
@@ -76,6 +83,7 @@ impl ChatMessage {
             tool_call_id: None,
             tool_calls: Vec::new(),
             images: Vec::new(),
+            replay: None,
         }
     }
 
@@ -87,6 +95,7 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             tool_calls: Vec::new(),
             images: Vec::new(),
+            replay: None,
         }
     }
 }
@@ -141,6 +150,9 @@ pub enum LlmEvent {
     },
     /// May arrive anywhere, usually at the end.
     Usage(Usage),
+    /// The whole replay state for the message being streamed (see
+    /// [`ChatMessage::replay`]); a later one replaces an earlier one.
+    Replay(serde_json::Value),
     Done(FinishReason),
 }
 

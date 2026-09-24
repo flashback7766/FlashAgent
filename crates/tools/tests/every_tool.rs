@@ -36,13 +36,10 @@ impl Project {
 
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: dir.clone(),
-            brave_api_key: None,
-            question_gate: None,
-            is_goal_mode: None,
             toolset_profile: Some(flashagent_core::ToolsetProfile::Full),
             web_enabled: Some(true),
             context_window: Some(200_000),
-            mcp_manager: None,
+            ..Default::default()
         })
         .unwrap();
         // `view_image` needs vision on. `/goal` stays off: it removes the memory tools.
@@ -403,13 +400,10 @@ async fn a_tool_turned_off_in_settings_says_so_rather_than_running() {
     let project = Project::new();
     let tools = BuiltinTools::new(BuiltinToolsConfig {
         cwd: project.dir.clone(),
-        brave_api_key: None,
-        question_gate: None,
-        is_goal_mode: None,
         toolset_profile: Some(flashagent_core::ToolsetProfile::Full),
         web_enabled: Some(false),
         context_window: Some(200_000),
-        mcp_manager: None,
+        ..Default::default()
     })
     .unwrap();
 

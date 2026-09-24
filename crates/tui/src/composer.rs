@@ -93,10 +93,6 @@ impl Composer {
         self.cursor = 0;
     }
 
-    pub fn is_at_end(&self) -> bool {
-        self.cursor == self.text.len()
-    }
-
     pub fn insert_char(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();

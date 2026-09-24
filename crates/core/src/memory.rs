@@ -11,9 +11,6 @@ fn token_count(text: &str) -> usize {
     estimate_tokens(text).max(0) as usize
 }
 
-/// In priority order. `MEMORY.md` is ours; the rest are foreign conventions.
-pub const PROJECT_FILENAMES: &[&str] = &["MEMORY.md", "CLAUDE.md", "AGENTS.md"];
-
 pub const GLOBAL_FILENAME: &str = "MEMORY.md";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,63 +52,35 @@ fn read_if_present(dir: &Path, name: &str, kind: MemoryKind) -> Option<MemoryDoc
     Some(MemoryDoc { path, kind, content })
 }
 
-/// Priority: .flashagent/rules/ > .agents/rules/ > AGENTS.md / CLAUDE.md /
-/// MEMORY.md > ~/.flashagent/rules/ > ~/.flashagent/MEMORY.md. Unreadable or
-/// absent files are skipped.
+/// The `.md` files of a rules folder in name order, each only if it really is
+/// inside `root` (a symlink out of it is skipped).
+fn rule_files(dir: &Path, root: &Path, kind: MemoryKind, docs: &mut Vec<MemoryDoc>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    paths.sort();
+    for path in paths {
+        if path.extension().is_some_and(|ext| ext == "md") && crate::permissions::path_is_inside(root, &path.to_string_lossy()) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                docs.push(MemoryDoc { path, kind, content });
+            }
+        }
+    }
+}
+
+/// Priority: .flashagent/rules/ > .agents/rules/ > MEMORY.md / CLAUDE.md /
+/// AGENTS.md / .cursorrules > ~/.flashagent/rules/ > ~/.flashagent/MEMORY.md.
+/// Unreadable or absent files are skipped.
 pub fn collect(project_dir: &Path, global_dir: &Path) -> Vec<MemoryDoc> {
     let mut docs = Vec::new();
-
-    for rules_subdir in &[".flashagent/rules", ".agents/rules"] {
-        let rdir = project_dir.join(rules_subdir);
-        if let Ok(entries) = std::fs::read_dir(rdir) {
-            let mut paths: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-            paths.sort();
-            for p in paths {
-                if p.extension().is_some_and(|ext| ext == "md")
-                    && crate::permissions::path_is_inside(project_dir, &p.to_string_lossy())
-                {
-                    if let Ok(content) = std::fs::read_to_string(&p) {
-                        docs.push(MemoryDoc {
-                            path: p,
-                            kind: MemoryKind::Project,
-                            content,
-                        });
-                    }
-                }
-            }
-        }
+    for rules in [".flashagent/rules", ".agents/rules"] {
+        rule_files(&project_dir.join(rules), project_dir, MemoryKind::Project, &mut docs);
     }
-
-    for name in &["MEMORY.md", "CLAUDE.md", "AGENTS.md", ".cursorrules"] {
-        let kind = if *name == "MEMORY.md" { MemoryKind::Project } else { MemoryKind::Foreign };
-        if let Some(d) = read_if_present(project_dir, name, kind) {
-            docs.push(d);
-        }
+    for name in ["MEMORY.md", "CLAUDE.md", "AGENTS.md", ".cursorrules"] {
+        let kind = if name == "MEMORY.md" { MemoryKind::Project } else { MemoryKind::Foreign };
+        docs.extend(read_if_present(project_dir, name, kind));
     }
-
-    let global_rules = global_dir.join("rules");
-    if let Ok(entries) = std::fs::read_dir(global_rules) {
-        let mut paths: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-        paths.sort();
-        for p in paths {
-            if p.extension().is_some_and(|ext| ext == "md")
-                && crate::permissions::path_is_inside(global_dir, &p.to_string_lossy())
-            {
-                if let Ok(content) = std::fs::read_to_string(&p) {
-                    docs.push(MemoryDoc {
-                        path: p,
-                        kind: MemoryKind::Global,
-                        content,
-                    });
-                }
-            }
-        }
-    }
-
-    if let Some(d) = read_if_present(global_dir, GLOBAL_FILENAME, MemoryKind::Global) {
-        docs.push(d);
-    }
-
+    rule_files(&global_dir.join("rules"), global_dir, MemoryKind::Global, &mut docs);
+    docs.extend(read_if_present(global_dir, GLOBAL_FILENAME, MemoryKind::Global));
     docs
 }
 

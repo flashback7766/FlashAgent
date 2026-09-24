@@ -16,4 +16,5 @@ ring = "0.17"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true, features = ["net", "io-util"] }
 

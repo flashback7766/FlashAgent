@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 /// Larger files are not copied; rewind reports them.
-pub const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
 
 const WRITING_TOOLS: &[&str] = &["write_file", "edit_file", "patch_file"];
 /// Project memory is files in the project like any other; global memory in
@@ -18,7 +18,7 @@ const MEMORY_TOOLS: &[&str] = &["memory_create", "memory_update", "memory_remove
 
 /// State before the turn first touched the file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Before {
+enum Before {
     /// Rewind removes it.
     Missing,
     /// Blob file name under the store's directory.
@@ -27,18 +27,18 @@ pub enum Before {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileBefore {
-    pub path: PathBuf,
-    pub before: Before,
+struct FileBefore {
+    path: PathBuf,
+    before: Before,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnSnapshot {
-    pub seq: u64,
+struct TurnSnapshot {
+    seq: u64,
     /// Hash of the user message that started the turn: it finds the turn again
     /// after compaction or steering has changed the history.
-    pub prompt_hash: u64,
-    pub files: Vec<FileBefore>,
+    prompt_hash: u64,
+    files: Vec<FileBefore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

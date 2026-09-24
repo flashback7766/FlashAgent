@@ -2,8 +2,10 @@
 //! has nothing cached: system prompt, tool schemas and memory are read from
 //! scratch (34 s for 8.3k tokens on LM Studio with Gemma 4 E2B, 0.9 s once
 //! cached). So the prefix is sent with a one-token answer while the user types:
-//! at start, after `--resume`, after a model or voice switch. It is assembled
-//! the way the agent loop assembles a turn, so the cached tokens match.
+//! at start, after `--resume`, after a switch of model, provider or voice. It is assembled
+//! the way the agent loop assembles a turn, so the cached tokens match. Only
+//! for a server on this machine or network: a hosted API bills the warm-up and
+//! reads a prompt in a second anyway.
 
 use super::*;
 use flashagent_core::ToolExec as _;
@@ -29,10 +31,24 @@ pub(crate) fn warm_messages(history: &[ChatMessage], prelude: &[ChatMessage], me
     messages
 }
 
-/// So the same prefix is not sent twice.
-fn prefix_key(model: &str, messages: &[ChatMessage], specs: &[flashagent_llm::ToolSpec]) -> u64 {
+/// A model server on this machine or the local network. Anthropic and Gemini
+/// are never local; an OpenAI-compatible server is local by what it runs
+/// (LM Studio, llama.cpp) or by its address (vLLM on a LAN box).
+pub(crate) fn worth_warming(endpoint: &flashagent_llm::Endpoint, kind: Option<flashagent_llm::thinking::ServerKind>) -> bool {
+    use flashagent_llm::ApiProtocol;
+    let local_address = || flashagent_core::url_host(&endpoint.url).is_some_and(|host| flashagent_core::is_local_host(&host));
+    match endpoint.protocol {
+        ApiProtocol::Anthropic | ApiProtocol::Gemini => false,
+        ApiProtocol::Ollama => true,
+        ApiProtocol::OpenAi => kind.is_some_and(|k| k.runs_local_models()) || local_address(),
+    }
+}
+
+/// So the same prefix is not sent twice to the same server: after a switch
+/// of provider it is another server's cache, even for a model of the same name.
+fn prefix_key(server: &str, model: &str, messages: &[ChatMessage], specs: &[flashagent_llm::ToolSpec]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    model.hash(&mut h);
+    (server, model).hash(&mut h);
     for m in messages {
         (m.role as u8).hash(&mut h);
         m.content.hash(&mut h);
@@ -50,15 +66,15 @@ fn prefix_key(model: &str, messages: &[ChatMessage], specs: &[flashagent_llm::To
 }
 
 impl App {
-    fn warm_key(&self, perm: &'static PermissionedTools, memory_block: &str) -> (u64, Vec<ChatMessage>, Vec<flashagent_llm::ToolSpec>) {
+    fn warm_key(&self, server: &str, perm: &'static PermissionedTools, memory_block: &str) -> (u64, Vec<ChatMessage>, Vec<flashagent_llm::ToolSpec>) {
         let messages = warm_messages(&self.history, &self.config.personality.voice_prelude(), memory_block);
         let specs = perm.specs();
-        (prefix_key(&self.current_model, &messages, &specs), messages, specs)
+        (prefix_key(server, &self.current_model, &messages, &specs), messages, specs)
     }
 
     /// Skipped when already sent or a turn has just read it.
     pub(crate) fn warm_prompt_cache(&mut self, source: &Arc<BackendSource>, perm: &'static PermissionedTools, memory_block: &str) {
-        if self.running || self.current_model.is_empty() {
+        if self.running || self.current_model.is_empty() || !worth_warming(&source.0.endpoint(), source.discovery().map(|d| d.kind)) {
             return;
         }
         if let Some((_, task)) = self.warm_task.as_mut() {
@@ -72,7 +88,7 @@ impl App {
                 self.cache_warm_key = None;
             }
         }
-        let (key, messages, specs) = self.warm_key(perm, memory_block);
+        let (key, messages, specs) = self.warm_key(&source.0.base_url(), perm, memory_block);
         if self.cache_warm_key == Some(key) {
             return;
         }
@@ -102,14 +118,28 @@ impl App {
     }
 
     /// The next request's prefix is already cached after a turn.
-    pub(crate) fn note_prompt_cached(&mut self, perm: &'static PermissionedTools, memory_block: &str) {
-        self.cache_warm_key = Some(self.warm_key(perm, memory_block).0);
+    pub(crate) fn note_prompt_cached(&mut self, source: &BackendSource, perm: &'static PermissionedTools, memory_block: &str) {
+        self.cache_warm_key = Some(self.warm_key(&source.0.base_url(), perm, memory_block).0);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_server_nearby_is_warmed() {
+        use flashagent_llm::{ApiProtocol, Endpoint};
+        let warm = |protocol, url: &str| worth_warming(&Endpoint::new(protocol, url, None), None);
+        assert!(warm(ApiProtocol::OpenAi, "http://localhost:1234/v1"));
+        assert!(warm(ApiProtocol::OpenAi, "http://192.168.1.20:8000/v1"), "vLLM on a LAN box");
+        assert!(warm(ApiProtocol::Ollama, "http://gpu-box:11434"));
+        assert!(!warm(ApiProtocol::OpenAi, "https://openrouter.ai/api/v1"), "billed, and fast anyway");
+        assert!(!warm(ApiProtocol::Anthropic, "https://api.anthropic.com"));
+        assert!(!warm(ApiProtocol::Gemini, "http://localhost:8080"), "a tunnel to Google is still Google");
+        let tunnelled = Endpoint::new(ApiProtocol::OpenAi, "https://llm.example.com/v1", None);
+        assert!(worth_warming(&tunnelled, Some(flashagent_llm::thinking::ServerKind::LmStudio)), "LM Studio behind a proxy caches all the same");
+    }
 
     #[test]
     fn a_fresh_session_warms_the_system_prompt_voice_and_memory_block() {
@@ -140,12 +170,13 @@ mod tests {
     #[test]
     fn a_change_of_model_voice_or_history_is_a_new_prefix() {
         let h = vec![ChatMessage::system("S")];
-        let base = prefix_key("m", &warm_messages(&h, &[], ""), &[]);
-        assert_eq!(base, prefix_key("m", &warm_messages(&h, &[], ""), &[]));
-        assert_ne!(base, prefix_key("other", &warm_messages(&h, &[], ""), &[]));
-        assert_ne!(base, prefix_key("m", &warm_messages(&h, &[ChatMessage::user("q")], ""), &[]));
+        let base = prefix_key("s", "m", &warm_messages(&h, &[], ""), &[]);
+        assert_eq!(base, prefix_key("s", "m", &warm_messages(&h, &[], ""), &[]));
+        assert_ne!(base, prefix_key("s", "other", &warm_messages(&h, &[], ""), &[]));
+        assert_ne!(base, prefix_key("another server", "m", &warm_messages(&h, &[], ""), &[]), "a provider switch warms the new server");
+        assert_ne!(base, prefix_key("s", "m", &warm_messages(&h, &[ChatMessage::user("q")], ""), &[]));
         let mut longer = h.clone();
         longer.push(ChatMessage::user("x"));
-        assert_ne!(base, prefix_key("m", &warm_messages(&longer, &[], ""), &[]));
+        assert_ne!(base, prefix_key("s", "m", &warm_messages(&longer, &[], ""), &[]));
     }
 }

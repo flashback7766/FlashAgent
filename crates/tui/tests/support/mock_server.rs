@@ -44,6 +44,8 @@ impl Request {
 pub struct MockServer {
     /// Ends in `/v1`.
     pub url: String,
+    /// The one model it serves, `MODEL` unless started with another.
+    pub model: String,
     requests: Arc<Mutex<Vec<Request>>>,
     replies: Arc<Mutex<VecDeque<Reply>>>,
     /// Beyond `MODEL`.
@@ -66,6 +68,11 @@ struct SideRequests {
 
 impl MockServer {
     pub fn start(script: Vec<Reply>) -> Self {
+        Self::start_with_model(MODEL, script)
+    }
+
+    /// A second server in one scenario, told apart by the model it serves.
+    pub fn start_with_model(model: &str, script: Vec<Reply>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -73,14 +80,16 @@ impl MockServer {
         let v0_extra_models = Arc::new(Mutex::new(Vec::new()));
         let v1_models = Arc::new(Mutex::new(None));
         let side = Arc::new(SideRequests::default());
+        let served = Arc::new(model.to_string());
         let (req2, rep2, v0e2, v12, side2) =
             (requests.clone(), replies.clone(), v0_extra_models.clone(), v1_models.clone(), side.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let (req3, rep3, v0e3, v13, side3) = (req2.clone(), rep2.clone(), v0e2.clone(), v12.clone(), side2.clone());
+                let served = served.clone();
                 std::thread::spawn(move || {
                     let closer = stream.try_clone();
-                    let _ = serve(stream, &req3, &rep3, &v0e3, &v13, &side3);
+                    let _ = serve(stream, &served, &req3, &rep3, &v0e3, &v13, &side3);
                     // Close gracefully: dropping the socket at once lets Windows send a reset,
                     // which can cut off the end of a reply the app is still reading.
                     if let Ok(mut socket) = closer {
@@ -92,7 +101,7 @@ impl MockServer {
                 });
             }
         });
-        MockServer { url, requests, replies, v0_extra_models, v1_models, side }
+        MockServer { url, model: model.to_string(), requests, replies, v0_extra_models, v1_models, side }
     }
 
     /// Lets the scenario press a key that must land before the answer.
@@ -131,7 +140,7 @@ impl MockServer {
     /// the server lists the model's reasoning settings.
     pub fn report_reasoning(&self, presets: &[&str], default: &str) {
         *self.v1_models.lock().unwrap() = Some(serde_json::json!({ "models": [ {
-            "key": MODEL,
+            "key": self.model,
             "capabilities": {
                 "trained_for_tool_use": true,
                 "reasoning": { "allowed_options": presets, "default": default }
@@ -152,6 +161,7 @@ impl MockServer {
 
 fn serve(
     stream: TcpStream,
+    model: &str,
     requests: &Mutex<Vec<Request>>,
     replies: &Mutex<VecDeque<Reply>>,
     v0_extra_models: &Mutex<Vec<serde_json::Value>>,
@@ -191,13 +201,13 @@ fn serve(
             }
         } else if path.ends_with("/api/v0/models") {
             let mut data = vec![serde_json::json!({
-                "id": MODEL, "object": "model", "type": "llm", "state": "loaded",
+                "id": model, "object": "model", "type": "llm", "state": "loaded",
                 "max_context_length": 32768, "loaded_context_length": 32768
             })];
             data.extend(v0_extra_models.lock().unwrap().iter().cloned());
             json(&mut out, &serde_json::json!({ "data": data }))
         } else if path.ends_with("/v1/models") && !path.contains("/api/") {
-            json(&mut out, &serde_json::json!({ "object": "list", "data": [ { "id": MODEL, "object": "model" } ] }))
+            json(&mut out, &serde_json::json!({ "object": "list", "data": [ { "id": model, "object": "model" } ] }))
         } else {
             out.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
         };

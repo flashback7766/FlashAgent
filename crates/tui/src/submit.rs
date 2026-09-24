@@ -5,6 +5,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "pick a saved session from this folder and continue it"),
     ("/settings, Tab", "settings"),
     ("/model, /m, F3", "choose and switch the model"),
+    ("/provider [name]", "switch to another saved provider, local or cloud; add or edit them"),
     ("/effort, /t, F4", "thinking effort (also Ctrl+T)"),
     ("/mode [plan|man|edits|all]", "permission mode (also Shift+Tab)"),
     ("/context, F1", "what fills the context window"),
@@ -17,6 +18,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/export [md|html|jsonl]", "write the conversation to a file"),
     ("/editor, Ctrl+E", "write the prompt in an external editor"),
     ("/mcp [list|market|test|add|reload]", "Model Context Protocol servers"),
+    ("/tasks", "background commands: their output, and stopping one"),
     ("/sampling", "sampling parameters (advanced)"),
     ("/skill:<name>", "run a skill from .agents/skills/"),
     ("/update, Ctrl+U", "check for, download and install an update"),
@@ -33,6 +35,7 @@ const HELP_KEYS: &[(&str, &str)] = &[
     ("Ctrl+F", "search the prompts sent before"),
     ("Ctrl+V", "paste a screenshot (Ctrl+Z takes it back); dropping an image works too"),
     ("Ctrl+K", "every command and menu, searchable"),
+    ("Ctrl+B", "move the running shell command to the background"),
     ("Click", "open or fold one thought or tool call"),
     ("Ctrl+D, Ctrl+C twice", "quit"),
     ("Esc", "close, dismiss or interrupt; it never quits"),
@@ -140,6 +143,7 @@ impl App {
                     arg.chars().for_each(|c| menu.push_filter_char(c));
                 }
             }
+            "provider" | "providers" => self.provider_command(cx, arg),
             "sampling" | "params" => self.open_overlay(Overlay::Sampling(SamplingView::new(&self.config))),
             "mode" => self.mode_command(cx, arg),
             "uninstall" => {
@@ -158,6 +162,7 @@ impl App {
             }
             "channel" => self.channel_command(cx, arg),
             "mcp" => self.mcp_command(cx, arg).await,
+            "tasks" | "bg" => self.open_tasks(cx),
             "compact" => self.compact_command(cx, arg).await,
             "verbose" | "expand" | "think" | "o" => self.verbose_command(arg),
             "exit" | "quit" | "q" => return Some(Flow::Quit),

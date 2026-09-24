@@ -3,22 +3,20 @@ use super::*;
 /// Once, right after setup.
 pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
     // Without a server every probe fails, and the verdict would blame the model.
-    let url = config.backend_url.trim_end_matches('/');
-    let probe = flashagent_llm::OpenAiCompat::new(&config.backend_url, "", config.api_key.clone());
-    if config.model.trim().is_empty() || probe.discover_server().await.is_none() {
+    let endpoint = config.endpoint();
+    let url = endpoint.url.as_str();
+    let model = config.active_profile().model.as_str();
+    let probe = flashagent_llm::Client::new(endpoint.clone(), "");
+    if model.trim().is_empty() || probe.discover_server().await.is_none() {
         return Some(format!(
             "Tool-calling check skipped: {url} did not list any models. Run `flashagent --tool-test` once it does."
         ));
     }
-    println!("\nChecking whether {} can drive tools…", config.model);
-    let source = BackendSource(flashagent_llm::OpenAiCompat::new(
-        &config.backend_url,
-        &config.model,
-        config.api_key.clone(),
-    ));
+    println!("\nChecking whether {model} can drive tools…");
+    let source = BackendSource(flashagent_llm::Client::new(endpoint.clone(), model));
     let report = flashagent_core::toolcheck::check_model(
         &source,
-        &config.model,
+        model,
         std::time::Duration::from_secs(60),
     )
     .await;
@@ -47,13 +45,10 @@ pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
 /// when a model cannot drive tools, so it works as a check.
 pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool) -> i32 {
     let timeout = std::time::Duration::from_secs(120);
-    let mut models = vec![config.model.clone()];
+    let endpoint = config.endpoint();
+    let mut models = vec![config.active_profile().model.clone()];
     if all_models {
-        let probe = BackendSource(flashagent_llm::OpenAiCompat::new(
-            &config.backend_url,
-            &config.model,
-            config.api_key.clone(),
-        ));
+        let probe = BackendSource(flashagent_llm::Client::new(endpoint.clone(), &models[0]));
         match probe.discover_server().await {
             Some(disc) if !disc.models.is_empty() => {
                 models = disc
@@ -64,20 +59,16 @@ pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool) -> 
                     .collect();
             }
             _ => {
-                eprintln!("Could not list models at {}; checking the configured one only.", config.backend_url);
+                eprintln!("Could not list models at {}; checking the configured one only.", endpoint.url);
             }
         }
     }
 
-    println!("Tool-calling check against {}", config.backend_url);
+    println!("Tool-calling check against {} ({})", endpoint.url, config.active_profile().name);
     let mut reports = Vec::new();
     for model in &models {
         println!("\n{model}");
-        let source = BackendSource(flashagent_llm::OpenAiCompat::new(
-            &config.backend_url,
-            model,
-            config.api_key.clone(),
-        ));
+        let source = BackendSource(flashagent_llm::Client::new(endpoint.clone(), model));
         let report = flashagent_core::toolcheck::check_model(&source, model, timeout).await;
         for line in report.lines() {
             println!("{line}");

@@ -58,11 +58,13 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/clear", "Clear terminal screen and conversation scrollback", AutocompleteCategory::Command),
         AutocompleteItem::new("/effort", "Select thinking effort preset (off, low, medium, high)", AutocompleteCategory::Command),
         AutocompleteItem::new("/model", "Open model selection menu or switch model", AutocompleteCategory::Command),
+        AutocompleteItem::new("/provider", "Switch to another saved provider, local or cloud; add or edit them", AutocompleteCategory::Command),
         AutocompleteItem::new("/verbose", "Toggle verbose mode for thoughts and tool calls (all, last, off)", AutocompleteCategory::Command),
         AutocompleteItem::new("/mode", "Cycle permission mode (Planning, Manual, Accept Edits, Accept All)", AutocompleteCategory::Command),
         AutocompleteItem::new("/goal", "Autonomous run: /goal <task> (limits in Settings → Goal)", AutocompleteCategory::Command),
         AutocompleteItem::new("/resume", "Pick a saved session from this folder and continue it", AutocompleteCategory::Command),
         AutocompleteItem::new("/mcp", "List and manage Model Context Protocol servers", AutocompleteCategory::Command),
+        AutocompleteItem::new("/tasks", "Background commands: see their output, stop one", AutocompleteCategory::Command),
         AutocompleteItem::new("/compact", "Compact conversation context (optional: /compact <focus instructions>)", AutocompleteCategory::Command),
         AutocompleteItem::new("/regenerate", "Regenerate the last assistant response from scratch (or press Ctrl+R)", AutocompleteCategory::Command),
         AutocompleteItem::new("/update", "Check and apply FlashAgent updates in-place", AutocompleteCategory::Command),
@@ -78,8 +80,25 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
     ]
 }
 
+/// The saved providers, `(name, how it is reached)`, for `/provider <name>`.
+/// Set by the app whenever its config is saved; completion reads no files.
+static PROVIDERS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_provider_names(providers: Vec<(String, String)>) {
+    *PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()) = providers;
+}
+
 pub fn sub_commands(input: &str) -> Option<Vec<AutocompleteItem>> {
     let lower = input.to_lowercase();
+    if lower.starts_with("/provider ") {
+        let providers = PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
+        return Some(
+            providers
+                .iter()
+                .map(|(name, reached)| AutocompleteItem::new(format!("/provider {name}"), reached.clone(), AutocompleteCategory::Command))
+                .collect(),
+        );
+    }
     if lower.starts_with("/expand ") || lower == "/expand" || lower.starts_with("/verbose ") || lower == "/verbose" {
         Some(vec![
             AutocompleteItem::new("/verbose all", "Expand both thoughts and tool calls permanently", AutocompleteCategory::Command),
@@ -152,7 +171,7 @@ fn cached_skills(cwd: &Path) -> Vec<AutocompleteItem> {
 /// first item.
 pub const COMMAND_ALIASES: &[&str] = &[
     "/?", "/config", "/changelog", "/memories", "/retry", "/thinking", "/t", "/models", "/m", "/params", "/expand",
-    "/think", "/o", "/quit", "/q",
+    "/think", "/o", "/quit", "/q", "/providers",
 ];
 
 /// A whole command or alias, as typed.
@@ -436,6 +455,16 @@ mod skill_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_saved_providers_complete_after_the_command() {
+        set_provider_names(vec![("LM Studio".into(), "OpenAI-compatible".into()), ("Anthropic".into(), "Anthropic".into())]);
+        let found: Vec<String> = find_matches("/provider an", Path::new(".")).into_iter().map(|i| i.trigger).collect();
+        assert_eq!(found, vec!["/provider Anthropic"], "matched however it is written");
+        assert_eq!(find_matches("/provider ", Path::new(".")).len(), 2);
+        assert!(find_matches("/provider Anthropic", Path::new(".")).is_empty(), "typed in full: nothing left to offer");
+        set_provider_names(Vec::new());
+    }
 
     #[test]
     fn a_command_typed_in_full_is_not_swapped_for_a_longer_one() {

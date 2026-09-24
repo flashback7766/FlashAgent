@@ -36,6 +36,9 @@ pub(crate) struct Renderer {
 
 pub(crate) struct FrameState<'a> {
     pub(crate) input: &'a flashagent_tui::Composer,
+    /// The provider in use and its model, at the end of the status line: the
+    /// first to go when it is narrow.
+    pub(crate) provider: (&'a str, &'a str),
     /// Ctrl+F: the query and the prompt it found.
     pub(crate) history_search: Option<(&'a str, Option<&'a str>)>,
     pub(crate) mode: PermissionMode,
@@ -49,6 +52,8 @@ pub(crate) struct FrameState<'a> {
     pub(crate) running: bool,
     /// Generation speed over the last 3 seconds; `None` when counters are off.
     pub(crate) tokens_per_sec: Option<f64>,
+    /// `draft 81%`: how much of a draft model's guessing the model kept.
+    pub(crate) draft_acceptance: Option<&'a str>,
     pub(crate) confirm_selection: ConfirmChoice,
     pub(crate) question_state: Option<&'a QuestionUiState>,
     pub(crate) custom_placeholder: Option<&'a str>,
@@ -65,6 +70,10 @@ pub(crate) struct FrameState<'a> {
     pub(crate) prompt_title: &'a str,
     pub(crate) context_warn_threshold: usize,
     pub(crate) pending_steers: &'a [String],
+    /// Background commands still running.
+    pub(crate) background_tasks: usize,
+    /// A foreground shell command Ctrl+B can move to the background.
+    pub(crate) shell_running: bool,
     /// The colour of how the last turn ended, and how far (0..=1) it has faded.
     pub(crate) composer_flash: Option<(Rgb, f32)>,
 }
@@ -132,6 +141,17 @@ impl Renderer {
     }
 }
 
+/// On the status line while background commands run; a narrow window drops it whole.
+fn tasks_status(running: usize) -> String {
+    if running == 0 {
+        return String::new();
+    }
+    format!(
+        " \x1b[38;2;100;95;90m\u{b7}\x1b[0m \x1b[38;2;168;199;250m\u{25cf} {}\x1b[0m",
+        flashagent_tui::plural(running, "task", "tasks")
+    )
+}
+
 /// The mode, and what the turn waits on when that is not the model: the phase
 /// itself is written in the composer, the speed on the line above.
 pub(crate) fn format_status_left(
@@ -156,6 +176,20 @@ pub(crate) fn format_status_left(
         (false, ..) => "\x1b[38;2;140;135;130mReady\x1b[0m".to_string(),
     };
     format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m {activity}{expand_status}")
+}
+
+/// " · Anthropic · claude-opus-5-5", in parts the status line drops from
+/// the end when it is narrow: the model first, then the provider.
+pub(crate) fn format_provider(provider: &str, model: &str) -> String {
+    let dot = " \x1b[38;2;100;95;90m\u{b7}\x1b[0m ";
+    let mut out = String::new();
+    if !provider.is_empty() {
+        out.push_str(&format!("{dot}\x1b[38;2;140;135;130m{provider}\x1b[0m"));
+    }
+    if !model.is_empty() {
+        out.push_str(&format!("{dot}\x1b[38;2;175;170;160m{model}\x1b[0m"));
+    }
+    out
 }
 
 impl Renderer {
@@ -663,6 +697,9 @@ impl Renderer {
             if let Some(speed) = st.tokens_per_sec.filter(|s| *s > 0.0) {
                 live.push_str(&format!(" \x1b[38;2;194;231;255m{speed:.1} t/s\x1b[0m"));
             }
+            if let Some(draft) = st.draft_acceptance {
+                live.push_str(&format!("{dot}{draft}"));
+            }
             if let Some(prefill) = st.ttft_display {
                 live.push_str(&format!("{dot}{prefill}"));
             }
@@ -675,7 +712,14 @@ impl Renderer {
                 Some(text) => format!("{live}{dot}{}", st.background_style.paint(text)),
                 None => live.clone(),
             };
-            let hints: Vec<&str> = if st.background.is_some() { vec![&esc, ""] } else { vec![&steer, &esc, ""] };
+            let detach = key_hints(&[("Ctrl+B", "background"), ("Esc", esc_does)], width);
+            let detach_steer = key_hints(&[("Ctrl+B", "background"), ("Enter", "steer"), ("Esc", esc_does)], width);
+            let hints: Vec<&str> = match (st.shell_running, st.background.is_some()) {
+                (true, true) => vec![&detach, &esc, ""],
+                (true, false) => vec![&detach_steer, &detach, &esc, ""],
+                (false, true) => vec![&esc, ""],
+                (false, false) => vec![&steer, &esc, ""],
+            };
             // The longest hint that fits, never cut mid-word.
             hints
                 .into_iter()
@@ -764,14 +808,15 @@ impl Renderer {
         } else {
             ""
         };
-        let left_telemetry = format_status_left(
+        let mut left_telemetry = format_status_left(
             st.running,
             st.is_goal_active,
             gate.pending().is_some() || question_gate.pending().is_some(),
             st.goal_progress,
             st.mode.label(),
-            expand_status,
+            &format!("{}{expand_status}", tasks_status(st.background_tasks)),
         );
+        left_telemetry.push_str(&format_provider(st.provider.0, st.provider.1));
 
         let left_vis = visible_width(&left_telemetry);
         let status_row = if left_vis + gauge_vis + 3 <= width {
@@ -908,6 +953,7 @@ impl App {
             self.token_tracker.live_prefill_status().filter(|_| self.announced_mood != MascotMood::Offline);
         let ttft_display = self.token_tracker.ttft_display();
         let tg_speed = self.token_tracker.tg_3s();
+        let draft = self.token_tracker.draft_display();
         let config = &self.config;
 
         self.renderer.frame(
@@ -919,6 +965,7 @@ impl App {
             &self.context_usage,
             FrameState {
                 input: &self.input,
+                provider: (self.config.active_profile().name.as_str(), self.current_model.as_str()),
                 history_search: self
                     .history_search
                     .as_ref()
@@ -933,6 +980,7 @@ impl App {
                 tick_n: self.tick_n,
                 running: self.running,
                 tokens_per_sec: config.show_tokens.then_some(tg_speed),
+                draft_acceptance: draft.as_deref().filter(|_| config.show_tokens),
                 confirm_selection: self.confirm_select.choice(),
                 question_state: Some(&self.question_ui_state),
                 custom_placeholder: self.custom_placeholder.as_deref(),
@@ -948,6 +996,8 @@ impl App {
                 background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                 context_warn_threshold: config.context_warn_threshold,
                 pending_steers: &self.pending_steers,
+                background_tasks: cx.tools_arc.shells().running_count(),
+                shell_running: self.running && cx.tools_arc.shells().foreground_running(),
                 composer_flash,
             },
         );

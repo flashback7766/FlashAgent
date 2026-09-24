@@ -7,7 +7,7 @@ mod support;
 use std::time::Duration;
 
 use support::mock_server::{MockServer, Reply, MODEL};
-use support::term::{Home, Term, ENTER, ESC};
+use support::term::{version, Home, Term, ENTER, ESC};
 
 const COLS: u16 = 120;
 const ROWS: u16 = 40;
@@ -65,10 +65,103 @@ fn the_wizard_sets_up_a_custom_server_and_opens_the_app() {
     let config: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(home.config_path()).expect("the wizard saved a config")).unwrap();
     assert_eq!(config["setup_completed"], true);
-    assert_eq!(config["backend_url"], server.url.as_str());
-    assert_eq!(config["model"], MODEL);
+    let provider = &config["providers"][0];
+    assert_eq!(provider["url"], server.url.as_str(), "{config}");
+    assert_eq!(provider["protocol"], "openai", "{config}");
+    assert_eq!(provider["model"], MODEL, "{config}");
+    assert_eq!(config["active_provider"], provider["name"], "{config}");
+    // Written for an older build to read, never read back.
+    assert_eq!(config["backend_url"], server.url.as_str(), "{config}");
 
     quit(&mut term);
+}
+
+/// Two saved providers, the first in use, each on its own mock server.
+fn two_providers(home: &Home, first: &MockServer, second: &MockServer) -> Term {
+    home.write_config(serde_json::json!({
+        "setup_completed": true,
+        "last_seen_version": version(),
+        "auto_check_updates": false,
+        "providers": [
+            { "name": "Desk", "protocol": "openai", "url": first.url, "model": first.model },
+            { "name": "Lab", "protocol": "openai", "url": second.url }
+        ],
+        "active_provider": "Desk"
+    }));
+    let term = Term::start(home, &["-y"], COLS, ROWS);
+    term.wait_for(PROMPT, WAIT);
+    term
+}
+
+#[test]
+fn switching_provider_mid_session_sends_the_next_turn_to_the_other_server() {
+    let first = MockServer::start(vec![Reply::Text("Answer from the desk server.".into())]);
+    let second = MockServer::start_with_model("lab-model", vec![Reply::Text("Answer from the lab server.".into())]);
+    let home = Home::new();
+    let mut term = two_providers(&home, &first, &second);
+    // The welcome card names the provider beside the model.
+    term.wait_for("Desk", WAIT);
+
+    ask(&term, "hello", "Answer from the desk server.");
+
+    term.type_text("/provider");
+    term.send(ENTER);
+    // Its last row: the menu unfolds as it opens.
+    let menu = term.wait_for("+ Edit providers", WAIT);
+    assert!(menu.contains("Desk  (in use)") && menu.contains("Lab"), "{menu}");
+    assert!(menu.contains(&second.url), "the menu shows where each provider is:\n{menu}");
+    term.type_text("lab");
+    term.send(ENTER);
+    // The server's own model, since none was saved for it.
+    term.wait_for("Switched to Lab \u{b7} lab-model", WAIT);
+    term.wait_for("Provider: Lab \u{b7} lab-model", WAIT);
+
+    ask(&term, "and now?", "Answer from the lab server.");
+    assert_eq!(first.turns().len(), 1, "the desk server got a turn after the switch");
+    let turns = second.turns();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].body["model"], "lab-model", "{}", turns[0].body);
+    let history = sent(&turns[0]);
+    assert!(
+        history.contains("hello") && history.contains("Answer from the desk server."),
+        "the conversation did not carry over: {history}"
+    );
+
+    let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
+    assert_eq!(config["active_provider"], "Lab", "the next launch starts on it: {config}");
+    assert_eq!(config["providers"][1]["model"], "lab-model", "{config}");
+    assert_eq!(config["providers"][0]["model"], MODEL, "{config}");
+
+    // And back, by name.
+    term.type_text("/provider desk");
+    term.send(ENTER);
+    term.wait_for("Switched to Desk", WAIT);
+    quit(&mut term);
+}
+
+#[test]
+fn a_provider_switch_waits_for_the_running_answer() {
+    let words: Vec<String> = (1..=8).map(|i| format!("slow{i}")).collect();
+    let first = MockServer::start(vec![Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(400) }]);
+    let second = MockServer::start_with_model("lab-model", vec![Reply::Text("Answer from the lab server.".into())]);
+    let home = Home::new();
+    let term = two_providers(&home, &first, &second);
+
+    term.type_text("take your time");
+    term.send(ENTER);
+    term.wait_for("slow1", WAIT);
+    term.type_text("/provider Lab");
+    term.send(ENTER);
+    term.wait_for("Wait for the answer to finish", WAIT);
+    term.wait_for("slow8", WAIT);
+    // With a draft, the running turn's hint is "Enter steer"; this one is the idle prompt's.
+    term.wait_for("Enter send", WAIT);
+    assert!(second.requests().iter().all(|r| !r.is_turn()), "nothing may reach the other server mid-turn");
+    assert!(!sent(first.turns().last().unwrap()).contains("/provider"), "the command was sent to the model as steering");
+
+    // Still typed, it switches once the answer is done.
+    term.send(ENTER);
+    term.wait_for("Switched to Lab", WAIT);
 }
 
 /// Ctrl+D on an empty prompt.
@@ -169,13 +262,15 @@ fn the_recap_waits_until_the_user_has_gone_quiet() {
     let server = MockServer::start(vec![Reply::Text("First answer.".into())]);
     let home = Home::new();
     home.set_up(&server.url);
-    let term = Term::start_with_env(&home, &["-y"], COLS, ROWS, &[("FLASHAGENT_RECAP_IDLE_SECS", "3")]);
+    // Five seconds of quiet, keys under one apart: a busy runner that reads a key
+    // late still sees one well inside the window.
+    let term = Term::start_with_env(&home, &["-y"], COLS, ROWS, &[("FLASHAGENT_RECAP_IDLE_SECS", "5")]);
     term.wait_for(PROMPT, WAIT);
     let recaps = || server.requests().iter().filter(|r| !r.is_turn() && r.body.to_string().contains("conversation analyzer")).count();
 
     ask(&term, "first question", "First answer.");
     // Typing keeps it back: the model stays free for the next question.
-    for _ in 0..4 {
+    for _ in 0..6 {
         std::thread::sleep(Duration::from_millis(900));
         term.send("x");
         term.send("\x7f");
@@ -523,6 +618,8 @@ const SCREENS: &[(&str, &str, &str)] = &[
     ("/settings", "Settings", "Esc save and close"),
     ("/memory", "remembers", "Esc close"),
     ("/mcp", "MCP", "Esc close"),
+    ("/tasks", "Background tasks", "Esc close"),
+    ("/provider", "Switch provider", "Esc cancel"),
     // Printed into the transcript, so the marker is its last line; the first has
     // scrolled away in a short terminal.
     ("/help", "/uninstall", "Esc"),
@@ -2077,24 +2174,32 @@ fn show_composer() {
     println!("{}", term.screen());
 }
 
-/// Two looks at an idle screen `apart`.
-fn idle_screens(animations: bool, apart: Duration) -> (String, String) {
+/// A look at an idle screen, and whether it changed within `watch`.
+fn idle_screen_moves(animations: bool, watch: Duration) -> (String, Option<String>) {
     let server = MockServer::start(Vec::new());
     let home = Home::new();
     let term = ready_with(&home, &server, serde_json::json!({ "animations": animations }));
     std::thread::sleep(Duration::from_millis(300));
     let first = term.screen();
-    std::thread::sleep(apart);
-    (first, term.screen())
+    let deadline = std::time::Instant::now() + watch;
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        let now = term.screen();
+        if now != first {
+            return (first, Some(now));
+        }
+    }
+    (first, None)
 }
 
 #[test]
 fn with_animations_off_an_idle_screen_holds_still() {
     // With motion off, nothing may change while nobody does anything.
-    let (first, later) = idle_screens(false, Duration::from_millis(1500));
-    assert_eq!(first, later, "the screen moved with animations off");
-    let (first, later) = idle_screens(true, Duration::from_millis(1500));
-    assert_ne!(first, later, "this test cannot tell: nothing moves with animations on either");
+    let (first, moved) = idle_screen_moves(false, Duration::from_millis(1500));
+    assert_eq!(moved, None, "the screen moved with animations off; it was:\n{first}");
+    // The tip pauses between its moves: watched long enough to see one on a slow runner.
+    let (_, moved) = idle_screen_moves(true, Duration::from_secs(10));
+    assert!(moved.is_some(), "this test cannot tell: nothing moves with animations on either");
 }
 
 #[test]
@@ -2443,4 +2548,153 @@ mod never_half_drawn {
         assert!(seen.reads > 50, "too little was drawn to judge: {seen:?}");
         assert_eq!(seen.half_drawn, 0, "the screen was seen half drawn: {seen:?}");
     }
+}
+
+/// The user-role messages of a request.
+fn user_messages(request: &support::mock_server::Request) -> Vec<String> {
+    request.body["messages"]
+        .as_array()
+        .map(|m| m.iter().filter(|m| m["role"] == "user").map(|m| m["content"].to_string()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_background_command_that_ends_wakes_the_agent_with_a_notice() {
+    let command = if cfg!(windows) { "ping -n 2 127.0.0.1 >NUL && echo bg-finished-marker" } else { "sleep 1; echo bg-finished-marker" };
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "header": "Build in the background", "command": command, "background": true }),
+        },
+        Reply::Text("Started it in the background.".into()),
+        Reply::Text("The background build is done.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+
+    ask(&term, "build it in the background", "Started it in the background.");
+    // Nobody types: the task's end starts a turn of its own.
+    let screen = term.wait_for("The background build is done.", WAIT);
+    assert!(screen.contains("Background task 1 exited with code 0"), "no line for the task:\n{screen}");
+    term.wait_gone(RUNNING_HINT, WAIT);
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let turns = server.turns();
+    assert_eq!(turns.len(), 3, "the notice woke the agent more or less than once");
+    assert!(sent(&turns[1]).contains("A notice arrives when it exits"), "{}", sent(&turns[1]));
+    let told: Vec<String> = user_messages(&turns[2]).into_iter().filter(|m| m.contains("[Background task 1 ")).collect();
+    assert_eq!(told.len(), 1, "the notice was delivered {} times", told.len());
+    assert!(told[0].contains("exited with code 0") && told[0].contains("bg-finished-marker"), "{}", told[0]);
+    assert!(told[0].contains("not a message from the user"), "{}", told[0]);
+}
+
+#[test]
+fn ctrl_b_moves_a_running_command_to_the_background() {
+    let command = if cfg!(windows) {
+        "echo detach-before && ping -n 7 127.0.0.1 >NUL && echo detach-after"
+    } else {
+        "echo detach-before; sleep 6; echo detach-after"
+    };
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "header": "Run the slow step", "command": command }),
+        },
+        Reply::Text("Carrying on while it runs.".into()),
+        Reply::Text("It has finished now.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+
+    term.type_text("run the slow step");
+    term.send(ENTER);
+    // The key is offered only while a command runs.
+    term.wait_for("Ctrl+B background", WAIT);
+    term.send("\x02");
+    term.wait_for("Carrying on while it runs.", WAIT);
+
+    let turns = server.turns();
+    let messages = turns[1].body["messages"].as_array().cloned().unwrap_or_default();
+    let result = messages.iter().find(|m| m["role"] == "tool").map(|m| m["content"].to_string()).unwrap_or_default();
+    assert!(result.contains("moved this command to the background") && result.contains("background task 1"), "{result}");
+    assert!(result.contains("detach-before"), "the output so far was lost: {result}");
+    assert!(!result.contains("detach-after"), "the call waited for the command to end: {result}");
+
+    // It kept running, and its end reaches the agent.
+    let screen = term.wait_for("It has finished now.", WAIT);
+    assert!(screen.contains("Background task 1 exited with code 0"), "{screen}");
+    let told = user_messages(&server.turns()[2]).join("\n");
+    assert!(told.contains("detach-after"), "the output after the move was lost: {told}");
+}
+
+fn background_sleep() -> Vec<Reply> {
+    let command = if cfg!(windows) { "ping -n 60 127.0.0.1" } else { "sleep 60" };
+    vec![
+        Reply::ToolCall {
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "header": "Start the server", "command": command, "background": true }),
+        },
+        Reply::Text("The server is starting.".into()),
+    ]
+}
+
+#[test]
+fn a_task_stopped_from_the_task_list_wakes_nobody() {
+    let server = MockServer::start(background_sleep());
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+    ask(&term, "start the server", "The server is starting.");
+    term.wait_for("1 task", WAIT);
+
+    term.type_text("/tasks");
+    term.send(ENTER);
+    // Its last row: the card unfolds as it opens.
+    let list = term.wait_for("Esc close", WAIT);
+    assert!(list.contains("#1") && list.contains("running"), "{list}");
+    term.send("k");
+    term.wait_for("stopped", WAIT);
+    term.send(ESC);
+    term.wait_for("Background task 1 was stopped", WAIT);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(server.turns().len(), 2, "a task the user stopped woke the agent");
+    assert!(!term.screen().contains("1 task"), "the footer still counts a stopped task");
+}
+
+#[test]
+fn quitting_says_how_many_background_tasks_it_stops() {
+    let server = MockServer::start(background_sleep());
+    let home = Home::new();
+    let mut term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+    ask(&term, "start the server", "The server is starting.");
+
+    term.send(CTRL_D);
+    term.wait_for("1 background task running", WAIT);
+    assert!(term.wait_exit(Duration::from_millis(500)).is_none(), "quit without saying a task would be stopped");
+    quit(&mut term);
+}
+
+#[test]
+fn a_notice_waits_while_the_user_is_typing() {
+    // Long enough to be typing before it ends, on a slow runner too.
+    let command = if cfg!(windows) { "ping -n 9 127.0.0.1 >NUL" } else { "sleep 8" };
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "header": "Wait a second", "command": command, "background": true }),
+        },
+        Reply::Text("Waiting on it.".into()),
+        Reply::Text("It is done.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+    ask(&term, "wait a second", "Waiting on it.");
+    term.type_text("half a thought");
+    term.wait_for("Background task 1 exited", WAIT);
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(server.turns().len(), 2, "a turn started under the user's draft");
+
+    // An emptied prompt lets it go.
+    term.send(ESC);
+    term.wait_for("It is done.", WAIT);
+    assert_eq!(server.turns().len(), 3);
 }

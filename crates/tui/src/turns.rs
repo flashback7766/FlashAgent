@@ -26,7 +26,7 @@ impl App {
 
     /// Once due, with no turn running.
     pub(crate) fn start_recap_if_due(&mut self, source: &Arc<BackendSource>, tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>) {
-        if self.running || !self.recap_due.is_some_and(|due| std::time::Instant::now() >= due) {
+        if self.running || self.recap_due.is_none_or(|due| std::time::Instant::now() < due) {
             return;
         }
         self.recap_due = None;
@@ -71,16 +71,21 @@ impl App {
     }
 
     /// The last message in the history is what the model answers.
-    pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
-        // The prompt names the model and the thinking mode, and F3 and F4 change
-        // both: "do not think" must not outlive a switch to high effort. Rebuilt
-        // only on a change, since the system prompt is the cached prefix.
+    /// The prompt names the model and the thinking mode, and F3, F4 and
+    /// `/provider` change them: "do not think" must not outlive a switch to
+    /// high effort. Rebuilt only on a change, since the system prompt is the
+    /// cached prefix.
+    pub(crate) fn sync_system_prompt(&mut self) {
         if self.prompt_config.model.as_deref() != Some(self.current_model.as_str())
             || self.prompt_config.effort.as_deref() != Some(self.current_effort.as_str())
         {
             self.prompt_config = self.prompt_config.clone().with_model(&self.current_model).with_effort(&self.current_effort);
             self.apply_personality();
         }
+    }
+
+    pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
+        self.sync_system_prompt();
         // Here, not only for typed prompts: a /goal, a skill or Ctrl+R measured
         // their growth from a turn long gone and compacted too early.
         self.context_before_turn = self.context_usage.total_used();
@@ -100,8 +105,13 @@ impl App {
         self.turn_outcome = flashagent_core::TurnOutcome::default();
         self.turn_flash = None;
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
-        self.active_steer_tx = Some(steer_tx);
         self.pending_steers.clear();
+        // Notices that waited (a draft, an Esc) ride along with this turn.
+        self.task_inbox.turn_started();
+        for notice in self.task_inbox.send_into_turn() {
+            let _ = steer_tx.send(notice);
+        }
+        self.active_steer_tx = Some(steer_tx);
         self.cancel_recap();
         self.active_turn_handle = Some(spawn_turn(
             cx.cancel.clone(),
@@ -162,6 +172,8 @@ impl App {
         self.turn_started = None;
         self.active_turn_handle = None;
         self.active_steer_tx = None;
+        self.task_inbox.turn_ended(matches!(res, Ok((_, DoneReason::Cancelled))));
+        self.flush_task_lines();
         // A steer typed as the turn ended never reached the model; it goes back into
         // the prompt.
         let unsent = std::mem::take(&mut self.pending_steers);
@@ -223,7 +235,7 @@ impl App {
                 update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                 // The turn just read all of it. A later change (interrupted turn closed,
                 // compaction) makes a new prefix, which is warmed.
-                self.note_prompt_cached(cx.perm, cx.memory_block);
+                self.note_prompt_cached(cx.source, cx.perm, cx.memory_block);
                 self.renderer.request_reprint();
 
                 if reason == DoneReason::Cancelled {
@@ -304,7 +316,7 @@ impl App {
                 // Plain explanation first, the raw text underneath.
                 let explained = flashagent_tui::backend_error::explain(
                     &e,
-                    &self.config.backend_url,
+                    &cx.source.0.base_url(),
                     &self.current_model,
                 );
                 self.chat.push_line(LineKind::ToolError, explained.headline.clone());
@@ -324,6 +336,8 @@ impl App {
                 self.notice("Ctrl+R retries the last prompt");
             }
         }
+        // Notices that came as the turn ended.
+        self.deliver_task_notices(cx);
 
         Flow::Next
     }
