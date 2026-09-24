@@ -16,6 +16,7 @@ mod gemini;
 mod ollama;
 mod openai;
 mod parse;
+mod text_tools;
 
 pub use client::{Client, EventStream};
 pub use encoding::base64_encode;
