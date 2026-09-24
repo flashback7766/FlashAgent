@@ -350,11 +350,6 @@ impl ChatView {
             .unwrap_or(self.lines.len())
     }
 
-    /// Crude activity gauge.
-    pub fn total_chars(&self) -> usize {
-        self.lines.iter().map(|l| l.text.len()).sum()
-    }
-
     /// (user, assistant, reasoning, tools)
     /// Since the last compaction; see [`Self::forget_counted_context`].
     pub fn raw_content_chars(&self) -> (usize, usize, usize, usize) {
