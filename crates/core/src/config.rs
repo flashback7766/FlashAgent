@@ -114,12 +114,16 @@ pub struct ProviderProfile {
     pub api_key: Option<String>,
     /// Empty: whichever the server has loaded, else its first.
     pub model: String,
+    /// Tokens of context to run models with, where the server lets the
+    /// client choose (Ollama). `None`: FlashAgent's own choice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
 }
 
 impl ProviderProfile {
     pub fn new(name: impl Into<String>, protocol: ApiProtocol, url: impl Into<String>) -> Self {
         let url: String = url.into();
-        Self { name: name.into(), protocol, url: url.trim().trim_end_matches('/').to_string(), api_key: None, model: String::new() }
+        Self { name: name.into(), protocol, url: url.trim().trim_end_matches('/').to_string(), api_key: None, model: String::new(), context_window: None }
     }
 
     pub fn from_preset(preset: &BackendPreset) -> Self {
@@ -171,7 +175,7 @@ impl ProviderProfile {
     /// Where requests go and with which key.
     pub fn endpoint(&self) -> Endpoint {
         let (key, _) = self.resolve_key(|var| std::env::var(var).ok());
-        Endpoint::new(self.protocol, &self.url, key)
+        Endpoint::new(self.protocol, &self.url, key).with_context_window(self.context_window)
     }
 
     /// The same server under the same protocol, however the address is written.
@@ -205,6 +209,7 @@ impl<'de> Deserialize<'de> for ProviderProfile {
         let mut profile = ProviderProfile::new(name, protocol, url);
         profile.api_key = text("api_key").map(str::to_string);
         profile.model = text("model").unwrap_or_default().to_string();
+        profile.context_window = value.get("context_window").and_then(|v| v.as_u64()).filter(|&n| n > 0).map(|n| n as usize);
         Ok(profile)
     }
 }
@@ -917,13 +922,41 @@ impl AppConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let invalid = |e: serde_json::Error| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+        let mut value = serde_json::to_value(self).map_err(invalid)?;
+        if let (Some(map), Some((url, key, model))) = (value.as_object_mut(), self.legacy_backend()) {
+            map.insert("backend_url".into(), url.into());
+            map.insert("model".into(), model.into());
+            if let Some(key) = key {
+                map.insert("api_key".into(), key.into());
+            }
+        }
+        let json = serde_json::to_string_pretty(&value).map_err(invalid)?;
         // Written beside the file and renamed over it: a half-written config reads
         // as no config and sends the user back through the setup wizard.
         let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, path)).inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp);
         })
+    }
+
+    /// What a build from before providers reads (`backend_url`, `api_key`,
+    /// `model`), written beside `providers` so going back to one keeps a
+    /// working server. It spoke only the OpenAI protocol: the saved provider
+    /// in use if that can be reached through it, else the first that can.
+    /// Never read back: `providers` wins.
+    fn legacy_backend(&self) -> Option<(String, Option<String>, String)> {
+        let openai_url = |p: &ProviderProfile| match p.protocol {
+            ApiProtocol::OpenAi => Some(p.url.clone()),
+            ApiProtocol::Ollama => Some(format!("{}/v1", p.url.trim_end_matches("/api"))),
+            ApiProtocol::Gemini => Some(format!("{}/openai", p.url)),
+            ApiProtocol::Anthropic => None,
+        };
+        let active = self.providers.iter().find(|p| p.name == self.active_provider);
+        active
+            .into_iter()
+            .chain(&self.providers)
+            .find_map(|p| openai_url(p).map(|url| (url, p.api_key.clone(), p.model.clone())))
     }
 
     pub fn load_from(path: &Path) -> Result<Self, std::io::Error> {
@@ -1034,6 +1067,38 @@ mod tests {
     }
 
     #[test]
+    fn an_older_build_gets_a_server_it_can_speak_to() {
+        let mut cfg = AppConfig::default();
+        let mut claude = ProviderProfile::new("Anthropic", ApiProtocol::Anthropic, "https://api.anthropic.com");
+        claude.api_key = Some("sk-ant".into());
+        let mut ollama = ProviderProfile::new("Ollama", ApiProtocol::Ollama, "http://localhost:11434");
+        ollama.model = "qwen3".into();
+        cfg.providers = vec![claude, ollama];
+        cfg.active_provider = "Anthropic".into();
+        assert_eq!(
+            cfg.legacy_backend(),
+            Some(("http://localhost:11434/v1".into(), None, "qwen3".into())),
+            "Anthropic's own API meant nothing to it; Ollama's /v1 did"
+        );
+        cfg.providers.push(ProviderProfile::new("Gemini", ApiProtocol::Gemini, "https://generativelanguage.googleapis.com/v1beta"));
+        cfg.active_provider = "Gemini".into();
+        assert_eq!(cfg.legacy_backend().unwrap().0, "https://generativelanguage.googleapis.com/v1beta/openai");
+        cfg.providers.retain(|p| p.protocol == ApiProtocol::Anthropic);
+        assert_eq!(cfg.legacy_backend(), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut ollama = ProviderProfile::new("Ollama", ApiProtocol::Ollama, "http://localhost:11434");
+        ollama.context_window = Some(65_536);
+        cfg.providers = vec![ollama];
+        cfg.active_provider = "Ollama".into();
+        cfg.save_to(&path).unwrap();
+        let loaded = AppConfig::load_from(&path).unwrap();
+        assert_eq!(loaded.providers, cfg.providers, "the old fields are not read back: providers win");
+        assert_eq!(loaded.active_profile().endpoint().context_window, Some(65_536));
+    }
+
+    #[test]
     fn the_old_fields_are_not_read_once_there_are_providers() {
         let json = serde_json::json!({
             "backend_url": "http://stale/v1",
@@ -1057,7 +1122,9 @@ mod tests {
         assert_eq!(loaded.providers, cfg.providers);
         assert_eq!(loaded.active_provider, "Home");
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains("backend_url"), "one place for the server: {text}");
+        let on_disk: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(on_disk["backend_url"], "http://on-disk/v1", "an older build finds the server in use: {text}");
+        assert_eq!(on_disk["model"], cfg.active_profile().model.as_str());
         assert_eq!(text.matches("\"api_key\"").count(), 1, "only the provider that has a key saves one: {text}");
         assert!(text.contains("\"protocol\": \"anthropic\""), "{text}");
     }

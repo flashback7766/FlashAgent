@@ -76,6 +76,9 @@ pub struct Endpoint {
     pub url: String,
     /// `None` for a server that needs none; a blank key is `None`.
     pub api_key: Option<String>,
+    /// The context window to run models with, where the server lets the
+    /// client choose (Ollama's `num_ctx`). `None` leaves it to the client.
+    pub context_window: Option<usize>,
 }
 
 impl Endpoint {
@@ -85,7 +88,13 @@ impl Endpoint {
             protocol,
             url: url.trim().trim_end_matches('/').to_string(),
             api_key: api_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()),
+            context_window: None,
         }
+    }
+
+    pub fn with_context_window(mut self, tokens: Option<usize>) -> Self {
+        self.context_window = tokens.filter(|&n| n > 0);
+        self
     }
 
     /// The protocol read from the address; see [`ApiProtocol::detect`].

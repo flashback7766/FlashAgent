@@ -119,6 +119,7 @@ fn num_ctx(client: &Client, model: &str) -> usize {
         .discovery()
         .and_then(|d| d.models.into_iter().chain(d.active_model).find(|m| m.id == model))
         .and_then(|m| m.context_length)
+        .or(client.endpoint().context_window)
         .unwrap_or(DEFAULT_NUM_CTX)
 }
 
@@ -413,12 +414,14 @@ fn thinking_profile(name: &str, family: &str, show: &Value, thinks: bool) -> Thi
 }
 
 /// The context a model runs with; see [`MIN_NUM_CTX`] and [`DEFAULT_NUM_CTX`].
-/// What was chosen `earlier` in this session is kept, loaded or not: every
+/// A size the user set for the provider comes first. Otherwise what was
+/// chosen `earlier` in this session is kept, loaded or not: every
 /// request sends it, so the model is loaded with it, and a later reading of
 /// `/api/ps` cannot move it (where Ollama counts the context of all parallel
 /// slots together, following it would grow the context at every look).
-fn choose_num_ctx(earlier: Option<usize>, loaded: Option<usize>, modelfile: Option<usize>, max: Option<usize>) -> usize {
-    let chosen = earlier
+fn choose_num_ctx(wanted: Option<usize>, earlier: Option<usize>, loaded: Option<usize>, modelfile: Option<usize>, max: Option<usize>) -> usize {
+    let chosen = wanted
+        .or(earlier)
         .or_else(|| [loaded, modelfile].into_iter().flatten().find(|&n| n >= MIN_NUM_CTX))
         .unwrap_or(DEFAULT_NUM_CTX);
     match max.filter(|&m| m > 0) {
@@ -483,6 +486,7 @@ pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
             Some((name.to_string(), context))
         })
         .collect();
+    let wanted = client.endpoint().context_window;
     let earlier = client.discovery();
     let earlier_ctx = |name: &str| earlier.as_ref()?.models.iter().find(|m| m.id == name)?.context_length;
 
@@ -511,7 +515,7 @@ pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
                 return None;
             }
             let loaded_ctx = loaded.get(&name);
-            let context = choose_num_ctx(earlier_ctx(&name), loaded_ctx.copied().flatten(), shown.modelfile_num_ctx, shown.max_context);
+            let context = choose_num_ctx(wanted, earlier_ctx(&name), loaded_ctx.copied().flatten(), shown.modelfile_num_ctx, shown.max_context);
             Some(DiscoveredModel {
                 is_loaded: loaded_ctx.is_some(),
                 context_length: Some(context),
@@ -675,16 +679,18 @@ mod tests {
 
     #[test]
     fn the_context_is_what_the_server_runs_else_a_default_never_above_the_model() {
-        assert_eq!(choose_num_ctx(None, None, None, Some(131_072)), DEFAULT_NUM_CTX);
-        assert_eq!(choose_num_ctx(None, None, None, None), DEFAULT_NUM_CTX);
-        assert_eq!(choose_num_ctx(None, None, None, Some(8192)), 8192, "an old model's own limit");
-        assert_eq!(choose_num_ctx(None, Some(65_536), None, Some(131_072)), 65_536, "loaded large enough: no reload");
-        assert_eq!(choose_num_ctx(None, Some(4096), None, Some(131_072)), DEFAULT_NUM_CTX, "Ollama's small default cannot hold the prompt");
-        assert_eq!(choose_num_ctx(None, None, Some(24_576), Some(131_072)), 24_576, "the Modelfile's own setting");
-        assert_eq!(choose_num_ctx(None, None, Some(2048), Some(131_072)), DEFAULT_NUM_CTX);
-        assert_eq!(choose_num_ctx(Some(65_536), None, None, Some(131_072)), 65_536, "unloaded since: the size it had");
-        assert_eq!(choose_num_ctx(Some(32_768), Some(131_072), None, Some(131_072)), 32_768, "once chosen, a reading of /api/ps does not move it");
-        assert_eq!(choose_num_ctx(Some(32_768), None, None, Some(8192)), 8192, "never above the model");
+        assert_eq!(choose_num_ctx(None, None, None, None, Some(131_072)), DEFAULT_NUM_CTX);
+        assert_eq!(choose_num_ctx(None, None, None, None, None), DEFAULT_NUM_CTX);
+        assert_eq!(choose_num_ctx(None, None, None, None, Some(8192)), 8192, "an old model's own limit");
+        assert_eq!(choose_num_ctx(None, None, Some(65_536), None, Some(131_072)), 65_536, "loaded large enough: no reload");
+        assert_eq!(choose_num_ctx(None, None, Some(4096), None, Some(131_072)), DEFAULT_NUM_CTX, "Ollama's small default cannot hold the prompt");
+        assert_eq!(choose_num_ctx(None, None, None, Some(24_576), Some(131_072)), 24_576, "the Modelfile's own setting");
+        assert_eq!(choose_num_ctx(None, None, None, Some(2048), Some(131_072)), DEFAULT_NUM_CTX);
+        assert_eq!(choose_num_ctx(None, Some(65_536), None, None, Some(131_072)), 65_536, "unloaded since: the size it had");
+        assert_eq!(choose_num_ctx(None, Some(32_768), Some(131_072), None, Some(131_072)), 32_768, "once chosen, a reading of /api/ps does not move it");
+        assert_eq!(choose_num_ctx(None, Some(32_768), None, None, Some(8192)), 8192, "never above the model");
+        assert_eq!(choose_num_ctx(Some(65_536), Some(32_768), Some(8192), None, Some(131_072)), 65_536, "the size set for the provider comes first");
+        assert_eq!(choose_num_ctx(Some(262_144), None, None, None, Some(131_072)), 131_072, "and is still never above the model");
     }
 
     #[test]
