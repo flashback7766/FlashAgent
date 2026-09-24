@@ -52,6 +52,8 @@ pub(crate) struct FrameState<'a> {
     pub(crate) running: bool,
     /// Generation speed over the last 3 seconds; `None` when counters are off.
     pub(crate) tokens_per_sec: Option<f64>,
+    /// `draft 81%`: how much of a draft model's guessing the model kept.
+    pub(crate) draft_acceptance: Option<&'a str>,
     pub(crate) confirm_selection: ConfirmChoice,
     pub(crate) question_state: Option<&'a QuestionUiState>,
     pub(crate) custom_placeholder: Option<&'a str>,
@@ -680,6 +682,9 @@ impl Renderer {
             if let Some(speed) = st.tokens_per_sec.filter(|s| *s > 0.0) {
                 live.push_str(&format!(" \x1b[38;2;194;231;255m{speed:.1} t/s\x1b[0m"));
             }
+            if let Some(draft) = st.draft_acceptance {
+                live.push_str(&format!("{dot}{draft}"));
+            }
             if let Some(prefill) = st.ttft_display {
                 live.push_str(&format!("{dot}{prefill}"));
             }
@@ -926,6 +931,7 @@ impl App {
             self.token_tracker.live_prefill_status().filter(|_| self.announced_mood != MascotMood::Offline);
         let ttft_display = self.token_tracker.ttft_display();
         let tg_speed = self.token_tracker.tg_3s();
+        let draft = self.token_tracker.draft_display();
         let config = &self.config;
 
         self.renderer.frame(
@@ -952,6 +958,7 @@ impl App {
                 tick_n: self.tick_n,
                 running: self.running,
                 tokens_per_sec: config.show_tokens.then_some(tg_speed),
+                draft_acceptance: draft.as_deref().filter(|_| config.show_tokens),
                 confirm_selection: self.confirm_select.choice(),
                 question_state: Some(&self.question_ui_state),
                 custom_placeholder: self.custom_placeholder.as_deref(),
