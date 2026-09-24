@@ -227,6 +227,7 @@ impl ProvidersView {
         self.status = Some(why.into());
     }
 
+    #[cfg(test)]
     pub fn is_editing(&self) -> bool {
         self.form.is_some()
     }
