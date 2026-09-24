@@ -15,6 +15,7 @@ pub mod prompt;
 mod repetition;
 pub mod snapshots;
 pub mod subagents;
+pub mod task_notices;
 pub mod toolcheck;
 
 pub use config::{AppConfig, BackendPreset, ColorTheme, SamplingPreset, ToolsetProfile, UpdateChannel};
@@ -36,6 +37,7 @@ pub use permissions::{
 };
 pub use personality::{BaseStyle, Level as TraitLevel, Personality, Trait as PersonalityTrait};
 pub use prompt::{build_system_prompt, SystemPromptConfig};
+pub use task_notices::{is_task_notice, NoticeInbox, TASK_NOTICE_NOTE, TASK_NOTICE_OPENING};
 pub use snapshots::{FilePreview, RewindReport, Rewindable, SnapshotStore};
 pub use subagents::{
     AgentRole, SubagentHandle, SubagentHost, SubagentResult, SubagentSpec, SubagentTool,
