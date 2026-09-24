@@ -73,22 +73,13 @@ impl McpManager {
         self.loaded_paths.read().clone()
     }
 
+    /// All at once: a server started through npx or uvx can take seconds to
+    /// answer, and one slow server must not hold up the others.
     pub async fn start_enabled_servers(&self) -> Vec<(String, Result<usize, String>)> {
-        let enabled: Vec<(String, McpServerConfig)> = {
-            let configs = self.configs.read();
-            configs
-                .iter()
-                .filter(|(_, cfg)| !cfg.disabled)
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        };
-
-        let mut results = Vec::new();
-        for (name, _) in enabled {
-            let res = self.start_server(&name).await.map(|c| c.tools().len());
-            results.push((name, res));
-        }
-        results
+        let mut enabled: Vec<String> = self.configs.read().iter().filter(|(_, cfg)| !cfg.disabled).map(|(name, _)| name.clone()).collect();
+        enabled.sort();
+        let started = futures::future::join_all(enabled.iter().map(|name| self.start_server(name))).await;
+        enabled.into_iter().zip(started).map(|(name, res)| (name, res.map(|c| c.tools().len()))).collect()
     }
 
     pub async fn start_server(&self, name: &str) -> Result<Arc<McpClient>, String> {
@@ -336,6 +327,38 @@ mod tests {
         assert!(mgr.is_tool_read_only("mcp__mock_db__read_query"));
         assert!(!mgr.is_tool_read_only("mcp__mock_db__write_query"));
         assert!(!mgr.is_tool_read_only("unknown_tool"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slow_servers_start_side_by_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = McpManager::new(dir.path().to_path_buf());
+        let mut configs = HashMap::new();
+        for name in ["one", "two", "three"] {
+            let script = dir.path().join(format!("{name}.sh"));
+            std::fs::write(
+                &script,
+                r#"while IFS= read -r line; do case "$line" in
+                *'"initialize"'*) sleep 1; echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"slow"}}}';;
+                *tools/list*) echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}';;
+                esac; done"#,
+            )
+            .unwrap();
+            configs.insert(name.to_string(), McpServerConfig::new("bash", vec![script.to_string_lossy().to_string()]));
+        }
+        // Only these: the user's own global servers must not start in a test.
+        *mgr.configs.write() = configs;
+        let started = std::time::Instant::now();
+        let results = mgr.start_enabled_servers().await;
+        let took = started.elapsed();
+        assert!(results.iter().all(|(_, r)| r.is_ok()), "{results:?}");
+        assert_eq!(results.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["one", "three", "two"]);
+        assert!(took < Duration::from_millis(2500), "three one-second starts took {took:?}: one after another");
+        let clients: Vec<Arc<McpClient>> = mgr.clients.read().values().cloned().collect();
+        for client in clients {
+            client.kill().await;
+        }
     }
 
     #[cfg(unix)]

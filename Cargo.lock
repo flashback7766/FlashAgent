@@ -421,6 +421,7 @@ dependencies = [
  "async-trait",
  "flashagent-core",
  "flashagent-llm",
+ "futures",
  "glob",
  "libc",
  "parking_lot",
