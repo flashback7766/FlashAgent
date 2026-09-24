@@ -310,16 +310,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Releases older than the manifest pass. A manifest that lacks or
-/// contradicts the asset is a hard failure.
-async fn verify_checksum(
-    client: &reqwest::Client,
-    checksums_url: Option<&str>,
-    asset_name: &str,
-    payload: &[u8],
-) -> anyhow::Result<()> {
+/// The asset's checksum from the release's manifest, or `None` for a release
+/// older than the manifest. A manifest that lacks the asset is a hard failure.
+async fn published_checksum(client: &reqwest::Client, checksums_url: Option<&str>, asset_name: &str) -> anyhow::Result<Option<String>> {
     let Some(url) = checksums_url else {
-        return Ok(());
+        return Ok(None);
     };
     let resp = client.get(url).send().await?;
     if !resp.status().is_success() {
@@ -328,11 +323,25 @@ async fn verify_checksum(
     let manifest = resp.text().await?;
     let expected = expected_checksum(&manifest, asset_name)
         .ok_or_else(|| anyhow::anyhow!("{asset_name} is not listed in {CHECKSUMS_ASSET}"))?;
+    Ok(Some(expected))
+}
+
+fn check_checksum(asset_name: &str, payload: &[u8], expected: Option<&str>) -> anyhow::Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
     let actual = sha256_hex(payload);
     if actual != expected {
         anyhow::bail!("checksum mismatch for {asset_name}: expected {expected}, got {actual}");
     }
     Ok(())
+}
+
+/// Hashing, unpacking and writing a release take a few hundred milliseconds
+/// of CPU and disk: done on the async workers, they held up whatever else
+/// ran there, such as the stream of an answer.
+async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> anyhow::Result<T> {
+    tokio::task::spawn_blocking(work).await?
 }
 
 /// Checks the folder, since replacing is a rename into it. A running
@@ -488,15 +497,19 @@ pub async fn download_and_apply_with_progress(
     let payload = download(&client, download_url, asset_name, &mut on_progress).await?;
 
     on_progress(UpdateProgress::Verifying);
-    verify_checksum(&client, checksums_url, asset_name, &payload).await?;
+    let expected = published_checksum(&client, checksums_url, asset_name).await?;
+    let asset = asset_name.to_string();
+    let payload = off_runtime(move || check_checksum(&asset, &payload, expected.as_deref()).map(|()| payload)).await?;
 
     on_progress(UpdateProgress::Installing);
-    let binary_bytes = extract_binary_bytes(asset_name, &payload)?;
-
-    let target_path = resolve_install_target()?;
-    atomic_replace_executable(&target_path, &binary_bytes)?;
-
-    Ok(target_path)
+    let asset = asset_name.to_string();
+    off_runtime(move || {
+        let binary_bytes = extract_binary_bytes(&asset, &payload)?;
+        let target_path = resolve_install_target()?;
+        atomic_replace_executable(&target_path, &binary_bytes)?;
+        Ok(target_path)
+    })
+    .await
 }
 
 /// The size a server declares reserves memory only up to this: a wrong
@@ -788,6 +801,10 @@ mod tests {
         assert_eq!(expected_checksum(stable, "flashagent-v1.0.0.b400-linux-x86_64.tar.gz").as_deref(), Some("beef"));
         assert_eq!(expected_checksum(stable, "flashagent-v1.0.0+b400-linux-x86_64.tar.gz").as_deref(), Some("beef"));
         assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert!(check_checksum("a", b"abc", Some(abc)).is_ok());
+        assert!(check_checksum("a", b"abd", Some(abc)).is_err(), "a changed download passed");
+        assert!(check_checksum("a", b"anything", None).is_ok(), "a release without a manifest");
     }
 
     #[test]
