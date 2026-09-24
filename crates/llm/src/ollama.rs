@@ -39,6 +39,10 @@ const KEEP_ALIVE: &str = "30m";
 /// `/api/show` for each installed model, a few at a time.
 const SHOW_CONCURRENCY: usize = 4;
 
+/// Models that refused `tools` on this server, as (root, model): their tools
+/// go in the prompt from then on (see `text_tools`).
+static NO_TOOLS: LazyLock<Mutex<std::collections::HashSet<(String, String)>>> = LazyLock::new(Default::default);
+
 /// The server's root: the address may be given with `/api` (or `/v1`) after it.
 fn root(client: &Client) -> String {
     let base = client.base_url();
@@ -57,20 +61,27 @@ pub(crate) async fn stream(
     let headers = crate::openai::headers(client);
     let mut body = body(client, messages, tools, options);
     let mut resp = client.post(&url, &headers, &body).await?;
-    if !resp.status().is_success() {
+    // A model refuses `think` or `tools` outright if it cannot take them, one
+    // refusal at a time; each is known from then on.
+    for _ in 0..2 {
+        if resp.status().is_success() {
+            break;
+        }
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
-        // A model that cannot think refuses `think` outright. Known from then on.
-        let refused_thinking = status == 400 && text.contains("does not support thinking");
-        if !refused_thinking || body.as_object_mut().and_then(|b| b.remove("think")).is_none() {
+        if status == 400 && text.contains("does not support thinking") && body.as_object_mut().and_then(|b| b.remove("think")).is_some() {
+            client.set_profile(no_thinking());
+        } else if status == 400 && text.contains("does not support tools") && body.get("tools").is_some() {
+            NO_TOOLS.lock().insert((root(client), client.model()));
+            body = self::body(client, messages, tools, options);
+        } else {
             return Err(LlmError::Status { status, body: text });
         }
-        client.set_profile(no_thinking());
         resp = client.post(&url, &headers, &body).await?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            return Err(LlmError::Status { status, body: resp.text().await.unwrap_or_default() });
-        }
+    }
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        return Err(LlmError::Status { status, body: resp.text().await.unwrap_or_default() });
     }
     Ok(pump(resp, busy, Decoder::default()))
 }
@@ -96,6 +107,14 @@ fn body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: 
     set("min_p", options.min_p.map(Value::from));
     set("num_predict", options.max_tokens.map(Value::from));
 
+    let in_text = !tools.is_empty() && !takes_tools(client, &model);
+    let flattened;
+    let messages = if in_text {
+        flattened = crate::text_tools::flatten(messages, tools);
+        &flattened[..]
+    } else {
+        messages
+    };
     let mut body = json!({
         "model": model,
         "messages": messages_json(messages),
@@ -103,7 +122,7 @@ fn body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: 
         "keep_alive": KEEP_ALIVE,
         "options": opts,
     });
-    if !tools.is_empty() {
+    if !tools.is_empty() && !in_text {
         body["tools"] = crate::openai::tools_json(tools);
     }
     if let Some(think) = think(client, messages, options) {
@@ -112,13 +131,19 @@ fn body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: 
     body
 }
 
+/// False for a model the server lists without the `tools` capability, or one
+/// that refused them: Ollama answers 400 to a request that carries tools.
+fn takes_tools(client: &Client, model: &str) -> bool {
+    let listed = client.discovery().and_then(|d| d.model(model).map(|m| m.supports_tools));
+    listed.unwrap_or(true) && !NO_TOOLS.lock().contains(&(root(client), model.to_string()))
+}
+
 /// The context chosen for the model when the server was looked at; the same
 /// on every request, since a change reloads the model.
 fn num_ctx(client: &Client, model: &str) -> usize {
     client
         .discovery()
-        .and_then(|d| d.models.into_iter().chain(d.active_model).find(|m| m.id == model))
-        .and_then(|m| m.context_length)
+        .and_then(|d| d.model(model).and_then(|m| m.context_length))
         .or(client.endpoint().context_window)
         .unwrap_or(DEFAULT_NUM_CTX)
 }
@@ -457,7 +482,7 @@ async fn show(client: &Client, root: &str, headers: &reqwest::header::HeaderMap,
 
 /// The installed models (`/api/tags`), which are loaded and with what context
 /// (`/api/ps`), and what each can do (`/api/show`).
-pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
+pub(crate) async fn discover(client: &Client, generation: u64) -> Option<ServerDiscovery> {
     let root = root(client);
     let headers = crate::openai::headers(client);
     let timeout = Duration::from_secs(2);
@@ -528,17 +553,7 @@ pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
             })
         })
         .collect();
-    // Ollama loads any installed model on demand, so the model the user chose
-    // stays chosen; preferring a loaded one would undo a pick at the next look.
-    let current = client.model();
-    let chosen = models.iter().find(|m| m.id == current || m.id == format!("{current}:latest")).cloned();
-    let mut disc = client.settle_discovery(models, ServerKind::Ollama)?;
-    if let Some(chosen) = chosen.filter(|c| disc.active_model.as_ref().is_none_or(|a| a.id != c.id)) {
-        client.set_model(&chosen.id);
-        disc.active_model = Some(chosen);
-        client.adopt_discovery(&disc);
-    }
-    Some(disc)
+    client.settle_discovery(generation, models, ServerKind::Ollama, None)
 }
 
 #[cfg(test)]
@@ -592,7 +607,7 @@ mod tests {
     #[test]
     fn a_turn_is_sent_the_way_ollama_reads_it() {
         let llm = client("http://localhost:11434", "qwen3:8b");
-        llm.settle_discovery(vec![model("qwen3:8b", 40_960)], ServerKind::Ollama);
+        llm.settle_discovery(0, vec![model("qwen3:8b", 40_960)], ServerKind::Ollama, None);
         let mut user = ChatMessage::user("what is on screen?");
         user.images.push("data:image/png;base64,iVBORw0KGgo=".into());
         let mut assistant = ChatMessage::assistant("");
@@ -975,6 +990,50 @@ mod tests {
         let (url, _) = test_server::serve(|_| ("404 Not Found", "application/json", r#"{"error":"model \"nope\" not found, try pulling it first"}"#.into())).await;
         let err = client(&url, "nope").stream(&[ChatMessage::user("hi")], &[]).await.err().expect("an error");
         assert!(matches!(err, LlmError::Status { status: 404, ref body } if body.contains("try pulling it")), "{err}");
+    }
+
+    fn spec(name: &str) -> ToolSpec {
+        ToolSpec { name: name.into(), description: format!("{name} it."), parameters_json: r#"{"type":"object"}"#.into() }
+    }
+
+    #[tokio::test]
+    async fn a_model_that_refuses_tools_gets_them_in_its_prompt() {
+        let (url, log) = test_server::serve(|req| {
+            if req.json().get("tools").is_some() {
+                ("400 Bad Request", "application/json", r#"{"error":"registry.ollama.ai/library/gemma3:latest does not support tools"}"#.into())
+            } else {
+                ("200 OK", "application/x-ndjson", r#"{"message":{"role":"assistant","content":"<tool_call>{\"name\":\"read_file\",\"arguments\":{}}</tool_call>"},"done":true,"done_reason":"stop"}"#.into())
+            }
+        })
+        .await;
+        let llm = client(&url, "gemma3:latest");
+        let history = [ChatMessage::system("You are an agent."), ChatMessage::user("read it")];
+        for _ in 0..2 {
+            let events: Vec<LlmEvent> = llm.stream(&history, &[spec("read_file")]).await.unwrap().map(|e| e.unwrap()).collect().await;
+            assert!(matches!(&events[0], LlmEvent::TextDelta(t) if t.starts_with("<tool_call>")), "{events:?}");
+        }
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 3, "refused once, then known");
+        let last = log.last().unwrap().json();
+        assert!(last.get("tools").is_none());
+        let system = last["messages"][0]["content"].as_str().unwrap();
+        assert!(system.starts_with("You are an agent.\n\n# Tools") && system.contains("## read_file"), "{system}");
+    }
+
+    #[tokio::test]
+    async fn a_model_listed_without_tools_never_gets_the_field() {
+        let (url, log) = test_server::serve(|_| ("200 OK", "application/x-ndjson", r#"{"message":{"role":"assistant","content":"ok"},"done":true}"#.into())).await;
+        let llm = client(&url, "llava:7b");
+        let mut listed = model("llava:7b", 8192);
+        listed.supports_tools = false;
+        llm.settle_discovery(0, vec![listed, model("qwen3:8b", 40_960)], ServerKind::Ollama, None);
+        let _: Vec<_> = llm.stream(&[ChatMessage::user("hi")], &[spec("read_file")]).await.unwrap().collect().await;
+        llm.set_model("qwen3:8b");
+        let _: Vec<_> = llm.stream(&[ChatMessage::user("hi")], &[spec("read_file")]).await.unwrap().collect().await;
+        let log = log.lock().unwrap();
+        assert!(log[0].json().get("tools").is_none(), "the listed capability was ignored");
+        assert_eq!(log[0].json()["messages"][0]["role"], "system");
+        assert!(log[1].json().get("tools").is_some(), "a model that takes tools gets them natively");
     }
 
     #[test]

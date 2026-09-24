@@ -1,41 +1,33 @@
 ---
 name: Bug Report
-about: Create a report to help us improve FlashAgent
+about: Something in FlashAgent does not work as it should
 title: "[BUG] "
 labels: bug
 assignees: ''
 ---
 
-### Describe the Bug
-A clear and concise description of what the bug is.
+### What happened
 
-### To Reproduce
-Steps to reproduce the behavior:
-1. Run FlashAgent with `...`
-2. Connect to backend `...` (LM Studio, Ollama, OpenAI, etc.)
-3. Send prompt / trigger tool `...`
-4. See error
+### Steps to reproduce
+1. Run `flashagent ...`
+2. Provider and model: ...
+3. Prompt or key pressed: ...
 
-### Expected Behavior
-A clear and concise description of what you expected to happen.
+### What you expected
 
-### Environment & System Info
- - **OS**: (e.g. Ubuntu 24.04, Windows 11, macOS Sequoia)
- - **Terminal**: (e.g. Alacritty, Kitty, Windows Terminal, iTerm2)
- - **FlashAgent Version**: (output of `flashagent --version`; for a source build, the git commit SHA)
- - **LLM Backend**: (e.g. LM Studio v0.3.x, Ollama 0.4.x, vLLM, OpenRouter)
- - **Active Model**: (e.g. Qwen2.5-Coder-32B, DeepSeek-R1-Distill, Llama-3.3-70B)
- - **Permission Mode**: (Planning, Manual, Accept Edits, Accept All, or during `/goal`)
+### Environment
+- **OS**: (e.g. Ubuntu 24.04, Windows 11, macOS 15)
+- **Terminal**: (e.g. Windows Terminal, Kitty, iTerm2)
+- **FlashAgent version**: `flashagent --version`, or the commit for a source build
+- **Server**: (e.g. LM Studio 0.3.x, Ollama 0.11, vLLM, a cloud API)
+- **Model**:
+- **Permission mode**: Planning, Manual, Accept Edits, Accept All, or during `/goal`
 
-### Tool Test Output
-If the bug involves tool calls, paste the output of `flashagent --tool-test` for the model you were using:
+### Tool test
+If tool calls are involved, the output of `flashagent --tool-test` for that model:
 
 ```
 (paste here)
 ```
 
-### Logs / Screenshots
-If applicable, add screenshots, terminal recordings, or relevant log excerpts to help explain the problem.
-
-### Additional Context
-Add any other context about the problem here (e.g. thinking effort level, context length).
+### Screenshots, recordings or logs

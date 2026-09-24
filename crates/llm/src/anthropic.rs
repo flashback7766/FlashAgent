@@ -1035,7 +1035,7 @@ async fn models_page(client: &Client, base: &str, url: &str) -> Option<Value> {
     Some(page)
 }
 
-pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
+pub(crate) async fn discover(client: &Client, generation: u64) -> Option<ServerDiscovery> {
     client.api_key()?;
     let base = client.base_url();
     let first = format!("{}/v1/models?limit=1000", root(&base));
@@ -1051,7 +1051,7 @@ pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
             None => break,
         }
     }
-    client.settle_discovery(models, ServerKind::Anthropic)
+    client.settle_discovery(generation, models, ServerKind::Anthropic, None)
 }
 
 #[cfg(test)]

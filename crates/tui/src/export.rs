@@ -9,7 +9,7 @@ const RESULT_CHARS: usize = 2000;
 pub(crate) fn conversation_markdown(history: &[ChatMessage], session_id: &str, model: &str, cwd: &str) -> String {
     let title = history
         .iter()
-        .find(|m| m.role == flashagent_llm::Role::User)
+        .find(|m| flashagent_core::is_prompt(m))
         .map(|m| extract_user_prompt(&m.content).lines().next().unwrap_or_default().trim().to_string())
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| "FlashAgent session".to_string());
@@ -20,6 +20,8 @@ pub(crate) fn conversation_markdown(history: &[ChatMessage], session_id: &str, m
     for m in history {
         match m.role {
             flashagent_llm::Role::System => {}
+            // A tool's picture, a task's notice or a nudge from the loop.
+            flashagent_llm::Role::User if !flashagent_core::is_prompt(m) => {}
             flashagent_llm::Role::User => {
                 md.push_str("---\n\n## You\n\n");
                 let prompt = extract_user_prompt(&m.content);
@@ -108,6 +110,15 @@ mod tests {
     fn a_result_with_backticks_cannot_break_out_of_its_fence() {
         let md = conversation_markdown(&conversation(), "s", "m", "~");
         assert!(md.contains("````\nsrc/\n```\nREADME.md\n````"), "{md}");
+    }
+
+    #[test]
+    fn what_the_loop_sent_in_the_user_s_name_is_not_exported_as_theirs() {
+        let mut history = conversation();
+        history.insert(3, ChatMessage::user("[Image opened by view_image and shown below — it is the result of that call, not a new request.]"));
+        let md = conversation_markdown(&history, "s", "m", "~");
+        assert_eq!(md.matches("## You").count(), 1, "{md}");
+        assert!(!md.contains("Image opened by"), "{md}");
     }
 
     #[test]

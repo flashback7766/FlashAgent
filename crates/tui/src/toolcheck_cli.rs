@@ -1,5 +1,18 @@
 use super::*;
 
+/// A client for `model` that knows what the server says about it, as the
+/// app's does: whether it takes tools, how it thinks, its context. Without
+/// that, a model that takes no tools met its first scenario with a refusal
+/// the app never sends it. Discovery may settle on the loaded model, so the
+/// one under test is chosen again after it.
+async fn client_for(endpoint: &flashagent_llm::Endpoint, model: &str) -> BackendSource {
+    let source = BackendSource(flashagent_llm::Client::new(endpoint.clone(), model));
+    if source.discover_server().await.is_some() {
+        source.0.set_model(model);
+    }
+    source
+}
+
 /// Once, right after setup.
 pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
     // Without a server every probe fails, and the verdict would blame the model.
@@ -13,7 +26,7 @@ pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
         ));
     }
     println!("\nChecking whether {model} can drive tools…");
-    let source = BackendSource(flashagent_llm::Client::new(endpoint.clone(), model));
+    let source = client_for(&endpoint, model).await;
     let report = flashagent_core::toolcheck::check_model(
         &source,
         model,
@@ -68,7 +81,7 @@ pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool) -> 
     let mut reports = Vec::new();
     for model in &models {
         println!("\n{model}");
-        let source = BackendSource(flashagent_llm::Client::new(endpoint.clone(), model));
+        let source = client_for(&endpoint, model).await;
         let report = flashagent_core::toolcheck::check_model(&source, model, timeout).await;
         for line in report.lines() {
             println!("{line}");

@@ -1,24 +1,19 @@
 ---
 name: Feature Request
-about: Suggest an idea or enhancement for FlashAgent
+about: Suggest something FlashAgent should do
 title: "[FEATURE] "
 labels: enhancement
 assignees: ''
 ---
 
-### Is your feature request related to a problem? Please describe.
-A clear and concise description of what the problem is. Ex. "I'm always frustrated when [...]"
+### The problem
+What you are trying to do, and what gets in the way.
 
-### Describe the solution you'd like
-A clear and concise description of what you want to happen.
+### What you would like
 
-### Describe alternatives you've considered
-A clear and concise description of any alternative solutions or features you've considered.
+### Other ways you considered
 
-### Does this align with FlashAgent Philosophy?
-- [ ] Local-first by default (no cloud dependencies required)
-- [ ] No Electron / webview bloat (native Rust performance)
-- [ ] Tool calling reliability over feature bloat
-
-### Additional context
-Add any other context, mockups, or screenshots about the feature request here.
+### Fit with [PHILOSOPHY.md](../../PHILOSOPHY.md)
+- [ ] Works with local models; needs no cloud service
+- [ ] Needs no Electron or web view
+- [ ] Does not make tool calling less reliable

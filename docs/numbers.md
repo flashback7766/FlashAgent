@@ -70,10 +70,12 @@ that is a fifth of a 60 Hz frame.
 
 ## Tests
 
+Counted 2026-09-24.
+
 | What | Count |
 |---|---:|
-| Tests in the workspace (`cargo test --workspace`) | 791 |
-| Of those, the real binary in a pseudo-terminal (`crates/tui/tests/scenarios.rs`) | 74 |
+| Tests in the workspace (`cargo test --workspace`) | 1,077 |
+| Of those, the real binary in a pseudo-terminal (`crates/tui/tests/scenarios.rs`) | 91 |
 | Every built-in tool called for real (`crates/tools/tests/every_tool.rs`) | 14 |
 | Ignored: diagnostics that print screens, measurements, tests that need the internet | 11 |
 
