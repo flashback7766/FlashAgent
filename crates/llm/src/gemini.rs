@@ -530,8 +530,13 @@ fn why_blocked(reason: &str) -> &'static str {
 }
 
 /// `GET /models`, every page. Needs the key: Google lists nothing without one.
-pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
+pub(crate) async fn discover(client: &Client, generation: u64) -> Option<ServerDiscovery> {
     client.api_key()?;
+    // A model saved under the listing's long name is the same model.
+    let current = client.model();
+    if current.starts_with("models/") {
+        client.set_model(short_name(&current));
+    }
     let headers = headers(client);
     let list_url = format!("{}/models", api_root(&client.base_url()));
     let mut listed = Vec::new();
@@ -552,12 +557,7 @@ pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
         }
     }
     let models = chat_models(&json!({ "models": listed }));
-    // A model saved under the listing's long name is the same model.
-    let current = client.model();
-    if current.starts_with("models/") {
-        client.set_model(short_name(&current));
-    }
-    client.settle_discovery(models, ServerKind::Gemini)
+    client.settle_discovery(generation, models, ServerKind::Gemini, None)
 }
 
 /// Named the short way, as people write them. Models that only speak or

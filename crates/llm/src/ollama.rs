@@ -457,7 +457,7 @@ async fn show(client: &Client, root: &str, headers: &reqwest::header::HeaderMap,
 
 /// The installed models (`/api/tags`), which are loaded and with what context
 /// (`/api/ps`), and what each can do (`/api/show`).
-pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
+pub(crate) async fn discover(client: &Client, generation: u64) -> Option<ServerDiscovery> {
     let root = root(client);
     let headers = crate::openai::headers(client);
     let timeout = Duration::from_secs(2);
@@ -528,17 +528,7 @@ pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
             })
         })
         .collect();
-    // Ollama loads any installed model on demand, so the model the user chose
-    // stays chosen; preferring a loaded one would undo a pick at the next look.
-    let current = client.model();
-    let chosen = models.iter().find(|m| m.id == current || m.id == format!("{current}:latest")).cloned();
-    let mut disc = client.settle_discovery(models, ServerKind::Ollama)?;
-    if let Some(chosen) = chosen.filter(|c| disc.active_model.as_ref().is_none_or(|a| a.id != c.id)) {
-        client.set_model(&chosen.id);
-        disc.active_model = Some(chosen);
-        client.adopt_discovery(&disc);
-    }
-    Some(disc)
+    client.settle_discovery(generation, models, ServerKind::Ollama, None)
 }
 
 #[cfg(test)]
@@ -592,7 +582,7 @@ mod tests {
     #[test]
     fn a_turn_is_sent_the_way_ollama_reads_it() {
         let llm = client("http://localhost:11434", "qwen3:8b");
-        llm.settle_discovery(vec![model("qwen3:8b", 40_960)], ServerKind::Ollama);
+        llm.settle_discovery(0, vec![model("qwen3:8b", 40_960)], ServerKind::Ollama, None);
         let mut user = ChatMessage::user("what is on screen?");
         user.images.push("data:image/png;base64,iVBORw0KGgo=".into());
         let mut assistant = ChatMessage::assistant("");

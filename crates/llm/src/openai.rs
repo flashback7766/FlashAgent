@@ -445,7 +445,7 @@ pub(crate) fn tools_json(tools: &[ToolSpec]) -> serde_json::Value {
 /// Google's own list beside its compatible endpoint
 /// (`…/v1beta/openai` → `…/v1beta/models`), asked with Google's key header:
 /// it is the one that knows each model's context and whether it thinks.
-async fn discover_gemini(client: &Client) -> Option<ServerDiscovery> {
+async fn discover_gemini(client: &Client, generation: u64) -> Option<ServerDiscovery> {
     let base = client.base_url();
     let root = base.strip_suffix("/openai")?;
     if !root.contains("generativelanguage.googleapis.com") {
@@ -457,12 +457,12 @@ async fn discover_gemini(client: &Client) -> Option<ServerDiscovery> {
         headers.insert("x-goog-api-key", value);
     }
     let val = client.get_json(&url, &headers, Duration::from_secs(5)).await?;
-    apply_listing(client, &url, &val, None)
+    apply_listing(client, generation, &url, &val, None)
 }
 
 /// Tries LM Studio's `/api/v1/models` and `/api/v0/models`, then the standard `/models`.
-pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
-    if let Some(disc) = discover_gemini(client).await {
+pub(crate) async fn discover(client: &Client, generation: u64) -> Option<ServerDiscovery> {
+    if let Some(disc) = discover_gemini(client, generation).await {
         return Some(disc);
     }
     let base = api_base(client);
@@ -481,7 +481,7 @@ pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
     if let Some(url) = cached {
         if let (_, Some(val)) = probe(url.clone()).await {
             let extra = if url.ends_with("/api/v1/models") { probe(v0_url.clone()).await.1 } else { None };
-            if let Some(disc) = apply_listing(client, &url, &val, extra.as_ref()) {
+            if let Some(disc) = apply_listing(client, generation, &url, &val, extra.as_ref()) {
                 return Some(disc);
             }
         }
@@ -499,7 +499,7 @@ pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
     for (url, val) in &results {
         let Some(val) = val else { continue };
         let extra = if url.ends_with("/api/v1/models") { v0 } else { None };
-        if let Some(disc) = apply_listing(client, url, val, extra) {
+        if let Some(disc) = apply_listing(client, generation, url, val, extra) {
             return Some(disc);
         }
     }
@@ -510,6 +510,7 @@ pub(crate) async fn discover(client: &Client) -> Option<ServerDiscovery> {
 /// which knows things the newer one does not.
 fn apply_listing(
     client: &Client,
+    generation: u64,
     url: &str,
     val: &serde_json::Value,
     extra_v0: Option<&serde_json::Value>,
@@ -533,8 +534,7 @@ fn apply_listing(
     if models.is_empty() {
         return None;
     }
-    *client.working_models_url.write() = Some(url.to_string());
-    client.settle_discovery(models, kind)
+    client.settle_discovery(generation, models, kind, Some(url.to_string()))
 }
 
 /// The 1×1 is the control for the 64×64.
@@ -927,7 +927,7 @@ mod tests {
             { "id": "openai/gpt-4o-audio-preview", "context_length": 128000 },
             { "id": "openai/gpt-4o", "context_length": 128000 }
         ] });
-        let disc = apply_listing(&b, "https://openrouter.ai/api/v1/models", &listing, None).expect("discovered");
+        let disc = apply_listing(&b, 0, "https://openrouter.ai/api/v1/models", &listing, None).expect("discovered");
         assert_eq!(b.model(), "openai/gpt-4o");
         assert_eq!(disc.kind, crate::thinking::ServerKind::Other);
     }
@@ -1228,7 +1228,7 @@ mod tests {
             { "id": "openai/gpt-4o", "context_length": 128000, "architecture": { "input_modalities": ["text", "image"] },
               "supported_parameters": ["max_tokens", "tools"] }
         ] });
-        let disc = apply_listing(&b, "https://openrouter.ai/api/v1/models", &openrouter, None).unwrap();
+        let disc = apply_listing(&b, 0, "https://openrouter.ai/api/v1/models", &openrouter, None).unwrap();
         let r1 = &disc.models[0];
         assert!(r1.supports_tools && !r1.supports_vision && r1.context_length == Some(163840));
         assert_eq!(r1.thinking.protocol, ThinkingProtocol::ReasoningObject);
@@ -1237,14 +1237,14 @@ mod tests {
         assert!(gpt.supports_vision && gpt.thinking.is_unreported(), "no reasoning parameter: nothing claimed");
 
         let groq = serde_json::json!({ "object": "list", "data": [ { "id": "llama-3.3-70b-versatile", "owned_by": "Meta", "context_window": 131072, "active": true } ] });
-        let disc = apply_listing(&client("https://api.groq.com/openai/v1", "m"), "https://api.groq.com/openai/v1/models", &groq, None).unwrap();
+        let disc = apply_listing(&client("https://api.groq.com/openai/v1", "m"), 0, "https://api.groq.com/openai/v1/models", &groq, None).unwrap();
         assert_eq!(disc.models[0].context_length, Some(131072));
 
         let mistral = serde_json::json!({ "object": "list", "data": [
             { "id": "mistral-embed", "capabilities": { "completion_chat": false, "function_calling": false }, "max_context_length": 8192 },
             { "id": "pixtral-large-latest", "capabilities": { "completion_chat": true, "function_calling": true, "vision": true }, "max_context_length": 131072 }
         ] });
-        let disc = apply_listing(&client("https://api.mistral.ai/v1", "m"), "https://api.mistral.ai/v1/models", &mistral, None).unwrap();
+        let disc = apply_listing(&client("https://api.mistral.ai/v1", "m"), 0, "https://api.mistral.ai/v1/models", &mistral, None).unwrap();
         assert_eq!(disc.models.len(), 1, "the embedding model is not offered for chat");
         assert!(disc.models[0].supports_tools && disc.models[0].supports_vision);
         assert_eq!(disc.models[0].max_context_length, Some(131072));
