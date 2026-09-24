@@ -401,6 +401,7 @@ impl App {
         cx.tools_arc.set_toolset_profile(self.config.toolset_profile);
         cx.tools_arc.set_web_enabled(self.config.web_tools);
         cx.source.0.set_max_retries(self.config.network_retries);
+        cx.source.0.set_user_sampling(self.config.sampling_preset == flashagent_core::config::SamplingPreset::Custom);
         if switching && !self.running {
             self.connect_active(cx);
         } else if !switching && !self.config.active_profile().model.is_empty() && self.config.active_profile().model != self.current_model {

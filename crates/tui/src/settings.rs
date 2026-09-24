@@ -193,7 +193,15 @@ impl SettingsView {
             ("Web tools", if self.config.web_tools { "Enabled (web_fetch, web_search)".into() } else { "Disabled".into() }),
             ("Network retries", format!("{} on connection failure", crate::plural(self.config.network_retries, "retry", "retries"))),
             // Last, and for those who know what the numbers do.
-            ("Sampling (advanced)", format!("{} · temperature {:.2}", self.config.sampling_preset.label(), self.config.temperature)),
+            ("Sampling (advanced)", {
+                // Mirrors `Client::set_user_sampling`: the presets are tuned for local models.
+                let maker_tuned = matches!(self.config.active_profile().protocol, flashagent_llm::ApiProtocol::Anthropic | flashagent_llm::ApiProtocol::Gemini);
+                if maker_tuned && self.config.sampling_preset != flashagent_core::SamplingPreset::Custom {
+                    format!("{} · {} chooses its own", self.config.sampling_preset.label(), self.config.active_profile().protocol.label())
+                } else {
+                    format!("{} · temperature {:.2}", self.config.sampling_preset.label(), self.config.temperature)
+                }
+            }),
         ],
         SettingsTab::Goal => vec![
             ("Step limit", match self.config.goal_max_steps {
