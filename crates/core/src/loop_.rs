@@ -203,7 +203,7 @@ impl AgentLoop {
         let mut stall_nudges: usize = 0;
         let mut promise_nudges: usize = 0;
         // A stalled scratchpad reply and the nudge answering it: sent with the next
-        // request only, never stored.
+        // request only, and stored only if the answer is bound to them.
         let mut transient: Vec<ChatMessage> = Vec::new();
         let mut turn_opts = self.config.base_turn_options.clone();
         let mut steer_rx = self.steer_rx.lock().unwrap_or_else(|p| p.into_inner()).take();
@@ -383,7 +383,7 @@ impl AgentLoop {
                 }
             }
 
-            transient.clear();
+            let sent_transient = std::mem::take(&mut transient);
 
             let assistant_msg = ChatMessage {
                 role: Role::Assistant,
@@ -395,7 +395,16 @@ impl AgentLoop {
                 replay,
             };
             let was_continuation = std::mem::take(&mut continuing);
-            let merge = was_continuation && history.last().is_some_and(|m| m.role == Role::Assistant);
+            // A server that signs its reasoning (Anthropic) binds it to the request
+            // as sent, nudge included. Stored without the nudge, or merged into the
+            // message it continued, the reply is refused on the next request and
+            // its reasoning, and all after it, is dropped. Such a reply keeps what
+            // it answered; elsewhere nudges never reach the history.
+            let bound = assistant_msg.replay.is_some() && !sent_transient.is_empty();
+            if bound {
+                history.extend(sent_transient);
+            }
+            let merge = !bound && was_continuation && history.last().is_some_and(|m| m.role == Role::Assistant);
             if merge {
                 if let Some(last) = history.last_mut() {
                     last.content.push_str(&assistant_msg.content);
@@ -437,7 +446,7 @@ impl AgentLoop {
                     transient = vec![ChatMessage::user(CONTINUE_NUDGE)];
                     continue;
                 }
-                if merge {
+                if was_continuation {
                     // The stall nudges below would discard the answer so far.
                     events(LoopEvent::Done(DoneReason::Completed));
                     return Ok((history, DoneReason::Completed));
@@ -586,12 +595,13 @@ const TOOL_PICTURE_OPENING: &str = "[Image opened by ";
 const TOOL_PICTURE_NOTE: &str = "it is the result of that call, not a new request.]";
 
 /// Something the user said, not the user-role message that carries a tool's
-/// picture or a background task's notice: finding "the last prompt" must skip
-/// those, or Ctrl+R answers a picture and a rewind takes back a turn too many.
+/// picture, a background task's notice or a nudge from the loop: finding "the
+/// last prompt" must skip those, or Ctrl+R answers a picture and a rewind
+/// takes back a turn too many.
 pub fn is_prompt(msg: &ChatMessage) -> bool {
-    msg.role == Role::User
-        && !(msg.content.starts_with(TOOL_PICTURE_OPENING) && msg.content.contains(TOOL_PICTURE_NOTE))
-        && !crate::task_notices::is_task_notice(&msg.content)
+    let tool_picture = msg.content.starts_with(TOOL_PICTURE_OPENING) && msg.content.contains(TOOL_PICTURE_NOTE);
+    let nudge = [STALL_NUDGE, PROMISE_NUDGE, CONTINUE_NUDGE].contains(&msg.content.as_str());
+    msg.role == Role::User && !tool_picture && !nudge && !crate::task_notices::is_task_notice(&msg.content)
 }
 
 /// 9 alphanumeric characters (Mistral chat templates insist on it), unique for
@@ -1711,6 +1721,39 @@ mod tests {
         assert_eq!(history[1].content, "The answer begins and ends here.");
         assert_eq!(shown, history[1].content, "what was shown is what was stored");
         assert!(history.iter().all(|m| m.content != CONTINUE_NUDGE), "the request to go on was stored");
+    }
+
+    fn signed(turn: MockTurn) -> MockTurn {
+        let mut events = turn.events;
+        events.insert(events.len() - 1, Ok(LlmEvent::Replay(serde_json::json!({ "protocol": "anthropic", "blocks": [] }))));
+        MockTurn { events }
+    }
+
+    #[test]
+    fn a_signed_continuation_is_stored_after_the_request_it_answered() {
+        let llm = MockLlm { turns: std::sync::Mutex::new(vec![cut_turn("The answer begins"), signed(text_turn(" and ends here."))]) };
+        let (history, done, shown) = run_showing(&llm);
+        assert_eq!(done, DoneReason::Completed);
+        let contents: Vec<&str> = history.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents[1..], ["The answer begins", CONTINUE_NUDGE, " and ends here."], "the signed reply must follow what it was sent");
+        assert_eq!(shown, "The answer begins and ends here.", "on screen it is still one answer");
+        assert_eq!(history.iter().filter(|m| is_prompt(m)).count(), 1, "the nudge is not something the user said");
+    }
+
+    #[test]
+    fn a_signed_answer_to_a_nudge_keeps_the_nudge_before_it() {
+        let promised = text_turn("I'll add a doc comment to the add function in src/lib.rs.");
+        let llm = RecordingLlm::new(vec![promised, signed(tool_turn("shell", "c1")), text_turn("Done.")]);
+        let tools = MockTools::new();
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let (history, done) = run_loop(&l, &llm, &tools, |_| {});
+        assert!(matches!(done, DoneReason::Completed));
+        let requests = llm.requests.lock().unwrap();
+        // Each request after the nudge begins with exactly what the signed reply answered.
+        let said = |msgs: &[ChatMessage]| msgs.iter().map(|m| (m.role, m.content.clone())).collect::<Vec<_>>();
+        assert!(said(&requests[2]).starts_with(&said(&requests[1])), "the history was rebuilt around the signed reply");
+        assert_eq!(history.iter().filter(|m| m.content == PROMISE_NUDGE).count(), 1);
+        assert!(!is_prompt(history.iter().find(|m| m.content == PROMISE_NUDGE).unwrap()));
     }
 
     #[test]

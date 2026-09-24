@@ -91,6 +91,16 @@ tool start and finish, usage) is emitted for the UI.
 Every tool call the model makes gets a result, including when the user
 cancels, because strict servers reject a history with an unanswered call.
 
+The loop nudges the model on its own at times: to go on with an answer cut
+off at the output limit, to answer instead of ending on a scratchpad, or to
+make a call it announced and did not make. A nudge goes out with one
+request and is not stored, and a continuation is merged into the answer it
+continues. A reply that carries signed state (Anthropic's thinking) is the
+exception: the signature is bound to the request as sent, so the nudge and
+what it answered stay in the history as they were. `core::is_prompt` tells
+such messages, like tool pictures and task notices, from what the user
+said.
+
 `run_shell` uses `sh` on Unix. On Windows it uses Git Bash when Git for
 Windows is installed, since models write Unix commands and cmd.exe runs
 none of them; otherwise cmd.exe, and the system prompt names the shell
