@@ -65,8 +65,12 @@ fn the_wizard_sets_up_a_custom_server_and_opens_the_app() {
     let config: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(home.config_path()).expect("the wizard saved a config")).unwrap();
     assert_eq!(config["setup_completed"], true);
-    assert_eq!(config["backend_url"], server.url.as_str());
-    assert_eq!(config["model"], MODEL);
+    let provider = &config["providers"][0];
+    assert_eq!(provider["url"], server.url.as_str(), "{config}");
+    assert_eq!(provider["protocol"], "openai", "{config}");
+    assert_eq!(provider["model"], MODEL, "{config}");
+    assert_eq!(config["active_provider"], provider["name"], "{config}");
+    assert!(config.get("backend_url").is_none(), "one place for the server: {config}");
 
     quit(&mut term);
 }

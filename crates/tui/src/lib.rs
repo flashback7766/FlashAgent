@@ -18,6 +18,7 @@ pub mod context_modal;
 pub mod goal;
 pub mod mcp_view;
 pub mod prefill;
+pub mod providers;
 pub mod sampling;
 pub mod screen;
 pub mod select;
@@ -46,6 +47,7 @@ pub use composer::{search_history, Composer, ComposerLayout, HistorySearch};
 pub use context_modal::ContextModal;
 pub use mcp_view::{McpModal, McpModalAction, McpViewTab};
 pub use prefill::{BucketStats, ContextBucket, ModelPrefillProfile, PrefillTracker};
+pub use providers::{ProvidersAction, ProvidersView};
 pub use sampling::{SamplingAction, SamplingView};
 pub use select::{ConfirmChoice, ConfirmSelect, SelectItem, SelectMenu};
 pub use settings::{SettingsAction, SettingsView};
@@ -72,6 +74,9 @@ pub enum UiEvent {
         result: Result<(Vec<ChatMessage>, DoneReason), (String, Vec<ChatMessage>)>,
     },
     ServerDiscovered(ServerDiscovery),
+    /// The client now talks to the provider at `url`, and this is what that
+    /// server said it runs; `None` if it did not answer.
+    ProviderReady { url: String, discovery: Option<ServerDiscovery> },
     /// Settings → "Run Tool Test".
     ToolTestResult(String),
     ImageCost { model: String, per_pixel: f32, fixed: f32 },
