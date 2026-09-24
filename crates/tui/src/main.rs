@@ -214,15 +214,33 @@ async fn startup_screens(config: &mut AppConfig, force_setup: bool) -> Option<bo
     Some(ran_setup)
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> Result<()> {
-    flashagent_svc::updater::remove_stale_backups_beside_exe();
-    let mut config = AppConfig::load();
-    let Some((force_setup, mut skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
+struct BackendStartup {
+    source: Arc<BackendSource>,
+    model: String,
+    context_display: Option<String>,
+    context_capacity: usize,
+    cwd_display: String,
+    cwd: std::path::PathBuf,
+    initial_effort: String,
+    available_models: Vec<String>,
+    first_run_verdict: Option<String>,
+    pending_discovery: Option<tokio::task::JoinHandle<Option<flashagent_llm::ServerDiscovery>>>,
+}
 
-    let Some(ran_setup) = startup_screens(&mut config, force_setup).await else { return Ok(()) };
+fn display_cwd(cwd: &std::path::Path) -> String {
+    let home_str = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    if !home_str.is_empty() {
+        cwd.strip_prefix(&home_str).map(|rel| {
+            let s = rel.to_string_lossy();
+            if s.is_empty() { "~".to_string() } else { format!("~/{}", s.trim_start_matches('/')) }
+        }).unwrap_or_else(|_| cwd.display().to_string())
+    } else {
+        cwd.display().to_string()
+    }
+}
+
+async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup: bool) -> Result<Option<BackendStartup>> {
     let mut first_run_verdict: Option<String> = None;
-
     let endpoint = config.endpoint();
     let url = endpoint.url.clone();
     let mut model = config.active_profile().model.clone();
@@ -248,7 +266,7 @@ async fn main() -> Result<()> {
         let action = flashagent_tui::startup::run_trust_screen(&mut cwd).await?;
         if action == flashagent_tui::StartupAction::Quit {
             discovery_task.abort();
-            return Ok(());
+            return Ok(None);
         }
         config.trust_directory(&cwd);
         let _ = config.save();
@@ -258,14 +276,14 @@ async fn main() -> Result<()> {
         // Whether the model can drive tools decides whether anything works. Asked
         // after the trust question, which is instant, so nobody waits for a check
         // before being asked where they are.
-        first_run_verdict = first_run_tool_check(&config).await;
+        first_run_verdict = first_run_tool_check(config).await;
     }
 
     // Leaked once so the spawned loop can hold &'static references; the process
     // is the session.
     let backend = flashagent_llm::Client::new(endpoint, &model);
     backend.set_max_retries(config.network_retries);
-    flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(&config));
+    flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(config));
     backend.set_user_sampling(config.sampling_preset == flashagent_core::config::SamplingPreset::Custom);
 
     let startup_timeout = if model.is_empty() {
@@ -330,21 +348,20 @@ async fn main() -> Result<()> {
         "auto".to_string()
     };
     let source: Arc<BackendSource> = Arc::new(BackendSource(backend));
-    let home_str = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
-    let cwd_display = if !home_str.is_empty() {
-        cwd.strip_prefix(&home_str)
-            .map(|rel| {
-                let s = rel.to_string_lossy();
-                if s.is_empty() {
-                    "~".to_string()
-                } else {
-                    format!("~/{}", s.trim_start_matches('/'))
-                }
-            })
-            .unwrap_or_else(|_| cwd.display().to_string())
-    } else {
-        cwd.display().to_string()
-    };
+    let cwd_display = display_cwd(&cwd);
+
+    Ok(Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, initial_effort, available_models, first_run_verdict, pending_discovery }))
+}
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+async fn main() -> Result<()> {
+    flashagent_svc::updater::remove_stale_backups_beside_exe();
+    let mut config = AppConfig::load();
+    let Some((force_setup, skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
+
+    let Some(ran_setup) = startup_screens(&mut config, force_setup).await else { return Ok(()) };
+    let Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, initial_effort, available_models, first_run_verdict, pending_discovery }) =
+        prepare_backend(&mut config, skip_trust, ran_setup).await? else { return Ok(()) };
 
     let gate = TuiGate::new();
     let question_gate = TuiQuestionGate::new();
