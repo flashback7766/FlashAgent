@@ -2,7 +2,7 @@
 //! endpoint, the model, what the server was found to support and refuse) and
 //! hands each request to the module for the protocol its endpoint speaks.
 
-use std::sync::atomic::{AtomicI8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,6 +29,10 @@ pub struct Client {
     /// Retries after a connection failure only. HTTP errors and mid-stream drops
     /// are not retried: the request may already have had effects.
     max_retries: AtomicUsize,
+    /// Sampling the user set by hand. Without it, APIs whose makers tune
+    /// their own models (Anthropic, Gemini) get none of the presets, which are
+    /// tuned for local models: Gemini 3 loops below temperature 1.0.
+    user_sampling: AtomicBool,
     /// Auto effort shift in presets, learned from this model's past turns.
     effort_bias: AtomicI8,
     /// Model requests not yet finished, streams included. Background polling
@@ -74,6 +78,7 @@ impl Client {
             discovery: RwLock::new(None),
             working_models_url: RwLock::new(None),
             max_retries: AtomicUsize::new(0),
+            user_sampling: AtomicBool::new(false),
             effort_bias: AtomicI8::new(0),
             in_flight: Arc::new(AtomicUsize::new(0)),
             learned: RwLock::default(),
@@ -125,6 +130,28 @@ impl Client {
 
     pub fn set_max_retries(&self, retries: usize) {
         self.max_retries.store(retries, Ordering::Relaxed);
+    }
+
+    /// True when the sampling was set by hand (the Custom preset): it then
+    /// goes to every server, not only to local ones.
+    pub fn set_user_sampling(&self, by_hand: bool) {
+        self.user_sampling.store(by_hand, Ordering::Relaxed);
+    }
+
+    /// What goes out with a request: the caller's options, without sampling
+    /// the provider should choose itself.
+    pub(crate) fn sampling_for_protocol(&self, options: &TurnOptions) -> TurnOptions {
+        let mut options = options.clone();
+        let tuned_by_maker = matches!(self.protocol(), ApiProtocol::Anthropic | ApiProtocol::Gemini);
+        if tuned_by_maker && !self.user_sampling.load(Ordering::Relaxed) {
+            options.temperature = None;
+            options.top_p = None;
+            options.top_k = None;
+            options.repeat_penalty = None;
+            options.presence_penalty = None;
+            options.min_p = None;
+        }
+        options
     }
 
     /// Only auto is affected; a preset the user picked by hand stays as is.
@@ -385,6 +412,7 @@ impl crate::LlmBackend for Client {
         tools: &[ToolSpec],
         options: &TurnOptions,
     ) -> Result<EventStream, LlmError> {
+        let options = &self.sampling_for_protocol(options);
         match self.protocol() {
             ApiProtocol::OpenAi => crate::openai::stream(self, messages, tools, options).await,
             ApiProtocol::Anthropic => crate::anthropic::stream(self, messages, tools, options).await,
@@ -429,6 +457,22 @@ mod tests {
         assert_eq!(llm.effort_bias(), 1);
         llm.set_effort_bias(0);
         assert_eq!(llm.effort_bias(), 0);
+    }
+
+    #[test]
+    fn a_maker_tuned_api_chooses_its_own_sampling_unless_the_user_set_it_by_hand() {
+        let options = TurnOptions { temperature: Some(0.6), top_p: Some(0.95), top_k: Some(20), min_p: Some(0.0), max_tokens: Some(100), ..Default::default() };
+        let llm = client("m");
+        assert_eq!(llm.sampling_for_protocol(&options), options, "local servers get the preset");
+        for protocol in [ApiProtocol::Anthropic, ApiProtocol::Gemini] {
+            llm.set_endpoint(Endpoint::new(protocol, "https://example.invalid", None));
+            let sent = llm.sampling_for_protocol(&options);
+            assert_eq!((sent.temperature, sent.top_p, sent.top_k, sent.min_p), (None, None, None, None), "{protocol}");
+            assert_eq!(sent.max_tokens, Some(100), "the output cap is not sampling");
+            llm.set_user_sampling(true);
+            assert_eq!(llm.sampling_for_protocol(&options), options, "{protocol}: set by hand, sent as set");
+            llm.set_user_sampling(false);
+        }
     }
 
     #[test]

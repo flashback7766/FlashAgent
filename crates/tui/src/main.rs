@@ -252,6 +252,7 @@ async fn main() -> Result<()> {
     // is the session.
     let backend = flashagent_llm::Client::new(endpoint, &model);
     backend.set_max_retries(config.network_retries);
+    backend.set_user_sampling(config.sampling_preset == flashagent_core::config::SamplingPreset::Custom);
 
     let startup_timeout = if model.is_empty() {
         std::time::Duration::from_millis(2000)
