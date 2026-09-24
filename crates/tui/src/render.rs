@@ -375,6 +375,131 @@ fn fit_status_row(width: usize, left: &str, provider: &str, gauge_str: &str) -> 
     status_row
 }
 
+fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameState<'_>, width: usize, inner_w: usize, border_color: &str) -> usize {
+    let req = gate.pending().expect("approval card needs a pending request");
+    let reset = "\x1b[0m";
+    // The composer becomes the approval card.
+    // Shows exactly what is approved, and never lets model-supplied escape codes
+    // restyle or hide part of it.
+    let args = flashagent_llm::effective_args(&req.args_json, &req.tool).unwrap_or_default();
+    let several_files = args.get("files").and_then(|f| f.as_array()).is_some_and(|f| f.len() > 1);
+    // A diff with nothing removed and nothing kept is a file that does not exist yet.
+    let new_file = req.diff.as_deref().is_some_and(|d| {
+        d.lines()
+            .filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ") && !l.starts_with("@@"))
+            .all(|l| l.starts_with('+'))
+    });
+    let question = match req.tool.as_str() {
+        "run_shell" => "Run this command?".to_string(),
+        "write_file" if new_file => "Create this file?".to_string(),
+        "edit_file" | "patch_file" | "write_file" if several_files => "Change these files?".to_string(),
+        "edit_file" | "patch_file" | "write_file" => "Change this file?".to_string(),
+        tool => format!("Allow {tool}?"),
+    };
+    let title = format!(" \x1b[1;38;2;225;175;95m{question}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m ", req.tool);
+    let dash_w = inner_w.saturating_sub(visible_width(&title) + 1);
+    tail.push((
+        LineKind::System,
+        format!("{border_color}╭─{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
+    ));
+
+    let field = |k: &str| args.get(k).and_then(|v| v.as_str()).map(card_safe);
+    let label_row = |label: &str, value: &str| {
+        pad_box_row(
+            &format!(" \x1b[38;2;160;155;145m{label}\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m", clip_ansi(value, inner_w.saturating_sub(label.len() + 4))),
+            width,
+        )
+    };
+    // The same budget label_row clips to, for the widest label: rows of
+    // any other width lost their ends.
+    let value_w = inner_w.saturating_sub(12).max(1);
+    let (label, value): (&str, String) = if let Some(cmd) = field("command") {
+        ("command:", cmd)
+    } else if let Some(path) = field("path") {
+        ("target:", flashagent_tui::relative_to_cwd(&path))
+    } else if let Some(files) = args.get("files").and_then(|f| f.as_array()) {
+        if let Some(first_path) = files.first().and_then(|f| f.get("path").or_else(|| f.get("filePath"))).and_then(|p| p.as_str()) {
+            let extra = if files.len() > 1 { format!(" (+{} more)", files.len() - 1) } else { String::new() };
+            ("target:", format!("{}{extra}", flashagent_tui::relative_to_cwd(first_path)))
+        } else if args.as_object().is_some_and(|o| !o.is_empty()) {
+            ("args:", card_safe(&args.to_string()))
+        } else {
+            ("", String::new())
+        }
+    } else if args.as_object().is_some_and(|o| !o.is_empty()) {
+        ("args:", card_safe(&args.to_string()))
+    } else {
+        ("", String::new())
+    };
+    for (i, row) in card_rows(&value, value_w, 6).iter().enumerate() {
+        tail.push((LineKind::System, label_row(if i == 0 { label } else { "        " }, row)));
+    }
+
+    if let Some(ref diff) = req.diff {
+        // The file is named on the target row; the preview rows are for the change.
+        let changed: Vec<&str> = diff
+            .lines()
+            .filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ") && !l.starts_with("@@"))
+            .collect();
+        for line in changed.iter().take(6) {
+            let (color, prefix) = if line.starts_with('+') {
+                ("\x1b[38;2;145;205;140m", "+")
+            } else if line.starts_with('-') {
+                ("\x1b[38;2;225;115;105m", "-")
+            } else {
+                ("\x1b[38;2;135;130;125m", " ")
+            };
+            // Only the diff's own marker goes: the indentation is part of the change.
+            // A note above the diff ("outside the project: ...") has none.
+            let body = match line.as_bytes().first() {
+                Some(b'+' | b'-' | b' ') => &line[1..],
+                _ => line,
+            };
+            // Shown, never executed: an escape in the new text must not hide part of it.
+            let line_clean = card_safe(&body.replace('\t', "    "));
+            let line_clipped = clip_ansi(&line_clean, inner_w.saturating_sub(6));
+            tail.push((
+                LineKind::System,
+                pad_box_row(&format!("  {color}{prefix} {line_clipped}\x1b[0m"), width),
+            ));
+        }
+        if changed.len() > 6 {
+            let more = flashagent_tui::plural(changed.len() - 6, "more line", "more lines");
+            tail.push((LineKind::System, pad_box_row(&format!("    \x1b[38;2;100;95;90m+{more}\x1b[0m"), width)));
+        }
+    }
+
+    // The keys are on the hint line under the card.
+    let button = |label: &str, choice: ConfirmChoice| {
+        if st.confirm_selection == choice {
+            let bg = if choice == ConfirmChoice::Deny { "225;115;105" } else { "225;175;95" };
+            format!("\x1b[1;38;2;30;26;22;48;2;{bg}m {label} \x1b[0m")
+        } else {
+            format!("\x1b[38;2;190;185;175m {label} \x1b[0m")
+        }
+    };
+    tail.push((LineKind::System, pad_box_row(" ", width)));
+    tail.push((
+        LineKind::System,
+        pad_box_row(
+            &format!(
+                " {}  {}  {}",
+                button("Allow", ConfirmChoice::Allow),
+                button("Always allow", ConfirmChoice::Always),
+                button("Deny", ConfirmChoice::Deny)
+            ),
+            width,
+        ),
+    ));
+
+    let input_line_idx = tail.len();
+    tail.push((
+        LineKind::System,
+        format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
+    ));
+    input_line_idx
+}
+
 impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn frame(
@@ -442,126 +567,8 @@ impl Renderer {
         // Where the user types, when they type into the composer.
         let mut text_cursor: Option<u16> = None;
 
-        if let Some(req) = gate.pending() {
-            // The composer becomes the approval card.
-            // Shows exactly what is approved, and never lets model-supplied escape codes
-            // restyle or hide part of it.
-            let args = flashagent_llm::effective_args(&req.args_json, &req.tool).unwrap_or_default();
-            let several_files = args.get("files").and_then(|f| f.as_array()).is_some_and(|f| f.len() > 1);
-            // A diff with nothing removed and nothing kept is a file that does not exist yet.
-            let new_file = req.diff.as_deref().is_some_and(|d| {
-                d.lines()
-                    .filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ") && !l.starts_with("@@"))
-                    .all(|l| l.starts_with('+'))
-            });
-            let question = match req.tool.as_str() {
-                "run_shell" => "Run this command?".to_string(),
-                "write_file" if new_file => "Create this file?".to_string(),
-                "edit_file" | "patch_file" | "write_file" if several_files => "Change these files?".to_string(),
-                "edit_file" | "patch_file" | "write_file" => "Change this file?".to_string(),
-                tool => format!("Allow {tool}?"),
-            };
-            let title = format!(" \x1b[1;38;2;225;175;95m{question}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m ", req.tool);
-            let dash_w = inner_w.saturating_sub(visible_width(&title) + 1);
-            tail.push((
-                LineKind::System,
-                format!("{border_color}╭─{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
-            ));
-
-            let field = |k: &str| args.get(k).and_then(|v| v.as_str()).map(card_safe);
-            let label_row = |label: &str, value: &str| {
-                pad_box_row(
-                    &format!(" \x1b[38;2;160;155;145m{label}\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m", clip_ansi(value, inner_w.saturating_sub(label.len() + 4))),
-                    width,
-                )
-            };
-            // The same budget label_row clips to, for the widest label: rows of
-            // any other width lost their ends.
-            let value_w = inner_w.saturating_sub(12).max(1);
-            let (label, value): (&str, String) = if let Some(cmd) = field("command") {
-                ("command:", cmd)
-            } else if let Some(path) = field("path") {
-                ("target:", flashagent_tui::relative_to_cwd(&path))
-            } else if let Some(files) = args.get("files").and_then(|f| f.as_array()) {
-                if let Some(first_path) = files.first().and_then(|f| f.get("path").or_else(|| f.get("filePath"))).and_then(|p| p.as_str()) {
-                    let extra = if files.len() > 1 { format!(" (+{} more)", files.len() - 1) } else { String::new() };
-                    ("target:", format!("{}{extra}", flashagent_tui::relative_to_cwd(first_path)))
-                } else if args.as_object().is_some_and(|o| !o.is_empty()) {
-                    ("args:", card_safe(&args.to_string()))
-                } else {
-                    ("", String::new())
-                }
-            } else if args.as_object().is_some_and(|o| !o.is_empty()) {
-                ("args:", card_safe(&args.to_string()))
-            } else {
-                ("", String::new())
-            };
-            for (i, row) in card_rows(&value, value_w, 6).iter().enumerate() {
-                tail.push((LineKind::System, label_row(if i == 0 { label } else { "        " }, row)));
-            }
-
-            if let Some(ref diff) = req.diff {
-                // The file is named on the target row; the preview rows are for the change.
-                let changed: Vec<&str> = diff
-                    .lines()
-                    .filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ") && !l.starts_with("@@"))
-                    .collect();
-                for line in changed.iter().take(6) {
-                    let (color, prefix) = if line.starts_with('+') {
-                        ("\x1b[38;2;145;205;140m", "+")
-                    } else if line.starts_with('-') {
-                        ("\x1b[38;2;225;115;105m", "-")
-                    } else {
-                        ("\x1b[38;2;135;130;125m", " ")
-                    };
-                    // Only the diff's own marker goes: the indentation is part of the change.
-                    // A note above the diff ("outside the project: ...") has none.
-                    let body = match line.as_bytes().first() {
-                        Some(b'+' | b'-' | b' ') => &line[1..],
-                        _ => line,
-                    };
-                    // Shown, never executed: an escape in the new text must not hide part of it.
-                    let line_clean = card_safe(&body.replace('\t', "    "));
-                    let line_clipped = clip_ansi(&line_clean, inner_w.saturating_sub(6));
-                    tail.push((
-                        LineKind::System,
-                        pad_box_row(&format!("  {color}{prefix} {line_clipped}\x1b[0m"), width),
-                    ));
-                }
-                if changed.len() > 6 {
-                    let more = flashagent_tui::plural(changed.len() - 6, "more line", "more lines");
-                    tail.push((LineKind::System, pad_box_row(&format!("    \x1b[38;2;100;95;90m+{more}\x1b[0m"), width)));
-                }
-            }
-
-            // The keys are on the hint line under the card.
-            let button = |label: &str, choice: ConfirmChoice| {
-                if st.confirm_selection == choice {
-                    let bg = if choice == ConfirmChoice::Deny { "225;115;105" } else { "225;175;95" };
-                    format!("\x1b[1;38;2;30;26;22;48;2;{bg}m {label} \x1b[0m")
-                } else {
-                    format!("\x1b[38;2;190;185;175m {label} \x1b[0m")
-                }
-            };
-            tail.push((LineKind::System, pad_box_row(" ", width)));
-            tail.push((
-                LineKind::System,
-                pad_box_row(
-                    &format!(
-                        " {}  {}  {}",
-                        button("Allow", ConfirmChoice::Allow),
-                        button("Always allow", ConfirmChoice::Always),
-                        button("Deny", ConfirmChoice::Deny)
-                    ),
-                    width,
-                ),
-            ));
-
-            input_line_idx = tail.len();
-            tail.push((
-                LineKind::System,
-                format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
-            ));
+        if gate.pending().is_some() {
+            input_line_idx = append_approval_card(&mut tail, gate, &st, width, inner_w, &border_color);
         } else if let Some(prompt) = st.channel_prompt {
             let title = format!(" {} ", st.prompt_title);
             let title = title.as_str();
