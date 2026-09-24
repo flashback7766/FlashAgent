@@ -30,6 +30,21 @@ const THINKING_RETRIES: u8 = 2;
 /// A page holds 1000 models; no real listing comes near this.
 const MAX_PAGES: usize = 10;
 
+/// What a model refused outright (Gemma: function declarations, a system
+/// instruction), by address and model, so it is not sent to it again.
+static REFUSED: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<(String, String, Refused)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Refused {
+    Tools,
+    SystemInstruction,
+}
+
+fn refused(client: &Client, model: &str, what: Refused) -> bool {
+    REFUSED.lock().contains(&(client.base_url(), model.to_string(), what))
+}
+
 fn headers(client: &Client) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     // A header, never `?key=`: addresses end up in logs and error messages.
@@ -86,13 +101,41 @@ pub(crate) async fn stream(
         }
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
-        if status == 400 && retries < THINKING_RETRIES && text.to_lowercase().contains("thinking") && think_less(client, &mut body) {
-            retries += 1;
-            continue;
+        let lower = text.to_lowercase();
+        let refusal = [("function calling is not enabled", "tools", Refused::Tools), ("developer instruction is not enabled", "systemInstruction", Refused::SystemInstruction)]
+            .into_iter()
+            .find(|(said, field, _)| lower.contains(said) && body.get(field).is_some());
+        if status == 400 && retries < THINKING_RETRIES + 2 {
+            if let Some((_, _, what)) = refusal {
+                REFUSED.lock().insert((client.base_url(), client.model(), what));
+                body = request_body(client, messages, tools, options);
+                retries += 1;
+                continue;
+            }
+            if lower.contains("thinking") && think_less(client, &mut body) {
+                retries += 1;
+                continue;
+            }
         }
         return Err(LlmError::Status { status, body: text });
     };
     Ok(pump(resp, busy, Decoder::default()))
+}
+
+/// For a model that refuses a system instruction: the instructions open the
+/// first user message instead.
+fn system_in_first_prompt(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let system: Vec<String> = messages.iter().filter(|m| m.role == Role::System && !m.content.trim().is_empty()).map(|m| m.content.clone()).collect();
+    let mut rest: Vec<ChatMessage> = messages.into_iter().filter(|m| m.role != Role::System).collect();
+    if system.is_empty() {
+        return rest;
+    }
+    let instructions = system.join("\n\n");
+    match rest.iter_mut().find(|m| m.role == Role::User) {
+        Some(first) => first.content = format!("{instructions}\n\n{}", first.content),
+        None => rest.insert(0, ChatMessage::user(instructions)),
+    }
+    rest
 }
 
 /// The model refused its thinking settings: first the level or budget goes
@@ -121,7 +164,15 @@ fn think_less(client: &Client, body: &mut Value) -> bool {
 /// Gemini's implicit cache keeps hitting; only generation settings vary.
 fn request_body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: &TurnOptions) -> Value {
     let model = client.model();
-    let mut body = json!({ "contents": contents(messages, validates_signatures(&model)) });
+    // Gemma, served here too, takes no function declarations: its tools go in
+    // the prompt as text (see `text_tools`).
+    let listed_without_tools = client.discovery().and_then(|d| d.model(&model).map(|m| !m.supports_tools)).unwrap_or(false);
+    let in_text = !tools.is_empty() && (listed_without_tools || refused(client, &model, Refused::Tools));
+    let mut messages = if in_text { crate::text_tools::flatten(messages, tools) } else { messages.to_vec() };
+    if refused(client, &model, Refused::SystemInstruction) {
+        messages = system_in_first_prompt(messages);
+    }
+    let mut body = json!({ "contents": contents(&messages, validates_signatures(&model)) });
     let system: Vec<Value> = messages
         .iter()
         .filter(|m| m.role == Role::System && !m.content.trim().is_empty())
@@ -130,7 +181,7 @@ fn request_body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], o
     if !system.is_empty() {
         body["systemInstruction"] = json!({ "parts": system });
     }
-    if !tools.is_empty() {
+    if !tools.is_empty() && !in_text {
         body["tools"] = json!([{ "functionDeclarations": tools.iter().map(declaration).collect::<Vec<_>>() }]);
     }
     // Repeat, presence and min-p penalties are local-model knobs: Gemini has
@@ -148,7 +199,7 @@ fn request_body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], o
     if let Some(n) = options.max_tokens {
         config.insert("maxOutputTokens".into(), json!(n));
     }
-    if let Some(thinking) = thinking_config(client, messages, options) {
+    if let Some(thinking) = thinking_config(client, &messages, options) {
         config.insert("thinkingConfig".into(), thinking);
     }
     if !config.is_empty() {
@@ -1035,6 +1086,56 @@ mod tests {
 
     fn gemini_client(url: &str, model: &str) -> Client {
         Client::new(Endpoint::new(ApiProtocol::Gemini, url, Some("k".into())), model)
+    }
+
+    fn request_json(request: &str) -> Value {
+        serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap_or_default()).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn gemma_gets_its_tools_and_instructions_as_text_once_it_refuses_them() {
+        let ok = sse(&[json!({ "candidates": [{ "content": { "role": "model", "parts": [{ "text": "ok" }] }, "finishReason": "STOP" }] })]);
+        let (url, seen) = serve(move |request| {
+            let body = request_json(request);
+            if body.get("tools").is_some() {
+                (400, r#"{"error":{"code":400,"message":"Function calling is not enabled for models/gemma-3-27b-it","status":"INVALID_ARGUMENT"}}"#.to_string())
+            } else if body.get("systemInstruction").is_some() {
+                (400, r#"{"error":{"code":400,"message":"Developer instruction is not enabled for models/gemma-3-27b-it","status":"INVALID_ARGUMENT"}}"#.to_string())
+            } else {
+                (200, ok.clone())
+            }
+        })
+        .await;
+        let llm = gemini_client(&url, "gemma-3-27b-it");
+        let read_file = ToolSpec { name: "read_file".into(), description: "Read a file.".into(), parameters_json: r#"{"type":"object"}"#.into() };
+        let history = [ChatMessage::system("You are FlashAgent."), ChatMessage::user("read it")];
+        for _ in 0..2 {
+            let events: Vec<LlmEvent> = llm.stream(&history, std::slice::from_ref(&read_file)).await.expect("answers").map(|e| e.unwrap()).collect().await;
+            assert_eq!(events[0], LlmEvent::TextDelta("ok".into()));
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 4, "each refusal once, then known");
+        let last = request_json(seen.last().unwrap());
+        let prompt = last["contents"][0]["parts"][0]["text"].as_str().unwrap();
+        assert!(prompt.starts_with("You are FlashAgent.\n\n# Tools") && prompt.contains("## read_file") && prompt.ends_with("read it"), "{prompt}");
+    }
+
+    #[test]
+    fn a_model_listed_without_tools_is_never_sent_declarations() {
+        let llm = client("gemma-3-27b-it");
+        let mut gemma = DiscoveredModel { id: "gemma-3-27b-it".into(), display_name: None, is_loaded: false, context_length: None, max_context_length: None, thinking: ThinkingProfile::unsupported(), supports_tools: false, supports_vision: false };
+        llm.settle_discovery(0, vec![gemma.clone()], ServerKind::Gemini, None);
+        let read_file = ToolSpec { name: "read_file".into(), description: "Read a file.".into(), parameters_json: r#"{"type":"object"}"#.into() };
+        let sent = request_body(&llm, &[ChatMessage::system("Be brief."), ChatMessage::user("hi")], std::slice::from_ref(&read_file), &TurnOptions::default());
+        assert!(sent.get("tools").is_none());
+        assert!(sent["systemInstruction"]["parts"][0]["text"].as_str().unwrap().contains("## read_file"));
+
+        gemma.id = "gemini-3-flash".into();
+        gemma.supports_tools = true;
+        llm.set_model("gemini-3-flash");
+        llm.settle_discovery(0, vec![gemma], ServerKind::Gemini, None);
+        let sent = request_body(&llm, &[ChatMessage::user("hi")], &[read_file], &TurnOptions::default());
+        assert!(sent.get("tools").is_some(), "Gemini itself takes declarations");
     }
 
     #[tokio::test]

@@ -140,11 +140,13 @@ address can speak two (Ollama answers both). An address typed by hand gets
 `ApiProtocol::detect`, which recognises only hosts that speak one protocol
 and takes anything else as OpenAI-compatible. What a model supports (context
 window, tool use, vision, thinking presets) is read from the server; the
-thinking profile is re-read when the model changes. An Ollama model without
-the `tools` capability, or one that refuses them, gets its tools described
-in the system prompt instead (`llm::text_tools`), its earlier calls and
-results written back as Hermes markup, and the loop's text-call parser
-reads its calls out of the reply.
+thinking profile is re-read when the model changes. A model without tool
+support (Ollama's without the `tools` capability, Gemma on the Gemini API),
+or one that refuses them, gets its tools described in the system prompt
+instead (`llm::text_tools`), its earlier calls and results written back as
+Hermes markup, and the loop's text-call parser reads its calls out of the
+reply. Gemma also refuses a system instruction; it then opens the first
+user message.
 
 **Providers.** `config.json` keeps a list of providers (`ProviderProfile`
 in `core::config`: name, protocol, address, key, model) and the name of the
