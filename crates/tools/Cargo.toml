@@ -9,6 +9,7 @@ rust-version.workspace = true
 flashagent-core = { path = "../core" }
 flashagent-llm = { path = "../llm" }
 async-trait = { workspace = true }
+futures = { workspace = true }
 tokio = { workspace = true, features = ["process", "io-util", "fs", "time", "net"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
