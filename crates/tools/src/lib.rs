@@ -51,9 +51,11 @@ fn parse_args<T: DeserializeOwned>(json: &str, tool: &str) -> Result<T, ToolErro
     serde_json::from_value(value).map_err(|e| ToolError::Other(format!("bad arguments: {e}")))
 }
 
+/// Cut in place, looking no further than the cut: a diff or a log can be
+/// megabytes.
 fn truncate_output(mut text: String) -> String {
-    if text.chars().count() > MAX_OUTPUT_CHARS {
-        text = text.chars().take(MAX_OUTPUT_CHARS).collect();
+    if let Some((cut, _)) = text.char_indices().nth(MAX_OUTPUT_CHARS) {
+        text.truncate(cut);
         text.push_str(&format!("\n...[truncated at {MAX_OUTPUT_CHARS} chars]"));
     }
     text
@@ -1043,6 +1045,10 @@ mod tests {
         let out = truncate_output(long);
         assert!(out.contains("[truncated"));
         assert_eq!(out.chars().count(), MAX_OUTPUT_CHARS + "\n...[truncated at 32000 chars]".len());
+        let exact = "ё".repeat(MAX_OUTPUT_CHARS);
+        assert_eq!(truncate_output(exact.clone()), exact, "a text exactly at the cap is whole");
+        let over = truncate_output("ё".repeat(MAX_OUTPUT_CHARS + 1));
+        assert!(over.starts_with(&exact) && over[exact.len()..].starts_with("\n...[truncated"), "cut by characters, not bytes");
     }
 
     #[test]
