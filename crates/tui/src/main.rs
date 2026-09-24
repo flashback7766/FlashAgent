@@ -318,9 +318,7 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
         );
     }
 
-    let active_model_info = discovery.as_ref().and_then(|d| {
-        d.models.iter().find(|m| m.id == model).cloned()
-    });
+    let active_model_info = discovery.as_ref().and_then(|d| d.model(&model).cloned());
 
     let context_display = active_model_info.as_ref().and_then(|m| m.context_display());
     let context_capacity = active_model_info

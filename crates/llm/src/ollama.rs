@@ -134,8 +134,8 @@ fn body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: 
 /// False for a model the server lists without the `tools` capability, or one
 /// that refused them: Ollama answers 400 to a request that carries tools.
 fn takes_tools(client: &Client, model: &str) -> bool {
-    let listed = client.discovery().and_then(|d| d.models.into_iter().chain(d.active_model).find(|m| m.id == model));
-    listed.is_none_or(|m| m.supports_tools) && !NO_TOOLS.lock().contains(&(root(client), model.to_string()))
+    let listed = client.discovery().and_then(|d| d.model(model).map(|m| m.supports_tools));
+    listed.unwrap_or(true) && !NO_TOOLS.lock().contains(&(root(client), model.to_string()))
 }
 
 /// The context chosen for the model when the server was looked at; the same
@@ -143,8 +143,7 @@ fn takes_tools(client: &Client, model: &str) -> bool {
 fn num_ctx(client: &Client, model: &str) -> usize {
     client
         .discovery()
-        .and_then(|d| d.models.into_iter().chain(d.active_model).find(|m| m.id == model))
-        .and_then(|m| m.context_length)
+        .and_then(|d| d.model(model).and_then(|m| m.context_length))
         .or(client.endpoint().context_window)
         .unwrap_or(DEFAULT_NUM_CTX)
 }
