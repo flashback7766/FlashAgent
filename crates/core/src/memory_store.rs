@@ -79,11 +79,11 @@ pub struct Entry {
 }
 
 impl Entry {
-    pub fn index_line(&self) -> String {
+    fn index_line(&self) -> String {
         format!("- [{}](memory/{}.md) — {}", self.name, self.name, self.description)
     }
 
-    pub fn to_markdown(&self) -> String {
+    fn to_markdown(&self) -> String {
         format!(
             "---\nname: {}\ndescription: {}\ntype: {}\nrecorded: {}\n---\n\n{}\n",
             self.name,
@@ -96,7 +96,7 @@ impl Entry {
 
     /// A file without frontmatter is read as a body titled by its file name, so a
     /// hand-edited memory does not disappear.
-    pub fn from_markdown(name: &str, text: &str) -> Self {
+    fn from_markdown(name: &str, text: &str) -> Self {
         let mut description = String::new();
         let mut kind = Kind::Decision;
         let mut recorded = String::new();
@@ -264,7 +264,7 @@ impl Store {
     }
 
     /// Text the user wrote around the generated block is kept as is.
-    pub fn rewrite_index(&self) -> std::io::Result<()> {
+    fn rewrite_index(&self) -> std::io::Result<()> {
         let entries = self.list();
         let mut block = String::from(BEGIN);
         block.push('\n');
