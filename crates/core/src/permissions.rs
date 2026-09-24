@@ -145,10 +145,10 @@ impl ApprovalGate for DenyAllGate {
     }
 }
 
-/// For tests.
-#[derive(Default)]
-pub struct AllowAllGate;
+#[cfg(test)]
+struct AllowAllGate;
 
+#[cfg(test)]
 #[async_trait]
 impl ApprovalGate for AllowAllGate {
     async fn approve(&self, _req: &ApprovalRequest) -> Decision {
@@ -289,7 +289,7 @@ fn smuggles_in(cmd: &str, dialect: ShellDialect) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ShellRule {
+enum ShellRule {
     /// `npm test` covering `npm test --watch`, never `npm publish`.
     Prefix(String),
     /// Verbatim: `rm -rf build` never grows into `rm -rf build ~`.
@@ -298,7 +298,7 @@ pub enum ShellRule {
 
 /// Only `program subcommand [--flags...]` becomes a prefix rule; any
 /// positional argument pins the rule to the verbatim segment.
-pub fn always_rule(segment: &str) -> ShellRule {
+fn always_rule(segment: &str) -> ShellRule {
     let segment = segment.trim();
     let words: Vec<&str> = segment.split_whitespace().collect();
     let is_word = |w: &str| !w.starts_with('-') && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':');

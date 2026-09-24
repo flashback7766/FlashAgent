@@ -27,7 +27,7 @@ pub use flashagent_llm::base64_encode;
 pub use effort_memory::{EffortMemory, ModelBias, TurnOutcome};
 pub use loop_::{is_prompt, AgentLoop, DoneReason, LoopConfig, LoopError, LoopEvent, LlmSource, ToolExec, ToolOutput, WritePreview};
 pub use memory_store::{Entry as MemoryEntry, Kind as MemoryEntryKind, Scope as MemoryScope, Store as MemoryStore};
-pub use memory::{collect, injection_block, outline, MemoryDoc, MemoryKind, GLOBAL_FILENAME, PROJECT_FILENAMES};
+pub use memory::{collect, injection_block, outline, MemoryDoc, MemoryKind, GLOBAL_FILENAME};
 pub use paths::{expand_home, resolve_path};
 pub use permissions::{
     is_local_host, is_local_ip, is_read_only_shell, parse_chain, path_is_inside, set_shell_dialect, url_host,
@@ -38,6 +38,6 @@ pub use personality::{BaseStyle, Level as TraitLevel, Personality, Trait as Pers
 pub use prompt::{build_system_prompt, SystemPromptConfig};
 pub use snapshots::{FilePreview, RewindReport, Rewindable, SnapshotStore};
 pub use subagents::{
-    AgentRole, SubagentHandle, SubagentHost, SubagentMsg, SubagentResult, SubagentSpec,
-    SubagentTool, SubagentToolFactory,
+    AgentRole, SubagentHandle, SubagentHost, SubagentResult, SubagentSpec, SubagentTool,
+    SubagentToolFactory,
 };

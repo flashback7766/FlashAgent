@@ -1,10 +1,9 @@
 //! Subagents: the parent loop spawns a child [`AgentLoop`] with its own role,
-//! a tool subset and inherited permissions, which it can never expand. Results
-//! come back as tool results; children can message each other over per-id
-//! channels.
+//! a tool subset and inherited permissions, which it can never expand. The
+//! child's answer comes back as a tool result.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -45,47 +44,39 @@ impl Default for SubagentSpec {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum SubagentMsg {
-    Text { from: String, to: String, body: String },
-    Finished { from: String, body: String, done: DoneReason },
-    Cancel { to: String },
-}
-
 pub struct SubagentHandle {
     pub id: String,
-    pub rx: tokio::sync::mpsc::UnboundedReceiver<SubagentMsg>,
-    pub task: tokio::task::JoinHandle<()>,
+    /// Ends with the child's answer; aborting it stops the child.
+    pub task: tokio::task::JoinHandle<SubagentResult>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubagentResult {
-    pub id: String,
     pub answer: String,
     pub done: DoneReason,
 }
 
 /// Supplied by the service layer, so the child sees the same tools with the
 /// parent's rights.
-#[async_trait]
 pub trait SubagentToolFactory: Send + Sync {
     /// `tools` restricts the visible set.
     fn build(&self, role: &AgentRole, tools: &[String]) -> Arc<dyn ToolExec>;
 }
 
+/// Used when `spec.max_steps == 0`.
+const DEFAULT_MAX_STEPS: u32 = 20;
+
 /// Children inherit the parent's permission state through the tool factory.
 pub struct SubagentHost {
     llm: Arc<dyn LlmSource>,
     factory: Arc<dyn SubagentToolFactory>,
-    next_id: Mutex<u32>,
+    next_id: AtomicU32,
     live: Arc<AtomicUsize>,
-    /// Used when `spec.max_steps == 0`.
-    default_max_steps: u32,
 }
 
 impl SubagentHost {
     pub fn new(llm: Arc<dyn LlmSource>, factory: Arc<dyn SubagentToolFactory>) -> Self {
-        Self { llm, factory, next_id: Mutex::new(1), live: Arc::new(AtomicUsize::new(0)), default_max_steps: 20 }
+        Self { llm, factory, next_id: AtomicU32::new(1), live: Arc::new(AtomicUsize::new(0)) }
     }
 
     pub fn live(&self) -> usize {
@@ -93,37 +84,21 @@ impl SubagentHost {
     }
 
     pub fn spawn(&self, spec: SubagentSpec) -> SubagentHandle {
-        let id = {
-            let mut n = self.next_id.lock().expect("next_id");
-            let id = *n;
-            *n += 1;
-            format!("sub{}", id)
-        };
-
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let id = format!("sub{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         let llm = self.llm.clone();
         let factory = self.factory.clone();
         let live = self.live.clone();
-        let max_steps = if spec.max_steps == 0 { self.default_max_steps } else { spec.max_steps };
-        let role = spec.role.clone();
-        let prompt = spec.prompt.clone();
-        let max_output = spec.max_output_chars;
-        let timeout = spec.timeout;
-        let id2 = id.clone();
+        let SubagentSpec { role, prompt, max_steps, timeout, max_output_chars } = spec;
+        let max_steps = if max_steps == 0 { DEFAULT_MAX_STEPS } else { max_steps };
         live.fetch_add(1, Ordering::Relaxed);
 
         let task = tokio::spawn(async move {
             // Decrements even when the task is aborted mid-run.
             let _live = LiveGuard(live);
             let tools = factory.build(&role, &role.tools);
-            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let config = LoopConfig { max_steps: Some(max_steps), max_tokens: None, ..Default::default() };
-            let loop_ = AgentLoop::new(config, cancel.clone());
-
-            let history = vec![
-                ChatMessage::system(role.system_prompt.clone()),
-                ChatMessage::user(prompt.clone()),
-            ];
+            let loop_ = AgentLoop::new(config, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            let history = vec![ChatMessage::system(role.system_prompt), ChatMessage::user(prompt)];
 
             let run = async {
                 match loop_.run(llm.as_ref(), tools.as_ref(), history, |_| {}).await {
@@ -140,11 +115,10 @@ impl SubagentHost {
                 run.await
             };
 
-            let body = body.chars().take(max_output).collect();
-            let _ = tx.send(SubagentMsg::Finished { from: id2, body, done });
+            SubagentResult { answer: body.chars().take(max_output_chars).collect(), done }
         });
 
-        SubagentHandle { id, rx, task }
+        SubagentHandle { id, task }
     }
 }
 
@@ -158,9 +132,9 @@ impl Drop for LiveGuard {
 
 /// Aborts the child when the parent stops waiting (the user cancelled the
 /// parent turn), so no orphaned subagent keeps running tools.
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
 
-impl Drop for AbortOnDrop {
+impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
         self.0.abort();
     }
@@ -179,13 +153,11 @@ fn last_assistant_text(history: &[ChatMessage]) -> String {
 /// content in the answer can never become an instruction.
 pub struct SubagentTool {
     host: Arc<SubagentHost>,
-    /// Also forward events to the UI.
-    pub events: bool,
 }
 
 impl SubagentTool {
     pub fn new(host: Arc<SubagentHost>) -> Self {
-        Self { host, events: true }
+        Self { host }
     }
 }
 
@@ -221,16 +193,13 @@ impl ToolExec for SubagentTool {
             max_output_chars: 32_000,
         };
 
-        let handle = self.host.spawn(spec);
-        let mut rx = handle.rx;
-        let _child = AbortOnDrop(handle.task);
-        while let Some(msg) = rx.recv().await {
-            if let SubagentMsg::Finished { body, done, .. } = msg {
-                let is_error = !matches!(done, DoneReason::Completed);
-                return ToolOutput { content: body, is_error, images: Vec::new() };
+        let mut child = AbortOnDrop(self.host.spawn(spec).task);
+        match (&mut child.0).await {
+            Ok(SubagentResult { answer, done }) => {
+                ToolOutput { content: answer, is_error: done != DoneReason::Completed, images: Vec::new() }
             }
+            Err(_) => ToolOutput { content: "[subagent exited without an answer]".into(), is_error: true, images: Vec::new() },
         }
-        ToolOutput { content: "[subagent exited without an answer]".into(), is_error: true, images: Vec::new() }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -274,7 +243,6 @@ mod tests {
     #[derive(Clone)]
     struct Factory;
 
-    #[async_trait]
     impl SubagentToolFactory for Factory {
         fn build(&self, _role: &AgentRole, tools: &[String]) -> Arc<dyn ToolExec> {
             let _ = tools;
@@ -314,13 +282,8 @@ mod tests {
             prompt: "find X".into(),
             ..Default::default()
         };
-        let mut handle = host.spawn(spec);
-        let msg = handle.rx.recv().await.unwrap();
-        match msg {
-            SubagentMsg::Finished { body, .. } => assert_eq!(body, "child answer"),
-            other => panic!("expected Finished, got {other:?}"),
-        }
-        handle.task.await.unwrap();
+        let result = host.spawn(spec).task.await.unwrap();
+        assert_eq!(result, SubagentResult { answer: "child answer".into(), done: DoneReason::Completed });
         assert_eq!(host.live(), 0);
     }
 
@@ -345,12 +308,9 @@ mod tests {
             timeout: Some(Duration::from_millis(50)),
             ..Default::default()
         };
-        let mut handle = host.spawn(spec);
-        let msg = handle.rx.recv().await.unwrap();
-        match msg {
-            SubagentMsg::Finished { body, .. } => assert!(body.contains("timed out")),
-            other => panic!("expected Finished, got {other:?}"),
-        }
+        let result = host.spawn(spec).task.await.unwrap();
+        assert!(result.answer.contains("timed out"), "{result:?}");
+        assert_eq!(result.done, DoneReason::Failed);
     }
 
     #[tokio::test]

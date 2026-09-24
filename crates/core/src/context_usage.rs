@@ -41,7 +41,7 @@ impl ContextUsage {
     }
 
     /// E.g. 5.2K instead of 5K.
-    pub fn format_used_tokens(tokens: usize) -> String {
+    fn format_used_tokens(tokens: usize) -> String {
         if tokens >= 1_000_000 {
             format!("{:.1}M", tokens as f64 / 1_000_000.0)
         } else if tokens >= 1000 {
@@ -52,7 +52,7 @@ impl ContextUsage {
     }
 
     /// E.g. 128K or 200K.
-    pub fn format_capacity_tokens(tokens: usize) -> String {
+    fn format_capacity_tokens(tokens: usize) -> String {
         if tokens >= 1_048_576 {
             let m = (tokens as f64) / 1_048_576.0;
             if (m.fract() * 10.0).round() == 0.0 {
@@ -63,23 +63,9 @@ impl ContextUsage {
         } else if tokens >= 1_000_000 {
             format!("{:.0}M", tokens as f64 / 1_000_000.0)
         } else if tokens >= 1024 {
-            if tokens == 131_072 || tokens == 128_000 {
-                "128K".to_string()
-            } else if tokens == 204_800 || tokens == 200_000 {
-                "200K".to_string()
-            } else if tokens == 65_536 || tokens == 64_000 {
-                "64K".to_string()
-            } else if tokens == 32_768 || tokens == 32_000 {
-                "32K".to_string()
-            } else if tokens == 16_384 || tokens == 16_000 {
-                "16K".to_string()
-            } else if tokens == 8_192 || tokens == 8_000 {
-                "8K".to_string()
-            } else if tokens == 4_096 || tokens == 4_000 {
-                "4K".to_string()
-            } else if tokens == 2_048 || tokens == 2_000 {
-                "2K".to_string()
-            } else if tokens.is_multiple_of(1000) {
+            // A round thousand or a power of two is named exactly: 128_000 and
+            // 131_072 are both "128K".
+            if tokens.is_multiple_of(1000) {
                 format!("{}K", tokens / 1_000)
             } else if tokens.is_multiple_of(1024) {
                 format!("{}K", tokens / 1024)
