@@ -58,6 +58,7 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/clear", "Clear terminal screen and conversation scrollback", AutocompleteCategory::Command),
         AutocompleteItem::new("/effort", "Select thinking effort preset (off, low, medium, high)", AutocompleteCategory::Command),
         AutocompleteItem::new("/model", "Open model selection menu or switch model", AutocompleteCategory::Command),
+        AutocompleteItem::new("/provider", "Switch to another saved provider, local or cloud; add or edit them", AutocompleteCategory::Command),
         AutocompleteItem::new("/verbose", "Toggle verbose mode for thoughts and tool calls (all, last, off)", AutocompleteCategory::Command),
         AutocompleteItem::new("/mode", "Cycle permission mode (Planning, Manual, Accept Edits, Accept All)", AutocompleteCategory::Command),
         AutocompleteItem::new("/goal", "Autonomous run: /goal <task> (limits in Settings → Goal)", AutocompleteCategory::Command),
@@ -152,7 +153,7 @@ fn cached_skills(cwd: &Path) -> Vec<AutocompleteItem> {
 /// first item.
 pub const COMMAND_ALIASES: &[&str] = &[
     "/?", "/config", "/changelog", "/memories", "/retry", "/thinking", "/t", "/models", "/m", "/params", "/expand",
-    "/think", "/o", "/quit", "/q",
+    "/think", "/o", "/quit", "/q", "/providers",
 ];
 
 /// A whole command or alias, as typed.

@@ -64,6 +64,8 @@ impl App {
                 Overlay::Mcp(modal) => self.mcp_key(cx, modal, code, mods).await,
                 Overlay::Sessions(menu) => self.session_menu_key(menu, code, mods),
                 Overlay::Model(menu) => self.model_menu_key(cx, menu, code, mods),
+                Overlay::Provider(menu) => self.provider_menu_key(cx, menu, code, mods).await,
+                Overlay::Providers(view) => self.providers_key(cx, view, code, mods).await,
                 Overlay::Rewind(card) => self.rewind_key(cx, card, code),
                 Overlay::Effort(menu) => self.effort_menu_key(cx, menu, code),
                 Overlay::Palette(menu) => {
@@ -261,19 +263,9 @@ impl App {
         let shown_effort = self.goal_state.as_ref().map_or(self.current_effort.clone(), |g| g.effort.clone());
         match settings.handle_key(code, mods) {
             SettingsAction::Close => self.close_settings(cx, settings, shown_mode, &shown_effort),
-            SettingsAction::DiscoverModels => {
-                self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
-                self.save_config();
-                // Probe the URL just typed, not the connected one.
-                let probe = flashagent_llm::Client::new(settings.config.endpoint(), "");
-                settings.available_models = match probe.discover_server().await {
-                    Some(disc) => disc.models.into_iter().map(|m| m.id).collect(),
-                    None => Vec::new(),
-                };
-                if settings.config.backend_url.trim_end_matches('/') != cx.source.0.base_url() {
-                    self.custom_placeholder = Some("Backend URL saved; restart FlashAgent to connect to it".to_string());
-                }
-                self.overlay = Some(Overlay::Settings(settings));
+            SettingsAction::OpenProviders => {
+                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
+                self.open_providers_view();
             }
             SettingsAction::RunToolTest => {
                 settings.tool_test_status = Some(format!("Probing {}…", self.current_model));
@@ -286,43 +278,19 @@ impl App {
                 self.overlay = Some(Overlay::Settings(settings));
             }
             SettingsAction::OpenModelMenu => {
-                self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
-                self.save_config();
+                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
                 self.open_model_menu(cx.source);
             }
             SettingsAction::OpenEffortMenu => {
-                self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
-                self.save_config();
+                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
                 self.open_effort_menu(cx.source);
             }
             SettingsAction::OpenWizard => {
-                self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
-                self.save_config();
-                let mut deferred = Vec::new();
-                let completed =
-                    flashagent_tui::run_wizard_channel(&mut self.config, cx.rx, &mut deferred).await.unwrap_or(false);
-                for ev in deferred {
-                    let _ = cx.tx.send(ev);
-                }
-                // The wizard had the whole screen.
-                self.renderer.request_reprint();
-                if completed {
-                    self.current_effort = self.config.thinking_effort.clone();
-                    cx.perm.state().set_mode(self.config.permission_mode);
-                    // The running connection is to the old server: its model name
-                    // means nothing there, so it waits for a restart.
-                    if self.config.backend_url.trim_end_matches('/') == cx.source.0.base_url() {
-                        let model = self.config.model.clone();
-                        self.switch_model(cx, &model);
-                    } else {
-                        self.custom_placeholder = Some("New server saved; restart FlashAgent to connect to it".to_string());
-                    }
-                    self.refresh_welcome(cx.source, cx.mascot_mood);
-                }
+                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
+                self.run_setup_in_app(cx, false).await;
             }
             SettingsAction::OpenSamplingMenu => {
-                self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
-                self.save_config();
+                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
                 self.overlay = Some(Overlay::Sampling(SamplingView::new(&self.config)));
             }
             SettingsAction::CheckUpdatesNow => {
@@ -347,23 +315,51 @@ impl App {
                 self.overlay = Some(Overlay::Settings(settings));
             }
             SettingsAction::OpenMcpMenu => {
-                self.config = persisted_from_view(&settings.config, &self.config, shown_mode, &shown_effort);
-                self.save_config();
+                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
                 self.open_mcp(cx, McpViewTab::Overview).await;
             }
             SettingsAction::None => self.overlay = Some(Overlay::Settings(settings)),
         }
     }
 
+    /// Settings left for one of its sub-screens: what was changed is kept.
+    fn keep_settings(&mut self, cx: &LoopCtx<'_>, view: &AppConfig, shown_mode: PermissionMode, shown_effort: &str) {
+        let mut applied = persisted_from_view(view, &self.config, shown_mode, shown_effort);
+        let switching = self.provider_picked(&applied);
+        if switching && self.running {
+            self.keep_provider(&mut applied);
+        }
+        self.config = applied;
+        self.save_config();
+        if switching && !self.running {
+            self.connect_active(cx);
+        }
+    }
+
+    /// Settings picked another provider than the one in use.
+    fn provider_picked(&self, applied: &AppConfig) -> bool {
+        applied.active_profile().name != self.config.active_profile().name || (applied.run_provider.is_none() && self.config.run_provider.is_some())
+    }
+
+    /// A switch waits for the running answer; the rest of what was changed stays.
+    fn keep_provider(&mut self, applied: &mut AppConfig) {
+        applied.active_provider = self.config.active_provider.clone();
+        applied.run_provider = self.config.run_provider.clone();
+        self.refuse_switch_while_busy();
+    }
+
     fn close_settings(&mut self, cx: &LoopCtx<'_>, settings: Box<SettingsView>, shown_mode: PermissionMode, shown_effort: &str) {
         let chosen_mode = settings.config.permission_mode;
         let chosen_effort = settings.config.thinking_effort.clone();
         let mut changes = Vec::new();
+        let switching = self.provider_picked(&settings.config);
         if chosen_mode != shown_mode {
             changes.push(format!("mode ({})", chosen_mode.label()));
         }
-        if settings.config.model != self.current_model {
-            changes.push(format!("model ({})", settings.config.model));
+        if switching {
+            changes.push(format!("provider ({})", settings.config.active_profile().name));
+        } else if settings.config.active_profile().model != self.current_model {
+            changes.push(format!("model ({})", settings.config.active_profile().model));
         }
         if chosen_effort != shown_effort {
             changes.push(format!("thinking ({chosen_effort})"));
@@ -392,6 +388,9 @@ impl App {
             self.custom_placeholder = None;
             self.ask_channel_switch(cx, wanted_channel);
         }
+        if switching && self.running {
+            self.keep_provider(&mut applied);
+        }
         self.config = applied;
         if personality_changed {
             self.apply_personality();
@@ -402,8 +401,10 @@ impl App {
         cx.tools_arc.set_toolset_profile(self.config.toolset_profile);
         cx.tools_arc.set_web_enabled(self.config.web_tools);
         cx.source.0.set_max_retries(self.config.network_retries);
-        if self.config.model != self.current_model {
-            let model = self.config.model.clone();
+        if switching && !self.running {
+            self.connect_active(cx);
+        } else if !switching && !self.config.active_profile().model.is_empty() && self.config.active_profile().model != self.current_model {
+            let model = self.config.active_profile().model.clone();
             self.switch_model(cx, &model);
         }
         // During /goal the live mode/effort are the goal's; edits apply to what the
@@ -538,8 +539,9 @@ impl App {
 
     /// Everything that follows the model, at once: the next prompt may go out
     /// before the idle poll catches up (it never runs during a turn), and a
-    /// 128K budget on an 8K model overflows the server.
-    fn switch_model(&mut self, cx: &LoopCtx<'_>, model: &str) {
+    /// 128K budget on an 8K model overflows the server. The new prefix is
+    /// warmed while the user types.
+    pub(crate) fn switch_model(&mut self, cx: &LoopCtx<'_>, model: &str) {
         self.current_model = model.to_string();
         cx.source.set_model(&self.current_model);
         cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
@@ -556,16 +558,21 @@ impl App {
                 self.current_effort = "auto".to_string();
             }
         }
+        if !self.running {
+            self.sync_system_prompt();
+        }
+        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        self.warm_prompt_cache(cx.source, cx.perm, cx.memory_block);
     }
 
     fn model_menu_key(&mut self, cx: &LoopCtx<'_>, mut menu: SelectMenu<String>, code: KeyCode, mods: KeyModifiers) {
         match code {
             KeyCode::Enter => {
                 let Some(val) = menu.selected_value().cloned() else { return };
-                // The menu lists the running server's models; after a new server was
-                // saved, its model must not be written beside that server's URL.
-                if self.config.backend_url.trim_end_matches('/') == cx.source.0.base_url() {
-                    self.config.model = val.clone();
+                // The menu lists the connected server's models; during a switch they
+                // are not the active provider's.
+                if self.on_active_provider(cx.source) && self.provider_switch.is_none() {
+                    self.config.active_profile_mut().model = val.clone();
                     self.save_config();
                 }
                 self.switch_model(cx, &val);
@@ -671,7 +678,12 @@ impl App {
     }
 
     pub(crate) fn open_model_menu(&mut self, source: &BackendSource) {
-        match build_model_menu(source) {
+        if let Some(switch) = &self.provider_switch {
+            let name = switch.name.clone();
+            self.notice(format!("Still connecting to {name}; its models are listed once it answers"));
+            return;
+        }
+        match build_model_menu(source, &self.config.active_profile().name) {
             Some(mut menu) => {
                 menu.select_by_value(&self.current_model);
                 self.open_overlay(Overlay::Model(menu));
@@ -694,7 +706,7 @@ impl App {
     }
 }
 
-fn navigate_menu(menu: &mut SelectMenu<String>, code: KeyCode, mods: KeyModifiers) {
+pub(crate) fn navigate_menu(menu: &mut SelectMenu<String>, code: KeyCode, mods: KeyModifiers) {
     match code {
         KeyCode::Up => menu.up(),
         KeyCode::Down => menu.down(),
