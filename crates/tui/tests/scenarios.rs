@@ -7,7 +7,7 @@ mod support;
 use std::time::Duration;
 
 use support::mock_server::{MockServer, Reply, MODEL};
-use support::term::{Home, Term, ENTER, ESC};
+use support::term::{version, Home, Term, ENTER, ESC};
 
 const COLS: u16 = 120;
 const ROWS: u16 = 40;
@@ -73,6 +73,94 @@ fn the_wizard_sets_up_a_custom_server_and_opens_the_app() {
     assert!(config.get("backend_url").is_none(), "one place for the server: {config}");
 
     quit(&mut term);
+}
+
+/// Two saved providers, the first in use, each on its own mock server.
+fn two_providers(home: &Home, first: &MockServer, second: &MockServer) -> Term {
+    home.write_config(serde_json::json!({
+        "setup_completed": true,
+        "last_seen_version": version(),
+        "auto_check_updates": false,
+        "providers": [
+            { "name": "Desk", "protocol": "openai", "url": first.url, "model": first.model },
+            { "name": "Lab", "protocol": "openai", "url": second.url }
+        ],
+        "active_provider": "Desk"
+    }));
+    let term = Term::start(home, &["-y"], COLS, ROWS);
+    term.wait_for(PROMPT, WAIT);
+    term
+}
+
+#[test]
+fn switching_provider_mid_session_sends_the_next_turn_to_the_other_server() {
+    let first = MockServer::start(vec![Reply::Text("Answer from the desk server.".into())]);
+    let second = MockServer::start_with_model("lab-model", vec![Reply::Text("Answer from the lab server.".into())]);
+    let home = Home::new();
+    let mut term = two_providers(&home, &first, &second);
+    // The welcome card names the provider beside the model.
+    term.wait_for("Desk", WAIT);
+
+    ask(&term, "hello", "Answer from the desk server.");
+
+    term.type_text("/provider");
+    term.send(ENTER);
+    // Its last row: the menu unfolds as it opens.
+    let menu = term.wait_for("+ Edit providers", WAIT);
+    assert!(menu.contains("Desk  (in use)") && menu.contains("Lab"), "{menu}");
+    assert!(menu.contains(&second.url), "the menu shows where each provider is:\n{menu}");
+    term.type_text("lab");
+    term.send(ENTER);
+    // The server's own model, since none was saved for it.
+    term.wait_for("Switched to Lab \u{b7} lab-model", WAIT);
+    term.wait_for("Provider: Lab \u{b7} lab-model", WAIT);
+
+    ask(&term, "and now?", "Answer from the lab server.");
+    assert_eq!(first.turns().len(), 1, "the desk server got a turn after the switch");
+    let turns = second.turns();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].body["model"], "lab-model", "{}", turns[0].body);
+    let history = sent(&turns[0]);
+    assert!(
+        history.contains("hello") && history.contains("Answer from the desk server."),
+        "the conversation did not carry over: {history}"
+    );
+
+    let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
+    assert_eq!(config["active_provider"], "Lab", "the next launch starts on it: {config}");
+    assert_eq!(config["providers"][1]["model"], "lab-model", "{config}");
+    assert_eq!(config["providers"][0]["model"], MODEL, "{config}");
+
+    // And back, by name.
+    term.type_text("/provider desk");
+    term.send(ENTER);
+    term.wait_for("Switched to Desk", WAIT);
+    quit(&mut term);
+}
+
+#[test]
+fn a_provider_switch_waits_for_the_running_answer() {
+    let words: Vec<String> = (1..=8).map(|i| format!("slow{i}")).collect();
+    let first = MockServer::start(vec![Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(400) }]);
+    let second = MockServer::start_with_model("lab-model", vec![Reply::Text("Answer from the lab server.".into())]);
+    let home = Home::new();
+    let term = two_providers(&home, &first, &second);
+
+    term.type_text("take your time");
+    term.send(ENTER);
+    term.wait_for("slow1", WAIT);
+    term.type_text("/provider Lab");
+    term.send(ENTER);
+    term.wait_for("Wait for the answer to finish", WAIT);
+    term.wait_for("slow8", WAIT);
+    // With a draft, the running turn's hint is "Enter steer"; this one is the idle prompt's.
+    term.wait_for("Enter send", WAIT);
+    assert!(second.requests().iter().all(|r| !r.is_turn()), "nothing may reach the other server mid-turn");
+    assert!(!sent(first.turns().last().unwrap()).contains("/provider"), "the command was sent to the model as steering");
+
+    // Still typed, it switches once the answer is done.
+    term.send(ENTER);
+    term.wait_for("Switched to Lab", WAIT);
 }
 
 /// Ctrl+D on an empty prompt.
@@ -527,6 +615,7 @@ const SCREENS: &[(&str, &str, &str)] = &[
     ("/settings", "Settings", "Esc save and close"),
     ("/memory", "remembers", "Esc close"),
     ("/mcp", "MCP", "Esc close"),
+    ("/provider", "Switch provider", "Esc cancel"),
     // Printed into the transcript, so the marker is its last line; the first has
     // scrolled away in a short terminal.
     ("/help", "/uninstall", "Esc"),
