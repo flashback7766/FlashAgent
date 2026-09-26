@@ -890,6 +890,25 @@ fn a_long_change_can_be_read_whole_before_it_is_approved() {
 }
 
 #[test]
+fn the_command_palette_and_model_menu_fit_an_80_by_24_terminal() {
+    // Ten two-row items put the title and the selected row above the screen.
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    home.set_up(&server.url);
+    let term = Term::start(&home, &["-y"], 80, 24);
+    term.wait_for(PROMPT, WAIT);
+    term.send("\x0b");
+    // It unfolds from its title down; unfolded, all of it is on screen.
+    let screen = term.wait_for("more below", WAIT);
+    assert!(screen.contains("Command palette") && screen.contains("› /") && screen.contains("╰"), "the menu does not fit:\n{screen}");
+    term.send(ESC);
+    term.send(F3);
+    let screen = term.wait_for("Select model", WAIT);
+    assert!(screen.contains(&server.model), "{screen}");
+    term.send(ESC);
+}
+
+#[test]
 fn esc_clears_a_steering_draft_before_it_stops_the_turn() {
     let words: Vec<String> = (1..=60).map(|i| format!("word{i}")).collect();
     let server = MockServer::start(vec![Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(300) }]);

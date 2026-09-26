@@ -35,10 +35,12 @@ impl Overlay {
         }
     }
 
-    pub(crate) fn render(&self, width: usize) -> Vec<RenderLine> {
+    /// `height` is the whole window: a menu keeps to what is left of it once
+    /// the footer under it has its rows.
+    pub(crate) fn render(&self, width: usize, height: usize) -> Vec<RenderLine> {
         match self {
             Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Provider(menu) | Overlay::Sessions(menu) | Overlay::Palette(menu) => {
-                menu.render(width)
+                menu.render_in(width, height.saturating_sub(MENU_FOOTER_ROWS))
             }
             Overlay::Providers(view) => view.render(width),
             Overlay::Rewind(card) => card.render(width),
@@ -51,6 +53,10 @@ impl Overlay {
         }
     }
 }
+
+/// The rows a frame keeps under an open menu (tip, status line) and the blank
+/// row above it.
+const MENU_FOOTER_ROWS: usize = 5;
 
 impl App {
     pub(crate) fn settings_view_mut(&mut self) -> Option<&mut SettingsView> {
