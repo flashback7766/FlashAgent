@@ -281,17 +281,12 @@ impl SetupWizard {
         if self.model_search.is_empty() {
             return (0..self.available_models.len()).collect();
         }
-        let q = self.model_search.to_lowercase();
         self.available_models
             .iter()
             .enumerate()
             .filter(|(idx, m)| {
-                m.to_lowercase().contains(&q)
-                    || self
-                        .discovered_models
-                        .get(*idx)
-                        .map(|dm| dm.capabilities_summary().to_lowercase().contains(&q))
-                        .unwrap_or(false)
+                let summary = self.discovered_models.get(*idx).map(|dm| dm.capabilities_summary()).unwrap_or_default();
+                crate::matches_words(&format!("{m}\n{summary}"), &self.model_search)
             })
             .map(|(idx, _)| idx)
             .collect()
