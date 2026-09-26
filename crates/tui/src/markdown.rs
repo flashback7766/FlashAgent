@@ -1,8 +1,8 @@
 use super::*;
 
-/// `**bold**` and `` `code` `` only; line-level, no full parser.
+/// `**bold**`, `*italic*` and `` `code` `` only; line-level, no full parser.
 pub fn md(line: &str) -> String {
-    if !line.contains("**") && !line.contains('`') {
+    if !line.contains('*') && !line.contains('`') {
         return line.to_string();
     }
     let mut out = String::with_capacity(line.len());
@@ -22,6 +22,9 @@ pub fn md(line: &str) -> String {
             }
             out.push_str("**");
             i += 2;
+        } else if let Some(len) = italic_at(line, i) {
+            out.push_str(&format!("\x1b[3m{}\x1b[23m", md(&line[i + 1..i + 1 + len])));
+            i += len + 2;
         } else if bytes[i] == b'`' {
             if let Some(end) = line[i + 1..].find('`') {
                 let inner = &line[i + 1..i + 1 + end];
@@ -42,6 +45,27 @@ pub fn md(line: &str) -> String {
         }
     }
     out
+}
+
+/// The length of `*text*` starting at `at`, when it is emphasis: it opens a
+/// word (at the start, after a space or a bracket) and closes one. So a list
+/// marker, `a * b`, `2*3*4` and `src/*.rs` stay as written.
+fn italic_at(line: &str, at: usize) -> Option<usize> {
+    let bytes = line.as_bytes();
+    if bytes.get(at) != Some(&b'*') || bytes.get(at + 1).is_none_or(|b| b.is_ascii_whitespace() || *b == b'*') {
+        return None;
+    }
+    if at > 0 && !matches!(bytes[at - 1], b' ' | b'\t' | b'(' | b'[' | b'"' | b'\'') {
+        return None;
+    }
+    let rest = &line[at + 1..];
+    let close = rest.find('*')?;
+    let inner = &rest[..close];
+    let after = rest.as_bytes().get(close + 1);
+    if inner.ends_with(char::is_whitespace) || after.is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'*') {
+        return None;
+    }
+    Some(close)
 }
 
 pub(crate) enum ListMarkerKind {
@@ -242,14 +266,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 top_border.push_str(reset);
                 out.push(top_border);
 
-                let mut header_str = format!("{border_color}│{reset}");
-                for (c, &w) in col_widths.iter().enumerate() {
-                    let raw_cell = header_row.get(c).map(|s| s.as_str()).unwrap_or("");
-                    let styled = md(raw_cell);
-                    let cell_content = fit_cell(styled, w);
-                    header_str.push_str(&format!(" \x1b[1;38;2;240;235;225m{cell_content}\x1b[0m {border_color}│{reset}"));
-                }
-                out.push(header_str);
+                out.extend(table_row_lines(&header_row, &col_widths, "\x1b[1;38;2;240;235;225m", border_color));
 
                 let mut mid_border = format!("{border_color}├");
                 for (c, &w) in col_widths.iter().enumerate() {
@@ -263,15 +280,8 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 mid_border.push_str(reset);
                 out.push(mid_border);
 
-                for row in data_rows {
-                    let mut row_str = format!("{border_color}│{reset}");
-                    for (c, &w) in col_widths.iter().enumerate() {
-                        let raw_cell = row.get(c).map(|s| s.as_str()).unwrap_or("");
-                        let styled = md(raw_cell);
-                        let cell_content = fit_cell(styled, w);
-                        row_str.push_str(&format!(" {cell_content} {border_color}│{reset}"));
-                    }
-                    out.push(row_str);
+                for row in &data_rows {
+                    out.extend(table_row_lines(row, &col_widths, "", border_color));
                 }
 
                 let mut bot_border = format!("{border_color}╰");
@@ -414,6 +424,32 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
 
 /// Exactly `width` cells: clipped when longer, and padded after a clip too,
 /// since a wide character that does not fit leaves the cell a column short.
+/// One table row, as many lines high as its tallest cell: a cell wider than
+/// its column wraps inside it. Clipped to one line, the end of most cells in
+/// a summary table was lost, with nothing to say so.
+fn table_row_lines(cells: &[String], widths: &[usize], style: &str, border_color: &str) -> Vec<String> {
+    let reset = "\x1b[0m";
+    let wrapped: Vec<Vec<String>> = widths
+        .iter()
+        .enumerate()
+        .map(|(c, &w)| {
+            let styled = md(cells.get(c).map(String::as_str).unwrap_or(""));
+            if visible_width(&styled) <= w { vec![styled] } else { wrap_styled(&styled, w) }
+        })
+        .collect();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    (0..height)
+        .map(|r| {
+            let mut line = format!("{border_color}│{reset}");
+            for (c, &w) in widths.iter().enumerate() {
+                let piece = wrapped[c].get(r).cloned().unwrap_or_default();
+                line.push_str(&format!(" {style}{}{reset} {border_color}│{reset}", fit_cell(piece, w)));
+            }
+            line
+        })
+        .collect()
+}
+
 fn fit_cell(styled: String, width: usize) -> String {
     let fitted = if visible_width(&styled) > width { clip_ansi(&styled, width) } else { styled };
     let pad = width.saturating_sub(visible_width(&fitted));
@@ -431,6 +467,36 @@ mod tests {
 
     fn render(text: &str, width: usize) -> Vec<String> {
         render_markdown_text(text, width)
+    }
+
+    #[test]
+    fn a_long_cell_wraps_inside_its_column_and_nothing_is_lost() {
+        let sentence = "Shows the current branch alongside every file in the working tree that differs from the index or the last commit";
+        let table = format!("| Tool | What it does | Example |\n| --- | --- | --- |\n| git status | {sentence} | git status |\n| git log | Prints the history | git log --oneline -5 |");
+        for width in [60, 90, 120] {
+            let lines = render(&table, width);
+            assert!(lines.iter().all(|l| visible_width(l) <= width), "{width}: a row is wider than the window");
+            let text = plain(&lines).join(" ");
+            for word in sentence.split(' ') {
+                assert!(text.contains(word), "{width}: \"{word}\" was cut off:\n{}", plain(&lines).join("\n"));
+            }
+            // Every line of the wrapped row has its borders, so the columns stay lined up.
+            let borders: Vec<usize> = plain(&lines).iter().filter(|l| l.starts_with('│')).map(|l| l.matches('│').count()).collect();
+            assert!(borders.iter().all(|&n| n == 4), "{width}: {borders:?}");
+        }
+        // A table that fits keeps one line per row.
+        let small = render("| a | b |\n| - | - |\n| 1 | 2 |", 80);
+        assert_eq!(small.len(), 5);
+    }
+
+    #[test]
+    fn italic_is_rendered_and_stars_that_are_not_emphasis_stay() {
+        assert_eq!(md("a *low* value"), "a \x1b[3mlow\x1b[23m value");
+        assert_eq!(md("(*note*)"), "(\x1b[3mnote\x1b[23m)");
+        assert_eq!(md("**bold** and *it*"), "\x1b[1mbold\x1b[22m and \x1b[3mit\x1b[23m");
+        for kept in ["* item", "a * b * c", "2*3*4", "src/*.rs and tests/*.rs", "*not closed", "*spaced *"] {
+            assert_eq!(md(kept), kept, "{kept}");
+        }
     }
 
     #[test]
