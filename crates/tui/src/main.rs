@@ -598,6 +598,8 @@ struct App {
     confirm_select: ConfirmSelect,
     /// The call whose whole diff `v` already put in the conversation.
     whole_change_shown: Option<String>,
+    /// The last look at the server got no answer; cleared when one comes.
+    server_silent: bool,
     /// Ctrl+X, waiting for Ctrl+E.
     ctrl_x_at: Option<std::time::Instant>,
     chat: ChatView,
@@ -687,7 +689,7 @@ struct App {
 
 /// How the line under the prompt says the server is not there, so a switch
 /// of provider can take it away.
-pub(crate) const OFFLINE_NOTICE: &str = "No model server at";
+pub(crate) const OFFLINE_NOTICE: &str = "No answer from";
 
 struct AppContext {
     config: AppConfig,
@@ -912,7 +914,7 @@ fn open_snapshots(perm: &PermissionedTools, session_id: &str, cwd: &std::path::P
 /// `None`: nothing worth saving; `Ok(id)`: saved; `Err(why)`: not saved.
 type SaveOutcome = Option<std::result::Result<String, String>>;
 
-fn start_event_sources(tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>, tools_arc: &Arc<BuiltinTools>, pending_discovery: Option<tokio::task::JoinHandle<Option<flashagent_llm::ServerDiscovery>>>) {
+fn start_event_sources(tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>, tools_arc: &Arc<BuiltinTools>, pending_discovery: Option<tokio::task::JoinHandle<Option<flashagent_llm::ServerDiscovery>>>, url: String) {
     {
         let mut ended = tools_arc.shells().subscribe();
         let tx = tx.clone();
@@ -926,9 +928,10 @@ fn start_event_sources(tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>, tools_a
     if let Some(task) = pending_discovery {
         let tx_disc = tx.clone();
         tokio::spawn(async move {
-            if let Ok(Some(disc)) = task.await {
-                let _ = tx_disc.send(UiEvent::ServerDiscovered(disc));
-            }
+            let _ = tx_disc.send(match task.await {
+                Ok(Some(disc)) => UiEvent::ServerDiscovered(disc),
+                _ => UiEvent::ServerSilent(url),
+            });
         });
     }
 
@@ -1162,6 +1165,7 @@ fn initial_app(init: InitialApp) -> App {
         last_ctrl_c: None,
         last_mascot_mood: MascotMood::Checking,
         announced_mood: MascotMood::Checking,
+        server_silent: false,
         config: app_config,
         available_models,
         provider_switch: None,
@@ -1230,7 +1234,9 @@ struct Inbox {
 
 async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     let (tx, events) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
-    start_event_sources(&tx, &ctx.tools_arc, ctx.pending_discovery);
+    // Start-up already asked, and was told nothing.
+    let startup_silent = ctx.pending_discovery.is_none() && ctx.available_models.is_empty();
+    start_event_sources(&tx, &ctx.tools_arc, ctx.pending_discovery, ctx.source.0.base_url());
     let (channel_probe_tx, channel_probes) = tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
     let (update_tx, updates) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
     let (channel_watch_tx, channel_watch_rx) = tokio::sync::watch::channel(ctx.config.update_channel);
@@ -1284,6 +1290,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         memory_docs: ctx.memory_docs,
         effort_memory,
     });
+    app.server_silent = startup_silent;
     update_context_usage(&mut app.context_usage, &app.history, &w.memory_block, &app.chat, w.perm);
 
     // Before anything is drawn. A resumed session's card is drawn whole: the
