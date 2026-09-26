@@ -1,5 +1,20 @@
 # Changelog
 
+## b450 — small models finish their tool calls, and fixes from a UX audit
+
+A large release: the build number goes up by 25.
+
+- **Small models make the tool calls they used to talk about.** The system prompt now says how to call tools in five short lines, and every tool parameter is described. The loop repairs what small models get wrong most often, a number sent as `"20"` or one argument under the wrong name (`status` where `code` is required), and asks once more when a model answers a failed call with an apology or stops before a call your request names ("...then report it with report_status"). Measured with `--tool-test` on a CPU with Ollama, qwen3 1.7B and qwen2.5 1.5B went from 5/8 to 8/8 and gemma4 e2b from 7/8 to 8/8; 1B models are still chat models (results in `docs/tool-calling.md`).
+- **`--tool-test` measures a model as the agent runs it.** Each scenario carries the agent's rules and repairs, and a pass that needed the loop's reminder is marked "after a nudge". A scenario the server refused (a rate limit, a 5xx) is marked not tested and the verdict says the run is incomplete, instead of blaming the model. On a local server the model is loaded before the first scenario is timed.
+- **Esc during a file write tells the model what happened.** The write finishes and the model gets its real result; it used to be told the write had not run, and did it again. A command or MCP call stopped midway, or one that timed out, is reported as possibly half done, so the model checks before running it again.
+- **A saved model is never swapped for another on a server that takes a key.** A mistyped or retired model name on OpenRouter or a cloud API was replaced by another model the server listed, billed at that model's price. It is now kept, and the status line says the server does not list it; a dated snapshot (`claude-...-20250929`) still counts as the same model.
+- **A long change can be read whole before you approve it.** The approval card shows what fits and how many lines are left; `v` prints the whole diff above it, and PgUp/PgDn scroll while the card waits.
+- **Menus fit the window.** The command palette, the model and provider pickers and the setup wizard fit an 80×24 terminal instead of running off its bottom; the wizard wraps its sentences, and Enter on an empty filter no longer picks a model you have not seen.
+- **The prompt edits as a shell does.** Ctrl+U deletes to the start of the line and Ctrl+E goes to its end; the external editor moved to Ctrl+X Ctrl+E and the update check to `/update`. Ctrl+W takes an emoji as a word. A question's written answer and the provider form fields edit like the prompt, with the cursor anywhere in the text.
+- **A resumed session looks as it did.** `/resume` brings back the tool calls and the model's thoughts, not only the text.
+- **Tables and italics.** A long table cell wraps inside its column, and `*italic*` renders.
+- **Fixes:** a model list slow to arrive no longer says the server is down; one Ctrl+C before any reply asks for a second instead of quitting; Ctrl+R during an answer says when it will work; a failed tool keeps the model's own header, and a declined, refused or stopped one is no longer shown as a failure; a thought's timer stops when the answer starts and no longer runs into the next turn; context windows are named the same way everywhere (128k, 1M); a menu search finds every word in any order; `/export` writes nothing for an empty session; a multi-file read card numbers each file's own lines.
+
 ## b425 — Gemini's thinking stays in its box
 
 - **Gemini's `<thought>` tags are never shown.** A model such as gemini-3.5-flash-lite could open a `<thought>` tag in its thinking and close it at the start of its answer, and both tags were on screen. They are now removed wherever they appear, and a tag that is never closed cannot pull the answer into the thinking box.
