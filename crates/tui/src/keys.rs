@@ -226,8 +226,11 @@ impl App {
             KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('\u{043a}') | KeyCode::Char('\u{041a}')
                 if mods.contains(KeyModifiers::CONTROL) =>
             {
-                if !self.running
-                    && cx.gate.pending().is_none()
+                // It did nothing and said nothing while an answer was written.
+                if self.running {
+                    self.background = Some(BackgroundNotice::fading("Ctrl+R regenerates once the answer is done · Esc stops it now".to_string(), 4));
+                    self.renderer.request_reprint();
+                } else if cx.gate.pending().is_none()
                     && cx.question_gate.pending().is_none()
                     && self.overlay.is_none()
                     && !self.regenerate(cx)
