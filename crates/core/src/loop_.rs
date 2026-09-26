@@ -205,6 +205,7 @@ impl AgentLoop {
         let mut stall_nudges: usize = 0;
         let mut promise_nudges: usize = 0;
         let mut error_nudges: usize = 0;
+        let mut named_nudges: usize = 0;
         // The last batch had a call that failed on its own terms: a wrong path,
         // name or argument, which a corrected call can fix.
         let mut call_failed = false;
@@ -493,6 +494,18 @@ impl AgentLoop {
                     continue;
                 }
 
+                // "Read status.txt, then report it with report_status": a small model
+                // reads the file and tells the user the number. Once per turn it is
+                // reminded of the call the request names.
+                if !is_scratchpad && named_nudges < 1 {
+                    if let Some(nudge) = named_tool_nudge(&history, &specs, &assistant_text) {
+                        named_nudges += 1;
+                        transient = history.pop().into_iter().chain([ChatMessage::user(nudge)]).collect();
+                        events(LoopEvent::TurnDelta("\n\n".to_string()));
+                        continue;
+                    }
+                }
+
                 if is_scratchpad || assistant_text.trim().is_empty() {
                     let fallback_source = if assistant_text.trim().is_empty() {
                         &assistant_reasoning
@@ -641,7 +654,7 @@ const TOOL_PICTURE_NOTE: &str = "it is the result of that call, not a new reques
 /// takes back a turn too many.
 pub fn is_prompt(msg: &ChatMessage) -> bool {
     let tool_picture = msg.content.starts_with(TOOL_PICTURE_OPENING) && msg.content.contains(TOOL_PICTURE_NOTE);
-    let nudge = [STALL_NUDGE, PROMISE_NUDGE, CONTINUE_NUDGE, ERROR_NUDGE].contains(&msg.content.as_str());
+    let nudge = [STALL_NUDGE, PROMISE_NUDGE, CONTINUE_NUDGE, ERROR_NUDGE].contains(&msg.content.as_str()) || msg.content.starts_with(NAMED_NUDGE_HEAD);
     msg.role == Role::User && !tool_picture && !nudge && !crate::task_notices::is_task_notice(&msg.content)
 }
 
@@ -672,6 +685,50 @@ const STALL_NUDGE: &str = "Please provide your direct, final answer to my reques
 const PROMISE_NUDGE: &str = "You said what you would do next but did not do it. Make that tool call now.";
 
 pub(crate) const ERROR_NUDGE: &str = "Your last tool call failed and you replied without trying again. If the error shows what to change (a path, a name, an argument), make the corrected call now. Otherwise say in one sentence what blocks you.";
+
+const NAMED_NUDGE_HEAD: &str = "The request asks for a call to ";
+
+/// Words before a tool's name that ask for a call to it: "report it with
+/// report_status", "call web_search", "через run_shell". After it: "tool".
+const CALL_WORDS: &[&str] = &["with", "using", "use", "call", "via", "through", "run", "через", "помощью", "вызови", "вызовом", "используй", "используя"];
+
+/// The reminder for a tool the last request asks for by name that no call
+/// since has used, once the model has made some other call and then answered
+/// in prose. A name only mentioned ("why did write_file fail?") asks for
+/// nothing, and a reply that ends on a question hands the turn to the user.
+pub(crate) fn named_tool_nudge(history: &[ChatMessage], specs: &[ToolSpec], reply: &str) -> Option<String> {
+    let reply = reply.trim();
+    if reply.is_empty() || reply.rsplit("\n\n").next().unwrap_or(reply).contains('?') {
+        return None;
+    }
+    let start = history.iter().rposition(is_prompt)?;
+    let called: HashSet<&str> = history[start..].iter().flat_map(|m| m.tool_calls.iter().map(|c| c.name.as_str())).collect();
+    if called.is_empty() {
+        return None;
+    }
+    let prompt = history[start].content.to_lowercase();
+    let (_, name) = specs
+        .iter()
+        .filter(|s| !called.contains(s.name.as_str()))
+        .filter_map(|s| asks_for_call(&prompt, &s.name.to_lowercase()).map(|at| (at, &s.name)))
+        .min_by_key(|(at, _)| *at)?;
+    Some(format!("{NAMED_NUDGE_HEAD}{name}, and you have not made it. Make that call now. If it is not needed after all, say why in one sentence."))
+}
+
+/// Where `prompt` asks for a call to the tool `name`, if it does.
+fn asks_for_call(prompt: &str, name: &str) -> Option<usize> {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let quote = |c: char| c == '`' || c == '"' || c == '\'' || c.is_whitespace();
+    prompt.match_indices(name).map(|(at, _)| at).find(|&at| {
+        let (before, after) = (&prompt[..at], &prompt[at + name.len()..]);
+        if before.chars().next_back().is_some_and(is_ident) || after.chars().next().is_some_and(is_ident) {
+            return false;
+        }
+        let word_before = before.trim_end_matches(quote).rsplit(|c: char| !is_ident(c)).next().unwrap_or_default();
+        let word_after = after.trim_start_matches(quote).split(|c: char| !is_ident(c)).next().unwrap_or_default();
+        CALL_WORDS.contains(&word_before) || word_after == "tool"
+    })
+}
 
 /// A failed shell command is often the answer itself (the tests fail), and a
 /// refused or cancelled call must not be tried again.
@@ -1512,6 +1569,63 @@ mod tests {
         let llm = RecordingLlm::new(vec![tool_turn("read_file", "c1"), text_turn("It says 7."), text_turn("unexpected")]);
         let (_, _) = run_loop(&l, &llm, &ScriptedTools::new(vec![]), |_| {});
         assert_eq!(llm.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_tool_the_request_names_is_asked_for_once_if_the_model_stops_before_it() {
+        let asked = |prompt: &str, turns: Vec<MockTurn>| {
+            let llm = RecordingLlm::new(turns);
+            let tools = ScriptedTools::new(vec![]);
+            let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+            let mut shown = String::new();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let (history, _) = rt
+                .block_on(l.run(&llm, &tools, vec![ChatMessage::user(prompt)], &mut |e| {
+                    if let LoopEvent::TurnDelta(d) = e {
+                        shown.push_str(&d);
+                    }
+                }))
+                .unwrap();
+            let names: Vec<String> = tools.calls.lock().unwrap().iter().map(|c| c.name.clone()).collect();
+            let requests = llm.requests.lock().unwrap().clone();
+            (names, requests, history, shown)
+        };
+        let (names, requests, history, shown) = asked(
+            "Read a.txt, then run the tests with `run_shell`.",
+            vec![tool_turn("read_file", "c1"), text_turn("a.txt says hi."), tool_turn("run_shell", "c2"), text_turn("They pass."), text_turn("unexpected")],
+        );
+        assert_eq!(names, ["read_file", "run_shell"]);
+        assert!(requests[2].last().unwrap().content.starts_with("The request asks for a call to run_shell,"), "{:?}", requests[2].last());
+        assert!(shown.contains("says hi.\n\n"), "the call ran into the prose: {shown:?}");
+        assert!(history.iter().all(|m| !m.content.starts_with(NAMED_NUDGE_HEAD)), "the reminder is not kept");
+        assert_eq!(requests.len(), 4);
+
+        // Only named, asked before any call, or answered with a question: nothing is sent.
+        for (prompt, turns) in [
+            ("Why did run_shell fail? Read a.txt.", vec![tool_turn("read_file", "c1"), text_turn("It timed out."), text_turn("unexpected")]),
+            ("Use run_shell to list the files.", vec![text_turn("I cannot."), text_turn("unexpected")]),
+            ("Read a.txt, then run it with run_shell.", vec![tool_turn("read_file", "c1"), text_turn("Which command?"), text_turn("unexpected")]),
+        ] {
+            let expected = turns.len() - 1;
+            let (_, requests, _, _) = asked(prompt, turns);
+            assert_eq!(requests.len(), expected, "{prompt}");
+        }
+        // Once per turn.
+        let (_, requests, _, _) = asked(
+            "Read a.txt, then report through run_shell.",
+            vec![tool_turn("read_file", "c1"), text_turn("Done."), text_turn("Not needed."), text_turn("unexpected")],
+        );
+        assert_eq!(requests.len(), 2 + 1);
+    }
+
+    #[test]
+    fn a_call_is_asked_for_by_name_in_english_and_russian() {
+        for prompt in ["report it with report_status", "call `report_status`", "the report_status tool", "сообщи через report_status", "используй report_status"] {
+            assert!(asks_for_call(prompt, "report_status").is_some(), "{prompt}");
+        }
+        for prompt in ["why did report_status fail", "report_status_v2 with it", "with my_report_status"] {
+            assert!(asks_for_call(prompt, "report_status").is_none(), "{prompt}");
+        }
     }
 
     #[test]
