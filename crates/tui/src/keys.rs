@@ -317,8 +317,12 @@ impl App {
                         flashagent_tui::clipboard::set_clipboard_text(&text);
                         self.copy_toast = Some(("Copied assistant response (press Ctrl+C again to exit)".to_string(), now));
                         self.renderer.request_reprint();
-                    } else {
+                    } else if is_double_tap {
                         return Some(Flow::Quit);
+                    } else {
+                        // Twice, as /help says: once quit a new session at a stray press.
+                        self.copy_toast = Some(("Press Ctrl+C again to exit".to_string(), now));
+                        self.renderer.request_reprint();
                     }
                 }
             }
