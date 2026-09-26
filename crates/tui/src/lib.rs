@@ -615,6 +615,12 @@ impl ChatView {
         match ev {
             LoopEvent::TurnDelta(d) => {
                 self.open_tool = None;
+                // The answer has begun, so the thinking is over: its time stops
+                // here, not when the answer ends.
+                // It stays open, so reasoning that comes back joins the same block.
+                if let Some(i) = self.streaming_reasoning.filter(|_| !d.trim().is_empty()) {
+                    self.lines[i].reasoning_secs.get_or_insert_with(|| thought_secs(self.reasoning_start.take()));
+                }
                 match self.streaming {
                     Some(i) => self.lines[i].text.push_str(d),
                     None => {
@@ -644,9 +650,10 @@ impl ChatView {
             LoopEvent::SteeringInjected(directive) if flashagent_core::is_task_notice(directive) => {}
             LoopEvent::SteeringInjected(directive) => {
                 self.streaming = None;
+                // Taken either way: left over, it would time the next thought from here.
+                let started = self.reasoning_start.take();
                 if let Some(i) = self.streaming_reasoning.take() {
-                    let secs = self.reasoning_start.take().map(|t| t.elapsed().as_secs()).unwrap_or(1);
-                    self.lines[i].reasoning_secs = Some(secs);
+                    self.lines[i].reasoning_secs.get_or_insert_with(|| thought_secs(started));
                 }
                 self.lines.push(ChatLine::new(LineKind::User, directive));
                 self.needs_reprint = true;
@@ -655,9 +662,10 @@ impl ChatView {
             LoopEvent::StepStarted { .. } => {}
             LoopEvent::Done(reason) => {
                 self.streaming = None;
+                // Taken either way: left over, it would time the next thought from here.
+                let started = self.reasoning_start.take();
                 if let Some(i) = self.streaming_reasoning.take() {
-                    let secs = self.reasoning_start.take().map(|t| t.elapsed().as_secs()).unwrap_or(1);
-                    self.lines[i].reasoning_secs = Some(secs);
+                    self.lines[i].reasoning_secs.get_or_insert_with(|| thought_secs(started));
                 }
                 self.open_tool = None;
                 // The enum's own name ("— StepLimit —") used to reach the chat.
@@ -676,6 +684,11 @@ impl ChatView {
             }
         }
     }
+}
+
+/// Whole seconds, rounded, and at least one: 0.8 s read "(0s)".
+pub(crate) fn thought_secs(started: Option<std::time::Instant>) -> u64 {
+    started.map_or(1, |t| ((t.elapsed().as_millis() + 500) / 1000).max(1) as u64)
 }
 
 /// `none()`: all collapsed; `all()`: all expanded (Ctrl+Shift+O, persists);
@@ -1856,6 +1869,26 @@ ok".into()));
         let rows: Vec<String> = settled.iter().chain(live.iter()).map(|(_, t)| crate::strip_ansi(t)).collect();
         assert!(rows.iter().any(|t| t.contains("Thought:")), "{rows:#?}");
         assert!(!rows.iter().any(|t| t.contains("Thinking:")), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_thoughts_time_stops_when_the_answer_starts_not_when_it_ends() {
+        // ~2 s of thinking read "(12s)": the clock ran through the answer.
+        let mut v = ChatView::default();
+        v.push_user("q");
+        v.on_event(&LoopEvent::ReasoningDelta("**Analyzing Request**".into()));
+        v.reasoning_start = Some(std::time::Instant::now() - std::time::Duration::from_millis(2_400));
+        v.on_event(&LoopEvent::TurnDelta("The answer".into()));
+        let thought = v.lines.iter().position(|l| l.kind == LineKind::Reasoning).unwrap();
+        assert_eq!(v.lines[thought].reasoning_secs, Some(2));
+        v.on_event(&LoopEvent::TurnDelta(" goes on for a while".into()));
+        v.on_event(&LoopEvent::ReasoningDelta(" and one more thought".into()));
+        v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
+        assert_eq!(v.lines[thought].reasoning_secs, Some(2), "the end of the answer changed it");
+        assert!(v.reasoning_start.is_none(), "the next turn's thought would be timed from here");
+        // Rounded, and never "(0s)".
+        assert_eq!(thought_secs(Some(std::time::Instant::now() - std::time::Duration::from_millis(800))), 1);
+        assert_eq!(thought_secs(Some(std::time::Instant::now() - std::time::Duration::from_millis(2_600))), 3);
     }
 
     #[test]

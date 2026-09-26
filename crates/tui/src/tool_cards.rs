@@ -139,9 +139,10 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
 impl ChatView {
     pub(crate) fn tool_started(&mut self, name: &str, args_json: &str) {
         self.streaming = None;
+        // Taken either way: left over, it would time the next thought from here.
+        let started = self.reasoning_start.take();
         if let Some(i) = self.streaming_reasoning.take() {
-            let secs = self.reasoning_start.take().map(|t| t.elapsed().as_secs()).unwrap_or(1);
-            self.lines[i].reasoning_secs = Some(secs);
+            self.lines[i].reasoning_secs.get_or_insert_with(|| crate::thought_secs(started));
         }
 
         // Read through the tool's own resolver, so aliases and batches show what will
