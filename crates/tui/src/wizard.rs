@@ -641,6 +641,11 @@ impl SetupWizard {
             let pos = filtered.iter().position(|&idx| idx == self.model_idx).unwrap_or(0);
             match code {
                 KeyCode::Enter => {
+                    // A filter that matches nothing picks nothing: going on saved
+                    // whichever model it had matched a few letters earlier.
+                    if filtered.is_empty() && !self.available_models.is_empty() {
+                        return None;
+                    }
                     if !filtered.is_empty() {
                         self.choose_model(filtered[pos]);
                     }
@@ -756,6 +761,31 @@ impl SetupWizard {
     }
 
     pub fn render(&self, width: usize) -> Vec<String> {
+        self.render_in(width, usize::MAX)
+    }
+
+    /// Within `height` rows where it can be: the server and model lists give
+    /// up rows first, so the hints, the border and the selected row stay.
+    pub fn render_in(&self, width: usize, height: usize) -> Vec<String> {
+        let model_page = if self.discovered_models.is_empty() { 10 } else { 5 };
+        let lines = self.render_page(width, PRESET_WINDOW, model_page);
+        // paint_page leaves the last row for the cursor.
+        let room = height.saturating_sub(1);
+        if lines.len() <= room {
+            return lines;
+        }
+        // Shrunk a row at a time: a shorter window adds its "more" rows.
+        let (mut presets, mut models) = (PRESET_WINDOW, model_page);
+        let mut lines = lines;
+        while lines.len() > room && (presets > 1 || models > 1) {
+            presets = presets.saturating_sub(1).max(1);
+            models = models.saturating_sub(1).max(1);
+            lines = self.render_page(width, presets, models);
+        }
+        lines
+    }
+
+    fn render_page(&self, width: usize, preset_window: usize, model_page: usize) -> Vec<String> {
         let mut lines = Vec::new();
         let border_color = "\x1b[38;2;100;95;90m";
         let reset = "\x1b[0m";
@@ -779,17 +809,23 @@ impl SetupWizard {
             format!("  {border_color}│{reset} {clipped}{pad} {border_color}│{reset}")
         };
         let heading = |step: usize, text: &str| format!("\x1b[1;38;2;240;235;225mStep {}: {text}\x1b[0m", self.step_number(step));
+        // A sentence goes on to the next row rather than lose its end.
+        let prose = |lines: &mut Vec<String>, indent: &str, color: &str, text: &str| {
+            for row in crate::wrap_styled(text, inner_w.saturating_sub(2 + indent.len())) {
+                lines.push(pad_row(&format!("{indent}{color}{row}\x1b[0m")));
+            }
+        };
 
         match self.step {
             0 => {
                 lines.push(pad_row(&heading(0, "Choose your model server")));
-                lines.push(pad_row("\x1b[38;2;160;155;145mWhere does your model run? A local server needs no key.\x1b[0m"));
+                prose(&mut lines, "", "\x1b[38;2;160;155;145m", "Where does your model run? A local server needs no key.");
                 lines.push(pad_row(""));
 
                 let presets = BackendPreset::all();
                 let rows = presets.len() + 1;
-                let start = (self.preset_idx + 1).saturating_sub(PRESET_WINDOW).min(rows.saturating_sub(PRESET_WINDOW + 1));
-                let end = (start + PRESET_WINDOW).min(presets.len());
+                let start = (self.preset_idx + 1).saturating_sub(preset_window).min(rows.saturating_sub(preset_window + 1));
+                let end = (start + preset_window).min(presets.len());
                 if start > 0 {
                     lines.push(pad_row(&format!("  \x1b[38;2;135;130;125m▲ {start} more above\x1b[0m")));
                 }
@@ -866,7 +902,7 @@ impl SetupWizard {
                 if let Some(var) = env_key {
                     lines.push(pad_row(&format!("\x1b[38;2;145;205;140mFound {var} in your environment.\x1b[0m")));
                     lines.push(pad_row(""));
-                    lines.push(pad_row("  \x1b[38;2;160;155;145mPress Enter to use it, or paste a key to save one for this provider.\x1b[0m"));
+                    prose(&mut lines, "  ", "\x1b[38;2;160;155;145m", "Press Enter to use it, or paste a key to save one for this provider.");
                 } else if self.key_required() {
                     lines.push(pad_row("\x1b[38;2;225;175;95mThis provider needs an API key.\x1b[0m"));
                     lines.push(pad_row(""));
@@ -886,12 +922,12 @@ impl SetupWizard {
                 } else if self.is_cloud_backend() {
                     lines.push(pad_row("\x1b[38;2;225;175;95mA server on the internet usually wants a key.\x1b[0m"));
                     lines.push(pad_row(""));
-                    lines.push(pad_row("  \x1b[38;2;160;155;145mPaste it below, or press Enter if this one takes none.\x1b[0m"));
+                    prose(&mut lines, "  ", "\x1b[38;2;160;155;145m", "Paste it below, or press Enter if this one takes none.");
                 } else {
                     lines.push(pad_row("\x1b[38;2;145;205;140mA server on your network usually needs no key.\x1b[0m"));
                     lines.push(pad_row(""));
-                    lines.push(pad_row("  \x1b[38;2;160;155;145mIf your server uses Bearer auth, enter it below.\x1b[0m"));
-                    lines.push(pad_row("  \x1b[38;2;135;130;125mOtherwise, leave empty and press Enter to continue.\x1b[0m"));
+                    prose(&mut lines, "  ", "\x1b[38;2;160;155;145m", "If your server uses Bearer auth, enter it below.");
+                    prose(&mut lines, "  ", "\x1b[38;2;135;130;125m", "Otherwise, leave empty and press Enter to continue.");
                 }
                 lines.push(pad_row(""));
 
@@ -957,7 +993,7 @@ impl SetupWizard {
                 } else {
                     let cur_pos = filtered.iter().position(|&idx| idx == self.model_idx).unwrap_or(0);
                     let has_metadata = !self.discovered_models.is_empty();
-                    let page_size = if has_metadata { 5 } else { 10 };
+                    let page_size = if has_metadata { model_page.min(5) } else { model_page };
                     let start = if cur_pos < page_size { 0 } else { (cur_pos + 1).saturating_sub(page_size) };
                     let end = (start + page_size).min(total_matches);
 
@@ -997,7 +1033,7 @@ impl SetupWizard {
             }
             3 => {
                 lines.push(pad_row(&heading(3, "Permissions")));
-                lines.push(pad_row("\x1b[38;2;160;155;145mWhat may the agent do without asking? Shift+Tab changes it any time.\x1b[0m"));
+                prose(&mut lines, "", "\x1b[38;2;160;155;145m", "What may the agent do without asking? Shift+Tab changes it any time.");
                 lines.push(pad_row(""));
                 let modes = [
                     (PermissionMode::Planning, "1. Planning", "only reads and plans; changes nothing"),
@@ -1018,7 +1054,7 @@ impl SetupWizard {
             }
             4 => {
                 lines.push(pad_row(&heading(4, "Sampling and launch")));
-                lines.push(pad_row("\x1b[38;2;160;155;145mHow the model samples. The preset suits most models; its numbers are in /sampling.\x1b[0m"));
+                prose(&mut lines, "", "\x1b[38;2;160;155;145m", "How the model samples. The preset suits most models; its numbers are in /sampling.");
                 lines.push(pad_row(""));
 
                 let preset_val = format!("[ {} ]", self.sampling.preset.label());
@@ -1037,8 +1073,8 @@ impl SetupWizard {
         let hint_w = inner_w.saturating_sub(2);
         let model_enter = if self.provider_only { "save" } else { "choose" };
         let hints: Vec<(&str, &str)> = match self.step {
-            0 if self.is_custom() => vec![("type", "the URL"), ("Tab", "protocol"), ("\u{2191}/\u{2193}", "presets"), ("Enter", "next"), ("Esc", "clear or quit")],
-            0 => vec![("\u{2191}/\u{2193}", "move"), ("0-9 c", "pick"), ("Enter", "next"), ("Esc", "quit")],
+            0 if self.is_custom() => vec![("type", "the URL"), ("Tab", "protocol"), ("\u{2191}/\u{2193}", "presets"), ("Enter", "next"), ("Esc", if self.provider_only { "clear or close" } else { "clear or quit" })],
+            0 => vec![("\u{2191}/\u{2193}", "move"), ("0-9 c", "pick"), ("Enter", "next"), ("Esc", if self.provider_only { "close" } else { "quit" })],
             1 if self.key_required() => vec![("paste", "the key"), ("Enter", "check it"), ("Esc", "clear or back")],
             1 => vec![("Enter", "skip"), ("Esc", "back")],
             2 => vec![("\u{2191}/\u{2193}", "move"), ("type", "to filter"), ("Enter", model_enter), ("Esc", "clear or back")],
@@ -1074,8 +1110,8 @@ async fn after_key(wizard: &mut SetupWizard, prev_step: usize, painter: &mut cra
     if prev_step < 2 && wizard.step == 2 {
         wizard.available_models.clear();
         wizard.connection_status = Some(format!("Connecting to {}\u{2026}", wizard.profile.url.trim_end_matches('/')));
-        let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
-        crate::screen::paint_page(painter, &wizard.render(term_w as usize), true);
+        let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
+        crate::screen::paint_page(painter, &wizard.render_in(term_w as usize, term_h as usize), true);
         probe_server(wizard).await;
     }
 }
@@ -1108,8 +1144,8 @@ pub async fn run_wizard_channel(
 
     let mut painter = crate::screen::Screen::new();
     let completed = loop {
-        let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
-        crate::screen::paint_page(&mut painter, &wizard.render(term_w as usize), true);
+        let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
+        crate::screen::paint_page(&mut painter, &wizard.render_in(term_w as usize, term_h as usize), true);
 
         tokio::select! {
             Some(ev) = rx.recv() => {
@@ -1162,8 +1198,8 @@ pub async fn run_wizard(config: &mut AppConfig) -> anyhow::Result<bool> {
 
     let mut painter = crate::screen::Screen::new();
     let completed = loop {
-        let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
-        crate::screen::paint_page(&mut painter, &wizard.render(term_w as usize), true);
+        let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
+        crate::screen::paint_page(&mut painter, &wizard.render_in(term_w as usize, term_h as usize), true);
 
         if crossterm::event::poll(std::time::Duration::from_millis(50))? {
             match crossterm::event::read()? {
@@ -1244,6 +1280,60 @@ mod tests {
         // On step 0, Esc exits.
         let res = wizard.handle_key(KeyCode::Esc, KeyModifiers::empty());
         assert_eq!(res, Some(false));
+    }
+
+    #[test]
+    fn the_wizard_fits_a_short_terminal_and_keeps_its_selection() {
+        let mut wizard = SetupWizard::new(AppConfig::default());
+        for _ in 0..12 {
+            wizard.next_option();
+        }
+        let selected = BackendPreset::all()[wizard.preset_idx].name;
+        for (w, h) in [(80, 20), (50, 15)] {
+            let page = wizard.render_in(w, h);
+            assert!(page.len() < h, "{w}x{h}: {} rows", page.len());
+            let text = crate::strip_ansi(&page.join("\n"));
+            assert!(text.contains("Esc quit") || text.contains("Esc"), "{w}x{h}: the hints fell off:\n{text}");
+            assert!(page.last().unwrap().contains('╰'), "{w}x{h}: no bottom border:\n{text}");
+            assert!(text.lines().any(|l| l.contains('▸') && l.contains(&selected[..selected.len().min(6)])), "{w}x{h}: the selection is off screen:\n{text}");
+        }
+        // With room, nothing changes.
+        assert_eq!(wizard.render_in(100, 200), wizard.render(100));
+    }
+
+    #[test]
+    fn a_sentence_in_the_wizard_wraps_instead_of_losing_its_end() {
+        let mut wizard = SetupWizard::new(AppConfig::default());
+        let text = crate::strip_ansi(&wizard.render_in(50, 60).join("\n"));
+        assert!(text.contains("needs no key."), "{text}");
+        wizard.step = 4;
+        let text = crate::strip_ansi(&wizard.render_in(80, 60).join("\n"));
+        assert!(text.contains("/sampling."), "{text}");
+    }
+
+    #[test]
+    fn enter_on_a_filter_that_matches_nothing_picks_nothing() {
+        let mut wizard = SetupWizard::new(AppConfig::default());
+        wizard.step = 2;
+        wizard.available_models = vec!["z-ai/glm-5.3-prime".into(), "qwen/qwen3.8".into()];
+        for c in "zzqq".chars() {
+            wizard.handle_key(KeyCode::Char(c), KeyModifiers::empty());
+        }
+        wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(wizard.step, 2, "went on with a model the user never saw: {}", wizard.profile.model);
+        // Nothing listed at all: going on to pick a model later still works.
+        wizard.available_models.clear();
+        wizard.model_search.clear();
+        wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(wizard.step, 3);
+    }
+
+    #[test]
+    fn adding_a_provider_says_esc_closes_it() {
+        let mut wizard = SetupWizard::new(AppConfig::default());
+        wizard.provider_only = true;
+        let text = crate::strip_ansi(&wizard.render(80).join("\n"));
+        assert!(text.contains("Esc close") && !text.contains("Esc quit"), "{text}");
     }
 
     #[test]
