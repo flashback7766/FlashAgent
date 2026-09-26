@@ -207,6 +207,8 @@ pub type SettledLines = std::sync::Arc<Vec<RenderLine>>;
 #[derive(Default)]
 pub struct ChatView {
     lines: Vec<ChatLine>,
+    /// An approval or question card is up: the call in flight has not run.
+    awaiting_user: bool,
     /// The assistant line being streamed.
     streaming: Option<usize>,
     streaming_reasoning: Option<usize>,
@@ -565,6 +567,13 @@ impl ChatView {
         self.lines.extend(remaining_notices);
     }
 
+    pub fn set_awaiting_user(&mut self, awaiting: bool) {
+        if self.awaiting_user != awaiting {
+            self.awaiting_user = awaiting;
+            self.needs_reprint = true;
+        }
+    }
+
     pub fn push_system(&mut self, text: &str) {
         self.streaming = None;
         self.streaming_reasoning = None;
@@ -702,7 +711,8 @@ impl From<bool> for ReasoningExpansion {
     }
 }
 
-fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLine> {
+fn render_single_tool_card(call: &ToolCallRecord, width: usize, waiting: bool) -> Vec<RenderLine> {
+    let state = tool_views::CallState::of(call.is_running, call.is_error, waiting);
     let tool_name = call.name.as_str();
     let details_str = call.args_json.as_str();
     let parsed: serde_json::Value = serde_json::from_str(details_str.trim()).unwrap_or_default();
@@ -732,14 +742,7 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "~".to_string())
         });
-        return card(tool_views::render_command_card(
-            &cwd,
-            cmd,
-            call.result.as_deref(),
-            call.is_error,
-            call.is_running,
-            width,
-        ));
+        return card(tool_views::render_command_card(&cwd, cmd, call.result.as_deref(), state, width));
     }
 
     if tool_name == "read_file" || tool_name == "outline_file" {
@@ -820,14 +823,7 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
             (a, d, Some(simulated))
         };
 
-        return card(tool_views::render_edit_card(
-            path,
-            added,
-            deleted,
-            diff_text.as_deref(),
-            is_write,
-            width,
-        ));
+        return card(tool_views::render_edit_card(path, added, deleted, diff_text.as_deref(), is_write, state, call.result.as_deref(), width));
     }
 
     if tool_name == "spawn_agent" {
@@ -859,12 +855,7 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
         ));
     }
 
-    tool_views::render_generic_card(
-        if !tool_name.is_empty() { tool_name } else { "tool" },
-        &call.args_json,
-        call.result.as_deref(),
-        width,
-    )
+    tool_views::render_generic_card(if !tool_name.is_empty() { tool_name } else { "tool" }, &call.args_json, call.result.as_deref(), state, width)
 }
 
 /// A blank line goes between blocks, so the question, the work and the
@@ -1149,8 +1140,10 @@ impl ChatView {
             if line.kind == LineKind::Tool || line.kind == LineKind::ToolError {
                 if is_expanded {
                     if !line.tool_calls.is_empty() {
+                        // The call in flight waits while an approval or question card is up.
+                        let waiting = self.awaiting_user && self.open_tool == Some(i);
                         for call in &line.tool_calls {
-                            let card_lines = render_single_tool_card(call, width);
+                            let card_lines = render_single_tool_card(call, width, waiting);
                             for cl in card_lines {
                                 target.push(cl);
                             }
@@ -1164,7 +1157,7 @@ impl ChatView {
                             is_error: line.kind == LineKind::ToolError,
                             is_running: false,
                         };
-                        let card_lines = render_single_tool_card(&synthetic_call, width);
+                        let card_lines = render_single_tool_card(&synthetic_call, width, false);
                         for cl in card_lines {
                             target.push(cl);
                         }
