@@ -403,8 +403,16 @@ pub(crate) fn read_session(dir: &std::path::Path, id: &str) -> Result<SavedSessi
 
 /// After the system prompt `history` already starts with. Returns how many
 /// messages came back.
+/// The conversation is drawn again as it was: thoughts, answers, and a line
+/// per tool call with its result. Only prompts and answer text came back, so
+/// nothing on screen said which files were edited or which commands ran,
+/// and the sentences between calls ran together into one paragraph.
 pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history: &mut Vec<ChatMessage>) -> usize {
+    use flashagent_core::{DoneReason, LoopEvent};
     let before = history.len();
+    // A call is drawn when its result comes, as while it ran.
+    let mut calls: std::collections::HashMap<String, flashagent_llm::ToolCall> = std::collections::HashMap::new();
+    let mut in_turn = false;
     for saved_msg in saved.messages {
         let msg: ChatMessage = saved_msg.into();
         match msg.role {
@@ -417,6 +425,9 @@ pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history:
             // A tool's picture has no line of its own; its tool line stands for it.
             flashagent_llm::Role::User if !flashagent_core::is_prompt(&msg) => history.push(msg),
             flashagent_llm::Role::User => {
+                if std::mem::take(&mut in_turn) {
+                    chat.on_event(&LoopEvent::Done(DoneReason::Completed));
+                }
                 let prompt = extract_user_prompt(&msg.content);
                 if prompt.is_empty() && !msg.images.is_empty() {
                     chat.push_user("[image]");
@@ -426,9 +437,16 @@ pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history:
                 history.push(msg);
             }
             flashagent_llm::Role::Assistant => {
-                if !msg.content.trim().is_empty() {
-                    chat.push_assistant(&msg.content);
+                in_turn = true;
+                if let Some(reasoning) = msg.reasoning.as_deref().filter(|r| !r.trim().is_empty()) {
+                    chat.on_event(&LoopEvent::ReasoningDelta(reasoning.to_string()));
                 }
+                if !msg.content.trim().is_empty() {
+                    chat.on_event(&LoopEvent::TurnDelta(msg.content.clone()));
+                }
+                // The next message's words start a block of their own.
+                chat.end_streaming();
+                calls.extend(msg.tool_calls.iter().map(|c| (c.id.clone(), c.clone())));
                 history.push(msg);
             }
             // The fresh system prompt wins; only a compaction summary carries over. A
@@ -441,10 +459,36 @@ pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history:
                     system.content.push_str(msg.content[pos + title.len()..].trim_start());
                 }
             }
-            flashagent_llm::Role::Tool => history.push(msg),
+            flashagent_llm::Role::Tool => {
+                if let Some(call) = msg.tool_call_id.as_ref().and_then(|id| calls.remove(id)) {
+                    chat.on_event(&LoopEvent::ToolStarted { id: call.id.clone(), name: call.name.clone(), args_json: call.args_json.clone() });
+                    chat.on_event(&LoopEvent::ToolFinished {
+                        id: call.id,
+                        is_error: result_was_an_error(&msg.content),
+                        result_len: msg.content.chars().count(),
+                        result: Some(msg.content.clone()),
+                    });
+                }
+                history.push(msg);
+            }
         }
     }
+    if in_turn {
+        chat.on_event(&LoopEvent::Done(DoneReason::Completed));
+    }
+    // How long each thought took was not saved.
+    chat.forget_thought_times();
     history.len() - before
+}
+
+/// A stored result says nothing else about how the call ended: the tools and
+/// the loop write these words when one fails or does not run.
+fn result_was_an_error(content: &str) -> bool {
+    content.starts_with("error:")
+        || content.starts_with("not executed:")
+        || content.starts_with(flashagent_core::permissions::DENIED)
+        || content == flashagent_core::permissions::DECLINED
+        || content == flashagent_core::CANCELLED_RESULT
 }
 
 /// `history` always opens with the system prompt, so an emptiness check would
@@ -623,6 +667,47 @@ mod session_tests {
         assert!(!history[0].content.contains("old prompt"), "{}", history[0].content);
         assert!(history[0].content.contains("what happened before"), "{}", history[0].content);
         assert_eq!(chat.user_turn_count(), 1);
+    }
+
+    #[test]
+    fn a_resumed_session_shows_its_tool_calls_and_thoughts_again() {
+        let mut asked = ChatMessage::assistant("Reading it.");
+        asked.reasoning = Some("**Reading Files**\nstore.py holds the bug".into());
+        asked.tool_calls = vec![
+            flashagent_llm::ToolCall { id: "c1".into(), name: "read_file".into(), args_json: r#"{"header":"Reading store.py","path":"store.py"}"#.into() },
+            flashagent_llm::ToolCall { id: "c2".into(), name: "edit_file".into(), args_json: r#"{"header":"Fixing total_value","path":"store.py","edits":[{"old_string":"a","new_string":"b"}]}"#.into() },
+        ];
+        let saved = SavedSession {
+            id: "s".into(),
+            timestamp: 1,
+            model: "m".into(),
+            cwd: "~/proj".into(),
+            messages: vec![
+                SavedMessage::from(&ChatMessage::system("sys")),
+                SavedMessage::from(&ChatMessage::user("fix the test")),
+                SavedMessage::from(&asked),
+                SavedMessage::from(&ChatMessage::tool_result("c1", "     1\tdef total_value():")),
+                SavedMessage::from(&ChatMessage::tool_result("c2", flashagent_core::permissions::DECLINED)),
+                SavedMessage::from(&ChatMessage::assistant("You declined the fix.")),
+                SavedMessage::from(&ChatMessage::user("thanks")),
+                SavedMessage::from(&ChatMessage::assistant("Any time.")),
+            ],
+        };
+        let mut chat = ChatView::default();
+        let mut history = vec![ChatMessage::system("new prompt")];
+        restore_session(saved, &mut chat, &mut history);
+        // As the screen shows it, folded.
+        let (settled, live) = chat.render_split(100, flashagent_tui::ReasoningExpansion::default());
+        let text = settled.iter().chain(live.iter()).map(|(_, t)| flashagent_tui::strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Reading store.py"), "the read is gone:\n{text}");
+        assert!(text.lines().any(|l| l.contains("Fixing total_value") && l.contains("· declined")), "the declined edit is gone:\n{text}");
+        assert!(text.contains("Thought: Reading Files") && !text.contains("(1s)"), "{text}");
+        // The words between calls are their own blocks, not one paragraph.
+        let reading = text.find("Reading it.").unwrap();
+        let declined = text.find("You declined the fix.").unwrap();
+        assert!(text[reading..declined].contains("Reading store.py"), "{text}");
+        assert!(!text.contains('▌'), "a restored answer is not still being written");
+        assert_eq!(chat.user_turn_count(), 2);
     }
 
     #[test]
