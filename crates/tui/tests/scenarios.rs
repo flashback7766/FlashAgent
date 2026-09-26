@@ -944,6 +944,18 @@ fn ctrl_x_ctrl_e_writes_the_prompt_in_an_external_editor() {
 }
 
 #[test]
+fn one_ctrl_c_before_any_reply_does_not_quit() {
+    // /help says Ctrl+C twice; before a reply, once was enough.
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+    term.send("\x03");
+    term.wait_for("Press Ctrl+C again to exit", WAIT);
+    term.send("\x03");
+    assert!(term.wait_exit(WAIT).is_some(), "the second Ctrl+C did not quit");
+}
+
+#[test]
 fn esc_clears_a_steering_draft_before_it_stops_the_turn() {
     let words: Vec<String> = (1..=60).map(|i| format!("word{i}")).collect();
     let server = MockServer::start(vec![Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(300) }]);
