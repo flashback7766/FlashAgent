@@ -728,7 +728,7 @@ fn strip_repeated_tail<'a>(prev: &str, next: &'a str) -> &'a str {
     &next[cut..]
 }
 
-const CANCELLED_RESULT: &str = "cancelled by user before completion";
+pub const CANCELLED_RESULT: &str = "cancelled by user before completion";
 
 const TRUNCATED_RESULT: &str = "not executed: your output hit the token limit while writing this call, so its arguments may be incomplete. Send the call again, shorter if needed (e.g. split a large write).";
 
