@@ -513,6 +513,17 @@ mod tests {
     }
 
     #[test]
+    fn a_context_window_is_named_as_people_name_it() {
+        use crate::thinking::token_count_label as label;
+        assert_eq!([label(1_000_000), label(1_048_576), label(2_000_000), label(1_500_000)], ["1M", "1M", "2M", "1.5M"]);
+        assert_eq!([label(128_000), label(131_072), label(262_144), label(32_768), label(200_000)], ["128K", "128K", "256K", "32K", "200K"]);
+        let mut m = DiscoveredModel { id: "m".into(), display_name: None, is_loaded: false, context_length: Some(1_000_000), max_context_length: None, thinking: ThinkingProfile::unreported(), supports_tools: true, supports_vision: false };
+        assert_eq!(m.context_display().as_deref(), Some("1M ctx"), "it read 977k ctx");
+        m.context_length = Some(131_072);
+        assert_eq!(m.context_display().as_deref(), Some("128k ctx"));
+    }
+
+    #[test]
     fn a_model_a_keyed_server_does_not_list_is_never_swapped_for_another() {
         let listed = |id: &str| DiscoveredModel {
             id: id.into(),
