@@ -47,6 +47,15 @@ pub enum ServerKind {
     Other,
 }
 
+/// `listed` is `wanted` itself, or a dated snapshot of it: an alias such as
+/// `claude-haiku-4-5` names `claude-haiku-4-5-20251001`. Anything else with a
+/// longer name (`-pro`, `-mini`) is another model.
+pub fn same_model(listed: &str, wanted: &str) -> bool {
+    let Some(rest) = listed.strip_prefix(wanted) else { return false };
+    rest.is_empty()
+        || rest.strip_prefix('-').is_some_and(|date| date.chars().all(|c| c.is_ascii_digit() || c == '-') && date.chars().filter(char::is_ascii_digit).count() >= 4)
+}
+
 impl ServerKind {
     /// Keeps a prompt cache and reads the thinking switches in the chat template.
     pub fn runs_local_models(self) -> bool {
