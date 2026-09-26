@@ -486,7 +486,7 @@ fn not_run_note(result: &str) -> Option<&'static str> {
         Some("declined")
     } else if result.starts_with(flashagent_core::permissions::DENIED) {
         Some("not allowed")
-    } else if result == flashagent_core::CANCELLED_RESULT {
+    } else if result == flashagent_core::CANCELLED_RESULT || result == flashagent_core::STOPPED_RESULT {
         Some("stopped")
     } else {
         None
@@ -589,6 +589,7 @@ mod tests {
             (flashagent_core::permissions::DECLINED.to_string(), "declined"),
             (format!("{}writes outside the project", flashagent_core::permissions::DENIED), "not allowed"),
             (flashagent_core::CANCELLED_RESULT.to_string(), "stopped"),
+            (flashagent_core::STOPPED_RESULT.to_string(), "stopped"),
         ] {
             let mut chat = started("run_shell", r#"{"header":"Запускаю тесты","command":"cargo test"}"#);
             chat.tool_finished(true, 5, Some(&result));

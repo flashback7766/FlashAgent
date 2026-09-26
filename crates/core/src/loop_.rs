@@ -559,16 +559,30 @@ impl AgentLoop {
                     None => call,
                 };
                 events(LoopEvent::ToolStarted { id: call.id.clone(), name: call.name.clone(), args_json: call.args_json.clone() });
+                let exec = tools.execute(call);
+                tokio::pin!(exec);
                 let out = tokio::select! {
-                    out = tools.execute(call) => out,
+                    out = &mut exec => out,
                     _ = wait_cancel(&self.cancel) => {
+                        // A file change under way goes on to its end even when dropped, and the
+                        // model was told it had not run; it then redid a change already made.
+                        // So it is let finish (for two seconds at most, in case it still waits
+                        // on an approval) and the model hears what it did. Anything else may
+                        // have done part of its work, unless it has just ended.
+                        let finished = if finishes_when_stopped(&call.name) {
+                            tokio::time::timeout(Duration::from_secs(2), &mut exec).await.ok()
+                        } else {
+                            futures::FutureExt::now_or_never(&mut exec)
+                        };
+                        let (content, is_error) = finished.map_or((STOPPED_RESULT.to_string(), true), |out| (out.content, out.is_error));
                         events(LoopEvent::ToolFinished {
                             id: call.id.clone(),
-                            is_error: true,
-                            result_len: CANCELLED_RESULT.len(),
-                            result: Some(CANCELLED_RESULT.to_string()),
+                            is_error,
+                            result_len: content.chars().count(),
+                            result: Some(content.clone()),
                         });
-                        answer_cancelled(&mut history, &calls[i..]);
+                        history.push(ChatMessage::tool_result(call.id.clone(), content));
+                        answer_cancelled(&mut history, &calls[i + 1..]);
                         history.append(&mut image_msgs);
                         events(LoopEvent::Done(DoneReason::Cancelled));
                         return Ok((history, DoneReason::Cancelled));
@@ -666,6 +680,9 @@ fn fixable_by_another_call(tool: &str, result: &str) -> bool {
         && !result.starts_with(crate::permissions::DENIED)
         && result != crate::permissions::DECLINED
         && result != CANCELLED_RESULT
+        && result != STOPPED_RESULT
+        // What timed out may have happened anyway; asked to try again, a model repeats it.
+        && !result.contains("timed out")
 }
 
 /// Whether a reply ends by saying what the model is about to do, rather than
@@ -729,6 +746,14 @@ fn strip_repeated_tail<'a>(prev: &str, next: &'a str) -> &'a str {
 }
 
 pub const CANCELLED_RESULT: &str = "cancelled by user before completion";
+
+/// A call Esc stopped while it ran: whatever it was doing may be half done.
+pub const STOPPED_RESULT: &str = "stopped by the user while it ran: it may have done part of its work, so check what it changed before running it again";
+
+/// Quick local writes, let finish when the turn is stopped.
+fn finishes_when_stopped(tool: &str) -> bool {
+    matches!(tool, "write_file" | "edit_file" | "patch_file" | "memory_create" | "memory_update" | "memory_remove")
+}
 
 const TRUNCATED_RESULT: &str = "not executed: your output hit the token limit while writing this call, so its arguments may be incomplete. Send the call again, shorter if needed (e.g. split a large write).";
 
@@ -1474,6 +1499,8 @@ mod tests {
             ("run_shell", "exit code: 1\noutput:\n3 tests failed"),
             ("read_file", crate::permissions::DECLINED),
             ("read_file", denied.as_str()),
+            // What timed out may have happened; a retry could do it twice.
+            ("mcp__ci__deploy", "MCP request 'tools/call' to 'ci' timed out after 30s; the server may have done it anyway, so check before calling it again"),
         ] {
             let llm = RecordingLlm::new(vec![tool_turn(tool, "c1"), text_turn("Three tests fail."), text_turn("unexpected")]);
             let tools = ScriptedTools::new(vec![(true, result)]);
@@ -1679,6 +1706,52 @@ mod tests {
         assert_eq!(done, DoneReason::Cancelled);
         assert_protocol_valid(&history);
         assert_eq!(history.iter().filter(|m| m.role == Role::Tool).count(), 2);
+    }
+
+    #[test]
+    fn a_stopped_write_says_what_it_did_and_a_stopped_command_that_it_may_have_done_part() {
+        // A write that takes a moment, a command that takes long.
+        struct SlowTools;
+        #[async_trait]
+        impl ToolExec for SlowTools {
+            async fn execute(&self, call: &ToolCall) -> ToolOutput {
+                let ms = if call.name == "write_file" { 300 } else { 30_000 };
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                ToolOutput { content: format!("{} done", call.name), is_error: false, images: Vec::new() }
+            }
+            fn specs(&self) -> Vec<ToolSpec> {
+                vec![]
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        for (first, expected) in [("write_file", "write_file done"), ("run_shell", STOPPED_RESULT)] {
+            let llm = MockLlm {
+                turns: std::sync::Mutex::new(vec![MockTurn {
+                    events: vec![
+                        Ok(LlmEvent::ToolCallDelta { index: 0, id: Some("a".into()), name: Some(first.into()), args_delta: "{}".into() }),
+                        Ok(LlmEvent::ToolCallDelta { index: 1, id: Some("b".into()), name: Some("read_file".into()), args_delta: "{}".into() }),
+                        Ok(LlmEvent::Done(FinishReason::ToolUse)),
+                    ],
+                }]),
+            };
+            let cancel = Arc::new(AtomicBool::new(false));
+            let l = AgentLoop::new(LoopConfig::default(), cancel.clone());
+            let flip = cancel.clone();
+            let mut shown = Vec::new();
+            let (history, done) = run_loop(&l, &llm, &SlowTools, |e| match e {
+                LoopEvent::ToolStarted { .. } => flip.store(true, Ordering::Relaxed),
+                LoopEvent::ToolFinished { id, result, .. } => shown.push((id, result.unwrap_or_default())),
+                _ => {}
+            });
+            assert_eq!(done, DoneReason::Cancelled);
+            assert_protocol_valid(&history);
+            let answers: Vec<&str> = history.iter().filter(|m| m.role == Role::Tool).map(|m| m.content.as_str()).collect();
+            // The call that never started is still "not run".
+            assert_eq!(answers, [expected, CANCELLED_RESULT], "{first}");
+            assert_eq!(shown, [("a".to_string(), expected.to_string())], "{first}");
+        }
     }
 
     #[test]
