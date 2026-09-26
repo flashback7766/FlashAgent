@@ -90,6 +90,11 @@ src/config.rs?)`, explain the problem in prose instead of calling the tool
 again with the corrected path. Tools fail all the time in real work, and a
 model that answers each failure with a paragraph leaves the next step to you.
 
+Small models do better since b450, which tells them how to call tools, repairs
+their commonest argument mistakes and reminds them once of a step left
+undone. On a CPU with Ollama, `qwen3:1.7b` and `qwen2.5:1.5b` went from 5/8 to
+8/8 and `gemma4:e2b` from 7/8 to 8/8; 1B models are still chat models.
+
 [Method, raw results, and how to run it on your own models →](docs/tool-calling.md)
 
 ---
