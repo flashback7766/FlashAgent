@@ -259,7 +259,11 @@ impl Client {
         // The exact name before a similar one: `gpt-4o` must not become
         // `gpt-4o-audio-preview` because the list happens to name that first.
         let exact = |m: &DiscoveredModel| !current.is_empty() && (m.id == current || (on_demand && m.id == format!("{current}:latest")));
-        let similar = |m: &DiscoveredModel| !current.is_empty() && (m.id.contains(&current) || current.contains(&m.id));
+        // A server that takes a key bills by the model: one the user did not
+        // name is never chosen for them, however close its name. A typo stays
+        // a typo, and the request says so. A local server serves what it has.
+        let pick_for_user = current.is_empty() || kind.runs_local_models() || endpoint.api_key.is_none();
+        let similar = |m: &DiscoveredModel| pick_for_user && !current.is_empty() && (m.id.contains(&current) || current.contains(&m.id));
         let active = models
             .iter()
             .find(|m| (m.is_loaded || on_demand) && exact(m))
@@ -267,7 +271,7 @@ impl Client {
             .or_else(|| models.iter().find(|m| m.is_loaded))
             .or_else(|| models.iter().find(|m| exact(m)))
             .or_else(|| models.iter().find(|m| similar(m)))
-            .or_else(|| models.first())
+            .or_else(|| models.first().filter(|_| pick_for_user))
             .cloned();
 
         if let Some(ref active) = active {
@@ -503,6 +507,40 @@ mod tests {
             assert_eq!(llm.sampling_for_protocol(&options), options, "{protocol}: set by hand, sent as set");
             llm.set_user_sampling(false);
         }
+    }
+
+    #[test]
+    fn a_model_a_keyed_server_does_not_list_is_never_swapped_for_another() {
+        let listed = |id: &str| DiscoveredModel {
+            id: id.into(),
+            display_name: None,
+            is_loaded: false,
+            context_length: None,
+            max_context_length: None,
+            thinking: ThinkingProfile::unreported(),
+            supports_tools: true,
+            supports_vision: false,
+        };
+        let models = || vec![listed("typesafe/jev-router"), listed("stealth/space-bunny-alpha"), listed("stealth/space-bunny-alpha-pro")];
+        // One letter off, on OpenRouter: the first listed model was taken, and billed.
+        let cloud = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://openrouter.ai/api/v1", Some("k".into())), "stealth/space-bunny-alfa");
+        let disc = cloud.settle_discovery(0, models(), ServerKind::Other, None).unwrap();
+        assert_eq!(cloud.model(), "stealth/space-bunny-alfa");
+        assert!(disc.active_model.is_none());
+        // A part of a name is not completed to a model the user did not name either.
+        let cloud = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://openrouter.ai/api/v1", Some("k".into())), "stealth/space-bunny");
+        cloud.settle_discovery(0, models(), ServerKind::Other, None);
+        assert_eq!(cloud.model(), "stealth/space-bunny");
+        // The exact name is taken, and nothing saved means the server picks.
+        let cloud = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://openrouter.ai/api/v1", Some("k".into())), "stealth/space-bunny-alpha");
+        assert_eq!(cloud.settle_discovery(0, models(), ServerKind::Other, None).unwrap().active_model.unwrap().id, "stealth/space-bunny-alpha");
+        let cloud = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://openrouter.ai/api/v1", Some("k".into())), "");
+        cloud.settle_discovery(0, models(), ServerKind::Other, None);
+        assert_eq!(cloud.model(), "typesafe/jev-router");
+        // A local server without a key still serves what it has.
+        let local = Client::new(Endpoint::new(ApiProtocol::OpenAi, "http://localhost:8000/v1", None), "gone-model");
+        local.settle_discovery(0, models(), ServerKind::Other, None);
+        assert_eq!(local.model(), "typesafe/jev-router");
     }
 
     #[test]

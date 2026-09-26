@@ -450,6 +450,20 @@ fn the_tool_test_asks_the_server_about_the_model_first_as_the_app_does() {
 }
 
 #[test]
+fn a_mistyped_model_on_a_server_that_takes_a_key_is_kept_not_swapped() {
+    // It became the first model the server listed, which would be billed in
+    // its place, and the config was rewritten so the typo could not be seen.
+    let server = MockServer::start(Vec::new());
+    server.serve_as_cloud();
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "model": "mock-modle", "api_key": "k" }));
+    term.wait_for("does not list mock-modle", WAIT);
+    assert!(term.screen().contains("mock-modle"), "{}", term.screen());
+    let saved = std::fs::read_to_string(home.config_path()).unwrap();
+    assert!(!saved.contains(&format!("\"model\": \"{}\"", server.model)), "the config was rewritten: {saved}");
+}
+
+#[test]
 fn the_first_turn_after_startup_already_knows_the_server_said_reasoning_is_off() {
     // b263 regression: the first turn went out before discovery was handed to
     // the sending backend, so it carried no reasoning setting even when the user

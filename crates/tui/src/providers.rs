@@ -92,12 +92,19 @@ pub fn provider_arg(config: &AppConfig, arg: &str) -> ProviderArg {
 /// longer id (`qwen3` finds `qwen3-coder-30b`), and only then as a longer name
 /// holding an id, the closest first: a saved `gemini-2.5-flash-lite` must not
 /// become `gemini-2.5-flash` because that is listed first.
-pub fn model_after_switch(saved: &str, disc: Option<&ServerDiscovery>) -> String {
+///
+/// On a server that takes a key (`keyed`) only the exact name counts, and a
+/// saved model it does not list is kept: another would be billed in its place.
+pub fn model_after_switch(saved: &str, disc: Option<&ServerDiscovery>, keyed: bool) -> String {
     let Some(disc) = disc else { return saved.to_string() };
     let bare = |id: &str| id.strip_prefix("models/").unwrap_or(id).to_ascii_lowercase();
     let wanted = bare(saved);
+    let pick_for_user = !keyed || disc.kind.runs_local_models();
     if !wanted.is_empty() {
         let exact = disc.models.iter().find(|m| bare(&m.id) == wanted);
+        if !pick_for_user {
+            return exact.map_or_else(|| saved.to_string(), |m| m.id.clone());
+        }
         let longer = || disc.models.iter().filter(|m| bare(&m.id).contains(&wanted)).min_by_key(|m| m.id.len());
         let shorter = || disc.models.iter().filter(|m| wanted.contains(&bare(&m.id))).max_by_key(|m| m.id.len());
         if let Some(m) = exact.or_else(longer).or_else(shorter) {
@@ -545,12 +552,12 @@ mod tests {
     #[test]
     fn a_saved_model_is_matched_exactly_before_by_part_of_its_name() {
         let disc = discovery(vec![model("gemini-2.5-flash", false), model("gemini-2.5-flash-lite", false)], None);
-        assert_eq!(model_after_switch("gemini-2.5-flash-lite", Some(&disc)), "gemini-2.5-flash-lite");
-        assert_eq!(model_after_switch("models/gemini-2.5-flash-lite", Some(&disc)), "gemini-2.5-flash-lite", "Google's prefix aside");
-        assert_eq!(model_after_switch("gemini-2.5-flash-lite-preview-06-17", Some(&disc)), "gemini-2.5-flash-lite", "the closest id it holds");
+        assert_eq!(model_after_switch("gemini-2.5-flash-lite", Some(&disc), false), "gemini-2.5-flash-lite");
+        assert_eq!(model_after_switch("models/gemini-2.5-flash-lite", Some(&disc), false), "gemini-2.5-flash-lite", "Google's prefix aside");
+        assert_eq!(model_after_switch("gemini-2.5-flash-lite-preview-06-17", Some(&disc), false), "gemini-2.5-flash-lite", "the closest id it holds");
         let disc = discovery(vec![model("qwen3-coder-30b-a3b", false), model("qwen3-coder-30b", false)], None);
-        assert_eq!(model_after_switch("qwen3-coder", Some(&disc)), "qwen3-coder-30b", "the shortest id holding it");
-        assert_eq!(model_after_switch("", Some(&disc)), "qwen3-coder-30b-a3b", "nothing saved: the first");
+        assert_eq!(model_after_switch("qwen3-coder", Some(&disc), false), "qwen3-coder-30b", "the shortest id holding it");
+        assert_eq!(model_after_switch("", Some(&disc), false), "qwen3-coder-30b-a3b", "nothing saved: the first");
     }
 
     #[test]
@@ -612,14 +619,20 @@ mod tests {
     #[test]
     fn after_a_switch_the_saved_model_wins_when_the_server_has_it() {
         let disc = discovery(vec![model("llama-3", true), model("qwen3-coder-30b", false)], Some("llama-3"));
-        assert_eq!(model_after_switch("qwen3-coder-30b", Some(&disc)), "qwen3-coder-30b");
-        assert_eq!(model_after_switch("qwen3-coder", Some(&disc)), "qwen3-coder-30b", "a partial name finds its full id");
-        assert_eq!(model_after_switch("gone-model", Some(&disc)), "llama-3", "else the loaded one");
-        assert_eq!(model_after_switch("", Some(&disc)), "llama-3");
+        assert_eq!(model_after_switch("qwen3-coder-30b", Some(&disc), false), "qwen3-coder-30b");
+        assert_eq!(model_after_switch("qwen3-coder", Some(&disc), false), "qwen3-coder-30b", "a partial name finds its full id");
+        assert_eq!(model_after_switch("gone-model", Some(&disc), false), "llama-3", "else the loaded one");
+        assert_eq!(model_after_switch("", Some(&disc), false), "llama-3");
         let unloaded = discovery(vec![model("first", false), model("second", false)], None);
-        assert_eq!(model_after_switch("", Some(&unloaded)), "first", "else the first listed");
-        assert_eq!(model_after_switch("kept", None), "kept", "no answer keeps what was saved");
-        assert_eq!(model_after_switch("", Some(&discovery(Vec::new(), None))), "");
+        assert_eq!(model_after_switch("", Some(&unloaded), false), "first", "else the first listed");
+        assert_eq!(model_after_switch("kept", None, false), "kept", "no answer keeps what was saved");
+        assert_eq!(model_after_switch("", Some(&discovery(Vec::new(), None)), false), "");
+
+        // A server that takes a key bills by the model: only the exact name counts.
+        assert_eq!(model_after_switch("gone-model", Some(&unloaded), true), "gone-model", "kept, not swapped");
+        assert_eq!(model_after_switch("fir", Some(&unloaded), true), "fir", "a part is not completed");
+        assert_eq!(model_after_switch("SECOND", Some(&unloaded), true), "second");
+        assert_eq!(model_after_switch("", Some(&unloaded), true), "first", "nothing saved: the server's first");
     }
 
     #[test]

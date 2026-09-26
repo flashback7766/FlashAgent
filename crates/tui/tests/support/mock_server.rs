@@ -64,6 +64,7 @@ struct SideRequests {
     answers: Mutex<Vec<(String, String)>>,
     /// Lets a scenario act while the model is still thinking.
     turn_delay: Mutex<Option<Duration>>,
+    cloud: std::sync::atomic::AtomicBool,
 }
 
 impl MockServer {
@@ -118,6 +119,11 @@ impl MockServer {
     /// can act while one is still being written.
     pub fn slow_side_requests(&self, per_word: Duration) {
         *self.side.per_word.lock().unwrap() = Some(per_word);
+    }
+
+    /// Only the OpenAI model list, as a cloud API answers: no loaded model.
+    pub fn serve_as_cloud(&self) {
+        self.side.cloud.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn side_requests_dropped(&self) -> usize {
@@ -199,7 +205,7 @@ fn serve(
                 Some(body) => json(&mut out, &body),
                 None => out.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"),
             }
-        } else if path.ends_with("/api/v0/models") {
+        } else if path.ends_with("/api/v0/models") && !side.cloud.load(std::sync::atomic::Ordering::SeqCst) {
             let mut data = vec![serde_json::json!({
                 "id": model, "object": "model", "type": "llm", "state": "loaded",
                 "max_context_length": 32768, "loaded_context_length": 32768

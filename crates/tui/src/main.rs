@@ -282,6 +282,7 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
 
     // Leaked once so the spawned loop can hold &'static references; the process
     // is the session.
+    let keyed = endpoint.api_key.is_some();
     let backend = flashagent_llm::Client::new(endpoint, &model);
     backend.set_max_retries(config.network_retries);
     flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(config));
@@ -298,7 +299,7 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
     };
 
     // No model given: the loaded one, else the first; a partial name is matched to its full id.
-    model = flashagent_tui::providers::model_after_switch(&model, discovery.as_ref());
+    model = flashagent_tui::providers::model_after_switch(&model, discovery.as_ref(), keyed);
     backend.set_model(&model);
     // Startup discovered through another backend; this one sends the turns and
     // must know the result from its first request.
