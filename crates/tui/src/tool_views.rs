@@ -343,6 +343,17 @@ pub fn parse_diff_to_rows(diff_text: &str) -> Vec<DiffRow> {
     rows
 }
 
+/// What an edit or a write changes.
+#[derive(Debug, Clone, Copy)]
+pub struct EditChange<'a> {
+    pub path: &'a str,
+    pub added: usize,
+    pub deleted: usize,
+    /// The diff, or for a write the new content.
+    pub body: Option<&'a str>,
+    pub is_write: bool,
+}
+
 /// Where a call stands, as its verbose card tells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallState {
@@ -368,16 +379,8 @@ impl CallState {
 /// `old new │ line`, red deletions, green additions, centered fold dividers.
 /// A change that did not happen says so, with why, and shows no diff: in
 /// green it read as made.
-pub fn render_edit_card(
-    path: &str,
-    added: usize,
-    deleted: usize,
-    diff_or_content: Option<&str>,
-    is_write: bool,
-    state: CallState,
-    reason: Option<&str>,
-    width: usize,
-) -> Vec<RenderLine> {
+pub fn render_edit_card(change: &EditChange<'_>, state: CallState, reason: Option<&str>, width: usize) -> Vec<RenderLine> {
+    let EditChange { path, added, deleted, body: diff_or_content, is_write } = *change;
     let mut lines = Vec::new();
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
@@ -591,7 +594,7 @@ pub fn render_git_card(
         let header = format!("  {TEXT_MUTED}Git diff{RESET} {chevron}");
         lines.push((LineKind::Tool, header));
         if let Some(text) = output {
-            lines.extend(render_edit_card("git-diff", 0, 0, Some(text), false, CallState::Done, None, width));
+            lines.extend(render_edit_card(&EditChange { path: "git-diff", added: 0, deleted: 0, body: Some(text), is_write: false }, CallState::Done, None, width));
         }
     } else {
         let header = format!("  {TEXT_MUTED}Git status{RESET} {chevron}");
@@ -690,12 +693,13 @@ mod tests {
         let plain = |lines: Vec<RenderLine>| lines.iter().map(|(_, l)| crate::strip_ansi(l)).collect::<Vec<_>>().join("\n");
         let diff = "-a\n+b\n";
         // Denied, or failed on bad arguments: it read "Edited" with a green diff.
-        let failed = plain(render_edit_card("store.py", 1, 1, Some(diff), false, CallState::Failed, Some("error: bad arguments: missing field `path`"), 80));
+        let change = EditChange { path: "store.py", added: 1, deleted: 1, body: Some(diff), is_write: false };
+        let failed = plain(render_edit_card(&change, CallState::Failed, Some("error: bad arguments: missing field `path`"), 80));
         assert!(failed.contains("Not edited: store.py") && failed.contains("missing field `path`"), "{failed}");
         assert!(!failed.contains("+ b") && !failed.contains("Edited"), "{failed}");
-        let waiting = plain(render_edit_card("store.py", 1, 1, Some(diff), false, CallState::Waiting, None, 80));
+        let waiting = plain(render_edit_card(&change, CallState::Waiting, None, 80));
         assert!(waiting.contains("Waiting to edit store.py"), "{waiting}");
-        assert!(plain(render_edit_card("store.py", 1, 1, Some(diff), false, CallState::Done, None, 80)).contains("Edited store.py"));
+        assert!(plain(render_edit_card(&change, CallState::Done, None, 80)).contains("Edited store.py"));
         // Nothing runs before Allow.
         let command = plain(render_command_card("/w", "cargo test", None, CallState::Waiting, 80));
         assert!(command.contains("Waiting to run cargo test") && command.contains("Runs once you allow it") && !command.contains("Executing"), "{command}");
@@ -713,7 +717,7 @@ mod tests {
         let cards = [
             render_directory_card("src", Some("main.rs\nmod/\nnotes.md"), false, 100),
             render_read_card("src/main.rs", Some("fn main() {}"), 0, 50, 100),
-            render_edit_card("src/lib.rs", 3, 1, None, false, CallState::Done, None, 100),
+            render_edit_card(&EditChange { path: "src/lib.rs", added: 3, deleted: 1, body: None, is_write: false }, CallState::Done, None, 100),
         ];
         for card in cards {
             for (_, line) in &card {
@@ -778,7 +782,7 @@ mod tests {
     #[test]
     fn a_written_file_is_all_additions_whatever_its_lines_start_with() {
         let content = "# Notes\n- item one\n  indented\n+ plus\nplain";
-        let lines = render_edit_card("notes.md", 5, 0, Some(content), true, CallState::Done, None, 80);
+        let lines = render_edit_card(&EditChange { path: "notes.md", added: 5, deleted: 0, body: Some(content), is_write: true }, CallState::Done, None, 80);
         let rows = plain_rows(&lines);
         for text in ["# Notes", "- item one", "  indented", "+ plus", "plain"] {
             assert!(rows.iter().any(|r| r.ends_with(text)), "{text:?} missing from {rows:#?}");
@@ -819,7 +823,7 @@ mod tests {
     #[test]
     fn test_render_edit_card_diff_columns_and_folding() {
         let diff = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,2 +10,2 @@\n-old line 1\n-old line 2\n+new line 1\n+new line 2\n";
-        let lines = render_edit_card("src/main.rs", 2, 2, Some(diff), false, CallState::Done, None, 80);
+        let lines = render_edit_card(&EditChange { path: "src/main.rs", added: 2, deleted: 2, body: Some(diff), is_write: false }, CallState::Done, None, 80);
         let text_dump = lines.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
         assert!(text_dump.contains("Edited") && text_dump.contains("src/main.rs"));
         assert!(text_dump.contains("+2") && text_dump.contains("-2"));

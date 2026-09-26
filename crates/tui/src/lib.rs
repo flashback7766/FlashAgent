@@ -836,7 +836,8 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize, waiting: bool) -
             (a, d, Some(simulated))
         };
 
-        return card(tool_views::render_edit_card(path, added, deleted, diff_text.as_deref(), is_write, state, call.result.as_deref(), width));
+        let change = tool_views::EditChange { path, added, deleted, body: diff_text.as_deref(), is_write };
+        return card(tool_views::render_edit_card(&change, state, call.result.as_deref(), width));
     }
 
     if tool_name == "spawn_agent" {
