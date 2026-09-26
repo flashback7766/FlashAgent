@@ -567,6 +567,22 @@ impl ChatView {
         self.lines.extend(remaining_notices);
     }
 
+    /// The streamed answer and thought are over; what follows starts blocks of its own.
+    pub fn end_streaming(&mut self) {
+        self.streaming = None;
+        self.streaming_reasoning = None;
+    }
+
+    /// For a restored session, whose thought times were not saved.
+    pub fn forget_thought_times(&mut self) {
+        for line in &mut self.lines {
+            line.reasoning_secs = None;
+        }
+        self.streaming_reasoning = None;
+        self.reasoning_start = None;
+        self.needs_reprint = true;
+    }
+
     pub fn set_awaiting_user(&mut self, awaiting: bool) {
         if self.awaiting_user != awaiting {
             self.awaiting_user = awaiting;
