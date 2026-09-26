@@ -75,8 +75,7 @@ impl App {
             "/effort" => "F4",
             "/settings" => "Tab",
             "/regenerate" => "Ctrl+R",
-            "/editor" => "Ctrl+E",
-            "/update" => "Ctrl+U",
+            "/editor" => "Ctrl+X Ctrl+E",
             "/exit" => "Ctrl+D",
             _ => "",
         };

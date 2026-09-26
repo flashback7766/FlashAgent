@@ -171,6 +171,21 @@ impl Composer {
         true
     }
 
+    /// Ctrl+U: back to the start of the line; at the start, the newline before it.
+    pub fn delete_to_line_start(&mut self) -> bool {
+        let start = match self.text[..self.cursor].rfind('\n') {
+            Some(i) if i + 1 == self.cursor => i,
+            Some(i) => i + 1,
+            None => 0,
+        };
+        if start == self.cursor {
+            return false;
+        }
+        self.text.replace_range(start..self.cursor, "");
+        self.cursor = start;
+        true
+    }
+
     /// Ctrl+K: to the end of the line; at the end, the newline itself.
     pub fn delete_to_line_end(&mut self) -> bool {
         let end = match self.text[self.cursor..].find('\n') {
@@ -413,6 +428,19 @@ mod tests {
         // At the very end the same, with nothing after it.
         let layout = at("abcde", 5).layout(5, 10);
         assert_eq!((layout.cursor_row, layout.cursor_col), (1, 0));
+    }
+
+    #[test]
+    fn ctrl_u_deletes_back_to_the_start_of_the_line_as_in_a_shell() {
+        let mut c = at("first line\nsecond half", 18);
+        assert!(c.delete_to_line_start());
+        assert_eq!(shown(&c), "first line\n|half");
+        // At the start of a line: the newline before it, as Ctrl+K takes the one after.
+        assert!(c.delete_to_line_start());
+        assert_eq!(shown(&c), "first line|half");
+        c.home();
+        c.home();
+        assert!(!c.delete_to_line_start(), "nothing before the start");
     }
 
     #[test]
