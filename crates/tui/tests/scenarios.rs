@@ -447,6 +447,23 @@ fn the_tool_test_asks_the_server_about_the_model_first_as_the_app_does() {
         "the first scenario went out before the model list was read: {:?}",
         requests.iter().map(|r| format!("{} {}", r.method, r.path)).collect::<Vec<_>>()
     );
+    // A local server loads the model before the first scenario is timed:
+    // on a CPU the load alone ran past the first scenario's time limit.
+    assert!(requests[..first_turn].iter().any(|r| r.is_warm_up()), "the first scenario was timed with the model still loading");
+}
+
+#[test]
+fn a_mistyped_model_on_a_server_that_takes_a_key_is_kept_not_swapped() {
+    // It became the first model the server listed, which would be billed in
+    // its place, and the config was rewritten so the typo could not be seen.
+    let server = MockServer::start(Vec::new());
+    server.serve_as_cloud();
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "model": "mock-modle", "api_key": "k" }));
+    term.wait_for("does not list mock-modle", WAIT);
+    assert!(term.screen().contains("mock-modle"), "{}", term.screen());
+    let saved = std::fs::read_to_string(home.config_path()).unwrap();
+    assert!(!saved.contains(&format!("\"model\": \"{}\"", server.model)), "the config was rewritten: {saved}");
 }
 
 #[test]
@@ -846,6 +863,115 @@ fn a_new_file_card_keeps_indentation_and_shows_escapes_as_text() {
     assert!(screen.contains("+     let x = 1;"), "indentation lost:\n{screen}");
     assert!(screen.contains("^[[8mhidden"), "an escape was executed instead of shown:\n{screen}");
     term.send(ESC);
+}
+
+#[test]
+fn a_long_change_can_be_read_whole_before_it_is_approved() {
+    // The card showed six lines and "+34 more lines", and no key showed the rest.
+    let content: String = (1..=40).map(|i| format!("line{i:02}\n")).collect();
+    let server = MockServer::start(vec![
+        Reply::ToolCall { name: "write_file".into(), arguments: serde_json::json!({ "path": "long.txt", "content": content }) },
+        Reply::Text("Written.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Manual" }));
+    term.type_text("make long.txt");
+    term.send(ENTER);
+    let screen = term.wait_for("v shows the whole change", WAIT);
+    assert!(screen.contains("+ line20"), "a 40-row window has room for more than six lines:\n{screen}");
+    assert!(!screen.contains("+ line40"), "{screen}");
+    term.send("v");
+    // Above the card, which still waits; a 40-line change fills the screen.
+    let screen = term.wait_for("+ line40", WAIT);
+    assert!(screen.contains("Always allow"), "the card went away:\n{screen}");
+    term.send("v");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(term.screen().matches("+ line40").count(), 1, "shown twice:\n{}", term.screen());
+    term.send(ESC);
+    term.wait_for("Written.", WAIT);
+    assert!(!home.work().join("long.txt").exists());
+}
+
+#[test]
+fn the_command_palette_and_model_menu_fit_an_80_by_24_terminal() {
+    // Ten two-row items put the title and the selected row above the screen.
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    home.set_up(&server.url);
+    let term = Term::start(&home, &["-y"], 80, 24);
+    term.wait_for(PROMPT, WAIT);
+    term.send("\x0b");
+    // It unfolds from its title down in 180 ms; unfolded, all of it is on screen.
+    term.wait_for("more below", WAIT);
+    std::thread::sleep(Duration::from_millis(400));
+    let screen = term.screen();
+    let bottom = screen.lines().position(|l| l.trim_start().starts_with("╰─")).unwrap_or(0);
+    assert!(screen.contains("Command palette") && screen.contains("› /") && bottom > 0, "the menu does not fit:\n{screen}");
+    term.send(ESC);
+    term.send(F3);
+    let screen = term.wait_for("Select model", WAIT);
+    assert!(screen.contains(&server.model), "{screen}");
+    term.send(ESC);
+}
+
+#[test]
+fn the_prompt_edits_as_a_shell_does_and_ctrl_u_does_not_update() {
+    // Ctrl+U checked for, downloaded and installed an update; Ctrl+E opened an editor.
+    let server = MockServer::start(vec![Reply::Text("Heard.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+    term.type_text("half typed prompt");
+    term.send("\x01"); // Ctrl+A
+    term.send("\x05"); // Ctrl+E
+    term.type_text(" end");
+    term.wait_for("half typed prompt end", WAIT);
+    term.send("\x15"); // Ctrl+U
+    term.wait_gone("half typed prompt end", WAIT);
+    assert!(!term.screen().contains("checking the"), "Ctrl+U started an update:\n{}", term.screen());
+    term.type_text("clean");
+    term.send(ENTER);
+    term.wait_for("Heard.", WAIT);
+    assert!(sent(&server.turns()[0]).contains("clean") && !sent(&server.turns()[0]).contains("half typed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_x_ctrl_e_writes_the_prompt_in_an_external_editor() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let editor = home.path().join("editor.sh");
+    std::fs::write(&editor, "#!/bin/sh\necho 'from the editor' > \"$1\"\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let term = ready_with(&home, &server, serde_json::json!({ "external_editor": editor.to_str().unwrap() }));
+    term.send("\x18"); // Ctrl+X
+    term.send("\x05"); // Ctrl+E
+    term.wait_for("from the editor", WAIT);
+}
+
+#[test]
+fn one_ctrl_c_before_any_reply_does_not_quit() {
+    // /help says Ctrl+C twice; before a reply, once was enough.
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+    term.send("\x03");
+    term.wait_for("Press Ctrl+C again to exit", WAIT);
+    term.send("\x03");
+    assert!(term.wait_exit(WAIT).is_some(), "the second Ctrl+C did not quit");
+}
+
+#[test]
+fn ctrl_r_while_an_answer_is_written_says_when_it_works() {
+    let words: Vec<String> = (1..=40).map(|i| format!("word{i}")).collect();
+    let server = MockServer::start(vec![Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(100) }]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+    term.type_text("count");
+    term.send(ENTER);
+    term.wait_for("word3", WAIT);
+    term.send("\x12"); // Ctrl+R
+    term.wait_for("regenerates once the answer is done", WAIT);
 }
 
 #[test]
@@ -1928,6 +2054,12 @@ fn export_writes_the_conversation_next_to_the_project() {
     let server = MockServer::start(vec![Reply::Text("Worth keeping.".into())]);
     let home = Home::new();
     let term = ready(&home, &server);
+
+    // Before anything was said there is nothing to keep, and no file.
+    term.type_text("/export");
+    term.send(ENTER);
+    term.wait_for("Nothing to export yet", WAIT);
+    assert!(!std::fs::read_dir(home.work()).unwrap().filter_map(Result::ok).any(|e| e.file_name().to_string_lossy().ends_with(".md")));
 
     term.type_text("hello");
     term.send(ENTER);

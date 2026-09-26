@@ -76,6 +76,8 @@ pub enum UiEvent {
         result: Result<(Vec<ChatMessage>, DoneReason), (String, Vec<ChatMessage>)>,
     },
     ServerDiscovered(ServerDiscovery),
+    /// A look at the server at this address got no answer (or an empty list).
+    ServerSilent(String),
     /// The client now talks to the provider at `url`, and this is what that
     /// server said it runs; `None` if it did not answer.
     ProviderReady { url: String, discovery: Option<ServerDiscovery> },
@@ -205,6 +207,8 @@ pub type SettledLines = std::sync::Arc<Vec<RenderLine>>;
 #[derive(Default)]
 pub struct ChatView {
     lines: Vec<ChatLine>,
+    /// An approval or question card is up: the call in flight has not run.
+    awaiting_user: bool,
     /// The assistant line being streamed.
     streaming: Option<usize>,
     streaming_reasoning: Option<usize>,
@@ -563,6 +567,29 @@ impl ChatView {
         self.lines.extend(remaining_notices);
     }
 
+    /// The streamed answer and thought are over; what follows starts blocks of its own.
+    pub fn end_streaming(&mut self) {
+        self.streaming = None;
+        self.streaming_reasoning = None;
+    }
+
+    /// For a restored session, whose thought times were not saved.
+    pub fn forget_thought_times(&mut self) {
+        for line in &mut self.lines {
+            line.reasoning_secs = None;
+        }
+        self.streaming_reasoning = None;
+        self.reasoning_start = None;
+        self.needs_reprint = true;
+    }
+
+    pub fn set_awaiting_user(&mut self, awaiting: bool) {
+        if self.awaiting_user != awaiting {
+            self.awaiting_user = awaiting;
+            self.needs_reprint = true;
+        }
+    }
+
     pub fn push_system(&mut self, text: &str) {
         self.streaming = None;
         self.streaming_reasoning = None;
@@ -604,6 +631,12 @@ impl ChatView {
         match ev {
             LoopEvent::TurnDelta(d) => {
                 self.open_tool = None;
+                // The answer has begun, so the thinking is over: its time stops
+                // here, not when the answer ends.
+                // It stays open, so reasoning that comes back joins the same block.
+                if let Some(i) = self.streaming_reasoning.filter(|_| !d.trim().is_empty()) {
+                    self.lines[i].reasoning_secs.get_or_insert_with(|| thought_secs(self.reasoning_start.take()));
+                }
                 match self.streaming {
                     Some(i) => self.lines[i].text.push_str(d),
                     None => {
@@ -633,9 +666,10 @@ impl ChatView {
             LoopEvent::SteeringInjected(directive) if flashagent_core::is_task_notice(directive) => {}
             LoopEvent::SteeringInjected(directive) => {
                 self.streaming = None;
+                // Taken either way: left over, it would time the next thought from here.
+                let started = self.reasoning_start.take();
                 if let Some(i) = self.streaming_reasoning.take() {
-                    let secs = self.reasoning_start.take().map(|t| t.elapsed().as_secs()).unwrap_or(1);
-                    self.lines[i].reasoning_secs = Some(secs);
+                    self.lines[i].reasoning_secs.get_or_insert_with(|| thought_secs(started));
                 }
                 self.lines.push(ChatLine::new(LineKind::User, directive));
                 self.needs_reprint = true;
@@ -644,9 +678,10 @@ impl ChatView {
             LoopEvent::StepStarted { .. } => {}
             LoopEvent::Done(reason) => {
                 self.streaming = None;
+                // Taken either way: left over, it would time the next thought from here.
+                let started = self.reasoning_start.take();
                 if let Some(i) = self.streaming_reasoning.take() {
-                    let secs = self.reasoning_start.take().map(|t| t.elapsed().as_secs()).unwrap_or(1);
-                    self.lines[i].reasoning_secs = Some(secs);
+                    self.lines[i].reasoning_secs.get_or_insert_with(|| thought_secs(started));
                 }
                 self.open_tool = None;
                 // The enum's own name ("— StepLimit —") used to reach the chat.
@@ -665,6 +700,11 @@ impl ChatView {
             }
         }
     }
+}
+
+/// Whole seconds, rounded, and at least one: 0.8 s read "(0s)".
+pub(crate) fn thought_secs(started: Option<std::time::Instant>) -> u64 {
+    started.map_or(1, |t| ((t.elapsed().as_millis() + 500) / 1000).max(1) as u64)
 }
 
 /// `none()`: all collapsed; `all()`: all expanded (Ctrl+Shift+O, persists);
@@ -700,7 +740,8 @@ impl From<bool> for ReasoningExpansion {
     }
 }
 
-fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLine> {
+fn render_single_tool_card(call: &ToolCallRecord, width: usize, waiting: bool) -> Vec<RenderLine> {
+    let state = tool_views::CallState::of(call.is_running, call.is_error, waiting);
     let tool_name = call.name.as_str();
     let details_str = call.args_json.as_str();
     let parsed: serde_json::Value = serde_json::from_str(details_str.trim()).unwrap_or_default();
@@ -730,14 +771,7 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "~".to_string())
         });
-        return card(tool_views::render_command_card(
-            &cwd,
-            cmd,
-            call.result.as_deref(),
-            call.is_error,
-            call.is_running,
-            width,
-        ));
+        return card(tool_views::render_command_card(&cwd, cmd, call.result.as_deref(), state, width));
     }
 
     if tool_name == "read_file" || tool_name == "outline_file" {
@@ -818,14 +852,8 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
             (a, d, Some(simulated))
         };
 
-        return card(tool_views::render_edit_card(
-            path,
-            added,
-            deleted,
-            diff_text.as_deref(),
-            is_write,
-            width,
-        ));
+        let change = tool_views::EditChange { path, added, deleted, body: diff_text.as_deref(), is_write };
+        return card(tool_views::render_edit_card(&change, state, call.result.as_deref(), width));
     }
 
     if tool_name == "spawn_agent" {
@@ -857,12 +885,7 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize) -> Vec<RenderLin
         ));
     }
 
-    tool_views::render_generic_card(
-        if !tool_name.is_empty() { tool_name } else { "tool" },
-        &call.args_json,
-        call.result.as_deref(),
-        width,
-    )
+    tool_views::render_generic_card(if !tool_name.is_empty() { tool_name } else { "tool" }, &call.args_json, call.result.as_deref(), state, width)
 }
 
 /// A blank line goes between blocks, so the question, the work and the
@@ -1147,8 +1170,10 @@ impl ChatView {
             if line.kind == LineKind::Tool || line.kind == LineKind::ToolError {
                 if is_expanded {
                     if !line.tool_calls.is_empty() {
+                        // The call in flight waits while an approval or question card is up.
+                        let waiting = self.awaiting_user && self.open_tool == Some(i);
                         for call in &line.tool_calls {
-                            let card_lines = render_single_tool_card(call, width);
+                            let card_lines = render_single_tool_card(call, width, waiting);
                             for cl in card_lines {
                                 target.push(cl);
                             }
@@ -1162,7 +1187,7 @@ impl ChatView {
                             is_error: line.kind == LineKind::ToolError,
                             is_running: false,
                         };
-                        let card_lines = render_single_tool_card(&synthetic_call, width);
+                        let card_lines = render_single_tool_card(&synthetic_call, width, false);
                         for cl in card_lines {
                             target.push(cl);
                         }
@@ -1864,6 +1889,26 @@ ok".into()));
     }
 
     #[test]
+    fn a_thoughts_time_stops_when_the_answer_starts_not_when_it_ends() {
+        // ~2 s of thinking read "(12s)": the clock ran through the answer.
+        let mut v = ChatView::default();
+        v.push_user("q");
+        v.on_event(&LoopEvent::ReasoningDelta("**Analyzing Request**".into()));
+        v.reasoning_start = Some(std::time::Instant::now() - std::time::Duration::from_millis(2_400));
+        v.on_event(&LoopEvent::TurnDelta("The answer".into()));
+        let thought = v.lines.iter().position(|l| l.kind == LineKind::Reasoning).unwrap();
+        assert_eq!(v.lines[thought].reasoning_secs, Some(2));
+        v.on_event(&LoopEvent::TurnDelta(" goes on for a while".into()));
+        v.on_event(&LoopEvent::ReasoningDelta(" and one more thought".into()));
+        v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
+        assert_eq!(v.lines[thought].reasoning_secs, Some(2), "the end of the answer changed it");
+        assert!(v.reasoning_start.is_none(), "the next turn's thought would be timed from here");
+        // Rounded, and never "(0s)".
+        assert_eq!(thought_secs(Some(std::time::Instant::now() - std::time::Duration::from_millis(800))), 1);
+        assert_eq!(thought_secs(Some(std::time::Instant::now() - std::time::Duration::from_millis(2_600))), 3);
+    }
+
+    #[test]
     fn a_live_thought_keeps_its_distance_from_the_settled_question() {
         let mut v = ChatView::default();
         v.push_user("first");
@@ -2155,10 +2200,8 @@ hm".into()));
         });
         // The expanded diff renders under the line; check the whole frame.
         let failed = collapsed(&v);
-        assert!(
-            failed.contains("Failed to add the missing null check to parser.rs"),
-            "{failed}"
-        );
+        assert!(failed.contains("Add the missing null check to parser.rs · failed"), "{failed}");
+        assert!(!failed.contains("Failed to"), "{failed}");
     }
 
     #[test]
@@ -2172,13 +2215,6 @@ hm".into()));
         let line = strip_ansi(&v.render(120)[0].1);
         assert!(line.contains("Running"), "{line}");
         assert!(line.contains("cargo test"), "{line}");
-    }
-
-    #[test]
-    fn an_identifier_is_not_lower_cased_into_nonsense() {
-        assert_eq!(lower_first("Add a null check"), "add a null check");
-        assert_eq!(lower_first("MEMORY.md needs a line"), "MEMORY.md needs a line");
-        assert_eq!(lower_first(""), "");
     }
 
     #[test]

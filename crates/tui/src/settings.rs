@@ -167,7 +167,7 @@ impl SettingsView {
             ("Setup wizard", "Run the setup again; a new server is added".into()),
         ],
         SettingsTab::Updates => vec![
-            ("Auto-update *", if self.config.auto_check_updates { "On (installs in the background)".into() } else { "Off (Ctrl+U or /update only)".into() }),
+            ("Auto-update *", if self.config.auto_check_updates { "On (installs in the background)".into() } else { "Off (/update only)".into() }),
             ("Release channel", self.config.update_channel.label().to_string()),
             ("Check for updates", self.update_check_status.clone().unwrap_or_else(|| "Ask GitHub for the newest release".into())),
         ],

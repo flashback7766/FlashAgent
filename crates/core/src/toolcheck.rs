@@ -14,6 +14,9 @@ pub enum CallStyle {
     Native,
     /// Arrived as text and was recovered by the scanner.
     Recovered,
+    /// Made only when asked again, as the agent loop asks once when a failed
+    /// call, or a step the request names, is answered in prose.
+    AfterNudge,
 }
 
 impl CallStyle {
@@ -21,6 +24,7 @@ impl CallStyle {
         match self {
             Self::Native => "native",
             Self::Recovered => "recovered",
+            Self::AfterNudge => "after a nudge",
         }
     }
 }
@@ -31,6 +35,9 @@ pub enum Outcome {
     /// Right tool, wrong arguments: the loop runs, the work is wrong.
     Partial { detail: String, secs: f32 },
     Fail { detail: String, secs: f32 },
+    /// The server refused or broke off the request (a rate limit, a model it
+    /// does not serve): this says nothing about the model.
+    Unavailable { detail: String, secs: f32 },
 }
 
 impl Outcome {
@@ -40,7 +47,7 @@ impl Outcome {
 
     fn secs(&self) -> f32 {
         match self {
-            Self::Pass { secs, .. } | Self::Partial { secs, .. } | Self::Fail { secs, .. } => *secs,
+            Self::Pass { secs, .. } | Self::Partial { secs, .. } | Self::Fail { secs, .. } | Self::Unavailable { secs, .. } => *secs,
         }
     }
 
@@ -48,6 +55,7 @@ impl Outcome {
         match self {
             Self::Pass { style, secs } => format!("{}, {secs:.1}s", style.label()),
             Self::Partial { detail, .. } | Self::Fail { detail, .. } => detail.clone(),
+            Self::Unavailable { detail, .. } => format!("not tested: {detail}"),
         }
     }
 }
@@ -109,17 +117,17 @@ fn probe_tools() -> Vec<ToolSpec> {
         ToolSpec {
             name: "read_lines".into(),
             description: "Read the first N lines of a file.".into(),
-            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string"},"count":{"type":"integer"}},"required":["path","count"]}"#.into(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"File path, relative to the working directory"},"count":{"type":"integer","description":"How many lines to read from the start"}},"required":["path","count"]}"#.into(),
         },
         ToolSpec {
             name: "write_file".into(),
             description: "Write content to a file, replacing it.".into(),
-            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#.into(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"File path, relative to the working directory"},"content":{"type":"string","description":"The whole new text of the file, exactly as it must be"}},"required":["path","content"]}"#.into(),
         },
         ToolSpec {
             name: "report_status".into(),
             description: "Report a numeric status code back to the harness.".into(),
-            parameters_json: r#"{"type":"object","properties":{"code":{"type":"integer"}},"required":["code"]}"#.into(),
+            parameters_json: r#"{"type":"object","properties":{"code":{"type":"integer","description":"The status code"}},"required":["code"]}"#.into(),
         },
     ]
 }
@@ -139,11 +147,25 @@ struct Turn {
     text: String,
     secs: f32,
     error: Option<String>,
+    /// The error came from the server, not from waiting on the model.
+    unavailable: bool,
 }
 
 impl Turn {
     fn first_call(&self) -> Option<&(String, String, CallStyle)> {
         self.calls.first()
+    }
+
+    /// A turn that ended in an error: the model's failure when it did not
+    /// answer in time, the server's when the request itself failed.
+    fn failed(&self, error: &str) -> Outcome {
+        if self.unavailable {
+            let first_line = error.lines().next().unwrap_or_default();
+            let detail: String = first_line.chars().take(120).collect();
+            Outcome::Unavailable { detail, secs: self.secs }
+        } else {
+            Outcome::Fail { detail: error.to_string(), secs: self.secs }
+        }
     }
 }
 
@@ -187,12 +209,14 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
             text: String::new(),
             secs: started.elapsed().as_secs_f32(),
             error: Some(format!("no answer within {}s", timeout.as_secs())),
+            unavailable: false,
         },
         Ok(Err(e)) => Turn {
             calls: Vec::new(),
             text: String::new(),
             secs: started.elapsed().as_secs_f32(),
             error: Some(e),
+            unavailable: true,
         },
         Ok(Ok((parts, text))) => {
             let secs = started.elapsed().as_secs_f32();
@@ -216,15 +240,20 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
                     })
                     .collect();
             }
-            Turn { calls, text, secs, error: None }
+            Turn { calls, text, secs, error: None, unavailable: false }
         }
     }
 }
 
-fn parsed_args(raw: &str) -> Option<serde_json::Value> {
-    flashagent_llm::effective_args(raw, "")
+/// As the agent loop runs them: repaired, and typed to the tool's schema.
+fn parsed_args(tool: &str, raw: &str) -> Option<serde_json::Value> {
+    let mut args = flashagent_llm::effective_args(raw, "")
         .or_else(|| serde_json::from_str(raw).ok())
-        .or_else(|| flashagent_llm::repair_json(raw).and_then(|r| serde_json::from_str(&r).ok()))
+        .or_else(|| flashagent_llm::repair_json(raw).and_then(|r| serde_json::from_str(&r).ok()))?;
+    if let Some(schema) = probe_tools().iter().find(|t| t.name == tool).and_then(|t| serde_json::from_str(&t.parameters_json).ok()) {
+        flashagent_llm::repair::coerce_to_schema(&mut args, &schema);
+    }
+    Some(args)
 }
 
 fn snippet(text: &str) -> String {
@@ -248,6 +277,11 @@ impl CheckReport {
         (self.results.iter().filter(|(_, o)| o.is_pass()).count(), self.results.len())
     }
 
+    /// Scenarios the server did not let run.
+    pub fn untested(&self) -> usize {
+        self.results.iter().filter(|(_, o)| matches!(o, Outcome::Unavailable { .. })).count()
+    }
+
     /// Any call that only arrived through the text scanner, which is slower and
     /// more fragile.
     pub fn needed_recovery(&self) -> bool {
@@ -256,12 +290,20 @@ impl CheckReport {
             .any(|(_, o)| matches!(o, Outcome::Pass { style: CallStyle::Recovered, .. }))
     }
 
+    /// A call came only when the model was asked again.
+    pub fn needed_nudge(&self) -> bool {
+        self.results.iter().any(|(_, o)| matches!(o, Outcome::Pass { style: CallStyle::AfterNudge, .. }))
+    }
+
     pub fn total_secs(&self) -> f32 {
         self.results.iter().map(|(_, o)| o.secs()).sum()
     }
 
     pub fn verdict(&self) -> &'static str {
         let (passed, total) = self.score();
+        if self.untested() > 0 {
+            return "incomplete: the server failed some requests, so this is not the model's score";
+        }
         match (passed, total) {
             (p, t) if p == t => "drives tools reliably",
             (p, t) if p + 1 == t => "usable, with one rough edge",
@@ -276,14 +318,19 @@ impl CheckReport {
         let title_width = scenarios().iter().map(|s| s.title.len()).max().unwrap_or(40);
         for (scenario, (key, outcome)) in scenarios().iter().zip(&self.results) {
             debug_assert_eq!(scenario.key, key);
-            let mark = if outcome.is_pass() { "ok  " } else { "FAIL" };
+            let mark = match outcome {
+                Outcome::Pass { .. } => "ok  ",
+                Outcome::Unavailable { .. } => "--  ",
+                _ => "FAIL",
+            };
             out.push(format!("  {mark}  {:<width$} {}", scenario.title, outcome.detail(), width = title_width));
         }
         let (passed, total) = self.score();
         out.push(format!(
-            "  {passed}/{total} — {}{}",
+            "  {passed}/{total} — {}{}{}",
             self.verdict(),
-            if self.needed_recovery() { " (calls recovered from text, not native)" } else { "" }
+            if self.needed_recovery() { " (calls recovered from text, not native)" } else { "" },
+            if self.needed_nudge() { " (some calls made only when asked again)" } else { "" }
         ));
         out
     }
@@ -308,6 +355,8 @@ impl CheckReport {
             "total": total,
             "verdict": self.verdict(),
             "needed_recovery": self.needed_recovery(),
+            "needed_nudge": self.needed_nudge(),
+            "untested": self.untested(),
             "seconds": self.total_secs(),
             "scenarios": self.results.iter().map(|(key, outcome)| serde_json::json!({
                 "key": key,
@@ -328,6 +377,12 @@ pub fn is_chat_model(id: &str) -> bool {
     !(lower.contains("embed") || lower.contains("rerank") || lower.contains("whisper"))
 }
 
+/// A scenario's instruction and the rules the agent's own prompt gives for
+/// calling tools, so a model is measured as the agent runs it.
+fn system(task: &str) -> ChatMessage {
+    ChatMessage::system(format!("{task}\n\n{}", crate::prompt::TOOL_CALL_RULES))
+}
+
 /// `timeout` caps each turn, not the run.
 pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) -> CheckReport {
     let mut results = Vec::new();
@@ -336,7 +391,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     let turn = run_turn(
         llm,
         &[
-            ChatMessage::system("You are a tool-calling test harness. Answer only by calling a tool."),
+            system("You are a tool-calling test harness. Answer only by calling a tool."),
             ChatMessage::user("Call report_status with code 42."),
         ],
         timeout,
@@ -353,7 +408,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     let turn = run_turn(
         llm,
         &[
-            ChatMessage::system("You are a coding agent. Use the tools to do what is asked."),
+            system("You are a coding agent. Use the tools to do what is asked."),
             ChatMessage::user("Show me the first 20 lines of src/main.rs."),
         ],
         timeout,
@@ -374,7 +429,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     let turn = run_turn(
         llm,
         &[
-            ChatMessage::system("You are a coding agent. Use the tools only when they are needed."),
+            system("You are a coding agent. Use the tools only when they are needed."),
             ChatMessage::user("In one sentence: what does a compiler do?"),
         ],
         timeout,
@@ -383,7 +438,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     results.push((
         "no_spurious_call".to_string(),
         match (&turn.error, turn.first_call()) {
-            (Some(e), _) => Outcome::Fail { detail: e.clone(), secs: turn.secs },
+            (Some(e), _) => turn.failed(e),
             (None, Some((name, _, _))) => Outcome::Fail {
                 detail: format!("called {name} on a question that needed no tool"),
                 secs: turn.secs,
@@ -405,7 +460,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     let turn = run_turn(
         llm,
         &[
-            ChatMessage::system("You are a coding agent. Use the tools to do what is asked."),
+            system("You are a coding agent. Use the tools to do what is asked."),
             ChatMessage::user("What version is in version.txt?"),
             asked,
             ChatMessage::tool_result("call_1", "version = v4.2.1"),
@@ -416,7 +471,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     results.push((
         "uses_result".to_string(),
         match (&turn.error, turn.first_call()) {
-            (Some(e), _) => Outcome::Fail { detail: e.clone(), secs: turn.secs },
+            (Some(e), _) => turn.failed(e),
             (None, Some((name, _, _))) => Outcome::Fail {
                 detail: format!("called {name} again instead of answering from the result"),
                 secs: turn.secs,
@@ -438,32 +493,29 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         name: "read_lines".into(),
         args_json: r#"{"path":"status.txt","count":1}"#.into(),
     }];
-    let turn = run_turn(
-        llm,
-        &[
-            ChatMessage::system("You are a coding agent. Use the tools to do what is asked."),
-            ChatMessage::user(
-                "Read status.txt, then report the number it contains with report_status.",
-            ),
-            first,
-            ChatMessage::tool_result("call_2", "status = 7"),
-        ],
-        timeout,
-    )
-    .await;
-    results.push(("second_step".to_string(), judge_call(&turn, "report_status", |args| {
-        match args.get("code").and_then(|c| c.as_i64()) {
-            Some(7) => Ok(()),
-            other => Err(format!("code was {other:?}, expected 7 from the file")),
-        }
-    })));
+    let mut messages = vec![
+        system("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user("Read status.txt, then report the number it contains with report_status."),
+        first,
+        ChatMessage::tool_result("call_2", "status = 7"),
+    ];
+    let turn = run_turn(llm, &messages, timeout).await;
+    let mut answered = messages.clone();
+    answered.push(ChatMessage::assistant(turn.text.clone()));
+    let nudge = crate::loop_::named_tool_nudge(&answered, &probe_tools(), &turn.text);
+    let (turn, nudged) = nudged_once(llm, &mut messages, turn, nudge, timeout).await;
+    let outcome = judge_call(&turn, "report_status", |args| match args.get("code").and_then(|c| c.as_i64()) {
+        Some(7) => Ok(()),
+        other => Err(format!("code was {other:?}, expected 7 from the file")),
+    });
+    results.push(("second_step".to_string(), after_nudge(outcome, nudged)));
 
     // 6. Content with characters that break naive JSON encoding.
     const EXACT: &str = "line one\n\"quoted\"\nend";
     let turn = run_turn(
         llm,
         &[
-            ChatMessage::system("You are a coding agent. Use the tools to do what is asked."),
+            system("You are a coding agent. Use the tools to do what is asked."),
             ChatMessage::user(
                 "Write exactly these three lines to notes.txt, nothing else:\nline one\n\"quoted\"\nend",
             ),
@@ -489,33 +541,31 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         name: "read_lines".into(),
         args_json: r#"{"path":"src/confg.rs","count":5}"#.into(),
     }];
-    let turn = run_turn(
-        llm,
-        &[
-            ChatMessage::system("You are a coding agent. Use the tools to do what is asked."),
-            ChatMessage::user("Read the first 5 lines of src/config.rs."),
-            failed,
-            ChatMessage::tool_result(
-                "call_3",
-                "error: no such file: src/confg.rs (did you mean src/config.rs?)",
-            ),
-        ],
-        timeout,
-    )
-    .await;
-    results.push(("after_error".to_string(), judge_call(&turn, "read_lines", |args| {
+    let mut messages = vec![
+        system("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user("Read the first 5 lines of src/config.rs."),
+        failed,
+        ChatMessage::tool_result(
+            "call_3",
+            "error: no such file: src/confg.rs (did you mean src/config.rs?)",
+        ),
+    ];
+    let turn = run_turn(llm, &messages, timeout).await;
+    let (turn, nudged) = nudged_once(llm, &mut messages, turn, Some(crate::loop_::ERROR_NUDGE.to_string()), timeout).await;
+    let outcome = judge_call(&turn, "read_lines", |args| {
         match args.get("path").and_then(|p| p.as_str()) {
             Some(path) if path.ends_with("src/config.rs") => Ok(()),
             Some(path) => Err(format!("retried with {path:?} instead of the corrected path")),
             None => Err("no path in the retry".to_string()),
         }
-    })));
+    });
+    results.push(("after_error".to_string(), after_nudge(outcome, nudged)));
 
     // 8. Two files asked for at once: does the turn carry both calls?
     let turn = run_turn(
         llm,
         &[
-            ChatMessage::system(
+            system(
                 "You are a coding agent. Use the tools to do what is asked, in as few turns as possible.",
             ),
             ChatMessage::user("Read the first 10 lines of both Cargo.toml and README.md."),
@@ -526,7 +576,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     results.push((
         "two_calls".to_string(),
         match (&turn.error, turn.calls.len()) {
-            (Some(e), _) => Outcome::Fail { detail: e.clone(), secs: turn.secs },
+            (Some(e), _) => turn.failed(e),
             (None, 0) => Outcome::Fail {
                 detail: format!("replied with text, no tool call: {}", snippet(&turn.text)),
                 secs: turn.secs,
@@ -545,13 +595,36 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     CheckReport { model: model.to_string(), results }
 }
 
+/// An answer in prose gets the one nudge the agent loop would send, if any.
+async fn nudged_once(llm: &dyn LlmSource, messages: &mut Vec<ChatMessage>, turn: Turn, nudge: Option<String>, timeout: Duration) -> (Turn, bool) {
+    match nudge {
+        Some(nudge) if turn.error.is_none() && turn.calls.is_empty() && !turn.text.trim().is_empty() => {
+            messages.push(ChatMessage::assistant(turn.text.clone()));
+            messages.push(ChatMessage::user(nudge));
+            let mut next = run_turn(llm, messages, timeout).await;
+            next.secs += turn.secs;
+            (next, true)
+        }
+        _ => (turn, false),
+    }
+}
+
+fn after_nudge(outcome: Outcome, nudged: bool) -> Outcome {
+    match outcome {
+        Outcome::Pass { secs, .. } if nudged => Outcome::Pass { style: CallStyle::AfterNudge, secs },
+        Outcome::Fail { detail, secs } if nudged => Outcome::Fail { detail: format!("{detail} (asked twice)"), secs },
+        Outcome::Partial { detail, secs } if nudged => Outcome::Partial { detail: format!("{detail} (asked twice)"), secs },
+        other => other,
+    }
+}
+
 fn judge_call(
     turn: &Turn,
     expected: &str,
     check_args: impl Fn(&serde_json::Value) -> Result<(), String>,
 ) -> Outcome {
     if let Some(e) = &turn.error {
-        return Outcome::Fail { detail: e.clone(), secs: turn.secs };
+        return turn.failed(e);
     }
     let Some((name, args, style)) = turn.first_call() else {
         return Outcome::Fail {
@@ -565,7 +638,7 @@ fn judge_call(
             secs: turn.secs,
         };
     }
-    let Some(parsed) = parsed_args(args) else {
+    let Some(parsed) = parsed_args(name, args) else {
         return Outcome::Partial {
             detail: format!("arguments were not JSON: {}", snippet(args)),
             secs: turn.secs,
@@ -651,6 +724,115 @@ mod tests {
                 ("read_lines", r#"{"path":"README.md","count":10}"#),
             ]),
         ]
+    }
+
+    /// Scripted, but the server refuses the turns at `refused`.
+    struct PartlyRefused {
+        inner: Scripted,
+        refused: Vec<usize>,
+        asked: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl LlmSource for PartlyRefused {
+        async fn turn(
+            &self,
+            messages: &[ChatMessage],
+            tools: &[ToolSpec],
+        ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+            let n = std::mem::replace(&mut *self.asked.lock().unwrap(), 0);
+            *self.asked.lock().unwrap() = n + 1;
+            let answer = self.inner.turn(messages, tools).await;
+            if self.refused.contains(&n) {
+                return Err(LlmError::Status { status: 429, body: "model is temporarily rate-limited upstream\nretry later".into() });
+            }
+            answer
+        }
+    }
+
+    #[test]
+    fn a_request_the_server_refuses_is_not_held_against_the_model() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let llm = PartlyRefused { inner: Scripted::new(perfect()), refused: vec![0, 2, 3, 4, 5, 6, 7], asked: Mutex::new(0) };
+        let report = rt.block_on(check_model(&llm, "rate-limited", Duration::from_secs(5)));
+        assert_eq!(report.score(), (1, 8));
+        assert_eq!(report.untested(), 7);
+        assert!(report.verdict().starts_with("incomplete"), "{}", report.verdict());
+        let lines = report.lines();
+        assert!(lines[0].contains("--") && lines[0].contains("not tested: backend returned 429"), "{}", lines[0]);
+        assert!(!lines[0].contains("retry later"), "one line of the error is enough: {}", lines[0]);
+        assert!(lines[1].contains("ok"), "{}", lines[1]);
+        assert_eq!(report.to_json()["untested"], 7);
+
+        // A model that answered nothing in time did fail.
+        let everything_right = run(perfect());
+        assert_eq!(everything_right.untested(), 0);
+        assert_eq!(everything_right.verdict(), "drives tools reliably");
+    }
+
+    #[test]
+    fn a_failed_call_retried_only_when_asked_again_passes_and_says_so() {
+        let mut turns = perfect();
+        // after_error: prose first, the corrected call once nudged.
+        turns[6] = text("I apologize, but that file does not exist.");
+        turns.insert(7, call("read_lines", r#"{"path":"src/config.rs","count":5}"#));
+        let report = run(turns);
+        assert_eq!(report.score(), (8, 8), "{:?}", report.results);
+        assert!(report.needed_nudge());
+        assert_eq!(report.results[6].1.detail().split(',').next(), Some("after a nudge"));
+        assert!(report.lines().last().unwrap().contains("some calls made only when asked again"));
+        assert_eq!(report.to_json()["needed_nudge"], true);
+
+        let mut turns = perfect();
+        turns[6] = text("Sorry, it does not exist.");
+        turns.insert(7, text("I cannot read it."));
+        let report = run(turns);
+        assert_eq!(report.score(), (7, 8));
+        assert!(report.results[6].1.detail().ends_with("(asked twice)"), "{}", report.results[6].1.detail());
+        assert!(!run(perfect()).needed_nudge());
+    }
+
+    #[test]
+    fn a_named_step_made_only_when_reminded_passes_and_says_so() {
+        let mut turns = perfect();
+        // second_step: the number told in prose, then reported once reminded.
+        turns[4] = text("The number in status.txt is 7.");
+        turns.insert(5, call("report_status", r#"{"code":7}"#));
+        let report = run(turns);
+        assert_eq!(report.score(), (8, 8), "{:?}", report.results);
+        assert_eq!(report.results[4].1.detail().split(',').next(), Some("after a nudge"));
+
+        // A reply that asks the user something is left alone.
+        let mut turns = perfect();
+        turns[4] = text("Which file did you mean?");
+        let report = run(turns);
+        assert_eq!(report.score(), (7, 8));
+        assert!(!report.needed_nudge());
+    }
+
+    #[test]
+    fn every_scenario_carries_the_agent_rules_for_calling_tools() {
+        struct Seen(Mutex<Vec<String>>);
+        #[async_trait]
+        impl LlmSource for Seen {
+            async fn turn(&self, messages: &[ChatMessage], _tools: &[ToolSpec]) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+                self.0.lock().unwrap().push(messages[0].content.clone());
+                Ok(Box::pin(futures::stream::iter(text("ok").into_iter().map(Ok))))
+            }
+        }
+        let seen = Seen(Mutex::new(Vec::new()));
+        tokio::runtime::Runtime::new().unwrap().block_on(check_model(&seen, "m", Duration::from_secs(5)));
+        let systems = seen.0.lock().unwrap();
+        assert!(systems.len() >= 8);
+        assert!(systems.iter().all(|s| s.ends_with(crate::prompt::TOOL_CALL_RULES)), "{systems:?}");
+    }
+
+    #[test]
+    fn a_quoted_number_counts_as_the_number_the_agent_would_run() {
+        let mut turns = perfect();
+        turns[0] = call("report_status", r#"{"code":"42"}"#);
+        turns[1] = call("read_lines", r#"{"path":"src/main.rs","count":"20"}"#);
+        assert_eq!(run(turns).score(), (8, 8));
     }
 
     #[test]

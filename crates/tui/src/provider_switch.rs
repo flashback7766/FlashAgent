@@ -115,7 +115,7 @@ impl App {
         }
         let Some(switch) = self.provider_switch.take() else { return };
         let saved = self.config.active_profile().model.clone();
-        let model = providers::model_after_switch(&saved, discovery.as_ref());
+        let model = providers::model_after_switch(&saved, discovery.as_ref(), self.config.endpoint().api_key.is_some());
         self.available_models = discovery.as_ref().map(providers::offered_models).unwrap_or_default();
         // The old model's window says nothing about the new one.
         self.current_context = None;

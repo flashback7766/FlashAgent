@@ -242,7 +242,11 @@ impl McpClient {
             Ok(Ok(Ok(val))) => Ok(val),
             Ok(Ok(Err(err))) => Err(format!("MCP error (code {}): {}", err.code, err.message)),
             Ok(Err(_)) => Err(format!("MCP server '{}' closed response channel", self.name)),
-            Err(_) => return Err(format!("MCP request '{method}' to '{}' timed out after {:?}", self.name, timeout)),
+            Err(_) => {
+                // A call that timed out may have happened on the server anyway.
+                let after = if method == "tools/call" { "; the server may have done it anyway, so check before calling it again" } else { "" };
+                return Err(format!("MCP request '{method}' to '{}' timed out after {:?}{after}", self.name, timeout));
+            }
         };
         outstanding.answered = true;
         result
@@ -411,6 +415,27 @@ done
         let result = client.call_tool("test_tool", None, DEFAULT_TIMEOUT).await.expect("call_tool");
         assert_eq!(result.plain_text(), "hello from mock");
 
+        client.kill().await;
+    }
+
+    #[tokio::test]
+    async fn a_call_that_times_out_is_said_to_maybe_have_happened() {
+        // Answers the handshake, then never answers a call.
+        let mock_script = r#"
+while IFS= read -r line; do
+    if [[ "$line" =~ "initialize" ]]; then
+        echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"slow","version":"1"}}}'
+    elif [[ "$line" =~ "tools/list" ]]; then
+        echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"deploy","inputSchema":{"type":"object"}}]}}'
+    fi
+done
+"#;
+        let client = McpClient::spawn("slow", "bash", &["-c".to_string(), mock_script.to_string()], &HashMap::new(), Path::new("."))
+            .expect("spawn mock");
+        client.initialize(DEFAULT_TIMEOUT).await.expect("initialize");
+        let err = client.call_tool("deploy", None, Duration::from_millis(200)).await.unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(err.contains("may have done it anyway"), "{err}");
         client.kill().await;
     }
 }

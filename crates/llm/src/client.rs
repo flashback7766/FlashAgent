@@ -259,7 +259,14 @@ impl Client {
         // The exact name before a similar one: `gpt-4o` must not become
         // `gpt-4o-audio-preview` because the list happens to name that first.
         let exact = |m: &DiscoveredModel| !current.is_empty() && (m.id == current || (on_demand && m.id == format!("{current}:latest")));
-        let similar = |m: &DiscoveredModel| !current.is_empty() && (m.id.contains(&current) || current.contains(&m.id));
+        // A server that takes a key bills by the model: one the user did not
+        // name is never chosen for them, however close its name. A typo stays
+        // a typo, and the request says so. A local server serves what it has.
+        let pick_for_user = current.is_empty() || kind.runs_local_models() || endpoint.api_key.is_none();
+        let similar = |m: &DiscoveredModel| {
+            !current.is_empty()
+                && if pick_for_user { m.id.contains(&current) || current.contains(&m.id) } else { crate::thinking::same_model(&m.id, &current) }
+        };
         let active = models
             .iter()
             .find(|m| (m.is_loaded || on_demand) && exact(m))
@@ -267,7 +274,7 @@ impl Client {
             .or_else(|| models.iter().find(|m| m.is_loaded))
             .or_else(|| models.iter().find(|m| exact(m)))
             .or_else(|| models.iter().find(|m| similar(m)))
-            .or_else(|| models.first())
+            .or_else(|| models.first().filter(|_| pick_for_user))
             .cloned();
 
         if let Some(ref active) = active {
@@ -503,6 +510,55 @@ mod tests {
             assert_eq!(llm.sampling_for_protocol(&options), options, "{protocol}: set by hand, sent as set");
             llm.set_user_sampling(false);
         }
+    }
+
+    #[test]
+    fn a_context_window_is_named_as_people_name_it() {
+        use crate::thinking::token_count_label as label;
+        assert_eq!([label(1_000_000), label(1_048_576), label(2_000_000), label(1_500_000)], ["1M", "1M", "2M", "1.5M"]);
+        assert_eq!([label(128_000), label(131_072), label(262_144), label(32_768), label(200_000)], ["128K", "128K", "256K", "32K", "200K"]);
+        let mut m = DiscoveredModel { id: "m".into(), display_name: None, is_loaded: false, context_length: Some(1_000_000), max_context_length: None, thinking: ThinkingProfile::unreported(), supports_tools: true, supports_vision: false };
+        assert_eq!(m.context_display().as_deref(), Some("1M ctx"), "it read 977k ctx");
+        m.context_length = Some(131_072);
+        assert_eq!(m.context_display().as_deref(), Some("128k ctx"));
+    }
+
+    #[test]
+    fn a_model_a_keyed_server_does_not_list_is_never_swapped_for_another() {
+        let listed = |id: &str| DiscoveredModel {
+            id: id.into(),
+            display_name: None,
+            is_loaded: false,
+            context_length: None,
+            max_context_length: None,
+            thinking: ThinkingProfile::unreported(),
+            supports_tools: true,
+            supports_vision: false,
+        };
+        let models = || vec![listed("typesafe/jev-router"), listed("stealth/space-bunny-alpha"), listed("stealth/space-bunny-alpha-pro")];
+        // One letter off, on OpenRouter: the first listed model was taken, and billed.
+        let cloud = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://openrouter.ai/api/v1", Some("k".into())), "stealth/space-bunny-alfa");
+        let disc = cloud.settle_discovery(0, models(), ServerKind::Other, None).unwrap();
+        assert_eq!(cloud.model(), "stealth/space-bunny-alfa");
+        assert!(disc.active_model.is_none());
+        // A dated snapshot of the name is the same model; -pro is another.
+        assert!(crate::thinking::same_model("claude-haiku-4-5-20251001", "claude-haiku-4-5"));
+        assert!(crate::thinking::same_model("gpt-4o-2024-08-06", "gpt-4o"));
+        assert!(!crate::thinking::same_model("gpt-5-pro", "gpt-5") && !crate::thinking::same_model("gpt-4o-audio-preview", "gpt-4o"));
+        // A part of a name is not completed to a model the user did not name either.
+        let cloud = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://openrouter.ai/api/v1", Some("k".into())), "stealth/space-bunny");
+        cloud.settle_discovery(0, models(), ServerKind::Other, None);
+        assert_eq!(cloud.model(), "stealth/space-bunny");
+        // The exact name is taken, and nothing saved means the server picks.
+        let cloud = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://openrouter.ai/api/v1", Some("k".into())), "stealth/space-bunny-alpha");
+        assert_eq!(cloud.settle_discovery(0, models(), ServerKind::Other, None).unwrap().active_model.unwrap().id, "stealth/space-bunny-alpha");
+        let cloud = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://openrouter.ai/api/v1", Some("k".into())), "");
+        cloud.settle_discovery(0, models(), ServerKind::Other, None);
+        assert_eq!(cloud.model(), "typesafe/jev-router");
+        // A local server without a key still serves what it has.
+        let local = Client::new(Endpoint::new(ApiProtocol::OpenAi, "http://localhost:8000/v1", None), "gone-model");
+        local.settle_discovery(0, models(), ServerKind::Other, None);
+        assert_eq!(local.model(), "typesafe/jev-router");
     }
 
     #[test]

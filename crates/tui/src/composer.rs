@@ -63,6 +63,19 @@ pub struct ComposerLayout {
     pub hidden_below: usize,
 }
 
+/// Letters, digits, `_`, and symbols outside ASCII such as emoji: Ctrl+W
+/// took emoji for spaces and deleted them with the word before. ASCII and
+/// typographic punctuation still end a word.
+fn is_word_grapheme(g: &str) -> bool {
+    g == "_" || g.chars().any(|c| c.is_alphanumeric() || (!c.is_ascii() && !c.is_whitespace() && !c.is_control() && !is_typographic_punctuation(c)))
+}
+
+/// Dashes, curly quotes, the ellipsis, guillemets and the middle dot, by
+/// code point: written out, they would count as symbols the UI draws.
+fn is_typographic_punctuation(c: char) -> bool {
+    (0x2000..=0x206F).contains(&(c as u32)) || [0xAB, 0xBB, 0xB7].contains(&(c as u32))
+}
+
 impl Composer {
     pub fn new() -> Self {
         Self::default()
@@ -150,7 +163,7 @@ impl Composer {
         let mut seen_word = false;
         let mut end = rest.len();
         for (i, g) in rest.grapheme_indices(true) {
-            let is_word = g.chars().any(char::is_alphanumeric) || g == "_";
+            let is_word = is_word_grapheme(g);
             if seen_word && !is_word {
                 end = i;
                 break;
@@ -163,6 +176,89 @@ impl Composer {
     /// Ctrl+W: the word before the cursor and the spaces after it.
     pub fn delete_word_before(&mut self) -> bool {
         let start = self.word_start_before(self.cursor);
+        if start == self.cursor {
+            return false;
+        }
+        self.text.replace_range(start..self.cursor, "");
+        self.cursor = start;
+        true
+    }
+
+    /// The keys every text field takes, as the prompt does: moves, deletes,
+    /// words. Typed characters, Enter and Esc are the caller's. True when the
+    /// key was one of these. The answer on a question card and the fields of
+    /// the provider editor took characters only at their end.
+    pub fn edit_key(&mut self, code: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let ctrl = mods.contains(KeyModifiers::CONTROL);
+        let alt = mods.contains(KeyModifiers::ALT);
+        match code {
+            KeyCode::Left if ctrl || alt => self.word_left(),
+            KeyCode::Right if ctrl || alt => self.word_right(),
+            KeyCode::Left => {
+                self.left();
+            }
+            KeyCode::Right => {
+                self.right();
+            }
+            KeyCode::Home => self.home(),
+            KeyCode::End => self.end(),
+            KeyCode::Backspace if ctrl || alt => {
+                self.delete_word_before();
+            }
+            KeyCode::Backspace => {
+                self.backspace();
+            }
+            KeyCode::Delete => {
+                self.delete();
+            }
+            KeyCode::Char(c) if ctrl => match c.to_ascii_lowercase() {
+                'a' => self.home(),
+                'e' => self.end(),
+                'u' => {
+                    self.delete_to_line_start();
+                }
+                'w' | 'h' => {
+                    self.delete_word_before();
+                }
+                'k' => {
+                    self.delete_to_line_end();
+                }
+                _ => return false,
+            },
+            KeyCode::Char('b') if alt => self.word_left(),
+            KeyCode::Char('f') if alt => self.word_right(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Before the cursor, the character under it (none at the end), after it:
+    /// for drawing the cursor inside a one-line field.
+    pub fn caret_parts(&self) -> (&str, &str, &str) {
+        let at = self.next_boundary(self.cursor).unwrap_or(self.cursor);
+        (&self.text[..self.cursor], &self.text[self.cursor..at], &self.text[at..])
+    }
+
+    /// A one-line field in `room` cells, the cursor on the character under it
+    /// (a block at the end), the view kept around the cursor. `safe` shows
+    /// control characters instead of sending them to the terminal.
+    pub fn field_view(&self, room: usize, safe: impl Fn(&str) -> String) -> String {
+        let (before, at, after) = self.caret_parts();
+        let (before, at, after) = (safe(before), safe(at), safe(after));
+        let (caret, caret_w) = if at.is_empty() { ("\u{2588}".to_string(), 1) } else { (format!("\x1b[7m{at}\x1b[27m"), at.width()) };
+        let (before_shown, before_w) = crate::tail_window(&before, room.saturating_sub(caret_w));
+        let after_shown = crate::clip_ansi(&after, room.saturating_sub(before_w + caret_w));
+        format!("{before_shown}{caret}{after_shown}")
+    }
+
+    /// Ctrl+U: back to the start of the line; at the start, the newline before it.
+    pub fn delete_to_line_start(&mut self) -> bool {
+        let start = match self.text[..self.cursor].rfind('\n') {
+            Some(i) if i + 1 == self.cursor => i,
+            Some(i) => i + 1,
+            None => 0,
+        };
         if start == self.cursor {
             return false;
         }
@@ -270,7 +366,7 @@ impl Composer {
         let mut start = at;
         let mut seen_word = false;
         for (i, g) in self.text[..at].grapheme_indices(true).rev() {
-            let is_word = g.chars().any(char::is_alphanumeric) || g == "_";
+            let is_word = is_word_grapheme(g);
             if seen_word && !is_word {
                 break;
             }
@@ -413,6 +509,54 @@ mod tests {
         // At the very end the same, with nothing after it.
         let layout = at("abcde", 5).layout(5, 10);
         assert_eq!((layout.cursor_row, layout.cursor_col), (1, 0));
+    }
+
+    #[test]
+    fn a_field_edits_anywhere_in_its_text() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let none = KeyModifiers::NONE;
+        let mut c = Composer::from("OpenRouterOR");
+        assert!(c.edit_key(KeyCode::Left, none) && c.edit_key(KeyCode::Left, none));
+        assert!(c.edit_key(KeyCode::Backspace, none));
+        c.insert_char('X');
+        assert_eq!(shown(&c), "OpenRouteX|OR");
+        assert_eq!(c.caret_parts(), ("OpenRouteX", "O", "R"));
+        assert!(c.edit_key(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(shown(&c), "|OR");
+        assert!(c.edit_key(KeyCode::End, none));
+        assert_eq!(c.caret_parts(), ("OR", "", ""));
+        assert!(!c.edit_key(KeyCode::Char('x'), none), "typing is the caller's");
+        assert!(!c.edit_key(KeyCode::Enter, none));
+    }
+
+    #[test]
+    fn ctrl_w_takes_emoji_as_a_word_of_their_own() {
+        let mut c = Composer::from("abc 你好世界 🎉👍 emoji");
+        for expected in ["abc 你好世界 🎉👍 ", "abc 你好世界 ", "abc ", ""] {
+            c.delete_word_before();
+            assert_eq!(c.text(), expected);
+        }
+        let mut c = Composer::from("say «hello»");
+        c.delete_word_before();
+        assert_eq!(c.text(), "say «", "quote marks around a word are not part of it");
+        let mut c = Composer::from("one—two “three”");
+        c.delete_word_before();
+        assert_eq!(c.text(), "one—two “");
+        c.delete_word_before();
+        assert_eq!(c.text(), "one—", "a dash ends a word");
+    }
+
+    #[test]
+    fn ctrl_u_deletes_back_to_the_start_of_the_line_as_in_a_shell() {
+        let mut c = at("first line\nsecond half", 18);
+        assert!(c.delete_to_line_start());
+        assert_eq!(shown(&c), "first line\n|half");
+        // At the start of a line: the newline before it, as Ctrl+K takes the one after.
+        assert!(c.delete_to_line_start());
+        assert_eq!(shown(&c), "first line|half");
+        c.home();
+        c.home();
+        assert!(!c.delete_to_line_start(), "nothing before the start");
     }
 
     #[test]
