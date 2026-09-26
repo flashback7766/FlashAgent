@@ -898,9 +898,12 @@ fn the_command_palette_and_model_menu_fit_an_80_by_24_terminal() {
     let term = Term::start(&home, &["-y"], 80, 24);
     term.wait_for(PROMPT, WAIT);
     term.send("\x0b");
-    // It unfolds from its title down; unfolded, all of it is on screen.
-    let screen = term.wait_for("more below", WAIT);
-    assert!(screen.contains("Command palette") && screen.contains("› /") && screen.contains("╰"), "the menu does not fit:\n{screen}");
+    // It unfolds from its title down in 180 ms; unfolded, all of it is on screen.
+    term.wait_for("more below", WAIT);
+    std::thread::sleep(Duration::from_millis(400));
+    let screen = term.screen();
+    let bottom = screen.lines().position(|l| l.trim_start().starts_with("╰─")).unwrap_or(0);
+    assert!(screen.contains("Command palette") && screen.contains("› /") && bottom > 0, "the menu does not fit:\n{screen}");
     term.send(ESC);
     term.send(F3);
     let screen = term.wait_for("Select model", WAIT);

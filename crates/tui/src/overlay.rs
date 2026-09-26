@@ -54,9 +54,10 @@ impl Overlay {
     }
 }
 
-/// The rows a frame keeps under an open menu (tip, status line) and the blank
-/// row above it.
-const MENU_FOOTER_ROWS: usize = 5;
+/// The rows a frame keeps under an open menu (the blank row above it, a blank,
+/// a tip of up to two lines, the status line): with five, a two-line tip cut
+/// off the menu's border.
+const MENU_FOOTER_ROWS: usize = 6;
 
 impl App {
     pub(crate) fn settings_view_mut(&mut self) -> Option<&mut SettingsView> {
