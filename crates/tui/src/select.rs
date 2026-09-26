@@ -126,6 +126,8 @@ pub struct SelectMenu<T> {
     pub page_size: usize,
     /// Items at the end that are actions ("Add a provider"), left out of the count.
     pub uncounted: usize,
+    /// How many items the last frame had room for: a page is what the user saw.
+    shown: std::cell::Cell<usize>,
 }
 
 impl<T> SelectMenu<T> {
@@ -138,6 +140,7 @@ impl<T> SelectMenu<T> {
             filter: String::new(),
             page_size: 10,
             uncounted: 0,
+            shown: std::cell::Cell::new(10),
         }
     }
 
@@ -192,7 +195,7 @@ impl<T> SelectMenu<T> {
             return;
         }
         let pos = matches.iter().position(|&idx| idx == self.selected).unwrap_or(0);
-        let new_pos = pos.saturating_sub(self.page_size);
+        let new_pos = pos.saturating_sub(self.page());
         self.selected = matches[new_pos];
     }
 
@@ -202,8 +205,12 @@ impl<T> SelectMenu<T> {
             return;
         }
         let pos = matches.iter().position(|&idx| idx == self.selected).unwrap_or(0);
-        let new_pos = (pos + self.page_size).min(matches.len() - 1);
+        let new_pos = (pos + self.page()).min(matches.len() - 1);
         self.selected = matches[new_pos];
+    }
+
+    fn page(&self) -> usize {
+        self.shown.get().clamp(1, self.page_size.max(1))
     }
 
     pub fn push_filter_char(&mut self, c: char) {
@@ -236,6 +243,12 @@ impl<T> SelectMenu<T> {
     }
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
+        self.render_in(width, usize::MAX)
+    }
+
+    /// In at most `max_rows` rows, so the title and the selected item stay on
+    /// a short screen: at 80x24 ten two-row items did not fit.
+    pub fn render_in(&self, width: usize, max_rows: usize) -> Vec<RenderLine> {
         let card_w = width.clamp(24, 74);
         let inner_w = card_w.saturating_sub(2);
         let border_color = "\x1b[38;2;95;90;85m";
@@ -287,7 +300,11 @@ impl<T> SelectMenu<T> {
             ));
         } else {
             let cur_pos = matches.iter().position(|&idx| idx == self.selected).unwrap_or(0);
-            let page_size = self.page_size;
+            // Title, bottom border, key hints and the two "more" rows.
+            let rows_per_item = if matches.iter().any(|&i| self.items[i].description.is_some()) { 2 } else { 1 };
+            let fit = (max_rows.saturating_sub(5) / rows_per_item).max(1);
+            let page_size = self.page_size.min(fit);
+            self.shown.set(page_size);
             let start = if cur_pos < page_size {
                 0
             } else {
@@ -336,7 +353,7 @@ impl<T> SelectMenu<T> {
             format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
         ));
         let mut hints = vec![("↑/↓", "move"), ("Enter", "select"), ("type", "to filter")];
-        if total_matches > self.page_size {
+        if total_matches > self.page() {
             hints.push(("PgUp/PgDn", "page"));
         }
         hints.push(("Esc", "cancel"));
@@ -349,6 +366,23 @@ impl<T> SelectMenu<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_menu_keeps_its_title_and_selection_on_a_short_screen() {
+        let items: Vec<SelectItem<usize>> = (0..28).map(|i| SelectItem::with_description(format!("/cmd{i}"), "what it does", i)).collect();
+        let mut menu = SelectMenu::new("Command palette", items);
+        let rows = menu.render_in(80, 19);
+        assert!(rows.len() <= 19, "{} rows", rows.len());
+        assert!(crate::strip_ansi(&rows[0].1).contains("Command palette"));
+        assert!(rows.iter().any(|(_, r)| crate::strip_ansi(r).contains("› /cmd0")));
+        // A page is what was on screen.
+        menu.page_down();
+        let rows = menu.render_in(80, 19);
+        assert!(rows.len() <= 19);
+        assert!(rows.iter().any(|(_, r)| crate::strip_ansi(r).contains("› /cmd7")), "{:?}", rows.iter().map(|r| crate::strip_ansi(&r.1)).collect::<Vec<_>>());
+        // With room, the page stays ten items.
+        assert!(menu.render_in(80, 100).len() > 20);
+    }
 
     #[test]
     fn typing_finds_an_item_by_its_hidden_text_and_shows_where() {

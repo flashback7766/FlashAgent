@@ -831,7 +831,7 @@ impl Renderer {
             input_line_idx = append_question_card(&mut tail, question_gate, &st, width, inner_w, &border_color);
         } else if let Some(overlay) = overlay {
             // The composer turns into the open menu or screen.
-            tail.extend(overlay.render(width));
+            tail.extend(overlay.render(width, height as usize));
             input_line_idx = tail.len().saturating_sub(1);
         } else {
             let composer = append_composer(&mut tail, &st, width, height, t, &border_color);
