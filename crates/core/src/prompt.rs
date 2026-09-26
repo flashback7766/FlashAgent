@@ -46,11 +46,15 @@ impl SystemPromptConfig {
 /// How to call tools, for any model and any set of tools. `--tool-test` sends
 /// the same rules, so it measures a model as the agent runs it. Small models
 /// fail here most: they explain an error instead of acting on it, stop after
-/// the first step, or drop line breaks from file content.
+/// the first step, or drop line breaks from file content. Argument types are
+/// not mentioned: asked for numbers as numbers, llama3.2 quoted them, and a
+/// quoted number is converted anyway (`llm::coerce_to_schema`). Each line was
+/// measured: gemma4:e2b made one call where two were asked for until the
+/// several-calls rule said "one call each".
 pub const TOOL_CALL_RULES: &str = "CALLING TOOLS:\n\
-     - Call a tool by its listed name, with the argument names and types its schema gives: numbers as numbers, true and false as booleans, paths exactly as written.\n\
+     - Call a tool by its listed name, with the argument names its schema gives and paths exactly as written.\n\
      - A request with several steps takes one call after another: after each result, make the next call at once. Answer in text only when every step is done.\n\
-     - Independent calls, such as reading several files, go together in one reply.\n\
+     - When a request needs several calls that do not depend on each other, such as reading two files, make all of them in the same reply, one call each.\n\
      - When a result already answers the question, answer from it. Never repeat a call whose result you have.\n\
      - When a call fails, read the error and make a corrected call: the path, name or argument it points to, or another tool. Do not apologise or stop after one failure, and never repeat the failing call unchanged.\n\
      - Content you write to a file is its exact text: every line break, quote and space as it must appear.";

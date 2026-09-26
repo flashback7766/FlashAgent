@@ -88,6 +88,79 @@ fn rename_first(obj: &mut serde_json::Map<String, serde_json::Value>, canonical:
     }
 }
 
+/// A value the model wrote in another type than the tool's schema asks for,
+/// converted where nothing is lost: `"20"` for an integer, `"true"` for a
+/// boolean, `42` for a string, an array or object sent as a JSON string.
+/// Small models quote numbers (llama3.2 most of all), and the tool would
+/// refuse the call over it. Anything else is left for the tool to report.
+pub fn coerce_to_schema(value: &mut serde_json::Value, schema: &serde_json::Value) {
+    use serde_json::Value;
+    let kind = schema.get("type").and_then(Value::as_str).unwrap_or(if schema.get("properties").is_some() { "object" } else { "" });
+    let parsed = |s: &str, open: char| (s.trim_start().starts_with(open)).then(|| serde_json::from_str::<Value>(s).ok()).flatten();
+    match (kind, &*value) {
+        ("integer", Value::String(s)) => {
+            if let Ok(n) = s.trim().parse::<i64>() {
+                *value = Value::from(n);
+            }
+        }
+        ("integer", Value::Number(n)) => {
+            if let Some(f) = n.as_f64().filter(|f| n.is_f64() && f.fract() == 0.0 && f.abs() < 9.0e15) {
+                *value = Value::from(f as i64);
+            }
+        }
+        ("number", Value::String(s)) => {
+            if let Some(n) = s.trim().parse::<f64>().ok().and_then(serde_json::Number::from_f64) {
+                *value = Value::Number(n);
+            }
+        }
+        ("boolean", Value::String(s)) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" => *value = Value::Bool(true),
+            "false" => *value = Value::Bool(false),
+            _ => {}
+        },
+        ("string", Value::Number(n)) => *value = Value::String(n.to_string()),
+        ("string", Value::Bool(b)) => *value = Value::String(b.to_string()),
+        ("array", Value::String(s)) => {
+            if let Some(v @ Value::Array(_)) = parsed(s, '[') {
+                *value = v;
+                coerce_to_schema(value, schema);
+            }
+        }
+        ("object", Value::String(s)) => {
+            if let Some(v @ Value::Object(_)) = parsed(s, '{') {
+                *value = v;
+                coerce_to_schema(value, schema);
+            }
+        }
+        ("array", Value::Array(_)) => {
+            if let (Some(items), Value::Array(values)) = (schema.get("items"), value) {
+                for v in values {
+                    coerce_to_schema(v, items);
+                }
+            }
+        }
+        ("object", Value::Object(_)) => {
+            if let (Some(props), Value::Object(map)) = (schema.get("properties").and_then(Value::as_object), value) {
+                for (name, sub) in props {
+                    if let Some(v) = map.get_mut(name) {
+                        coerce_to_schema(v, sub);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The call's arguments with their types made to match the schema, or
+/// `None` when nothing needed changing.
+pub fn coerced_args(args_json: &str, tool: &str, schema: &serde_json::Value) -> Option<String> {
+    let before = effective_args(args_json, tool)?;
+    let mut after = before.clone();
+    coerce_to_schema(&mut after, schema);
+    (after != before).then(|| after.to_string())
+}
+
 /// External tools keep their names: those belong to the server.
 fn canonical_names(tool: &str, mut value: serde_json::Value) -> serde_json::Value {
     let Some(obj) = value.as_object_mut() else {
@@ -531,6 +604,28 @@ fn extract_embedded_json(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quoted_number_or_boolean_takes_the_type_the_schema_asks_for() {
+        use serde_json::json;
+        let schema = json!({"type": "object", "properties": {
+            "count": {"type": "integer"}, "ratio": {"type": "number"}, "all": {"type": "boolean"}, "path": {"type": "string"},
+            "files": {"type": "array", "items": {"type": "object", "properties": {"limit": {"type": "integer"}}}}}});
+        let mut args = json!({"count": " 20 ", "ratio": "0.5", "all": "True", "path": 42, "files": "[{\"limit\": \"3\"}]", "extra": "7"});
+        coerce_to_schema(&mut args, &schema);
+        assert_eq!(args, json!({"count": 20, "ratio": 0.5, "all": true, "path": "42", "files": [{"limit": 3}], "extra": "7"}));
+
+        // What does not convert cleanly is left for the tool to report.
+        let mut odd = json!({"count": "twenty", "all": "maybe", "ratio": 2.5});
+        coerce_to_schema(&mut odd, &schema);
+        assert_eq!(odd, json!({"count": "twenty", "all": "maybe", "ratio": 2.5}));
+        let mut whole = json!({"count": 20.0});
+        coerce_to_schema(&mut whole, &schema);
+        assert_eq!(whole, json!({"count": 20}));
+
+        assert_eq!(coerced_args(r#"{"count":"20"}"#, "read_lines", &schema).as_deref(), Some(r#"{"count":20}"#));
+        assert_eq!(coerced_args(r#"{"count":20}"#, "read_lines", &schema), None, "nothing to change, nothing rewritten");
+    }
 
     #[test]
     fn an_external_tool_keeps_arguments_named_like_a_wrapper() {

@@ -197,6 +197,8 @@ impl AgentLoop {
     ) -> Result<(Vec<ChatMessage>, DoneReason), LoopError> {
         let specs = tools.specs();
         let known_tools: HashSet<String> = specs.iter().map(|s| s.name.clone()).collect();
+        let schemas: std::collections::HashMap<&str, serde_json::Value> =
+            specs.iter().filter_map(|s| serde_json::from_str(&s.parameters_json).ok().map(|v| (s.name.as_str(), v))).collect();
         let mut tokens_used: i64 = 0;
         let mut output_tokens: i64 = 0;
         let started = Instant::now();
@@ -547,6 +549,15 @@ impl AgentLoop {
                     events(LoopEvent::Done(DoneReason::Cancelled));
                     return Ok((history, DoneReason::Cancelled));
                 }
+                // `"20"` where the schema wants 20: run, shown and checked as the tool reads it.
+                let typed;
+                let call = match schemas.get(call.name.as_str()).and_then(|schema| flashagent_llm::repair::coerced_args(&call.args_json, &call.name, schema)) {
+                    Some(args_json) => {
+                        typed = ToolCall { args_json, ..call.clone() };
+                        &typed
+                    }
+                    None => call,
+                };
                 events(LoopEvent::ToolStarted { id: call.id.clone(), name: call.name.clone(), args_json: call.args_json.clone() });
                 let out = tokio::select! {
                     out = tools.execute(call) => out,
@@ -1474,6 +1485,43 @@ mod tests {
         let llm = RecordingLlm::new(vec![tool_turn("read_file", "c1"), text_turn("It says 7."), text_turn("unexpected")]);
         let (_, _) = run_loop(&l, &llm, &ScriptedTools::new(vec![]), |_| {});
         assert_eq!(llm.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_quoted_number_reaches_the_tool_as_a_number() {
+        struct Typed(std::sync::Mutex<Vec<ToolCall>>);
+        #[async_trait]
+        impl ToolExec for Typed {
+            async fn execute(&self, call: &ToolCall) -> ToolOutput {
+                self.0.lock().unwrap().push(call.clone());
+                ToolOutput { content: "ok".into(), is_error: false, images: Vec::new() }
+            }
+            fn specs(&self) -> Vec<ToolSpec> {
+                vec![ToolSpec { name: "shell".into(), description: String::new(), parameters_json: r#"{"type":"object","properties":{"timeout_ms":{"type":"integer"}}}"#.into() }]
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        let quoted = MockTurn {
+            events: vec![
+                Ok(LlmEvent::ToolCallDelta { index: 0, id: Some("c1".into()), name: Some("shell".into()), args_delta: r#"{"timeout_ms":"500"}"#.into() }),
+                Ok(LlmEvent::Done(flashagent_llm::FinishReason::ToolUse)),
+            ],
+        };
+        let llm = MockLlm { turns: std::sync::Mutex::new(vec![quoted, text_turn("done")]) };
+        let tools = Typed(std::sync::Mutex::new(Vec::new()));
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let mut started = String::new();
+        let (history, _) = run_loop(&l, &llm, &tools, |e| {
+            if let LoopEvent::ToolStarted { args_json, .. } = e {
+                started = args_json;
+            }
+        });
+        assert_eq!(tools.0.lock().unwrap()[0].args_json, r#"{"timeout_ms":500}"#);
+        assert_eq!(started, r#"{"timeout_ms":500}"#, "the card shows what runs");
+        let asked = history.iter().find(|m| !m.tool_calls.is_empty()).unwrap();
+        assert_eq!(asked.tool_calls[0].args_json, r#"{"timeout_ms":"500"}"#, "the history keeps what the model wrote");
     }
 
     #[test]
