@@ -202,6 +202,10 @@ impl AgentLoop {
         let started = Instant::now();
         let mut stall_nudges: usize = 0;
         let mut promise_nudges: usize = 0;
+        let mut error_nudges: usize = 0;
+        // The last batch had a call that failed on its own terms: a wrong path,
+        // name or argument, which a corrected call can fix.
+        let mut call_failed = false;
         // A stalled scratchpad reply and the nudge answering it: sent with the next
         // request only, and stored only if the answer is bound to them.
         let mut transient: Vec<ChatMessage> = Vec::new();
@@ -467,6 +471,16 @@ impl AgentLoop {
                     continue;
                 }
 
+                // Small models answer a failed call with an apology or an explanation
+                // of the error. Once per turn they are asked to act on it.
+                if !is_scratchpad && error_nudges < 1 && call_failed && !assistant_text.trim().is_empty() {
+                    error_nudges += 1;
+                    call_failed = false;
+                    transient = history.pop().into_iter().chain([ChatMessage::user(ERROR_NUDGE)]).collect();
+                    events(LoopEvent::TurnDelta("\n\n".to_string()));
+                    continue;
+                }
+
                 // "I'll add the comment." and nothing more: a small model often ends its
                 // turn on the announcement. Once per turn it is asked to make the call.
                 if !is_scratchpad && promise_nudges < 1 && !specs.is_empty() && announces_a_tool_call(&assistant_text) {
@@ -525,6 +539,7 @@ impl AgentLoop {
             // servers reject the next request. Pictures come after all of them: a
             // user message between two results breaks the same rule.
             let mut image_msgs: Vec<ChatMessage> = Vec::new();
+            call_failed = false;
             for (i, call) in calls.iter().enumerate() {
                 if self.cancel.load(Ordering::Relaxed) {
                     answer_cancelled(&mut history, &calls[i..]);
@@ -554,6 +569,7 @@ impl AgentLoop {
                     result_len: out.content.chars().count(),
                     result: Some(out.content.clone()),
                 });
+                call_failed |= out.is_error && fixable_by_another_call(&call.name, &out.content);
                 let images = out.images;
                 history.push(ChatMessage::tool_result(call.id.clone(), out.content));
                 if !images.is_empty() {
@@ -600,7 +616,7 @@ const TOOL_PICTURE_NOTE: &str = "it is the result of that call, not a new reques
 /// takes back a turn too many.
 pub fn is_prompt(msg: &ChatMessage) -> bool {
     let tool_picture = msg.content.starts_with(TOOL_PICTURE_OPENING) && msg.content.contains(TOOL_PICTURE_NOTE);
-    let nudge = [STALL_NUDGE, PROMISE_NUDGE, CONTINUE_NUDGE].contains(&msg.content.as_str());
+    let nudge = [STALL_NUDGE, PROMISE_NUDGE, CONTINUE_NUDGE, ERROR_NUDGE].contains(&msg.content.as_str());
     msg.role == Role::User && !tool_picture && !nudge && !crate::task_notices::is_task_notice(&msg.content)
 }
 
@@ -629,6 +645,17 @@ const STALL_NUDGE: &str = "Please provide your direct, final answer to my reques
 
 /// Sent when the model announced a tool call and ended its turn without it.
 const PROMISE_NUDGE: &str = "You said what you would do next but did not do it. Make that tool call now.";
+
+pub(crate) const ERROR_NUDGE: &str = "Your last tool call failed and you replied without trying again. If the error shows what to change (a path, a name, an argument), make the corrected call now. Otherwise say in one sentence what blocks you.";
+
+/// A failed shell command is often the answer itself (the tests fail), and a
+/// refused or cancelled call must not be tried again.
+fn fixable_by_another_call(tool: &str, result: &str) -> bool {
+    tool != "run_shell"
+        && !result.starts_with(crate::permissions::DENIED)
+        && result != crate::permissions::DECLINED
+        && result != CANCELLED_RESULT
+}
 
 /// Whether a reply ends by saying what the model is about to do, rather than
 /// with an answer: its last sentence is "I'll ..." or "Let me ...", in English
@@ -1365,6 +1392,88 @@ mod tests {
         assert!(requests[1].last().unwrap().content.contains("Make that tool call now"));
         // The nudge is not kept.
         assert!(history.iter().all(|m| m.content != PROMISE_NUDGE));
+    }
+
+    /// Answers each call with the next scripted result.
+    struct ScriptedTools {
+        results: std::sync::Mutex<Vec<ToolOutput>>,
+        calls: std::sync::Mutex<Vec<ToolCall>>,
+    }
+
+    impl ScriptedTools {
+        fn new(results: Vec<(bool, &str)>) -> Self {
+            let results = results.into_iter().map(|(is_error, content)| ToolOutput { content: content.into(), is_error, images: Vec::new() }).collect();
+            Self { results: std::sync::Mutex::new(results), calls: std::sync::Mutex::new(Vec::new()) }
+        }
+    }
+
+    #[async_trait]
+    impl ToolExec for ScriptedTools {
+        async fn execute(&self, call: &ToolCall) -> ToolOutput {
+            self.calls.lock().unwrap().push(call.clone());
+            let mut results = self.results.lock().unwrap();
+            if results.is_empty() { ToolOutput { content: "ok".into(), is_error: false, images: Vec::new() } } else { results.remove(0) }
+        }
+
+        fn specs(&self) -> Vec<ToolSpec> {
+            ["read_file", "run_shell"].iter().map(|n| ToolSpec { name: (*n).into(), description: String::new(), parameters_json: r#"{"type":"object"}"#.into() }).collect()
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn a_failed_call_answered_with_an_apology_is_asked_to_try_again_once() {
+        let llm = RecordingLlm::new(vec![
+            tool_turn("read_file", "c1"),
+            text_turn("I apologize, but I cannot read a file that does not exist."),
+            tool_turn("read_file", "c2"),
+            text_turn("Here it is."),
+        ]);
+        let tools = ScriptedTools::new(vec![(true, "error: no such file: src/confg.rs (did you mean src/config.rs?)")]);
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let mut shown = String::new();
+        let (history, done) = run_loop(&l, &llm, &tools, |e| {
+            if let LoopEvent::TurnDelta(d) = e {
+                shown.push_str(&d);
+            }
+        });
+        assert!(matches!(done, DoneReason::Completed));
+        assert_eq!(tools.calls.lock().unwrap().len(), 2, "the corrected call was never made");
+        let requests = llm.requests.lock().unwrap();
+        assert_eq!(requests[2].last().unwrap().content, ERROR_NUDGE);
+        assert!(shown.contains("not exist.\n\n"), "the retry ran into the apology: {shown:?}");
+        assert!(history.iter().all(|m| m.content != ERROR_NUDGE), "an unsigned nudge is not kept");
+
+        // Once per turn: a second apology ends it.
+        let llm = RecordingLlm::new(vec![tool_turn("read_file", "c1"), text_turn("Sorry."), text_turn("Still no.")]);
+        let tools = ScriptedTools::new(vec![(true, "error: no such file")]);
+        let (_, done) = run_loop(&l, &llm, &tools, |_| {});
+        assert!(matches!(done, DoneReason::Completed));
+        assert_eq!(llm.requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn no_retry_is_asked_after_a_failed_command_a_refusal_or_a_cancel() {
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let denied = format!("{}writes outside the project", crate::permissions::DENIED);
+        for (tool, result) in [
+            ("run_shell", "exit code: 1\noutput:\n3 tests failed"),
+            ("read_file", crate::permissions::DECLINED),
+            ("read_file", denied.as_str()),
+        ] {
+            let llm = RecordingLlm::new(vec![tool_turn(tool, "c1"), text_turn("Three tests fail."), text_turn("unexpected")]);
+            let tools = ScriptedTools::new(vec![(true, result)]);
+            let (_, done) = run_loop(&l, &llm, &tools, |_| {});
+            assert!(matches!(done, DoneReason::Completed));
+            assert_eq!(llm.requests.lock().unwrap().len(), 2, "{tool}: {result}");
+        }
+        // A call that succeeded asks for nothing either.
+        let llm = RecordingLlm::new(vec![tool_turn("read_file", "c1"), text_turn("It says 7."), text_turn("unexpected")]);
+        let (_, _) = run_loop(&l, &llm, &ScriptedTools::new(vec![]), |_| {});
+        assert_eq!(llm.requests.lock().unwrap().len(), 2);
     }
 
     #[test]

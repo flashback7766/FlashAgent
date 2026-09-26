@@ -14,6 +14,9 @@ pub enum CallStyle {
     Native,
     /// Arrived as text and was recovered by the scanner.
     Recovered,
+    /// Made only when asked again, as the agent loop asks once after a failed
+    /// call is answered in prose.
+    AfterNudge,
 }
 
 impl CallStyle {
@@ -21,6 +24,7 @@ impl CallStyle {
         match self {
             Self::Native => "native",
             Self::Recovered => "recovered",
+            Self::AfterNudge => "after a nudge",
         }
     }
 }
@@ -113,17 +117,17 @@ fn probe_tools() -> Vec<ToolSpec> {
         ToolSpec {
             name: "read_lines".into(),
             description: "Read the first N lines of a file.".into(),
-            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string""},"count":{"type":"integer"}},"required":["path","count"]}"#.into(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"File path, relative to the working directory"},"count":{"type":"integer","description":"How many lines to read from the start"}},"required":["path","count"]}"#.into(),
         },
         ToolSpec {
             name: "write_file".into(),
             description: "Write content to a file, replacing it.".into(),
-            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string""},"content":{"type":"string"}},"required":["path","content"]}"#.into(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"File path, relative to the working directory"},"content":{"type":"string","description":"The whole new text of the file, exactly as it must be"}},"required":["path","content"]}"#.into(),
         },
         ToolSpec {
             name: "report_status".into(),
             description: "Report a numeric status code back to the harness.".into(),
-            parameters_json: r#"{"type":"object","properties":{"code":{"type":"integer"}},"required":["code"]}"#.into(),
+            parameters_json: r#"{"type":"object","properties":{"code":{"type":"integer","description":"The status code"}},"required":["code"]}"#.into(),
         },
     ]
 }
@@ -281,6 +285,11 @@ impl CheckReport {
             .any(|(_, o)| matches!(o, Outcome::Pass { style: CallStyle::Recovered, .. }))
     }
 
+    /// A failed call was retried only when asked again.
+    pub fn needed_nudge(&self) -> bool {
+        self.results.iter().any(|(_, o)| matches!(o, Outcome::Pass { style: CallStyle::AfterNudge, .. }))
+    }
+
     pub fn total_secs(&self) -> f32 {
         self.results.iter().map(|(_, o)| o.secs()).sum()
     }
@@ -313,9 +322,10 @@ impl CheckReport {
         }
         let (passed, total) = self.score();
         out.push(format!(
-            "  {passed}/{total} — {}{}",
+            "  {passed}/{total} — {}{}{}",
             self.verdict(),
-            if self.needed_recovery() { " (calls recovered from text, not native)" } else { "" }
+            if self.needed_recovery() { " (calls recovered from text, not native)" } else { "" },
+            if self.needed_nudge() { " (retried a failed call only when asked again)" } else { "" }
         ));
         out
     }
@@ -340,6 +350,7 @@ impl CheckReport {
             "total": total,
             "verdict": self.verdict(),
             "needed_recovery": self.needed_recovery(),
+            "needed_nudge": self.needed_nudge(),
             "untested": self.untested(),
             "seconds": self.total_secs(),
             "scenarios": self.results.iter().map(|(key, outcome)| serde_json::json!({
@@ -361,6 +372,12 @@ pub fn is_chat_model(id: &str) -> bool {
     !(lower.contains("embed") || lower.contains("rerank") || lower.contains("whisper"))
 }
 
+/// A scenario's instruction and the rules the agent's own prompt gives for
+/// calling tools, so a model is measured as the agent runs it.
+fn system(task: &str) -> ChatMessage {
+    ChatMessage::system(format!("{task}\n\n{}", crate::prompt::TOOL_CALL_RULES))
+}
+
 /// `timeout` caps each turn, not the run.
 pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) -> CheckReport {
     let mut results = Vec::new();
@@ -369,7 +386,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     let turn = run_turn(
         llm,
         &[
-            ChatMessage::system("You are a tool-calling test harness. Answer only by calling a tool."),
+            system("You are a tool-calling test harness. Answer only by calling a tool."),
             ChatMessage::user("Call report_status with code 42."),
         ],
         timeout,
@@ -386,7 +403,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     let turn = run_turn(
         llm,
         &[
-            ChatMessage::system("You are a coding agent. Use the tools to do what is asked."),
+            system("You are a coding agent. Use the tools to do what is asked."),
             ChatMessage::user("Show me the first 20 lines of src/main.rs."),
         ],
         timeout,
@@ -407,7 +424,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     let turn = run_turn(
         llm,
         &[
-            ChatMessage::system("You are a coding agent. Use the tools only when they are needed."),
+            system("You are a coding agent. Use the tools only when they are needed."),
             ChatMessage::user("In one sentence: what does a compiler do?"),
         ],
         timeout,
@@ -438,7 +455,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     let turn = run_turn(
         llm,
         &[
-            ChatMessage::system("You are a coding agent. Use the tools to do what is asked."),
+            system("You are a coding agent. Use the tools to do what is asked."),
             ChatMessage::user("What version is in version.txt?"),
             asked,
             ChatMessage::tool_result("call_1", "version = v4.2.1"),
@@ -474,7 +491,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     let turn = run_turn(
         llm,
         &[
-            ChatMessage::system("You are a coding agent. Use the tools to do what is asked."),
+            system("You are a coding agent. Use the tools to do what is asked."),
             ChatMessage::user(
                 "Read status.txt, then report the number it contains with report_status.",
             ),
@@ -496,7 +513,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     let turn = run_turn(
         llm,
         &[
-            ChatMessage::system("You are a coding agent. Use the tools to do what is asked."),
+            system("You are a coding agent. Use the tools to do what is asked."),
             ChatMessage::user(
                 "Write exactly these three lines to notes.txt, nothing else:\nline one\n\"quoted\"\nend",
             ),
@@ -522,33 +539,44 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         name: "read_lines".into(),
         args_json: r#"{"path":"src/confg.rs","count":5}"#.into(),
     }];
-    let turn = run_turn(
-        llm,
-        &[
-            ChatMessage::system("You are a coding agent. Use the tools to do what is asked."),
-            ChatMessage::user("Read the first 5 lines of src/config.rs."),
-            failed,
-            ChatMessage::tool_result(
-                "call_3",
-                "error: no such file: src/confg.rs (did you mean src/config.rs?)",
-            ),
-        ],
-        timeout,
-    )
-    .await;
-    results.push(("after_error".to_string(), judge_call(&turn, "read_lines", |args| {
+    let mut messages = vec![
+        system("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user("Read the first 5 lines of src/config.rs."),
+        failed,
+        ChatMessage::tool_result(
+            "call_3",
+            "error: no such file: src/confg.rs (did you mean src/config.rs?)",
+        ),
+    ];
+    let mut turn = run_turn(llm, &messages, timeout).await;
+    let mut nudged = false;
+    // An answer in prose gets the one nudge the agent loop would send.
+    if turn.error.is_none() && turn.calls.is_empty() && !turn.text.trim().is_empty() {
+        messages.push(ChatMessage::assistant(turn.text.clone()));
+        messages.push(ChatMessage::user(crate::loop_::ERROR_NUDGE));
+        let first_secs = turn.secs;
+        turn = run_turn(llm, &messages, timeout).await;
+        turn.secs += first_secs;
+        nudged = true;
+    }
+    let outcome = judge_call(&turn, "read_lines", |args| {
         match args.get("path").and_then(|p| p.as_str()) {
             Some(path) if path.ends_with("src/config.rs") => Ok(()),
             Some(path) => Err(format!("retried with {path:?} instead of the corrected path")),
             None => Err("no path in the retry".to_string()),
         }
-    })));
+    });
+    results.push(("after_error".to_string(), match outcome {
+        Outcome::Pass { secs, .. } if nudged => Outcome::Pass { style: CallStyle::AfterNudge, secs },
+        Outcome::Fail { detail, secs } if nudged => Outcome::Fail { detail: format!("{detail} (asked twice)"), secs },
+        other => other,
+    }));
 
     // 8. Two files asked for at once: does the turn carry both calls?
     let turn = run_turn(
         llm,
         &[
-            ChatMessage::system(
+            system(
                 "You are a coding agent. Use the tools to do what is asked, in as few turns as possible.",
             ),
             ChatMessage::user("Read the first 10 lines of both Cargo.toml and README.md."),
@@ -728,6 +756,45 @@ mod tests {
         let everything_right = run(perfect());
         assert_eq!(everything_right.untested(), 0);
         assert_eq!(everything_right.verdict(), "drives tools reliably");
+    }
+
+    #[test]
+    fn a_failed_call_retried_only_when_asked_again_passes_and_says_so() {
+        let mut turns = perfect();
+        // after_error: prose first, the corrected call once nudged.
+        turns[6] = text("I apologize, but that file does not exist.");
+        turns.insert(7, call("read_lines", r#"{"path":"src/config.rs","count":5}"#));
+        let report = run(turns);
+        assert_eq!(report.score(), (8, 8), "{:?}", report.results);
+        assert!(report.needed_nudge());
+        assert_eq!(report.results[6].1.detail().split(',').next(), Some("after a nudge"));
+        assert!(report.lines().last().unwrap().contains("retried a failed call only when asked again"));
+        assert_eq!(report.to_json()["needed_nudge"], true);
+
+        let mut turns = perfect();
+        turns[6] = text("Sorry, it does not exist.");
+        turns.insert(7, text("I cannot read it."));
+        let report = run(turns);
+        assert_eq!(report.score(), (7, 8));
+        assert!(report.results[6].1.detail().ends_with("(asked twice)"), "{}", report.results[6].1.detail());
+        assert!(!run(perfect()).needed_nudge());
+    }
+
+    #[test]
+    fn every_scenario_carries_the_agent_rules_for_calling_tools() {
+        struct Seen(Mutex<Vec<String>>);
+        #[async_trait]
+        impl LlmSource for Seen {
+            async fn turn(&self, messages: &[ChatMessage], _tools: &[ToolSpec]) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+                self.0.lock().unwrap().push(messages[0].content.clone());
+                Ok(Box::pin(futures::stream::iter(text("ok").into_iter().map(Ok))))
+            }
+        }
+        let seen = Seen(Mutex::new(Vec::new()));
+        tokio::runtime::Runtime::new().unwrap().block_on(check_model(&seen, "m", Duration::from_secs(5)));
+        let systems = seen.0.lock().unwrap();
+        assert!(systems.len() >= 8);
+        assert!(systems.iter().all(|s| s.ends_with(crate::prompt::TOOL_CALL_RULES)), "{systems:?}");
     }
 
     #[test]
