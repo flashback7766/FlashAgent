@@ -720,6 +720,12 @@ impl App {
     }
 
     fn export_conversation(&mut self, cx: &LoopCtx<'_>, format_arg: &str) {
+        // A file with only a header, in the project folder, helps nobody.
+        if !self.history.iter().any(flashagent_core::is_prompt) {
+            self.background = Some(BackgroundNotice::fading("Nothing to export yet".to_string(), 5));
+            self.renderer.request_reprint();
+            return;
+        }
         let format_arg = format_arg.to_lowercase();
         // The id already starts with "session_" (was session_session_1789.md).
         let stem = cx.session_id.strip_prefix("session_").unwrap_or(cx.session_id);
@@ -758,7 +764,9 @@ impl App {
         match std::fs::write(&filename, content) {
             Ok(_) => {
                 let shown = std::fs::canonicalize(&filename).map_or(filename, |p| p.display().to_string());
-                self.notice(format!("Exported to {shown}"));
+                // It fades: as the prompt's placeholder it came back every time the prompt was emptied.
+                self.background = Some(BackgroundNotice::fading(format!("Exported to {shown}"), 8));
+                self.renderer.request_reprint();
             }
             Err(e) => self.notice(format!("Failed to export conversation: {e}")),
         }

@@ -2039,6 +2039,12 @@ fn export_writes_the_conversation_next_to_the_project() {
     let home = Home::new();
     let term = ready(&home, &server);
 
+    // Before anything was said there is nothing to keep, and no file.
+    term.type_text("/export");
+    term.send(ENTER);
+    term.wait_for("Nothing to export yet", WAIT);
+    assert!(!std::fs::read_dir(home.work()).unwrap().filter_map(Result::ok).any(|e| e.file_name().to_string_lossy().ends_with(".md")));
+
     term.type_text("hello");
     term.send(ENTER);
     term.wait_for("Worth keeping.", WAIT);
