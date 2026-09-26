@@ -517,7 +517,7 @@ impl App {
                 state.is_writing = true;
                 state.write_in_text.clear();
             }
-            state.write_in_text.push_str(&one_line());
+            state.write_in_text.insert_str(&one_line());
         } else if let Some(Overlay::Sampling(sm)) = self.overlay.as_mut() {
             for ch in one_line().chars() {
                 sm.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);

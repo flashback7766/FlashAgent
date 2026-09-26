@@ -69,7 +69,7 @@ use overlay_keys::navigate_menu;
 #[derive(Default, Clone)]
 struct QuestionUiState {
     selected_index: usize,
-    write_in_text: String,
+    write_in_text: flashagent_tui::Composer,
     is_writing: bool,
     selected_indices: std::collections::BTreeSet<usize>,
 }
