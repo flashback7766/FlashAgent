@@ -41,7 +41,73 @@ runs. The report says when that happened: it is slower and more fragile than a
 native call, and a model that needs it will break on a backend without the
 recovery.
 
+The model is tested as the agent runs it, no more and no less:
+
+- **The same rules.** Every scenario's system prompt ends with the rules the
+  agent gives a model for calling tools (one step after another, independent
+  calls together, a failed call corrected rather than explained).
+- **The same repairs.** A call is judged after the repairs the loop makes
+  before it runs one: `"20"` where the schema asks for a number becomes 20, and
+  a lone argument under the wrong name (`status` where `code` is required and
+  missing) takes the required name.
+- **The same reminders.** Where the loop asks a model once more, the test does
+  too, once: when a failed call is answered in prose (*recovers from a failed
+  call*), and when the model stops before a call the request names (*moves on
+  to the next tool*: "...then report it with report_status"). A pass that
+  needed it is marked **after a nudge**: the work gets done, one round trip
+  later.
+- **The server's failures are not the model's.** A scenario the server refused
+  (a rate limit, a 5xx, a dropped connection) is marked `--` and *not tested*,
+  and the verdict says the run is *incomplete*.
+
 ## Results
+
+### Small local models, before and after b450
+
+b450 gave the model the agent's rules for calling tools, described every tool
+parameter, and taught the loop the repairs and reminders listed above. Seven
+small models on Ollama 0.34.4 (default tags), CPU only, one model loaded at a
+time, before and after. The before column is the b425 test, which had none of
+them.
+
+| Model | Size | b425 | b450 | Still fails |
+| :--- | :--- | :--- | :--- | :--- |
+| `gemma4:e2b` | 4.6B | 7/8 | **8/8** | — (recovers from a failed call after a nudge) |
+| `qwen3:1.7b` | 1.7B | 5/8 | **8/8** | — (moves on to the next tool after a nudge) |
+| `qwen2.5:1.5b` | 1.5B | 5/8 | **8/8** | — (moves on to the next tool after a nudge) |
+| `llama3.2:3b` | 3B | 4/8 | 6/8 | answers plainly when no tool is needed; keeps content exact |
+| `qwen3:0.6b` | 0.6B | 5/8 | 6/8 | keeps content exact; recovers from a failed call |
+| `llama3.2:1b` | 1B | 1/8 | 2/8 | six scenarios |
+| `gemma3:1b` | 1B | 2/8 | 2/8 | no native tool calls on Ollama; six scenarios |
+
+What moved them:
+
+- **A failed call corrected, not explained.** Before, six of the seven
+  answered `error: no such file ... (did you mean src/config.rs?)` with prose.
+  Now qwen3 1.7B, qwen2.5 1.5B and llama3.2 3B retry with the corrected path
+  on their own, and gemma4 e2b once reminded.
+- **The second step.** The qwen models read the file and then told the user
+  the number instead of reporting it with the tool the request named. All
+  three report it once reminded of that call. llama3.2 3B reports it under
+  the wrong argument name (`status`), which the loop now repairs.
+
+What did not move: llama3.2 3B still calls a tool on a question that needs
+none, and it and qwen3 0.6B drop the quotes or line breaks from file content.
+The 1B models remain chat models. llama3.2 3B's b425 score counts two
+scenarios that ran out of time while the model loaded; the test now loads a
+local model before it times anything.
+
+The rules were chosen by measurement, and small models are brittle about them:
+a six-line version made llama3.2 3B describe a tool result instead of
+answering from it, and "read the error and make a corrected call" left
+qwen3 1.7B explaining the error where "do not explain the error: make a
+corrected call" did not. Times are left out: on this CPU they measure the
+machine, not the model.
+
+Raw per-scenario output: [before](tool-calling/results-2026-09-26-b425.json),
+[after](tool-calling/results-2026-09-26.json).
+
+### Larger models on a GPU, b425 conditions
 
 Raw per-scenario output: [`docs/tool-calling/results-2026-09-12.json`](tool-calling/results-2026-09-12.json).
 

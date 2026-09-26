@@ -53,28 +53,7 @@ impl ContextUsage {
 
     /// E.g. 128K or 200K.
     fn format_capacity_tokens(tokens: usize) -> String {
-        if tokens >= 1_048_576 {
-            let m = (tokens as f64) / 1_048_576.0;
-            if (m.fract() * 10.0).round() == 0.0 {
-                format!("{:.0}M", m)
-            } else {
-                format!("{:.1}M", m)
-            }
-        } else if tokens >= 1_000_000 {
-            format!("{:.0}M", tokens as f64 / 1_000_000.0)
-        } else if tokens >= 1024 {
-            // A round thousand or a power of two is named exactly: 128_000 and
-            // 131_072 are both "128K".
-            if tokens.is_multiple_of(1000) {
-                format!("{}K", tokens / 1_000)
-            } else if tokens.is_multiple_of(1024) {
-                format!("{}K", tokens / 1024)
-            } else {
-                format!("{}K", (tokens + 500) / 1_000)
-            }
-        } else {
-            tokens.to_string()
-        }
+        flashagent_llm::thinking::token_count_label(tokens)
     }
 
     /// E.g. 128K or 1.2M.

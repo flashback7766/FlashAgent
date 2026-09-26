@@ -10,7 +10,26 @@ async fn client_for(endpoint: &flashagent_llm::Endpoint, model: &str) -> Backend
     if source.discover_server().await.is_some() {
         source.0.set_model(model);
     }
+    // A local server loads the model on its first request, which takes minutes
+    // on a CPU; timed as the first scenario, the load failed it.
+    if crate::warm::worth_warming(endpoint, source.discovery().map(|d| d.kind)) {
+        println!("  loading the model…");
+        load_model(&source).await;
+    }
     source
+}
+
+/// One reply of one token, whatever it says.
+async fn load_model(source: &BackendSource) {
+    use flashagent_core::LlmSource;
+    use futures::StreamExt;
+    let opts = flashagent_llm::TurnOptions { thinking: flashagent_llm::ThinkingEffort::Off, max_tokens: Some(1), ..Default::default() };
+    let answer = async {
+        if let Ok(mut stream) = source.turn_with_options(&[ChatMessage::user("Reply with OK.")], &[], &opts).await {
+            while stream.next().await.is_some() {}
+        }
+    };
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(600), answer).await;
 }
 
 /// Once, right after setup.

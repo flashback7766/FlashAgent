@@ -1,5 +1,20 @@
 use super::*;
 
+/// Checking while a look may still answer; offline once one got nothing
+/// (after a moment, so the face does not flash) or when none has answered
+/// for half a minute.
+pub(crate) fn server_mood(switching: bool, answered: bool, silent: bool, since_start: std::time::Duration) -> MascotMood {
+    if switching {
+        MascotMood::Checking
+    } else if answered {
+        MascotMood::Happy
+    } else if (silent && since_start >= std::time::Duration::from_secs(2)) || since_start >= std::time::Duration::from_secs(30) {
+        MascotMood::Offline
+    } else {
+        MascotMood::Checking
+    }
+}
+
 impl App {
     /// One event from the terminal, the agent loop or a background task.
     pub(crate) async fn on_ui_event(&mut self, cx: &mut LoopCtx<'_>, ev: UiEvent) -> Flow {
@@ -23,7 +38,11 @@ impl App {
             // From a server the client has since left (a provider switch after
             // startup's first look), or overtaken by a switch under way.
             UiEvent::ServerDiscovered(disc) if self.provider_switch.is_some() || disc.base_url != cx.source.0.base_url() => {}
-            UiEvent::ServerDiscovered(disc) => self.on_server_discovered(cx, disc),
+            UiEvent::ServerDiscovered(disc) => {
+                self.server_silent = false;
+                self.on_server_discovered(cx, disc)
+            }
+            UiEvent::ServerSilent(url) => self.server_silent = self.provider_switch.is_none() && url == cx.source.0.base_url(),
             UiEvent::Loop { turn_id, event } => self.on_loop_event(cx, turn_id, &event),
             UiEvent::Finished { turn_id, result } => return self.finish_turn(cx, turn_id, result).await,
             UiEvent::Resize(cols, rows) => {
@@ -56,17 +75,11 @@ impl App {
     }
 
     /// The face shows whether the model server answered. Discovery reruns,
-    /// so starting the server later turns it around on its own.
+    /// so starting the server later turns it around on its own. Offline once
+    /// a look got no answer, not merely because it is slow: a cloud API's
+    /// model list can take longer than a few seconds, and was reported down.
     pub(crate) fn server_mood(&self, source: &BackendSource, started_at: std::time::Instant) -> MascotMood {
-        if self.provider_switch.is_some() {
-            MascotMood::Checking
-        } else if source.discovery().is_some() {
-            MascotMood::Happy
-        } else if started_at.elapsed() < std::time::Duration::from_secs(5) {
-            MascotMood::Checking
-        } else {
-            MascotMood::Offline
-        }
+        server_mood(self.provider_switch.is_some(), source.discovery().is_some(), self.server_silent, started_at.elapsed())
     }
 
     /// An unreachable server is announced once, and taken back when it answers.
@@ -77,13 +90,11 @@ impl App {
         let previous = std::mem::replace(&mut self.announced_mood, mood);
         match mood {
             MascotMood::Offline => {
-                self.background = Some(
-                    BackgroundNotice::sticky(format!(
-                        "{OFFLINE_NOTICE} {} \u{b7} start it, or /provider switches to another",
-                        source.0.base_url()
-                    ))
-                    .warning(),
-                );
+                let url = source.0.base_url();
+                // "Start it" is for a server on this machine, not for a cloud API.
+                let local = flashagent_core::url_host(&url).is_some_and(|host| flashagent_core::is_local_host(&host));
+                let next = if local { "start the server" } else { "check the address and the connection" };
+                self.background = Some(BackgroundNotice::sticky(format!("{OFFLINE_NOTICE} {url} \u{b7} {next}, or /provider switches to another")).warning());
             }
             MascotMood::Happy if previous == MascotMood::Offline => {
                 self.background = Some(BackgroundNotice::fading(
@@ -115,14 +126,14 @@ impl App {
             UpdateNotice::Available { version, asset_name, download_url, checksums_url } => {
                 self.pending_update = Some((version.clone(), asset_name, download_url, checksums_url));
                 self.background = Some(BackgroundNotice::sticky(format!(
-                    "Update available: {version} · press Ctrl+U to install"
+                    "Update available: {version} · /update installs it"
                 )));
                 if let Some(s) = self.settings_view_mut() {
-                    s.update_check_status = Some(format!("Available: {version} (Press Ctrl+U)"));
+                    s.update_check_status = Some(format!("Available: {version} (/update)"));
                 }
             }
             UpdateNotice::Progress { version, stage } => {
-                // Kept either way, so Ctrl+U can show a download that started unasked.
+                // Kept either way, so /update can show a download that started unasked.
                 if self.update_watched {
                     BackgroundNotice::update_sticky(&mut self.background, update_progress_line(&version, stage));
                 }
@@ -252,9 +263,11 @@ impl App {
         let tx = cx.tx.clone();
         let flag = cx.is_discovering.clone();
         tokio::spawn(async move {
-            if let Some(disc) = source.discover_server().await {
-                let _ = tx.send(UiEvent::ServerDiscovered(disc));
-            }
+            let url = source.0.base_url();
+            let _ = tx.send(match source.discover_server().await {
+                Some(disc) => UiEvent::ServerDiscovered(disc),
+                None => UiEvent::ServerSilent(url),
+            });
             flag.store(false, Ordering::Relaxed);
         });
     }
@@ -271,6 +284,13 @@ impl App {
                 self.save_config();
             }
             self.refresh_welcome(cx.source, cx.mascot_mood);
+            self.renderer.request_reprint();
+        }
+        // Kept rather than swapped for a model that would be billed instead,
+        // so the user hears about it before the first request fails.
+        if disc.active_model.is_none() && self.on_active_provider(cx.source) && self.config.endpoint().api_key.is_some() && !self.current_model.is_empty() && disc.model(&self.current_model).is_none() {
+            self.custom_placeholder = Some(format!("{} does not list {} · F3 picks one of its models", self.config.active_profile().name, self.current_model));
+            self.suggested_prompt = None;
             self.renderer.request_reprint();
         }
         if let Some(active) = disc.active_model {
@@ -497,7 +517,7 @@ impl App {
                 state.is_writing = true;
                 state.write_in_text.clear();
             }
-            state.write_in_text.push_str(&one_line());
+            state.write_in_text.insert_str(&one_line());
         } else if let Some(Overlay::Sampling(sm)) = self.overlay.as_mut() {
             for ch in one_line().chars() {
                 sm.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);
@@ -529,5 +549,22 @@ impl App {
             self.autocomplete_idx = 0;
         }
         self.renderer.request_reprint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_slow_server_is_not_called_down_until_a_look_gets_no_answer() {
+        use std::time::Duration;
+        let secs = Duration::from_secs;
+        assert_eq!(server_mood(false, false, false, secs(8)), MascotMood::Checking, "a slow cloud list is still coming");
+        assert_eq!(server_mood(false, false, true, secs(8)), MascotMood::Offline);
+        assert_eq!(server_mood(false, false, true, secs(1)), MascotMood::Checking, "no flash before the first frame settles");
+        assert_eq!(server_mood(false, false, false, secs(31)), MascotMood::Offline, "nothing for half a minute");
+        assert_eq!(server_mood(false, true, true, secs(40)), MascotMood::Happy);
+        assert_eq!(server_mood(true, false, true, secs(40)), MascotMood::Checking);
     }
 }

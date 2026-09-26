@@ -90,6 +90,11 @@ src/config.rs?)`, explain the problem in prose instead of calling the tool
 again with the corrected path. Tools fail all the time in real work, and a
 model that answers each failure with a paragraph leaves the next step to you.
 
+Small models do better since b450, which tells them how to call tools, repairs
+their commonest argument mistakes and reminds them once of a step left
+undone. On a CPU with Ollama, `qwen3:1.7b` and `qwen2.5:1.5b` went from 5/8 to
+8/8 and `gemma4:e2b` from 7/8 to 8/8; 1B models are still chat models.
+
 [Method, raw results, and how to run it on your own models →](docs/tool-calling.md)
 
 ---
@@ -249,7 +254,7 @@ FlashAgent starts in the mode you left it in. Reads inside the project and web t
 
 **Updates** — installed in the background: a new release is downloaded, verified against the release checksums and installed on its own, and the status line tells you to restart once it is in. <kbd>Ctrl</kbd>+<kbd>U</kbd> (or `/update`) shows the progress of a download that is already under way, or checks and installs right away when nothing is running; `flashagent --update` does the same from the shell. Background updates can be turned off in Settings; `--channel stable|beta` or `/channel` switches channels.
 
-<img src="docs/screenshots/gifs/update-progress.gif" width="100%" alt="Ctrl+U checking, downloading and installing an update">
+<img src="docs/screenshots/gifs/update-progress.gif" width="100%" alt="/update checking, downloading and installing an update">
 
 **What leaves your machine** — requests to the provider in use; update checks against GitHub Releases (on by default, off with Settings → Updates → Auto-update); `web_fetch` requests to the pages the model asks for and `web_search` queries to DuckDuckGo, or Brave Search with `BRAVE_API_KEY` (on by default, off with Settings → LLM → Web tools); and whatever the MCP servers you add do. There is no telemetry.
 

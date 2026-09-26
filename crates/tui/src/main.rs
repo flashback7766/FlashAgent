@@ -69,7 +69,7 @@ use overlay_keys::navigate_menu;
 #[derive(Default, Clone)]
 struct QuestionUiState {
     selected_index: usize,
-    write_in_text: String,
+    write_in_text: flashagent_tui::Composer,
     is_writing: bool,
     selected_indices: std::collections::BTreeSet<usize>,
 }
@@ -282,6 +282,7 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
 
     // Leaked once so the spawned loop can hold &'static references; the process
     // is the session.
+    let keyed = endpoint.api_key.is_some();
     let backend = flashagent_llm::Client::new(endpoint, &model);
     backend.set_max_retries(config.network_retries);
     flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(config));
@@ -298,7 +299,7 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
     };
 
     // No model given: the loaded one, else the first; a partial name is matched to its full id.
-    model = flashagent_tui::providers::model_after_switch(&model, discovery.as_ref());
+    model = flashagent_tui::providers::model_after_switch(&model, discovery.as_ref(), keyed);
     backend.set_model(&model);
     // Startup discovered through another backend; this one sends the turns and
     // must know the result from its first request.
@@ -595,6 +596,12 @@ struct App {
     history_search: Option<flashagent_tui::HistorySearch>,
     current_draft: String,
     confirm_select: ConfirmSelect,
+    /// The call whose whole diff `v` already put in the conversation.
+    whole_change_shown: Option<String>,
+    /// The last look at the server got no answer; cleared when one comes.
+    server_silent: bool,
+    /// Ctrl+X, waiting for Ctrl+E.
+    ctrl_x_at: Option<std::time::Instant>,
     chat: ChatView,
     running: bool,
     active_turn_handle: Option<tokio::task::JoinHandle<()>>,
@@ -652,7 +659,7 @@ struct App {
     pending_resume: Option<String>,
     /// Background or manual.
     update_progress: Option<(String, flashagent_svc::updater::UpdateProgress)>,
-    /// Ctrl+U or /update; until then a background update goes unannounced.
+    /// /update; until then a background update goes unannounced.
     update_watched: bool,
     turn_phase: TurnPhase,
     /// Per-model correction of auto effort, learned from how turns went.
@@ -682,7 +689,7 @@ struct App {
 
 /// How the line under the prompt says the server is not there, so a switch
 /// of provider can take it away.
-pub(crate) const OFFLINE_NOTICE: &str = "No model server at";
+pub(crate) const OFFLINE_NOTICE: &str = "No answer from";
 
 struct AppContext {
     config: AppConfig,
@@ -712,7 +719,7 @@ static INPUT_PAUSED: AtomicBool = AtomicBool::new(false);
 
 /// The editor setting, or `$VISUAL`, `$EDITOR` and the platform's own. The
 /// default setting is the text `$EDITOR`, which is not a program: run as one,
-/// Ctrl+E failed on every fresh config.
+/// The external editor failed on every fresh config.
 fn editor_command(preferred_editor: &str) -> String {
     let configured = preferred_editor.trim();
     if !configured.is_empty() && !matches!(configured, "$EDITOR" | "$VISUAL" | "${EDITOR}" | "${VISUAL}") {
@@ -907,7 +914,7 @@ fn open_snapshots(perm: &PermissionedTools, session_id: &str, cwd: &std::path::P
 /// `None`: nothing worth saving; `Ok(id)`: saved; `Err(why)`: not saved.
 type SaveOutcome = Option<std::result::Result<String, String>>;
 
-fn start_event_sources(tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>, tools_arc: &Arc<BuiltinTools>, pending_discovery: Option<tokio::task::JoinHandle<Option<flashagent_llm::ServerDiscovery>>>) {
+fn start_event_sources(tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>, tools_arc: &Arc<BuiltinTools>, pending_discovery: Option<tokio::task::JoinHandle<Option<flashagent_llm::ServerDiscovery>>>, url: String) {
     {
         let mut ended = tools_arc.shells().subscribe();
         let tx = tx.clone();
@@ -921,9 +928,10 @@ fn start_event_sources(tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>, tools_a
     if let Some(task) = pending_discovery {
         let tx_disc = tx.clone();
         tokio::spawn(async move {
-            if let Ok(Some(disc)) = task.await {
-                let _ = tx_disc.send(UiEvent::ServerDiscovered(disc));
-            }
+            let _ = tx_disc.send(match task.await {
+                Ok(Some(disc)) => UiEvent::ServerDiscovered(disc),
+                _ => UiEvent::ServerSilent(url),
+            });
         });
     }
 
@@ -1099,6 +1107,8 @@ fn initial_app(init: InitialApp) -> App {
         history_search: None,
         current_draft: String::new(),
         confirm_select: ConfirmSelect::new(),
+        whole_change_shown: None,
+        ctrl_x_at: None,
         chat: ChatView::default(),
         running: false,
         active_turn_handle: None,
@@ -1155,6 +1165,7 @@ fn initial_app(init: InitialApp) -> App {
         last_ctrl_c: None,
         last_mascot_mood: MascotMood::Checking,
         announced_mood: MascotMood::Checking,
+        server_silent: false,
         config: app_config,
         available_models,
         provider_switch: None,
@@ -1223,11 +1234,13 @@ struct Inbox {
 
 async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     let (tx, events) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
-    start_event_sources(&tx, &ctx.tools_arc, ctx.pending_discovery);
+    // Start-up already asked, and was told nothing.
+    let startup_silent = ctx.pending_discovery.is_none() && ctx.available_models.is_empty();
+    start_event_sources(&tx, &ctx.tools_arc, ctx.pending_discovery, ctx.source.0.base_url());
     let (channel_probe_tx, channel_probes) = tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
     let (update_tx, updates) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
     let (channel_watch_tx, channel_watch_rx) = tokio::sync::watch::channel(ctx.config.update_channel);
-    // The background updater and Ctrl+U both claim this, so they never download
+    // The background updater and /update both claim this, so they never download
     // over each other.
     let update_busy = Arc::new(AtomicBool::new(false));
     start_background_updates(ctx.config.auto_check_updates, channel_watch_rx, update_tx.clone(), update_busy.clone());
@@ -1277,6 +1290,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         memory_docs: ctx.memory_docs,
         effort_memory,
     });
+    app.server_silent = startup_silent;
     update_context_usage(&mut app.context_usage, &app.history, &w.memory_block, &app.chat, w.perm);
 
     // Before anything is drawn. A resumed session's card is drawn whole: the

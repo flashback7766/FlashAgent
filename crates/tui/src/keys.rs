@@ -20,8 +20,20 @@ impl App {
         }
     }
 
-    /// Ctrl+U and /update: watch an update already under way in the background,
+    /// /update: watch an update already under way in the background,
     /// or check, download and install in one go.
+    /// /editor and Ctrl+X Ctrl+E.
+    pub(crate) fn open_external_editor(&mut self) {
+        match open_in_external_editor(&self.input, &self.config.external_editor) {
+            Ok(edited) => {
+                self.input.set(edited);
+                self.autocomplete_idx = 0;
+            }
+            Err(err) => self.notice(format!("Failed to launch external editor: {err}")),
+        }
+        self.renderer.request_reprint();
+    }
+
     pub(crate) fn start_or_watch_update(&mut self, cx: &LoopCtx<'_>) {
         let action = update_key_action(
             flashagent_svc::updater::is_dev_mode(),
@@ -159,6 +171,22 @@ impl App {
             self.history_search_key(code, mods);
             return Flow::Next;
         }
+        // Ctrl+X Ctrl+E, as in bash: the prompt in an external editor. Any other
+        // key after Ctrl+X is itself.
+        let after_ctrl_x = self.ctrl_x_at.take().is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2));
+        if mods.contains(KeyModifiers::CONTROL) {
+            match latin_key(code) {
+                Some('x') => {
+                    self.ctrl_x_at = Some(std::time::Instant::now());
+                    return Flow::Continue;
+                }
+                Some('e') if after_ctrl_x && !self.running => {
+                    self.open_external_editor();
+                    return Flow::Continue;
+                }
+                _ => {}
+            }
+        }
         if let Some(flow) = self.handle_view_key(cx, code, mods) { return flow; }
         if let Some(flow) = self.handle_clipboard_key(cx, code, mods) { return flow; }
         if let Some(flow) = self.handle_navigation_key(cx, code, mods) { return flow; }
@@ -198,8 +226,11 @@ impl App {
             KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('\u{043a}') | KeyCode::Char('\u{041a}')
                 if mods.contains(KeyModifiers::CONTROL) =>
             {
-                if !self.running
-                    && cx.gate.pending().is_none()
+                // It did nothing and said nothing while an answer was written.
+                if self.running {
+                    self.background = Some(BackgroundNotice::fading("Ctrl+R regenerates once the answer is done · Esc stops it now".to_string(), 4));
+                    self.renderer.request_reprint();
+                } else if cx.gate.pending().is_none()
                     && cx.question_gate.pending().is_none()
                     && self.overlay.is_none()
                     && !self.regenerate(cx)
@@ -247,27 +278,6 @@ impl App {
                 self.renderer.request_reprint();
             }
 
-            KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Char('\u{0443}') | KeyCode::Char('\u{0423}')
-                if mods.contains(KeyModifiers::CONTROL) && !self.running =>
-            {
-                match open_in_external_editor(&self.input, &self.config.external_editor) {
-                    Ok(edited) => {
-                        self.input.set(edited);
-                        self.autocomplete_idx = 0;
-                    }
-                    Err(err) => {
-                        self.notice(format!("Failed to launch external editor: {err}"));
-                    }
-                }
-                self.renderer.request_reprint();
-            }
-
-            KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Char('\u{0433}') | KeyCode::Char('\u{0413}')
-                if mods.contains(KeyModifiers::CONTROL) =>
-            {
-                self.start_or_watch_update(cx);
-            }
-
             KeyCode::F(4)
             | KeyCode::Char('t') | KeyCode::Char('T') | KeyCode::Char('\u{0435}') | KeyCode::Char('\u{0415}')
                 if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) || matches!(code, KeyCode::F(4)) =>
@@ -310,8 +320,12 @@ impl App {
                         flashagent_tui::clipboard::set_clipboard_text(&text);
                         self.copy_toast = Some(("Copied assistant response (press Ctrl+C again to exit)".to_string(), now));
                         self.renderer.request_reprint();
-                    } else {
+                    } else if is_double_tap {
                         return Some(Flow::Quit);
+                    } else {
+                        // Twice, as /help says: once quit a new session at a stray press.
+                        self.copy_toast = Some(("Press Ctrl+C again to exit".to_string(), now));
+                        self.renderer.request_reprint();
                     }
                 }
             }
@@ -587,7 +601,13 @@ impl App {
                 'k' => self.open_palette(),
                 // Claude Code's key: the running shell command goes on in the background.
                 'b' if self.running => self.detach_shell(cx),
+                // Readline's: Ctrl+A and Ctrl+E the line's ends, Ctrl+U back to its start.
                 'a' => self.input.home(),
+                'e' => self.input.end(),
+                'u' => {
+                    self.input.delete_to_line_start();
+                    self.edited();
+                }
                 'j' => {
                     self.input.insert_char('\n');
                     self.edited();
@@ -624,6 +644,14 @@ impl App {
 
 fn word_mods(mods: KeyModifiers) -> bool {
     mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT)
+}
+
+/// `latin` of a character key.
+fn latin_key(code: KeyCode) -> Option<char> {
+    match code {
+        KeyCode::Char(c) => Some(latin(c)),
+        _ => None,
+    }
 }
 
 /// The Latin letter on the same key in the Russian layout, so Ctrl+W works

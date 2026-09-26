@@ -19,7 +19,12 @@ impl App {
     /// approval over open settings takes Enter. `Flow::Next` means none claimed it.
     pub(crate) async fn handle_overlay_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Flow {
         if cx.gate.pending().is_some() {
-            self.approval_key(cx, code, mods);
+            // The conversation above stays readable while the card waits.
+            if matches!(code, KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End) {
+                self.scroll_key(code, mods);
+            } else {
+                self.approval_key(cx, code, mods);
+            }
             self.renderer.request_reprint();
             return Flow::Continue;
         }
@@ -97,6 +102,7 @@ impl App {
             KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('\u{0444}') | KeyCode::Char('\u{0424}') => {
                 self.allow_always(cx);
             }
+            KeyCode::Char('v') | KeyCode::Char('V') | KeyCode::Char('\u{043c}') | KeyCode::Char('\u{041c}') => self.show_whole_change(cx),
             KeyCode::Enter if self.confirm_select.choice() == ConfirmChoice::Always => self.allow_always(cx),
             KeyCode::Enter => {
                 cx.gate.respond(self.confirm_select.decision());
@@ -107,6 +113,23 @@ impl App {
             KeyCode::Tab | KeyCode::Up | KeyCode::Down => self.confirm_select.toggle(),
             _ => {}
         }
+    }
+
+    /// The whole diff, into the conversation above the card, once per call:
+    /// the card has room for only part of a long change.
+    fn show_whole_change(&mut self, cx: &LoopCtx<'_>) {
+        let Some(req) = cx.gate.pending() else { return };
+        let Some(diff) = req.diff.as_deref() else { return };
+        if self.whole_change_shown.as_deref() == Some(req.args_json.as_str()) {
+            return;
+        }
+        let (width, _) = crossterm::terminal::size().unwrap_or((100, 24));
+        self.chat.push_line(LineKind::System, format!("  \x1b[1;38;2;225;175;95mThe whole change\x1b[0m \x1b[38;2;135;130;125m· {}\x1b[0m", req.tool));
+        for row in crate::render::diff_rows(diff, (width as usize).saturating_sub(2)) {
+            self.chat.push_line(LineKind::System, row);
+        }
+        self.whole_change_shown = Some(req.args_json.clone());
+        self.renderer.scroll_to_bottom();
     }
 
     fn allow_always(&mut self, cx: &LoopCtx<'_>) {
@@ -133,7 +156,7 @@ impl App {
                 view.config.update_channel = sw.to;
             }
             self.background = Some(BackgroundNotice::sticky(format!(
-                "Release channel is now {} \u{b7} press Ctrl+U to move to it",
+                "Release channel is now {} \u{b7} /update moves to it",
                 sw.to.label()
             )));
         } else {
@@ -166,7 +189,7 @@ impl App {
                 Some(opts) => {
                     let total_choices = opts.len();
                     if state.is_writing {
-                        let answer = std::mem::take(&mut state.write_in_text);
+                        let answer = state.write_in_text.take();
                         let trimmed = answer.trim().to_string();
                         if !trimmed.is_empty() {
                             let mut chosen: Vec<String> = if req.multi_select {
@@ -196,7 +219,7 @@ impl App {
                     }
                 }
                 None => {
-                    let answer = std::mem::take(&mut state.write_in_text);
+                    let answer = state.write_in_text.take();
                     *state = QuestionUiState::default();
                     cx.question_gate.respond(answer.trim().to_string(), true);
                 }
@@ -212,11 +235,8 @@ impl App {
                     state.selected_index = (state.selected_index + 1) % (opts.len() + 1);
                 }
             }
-            KeyCode::Backspace => {
-                if state.is_writing || req.options.is_none() {
-                    state.write_in_text.pop();
-                }
-            }
+            // Moves and deletes anywhere in the answer, as in the prompt.
+            _ if (state.is_writing || req.options.is_none()) && state.write_in_text.edit_key(code, mods) => {}
             KeyCode::Char(' ') if req.multi_select && !state.is_writing => {
                 if let Some(opts) = &req.options {
                     let idx = state.selected_index;
@@ -232,14 +252,14 @@ impl App {
             }
             KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
                 if state.is_writing || req.options.is_none() {
-                    state.write_in_text.push(c);
+                    state.write_in_text.insert_char(c);
                 } else if let (Some(opts), false) = (&req.options, c.is_ascii_digit() || c.is_whitespace()) {
                     // Typing starts an answer of one's own, with no key to open it first. A
                     // path pasted into the card (keys, in a Windows console) is typed too,
                     // so the digits in it no longer pick options.
                     state.selected_index = opts.len();
                     state.is_writing = true;
-                    state.write_in_text = c.to_string();
+                    state.write_in_text.set(c.to_string());
                 } else if let (Some(opts), Some(d)) = (&req.options, c.to_digit(10)) {
                     let idx = (d as usize).saturating_sub(1);
                     if idx < opts.len() {

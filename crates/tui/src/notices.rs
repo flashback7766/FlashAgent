@@ -181,7 +181,7 @@ impl BackgroundNotice {
 
 pub(crate) enum UpdateNotice {
     Available { version: String, asset_name: String, download_url: String, checksums_url: Option<String> },
-    /// Drawn only once the user asks to watch (Ctrl+U), so an unrequested update
+    /// Drawn only once the user asks to watch (/update), so an unrequested update
     /// never takes over the screen.
     Progress { version: String, stage: flashagent_svc::updater::UpdateProgress },
     Ready { version: String },
@@ -229,7 +229,7 @@ pub(crate) fn update_progress_line(version: &str, stage: flashagent_svc::updater
 /// Marks the one line that update progress rewrites in place.
 pub(crate) const UPDATE_LINE_PREFIX: &str = "Update ";
 
-/// What Ctrl+U (or /update) does, given what is already going on.
+/// What /update does, given what is already going on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UpdateKeyAction {
     /// A build from source never replaces itself.

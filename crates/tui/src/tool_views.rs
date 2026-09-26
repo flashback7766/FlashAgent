@@ -131,16 +131,18 @@ pub fn render_command_card(
     cwd: &str,
     cmd: &str,
     output: Option<&str>,
-    is_error: bool,
-    is_running: bool,
+    state: CallState,
     width: usize,
 ) -> Vec<RenderLine> {
+    let (is_error, is_running) = (state == CallState::Failed, state == CallState::Running);
     let mut lines = Vec::new();
     let box_w = box_width(width);
     let inner_w = box_w.saturating_sub(6);
 
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
-    let status_header = if is_running {
+    let status_header = if state == CallState::Waiting {
+        format!("  {TEXT_MUTED}Waiting to run{RESET} {TEXT_BRIGHT}{cmd}{RESET} {chevron}")
+    } else if is_running {
         format!("  {TEXT_MUTED}Running{RESET} {TEXT_BRIGHT}{cmd}{RESET} {}", crate::anim::spinner(crate::anim::now_ms()))
     } else if is_error {
         format!("  {TEXT_RED}Failed{RESET} {TEXT_BRIGHT}{cmd}{RESET} {chevron}")
@@ -180,6 +182,8 @@ pub fn render_command_card(
                 lines.push(box_row(&more_lines(all_lines.len() - display_count), TEXT_MUTED, inner_w));
             }
         }
+    } else if state == CallState::Waiting {
+        lines.push(box_row("Runs once you allow it", TEXT_MUTED, inner_w));
     } else if is_running {
         lines.push(box_row("Executing command…", TEXT_MUTED, inner_w));
     }
@@ -226,6 +230,11 @@ pub fn render_directory_card(
     lines
 }
 
+fn is_file_separator(line: &str) -> bool {
+    let line = line.trim();
+    line.len() > 8 && line.starts_with("=== ") && line.ends_with(" ===") && !line.contains('\t')
+}
+
 /// Unread blocks are folded.
 pub fn render_read_card(
     path: &str,
@@ -239,7 +248,8 @@ pub fn render_read_card(
 
     let raw_text = content.unwrap_or("");
     let file_lines: Vec<&str> = raw_text.lines().collect();
-    let count = file_lines.len();
+    // Several files come back with "=== path ===" before each; those are not lines of a file.
+    let count = file_lines.iter().filter(|l| !is_file_separator(l)).count();
 
     let header = format!(
         "  {TEXT_MUTED}Read{RESET} {TEXT_BRIGHT}{path}{RESET} {TEXT_MUTED}({}){RESET} {chevron}",
@@ -252,9 +262,14 @@ pub fn render_read_card(
     }
 
     const MAX_PREVIEW: usize = 20;
-    let preview_count = count.min(MAX_PREVIEW);
+    let preview_count = file_lines.len().min(MAX_PREVIEW);
+    let shown = file_lines[..preview_count].iter().filter(|l| !is_file_separator(l)).count();
 
     for (i, &line_content) in file_lines.iter().take(preview_count).enumerate() {
+        if is_file_separator(line_content) {
+            lines.push((LineKind::Tool, format!("  {TEXT_MUTED}{}{RESET}", clip_ellipsis(line_content.trim(), width.saturating_sub(4)))));
+            continue;
+        }
         // `read_file` output already carries "   1\t..." line numbers.
         let (line_no, text) = if let Some(tab_idx) = line_content.find('\t') {
             let (num_part, rest) = line_content.split_at(tab_idx);
@@ -273,8 +288,8 @@ pub fn render_read_card(
         lines.push((LineKind::Tool, styled));
     }
 
-    if count > preview_count {
-        lines.push((LineKind::Tool, render_fold_line(&more_lines(count - preview_count), width)));
+    if count > shown {
+        lines.push((LineKind::Tool, render_fold_line(&more_lines(count - shown), width)));
     }
 
     lines
@@ -339,23 +354,69 @@ pub fn parse_diff_to_rows(diff_text: &str) -> Vec<DiffRow> {
     rows
 }
 
+/// What an edit or a write changes.
+#[derive(Debug, Clone, Copy)]
+pub struct EditChange<'a> {
+    pub path: &'a str,
+    pub added: usize,
+    pub deleted: usize,
+    /// The diff, or for a write the new content.
+    pub body: Option<&'a str>,
+    pub is_write: bool,
+}
+
+/// Where a call stands, as its verbose card tells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallState {
+    /// Started, and its approval or question card is up: nothing has run.
+    Waiting,
+    Running,
+    Done,
+    /// It failed, or was declined or stopped: nothing it proposed happened.
+    Failed,
+}
+
+impl CallState {
+    pub fn of(is_running: bool, is_error: bool, waiting: bool) -> Self {
+        match (is_running, is_error) {
+            (true, _) if waiting => Self::Waiting,
+            (true, _) => Self::Running,
+            (false, true) => Self::Failed,
+            (false, false) => Self::Done,
+        }
+    }
+}
+
 /// `old new │ line`, red deletions, green additions, centered fold dividers.
-pub fn render_edit_card(
-    path: &str,
-    added: usize,
-    deleted: usize,
-    diff_or_content: Option<&str>,
-    is_write: bool,
-    width: usize,
-) -> Vec<RenderLine> {
+/// A change that did not happen says so, with why, and shows no diff: in
+/// green it read as made.
+pub fn render_edit_card(change: &EditChange<'_>, state: CallState, reason: Option<&str>, width: usize) -> Vec<RenderLine> {
+    let EditChange { path, added, deleted, body: diff_or_content, is_write } = *change;
     let mut lines = Vec::new();
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
-    let action_verb = if is_write { "Wrote" } else { "Edited" };
+    let action_verb = match (state, is_write) {
+        (CallState::Done, true) => "Wrote",
+        (CallState::Done, false) => "Edited",
+        (CallState::Waiting, true) => "Waiting to write",
+        (CallState::Waiting, false) => "Waiting to edit",
+        (CallState::Running, true) => "Writing",
+        (CallState::Running, false) => "Editing",
+        (CallState::Failed, true) => "Not written:",
+        (CallState::Failed, false) => "Not edited:",
+    };
+    let verb_color = if state == CallState::Failed { TEXT_RED } else { TEXT_MUTED };
     let header = format!(
-        "  {TEXT_MUTED}{action_verb}{RESET} {TEXT_BRIGHT}{path}{RESET} {TEXT_GREEN}+{added}{RESET} {TEXT_RED}-{deleted}{RESET} {chevron}"
+        "  {verb_color}{action_verb}{RESET} {TEXT_BRIGHT}{path}{RESET} {TEXT_GREEN}+{added}{RESET} {TEXT_RED}-{deleted}{RESET} {chevron}"
     );
     lines.push((LineKind::Tool, header));
+
+    if state == CallState::Failed {
+        if let Some(reason) = reason.and_then(|r| r.lines().find(|l| !l.trim().is_empty())) {
+            lines.push((LineKind::Tool, format!("    {TEXT_MUTED}{}{RESET}", crate::tool_views::clip_ellipsis(reason.trim(), width.saturating_sub(6)))));
+        }
+        return lines;
+    }
 
     if let Some(text) = diff_or_content {
         let budget = width.saturating_sub(14).max(10);
@@ -544,7 +605,7 @@ pub fn render_git_card(
         let header = format!("  {TEXT_MUTED}Git diff{RESET} {chevron}");
         lines.push((LineKind::Tool, header));
         if let Some(text) = output {
-            lines.extend(render_edit_card("git-diff", 0, 0, Some(text), false, width));
+            lines.extend(render_edit_card(&EditChange { path: "git-diff", added: 0, deleted: 0, body: Some(text), is_write: false }, CallState::Done, None, width));
         }
     } else {
         let header = format!("  {TEXT_MUTED}Git status{RESET} {chevron}");
@@ -578,12 +639,20 @@ pub fn render_generic_card(
     name: &str,
     args: &str,
     output: Option<&str>,
+    state: CallState,
     width: usize,
 ) -> Vec<RenderLine> {
     let mut lines = Vec::new();
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
-    let header = format!("  {TEXT_MUTED}Ran{RESET} {TEXT_BRIGHT}{name}{RESET} {chevron}");
+    let verb = match state {
+        CallState::Waiting => "Waiting on",
+        CallState::Running => "Running",
+        CallState::Done => "Ran",
+        CallState::Failed => "Failed",
+    };
+    let color = if state == CallState::Failed { TEXT_RED } else { TEXT_MUTED };
+    let header = format!("  {color}{verb}{RESET} {TEXT_BRIGHT}{name}{RESET} {chevron}");
     lines.push((LineKind::Tool, header));
 
     lines.push((LineKind::Tool, render_card_top(name, width)));
@@ -630,6 +699,37 @@ pub fn render_generic_card(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_file_separator_in_a_multi_file_read_is_not_numbered_or_counted() {
+        let content = "=== a.py ===\n     1\t\"Store.\"\n     2\timport os\n=== b.py ===\n     1\tx = 1";
+        let rows: Vec<String> = render_read_card("2 files", Some(content), 0, 0, 80).iter().map(|(_, l)| crate::strip_ansi(l)).collect();
+        assert!(rows[0].contains("(3 lines)"), "{rows:?}");
+        assert!(rows.iter().any(|r| r.trim() == "=== a.py ==="), "{rows:?}");
+        assert_eq!(rows.iter().filter(|r| r.contains("   1    1")).count(), 2, "{rows:?}");
+    }
+
+    #[test]
+    fn a_verbose_card_tells_what_happened_to_the_call() {
+        let plain = |lines: Vec<RenderLine>| lines.iter().map(|(_, l)| crate::strip_ansi(l)).collect::<Vec<_>>().join("\n");
+        let diff = "-a\n+b\n";
+        // Denied, or failed on bad arguments: it read "Edited" with a green diff.
+        let change = EditChange { path: "store.py", added: 1, deleted: 1, body: Some(diff), is_write: false };
+        let failed = plain(render_edit_card(&change, CallState::Failed, Some("error: bad arguments: missing field `path`"), 80));
+        assert!(failed.contains("Not edited: store.py") && failed.contains("missing field `path`"), "{failed}");
+        assert!(!failed.contains("+ b") && !failed.contains("Edited"), "{failed}");
+        let waiting = plain(render_edit_card(&change, CallState::Waiting, None, 80));
+        assert!(waiting.contains("Waiting to edit store.py"), "{waiting}");
+        assert!(plain(render_edit_card(&change, CallState::Done, None, 80)).contains("Edited store.py"));
+        // Nothing runs before Allow.
+        let command = plain(render_command_card("/w", "cargo test", None, CallState::Waiting, 80));
+        assert!(command.contains("Waiting to run cargo test") && command.contains("Runs once you allow it") && !command.contains("Executing"), "{command}");
+        let asked = plain(render_generic_card("ask_user", "{}", None, CallState::Waiting, 80));
+        assert!(asked.contains("Waiting on ask_user") && !asked.contains("Ran"), "{asked}");
+        assert_eq!(CallState::of(true, false, true), CallState::Waiting);
+        assert_eq!(CallState::of(true, false, false), CallState::Running);
+        assert_eq!(CallState::of(false, true, true), CallState::Failed);
+    }
+
     /// Emoji are two columns wide next to one-column glyphs, so listing columns
     /// never line up.
     #[test]
@@ -637,7 +737,7 @@ mod tests {
         let cards = [
             render_directory_card("src", Some("main.rs\nmod/\nnotes.md"), false, 100),
             render_read_card("src/main.rs", Some("fn main() {}"), 0, 50, 100),
-            render_edit_card("src/lib.rs", 3, 1, None, false, 100),
+            render_edit_card(&EditChange { path: "src/lib.rs", added: 3, deleted: 1, body: None, is_write: false }, CallState::Done, None, 100),
         ];
         for card in cards {
             for (_, line) in &card {
@@ -655,7 +755,7 @@ mod tests {
     #[test]
     fn test_render_command_card_prompt_and_folding() {
         let output = (1..=25).map(|i| format!("Compiling package_{i} v0.1.0")).collect::<Vec<_>>().join("\n");
-        let lines = render_command_card("/home/flashback/FlashAgent", "cargo build --release", Some(&output), false, false, 80);
+        let lines = render_command_card("/home/flashback/FlashAgent", "cargo build --release", Some(&output), CallState::Done, 80);
         let text_dump = lines.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
         let plain = crate::strip_ansi(&text_dump);
         assert!(plain.contains("Ran cargo build --release"));
@@ -683,7 +783,7 @@ mod tests {
         let cmd = format!("cargo test --workspace {}", "--features very-long-feature-name ".repeat(6));
         let output = "ok\n\tindented by a tab\nprogress 10%\rprogress 100%";
         for width in [40usize, 80, 120] {
-            let lines = render_command_card("/work/FlashAgent", &cmd, Some(output), false, false, width);
+            let lines = render_command_card("/work/FlashAgent", &cmd, Some(output), CallState::Done, width);
             assert_box_is_square(&lines);
             let rows = plain_rows(&lines);
             assert!(rows[1].starts_with("╭─ /work/FlashAgent "), "the folder is the title: {:?}", rows[1]);
@@ -694,7 +794,7 @@ mod tests {
 
     #[test]
     fn the_generic_card_divider_lines_up_with_its_edges() {
-        let lines = render_generic_card("web_fetch", r#"{"url":"https://example.com"}"#, Some("fetched"), 80);
+        let lines = render_generic_card("web_fetch", r#"{"url":"https://example.com"}"#, Some("fetched"), CallState::Done, 80);
         assert_box_is_square(&lines);
         assert!(plain_rows(&lines).iter().any(|r| r.starts_with('├') && r.ends_with('┤')));
     }
@@ -702,7 +802,7 @@ mod tests {
     #[test]
     fn a_written_file_is_all_additions_whatever_its_lines_start_with() {
         let content = "# Notes\n- item one\n  indented\n+ plus\nplain";
-        let lines = render_edit_card("notes.md", 5, 0, Some(content), true, 80);
+        let lines = render_edit_card(&EditChange { path: "notes.md", added: 5, deleted: 0, body: Some(content), is_write: true }, CallState::Done, None, 80);
         let rows = plain_rows(&lines);
         for text in ["# Notes", "- item one", "  indented", "+ plus", "plain"] {
             assert!(rows.iter().any(|r| r.ends_with(text)), "{text:?} missing from {rows:#?}");
@@ -743,7 +843,7 @@ mod tests {
     #[test]
     fn test_render_edit_card_diff_columns_and_folding() {
         let diff = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,2 +10,2 @@\n-old line 1\n-old line 2\n+new line 1\n+new line 2\n";
-        let lines = render_edit_card("src/main.rs", 2, 2, Some(diff), false, 80);
+        let lines = render_edit_card(&EditChange { path: "src/main.rs", added: 2, deleted: 2, body: Some(diff), is_write: false }, CallState::Done, None, 80);
         let text_dump = lines.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
         assert!(text_dump.contains("Edited") && text_dump.contains("src/main.rs"));
         assert!(text_dump.contains("+2") && text_dump.contains("-2"));

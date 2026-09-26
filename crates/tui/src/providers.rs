@@ -92,12 +92,20 @@ pub fn provider_arg(config: &AppConfig, arg: &str) -> ProviderArg {
 /// longer id (`qwen3` finds `qwen3-coder-30b`), and only then as a longer name
 /// holding an id, the closest first: a saved `gemini-2.5-flash-lite` must not
 /// become `gemini-2.5-flash` because that is listed first.
-pub fn model_after_switch(saved: &str, disc: Option<&ServerDiscovery>) -> String {
+///
+/// On a server that takes a key (`keyed`) only the exact name counts, and a
+/// saved model it does not list is kept: another would be billed in its place.
+pub fn model_after_switch(saved: &str, disc: Option<&ServerDiscovery>, keyed: bool) -> String {
     let Some(disc) = disc else { return saved.to_string() };
     let bare = |id: &str| id.strip_prefix("models/").unwrap_or(id).to_ascii_lowercase();
     let wanted = bare(saved);
+    let pick_for_user = !keyed || disc.kind.runs_local_models();
     if !wanted.is_empty() {
         let exact = disc.models.iter().find(|m| bare(&m.id) == wanted);
+        if !pick_for_user {
+            let snapshot = || disc.models.iter().find(|m| flashagent_llm::thinking::same_model(&bare(&m.id), &wanted));
+            return exact.or_else(snapshot).map_or_else(|| saved.to_string(), |m| m.id.clone());
+        }
         let longer = || disc.models.iter().filter(|m| bare(&m.id).contains(&wanted)).min_by_key(|m| m.id.len());
         let shorter = || disc.models.iter().filter(|m| wanted.contains(&bare(&m.id))).max_by_key(|m| m.id.len());
         if let Some(m) = exact.or_else(longer).or_else(shorter) {
@@ -177,7 +185,7 @@ struct Form {
     row: usize,
     /// What is being typed into the selected field. A key starts empty: the
     /// saved one is never put on screen.
-    typing: Option<String>,
+    typing: Option<crate::Composer>,
 }
 
 /// Settings -> Providers, and "Edit providers" in `/provider`: every saved
@@ -247,7 +255,7 @@ impl ProvidersView {
     pub fn handle_paste(&mut self, text: &str) {
         if let Some(typing) = self.form.as_mut().and_then(|f| f.typing.as_mut()) {
             // A key or an address copied from a page often brings a space or a line break.
-            typing.extend(text.chars().filter(|c| !c.is_control() && !c.is_whitespace()));
+            typing.insert_str(&text.chars().filter(|c| !c.is_control() && !c.is_whitespace()).collect::<String>());
         }
     }
 
@@ -307,11 +315,8 @@ impl ProvidersView {
         if let Some(typing) = form.typing.as_mut() {
             match code {
                 KeyCode::Esc => form.typing = None,
-                KeyCode::Backspace => {
-                    typing.pop();
-                }
                 KeyCode::Enter => {
-                    let text = typing.trim().to_string();
+                    let text = typing.text().trim().to_string();
                     match field {
                         Field::Name if !text.is_empty() => form.draft.name = text,
                         Field::Address if !text.is_empty() => {
@@ -324,11 +329,13 @@ impl ProvidersView {
                     }
                     form.typing = None;
                 }
+                // Moves and deletes anywhere in the value, as in the prompt.
+                _ if typing.edit_key(code, mods) => {}
                 // A key never has a space in it; one pasted as keys brings them along.
                 KeyCode::Char(c)
                     if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && (field != Field::Key || !c.is_whitespace()) =>
                 {
-                    typing.push(c);
+                    typing.insert_char(c);
                 }
                 _ => {}
             }
@@ -352,11 +359,11 @@ impl ProvidersView {
                 Field::Save => {
                     return ProvidersAction::Save { original: form.original.clone(), profile: form.draft.clone() };
                 }
-                Field::Name => form.typing = Some(form.draft.name.clone()),
-                Field::Address => form.typing = Some(form.draft.url.clone()),
-                Field::Model => form.typing = Some(form.draft.model.clone()),
-                Field::Context => form.typing = Some(form.draft.context_window.map(|n| n.to_string()).unwrap_or_default()),
-                Field::Key => form.typing = Some(String::new()),
+                Field::Name => form.typing = Some(crate::Composer::from(form.draft.name.as_str())),
+                Field::Address => form.typing = Some(crate::Composer::from(form.draft.url.as_str())),
+                Field::Model => form.typing = Some(crate::Composer::from(form.draft.model.as_str())),
+                Field::Context => form.typing = Some(crate::Composer::from(form.draft.context_window.map(|n| n.to_string()).unwrap_or_default())),
+                Field::Key => form.typing = Some(crate::Composer::new()),
             },
             _ => {}
         }
@@ -393,14 +400,14 @@ impl ProvidersView {
                 for (i, field) in fields(&form.draft).iter().enumerate() {
                     let current = i == form.row;
                     let ptr = if current { format!("{GOLD}\u{25b8}{OFF}") } else { " ".to_string() };
-                    let typed = form.typing.as_deref().filter(|_| current);
+                    let typed = form.typing.as_ref().filter(|_| current);
                     let value = match (field, typed) {
                         (Field::Key, Some(t)) => format!(
                             "{GOLD}{}\u{2588}{OFF} {DIM}({}){OFF}",
-                            crate::wizard::mask_api_key(t),
-                            crate::plural(t.chars().count(), "character", "characters")
+                            crate::wizard::mask_api_key(t.text()),
+                            crate::plural(t.text().chars().count(), "character", "characters")
                         ),
-                        (_, Some(t)) => format!("{GOLD}{t}\u{2588}{OFF}"),
+                        (_, Some(t)) => format!("{GOLD}{}{OFF}", t.field_view(box_w.saturating_sub(label_w + 8), str::to_string)),
                         (Field::Name, None) => form.draft.name.clone(),
                         (Field::Protocol, None) => format!("{}  {DIM}\u{2190}/\u{2192}{OFF}", form.draft.protocol.label()),
                         (Field::Address, None) => form.draft.url.clone(),
@@ -545,12 +552,12 @@ mod tests {
     #[test]
     fn a_saved_model_is_matched_exactly_before_by_part_of_its_name() {
         let disc = discovery(vec![model("gemini-2.5-flash", false), model("gemini-2.5-flash-lite", false)], None);
-        assert_eq!(model_after_switch("gemini-2.5-flash-lite", Some(&disc)), "gemini-2.5-flash-lite");
-        assert_eq!(model_after_switch("models/gemini-2.5-flash-lite", Some(&disc)), "gemini-2.5-flash-lite", "Google's prefix aside");
-        assert_eq!(model_after_switch("gemini-2.5-flash-lite-preview-06-17", Some(&disc)), "gemini-2.5-flash-lite", "the closest id it holds");
+        assert_eq!(model_after_switch("gemini-2.5-flash-lite", Some(&disc), false), "gemini-2.5-flash-lite");
+        assert_eq!(model_after_switch("models/gemini-2.5-flash-lite", Some(&disc), false), "gemini-2.5-flash-lite", "Google's prefix aside");
+        assert_eq!(model_after_switch("gemini-2.5-flash-lite-preview-06-17", Some(&disc), false), "gemini-2.5-flash-lite", "the closest id it holds");
         let disc = discovery(vec![model("qwen3-coder-30b-a3b", false), model("qwen3-coder-30b", false)], None);
-        assert_eq!(model_after_switch("qwen3-coder", Some(&disc)), "qwen3-coder-30b", "the shortest id holding it");
-        assert_eq!(model_after_switch("", Some(&disc)), "qwen3-coder-30b-a3b", "nothing saved: the first");
+        assert_eq!(model_after_switch("qwen3-coder", Some(&disc), false), "qwen3-coder-30b", "the shortest id holding it");
+        assert_eq!(model_after_switch("", Some(&disc), false), "qwen3-coder-30b-a3b", "nothing saved: the first");
     }
 
     #[test]
@@ -612,14 +619,23 @@ mod tests {
     #[test]
     fn after_a_switch_the_saved_model_wins_when_the_server_has_it() {
         let disc = discovery(vec![model("llama-3", true), model("qwen3-coder-30b", false)], Some("llama-3"));
-        assert_eq!(model_after_switch("qwen3-coder-30b", Some(&disc)), "qwen3-coder-30b");
-        assert_eq!(model_after_switch("qwen3-coder", Some(&disc)), "qwen3-coder-30b", "a partial name finds its full id");
-        assert_eq!(model_after_switch("gone-model", Some(&disc)), "llama-3", "else the loaded one");
-        assert_eq!(model_after_switch("", Some(&disc)), "llama-3");
+        assert_eq!(model_after_switch("qwen3-coder-30b", Some(&disc), false), "qwen3-coder-30b");
+        assert_eq!(model_after_switch("qwen3-coder", Some(&disc), false), "qwen3-coder-30b", "a partial name finds its full id");
+        assert_eq!(model_after_switch("gone-model", Some(&disc), false), "llama-3", "else the loaded one");
+        assert_eq!(model_after_switch("", Some(&disc), false), "llama-3");
         let unloaded = discovery(vec![model("first", false), model("second", false)], None);
-        assert_eq!(model_after_switch("", Some(&unloaded)), "first", "else the first listed");
-        assert_eq!(model_after_switch("kept", None), "kept", "no answer keeps what was saved");
-        assert_eq!(model_after_switch("", Some(&discovery(Vec::new(), None))), "");
+        assert_eq!(model_after_switch("", Some(&unloaded), false), "first", "else the first listed");
+        assert_eq!(model_after_switch("kept", None, false), "kept", "no answer keeps what was saved");
+        assert_eq!(model_after_switch("", Some(&discovery(Vec::new(), None)), false), "");
+
+        // A server that takes a key bills by the model: only the exact name counts.
+        assert_eq!(model_after_switch("gone-model", Some(&unloaded), true), "gone-model", "kept, not swapped");
+        assert_eq!(model_after_switch("fir", Some(&unloaded), true), "fir", "a part is not completed");
+        let dated = discovery(vec![model("claude-haiku-4-5-20251001", false), model("gpt-5-pro", false)], None);
+        assert_eq!(model_after_switch("claude-haiku-4-5", Some(&dated), true), "claude-haiku-4-5-20251001", "an alias finds its dated snapshot");
+        assert_eq!(model_after_switch("gpt-5", Some(&dated), true), "gpt-5", "a longer name is another model");
+        assert_eq!(model_after_switch("SECOND", Some(&unloaded), true), "second");
+        assert_eq!(model_after_switch("", Some(&unloaded), true), "first", "nothing saved: the server's first");
     }
 
     #[test]
@@ -674,6 +690,24 @@ mod tests {
         assert_eq!(profile.protocol, ApiProtocol::Anthropic);
         assert_eq!(profile.url, "http://claude-proxy:8080", "an address without a scheme gets http://");
         assert_eq!(profile.api_key.as_deref(), Some("sk-newkey"));
+    }
+
+    #[test]
+    fn a_field_is_edited_in_the_middle_not_only_at_its_end() {
+        // Fixing one letter in an address meant deleting everything after it.
+        let mut view = ProvidersView::new(&config());
+        view.selected = 1;
+        view.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+        view.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        for _ in 0..3 {
+            view.handle_key(KeyCode::Left, KeyModifiers::NONE);
+        }
+        view.handle_key(KeyCode::Char('X'), KeyModifiers::NONE);
+        view.handle_key(KeyCode::End, KeyModifiers::NONE);
+        view.handle_key(KeyCode::Char('!'), KeyModifiers::NONE);
+        view.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        let shown = text(&view.render(100));
+        assert!(shown.contains("ClaXude!"), "{shown}");
     }
 
     #[test]

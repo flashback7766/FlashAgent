@@ -197,11 +197,18 @@ impl AgentLoop {
     ) -> Result<(Vec<ChatMessage>, DoneReason), LoopError> {
         let specs = tools.specs();
         let known_tools: HashSet<String> = specs.iter().map(|s| s.name.clone()).collect();
+        let schemas: std::collections::HashMap<&str, serde_json::Value> =
+            specs.iter().filter_map(|s| serde_json::from_str(&s.parameters_json).ok().map(|v| (s.name.as_str(), v))).collect();
         let mut tokens_used: i64 = 0;
         let mut output_tokens: i64 = 0;
         let started = Instant::now();
         let mut stall_nudges: usize = 0;
         let mut promise_nudges: usize = 0;
+        let mut error_nudges: usize = 0;
+        let mut named_nudges: usize = 0;
+        // The last batch had a call that failed on its own terms: a wrong path,
+        // name or argument, which a corrected call can fix.
+        let mut call_failed = false;
         // A stalled scratchpad reply and the nudge answering it: sent with the next
         // request only, and stored only if the answer is bound to them.
         let mut transient: Vec<ChatMessage> = Vec::new();
@@ -467,6 +474,16 @@ impl AgentLoop {
                     continue;
                 }
 
+                // Small models answer a failed call with an apology or an explanation
+                // of the error. Once per turn they are asked to act on it.
+                if !is_scratchpad && error_nudges < 1 && call_failed && !assistant_text.trim().is_empty() {
+                    error_nudges += 1;
+                    call_failed = false;
+                    transient = history.pop().into_iter().chain([ChatMessage::user(ERROR_NUDGE)]).collect();
+                    events(LoopEvent::TurnDelta("\n\n".to_string()));
+                    continue;
+                }
+
                 // "I'll add the comment." and nothing more: a small model often ends its
                 // turn on the announcement. Once per turn it is asked to make the call.
                 if !is_scratchpad && promise_nudges < 1 && !specs.is_empty() && announces_a_tool_call(&assistant_text) {
@@ -475,6 +492,18 @@ impl AgentLoop {
                     // The announcement stays on screen; what follows starts a new paragraph.
                     events(LoopEvent::TurnDelta("\n\n".to_string()));
                     continue;
+                }
+
+                // "Read status.txt, then report it with report_status": a small model
+                // reads the file and tells the user the number. Once per turn it is
+                // reminded of the call the request names.
+                if !is_scratchpad && named_nudges < 1 {
+                    if let Some(nudge) = named_tool_nudge(&history, &specs, &assistant_text) {
+                        named_nudges += 1;
+                        transient = history.pop().into_iter().chain([ChatMessage::user(nudge)]).collect();
+                        events(LoopEvent::TurnDelta("\n\n".to_string()));
+                        continue;
+                    }
                 }
 
                 if is_scratchpad || assistant_text.trim().is_empty() {
@@ -525,6 +554,7 @@ impl AgentLoop {
             // servers reject the next request. Pictures come after all of them: a
             // user message between two results breaks the same rule.
             let mut image_msgs: Vec<ChatMessage> = Vec::new();
+            call_failed = false;
             for (i, call) in calls.iter().enumerate() {
                 if self.cancel.load(Ordering::Relaxed) {
                     answer_cancelled(&mut history, &calls[i..]);
@@ -532,17 +562,40 @@ impl AgentLoop {
                     events(LoopEvent::Done(DoneReason::Cancelled));
                     return Ok((history, DoneReason::Cancelled));
                 }
+                // `"20"` where the schema wants 20: run, shown and checked as the tool reads it.
+                let typed;
+                let call = match schemas.get(call.name.as_str()).and_then(|schema| flashagent_llm::repair::coerced_args(&call.args_json, &call.name, schema)) {
+                    Some(args_json) => {
+                        typed = ToolCall { args_json, ..call.clone() };
+                        &typed
+                    }
+                    None => call,
+                };
                 events(LoopEvent::ToolStarted { id: call.id.clone(), name: call.name.clone(), args_json: call.args_json.clone() });
+                let exec = tools.execute(call);
+                tokio::pin!(exec);
                 let out = tokio::select! {
-                    out = tools.execute(call) => out,
+                    out = &mut exec => out,
                     _ = wait_cancel(&self.cancel) => {
+                        // A file change under way goes on to its end even when dropped, and the
+                        // model was told it had not run; it then redid a change already made.
+                        // So it is let finish (for two seconds at most, in case it still waits
+                        // on an approval) and the model hears what it did. Anything else may
+                        // have done part of its work, unless it has just ended.
+                        let finished = if finishes_when_stopped(&call.name) {
+                            tokio::time::timeout(Duration::from_secs(2), &mut exec).await.ok()
+                        } else {
+                            futures::FutureExt::now_or_never(&mut exec)
+                        };
+                        let (content, is_error) = finished.map_or((STOPPED_RESULT.to_string(), true), |out| (out.content, out.is_error));
                         events(LoopEvent::ToolFinished {
                             id: call.id.clone(),
-                            is_error: true,
-                            result_len: CANCELLED_RESULT.len(),
-                            result: Some(CANCELLED_RESULT.to_string()),
+                            is_error,
+                            result_len: content.chars().count(),
+                            result: Some(content.clone()),
                         });
-                        answer_cancelled(&mut history, &calls[i..]);
+                        history.push(ChatMessage::tool_result(call.id.clone(), content));
+                        answer_cancelled(&mut history, &calls[i + 1..]);
                         history.append(&mut image_msgs);
                         events(LoopEvent::Done(DoneReason::Cancelled));
                         return Ok((history, DoneReason::Cancelled));
@@ -554,6 +607,7 @@ impl AgentLoop {
                     result_len: out.content.chars().count(),
                     result: Some(out.content.clone()),
                 });
+                call_failed |= out.is_error && fixable_by_another_call(&call.name, &out.content);
                 let images = out.images;
                 history.push(ChatMessage::tool_result(call.id.clone(), out.content));
                 if !images.is_empty() {
@@ -600,7 +654,7 @@ const TOOL_PICTURE_NOTE: &str = "it is the result of that call, not a new reques
 /// takes back a turn too many.
 pub fn is_prompt(msg: &ChatMessage) -> bool {
     let tool_picture = msg.content.starts_with(TOOL_PICTURE_OPENING) && msg.content.contains(TOOL_PICTURE_NOTE);
-    let nudge = [STALL_NUDGE, PROMISE_NUDGE, CONTINUE_NUDGE].contains(&msg.content.as_str());
+    let nudge = [STALL_NUDGE, PROMISE_NUDGE, CONTINUE_NUDGE, ERROR_NUDGE].contains(&msg.content.as_str()) || msg.content.starts_with(NAMED_NUDGE_HEAD);
     msg.role == Role::User && !tool_picture && !nudge && !crate::task_notices::is_task_notice(&msg.content)
 }
 
@@ -629,6 +683,74 @@ const STALL_NUDGE: &str = "Please provide your direct, final answer to my reques
 
 /// Sent when the model announced a tool call and ended its turn without it.
 const PROMISE_NUDGE: &str = "You said what you would do next but did not do it. Make that tool call now.";
+
+pub(crate) const ERROR_NUDGE: &str = "Your last tool call failed and you replied without trying again. If the error shows what to change (a path, a name, an argument), make the corrected call now. Otherwise say in one sentence what blocks you.";
+
+const NAMED_NUDGE_HEAD: &str = "The request asks for a call to ";
+
+/// Words before a tool's name that ask for a call to it: "report it with
+/// report_status", "call web_search", "через run_shell". After it: "tool".
+const CALL_WORDS: &[&str] = &["with", "using", "use", "call", "via", "through", "run", "через", "помощью", "вызови", "вызовом", "используй", "используя"];
+
+/// The reminder for a tool the last request asks for by name that no call
+/// since has used, once the model has made some other call and then answered
+/// in prose. A name only mentioned ("why did write_file fail?") asks for
+/// nothing, and a reply that ends on a question hands the turn to the user.
+pub(crate) fn named_tool_nudge(history: &[ChatMessage], specs: &[ToolSpec], reply: &str) -> Option<String> {
+    let reply = reply.trim();
+    if reply.is_empty() || reply.rsplit("\n\n").next().unwrap_or(reply).contains('?') {
+        return None;
+    }
+    let start = history.iter().rposition(is_prompt)?;
+    let called: HashSet<&str> = history[start..].iter().flat_map(|m| m.tool_calls.iter().map(|c| c.name.as_str())).collect();
+    if called.is_empty() {
+        return None;
+    }
+    let prompt = &history[start].content;
+    let (_, name) = specs
+        .iter()
+        .filter(|s| !called.contains(s.name.as_str()))
+        .filter_map(|s| asks_for_call(prompt, &s.name).map(|at| (at, &s.name)))
+        .min_by_key(|(at, _)| *at)?;
+    Some(format!("{NAMED_NUDGE_HEAD}{name}, and you have not made it. Make that call now. If it is not needed after all, say why in one sentence."))
+}
+
+/// A sentence with one of these asks for a call only in some case: "ask the
+/// user with ask_user only when you are blocked" (the /goal directive).
+const CONDITION_WORDS: &[&str] = &["if", "when", "whenever", "only", "unless", "если", "когда", "только"];
+
+/// Where `prompt` asks for a call to the tool `name`, if it does. Case is
+/// ignored.
+fn asks_for_call(prompt: &str, name: &str) -> Option<usize> {
+    let (prompt, name) = (&prompt.to_lowercase(), &name.to_lowercase());
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let quote = |c: char| c == '`' || c == '"' || c == '\'' || c.is_whitespace();
+    let ends = [". ", "! ", "? ", "; ", "\n"];
+    prompt.match_indices(name).map(|(at, _)| at).find(|&at| {
+        let (before, after) = (&prompt[..at], &prompt[at + name.len()..]);
+        if before.chars().next_back().is_some_and(is_ident) || after.chars().next().is_some_and(is_ident) {
+            return false;
+        }
+        let word_before = before.trim_end_matches(quote).rsplit(|c: char| !is_ident(c)).next().unwrap_or_default();
+        let word_after = after.trim_start_matches(quote).split(|c: char| !is_ident(c)).next().unwrap_or_default();
+        let start = ends.iter().filter_map(|e| before.rfind(e).map(|i| i + e.len())).max().unwrap_or(0);
+        let end = ends.iter().filter_map(|e| after.find(e)).min().map_or(prompt.len(), |i| at + name.len() + i);
+        let conditional = prompt[start..end].split(|c: char| !is_ident(c)).any(|w| CONDITION_WORDS.contains(&w));
+        (CALL_WORDS.contains(&word_before) || word_after == "tool") && !conditional
+    })
+}
+
+/// A failed shell command is often the answer itself (the tests fail), and a
+/// refused or cancelled call must not be tried again.
+fn fixable_by_another_call(tool: &str, result: &str) -> bool {
+    tool != "run_shell"
+        && !result.starts_with(crate::permissions::DENIED)
+        && result != crate::permissions::DECLINED
+        && result != CANCELLED_RESULT
+        && result != STOPPED_RESULT
+        // What timed out may have happened anyway; asked to try again, a model repeats it.
+        && !result.contains("timed out")
+}
 
 /// Whether a reply ends by saying what the model is about to do, rather than
 /// with an answer: its last sentence is "I'll ..." or "Let me ...", in English
@@ -690,7 +812,15 @@ fn strip_repeated_tail<'a>(prev: &str, next: &'a str) -> &'a str {
     &next[cut..]
 }
 
-const CANCELLED_RESULT: &str = "cancelled by user before completion";
+pub const CANCELLED_RESULT: &str = "cancelled by user before completion";
+
+/// A call Esc stopped while it ran: whatever it was doing may be half done.
+pub const STOPPED_RESULT: &str = "stopped by the user while it ran: it may have done part of its work, so check what it changed before running it again";
+
+/// Quick local writes, let finish when the turn is stopped.
+fn finishes_when_stopped(tool: &str) -> bool {
+    matches!(tool, "write_file" | "edit_file" | "patch_file" | "memory_create" | "memory_update" | "memory_remove")
+}
 
 const TRUNCATED_RESULT: &str = "not executed: your output hit the token limit while writing this call, so its arguments may be incomplete. Send the call again, shorter if needed (e.g. split a large write).";
 
@@ -1367,6 +1497,198 @@ mod tests {
         assert!(history.iter().all(|m| m.content != PROMISE_NUDGE));
     }
 
+    /// Answers each call with the next scripted result.
+    struct ScriptedTools {
+        results: std::sync::Mutex<Vec<ToolOutput>>,
+        calls: std::sync::Mutex<Vec<ToolCall>>,
+    }
+
+    impl ScriptedTools {
+        fn new(results: Vec<(bool, &str)>) -> Self {
+            let results = results.into_iter().map(|(is_error, content)| ToolOutput { content: content.into(), is_error, images: Vec::new() }).collect();
+            Self { results: std::sync::Mutex::new(results), calls: std::sync::Mutex::new(Vec::new()) }
+        }
+    }
+
+    #[async_trait]
+    impl ToolExec for ScriptedTools {
+        async fn execute(&self, call: &ToolCall) -> ToolOutput {
+            self.calls.lock().unwrap().push(call.clone());
+            let mut results = self.results.lock().unwrap();
+            if results.is_empty() { ToolOutput { content: "ok".into(), is_error: false, images: Vec::new() } } else { results.remove(0) }
+        }
+
+        fn specs(&self) -> Vec<ToolSpec> {
+            ["read_file", "run_shell"].iter().map(|n| ToolSpec { name: (*n).into(), description: String::new(), parameters_json: r#"{"type":"object"}"#.into() }).collect()
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn a_failed_call_answered_with_an_apology_is_asked_to_try_again_once() {
+        let llm = RecordingLlm::new(vec![
+            tool_turn("read_file", "c1"),
+            text_turn("I apologize, but I cannot read a file that does not exist."),
+            tool_turn("read_file", "c2"),
+            text_turn("Here it is."),
+        ]);
+        let tools = ScriptedTools::new(vec![(true, "error: no such file: src/confg.rs (did you mean src/config.rs?)")]);
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let mut shown = String::new();
+        let (history, done) = run_loop(&l, &llm, &tools, |e| {
+            if let LoopEvent::TurnDelta(d) = e {
+                shown.push_str(&d);
+            }
+        });
+        assert!(matches!(done, DoneReason::Completed));
+        assert_eq!(tools.calls.lock().unwrap().len(), 2, "the corrected call was never made");
+        let requests = llm.requests.lock().unwrap();
+        assert_eq!(requests[2].last().unwrap().content, ERROR_NUDGE);
+        assert!(shown.contains("not exist.\n\n"), "the retry ran into the apology: {shown:?}");
+        assert!(history.iter().all(|m| m.content != ERROR_NUDGE), "an unsigned nudge is not kept");
+
+        // Once per turn: a second apology ends it.
+        let llm = RecordingLlm::new(vec![tool_turn("read_file", "c1"), text_turn("Sorry."), text_turn("Still no.")]);
+        let tools = ScriptedTools::new(vec![(true, "error: no such file")]);
+        let (_, done) = run_loop(&l, &llm, &tools, |_| {});
+        assert!(matches!(done, DoneReason::Completed));
+        assert_eq!(llm.requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn no_retry_is_asked_after_a_failed_command_a_refusal_or_a_cancel() {
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let denied = format!("{}writes outside the project", crate::permissions::DENIED);
+        for (tool, result) in [
+            ("run_shell", "exit code: 1\noutput:\n3 tests failed"),
+            ("read_file", crate::permissions::DECLINED),
+            ("read_file", denied.as_str()),
+            // What timed out may have happened; a retry could do it twice.
+            ("mcp__ci__deploy", "MCP request 'tools/call' to 'ci' timed out after 30s; the server may have done it anyway, so check before calling it again"),
+        ] {
+            let llm = RecordingLlm::new(vec![tool_turn(tool, "c1"), text_turn("Three tests fail."), text_turn("unexpected")]);
+            let tools = ScriptedTools::new(vec![(true, result)]);
+            let (_, done) = run_loop(&l, &llm, &tools, |_| {});
+            assert!(matches!(done, DoneReason::Completed));
+            assert_eq!(llm.requests.lock().unwrap().len(), 2, "{tool}: {result}");
+        }
+        // A call that succeeded asks for nothing either.
+        let llm = RecordingLlm::new(vec![tool_turn("read_file", "c1"), text_turn("It says 7."), text_turn("unexpected")]);
+        let (_, _) = run_loop(&l, &llm, &ScriptedTools::new(vec![]), |_| {});
+        assert_eq!(llm.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_tool_the_request_names_is_asked_for_once_if_the_model_stops_before_it() {
+        let asked = |prompt: &str, turns: Vec<MockTurn>| {
+            let llm = RecordingLlm::new(turns);
+            let tools = ScriptedTools::new(vec![]);
+            let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+            let mut shown = String::new();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let (history, _) = rt
+                .block_on(l.run(&llm, &tools, vec![ChatMessage::user(prompt)], &mut |e| {
+                    if let LoopEvent::TurnDelta(d) = e {
+                        shown.push_str(&d);
+                    }
+                }))
+                .unwrap();
+            let names: Vec<String> = tools.calls.lock().unwrap().iter().map(|c| c.name.clone()).collect();
+            let requests = llm.requests.lock().unwrap().clone();
+            (names, requests, history, shown)
+        };
+        let (names, requests, history, shown) = asked(
+            "Read a.txt, then run the tests with `run_shell`.",
+            vec![tool_turn("read_file", "c1"), text_turn("a.txt says hi."), tool_turn("run_shell", "c2"), text_turn("They pass."), text_turn("unexpected")],
+        );
+        assert_eq!(names, ["read_file", "run_shell"]);
+        assert!(requests[2].last().unwrap().content.starts_with("The request asks for a call to run_shell,"), "{:?}", requests[2].last());
+        assert!(shown.contains("says hi.\n\n"), "the call ran into the prose: {shown:?}");
+        assert!(history.iter().all(|m| !m.content.starts_with(NAMED_NUDGE_HEAD)), "the reminder is not kept");
+        assert_eq!(requests.len(), 4);
+
+        // Only named, asked before any call, or answered with a question: nothing is sent.
+        for (prompt, turns) in [
+            ("Why did run_shell fail? Read a.txt.", vec![tool_turn("read_file", "c1"), text_turn("It timed out."), text_turn("unexpected")]),
+            ("Use run_shell to list the files.", vec![text_turn("I cannot."), text_turn("unexpected")]),
+            ("Read a.txt, then run it with run_shell.", vec![tool_turn("read_file", "c1"), text_turn("Which command?"), text_turn("unexpected")]),
+        ] {
+            let expected = turns.len() - 1;
+            let (_, requests, _, _) = asked(prompt, turns);
+            assert_eq!(requests.len(), expected, "{prompt}");
+        }
+        // Once per turn.
+        let (_, requests, _, _) = asked(
+            "Read a.txt, then report through run_shell.",
+            vec![tool_turn("read_file", "c1"), text_turn("Done."), text_turn("Not needed."), text_turn("unexpected")],
+        );
+        assert_eq!(requests.len(), 2 + 1);
+    }
+
+    #[test]
+    fn a_call_is_asked_for_by_name_in_english_and_russian() {
+        for prompt in [
+            "report it with report_status",
+            "call `report_status`",
+            "the report_status tool",
+            "сообщи через report_status",
+            "используй report_status",
+            "If the build breaks, stop. Then report it with report_status.",
+        ] {
+            assert!(asks_for_call(prompt, "report_status").is_some(), "{prompt}");
+        }
+        for prompt in [
+            "why did report_status fail",
+            "report_status_v2 with it",
+            "with my_report_status",
+            "Ask the user with report_status only when you are truly blocked.",
+            "If it fails, use report_status to say so.",
+            "Call report_status with your plan, and again whenever a step finishes.",
+        ] {
+            assert!(asks_for_call(prompt, "report_status").is_none(), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn a_quoted_number_reaches_the_tool_as_a_number() {
+        struct Typed(std::sync::Mutex<Vec<ToolCall>>);
+        #[async_trait]
+        impl ToolExec for Typed {
+            async fn execute(&self, call: &ToolCall) -> ToolOutput {
+                self.0.lock().unwrap().push(call.clone());
+                ToolOutput { content: "ok".into(), is_error: false, images: Vec::new() }
+            }
+            fn specs(&self) -> Vec<ToolSpec> {
+                vec![ToolSpec { name: "shell".into(), description: String::new(), parameters_json: r#"{"type":"object","properties":{"timeout_ms":{"type":"integer"}}}"#.into() }]
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        let quoted = MockTurn {
+            events: vec![
+                Ok(LlmEvent::ToolCallDelta { index: 0, id: Some("c1".into()), name: Some("shell".into()), args_delta: r#"{"timeout_ms":"500"}"#.into() }),
+                Ok(LlmEvent::Done(flashagent_llm::FinishReason::ToolUse)),
+            ],
+        };
+        let llm = MockLlm { turns: std::sync::Mutex::new(vec![quoted, text_turn("done")]) };
+        let tools = Typed(std::sync::Mutex::new(Vec::new()));
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let mut started = String::new();
+        let (history, _) = run_loop(&l, &llm, &tools, |e| {
+            if let LoopEvent::ToolStarted { args_json, .. } = e {
+                started = args_json;
+            }
+        });
+        assert_eq!(tools.0.lock().unwrap()[0].args_json, r#"{"timeout_ms":500}"#);
+        assert_eq!(started, r#"{"timeout_ms":500}"#, "the card shows what runs");
+        let asked = history.iter().find(|m| !m.tool_calls.is_empty()).unwrap();
+        assert_eq!(asked.tool_calls[0].args_json, r#"{"timeout_ms":"500"}"#, "the history keeps what the model wrote");
+    }
+
     #[test]
     fn what_counts_as_a_promise() {
         for yes in [
@@ -1522,6 +1844,52 @@ mod tests {
         assert_eq!(done, DoneReason::Cancelled);
         assert_protocol_valid(&history);
         assert_eq!(history.iter().filter(|m| m.role == Role::Tool).count(), 2);
+    }
+
+    #[test]
+    fn a_stopped_write_says_what_it_did_and_a_stopped_command_that_it_may_have_done_part() {
+        // A write that takes a moment, a command that takes long.
+        struct SlowTools;
+        #[async_trait]
+        impl ToolExec for SlowTools {
+            async fn execute(&self, call: &ToolCall) -> ToolOutput {
+                let ms = if call.name == "write_file" { 300 } else { 30_000 };
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                ToolOutput { content: format!("{} done", call.name), is_error: false, images: Vec::new() }
+            }
+            fn specs(&self) -> Vec<ToolSpec> {
+                vec![]
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        for (first, expected) in [("write_file", "write_file done"), ("run_shell", STOPPED_RESULT)] {
+            let llm = MockLlm {
+                turns: std::sync::Mutex::new(vec![MockTurn {
+                    events: vec![
+                        Ok(LlmEvent::ToolCallDelta { index: 0, id: Some("a".into()), name: Some(first.into()), args_delta: "{}".into() }),
+                        Ok(LlmEvent::ToolCallDelta { index: 1, id: Some("b".into()), name: Some("read_file".into()), args_delta: "{}".into() }),
+                        Ok(LlmEvent::Done(FinishReason::ToolUse)),
+                    ],
+                }]),
+            };
+            let cancel = Arc::new(AtomicBool::new(false));
+            let l = AgentLoop::new(LoopConfig::default(), cancel.clone());
+            let flip = cancel.clone();
+            let mut shown = Vec::new();
+            let (history, done) = run_loop(&l, &llm, &SlowTools, |e| match e {
+                LoopEvent::ToolStarted { .. } => flip.store(true, Ordering::Relaxed),
+                LoopEvent::ToolFinished { id, result, .. } => shown.push((id, result.unwrap_or_default())),
+                _ => {}
+            });
+            assert_eq!(done, DoneReason::Cancelled);
+            assert_protocol_valid(&history);
+            let answers: Vec<&str> = history.iter().filter(|m| m.role == Role::Tool).map(|m| m.content.as_str()).collect();
+            // The call that never started is still "not run".
+            assert_eq!(answers, [expected, CANCELLED_RESULT], "{first}");
+            assert_eq!(shown, [("a".to_string(), expected.to_string())], "{first}");
+        }
     }
 
     #[test]
