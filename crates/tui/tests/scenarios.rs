@@ -863,6 +863,33 @@ fn a_new_file_card_keeps_indentation_and_shows_escapes_as_text() {
 }
 
 #[test]
+fn a_long_change_can_be_read_whole_before_it_is_approved() {
+    // The card showed six lines and "+34 more lines", and no key showed the rest.
+    let content: String = (1..=40).map(|i| format!("line{i:02}\n")).collect();
+    let server = MockServer::start(vec![
+        Reply::ToolCall { name: "write_file".into(), arguments: serde_json::json!({ "path": "long.txt", "content": content }) },
+        Reply::Text("Written.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Manual" }));
+    term.type_text("make long.txt");
+    term.send(ENTER);
+    let screen = term.wait_for("v shows the whole change", WAIT);
+    assert!(screen.contains("+ line20"), "a 40-row window has room for more than six lines:\n{screen}");
+    assert!(!screen.contains("+ line40"), "{screen}");
+    term.send("v");
+    // Above the card, which still waits; a 40-line change fills the screen.
+    let screen = term.wait_for("+ line40", WAIT);
+    assert!(screen.contains("Always allow"), "the card went away:\n{screen}");
+    term.send("v");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(term.screen().matches("+ line40").count(), 1, "shown twice:\n{}", term.screen());
+    term.send(ESC);
+    term.wait_for("Written.", WAIT);
+    assert!(!home.work().join("long.txt").exists());
+}
+
+#[test]
 fn esc_clears_a_steering_draft_before_it_stops_the_turn() {
     let words: Vec<String> = (1..=60).map(|i| format!("word{i}")).collect();
     let server = MockServer::start(vec![Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(300) }]);
