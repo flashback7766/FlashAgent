@@ -14,8 +14,8 @@ pub enum CallStyle {
     Native,
     /// Arrived as text and was recovered by the scanner.
     Recovered,
-    /// Made only when asked again, as the agent loop asks once after a failed
-    /// call is answered in prose.
+    /// Made only when asked again, as the agent loop asks once when a failed
+    /// call, or a step the request names, is answered in prose.
     AfterNudge,
 }
 
@@ -290,7 +290,7 @@ impl CheckReport {
             .any(|(_, o)| matches!(o, Outcome::Pass { style: CallStyle::Recovered, .. }))
     }
 
-    /// A failed call was retried only when asked again.
+    /// A call came only when the model was asked again.
     pub fn needed_nudge(&self) -> bool {
         self.results.iter().any(|(_, o)| matches!(o, Outcome::Pass { style: CallStyle::AfterNudge, .. }))
     }
@@ -330,7 +330,7 @@ impl CheckReport {
             "  {passed}/{total} — {}{}{}",
             self.verdict(),
             if self.needed_recovery() { " (calls recovered from text, not native)" } else { "" },
-            if self.needed_nudge() { " (retried a failed call only when asked again)" } else { "" }
+            if self.needed_nudge() { " (some calls made only when asked again)" } else { "" }
         ));
         out
     }
@@ -493,25 +493,22 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         name: "read_lines".into(),
         args_json: r#"{"path":"status.txt","count":1}"#.into(),
     }];
-    let turn = run_turn(
-        llm,
-        &[
-            system("You are a coding agent. Use the tools to do what is asked."),
-            ChatMessage::user(
-                "Read status.txt, then report the number it contains with report_status.",
-            ),
-            first,
-            ChatMessage::tool_result("call_2", "status = 7"),
-        ],
-        timeout,
-    )
-    .await;
-    results.push(("second_step".to_string(), judge_call(&turn, "report_status", |args| {
-        match args.get("code").and_then(|c| c.as_i64()) {
-            Some(7) => Ok(()),
-            other => Err(format!("code was {other:?}, expected 7 from the file")),
-        }
-    })));
+    let mut messages = vec![
+        system("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user("Read status.txt, then report the number it contains with report_status."),
+        first,
+        ChatMessage::tool_result("call_2", "status = 7"),
+    ];
+    let turn = run_turn(llm, &messages, timeout).await;
+    let mut answered = messages.clone();
+    answered.push(ChatMessage::assistant(turn.text.clone()));
+    let nudge = crate::loop_::named_tool_nudge(&answered, &probe_tools(), &turn.text);
+    let (turn, nudged) = nudged_once(llm, &mut messages, turn, nudge, timeout).await;
+    let outcome = judge_call(&turn, "report_status", |args| match args.get("code").and_then(|c| c.as_i64()) {
+        Some(7) => Ok(()),
+        other => Err(format!("code was {other:?}, expected 7 from the file")),
+    });
+    results.push(("second_step".to_string(), after_nudge(outcome, nudged)));
 
     // 6. Content with characters that break naive JSON encoding.
     const EXACT: &str = "line one\n\"quoted\"\nend";
@@ -553,17 +550,8 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
             "error: no such file: src/confg.rs (did you mean src/config.rs?)",
         ),
     ];
-    let mut turn = run_turn(llm, &messages, timeout).await;
-    let mut nudged = false;
-    // An answer in prose gets the one nudge the agent loop would send.
-    if turn.error.is_none() && turn.calls.is_empty() && !turn.text.trim().is_empty() {
-        messages.push(ChatMessage::assistant(turn.text.clone()));
-        messages.push(ChatMessage::user(crate::loop_::ERROR_NUDGE));
-        let first_secs = turn.secs;
-        turn = run_turn(llm, &messages, timeout).await;
-        turn.secs += first_secs;
-        nudged = true;
-    }
+    let turn = run_turn(llm, &messages, timeout).await;
+    let (turn, nudged) = nudged_once(llm, &mut messages, turn, Some(crate::loop_::ERROR_NUDGE.to_string()), timeout).await;
     let outcome = judge_call(&turn, "read_lines", |args| {
         match args.get("path").and_then(|p| p.as_str()) {
             Some(path) if path.ends_with("src/config.rs") => Ok(()),
@@ -571,11 +559,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
             None => Err("no path in the retry".to_string()),
         }
     });
-    results.push(("after_error".to_string(), match outcome {
-        Outcome::Pass { secs, .. } if nudged => Outcome::Pass { style: CallStyle::AfterNudge, secs },
-        Outcome::Fail { detail, secs } if nudged => Outcome::Fail { detail: format!("{detail} (asked twice)"), secs },
-        other => other,
-    }));
+    results.push(("after_error".to_string(), after_nudge(outcome, nudged)));
 
     // 8. Two files asked for at once: does the turn carry both calls?
     let turn = run_turn(
@@ -609,6 +593,29 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     ));
 
     CheckReport { model: model.to_string(), results }
+}
+
+/// An answer in prose gets the one nudge the agent loop would send, if any.
+async fn nudged_once(llm: &dyn LlmSource, messages: &mut Vec<ChatMessage>, turn: Turn, nudge: Option<String>, timeout: Duration) -> (Turn, bool) {
+    match nudge {
+        Some(nudge) if turn.error.is_none() && turn.calls.is_empty() && !turn.text.trim().is_empty() => {
+            messages.push(ChatMessage::assistant(turn.text.clone()));
+            messages.push(ChatMessage::user(nudge));
+            let mut next = run_turn(llm, messages, timeout).await;
+            next.secs += turn.secs;
+            (next, true)
+        }
+        _ => (turn, false),
+    }
+}
+
+fn after_nudge(outcome: Outcome, nudged: bool) -> Outcome {
+    match outcome {
+        Outcome::Pass { secs, .. } if nudged => Outcome::Pass { style: CallStyle::AfterNudge, secs },
+        Outcome::Fail { detail, secs } if nudged => Outcome::Fail { detail: format!("{detail} (asked twice)"), secs },
+        Outcome::Partial { detail, secs } if nudged => Outcome::Partial { detail: format!("{detail} (asked twice)"), secs },
+        other => other,
+    }
 }
 
 fn judge_call(
@@ -773,7 +780,7 @@ mod tests {
         assert_eq!(report.score(), (8, 8), "{:?}", report.results);
         assert!(report.needed_nudge());
         assert_eq!(report.results[6].1.detail().split(',').next(), Some("after a nudge"));
-        assert!(report.lines().last().unwrap().contains("retried a failed call only when asked again"));
+        assert!(report.lines().last().unwrap().contains("some calls made only when asked again"));
         assert_eq!(report.to_json()["needed_nudge"], true);
 
         let mut turns = perfect();
@@ -783,6 +790,24 @@ mod tests {
         assert_eq!(report.score(), (7, 8));
         assert!(report.results[6].1.detail().ends_with("(asked twice)"), "{}", report.results[6].1.detail());
         assert!(!run(perfect()).needed_nudge());
+    }
+
+    #[test]
+    fn a_named_step_made_only_when_reminded_passes_and_says_so() {
+        let mut turns = perfect();
+        // second_step: the number told in prose, then reported once reminded.
+        turns[4] = text("The number in status.txt is 7.");
+        turns.insert(5, call("report_status", r#"{"code":7}"#));
+        let report = run(turns);
+        assert_eq!(report.score(), (8, 8), "{:?}", report.results);
+        assert_eq!(report.results[4].1.detail().split(',').next(), Some("after a nudge"));
+
+        // A reply that asks the user something is left alone.
+        let mut turns = perfect();
+        turns[4] = text("Which file did you mean?");
+        let report = run(turns);
+        assert_eq!(report.score(), (7, 8));
+        assert!(!report.needed_nudge());
     }
 
     #[test]
