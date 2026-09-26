@@ -47,6 +47,29 @@ pub enum ServerKind {
     Other,
 }
 
+/// A context window as people name it: 128_000 and 131_072 are both 128K,
+/// a million is 1M. Divided by 1024 throughout, a million read "977k", while
+/// the status line said "1M" for the same model.
+pub fn token_count_label(tokens: usize) -> String {
+    if tokens >= 1_000_000 {
+        // 2_000_000 read "1.9M" when every million was 1_048_576.
+        let m = if tokens.is_multiple_of(1_048_576) { (tokens / 1_048_576) as f64 } else { tokens as f64 / 1_000_000.0 };
+        let text = format!("{m:.1}");
+        format!("{}M", text.strip_suffix(".0").unwrap_or(&text))
+    } else if tokens >= 1024 {
+        // A round thousand or a power of two is named exactly.
+        if tokens.is_multiple_of(1000) {
+            format!("{}K", tokens / 1_000)
+        } else if tokens.is_multiple_of(1024) {
+            format!("{}K", tokens / 1024)
+        } else {
+            format!("{}K", (tokens + 500) / 1_000)
+        }
+    } else {
+        tokens.to_string()
+    }
+}
+
 /// `listed` is `wanted` itself, or a dated snapshot of it: an alias such as
 /// `claude-haiku-4-5` names `claude-haiku-4-5-20251001`. Anything else with a
 /// longer name (`-pro`, `-mini`) is another model.
@@ -78,19 +101,10 @@ pub struct DiscoveredModel {
 }
 
 impl DiscoveredModel {
-    /// E.g. `131k ctx`.
+    /// E.g. `128k ctx`, `1M ctx`.
     pub fn context_display(&self) -> Option<String> {
         let len = self.context_length.or(self.max_context_length)?;
-        if len == 131_072 || len == 128_000 {
-            Some("128k ctx".to_string())
-        } else if len == 65_536 || len == 64_000 {
-            Some("64k ctx".to_string())
-        } else if len >= 1024 {
-            let k = (len + 512) / 1024;
-            Some(format!("{k}k ctx"))
-        } else {
-            Some(format!("{len} ctx"))
-        }
+        Some(format!("{} ctx", token_count_label(len).replace('K', "k")))
     }
 
     /// E.g. `128k ctx · tools · thinking: on [off,on]`.
