@@ -596,6 +596,8 @@ struct App {
     history_search: Option<flashagent_tui::HistorySearch>,
     current_draft: String,
     confirm_select: ConfirmSelect,
+    /// The call whose whole diff `v` already put in the conversation.
+    whole_change_shown: Option<String>,
     chat: ChatView,
     running: bool,
     active_turn_handle: Option<tokio::task::JoinHandle<()>>,
@@ -1100,6 +1102,7 @@ fn initial_app(init: InitialApp) -> App {
         history_search: None,
         current_draft: String::new(),
         confirm_select: ConfirmSelect::new(),
+        whole_change_shown: None,
         chat: ChatView::default(),
         running: false,
         active_turn_handle: None,

@@ -338,7 +338,40 @@ fn fit_status_row(width: usize, left: &str, provider: &str, gauge_str: &str) -> 
     status_row
 }
 
-fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameState<'_>, width: usize, inner_w: usize, border_color: &str) -> usize {
+/// The change an approval card asks about, one styled row per diff line.
+/// The card shows as many as fit; `v` puts them all in the conversation.
+pub(crate) fn diff_rows(diff: &str, inner_w: usize) -> Vec<String> {
+    diff.lines()
+        .filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ") && !l.starts_with("@@"))
+        .map(|line| {
+            let (color, prefix) = if line.starts_with('+') {
+                ("\x1b[38;2;145;205;140m", "+")
+            } else if line.starts_with('-') {
+                ("\x1b[38;2;225;115;105m", "-")
+            } else {
+                ("\x1b[38;2;135;130;125m", " ")
+            };
+            // Only the diff's own marker goes: the indentation is part of the change.
+            // A note above the diff ("outside the project: ...") has none.
+            let body = match line.as_bytes().first() {
+                Some(b'+' | b'-' | b' ') => &line[1..],
+                _ => line,
+            };
+            // Shown, never executed: an escape in the new text must not hide part of it.
+            let line_clean = card_safe(&body.replace('\t', "    "));
+            let line_clipped = clip_ansi(&line_clean, inner_w.saturating_sub(6));
+            format!("  {color}{prefix} {line_clipped}\x1b[0m")
+        })
+        .collect()
+}
+
+/// Diff rows the card has room for: the rest of the screen, less the card's
+/// own rows, the footer and a few lines of the conversation.
+fn approval_preview_rows(height: usize) -> usize {
+    height.saturating_sub(16).max(6)
+}
+
+fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameState<'_>, width: usize, height: usize, inner_w: usize, border_color: &str) -> usize {
     let req = gate.pending().expect("approval card needs a pending request");
     let reset = "\x1b[0m";
     // The composer becomes the approval card.
@@ -400,35 +433,16 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
 
     if let Some(ref diff) = req.diff {
         // The file is named on the target row; the preview rows are for the change.
-        let changed: Vec<&str> = diff
-            .lines()
-            .filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ") && !l.starts_with("@@"))
-            .collect();
-        for line in changed.iter().take(6) {
-            let (color, prefix) = if line.starts_with('+') {
-                ("\x1b[38;2;145;205;140m", "+")
-            } else if line.starts_with('-') {
-                ("\x1b[38;2;225;115;105m", "-")
-            } else {
-                ("\x1b[38;2;135;130;125m", " ")
-            };
-            // Only the diff's own marker goes: the indentation is part of the change.
-            // A note above the diff ("outside the project: ...") has none.
-            let body = match line.as_bytes().first() {
-                Some(b'+' | b'-' | b' ') => &line[1..],
-                _ => line,
-            };
-            // Shown, never executed: an escape in the new text must not hide part of it.
-            let line_clean = card_safe(&body.replace('\t', "    "));
-            let line_clipped = clip_ansi(&line_clean, inner_w.saturating_sub(6));
-            tail.push((
-                LineKind::System,
-                pad_box_row(&format!("  {color}{prefix} {line_clipped}\x1b[0m"), width),
-            ));
+        let rows = diff_rows(diff, inner_w);
+        let room = approval_preview_rows(height);
+        // A last row that would only say "+1 more line" shows that line instead.
+        let shown = if rows.len() <= room + 1 { rows.len() } else { room };
+        for row in &rows[..shown] {
+            tail.push((LineKind::System, pad_box_row(row, width)));
         }
-        if changed.len() > 6 {
-            let more = flashagent_tui::plural(changed.len() - 6, "more line", "more lines");
-            tail.push((LineKind::System, pad_box_row(&format!("    \x1b[38;2;100;95;90m+{more}\x1b[0m"), width)));
+        if rows.len() > shown {
+            let more = flashagent_tui::plural(rows.len() - shown, "more line", "more lines");
+            tail.push((LineKind::System, pad_box_row(&format!("    \x1b[38;2;100;95;90m+{more} · \x1b[38;2;225;175;95mv\x1b[38;2;100;95;90m shows the whole change\x1b[0m"), width)));
         }
     }
 
@@ -810,7 +824,7 @@ impl Renderer {
         let mut text_cursor: Option<u16> = None;
 
         if gate.pending().is_some() {
-            input_line_idx = append_approval_card(&mut tail, gate, &st, width, inner_w, &border_color);
+            input_line_idx = append_approval_card(&mut tail, gate, &st, width, height as usize, inner_w, &border_color);
         } else if st.channel_prompt.is_some() {
             input_line_idx = append_channel_card(&mut tail, &st, width, inner_w, t);
         } else if question_gate.pending().is_some() {

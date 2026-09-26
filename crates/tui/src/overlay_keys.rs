@@ -19,7 +19,12 @@ impl App {
     /// approval over open settings takes Enter. `Flow::Next` means none claimed it.
     pub(crate) async fn handle_overlay_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Flow {
         if cx.gate.pending().is_some() {
-            self.approval_key(cx, code, mods);
+            // The conversation above stays readable while the card waits.
+            if matches!(code, KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End) {
+                self.scroll_key(code, mods);
+            } else {
+                self.approval_key(cx, code, mods);
+            }
             self.renderer.request_reprint();
             return Flow::Continue;
         }
@@ -97,6 +102,7 @@ impl App {
             KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('\u{0444}') | KeyCode::Char('\u{0424}') => {
                 self.allow_always(cx);
             }
+            KeyCode::Char('v') | KeyCode::Char('V') | KeyCode::Char('\u{043c}') | KeyCode::Char('\u{041c}') => self.show_whole_change(cx),
             KeyCode::Enter if self.confirm_select.choice() == ConfirmChoice::Always => self.allow_always(cx),
             KeyCode::Enter => {
                 cx.gate.respond(self.confirm_select.decision());
@@ -107,6 +113,23 @@ impl App {
             KeyCode::Tab | KeyCode::Up | KeyCode::Down => self.confirm_select.toggle(),
             _ => {}
         }
+    }
+
+    /// The whole diff, into the conversation above the card, once per call:
+    /// the card has room for only part of a long change.
+    fn show_whole_change(&mut self, cx: &LoopCtx<'_>) {
+        let Some(req) = cx.gate.pending() else { return };
+        let Some(diff) = req.diff.as_deref() else { return };
+        if self.whole_change_shown.as_deref() == Some(req.args_json.as_str()) {
+            return;
+        }
+        let (width, _) = crossterm::terminal::size().unwrap_or((100, 24));
+        self.chat.push_line(LineKind::System, format!("  \x1b[1;38;2;225;175;95mThe whole change\x1b[0m \x1b[38;2;135;130;125m· {}\x1b[0m", req.tool));
+        for row in crate::render::diff_rows(diff, (width as usize).saturating_sub(2)) {
+            self.chat.push_line(LineKind::System, row);
+        }
+        self.whole_change_shown = Some(req.args_json.clone());
+        self.renderer.scroll_to_bottom();
     }
 
     fn allow_always(&mut self, cx: &LoopCtx<'_>) {
