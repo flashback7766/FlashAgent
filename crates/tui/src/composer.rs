@@ -63,6 +63,16 @@ pub struct ComposerLayout {
     pub hidden_below: usize,
 }
 
+/// Letters, digits, `_`, and symbols outside ASCII such as emoji: Ctrl+W
+/// took emoji for spaces and deleted them with the word before. ASCII and
+/// typographic punctuation still end a word.
+fn is_word_grapheme(g: &str) -> bool {
+    g == "_"
+        || g.chars().any(|c| {
+            c.is_alphanumeric() || (!c.is_ascii() && !c.is_whitespace() && !"…—–«»“”„‘’‚·".contains(c) && !c.is_control())
+        })
+}
+
 impl Composer {
     pub fn new() -> Self {
         Self::default()
@@ -150,7 +160,7 @@ impl Composer {
         let mut seen_word = false;
         let mut end = rest.len();
         for (i, g) in rest.grapheme_indices(true) {
-            let is_word = g.chars().any(char::is_alphanumeric) || g == "_";
+            let is_word = is_word_grapheme(g);
             if seen_word && !is_word {
                 end = i;
                 break;
@@ -285,7 +295,7 @@ impl Composer {
         let mut start = at;
         let mut seen_word = false;
         for (i, g) in self.text[..at].grapheme_indices(true).rev() {
-            let is_word = g.chars().any(char::is_alphanumeric) || g == "_";
+            let is_word = is_word_grapheme(g);
             if seen_word && !is_word {
                 break;
             }
@@ -428,6 +438,18 @@ mod tests {
         // At the very end the same, with nothing after it.
         let layout = at("abcde", 5).layout(5, 10);
         assert_eq!((layout.cursor_row, layout.cursor_col), (1, 0));
+    }
+
+    #[test]
+    fn ctrl_w_takes_emoji_as_a_word_of_their_own() {
+        let mut c = Composer::from("abc 你好世界 🎉👍 emoji");
+        for expected in ["abc 你好世界 🎉👍 ", "abc 你好世界 ", "abc ", ""] {
+            c.delete_word_before();
+            assert_eq!(c.text(), expected);
+        }
+        let mut c = Composer::from("say «hello»");
+        c.delete_word_before();
+        assert_eq!(c.text(), "say «", "quote marks around a word are not part of it");
     }
 
     #[test]
