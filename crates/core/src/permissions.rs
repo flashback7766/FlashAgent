@@ -950,9 +950,9 @@ impl PermissionedTools {
 }
 
 /// A call the permission rules refused, before its reason.
-pub(crate) const DENIED: &str = "denied by permissions: ";
+pub const DENIED: &str = "denied by permissions: ";
 /// A small model read "denied by user" as a privilege error and asked for sudo.
-pub(crate) const DECLINED: &str = "The user declined this call. Do not retry it and do not look for a way around it — ask them what they would prefer, or carry on with what you can do without it.";
+pub const DECLINED: &str = "The user declined this call. Do not retry it and do not look for a way around it — ask them what they would prefer, or carry on with what you can do without it.";
 
 #[async_trait]
 impl ToolExec for PermissionedTools {

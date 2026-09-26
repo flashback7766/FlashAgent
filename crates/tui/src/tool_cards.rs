@@ -234,9 +234,12 @@ impl ChatView {
             .map(|f| format!(" {FAINT}·{OFF} {MUTED}{f}{OFF}"))
             .unwrap_or_default();
         let run = format!("  {FAINT}{TOOL_MARK}{OFF} {MUTED}{header}{OFF}{facts} {}", chevron());
+        // The model's own words stay as it wrote them, in whatever language and
+        // form: "Failed to" in front made "Failed to running the tests".
         let labels = Labels {
             done: run.clone(),
-            fail: failed_line(&format!("Failed to {}", lower_first(header)), None),
+            // What it would have changed did not happen, so its size is left out.
+            fail: format!("  {FAILED}{TOOL_MARK}{OFF} {MUTED}{header}{OFF} {FAINT}\u{b7}{OFF} {FAILED}failed{OFF} {}", chevron()),
             run,
         };
         self.push_card(name, args_json, labels);
@@ -456,12 +459,36 @@ impl ChatView {
         let total = calls.len().max(1);
         let all_failed = failed > 0 && failed >= total;
         let Some(mut group) = self.lines[i].tool_group.take() else { return };
+        // Refused or stopped, the call did not fail: it did not run. It says so
+        // after what it was about to do, not in red.
+        let refused = if is_error && total == 1 { result.and_then(not_run_note) } else { None };
+        let running = self.lines[i].text.clone();
         let text = finished_text(&mut group, is_error, failed, total);
         let grouped = !matches!(group, ToolGroupKind::Custom { .. } | ToolGroupKind::Generic { .. } | ToolGroupKind::Memory { .. });
         let shown_as_error = if grouped { all_failed } else { is_error };
-        self.lines[i].kind = if shown_as_error { LineKind::ToolError } else { LineKind::Tool };
-        self.lines[i].text = text;
+        self.lines[i].kind = if shown_as_error && refused.is_none() { LineKind::ToolError } else { LineKind::Tool };
+        self.lines[i].text = match refused {
+            Some(note) => {
+                let what = running.trim_end().strip_suffix(&chevron()).unwrap_or(&running).trim_end().to_string();
+                format!("{what} {FAINT}\u{b7}{OFF} {MUTED}{note}{OFF} {}", chevron())
+            }
+            None => text,
+        };
         self.lines[i].tool_group = Some(group);
+    }
+}
+
+/// What a call that never ran says about it: the user said no, the rules
+/// did, or Esc stopped it.
+fn not_run_note(result: &str) -> Option<&'static str> {
+    if result == flashagent_core::permissions::DECLINED {
+        Some("declined")
+    } else if result.starts_with(flashagent_core::permissions::DENIED) {
+        Some("not allowed")
+    } else if result == flashagent_core::CANCELLED_RESULT {
+        Some("stopped")
+    } else {
+        None
     }
 }
 
@@ -546,6 +573,28 @@ mod tests {
 
     fn text_of(chat: &ChatView) -> String {
         strip_ansi(&chat.lines.last().expect("a line was opened").text)
+    }
+
+    #[test]
+    fn a_failed_call_keeps_the_models_words_and_a_refused_one_is_not_a_failure() {
+        // "Failed to running the test suite", "Failed to запускаю тесты".
+        for header in ["Running the test suite", "Запускаю тесты"] {
+            let mut chat = started("read_file", &format!(r#"{{"header":"{header}","path":"a.rs"}}"#));
+            chat.tool_finished(true, 5, Some("error: no such file"));
+            assert_eq!(text_of(&chat), format!("  ▸ {header} · failed ›"));
+            assert_eq!(chat.lines.last().unwrap().kind, LineKind::ToolError);
+        }
+        for (result, note) in [
+            (flashagent_core::permissions::DECLINED.to_string(), "declined"),
+            (format!("{}writes outside the project", flashagent_core::permissions::DENIED), "not allowed"),
+            (flashagent_core::CANCELLED_RESULT.to_string(), "stopped"),
+        ] {
+            let mut chat = started("run_shell", r#"{"header":"Запускаю тесты","command":"cargo test"}"#);
+            chat.tool_finished(true, 5, Some(&result));
+            let line = text_of(&chat);
+            assert!(line.ends_with(&format!("· {note} ›")) && !line.contains("Failed"), "{line}");
+            assert_eq!(chat.lines.last().unwrap().kind, LineKind::Tool, "{note}: not shown as an error");
+        }
     }
 
     #[test]

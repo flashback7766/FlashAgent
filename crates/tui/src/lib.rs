@@ -2157,10 +2157,8 @@ hm".into()));
         });
         // The expanded diff renders under the line; check the whole frame.
         let failed = collapsed(&v);
-        assert!(
-            failed.contains("Failed to add the missing null check to parser.rs"),
-            "{failed}"
-        );
+        assert!(failed.contains("Add the missing null check to parser.rs · failed"), "{failed}");
+        assert!(!failed.contains("Failed to"), "{failed}");
     }
 
     #[test]
@@ -2174,13 +2172,6 @@ hm".into()));
         let line = strip_ansi(&v.render(120)[0].1);
         assert!(line.contains("Running"), "{line}");
         assert!(line.contains("cargo test"), "{line}");
-    }
-
-    #[test]
-    fn an_identifier_is_not_lower_cased_into_nonsense() {
-        assert_eq!(lower_first("Add a null check"), "add a null check");
-        assert_eq!(lower_first("MEMORY.md needs a line"), "MEMORY.md needs a line");
-        assert_eq!(lower_first(""), "");
     }
 
     #[test]

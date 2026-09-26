@@ -267,20 +267,6 @@ pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     wrap_styled(text, width)
 }
 
-/// So it can follow "Failed to". Identifiers like `MEMORY.md` are left alone.
-pub fn lower_first(text: &str) -> String {
-    let mut chars = text.chars();
-    let Some(first) = chars.next() else {
-        return String::new();
-    };
-    let rest: String = chars.collect();
-    let second_is_upper = rest.chars().next().is_some_and(|c| c.is_uppercase());
-    if second_is_upper {
-        return text.to_string();
-    }
-    first.to_lowercase().collect::<String>() + &rest
-}
-
 /// Models return absolute paths; the part up to the project is noise.
 pub fn relative_to_cwd(text: &str) -> String {
     match std::env::current_dir() {

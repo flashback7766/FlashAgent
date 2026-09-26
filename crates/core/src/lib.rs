@@ -26,7 +26,7 @@ pub use context_usage::{
 pub use diff::unified;
 pub use flashagent_llm::base64_encode;
 pub use effort_memory::{EffortMemory, ModelBias, TurnOutcome};
-pub use loop_::{is_prompt, AgentLoop, DoneReason, LoopConfig, LoopError, LoopEvent, LlmSource, ToolExec, ToolOutput, WritePreview};
+pub use loop_::{is_prompt, AgentLoop, CANCELLED_RESULT, DoneReason, LoopConfig, LoopError, LoopEvent, LlmSource, ToolExec, ToolOutput, WritePreview};
 pub use memory_store::{Entry as MemoryEntry, Kind as MemoryEntryKind, Scope as MemoryScope, Store as MemoryStore};
 pub use memory::{collect, injection_block, outline, MemoryDoc, MemoryKind, GLOBAL_FILENAME};
 pub use paths::{expand_home, resolve_path};
