@@ -267,6 +267,14 @@ pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     wrap_styled(text, width)
 }
 
+/// Every word of `query` is somewhere in `text`, in any order and case:
+/// "claude son" finds anthropic/claude-sonnet-5. As one string it found
+/// nothing among 458 models.
+pub fn matches_words(text: &str, query: &str) -> bool {
+    let text = text.to_lowercase();
+    query.split_whitespace().all(|word| text.contains(&word.to_lowercase()))
+}
+
 /// Models return absolute paths; the part up to the project is noise.
 pub fn relative_to_cwd(text: &str) -> String {
     match std::env::current_dir() {

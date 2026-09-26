@@ -154,14 +154,12 @@ impl<T> SelectMenu<T> {
         if self.filter.is_empty() {
             return (0..self.items.len()).collect();
         }
-        let q = self.filter.to_lowercase();
         self.items
             .iter()
             .enumerate()
             .filter(|(_, it)| {
-                it.label.to_lowercase().contains(&q)
-                    || it.description.as_ref().is_some_and(|d| d.to_lowercase().contains(&q))
-                    || it.search_text.as_ref().is_some_and(|t| t.to_lowercase().contains(&q))
+                let text = format!("{}\n{}\n{}", it.label, it.description.as_deref().unwrap_or(""), it.search_text.as_deref().unwrap_or(""));
+                crate::matches_words(&text, &self.filter)
             })
             .map(|(idx, _)| idx)
             .collect()
@@ -366,6 +364,24 @@ impl<T> SelectMenu<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_search_of_several_words_finds_them_in_any_order() {
+        let items: Vec<SelectItem<usize>> = ["anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "openai/gpt-5"]
+            .iter()
+            .enumerate()
+            .map(|(i, m)| SelectItem::new(*m, i))
+            .collect();
+        let mut menu = SelectMenu::new("Select model", items);
+        for query in ["claude son", "sonnet 5", "SON claude"] {
+            menu.filter = query.into();
+            assert_eq!(menu.filtered_indices(), vec![0], "{query}");
+        }
+        menu.filter = "claude".into();
+        assert_eq!(menu.filtered_indices(), vec![0, 1]);
+        menu.filter = "claude gpt".into();
+        assert!(menu.filtered_indices().is_empty());
+    }
 
     #[test]
     fn a_menu_keeps_its_title_and_selection_on_a_short_screen() {
