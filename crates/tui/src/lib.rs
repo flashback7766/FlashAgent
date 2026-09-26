@@ -76,6 +76,8 @@ pub enum UiEvent {
         result: Result<(Vec<ChatMessage>, DoneReason), (String, Vec<ChatMessage>)>,
     },
     ServerDiscovered(ServerDiscovery),
+    /// A look at the server at this address got no answer (or an empty list).
+    ServerSilent(String),
     /// The client now talks to the provider at `url`, and this is what that
     /// server said it runs; `None` if it did not answer.
     ProviderReady { url: String, discovery: Option<ServerDiscovery> },
