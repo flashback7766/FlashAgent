@@ -103,7 +103,8 @@ pub fn model_after_switch(saved: &str, disc: Option<&ServerDiscovery>, keyed: bo
     if !wanted.is_empty() {
         let exact = disc.models.iter().find(|m| bare(&m.id) == wanted);
         if !pick_for_user {
-            return exact.map_or_else(|| saved.to_string(), |m| m.id.clone());
+            let snapshot = || disc.models.iter().find(|m| flashagent_llm::thinking::same_model(&bare(&m.id), &wanted));
+            return exact.or_else(snapshot).map_or_else(|| saved.to_string(), |m| m.id.clone());
         }
         let longer = || disc.models.iter().filter(|m| bare(&m.id).contains(&wanted)).min_by_key(|m| m.id.len());
         let shorter = || disc.models.iter().filter(|m| wanted.contains(&bare(&m.id))).max_by_key(|m| m.id.len());
@@ -631,6 +632,9 @@ mod tests {
         // A server that takes a key bills by the model: only the exact name counts.
         assert_eq!(model_after_switch("gone-model", Some(&unloaded), true), "gone-model", "kept, not swapped");
         assert_eq!(model_after_switch("fir", Some(&unloaded), true), "fir", "a part is not completed");
+        let dated = discovery(vec![model("claude-haiku-4-5-20251001", false), model("gpt-5-pro", false)], None);
+        assert_eq!(model_after_switch("claude-haiku-4-5", Some(&dated), true), "claude-haiku-4-5-20251001", "an alias finds its dated snapshot");
+        assert_eq!(model_after_switch("gpt-5", Some(&dated), true), "gpt-5", "a longer name is another model");
         assert_eq!(model_after_switch("SECOND", Some(&unloaded), true), "second");
         assert_eq!(model_after_switch("", Some(&unloaded), true), "first", "nothing saved: the server's first");
     }

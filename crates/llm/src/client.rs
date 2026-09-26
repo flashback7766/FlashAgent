@@ -263,7 +263,10 @@ impl Client {
         // name is never chosen for them, however close its name. A typo stays
         // a typo, and the request says so. A local server serves what it has.
         let pick_for_user = current.is_empty() || kind.runs_local_models() || endpoint.api_key.is_none();
-        let similar = |m: &DiscoveredModel| pick_for_user && !current.is_empty() && (m.id.contains(&current) || current.contains(&m.id));
+        let similar = |m: &DiscoveredModel| {
+            !current.is_empty()
+                && if pick_for_user { m.id.contains(&current) || current.contains(&m.id) } else { crate::thinking::same_model(&m.id, &current) }
+        };
         let active = models
             .iter()
             .find(|m| (m.is_loaded || on_demand) && exact(m))
@@ -527,6 +530,10 @@ mod tests {
         let disc = cloud.settle_discovery(0, models(), ServerKind::Other, None).unwrap();
         assert_eq!(cloud.model(), "stealth/space-bunny-alfa");
         assert!(disc.active_model.is_none());
+        // A dated snapshot of the name is the same model; -pro is another.
+        assert!(crate::thinking::same_model("claude-haiku-4-5-20251001", "claude-haiku-4-5"));
+        assert!(crate::thinking::same_model("gpt-4o-2024-08-06", "gpt-4o"));
+        assert!(!crate::thinking::same_model("gpt-5-pro", "gpt-5") && !crate::thinking::same_model("gpt-4o-audio-preview", "gpt-4o"));
         // A part of a name is not completed to a model the user did not name either.
         let cloud = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://openrouter.ai/api/v1", Some("k".into())), "stealth/space-bunny");
         cloud.settle_discovery(0, models(), ServerKind::Other, None);
