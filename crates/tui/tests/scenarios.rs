@@ -909,6 +909,41 @@ fn the_command_palette_and_model_menu_fit_an_80_by_24_terminal() {
 }
 
 #[test]
+fn the_prompt_edits_as_a_shell_does_and_ctrl_u_does_not_update() {
+    // Ctrl+U checked for, downloaded and installed an update; Ctrl+E opened an editor.
+    let server = MockServer::start(vec![Reply::Text("Heard.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+    term.type_text("half typed prompt");
+    term.send("\x01"); // Ctrl+A
+    term.send("\x05"); // Ctrl+E
+    term.type_text(" end");
+    term.wait_for("half typed prompt end", WAIT);
+    term.send("\x15"); // Ctrl+U
+    term.wait_gone("half typed prompt end", WAIT);
+    assert!(!term.screen().contains("checking the"), "Ctrl+U started an update:\n{}", term.screen());
+    term.type_text("clean");
+    term.send(ENTER);
+    term.wait_for("Heard.", WAIT);
+    assert!(sent(&server.turns()[0]).contains("clean") && !sent(&server.turns()[0]).contains("half typed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_x_ctrl_e_writes_the_prompt_in_an_external_editor() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let editor = home.path().join("editor.sh");
+    std::fs::write(&editor, "#!/bin/sh\necho 'from the editor' > \"$1\"\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let term = ready_with(&home, &server, serde_json::json!({ "external_editor": editor.to_str().unwrap() }));
+    term.send("\x18"); // Ctrl+X
+    term.send("\x05"); // Ctrl+E
+    term.wait_for("from the editor", WAIT);
+}
+
+#[test]
 fn esc_clears_a_steering_draft_before_it_stops_the_turn() {
     let words: Vec<String> = (1..=60).map(|i| format!("word{i}")).collect();
     let server = MockServer::start(vec![Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(300) }]);

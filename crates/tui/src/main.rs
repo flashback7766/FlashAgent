@@ -598,6 +598,8 @@ struct App {
     confirm_select: ConfirmSelect,
     /// The call whose whole diff `v` already put in the conversation.
     whole_change_shown: Option<String>,
+    /// Ctrl+X, waiting for Ctrl+E.
+    ctrl_x_at: Option<std::time::Instant>,
     chat: ChatView,
     running: bool,
     active_turn_handle: Option<tokio::task::JoinHandle<()>>,
@@ -655,7 +657,7 @@ struct App {
     pending_resume: Option<String>,
     /// Background or manual.
     update_progress: Option<(String, flashagent_svc::updater::UpdateProgress)>,
-    /// Ctrl+U or /update; until then a background update goes unannounced.
+    /// /update; until then a background update goes unannounced.
     update_watched: bool,
     turn_phase: TurnPhase,
     /// Per-model correction of auto effort, learned from how turns went.
@@ -715,7 +717,7 @@ static INPUT_PAUSED: AtomicBool = AtomicBool::new(false);
 
 /// The editor setting, or `$VISUAL`, `$EDITOR` and the platform's own. The
 /// default setting is the text `$EDITOR`, which is not a program: run as one,
-/// Ctrl+E failed on every fresh config.
+/// The external editor failed on every fresh config.
 fn editor_command(preferred_editor: &str) -> String {
     let configured = preferred_editor.trim();
     if !configured.is_empty() && !matches!(configured, "$EDITOR" | "$VISUAL" | "${EDITOR}" | "${VISUAL}") {
@@ -1103,6 +1105,7 @@ fn initial_app(init: InitialApp) -> App {
         current_draft: String::new(),
         confirm_select: ConfirmSelect::new(),
         whole_change_shown: None,
+        ctrl_x_at: None,
         chat: ChatView::default(),
         running: false,
         active_turn_handle: None,
@@ -1231,7 +1234,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     let (channel_probe_tx, channel_probes) = tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
     let (update_tx, updates) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
     let (channel_watch_tx, channel_watch_rx) = tokio::sync::watch::channel(ctx.config.update_channel);
-    // The background updater and Ctrl+U both claim this, so they never download
+    // The background updater and /update both claim this, so they never download
     // over each other.
     let update_busy = Arc::new(AtomicBool::new(false));
     start_background_updates(ctx.config.auto_check_updates, channel_watch_rx, update_tx.clone(), update_busy.clone());

@@ -156,7 +156,7 @@ impl App {
                 view.config.update_channel = sw.to;
             }
             self.background = Some(BackgroundNotice::sticky(format!(
-                "Release channel is now {} \u{b7} press Ctrl+U to move to it",
+                "Release channel is now {} \u{b7} /update moves to it",
                 sw.to.label()
             )));
         } else {

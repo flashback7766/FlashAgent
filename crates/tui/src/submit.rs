@@ -16,12 +16,12 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/rewind [n]", "files and conversation go back to before turn n"),
     ("/diff, /commit <msg>", "git diff --stat; commit the staged changes"),
     ("/export [md|html|jsonl]", "write the conversation to a file"),
-    ("/editor, Ctrl+E", "write the prompt in an external editor"),
+    ("/editor, Ctrl+X Ctrl+E", "write the prompt in an external editor"),
     ("/mcp [list|market|test|add|reload]", "Model Context Protocol servers"),
     ("/tasks", "background commands: their output, and stopping one"),
     ("/sampling", "sampling parameters (advanced)"),
     ("/skill:<name>", "run a skill from .agents/skills/"),
-    ("/update, Ctrl+U", "check for, download and install an update"),
+    ("/update", "check for, download and install an update"),
     ("/channel <stable|beta>", "switch the release channel"),
     ("/clear", "clear the screen and scrollback"),
     ("/uninstall", "close FlashAgent and remove it; asks what data to delete"),
@@ -31,7 +31,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
 const HELP_KEYS: &[(&str, &str)] = &[
     ("Enter", "send; while a turn runs, steer it"),
     ("Alt+Enter, Ctrl+J, \\ Enter", "a new line in the prompt"),
-    ("\u{2190}/\u{2192}, Home/End, Ctrl+W, Alt+K", "move and delete in the prompt"),
+    ("\u{2190}/\u{2192}, Home/End, Ctrl+A/E, Ctrl+W, Ctrl+U, Alt+K", "move and delete in the prompt, as in a shell"),
     ("Ctrl+F", "search the prompts sent before"),
     ("Ctrl+V", "paste a screenshot (Ctrl+Z takes it back); dropping an image works too"),
     ("Ctrl+K", "every command and menu, searchable"),
@@ -156,7 +156,7 @@ impl App {
                 if flashagent_svc::updater::is_dev_mode() {
                     self.chat.push_system("  \x1b[38;2;225;175;95mAuto-updater is disabled in dev mode\x1b[0m (running from source repository / cargo build).\n  To update your dev build, pull latest git commits and run `cargo build --release`.");
                 } else {
-                    // Same as Ctrl+U.
+                    // Watches one already under way, or starts one.
                     self.start_or_watch_update(cx);
                 }
             }

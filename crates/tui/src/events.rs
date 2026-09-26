@@ -115,14 +115,14 @@ impl App {
             UpdateNotice::Available { version, asset_name, download_url, checksums_url } => {
                 self.pending_update = Some((version.clone(), asset_name, download_url, checksums_url));
                 self.background = Some(BackgroundNotice::sticky(format!(
-                    "Update available: {version} · press Ctrl+U to install"
+                    "Update available: {version} · /update installs it"
                 )));
                 if let Some(s) = self.settings_view_mut() {
-                    s.update_check_status = Some(format!("Available: {version} (Press Ctrl+U)"));
+                    s.update_check_status = Some(format!("Available: {version} (/update)"));
                 }
             }
             UpdateNotice::Progress { version, stage } => {
-                // Kept either way, so Ctrl+U can show a download that started unasked.
+                // Kept either way, so /update can show a download that started unasked.
                 if self.update_watched {
                     BackgroundNotice::update_sticky(&mut self.background, update_progress_line(&version, stage));
                 }
