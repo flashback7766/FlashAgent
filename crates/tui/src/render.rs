@@ -970,6 +970,7 @@ impl Renderer {
 impl App {
     pub(crate) fn draw(&mut self, cx: &LoopCtx<'_>, autocomplete: Option<&AutocompletePopup>) {
         anim::set_enabled(self.config.animations);
+        self.chat.set_awaiting_user(cx.gate.pending().is_some() || cx.question_gate.pending().is_some());
         self.show_progress(cx);
         // Read every frame, so leaving settings without saving restores the theme;
         // while Settings is open, the theme picked there is the one shown.
