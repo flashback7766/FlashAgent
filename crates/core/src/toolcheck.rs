@@ -245,10 +245,15 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
     }
 }
 
-fn parsed_args(raw: &str) -> Option<serde_json::Value> {
-    flashagent_llm::effective_args(raw, "")
+/// As the agent loop runs them: repaired, and typed to the tool's schema.
+fn parsed_args(tool: &str, raw: &str) -> Option<serde_json::Value> {
+    let mut args = flashagent_llm::effective_args(raw, "")
         .or_else(|| serde_json::from_str(raw).ok())
-        .or_else(|| flashagent_llm::repair_json(raw).and_then(|r| serde_json::from_str(&r).ok()))
+        .or_else(|| flashagent_llm::repair_json(raw).and_then(|r| serde_json::from_str(&r).ok()))?;
+    if let Some(schema) = probe_tools().iter().find(|t| t.name == tool).and_then(|t| serde_json::from_str(&t.parameters_json).ok()) {
+        flashagent_llm::repair::coerce_to_schema(&mut args, &schema);
+    }
+    Some(args)
 }
 
 fn snippet(text: &str) -> String {
@@ -626,7 +631,7 @@ fn judge_call(
             secs: turn.secs,
         };
     }
-    let Some(parsed) = parsed_args(args) else {
+    let Some(parsed) = parsed_args(name, args) else {
         return Outcome::Partial {
             detail: format!("arguments were not JSON: {}", snippet(args)),
             secs: turn.secs,
@@ -795,6 +800,14 @@ mod tests {
         let systems = seen.0.lock().unwrap();
         assert!(systems.len() >= 8);
         assert!(systems.iter().all(|s| s.ends_with(crate::prompt::TOOL_CALL_RULES)), "{systems:?}");
+    }
+
+    #[test]
+    fn a_quoted_number_counts_as_the_number_the_agent_would_run() {
+        let mut turns = perfect();
+        turns[0] = call("report_status", r#"{"code":"42"}"#);
+        turns[1] = call("read_lines", r#"{"path":"src/main.rs","count":"20"}"#);
+        assert_eq!(run(turns).score(), (8, 8));
     }
 
     #[test]
