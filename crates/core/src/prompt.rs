@@ -48,7 +48,8 @@ impl SystemPromptConfig {
 /// fail here most: they explain an error instead of acting on it, stop after
 /// the first step, or drop line breaks from file content. Each line was
 /// measured on seven small models, and the list is short on purpose: a longer
-/// one made llama3.2 3B describe a tool result instead of answering from it.
+/// one made llama3.2 3B describe a tool result instead of answering from it,
+/// and "do not explain the error" is what got qwen3 1.7B to retry a call.
 /// Argument types are not mentioned: asked for numbers as numbers, llama3.2
 /// quoted them, and a quoted number is converted anyway
 /// (`llm::coerce_to_schema`). gemma4:e2b made one call where two were asked
@@ -57,7 +58,7 @@ pub const TOOL_CALL_RULES: &str = "CALLING TOOLS:\n\
      - Call tools by their listed names, with the argument names their schema gives.\n\
      - When a result answers the question, answer from it. When the request has another step, make its call at once.\n\
      - Calls that do not depend on each other, such as reading two files, go in the same reply, one call each.\n\
-     - When a call fails, read the error and make a corrected call: the path, name or argument it points to. Do not apologise or stop.\n\
+     - When a call fails, do not explain the error: make a corrected call, fixing the path, name or argument it points to.\n\
      - Content you write to a file is its exact text.";
 
 pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
