@@ -41,6 +41,25 @@ runs. The report says when that happened: it is slower and more fragile than a
 native call, and a model that needs it will break on a backend without the
 recovery.
 
+The model is tested as the agent runs it, no more and no less:
+
+- **The same rules.** Every scenario's system prompt ends with the rules the
+  agent gives a model for calling tools (one step after another, independent
+  calls together, a failed call corrected rather than apologised for).
+- **The same repairs.** A call is judged after the repairs the loop makes
+  before it runs one: `"20"` where the schema asks for a number becomes 20, and
+  a lone argument under the wrong name (`status` where `code` is required and
+  missing) takes the required name.
+- **The same reminders.** Where the loop asks a model once more, the test does
+  too, once: when a failed call is answered in prose (*recovers from a failed
+  call*), and when the model stops before a call the request names (*moves on
+  to the next tool*: "...then report it with report_status"). A pass that
+  needed it is marked **after a nudge**: the work gets done, one round trip
+  later.
+- **The server's failures are not the model's.** A scenario the server refused
+  (a rate limit, a 5xx, a dropped connection) is marked `--` and *not tested*,
+  and the verdict says the run is *incomplete*.
+
 ## Results
 
 Raw per-scenario output: [`docs/tool-calling/results-2026-09-12.json`](tool-calling/results-2026-09-12.json).
