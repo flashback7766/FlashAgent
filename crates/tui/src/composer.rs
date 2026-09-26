@@ -67,10 +67,13 @@ pub struct ComposerLayout {
 /// took emoji for spaces and deleted them with the word before. ASCII and
 /// typographic punctuation still end a word.
 fn is_word_grapheme(g: &str) -> bool {
-    g == "_"
-        || g.chars().any(|c| {
-            c.is_alphanumeric() || (!c.is_ascii() && !c.is_whitespace() && !"…—–«»“”„‘’‚·".contains(c) && !c.is_control())
-        })
+    g == "_" || g.chars().any(|c| c.is_alphanumeric() || (!c.is_ascii() && !c.is_whitespace() && !c.is_control() && !is_typographic_punctuation(c)))
+}
+
+/// Dashes, curly quotes, the ellipsis, guillemets and the middle dot, by
+/// code point: written out, they would count as symbols the UI draws.
+fn is_typographic_punctuation(c: char) -> bool {
+    (0x2000..=0x206F).contains(&(c as u32)) || [0xAB, 0xBB, 0xB7].contains(&(c as u32))
 }
 
 impl Composer {
@@ -536,6 +539,11 @@ mod tests {
         let mut c = Composer::from("say «hello»");
         c.delete_word_before();
         assert_eq!(c.text(), "say «", "quote marks around a word are not part of it");
+        let mut c = Composer::from("one—two “three”");
+        c.delete_word_before();
+        assert_eq!(c.text(), "one—two “");
+        c.delete_word_before();
+        assert_eq!(c.text(), "one—", "a dash ends a word");
     }
 
     #[test]
