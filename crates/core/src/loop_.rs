@@ -706,19 +706,26 @@ pub(crate) fn named_tool_nudge(history: &[ChatMessage], specs: &[ToolSpec], repl
     if called.is_empty() {
         return None;
     }
-    let prompt = history[start].content.to_lowercase();
+    let prompt = &history[start].content;
     let (_, name) = specs
         .iter()
         .filter(|s| !called.contains(s.name.as_str()))
-        .filter_map(|s| asks_for_call(&prompt, &s.name.to_lowercase()).map(|at| (at, &s.name)))
+        .filter_map(|s| asks_for_call(prompt, &s.name).map(|at| (at, &s.name)))
         .min_by_key(|(at, _)| *at)?;
     Some(format!("{NAMED_NUDGE_HEAD}{name}, and you have not made it. Make that call now. If it is not needed after all, say why in one sentence."))
 }
 
-/// Where `prompt` asks for a call to the tool `name`, if it does.
+/// A sentence with one of these asks for a call only in some case: "ask the
+/// user with ask_user only when you are blocked" (the /goal directive).
+const CONDITION_WORDS: &[&str] = &["if", "when", "whenever", "only", "unless", "если", "когда", "только"];
+
+/// Where `prompt` asks for a call to the tool `name`, if it does. Case is
+/// ignored.
 fn asks_for_call(prompt: &str, name: &str) -> Option<usize> {
+    let (prompt, name) = (&prompt.to_lowercase(), &name.to_lowercase());
     let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     let quote = |c: char| c == '`' || c == '"' || c == '\'' || c.is_whitespace();
+    let ends = [". ", "! ", "? ", "; ", "\n"];
     prompt.match_indices(name).map(|(at, _)| at).find(|&at| {
         let (before, after) = (&prompt[..at], &prompt[at + name.len()..]);
         if before.chars().next_back().is_some_and(is_ident) || after.chars().next().is_some_and(is_ident) {
@@ -726,7 +733,10 @@ fn asks_for_call(prompt: &str, name: &str) -> Option<usize> {
         }
         let word_before = before.trim_end_matches(quote).rsplit(|c: char| !is_ident(c)).next().unwrap_or_default();
         let word_after = after.trim_start_matches(quote).split(|c: char| !is_ident(c)).next().unwrap_or_default();
-        CALL_WORDS.contains(&word_before) || word_after == "tool"
+        let start = ends.iter().filter_map(|e| before.rfind(e).map(|i| i + e.len())).max().unwrap_or(0);
+        let end = ends.iter().filter_map(|e| after.find(e)).min().map_or(prompt.len(), |i| at + name.len() + i);
+        let conditional = prompt[start..end].split(|c: char| !is_ident(c)).any(|w| CONDITION_WORDS.contains(&w));
+        (CALL_WORDS.contains(&word_before) || word_after == "tool") && !conditional
     })
 }
 
@@ -1620,10 +1630,24 @@ mod tests {
 
     #[test]
     fn a_call_is_asked_for_by_name_in_english_and_russian() {
-        for prompt in ["report it with report_status", "call `report_status`", "the report_status tool", "сообщи через report_status", "используй report_status"] {
+        for prompt in [
+            "report it with report_status",
+            "call `report_status`",
+            "the report_status tool",
+            "сообщи через report_status",
+            "используй report_status",
+            "If the build breaks, stop. Then report it with report_status.",
+        ] {
             assert!(asks_for_call(prompt, "report_status").is_some(), "{prompt}");
         }
-        for prompt in ["why did report_status fail", "report_status_v2 with it", "with my_report_status"] {
+        for prompt in [
+            "why did report_status fail",
+            "report_status_v2 with it",
+            "with my_report_status",
+            "Ask the user with report_status only when you are truly blocked.",
+            "If it fails, use report_status to say so.",
+            "Call report_status with your plan, and again whenever a step finishes.",
+        ] {
             assert!(asks_for_call(prompt, "report_status").is_none(), "{prompt}");
         }
     }
