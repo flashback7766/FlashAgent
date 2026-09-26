@@ -141,6 +141,7 @@ pub fn coerce_to_schema(value: &mut serde_json::Value, schema: &serde_json::Valu
         }
         ("object", Value::Object(_)) => {
             if let (Some(props), Value::Object(map)) = (schema.get("properties").and_then(Value::as_object), value) {
+                rename_misnamed(map, props, schema.get("required"));
                 for (name, sub) in props {
                     if let Some(v) = map.get_mut(name) {
                         coerce_to_schema(v, sub);
@@ -149,6 +150,38 @@ pub fn coerce_to_schema(value: &mut serde_json::Value, schema: &serde_json::Valu
             }
         }
         _ => {}
+    }
+}
+
+/// `{"status": 7}` where the schema's one missing required argument is
+/// `code`: with one name the schema does not know and one required name
+/// absent, the model meant that one (llama3.2 does this). The call would
+/// fail on the missing argument anyway. The value must fit its type.
+fn rename_misnamed(map: &mut serde_json::Map<String, serde_json::Value>, props: &serde_json::Map<String, serde_json::Value>, required: Option<&serde_json::Value>) {
+    use serde_json::Value;
+    let unknown: Vec<&String> = map.keys().filter(|k| !props.contains_key(*k)).collect();
+    let missing: Vec<&str> = required.and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).filter(|r| !map.contains_key(*r)).collect();
+    let ([key], [wanted]) = (unknown.as_slice(), missing.as_slice()) else {
+        return;
+    };
+    let (key, wanted) = ((*key).clone(), wanted.to_string());
+    let Some(sub) = props.get(&wanted) else {
+        return;
+    };
+    let mut v = map[&key].clone();
+    coerce_to_schema(&mut v, sub);
+    let fits = match sub.get("type").and_then(Value::as_str) {
+        Some("integer") => v.is_i64() || v.is_u64(),
+        Some("number") => v.is_number(),
+        Some("string") => v.is_string(),
+        Some("boolean") => v.is_boolean(),
+        Some("array") => v.is_array(),
+        Some("object") => v.is_object(),
+        _ => true,
+    };
+    if fits {
+        map.remove(&key);
+        map.insert(wanted, v);
     }
 }
 
@@ -625,6 +658,32 @@ mod tests {
 
         assert_eq!(coerced_args(r#"{"count":"20"}"#, "read_lines", &schema).as_deref(), Some(r#"{"count":20}"#));
         assert_eq!(coerced_args(r#"{"count":20}"#, "read_lines", &schema), None, "nothing to change, nothing rewritten");
+    }
+
+    #[test]
+    fn one_misnamed_argument_takes_the_one_required_name_left_out() {
+        use serde_json::json;
+        let schema = json!({"type": "object", "properties": {"code": {"type": "integer"}}, "required": ["code"]});
+        let mut args = json!({"status": "7"});
+        coerce_to_schema(&mut args, &schema);
+        assert_eq!(args, json!({"code": 7}));
+
+        let lines = json!({"type": "object", "properties": {"path": {"type": "string"}, "count": {"type": "integer"}}, "required": ["path", "count"]});
+        let mut args = json!({"path": "a.rs", "lines": 5});
+        coerce_to_schema(&mut args, &lines);
+        assert_eq!(args, json!({"path": "a.rs", "count": 5}));
+
+        // Two guesses, or a value of the wrong type: nothing is renamed.
+        for odd in [json!({"file": "a.rs", "lines": 5}), json!({"path": "a.rs", "lines": "all"}), json!({"code": 7, "status": 7})] {
+            let mut args = odd.clone();
+            coerce_to_schema(&mut args, &lines);
+            assert_eq!(args, odd);
+        }
+        // Nothing required, nothing missing.
+        let optional = json!({"type": "object", "properties": {"limit": {"type": "integer"}}});
+        let mut args = json!({"max": 3});
+        coerce_to_schema(&mut args, &optional);
+        assert_eq!(args, json!({"max": 3}));
     }
 
     #[test]
