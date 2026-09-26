@@ -273,6 +273,13 @@ impl App {
             self.refresh_welcome(cx.source, cx.mascot_mood);
             self.renderer.request_reprint();
         }
+        // Kept rather than swapped for a model that would be billed instead,
+        // so the user hears about it before the first request fails.
+        if disc.active_model.is_none() && self.on_active_provider(cx.source) && self.config.endpoint().api_key.is_some() && !self.current_model.is_empty() && disc.model(&self.current_model).is_none() {
+            self.custom_placeholder = Some(format!("{} does not list {} · F3 picks one of its models", self.config.active_profile().name, self.current_model));
+            self.suggested_prompt = None;
+            self.renderer.request_reprint();
+        }
         if let Some(active) = disc.active_model {
             let new_ctx_len = active.context_length.or(active.max_context_length).unwrap_or(131_072);
             let new_ctx_disp = active.context_display();
