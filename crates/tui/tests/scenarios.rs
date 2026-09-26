@@ -447,6 +447,9 @@ fn the_tool_test_asks_the_server_about_the_model_first_as_the_app_does() {
         "the first scenario went out before the model list was read: {:?}",
         requests.iter().map(|r| format!("{} {}", r.method, r.path)).collect::<Vec<_>>()
     );
+    // A local server loads the model before the first scenario is timed:
+    // on a CPU the load alone ran past the first scenario's time limit.
+    assert!(requests[..first_turn].iter().any(|r| r.is_warm_up()), "the first scenario was timed with the model still loading");
 }
 
 #[test]
