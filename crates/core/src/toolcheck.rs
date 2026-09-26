@@ -31,6 +31,9 @@ pub enum Outcome {
     /// Right tool, wrong arguments: the loop runs, the work is wrong.
     Partial { detail: String, secs: f32 },
     Fail { detail: String, secs: f32 },
+    /// The server refused or broke off the request (a rate limit, a model it
+    /// does not serve): this says nothing about the model.
+    Unavailable { detail: String, secs: f32 },
 }
 
 impl Outcome {
@@ -40,7 +43,7 @@ impl Outcome {
 
     fn secs(&self) -> f32 {
         match self {
-            Self::Pass { secs, .. } | Self::Partial { secs, .. } | Self::Fail { secs, .. } => *secs,
+            Self::Pass { secs, .. } | Self::Partial { secs, .. } | Self::Fail { secs, .. } | Self::Unavailable { secs, .. } => *secs,
         }
     }
 
@@ -48,6 +51,7 @@ impl Outcome {
         match self {
             Self::Pass { style, secs } => format!("{}, {secs:.1}s", style.label()),
             Self::Partial { detail, .. } | Self::Fail { detail, .. } => detail.clone(),
+            Self::Unavailable { detail, .. } => format!("not tested: {detail}"),
         }
     }
 }
@@ -109,12 +113,12 @@ fn probe_tools() -> Vec<ToolSpec> {
         ToolSpec {
             name: "read_lines".into(),
             description: "Read the first N lines of a file.".into(),
-            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string"},"count":{"type":"integer"}},"required":["path","count"]}"#.into(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string""},"count":{"type":"integer"}},"required":["path","count"]}"#.into(),
         },
         ToolSpec {
             name: "write_file".into(),
             description: "Write content to a file, replacing it.".into(),
-            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#.into(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string""},"content":{"type":"string"}},"required":["path","content"]}"#.into(),
         },
         ToolSpec {
             name: "report_status".into(),
@@ -139,11 +143,25 @@ struct Turn {
     text: String,
     secs: f32,
     error: Option<String>,
+    /// The error came from the server, not from waiting on the model.
+    unavailable: bool,
 }
 
 impl Turn {
     fn first_call(&self) -> Option<&(String, String, CallStyle)> {
         self.calls.first()
+    }
+
+    /// A turn that ended in an error: the model's failure when it did not
+    /// answer in time, the server's when the request itself failed.
+    fn failed(&self, error: &str) -> Outcome {
+        if self.unavailable {
+            let first_line = error.lines().next().unwrap_or_default();
+            let detail: String = first_line.chars().take(120).collect();
+            Outcome::Unavailable { detail, secs: self.secs }
+        } else {
+            Outcome::Fail { detail: error.to_string(), secs: self.secs }
+        }
     }
 }
 
@@ -187,12 +205,14 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
             text: String::new(),
             secs: started.elapsed().as_secs_f32(),
             error: Some(format!("no answer within {}s", timeout.as_secs())),
+            unavailable: false,
         },
         Ok(Err(e)) => Turn {
             calls: Vec::new(),
             text: String::new(),
             secs: started.elapsed().as_secs_f32(),
             error: Some(e),
+            unavailable: true,
         },
         Ok(Ok((parts, text))) => {
             let secs = started.elapsed().as_secs_f32();
@@ -216,7 +236,7 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
                     })
                     .collect();
             }
-            Turn { calls, text, secs, error: None }
+            Turn { calls, text, secs, error: None, unavailable: false }
         }
     }
 }
@@ -248,6 +268,11 @@ impl CheckReport {
         (self.results.iter().filter(|(_, o)| o.is_pass()).count(), self.results.len())
     }
 
+    /// Scenarios the server did not let run.
+    pub fn untested(&self) -> usize {
+        self.results.iter().filter(|(_, o)| matches!(o, Outcome::Unavailable { .. })).count()
+    }
+
     /// Any call that only arrived through the text scanner, which is slower and
     /// more fragile.
     pub fn needed_recovery(&self) -> bool {
@@ -262,6 +287,9 @@ impl CheckReport {
 
     pub fn verdict(&self) -> &'static str {
         let (passed, total) = self.score();
+        if self.untested() > 0 {
+            return "incomplete: the server failed some requests, so this is not the model's score";
+        }
         match (passed, total) {
             (p, t) if p == t => "drives tools reliably",
             (p, t) if p + 1 == t => "usable, with one rough edge",
@@ -276,7 +304,11 @@ impl CheckReport {
         let title_width = scenarios().iter().map(|s| s.title.len()).max().unwrap_or(40);
         for (scenario, (key, outcome)) in scenarios().iter().zip(&self.results) {
             debug_assert_eq!(scenario.key, key);
-            let mark = if outcome.is_pass() { "ok  " } else { "FAIL" };
+            let mark = match outcome {
+                Outcome::Pass { .. } => "ok  ",
+                Outcome::Unavailable { .. } => "--  ",
+                _ => "FAIL",
+            };
             out.push(format!("  {mark}  {:<width$} {}", scenario.title, outcome.detail(), width = title_width));
         }
         let (passed, total) = self.score();
@@ -308,6 +340,7 @@ impl CheckReport {
             "total": total,
             "verdict": self.verdict(),
             "needed_recovery": self.needed_recovery(),
+            "untested": self.untested(),
             "seconds": self.total_secs(),
             "scenarios": self.results.iter().map(|(key, outcome)| serde_json::json!({
                 "key": key,
@@ -383,7 +416,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     results.push((
         "no_spurious_call".to_string(),
         match (&turn.error, turn.first_call()) {
-            (Some(e), _) => Outcome::Fail { detail: e.clone(), secs: turn.secs },
+            (Some(e), _) => turn.failed(e),
             (None, Some((name, _, _))) => Outcome::Fail {
                 detail: format!("called {name} on a question that needed no tool"),
                 secs: turn.secs,
@@ -416,7 +449,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     results.push((
         "uses_result".to_string(),
         match (&turn.error, turn.first_call()) {
-            (Some(e), _) => Outcome::Fail { detail: e.clone(), secs: turn.secs },
+            (Some(e), _) => turn.failed(e),
             (None, Some((name, _, _))) => Outcome::Fail {
                 detail: format!("called {name} again instead of answering from the result"),
                 secs: turn.secs,
@@ -526,7 +559,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     results.push((
         "two_calls".to_string(),
         match (&turn.error, turn.calls.len()) {
-            (Some(e), _) => Outcome::Fail { detail: e.clone(), secs: turn.secs },
+            (Some(e), _) => turn.failed(e),
             (None, 0) => Outcome::Fail {
                 detail: format!("replied with text, no tool call: {}", snippet(&turn.text)),
                 secs: turn.secs,
@@ -551,7 +584,7 @@ fn judge_call(
     check_args: impl Fn(&serde_json::Value) -> Result<(), String>,
 ) -> Outcome {
     if let Some(e) = &turn.error {
-        return Outcome::Fail { detail: e.clone(), secs: turn.secs };
+        return turn.failed(e);
     }
     let Some((name, args, style)) = turn.first_call() else {
         return Outcome::Fail {
@@ -651,6 +684,50 @@ mod tests {
                 ("read_lines", r#"{"path":"README.md","count":10}"#),
             ]),
         ]
+    }
+
+    /// Scripted, but the server refuses the turns at `refused`.
+    struct PartlyRefused {
+        inner: Scripted,
+        refused: Vec<usize>,
+        asked: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl LlmSource for PartlyRefused {
+        async fn turn(
+            &self,
+            messages: &[ChatMessage],
+            tools: &[ToolSpec],
+        ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+            let n = std::mem::replace(&mut *self.asked.lock().unwrap(), 0);
+            *self.asked.lock().unwrap() = n + 1;
+            let answer = self.inner.turn(messages, tools).await;
+            if self.refused.contains(&n) {
+                return Err(LlmError::Status { status: 429, body: "model is temporarily rate-limited upstream\nretry later".into() });
+            }
+            answer
+        }
+    }
+
+    #[test]
+    fn a_request_the_server_refuses_is_not_held_against_the_model() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let llm = PartlyRefused { inner: Scripted::new(perfect()), refused: vec![0, 2, 3, 4, 5, 6, 7], asked: Mutex::new(0) };
+        let report = rt.block_on(check_model(&llm, "rate-limited", Duration::from_secs(5)));
+        assert_eq!(report.score(), (1, 8));
+        assert_eq!(report.untested(), 7);
+        assert!(report.verdict().starts_with("incomplete"), "{}", report.verdict());
+        let lines = report.lines();
+        assert!(lines[0].contains("--") && lines[0].contains("not tested: backend returned 429"), "{}", lines[0]);
+        assert!(!lines[0].contains("retry later"), "one line of the error is enough: {}", lines[0]);
+        assert!(lines[1].contains("ok"), "{}", lines[1]);
+        assert_eq!(report.to_json()["untested"], 7);
+
+        // A model that answered nothing in time did fail.
+        let everything_right = run(perfect());
+        assert_eq!(everything_right.untested(), 0);
+        assert_eq!(everything_right.verdict(), "drives tools reliably");
     }
 
     #[test]
