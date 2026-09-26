@@ -384,7 +384,7 @@ async fn run(cmd: &str, timeout: Duration, registry: Option<&ShellRegistry>) -> 
             let out = buffer.lock();
             let out = tail_noted(&out, 4000);
             return Err(ToolError::Other(format!(
-                "timeout after {}s, process killed. partial output:\n{}",
+                "timeout after {}s, process killed; it may have done part of its work, so check what it changed before running it again. partial output:\n{}",
                 timeout.as_secs(),
                 if out.trim().is_empty() { "(no output)" } else { &out }
             )));
@@ -878,6 +878,8 @@ mod tests {
     async fn timeout_kills_process() {
         let err = run_foreground("sleep 5", Duration::from_millis(150)).await.unwrap_err();
         assert!(err.to_string().contains("timeout after 0s"));
+        // It may have changed something before it was killed.
+        assert!(err.to_string().contains("check what it changed"));
     }
 
     #[cfg(unix)]
