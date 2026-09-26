@@ -949,6 +949,11 @@ impl PermissionedTools {
     }
 }
 
+/// A call the permission rules refused, before its reason.
+pub(crate) const DENIED: &str = "denied by permissions: ";
+/// A small model read "denied by user" as a privilege error and asked for sudo.
+pub(crate) const DECLINED: &str = "The user declined this call. Do not retry it and do not look for a way around it — ask them what they would prefer, or carry on with what you can do without it.";
+
 #[async_trait]
 impl ToolExec for PermissionedTools {
     fn specs(&self) -> Vec<ToolSpec> {
@@ -959,7 +964,7 @@ impl ToolExec for PermissionedTools {
         match self.state.decide(call, || self.preview.as_deref().and_then(|p| p.write_preview(call))) {
             Verdict::Allow => self.run_allowed(call).await,
             Verdict::Deny(reason) => ToolOutput {
-                content: format!("denied by permissions: {reason}"),
+                content: format!("{DENIED}{reason}"),
                 is_error: true,
                 images: Vec::new(),
             },
@@ -977,11 +982,7 @@ impl ToolExec for PermissionedTools {
                 match self.state.gate.approve(&req).await {
                     Decision::Allow => self.run_allowed(call).await,
                     Decision::Deny => ToolOutput {
-                        // A small model read "denied by user" as a privilege error and asked for sudo.
-                        content: "The user declined this call. Do not retry it and do not look \
-                                  for a way around it — ask them what they would prefer, or \
-                                  carry on with what you can do without it."
-                            .into(),
+                        content: DECLINED.into(),
                         is_error: true,
                         images: Vec::new(),
                     },
