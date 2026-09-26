@@ -959,6 +959,19 @@ fn one_ctrl_c_before_any_reply_does_not_quit() {
 }
 
 #[test]
+fn ctrl_r_while_an_answer_is_written_says_when_it_works() {
+    let words: Vec<String> = (1..=40).map(|i| format!("word{i}")).collect();
+    let server = MockServer::start(vec![Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(100) }]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+    term.type_text("count");
+    term.send(ENTER);
+    term.wait_for("word3", WAIT);
+    term.send("\x12"); // Ctrl+R
+    term.wait_for("regenerates once the answer is done", WAIT);
+}
+
+#[test]
 fn esc_clears_a_steering_draft_before_it_stops_the_turn() {
     let words: Vec<String> = (1..=60).map(|i| format!("word{i}")).collect();
     let server = MockServer::start(vec![Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(300) }]);
