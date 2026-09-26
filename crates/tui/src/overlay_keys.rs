@@ -189,7 +189,7 @@ impl App {
                 Some(opts) => {
                     let total_choices = opts.len();
                     if state.is_writing {
-                        let answer = std::mem::take(&mut state.write_in_text);
+                        let answer = state.write_in_text.take();
                         let trimmed = answer.trim().to_string();
                         if !trimmed.is_empty() {
                             let mut chosen: Vec<String> = if req.multi_select {
@@ -219,7 +219,7 @@ impl App {
                     }
                 }
                 None => {
-                    let answer = std::mem::take(&mut state.write_in_text);
+                    let answer = state.write_in_text.take();
                     *state = QuestionUiState::default();
                     cx.question_gate.respond(answer.trim().to_string(), true);
                 }
@@ -235,11 +235,8 @@ impl App {
                     state.selected_index = (state.selected_index + 1) % (opts.len() + 1);
                 }
             }
-            KeyCode::Backspace => {
-                if state.is_writing || req.options.is_none() {
-                    state.write_in_text.pop();
-                }
-            }
+            // Moves and deletes anywhere in the answer, as in the prompt.
+            _ if (state.is_writing || req.options.is_none()) && state.write_in_text.edit_key(code, mods) => {}
             KeyCode::Char(' ') if req.multi_select && !state.is_writing => {
                 if let Some(opts) = &req.options {
                     let idx = state.selected_index;
@@ -255,14 +252,14 @@ impl App {
             }
             KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
                 if state.is_writing || req.options.is_none() {
-                    state.write_in_text.push(c);
+                    state.write_in_text.insert_char(c);
                 } else if let (Some(opts), false) = (&req.options, c.is_ascii_digit() || c.is_whitespace()) {
                     // Typing starts an answer of one's own, with no key to open it first. A
                     // path pasted into the card (keys, in a Windows console) is typed too,
                     // so the digits in it no longer pick options.
                     state.selected_index = opts.len();
                     state.is_writing = true;
-                    state.write_in_text = c.to_string();
+                    state.write_in_text.set(c.to_string());
                 } else if let (Some(opts), Some(d)) = (&req.options, c.to_digit(10)) {
                     let idx = (d as usize).saturating_sub(1);
                     if idx < opts.len() {

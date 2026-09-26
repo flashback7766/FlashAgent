@@ -514,13 +514,11 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
     let q_state = st.question_state;
     let sel_idx = q_state.map(|s| s.selected_index).unwrap_or(0);
     let is_writing = q_state.map(|s| s.is_writing).unwrap_or(false);
-    let write_text = q_state.map(|s| s.write_in_text.as_str()).unwrap_or("");
-    // The end of the answer, where it is being typed, fitted to the row after
-    // its label: a long answer ran past the border, cursor and all. Pasted
-    // control characters are shown, not sent to the terminal.
-    let answer_in = |label_cells: usize| {
-        flashagent_tui::tail_window(&card_safe(write_text), inner_w.saturating_sub(label_cells + 4)).0
-    };
+    let no_answer = flashagent_tui::Composer::new();
+    let write_text = q_state.map_or(&no_answer, |s| &s.write_in_text);
+    // Around the cursor, fitted to the row after its label: a long answer ran
+    // past the border. Pasted control characters are shown, not sent.
+    let answer_in = |label_cells: usize| write_text.field_view(inner_w.saturating_sub(label_cells + 4), card_safe);
     let mut typing_line_idx = None;
 
     if let Some(ref opts) = req.options {
@@ -567,7 +565,7 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
             let shown = answer_in(4 + label.len());
             tail.push((
                 LineKind::User,
-                pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. Your answer:\x1b[0m \x1b[1;38;2;240;235;225m{shown}█\x1b[0m"), width),
+                pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. Your answer:\x1b[0m \x1b[1;38;2;240;235;225m{shown}\x1b[0m"), width),
             ));
             let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "back to the choices")], inner_w.saturating_sub(4));
             tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
@@ -591,7 +589,7 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
         let shown = answer_in(4);
         tail.push((
             LineKind::User,
-            pad_box_row(&format!("  \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{shown}█\x1b[0m"), width),
+            pad_box_row(&format!("  \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{shown}\x1b[0m"), width),
         ));
         let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "cancel")], inner_w.saturating_sub(4));
         tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
