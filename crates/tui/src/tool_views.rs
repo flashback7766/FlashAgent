@@ -230,6 +230,11 @@ pub fn render_directory_card(
     lines
 }
 
+fn is_file_separator(line: &str) -> bool {
+    let line = line.trim();
+    line.len() > 8 && line.starts_with("=== ") && line.ends_with(" ===") && !line.contains('\t')
+}
+
 /// Unread blocks are folded.
 pub fn render_read_card(
     path: &str,
@@ -243,7 +248,8 @@ pub fn render_read_card(
 
     let raw_text = content.unwrap_or("");
     let file_lines: Vec<&str> = raw_text.lines().collect();
-    let count = file_lines.len();
+    // Several files come back with "=== path ===" before each; those are not lines of a file.
+    let count = file_lines.iter().filter(|l| !is_file_separator(l)).count();
 
     let header = format!(
         "  {TEXT_MUTED}Read{RESET} {TEXT_BRIGHT}{path}{RESET} {TEXT_MUTED}({}){RESET} {chevron}",
@@ -256,9 +262,14 @@ pub fn render_read_card(
     }
 
     const MAX_PREVIEW: usize = 20;
-    let preview_count = count.min(MAX_PREVIEW);
+    let preview_count = file_lines.len().min(MAX_PREVIEW);
+    let shown = file_lines[..preview_count].iter().filter(|l| !is_file_separator(l)).count();
 
     for (i, &line_content) in file_lines.iter().take(preview_count).enumerate() {
+        if is_file_separator(line_content) {
+            lines.push((LineKind::Tool, format!("  {TEXT_MUTED}{}{RESET}", clip_ellipsis(line_content.trim(), width.saturating_sub(4)))));
+            continue;
+        }
         // `read_file` output already carries "   1\t..." line numbers.
         let (line_no, text) = if let Some(tab_idx) = line_content.find('\t') {
             let (num_part, rest) = line_content.split_at(tab_idx);
@@ -277,8 +288,8 @@ pub fn render_read_card(
         lines.push((LineKind::Tool, styled));
     }
 
-    if count > preview_count {
-        lines.push((LineKind::Tool, render_fold_line(&more_lines(count - preview_count), width)));
+    if count > shown {
+        lines.push((LineKind::Tool, render_fold_line(&more_lines(count - shown), width)));
     }
 
     lines
@@ -687,6 +698,15 @@ pub fn render_generic_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_separator_in_a_multi_file_read_is_not_numbered_or_counted() {
+        let content = "=== a.py ===\n     1\t\"Store.\"\n     2\timport os\n=== b.py ===\n     1\tx = 1";
+        let rows: Vec<String> = render_read_card("2 files", Some(content), 0, 0, 80).iter().map(|(_, l)| crate::strip_ansi(l)).collect();
+        assert!(rows[0].contains("(3 lines)"), "{rows:?}");
+        assert!(rows.iter().any(|r| r.trim() == "=== a.py ==="), "{rows:?}");
+        assert_eq!(rows.iter().filter(|r| r.contains("   1    1")).count(), 2, "{rows:?}");
+    }
 
     #[test]
     fn a_verbose_card_tells_what_happened_to_the_call() {
