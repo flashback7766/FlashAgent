@@ -829,6 +829,57 @@ fn strip_repeated_tail<'a>(prev: &str, next: &'a str) -> &'a str {
 /// completion" left a model unsure whether the call had done anything.
 pub const CANCELLED_RESULT: &str = "not run: the user stopped the turn before this call started, so it changed nothing";
 
+/// How a turn ended before the model finished it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CutShort {
+    /// Esc, or Ctrl+C at an approval.
+    ByUser,
+    /// The model server failed or the connection broke.
+    ByError,
+    /// Stopped, but a tool would not wind down: the turn's steps were dropped.
+    Abandoned,
+}
+
+/// Where a turn ended early, written into the history at that point, so the
+/// next reply knows its last one was cut short or never came: a small model
+/// took a half sentence for its finished answer, and a user's "go on" for a
+/// new request. Keeps roles alternating, which strict templates (Gemma,
+/// Mistral) require: the note is the model's own line, or the end of its
+/// partial reply.
+pub fn mark_cut_short(history: &mut Vec<ChatMessage>, how: CutShort) {
+    let Some(last) = history.last_mut() else { return };
+    let (before_reply, after_results, mid_reply) = match how {
+        CutShort::ByUser => (
+            "[The user stopped this turn before you replied.]",
+            "[The user stopped this turn after these results, before you replied to them.]",
+            "[The user stopped this reply here.]",
+        ),
+        CutShort::ByError => (
+            "[No reply: the model server failed before you answered.]",
+            "[The model server failed after these results, before you replied to them.]",
+            "[The reply broke off here: the connection to the model server failed, and any tool call you had started was not run.]",
+        ),
+        CutShort::Abandoned => {
+            let note = "[The user stopped this turn, and it did not stop in time, so its steps are missing here. Tools it ran may have changed files: check before repeating anything.]";
+            (note, note, note)
+        }
+    };
+    let note = match last.role {
+        Role::Assistant if !last.tool_calls.is_empty() => return,
+        Role::Assistant => {
+            if !last.content.ends_with(mid_reply) {
+                last.content.push_str(if last.content.is_empty() { "" } else { "\n\n" });
+                last.content.push_str(mid_reply);
+            }
+            return;
+        }
+        Role::User if is_prompt(last) => before_reply,
+        Role::User | Role::Tool => after_results,
+        Role::System => before_reply,
+    };
+    history.push(ChatMessage::assistant(note));
+}
+
 /// What sessions saved before b451 say for [`CANCELLED_RESULT`].
 const OLD_CANCELLED_RESULT: &str = "cancelled by user before completion";
 
@@ -2056,6 +2107,42 @@ mod tests {
         let (history, done) = run_loop(&l, &StallThenHang(std::sync::Mutex::new(0)), &tools, |_| {});
         assert_eq!(done, DoneReason::Cancelled);
         assert!(history.iter().all(|m| m.content != STALL_NUDGE), "nudge leaked: {history:?}");
+    }
+
+    #[test]
+    fn where_a_turn_was_cut_short_is_written_into_the_history() {
+        let prompt = || vec![ChatMessage::system("s"), ChatMessage::user("fix it")];
+        // No reply yet: the model's own line closes the turn, so roles alternate.
+        let mut h = prompt();
+        mark_cut_short(&mut h, CutShort::ByUser);
+        assert_eq!(h.last().unwrap().role, Role::Assistant);
+        assert_eq!(h.last().unwrap().content, "[The user stopped this turn before you replied.]");
+
+        // A half-written reply ends with the note, once.
+        let mut h = prompt();
+        h.push(ChatMessage::assistant("The bug is in"));
+        mark_cut_short(&mut h, CutShort::ByUser);
+        mark_cut_short(&mut h, CutShort::ByUser);
+        assert_eq!(h.last().unwrap().content, "The bug is in\n\n[The user stopped this reply here.]");
+
+        // After tool results, and after a broken connection.
+        let mut h = prompt();
+        let mut asked = ChatMessage::assistant("");
+        asked.tool_calls = vec![ToolCall { id: "c".into(), name: "read_file".into(), args_json: "{}".into() }];
+        h.push(asked);
+        h.push(ChatMessage::tool_result("c", "fn main() {}"));
+        mark_cut_short(&mut h, CutShort::ByError);
+        assert!(h.last().unwrap().content.contains("failed after these results"), "{:?}", h.last());
+        let mut h = prompt();
+        h.push(ChatMessage::assistant("Writing the file now."));
+        mark_cut_short(&mut h, CutShort::ByError);
+        assert!(h.last().unwrap().content.ends_with("any tool call you had started was not run.]"));
+
+        // Its steps dropped: the model is told they may have changed files.
+        let mut h = prompt();
+        mark_cut_short(&mut h, CutShort::Abandoned);
+        assert!(h.last().unwrap().content.contains("may have changed files"));
+        assert!(!is_prompt(h.last().unwrap()));
     }
 
     #[test]

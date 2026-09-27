@@ -517,14 +517,6 @@ pub(crate) fn extract_user_prompt(content: &str) -> &str {
 
 
 
-/// Strict templates (Gemma, Mistral) require alternating turns; a turn with no
-/// reply would leave two user messages in a row.
-pub(crate) fn close_dangling_user(history: &mut Vec<ChatMessage>, note: &str) {
-    if history.last().is_some_and(|m| m.role == flashagent_llm::Role::User) {
-        history.push(ChatMessage::assistant(note));
-    }
-}
-
 #[cfg(test)]
 mod session_tests {
     use super::*;
