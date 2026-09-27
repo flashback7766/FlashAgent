@@ -5,7 +5,7 @@
 
 use super::*;
 
-use flashagent_tools::{TaskNotice, TaskState};
+use flashagent_tools::{TaskInfo, TaskNotice, TaskState};
 use flashagent_tui::{TasksAction, TasksModal};
 
 /// The transcript's line for a task that ended.
@@ -35,7 +35,74 @@ pub(crate) fn notice_lines(content: &str) -> Vec<String> {
         .collect()
 }
 
+/// Background tasks the history saw start and never saw end: id and
+/// command, oldest first. Ids start again at 1 in each run, so a later start
+/// of an id replaces an earlier one.
+pub(crate) fn tasks_left_running(history: &[ChatMessage]) -> Vec<(u32, String)> {
+    use flashagent_llm::Role;
+    let number = |text: &str| text.split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse::<u32>().ok());
+    let mut commands: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+    let mut open: Vec<(u32, String)> = Vec::new();
+    for m in history {
+        match m.role {
+            Role::Assistant => {
+                for call in m.tool_calls.iter().filter(|c| c.name == "run_shell") {
+                    let command = flashagent_llm::effective_args(&call.args_json, "run_shell")
+                        .and_then(|a| a.get("command").and_then(|c| c.as_str()).map(str::to_string));
+                    if let Some(command) = command {
+                        commands.insert(call.id.as_str(), command);
+                    }
+                }
+            }
+            Role::Tool => {
+                let text = m.content.as_str();
+                let started = text
+                    .strip_prefix("started background task ")
+                    .or_else(|| text.split_once("it keeps running as background task ").map(|(_, rest)| rest))
+                    .and_then(number);
+                if let Some(id) = started {
+                    open.retain(|(i, _)| *i != id);
+                    if let Some(command) = m.tool_call_id.as_deref().and_then(|call| commands.get(call)) {
+                        open.push((id, command.clone()));
+                    }
+                } else if let Some(id) = text.strip_prefix("task ").and_then(number) {
+                    let rest = &text["task ".len() + id.to_string().len()..];
+                    // Killed, already ended, or a status that is not "running".
+                    if rest.starts_with(" killed") || rest.starts_with(" had already ended") || (rest.starts_with(": ") && !rest.starts_with(": running")) {
+                        open.retain(|(i, _)| *i != id);
+                    }
+                }
+            }
+            Role::User if flashagent_core::is_task_notice(&m.content) => {
+                for id in m.content.lines().filter_map(|line| line.strip_prefix(flashagent_core::TASK_NOTICE_OPENING)).filter_map(number) {
+                    open.retain(|(i, _)| *i != id);
+                }
+            }
+            _ => {}
+        }
+    }
+    open
+}
+
 impl App {
+    /// After a resume: the tasks the history left running that this run is not
+    /// running. The model, which would take its dev server for up, hears of
+    /// it with the next thing the user sends.
+    pub(crate) fn tell_of_lost_tasks(&mut self, running: &[TaskInfo]) {
+        use flashagent_core::{TASK_NOTICE_NOTE, TASK_NOTICE_OPENING};
+        let alive = |id: u32, command: &str| running.iter().any(|t| t.id == id && t.command == command && t.state == TaskState::Running);
+        for (id, command) in tasks_left_running(&self.history).into_iter().filter(|(id, command)| !alive(*id, command)) {
+            let command: String = command.chars().take(300).collect();
+            let notice = format!(
+                "{TASK_NOTICE_OPENING}{id} is not running any more: it ended, or FlashAgent was closed, since this session last ran. {TASK_NOTICE_NOTE}\ncommand: {command}\nStart it again only if the work still needs it."
+            );
+            for line in notice_lines(&notice) {
+                self.chat.push_system(&line);
+            }
+            self.task_inbox.push_quiet(notice);
+        }
+    }
+
     pub(crate) fn on_task_ended(&mut self, cx: &LoopCtx<'_>, notice: TaskNotice) {
         let line = task_line(&notice);
         if self.running {
@@ -51,9 +118,13 @@ impl App {
         } else {
             self.chat.push_system(&line);
         }
-        // Stopped on purpose: nothing for the model to react to.
+        // Stopped by the model or on quit: nothing to tell. Stopped by the user
+        // from the task list: the model thinks it still runs, and hears
+        // otherwise with the next thing the user sends, without a turn of its own.
         if !notice.killed() {
             self.task_inbox.push(notice.message());
+        } else if notice.by_user {
+            self.task_inbox.push_quiet(notice.message());
         }
         self.refresh_tasks_overlay(cx);
         self.deliver_task_notices(cx);
@@ -120,7 +191,7 @@ impl App {
             TasksAction::Close => return,
             TasksAction::Open(id) => modal.detail = Some((id, shells.output(id).unwrap_or_default())),
             TasksAction::Kill(id) => {
-                if shells.stop(id) {
+                if shells.stop_for_user(id) {
                     self.background = Some(BackgroundNotice::fading(format!("Stopping background task {id}"), 4));
                 }
             }
@@ -181,6 +252,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_tasks_a_history_left_running_are_found() {
+        let shell = |id: &str, args: &str| {
+            let mut m = ChatMessage::assistant("");
+            m.tool_calls = vec![flashagent_llm::ToolCall { id: id.into(), name: "run_shell".into(), args_json: args.into() }];
+            m
+        };
+        let history = vec![
+            ChatMessage::user("start everything"),
+            shell("a", r#"{"command":"npm run dev","background":true}"#),
+            ChatMessage::tool_result("a", "started background task 1. A notice arrives when it exits"),
+            shell("b", r#"{"command":"cargo watch","background":true}"#),
+            ChatMessage::tool_result("b", "started background task 2. A notice arrives when it exits"),
+            shell("c", r#"{"command":"make test"}"#),
+            ChatMessage::tool_result("c", "The user moved this command to the background; it keeps running as background task 3. A notice"),
+            shell("d", r#"{"command":"sleep 5","background":true}"#),
+            ChatMessage::tool_result("d", "started background task 4. A notice arrives when it exits"),
+            // Ended three ways: its notice, killed by the model, a status check.
+            ChatMessage::user(format!("{}2 exited with code 0 after 3s. {}\ncommand: cargo watch", flashagent_core::TASK_NOTICE_OPENING, flashagent_core::TASK_NOTICE_NOTE)),
+            shell("e", r#"{"task_id":3,"kill":true}"#),
+            ChatMessage::tool_result("e", "task 3 killed. output:\n(no output)"),
+            shell("f", r#"{"task_id":4}"#),
+            ChatMessage::tool_result("f", "task 4: exited with code 0\noutput:\n(no output)"),
+        ];
+        assert_eq!(tasks_left_running(&history), vec![(1, "npm run dev".to_string())]);
+
+        // A later run starts its own task 1.
+        let mut later = history.clone();
+        later.push(shell("g", r#"{"command":"python -m http.server","background":true}"#));
+        later.push(ChatMessage::tool_result("g", "started background task 1. A notice arrives when it exits"));
+        assert_eq!(tasks_left_running(&later), vec![(1, "python -m http.server".to_string())]);
+    }
+
+    #[test]
     fn a_saved_notice_is_shown_as_its_own_line() {
         let notice = TaskNotice {
             id: 4,
@@ -188,6 +292,7 @@ mod tests {
             state: TaskState::Exited(Some(0)),
             elapsed: std::time::Duration::from_secs(3),
             tail: "Finished".into(),
+            by_user: false,
         };
         let lines = notice_lines(&format!("{}\n\n{}", notice.message(), TaskNotice { id: 5, ..notice.clone() }.message()));
         assert_eq!(lines.len(), 2, "{lines:?}");

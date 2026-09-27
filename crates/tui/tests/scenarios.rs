@@ -841,6 +841,8 @@ fn esc_during_a_turn_stops_it_and_keeps_what_was_already_said() {
     let history = sent(&turns[1]);
     assert!(history.contains("word1 "), "the words written before Esc were not kept: {history}");
     assert!(!history.contains("word60"));
+    // The model is told its last reply was cut, not left to take it for finished.
+    assert!(history.contains("[The user stopped this reply here.]"), "{history}");
 }
 
 #[test]
@@ -1706,6 +1708,33 @@ fn a_saved_session_comes_back_with_resume() {
 }
 
 #[test]
+fn a_resumed_session_tells_the_model_its_background_tasks_are_gone() {
+    // The dev server it started died with the last run; it took it for up.
+    let mut replies = background_sleep();
+    replies.push(Reply::Text("I will start it again.".into()));
+    let server = MockServer::start(replies);
+    let home = Home::new();
+    {
+        let mut term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+        ask(&term, "start the server", "The server is starting.");
+        term.wait_for("1 task", WAIT);
+        // The first Ctrl+D says the task will be stopped.
+        term.send(CTRL_D);
+        term.wait_for("1 background task running", WAIT);
+        quit(&mut term);
+    }
+    let session = home.sessions().pop().expect("the conversation was saved");
+    let id = session.file_stem().unwrap().to_string_lossy().to_string();
+
+    let term = Term::start(&home, &["-y", "--resume", &id], COLS, ROWS);
+    term.wait_for("Background task 1 is not running any more", WAIT);
+    ask(&term, "is the server up?", "I will start it again.");
+    let told = sent(server.turns().last().unwrap());
+    assert!(told.contains("Background task 1 is not running any more"), "{told}");
+    assert!(told.contains("command: ") && told.contains("Start it again only if the work still needs it."), "{told}");
+}
+
+#[test]
 fn a_session_that_fails_to_load_is_left_as_it_was() {
     let server = MockServer::start(vec![Reply::Text("A fresh answer.".into())]);
     let home = Home::new();
@@ -2006,6 +2035,34 @@ fn a_question_from_the_model_is_answered_from_its_card() {
     term.wait_for("Going with it.", WAIT);
     let turns = server.turns();
     assert!(sent(turns.last().unwrap()).contains("SQLite"), "the model was not told the answer");
+}
+
+#[test]
+fn a_question_closed_with_esc_is_not_passed_off_as_an_answer() {
+    // It reached the model as the write-in answer "User cancelled the question".
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "ask_user".into(),
+            arguments: serde_json::json!({ "question": "Which database?", "options": ["Postgres", "SQLite"] }),
+        },
+        Reply::Text("Carrying on without it.".into()),
+        Reply::Text("unexpected".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("pick a database");
+    term.send(ENTER);
+    term.wait_for("Which database?", WAIT);
+    term.send(ESC);
+    term.wait_for("Carrying on without it.", WAIT);
+    term.wait_for("not answered", WAIT);
+    let turns = server.turns();
+    let told = sent(turns.last().unwrap());
+    assert!(told.contains("the user closed the question without answering"), "{told}");
+    assert!(!told.contains("(write-in)"), "{told}");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(server.turns().len(), 2, "a closed question was answered with a request to try again");
 }
 
 #[test]
@@ -2799,7 +2856,9 @@ fn background_sleep() -> Vec<Reply> {
 
 #[test]
 fn a_task_stopped_from_the_task_list_wakes_nobody() {
-    let server = MockServer::start(background_sleep());
+    let mut replies = background_sleep();
+    replies.push(Reply::Text("It is stopped.".into()));
+    let server = MockServer::start(replies);
     let home = Home::new();
     let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
     ask(&term, "start the server", "The server is starting.");
@@ -2817,6 +2876,12 @@ fn a_task_stopped_from_the_task_list_wakes_nobody() {
     std::thread::sleep(Duration::from_millis(1500));
     assert_eq!(server.turns().len(), 2, "a task the user stopped woke the agent");
     assert!(!term.screen().contains("1 task"), "the footer still counts a stopped task");
+
+    // It hears of it with the next thing the user says.
+    ask(&term, "is the server up?", "It is stopped.");
+    let told = sent(server.turns().last().unwrap());
+    assert!(told.contains("Background task 1 was stopped by the user after"), "{told}");
+    assert!(told.contains("It is no longer running"), "{told}");
 }
 
 #[test]
