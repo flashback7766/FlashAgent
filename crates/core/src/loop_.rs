@@ -285,6 +285,8 @@ impl AgentLoop {
             // Stopped at max_tokens: any tool call may be cut off mid-arguments, and JSON
             // repair would happily "complete" it.
             let mut truncated = false;
+            // The server said the reply ended (a finish reason or `[DONE]`).
+            let mut finished = false;
             // A continuation often starts by repeating the last words, so its start is
             // held back until that is known.
             let prefix = if continuing { history.last().map(|m| m.content.clone()).unwrap_or_default() } else { String::new() };
@@ -299,6 +301,15 @@ impl AgentLoop {
                 let item = tokio::select! {
                     next = stream.next() => match next {
                         Some(item) => item,
+                        // The connection closed before the reply ended, in the middle of a
+                        // call: JSON repair would close its arguments, and a write would
+                        // replace a file with half its content. As when the stream breaks,
+                        // the half-written call is dropped unrun.
+                        None if !finished && indexed_calls.iter().any(|(_, c)| !flashagent_llm::is_complete_json(&c.args_json)) => {
+                            keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
+                            let source = LlmError::Stream("the server closed the connection in the middle of a tool call, which was not run".into());
+                            return Err(LoopError::Llm { source, history });
+                        }
                         None => break,
                     },
                     _ = &mut cancelled => {
@@ -364,7 +375,10 @@ impl AgentLoop {
                         events(LoopEvent::Usage(u));
                     }
                     LlmEvent::Replay(state) => replay = Some(state),
-                    LlmEvent::Done(reason) => truncated |= reason == flashagent_llm::FinishReason::Length,
+                    LlmEvent::Done(reason) => {
+                        finished = true;
+                        truncated |= reason == flashagent_llm::FinishReason::Length;
+                    }
                 }
             }
             if let Some(buf) = held.take() {
@@ -2033,6 +2047,58 @@ mod tests {
         let (history, done) = run_loop(&l, &StallThenHang(std::sync::Mutex::new(0)), &tools, |_| {});
         assert_eq!(done, DoneReason::Cancelled);
         assert!(history.iter().all(|m| m.content != STALL_NUDGE), "nudge leaked: {history:?}");
+    }
+
+    #[test]
+    fn a_call_whose_stream_ended_without_a_finish_is_not_executed() {
+        // The connection closed mid-write: no finish reason, no `[DONE]`. JSON
+        // repair would close the string, and the file would be overwritten with
+        // half its content.
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![
+                MockTurn {
+                    events: vec![Ok(LlmEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("w".into()),
+                        name: Some("write_file".into()),
+                        args_delta: r#"{"path":"notes.txt","content":"first half of the fi"#.into(),
+                    })],
+                },
+                text_turn("unexpected"),
+            ]),
+        };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(l.run(&llm, &tools, vec![ChatMessage::user("x")], &mut |_| {}));
+        assert!(tools.calls.lock().unwrap().is_empty(), "a call cut off by the connection ran: {:?}", tools.calls.lock().unwrap());
+        match result {
+            Err(LoopError::Llm { source, history }) => {
+                assert!(source.to_string().contains("in the middle of a tool call"), "{source}");
+                assert_protocol_valid(&history);
+                assert!(history.iter().all(|m| m.tool_calls.is_empty()), "the half-written call was kept: {history:?}");
+            }
+            other => panic!("the cut was not reported: {other:?}"),
+        }
+
+        // A server that ends without a finish but with whole arguments still gets its call run.
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![
+                MockTurn {
+                    events: vec![Ok(LlmEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("r".into()),
+                        name: Some("read_file".into()),
+                        args_delta: r#"{"path":"notes.txt"}"#.into(),
+                    })],
+                },
+                text_turn("It says hi."),
+            ]),
+        };
+        let tools = MockTools::new();
+        let (_, done) = run_loop(&l, &llm, &tools, |_| {});
+        assert_eq!(done, DoneReason::Completed);
+        assert_eq!(tools.calls.lock().unwrap().len(), 1);
     }
 
     #[test]

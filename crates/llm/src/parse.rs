@@ -932,7 +932,8 @@ fn balanced_len(text: &str) -> Option<usize> {
 }
 
 /// Cosmetic repair (quotes, trailing commas) is allowed.
-fn is_complete_json(body: &str) -> bool {
+/// Closed brackets and nothing after them: arguments not cut off mid-way.
+pub fn is_complete_json(body: &str) -> bool {
     let body = body.trim();
     balanced_len(body).is_some_and(|len| body[len..].trim().is_empty())
 }

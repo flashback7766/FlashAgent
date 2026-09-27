@@ -21,7 +21,7 @@ mod text_tools;
 pub use client::{Client, EventStream};
 pub use encoding::base64_encode;
 pub use protocol::{ApiProtocol, Endpoint};
-pub use parse::{ChunkParser, SseDecoder, TextToolScanner, ScannerEvent};
+pub use parse::{is_complete_json, ChunkParser, SseDecoder, TextToolScanner, ScannerEvent};
 pub use repair::{effective_args, repair_json};
 pub use thinking::{DiscoveredModel, ServerDiscovery, TaskComplexity, ThinkingProfile, ThinkingProtocol};
 pub use tokenizer::count_tokens;
