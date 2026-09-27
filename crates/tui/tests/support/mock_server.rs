@@ -19,6 +19,10 @@ pub enum Reply {
     Slow { text: String, per_word: Duration },
     /// Cut off at the output limit (`finish_reason: length`).
     Cut(String),
+    /// Streams `before`, then waits for [`MockServer::release`] to stream
+    /// `after`: a turn that is certainly still running while the scenario
+    /// acts, however slow the machine.
+    Held { before: String, after: String },
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +69,7 @@ struct SideRequests {
     /// Lets a scenario act while the model is still thinking.
     turn_delay: Mutex<Option<Duration>>,
     cloud: std::sync::atomic::AtomicBool,
+    released: std::sync::atomic::AtomicBool,
 }
 
 impl MockServer {
@@ -124,6 +129,11 @@ impl MockServer {
     /// Only the OpenAI model list, as a cloud API answers: no loaded model.
     pub fn serve_as_cloud(&self) {
         self.side.cloud.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Lets a [`Reply::Held`] answer finish.
+    pub fn release(&self) {
+        self.side.released.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn side_requests_dropped(&self) -> usize {
@@ -255,6 +265,7 @@ fn serve(
     if request.body["stream"] != serde_json::Value::Bool(true) {
         let text = match &reply {
             Reply::Text(t) | Reply::Slow { text: t, .. } | Reply::Cut(t) => t.clone(),
+            Reply::Held { before, after } => format!("{before}{after}"),
             Reply::ToolCall { .. } => String::new(),
         };
         return json(&mut out, &serde_json::json!({
@@ -279,6 +290,21 @@ fn serve(
                 chunk(&mut out, serde_json::json!({ "choices": [ { "delta": { "content": word } } ] }))?;
                 out.flush()?;
                 std::thread::sleep(per_word);
+            }
+            chunk(&mut out, serde_json::json!({ "choices": [ { "delta": {}, "finish_reason": "stop" } ] }))?;
+        }
+        Reply::Held { before, after } => {
+            for word in words(&before) {
+                chunk(&mut out, serde_json::json!({ "choices": [ { "delta": { "content": word } } ] }))?;
+            }
+            out.flush()?;
+            // A minute at most, so a scenario that never releases it fails instead of hanging.
+            let until = Instant::now() + Duration::from_secs(60);
+            while !side.released.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            for word in words(&after) {
+                chunk(&mut out, serde_json::json!({ "choices": [ { "delta": { "content": word } } ] }))?;
             }
             chunk(&mut out, serde_json::json!({ "choices": [ { "delta": {}, "finish_reason": "stop" } ] }))?;
         }
