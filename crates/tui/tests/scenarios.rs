@@ -1708,6 +1708,33 @@ fn a_saved_session_comes_back_with_resume() {
 }
 
 #[test]
+fn a_resumed_session_tells_the_model_its_background_tasks_are_gone() {
+    // The dev server it started died with the last run; it took it for up.
+    let mut replies = background_sleep();
+    replies.push(Reply::Text("I will start it again.".into()));
+    let server = MockServer::start(replies);
+    let home = Home::new();
+    {
+        let mut term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+        ask(&term, "start the server", "The server is starting.");
+        term.wait_for("1 task", WAIT);
+        // The first Ctrl+D says the task will be stopped.
+        term.send(CTRL_D);
+        term.wait_for("1 background task running", WAIT);
+        quit(&mut term);
+    }
+    let session = home.sessions().pop().expect("the conversation was saved");
+    let id = session.file_stem().unwrap().to_string_lossy().to_string();
+
+    let term = Term::start(&home, &["-y", "--resume", &id], COLS, ROWS);
+    term.wait_for("Background task 1 is not running any more", WAIT);
+    ask(&term, "is the server up?", "I will start it again.");
+    let told = sent(server.turns().last().unwrap());
+    assert!(told.contains("Background task 1 is not running any more"), "{told}");
+    assert!(told.contains("command: ") && told.contains("Start it again only if the work still needs it."), "{told}");
+}
+
+#[test]
 fn a_session_that_fails_to_load_is_left_as_it_was() {
     let server = MockServer::start(vec![Reply::Text("A fresh answer.".into())]);
     let home = Home::new();
