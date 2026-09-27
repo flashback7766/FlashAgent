@@ -1,5 +1,13 @@
 # Changelog
 
+## b453 — the model hears what really happened
+
+- **A tool call cut off by a closed connection is never run.** A server that closed the connection in the middle of a tool call sent no sign that the reply had ended, and the call ran with its arguments cut short: a file write cut in its content would have replaced the file with its first half. The call is now dropped, and the answer is reported as stopped mid-stream (Ctrl+R retries).
+- **The model is told where a turn was cut short.** After Esc mid-answer, its half-written reply looked finished to it, and "go on" read as a new request. The history now says where the user stopped the turn, where the server failed, or that a turn which would not stop lost its steps, which may have changed files.
+- **A call stopped before it started says it changed nothing.** It used to read "cancelled by user before completion".
+- **A question you close is not taken for an answer.** Esc on a question card reached the model as the answer "User cancelled the question", as if you had typed it. The model is now told you closed it without answering and not to ask again right away; answers to earlier questions in the same card are kept.
+- **Background tasks you stop, or that died with an earlier run, are told to the model.** Stopping a task from `/tasks` used to go unmentioned, and the model took its dev server for running. It now hears of it with the next thing you send, without a turn of its own. A resumed session (`--resume`, `--continue`, `/resume`) tells it which of its tasks are not running any more.
+
 ## b450 — small models finish their tool calls, and fixes from a UX audit
 
 A large release: the build number goes up by 25.
