@@ -1778,11 +1778,10 @@ fn two_instances_started_together_keep_their_own_sessions() {
 
 #[test]
 fn steering_during_turn_pins_message_until_completion_and_pivots() {
-    let words: Vec<String> = (1..=6).map(|i| format!("word{i}")).collect();
     let server = MockServer::start(vec![
-        // Slow enough that a loaded CI machine sees the steer queued before the
-        // answer ends.
-        Reply::Slow { text: words.join(" "), per_word: Duration::from_millis(1000) },
+        // Held after word3 until the steer is seen queued: a slow stream still
+        // ended first on a loaded macOS runner.
+        Reply::Held { before: "word1 word2 word3 ".into(), after: "word4 word5 word6".into() },
         Reply::Text("Pivoted to user steering.".into()),
     ]);
     let home = Home::new();
@@ -1790,12 +1789,13 @@ fn steering_during_turn_pins_message_until_completion_and_pivots() {
 
     term.type_text("start counting");
     term.send(ENTER);
-    term.wait_for("word2", WAIT);
+    term.wait_for("word3", WAIT);
 
     term.type_text("steer: change direction");
     term.send(ENTER);
 
     term.wait_for("steer queued", WAIT);
+    server.release();
 
     // The stream finishes; it is not cut off.
     term.wait_for("word6", WAIT);
