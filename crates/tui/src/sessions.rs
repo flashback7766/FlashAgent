@@ -488,8 +488,7 @@ fn result_was_an_error(content: &str) -> bool {
         || content.starts_with("not executed:")
         || content.starts_with(flashagent_core::permissions::DENIED)
         || content == flashagent_core::permissions::DECLINED
-        || content == flashagent_core::CANCELLED_RESULT
-        || content == flashagent_core::STOPPED_RESULT
+        || flashagent_core::stopped_by_user(content)
 }
 
 /// `history` always opens with the system prompt, so an emptiness check would

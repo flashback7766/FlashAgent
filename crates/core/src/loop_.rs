@@ -760,8 +760,7 @@ fn fixable_by_another_call(tool: &str, result: &str) -> bool {
     tool != "run_shell"
         && !result.starts_with(crate::permissions::DENIED)
         && result != crate::permissions::DECLINED
-        && result != CANCELLED_RESULT
-        && result != STOPPED_RESULT
+        && !stopped_by_user(result)
         // What timed out may have happened anyway; asked to try again, a model repeats it.
         && !result.contains("timed out")
 }
@@ -826,7 +825,17 @@ fn strip_repeated_tail<'a>(prev: &str, next: &'a str) -> &'a str {
     &next[cut..]
 }
 
-pub const CANCELLED_RESULT: &str = "cancelled by user before completion";
+/// A call Esc stopped before it started. "cancelled by user before
+/// completion" left a model unsure whether the call had done anything.
+pub const CANCELLED_RESULT: &str = "not run: the user stopped the turn before this call started, so it changed nothing";
+
+/// What sessions saved before b451 say for [`CANCELLED_RESULT`].
+const OLD_CANCELLED_RESULT: &str = "cancelled by user before completion";
+
+/// A call the user stopped, before it started or while it ran.
+pub fn stopped_by_user(result: &str) -> bool {
+    result == CANCELLED_RESULT || result == STOPPED_RESULT || result == OLD_CANCELLED_RESULT
+}
 
 /// A call Esc stopped while it ran: whatever it was doing may be half done.
 pub const STOPPED_RESULT: &str = "stopped by the user while it ran: it may have done part of its work, so check what it changed before running it again";
