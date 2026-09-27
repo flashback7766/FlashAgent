@@ -841,6 +841,8 @@ fn esc_during_a_turn_stops_it_and_keeps_what_was_already_said() {
     let history = sent(&turns[1]);
     assert!(history.contains("word1 "), "the words written before Esc were not kept: {history}");
     assert!(!history.contains("word60"));
+    // The model is told its last reply was cut, not left to take it for finished.
+    assert!(history.contains("[The user stopped this reply here.]"), "{history}");
 }
 
 #[test]

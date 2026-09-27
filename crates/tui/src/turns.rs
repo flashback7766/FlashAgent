@@ -239,7 +239,7 @@ impl App {
                 self.renderer.request_reprint();
 
                 if reason == DoneReason::Cancelled {
-                    close_dangling_user(&mut self.history, "[interrupted by the user before replying]");
+                    flashagent_core::mark_cut_short(&mut self.history, flashagent_core::CutShort::ByUser);
                     self.suggested_prompt = None;
                     let interrupt_msg = "Request interrupted by user";
                     self.custom_placeholder = Some(interrupt_msg.to_string());
@@ -310,7 +310,7 @@ impl App {
                 // Keep the steps that already ran and changed files.
                 self.history = h;
                 self.apply_personality();
-                close_dangling_user(&mut self.history, "[no reply: the model backend failed]");
+                flashagent_core::mark_cut_short(&mut self.history, flashagent_core::CutShort::ByError);
                 update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                 self.chat.on_event(&LoopEvent::Done(DoneReason::Failed));
                 // Plain explanation first, the raw text underneath.

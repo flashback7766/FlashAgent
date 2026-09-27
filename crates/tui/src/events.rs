@@ -231,7 +231,7 @@ impl App {
         self.turn_started = None;
         self.cancel_requested = None;
         self.aborted_turn = Some(self.turn_counter);
-        close_dangling_user(&mut self.history, "[turn aborted by the user]");
+        flashagent_core::mark_cut_short(&mut self.history, flashagent_core::CutShort::Abandoned);
         self.task_inbox.turn_aborted();
         self.flush_task_lines();
         self.token_tracker.on_finished();
