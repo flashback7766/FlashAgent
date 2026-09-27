@@ -51,9 +51,13 @@ impl App {
         } else {
             self.chat.push_system(&line);
         }
-        // Stopped on purpose: nothing for the model to react to.
+        // Stopped by the model or on quit: nothing to tell. Stopped by the user
+        // from the task list: the model thinks it still runs, and hears
+        // otherwise with the next thing the user sends, without a turn of its own.
         if !notice.killed() {
             self.task_inbox.push(notice.message());
+        } else if notice.by_user {
+            self.task_inbox.push_quiet(notice.message());
         }
         self.refresh_tasks_overlay(cx);
         self.deliver_task_notices(cx);
@@ -120,7 +124,7 @@ impl App {
             TasksAction::Close => return,
             TasksAction::Open(id) => modal.detail = Some((id, shells.output(id).unwrap_or_default())),
             TasksAction::Kill(id) => {
-                if shells.stop(id) {
+                if shells.stop_for_user(id) {
                     self.background = Some(BackgroundNotice::fading(format!("Stopping background task {id}"), 4));
                 }
             }
@@ -188,6 +192,7 @@ mod tests {
             state: TaskState::Exited(Some(0)),
             elapsed: std::time::Duration::from_secs(3),
             tail: "Finished".into(),
+            by_user: false,
         };
         let lines = notice_lines(&format!("{}\n\n{}", notice.message(), TaskNotice { id: 5, ..notice.clone() }.message()));
         assert_eq!(lines.len(), 2, "{lines:?}");

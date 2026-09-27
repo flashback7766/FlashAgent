@@ -22,11 +22,21 @@ pub struct NoticeInbox {
     injected: Vec<String>,
     /// The user stopped the last turn: notices wait for them to send something.
     held: bool,
+    /// Ride along with the next turn but never start one: the user caused
+    /// them and is not waiting on the model.
+    quiet: Vec<String>,
+    /// Which of the sent and injected ones are quiet, to put them back there.
+    quiet_sent: Vec<String>,
 }
 
 impl NoticeInbox {
     pub fn push(&mut self, notice: String) {
         self.queued.push(notice);
+    }
+
+    /// For the next turn, whenever it starts; it wakes nobody.
+    pub fn push_quiet(&mut self, notice: String) {
+        self.quiet.push(notice);
     }
 
     /// Waiting for a turn, or sent into one and not injected yet.
@@ -37,9 +47,22 @@ impl NoticeInbox {
     /// For the running turn's steering channel. Each stays marked as sent
     /// until the loop reports it injected.
     pub fn send_into_turn(&mut self) -> Vec<String> {
-        let out = std::mem::take(&mut self.queued);
+        let quiet = std::mem::take(&mut self.quiet);
+        self.quiet_sent.extend(quiet.iter().cloned());
+        let out: Vec<String> = quiet.into_iter().chain(std::mem::take(&mut self.queued)).collect();
         self.sent.extend(out.iter().cloned());
         out
+    }
+
+    /// Back to where they waited: quiet ones stay quiet.
+    fn requeue(&mut self, mut back: Vec<String>) {
+        back.append(&mut self.queued);
+        let (quiet, loud): (Vec<String>, Vec<String>) = back.into_iter().partition(|n| self.quiet_sent.contains(n));
+        self.quiet_sent.retain(|n| quiet.contains(n));
+        let mut quiet = quiet;
+        quiet.append(&mut self.quiet);
+        self.quiet = quiet;
+        self.queued = loud;
     }
 
     /// The loop injected `text`. False when it is not one of ours (the user
@@ -58,10 +81,10 @@ impl NoticeInbox {
     /// turn the user stopped holds the queue until they send something: they
     /// asked for quiet.
     pub fn turn_ended(&mut self, stopped_by_user: bool) {
-        self.injected.clear();
-        let mut back = std::mem::take(&mut self.sent);
-        back.append(&mut self.queued);
-        self.queued = back;
+        let injected = std::mem::take(&mut self.injected);
+        self.quiet_sent.retain(|n| !injected.contains(n));
+        let back = std::mem::take(&mut self.sent);
+        self.requeue(back);
         if stopped_by_user {
             self.held = true;
         }
@@ -72,8 +95,7 @@ impl NoticeInbox {
     pub fn turn_aborted(&mut self) {
         let mut back = std::mem::take(&mut self.injected);
         back.append(&mut self.sent);
-        back.append(&mut self.queued);
-        self.queued = back;
+        self.requeue(back);
         self.held = true;
     }
 
@@ -154,6 +176,31 @@ mod tests {
         assert_eq!(inbox.wake(false), None, "woke up after Esc");
         inbox.turn_started();
         assert_eq!(inbox.send_into_turn(), vec![notice(1)], "it rides along with the next prompt");
+    }
+
+    #[test]
+    fn a_task_the_user_stopped_rides_along_with_the_next_turn_but_starts_none() {
+        let mut inbox = NoticeInbox::default();
+        inbox.push_quiet(notice(1));
+        assert_eq!(inbox.wake(false), None, "a quiet notice started a turn");
+        assert_eq!(inbox.pending(), 0);
+        // A turn that ended before the loop took it: still quiet, still waiting.
+        inbox.turn_started();
+        assert_eq!(inbox.send_into_turn(), vec![notice(1)]);
+        inbox.turn_ended(false);
+        assert_eq!(inbox.wake(false), None);
+        // Next time it arrives, and it is not given again.
+        inbox.turn_started();
+        let sent = inbox.send_into_turn();
+        assert_eq!(sent, vec![notice(1)]);
+        assert!(inbox.injected(&sent[0]));
+        inbox.turn_ended(false);
+        inbox.turn_started();
+        assert!(inbox.send_into_turn().is_empty());
+        // A loud one queued behind it still wakes on its own.
+        inbox.push_quiet(notice(2));
+        inbox.push(notice(3));
+        assert_eq!(inbox.wake(false), Some(notice(3)));
     }
 
     #[test]
