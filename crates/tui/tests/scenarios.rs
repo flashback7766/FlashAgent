@@ -2829,7 +2829,9 @@ fn background_sleep() -> Vec<Reply> {
 
 #[test]
 fn a_task_stopped_from_the_task_list_wakes_nobody() {
-    let server = MockServer::start(background_sleep());
+    let mut replies = background_sleep();
+    replies.push(Reply::Text("It is stopped.".into()));
+    let server = MockServer::start(replies);
     let home = Home::new();
     let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
     ask(&term, "start the server", "The server is starting.");
@@ -2847,6 +2849,12 @@ fn a_task_stopped_from_the_task_list_wakes_nobody() {
     std::thread::sleep(Duration::from_millis(1500));
     assert_eq!(server.turns().len(), 2, "a task the user stopped woke the agent");
     assert!(!term.screen().contains("1 task"), "the footer still counts a stopped task");
+
+    // It hears of it with the next thing the user says.
+    ask(&term, "is the server up?", "It is stopped.");
+    let told = sent(server.turns().last().unwrap());
+    assert!(told.contains("Background task 1 was stopped by the user after"), "{told}");
+    assert!(told.contains("It is no longer running"), "{told}");
 }
 
 #[test]
