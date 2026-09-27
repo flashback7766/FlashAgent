@@ -2011,6 +2011,34 @@ fn a_question_from_the_model_is_answered_from_its_card() {
 }
 
 #[test]
+fn a_question_closed_with_esc_is_not_passed_off_as_an_answer() {
+    // It reached the model as the write-in answer "User cancelled the question".
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "ask_user".into(),
+            arguments: serde_json::json!({ "question": "Which database?", "options": ["Postgres", "SQLite"] }),
+        },
+        Reply::Text("Carrying on without it.".into()),
+        Reply::Text("unexpected".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("pick a database");
+    term.send(ENTER);
+    term.wait_for("Which database?", WAIT);
+    term.send(ESC);
+    term.wait_for("Carrying on without it.", WAIT);
+    term.wait_for("not answered", WAIT);
+    let turns = server.turns();
+    let told = sent(turns.last().unwrap());
+    assert!(told.contains("the user closed the question without answering"), "{told}");
+    assert!(!told.contains("(write-in)"), "{told}");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(server.turns().len(), 2, "a closed question was answered with a request to try again");
+}
+
+#[test]
 fn typing_in_a_question_card_answers_in_ones_own_words() {
     let server = MockServer::start(vec![
         Reply::ToolCall {
