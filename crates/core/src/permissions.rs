@@ -951,6 +951,10 @@ impl PermissionedTools {
 
 /// A call the permission rules refused, before its reason.
 pub const DENIED: &str = "denied by permissions: ";
+/// An `ask_user` question the user closed. It came back as the answer "User
+/// cancelled the question", as if they had typed it.
+pub const QUESTION_CLOSED: &str = "the user closed the question without answering. Do not ask it again right away: carry on with what you can do without the answer, or say in one sentence what you need from them.";
+
 /// A small model read "denied by user" as a privilege error and asked for sudo.
 pub const DECLINED: &str = "The user declined this call. Do not retry it and do not look for a way around it — ask them what they would prefer, or carry on with what you can do without it.";
 

@@ -69,7 +69,8 @@ pub struct QuestionRequest {
     pub deadline: Option<std::time::Instant>,
 }
 
-pub(crate) type QuestionSlot = Option<(QuestionRequest, Option<(String, bool)>)>;
+/// An answer and whether it was written in, or why there is none.
+pub(crate) type QuestionSlot = Option<(QuestionRequest, Option<Result<(String, bool), String>>)>;
 
 #[derive(Default)]
 pub struct TuiQuestionGate {
@@ -87,19 +88,25 @@ impl TuiQuestionGate {
     }
 
     pub fn respond(&self, answer: String, is_write_in: bool) {
+        self.settle(Ok((answer, is_write_in)));
+    }
+
+    /// Closed without an answer: the model is told so, not handed words the
+    /// user never wrote.
+    pub fn cancel(&self) {
+        self.settle(Err(flashagent_core::permissions::QUESTION_CLOSED.to_string()));
+    }
+
+    fn settle(&self, reply: Result<(String, bool), String>) {
         let mut guard = self.pending.lock();
         if let Some(slot) = guard.as_mut() {
-            slot.1 = Some((answer, is_write_in));
+            slot.1 = Some(reply);
         }
         drop(guard);
         self.changed.notify_waiters();
     }
 
-    pub fn cancel(&self) {
-        self.respond("User cancelled the question".to_string(), true);
-    }
-
-    async fn wait_answer(&self) -> (String, bool) {
+    async fn wait_answer(&self) -> Result<(String, bool), String> {
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
@@ -130,6 +137,6 @@ impl flashagent_tools::QuestionGate for TuiQuestionGate {
         *self.pending.lock() = Some((req, None));
         let _clear = ClearOnDrop(&self.pending, &self.changed);
         self.changed.notify_waiters();
-        Ok(self.wait_answer().await)
+        self.wait_answer().await
     }
 }

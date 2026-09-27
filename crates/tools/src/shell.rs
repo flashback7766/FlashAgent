@@ -459,6 +459,8 @@ pub struct TaskNotice {
     pub elapsed: Duration,
     /// The end of its output, a few lines.
     pub tail: String,
+    /// Stopped from the task list: the model that started it does not know.
+    pub by_user: bool,
 }
 
 const NOTICE_LINES: usize = 20;
@@ -475,10 +477,15 @@ impl TaskNotice {
         use flashagent_core::{TASK_NOTICE_NOTE, TASK_NOTICE_OPENING};
         let command: String = self.command.chars().take(300).collect();
         let output = if self.tail.trim().is_empty() { "(no output)".to_string() } else { format!("last output:\n{}", self.tail) };
+        let (how, next) = if self.by_user {
+            ("was stopped by the user", "\nIt is no longer running: start it again only if the user asks for it or the work needs it.")
+        } else {
+            ("", "")
+        };
         format!(
-            "{TASK_NOTICE_OPENING}{} {} after {}. {TASK_NOTICE_NOTE}\ncommand: {command}\n{output}",
+            "{TASK_NOTICE_OPENING}{} {} after {}. {TASK_NOTICE_NOTE}\ncommand: {command}\n{output}{next}",
             self.id,
-            self.state.describe(),
+            if how.is_empty() { self.state.describe() } else { how.to_string() },
             format_elapsed(self.elapsed)
         )
     }
@@ -505,6 +512,7 @@ struct ShellTask {
     stop: Option<oneshot::Sender<()>>,
     /// An exit racing the kill still counts as stopped, with no wake-up.
     kill_requested: bool,
+    stopped_by_user: bool,
     detached: bool,
 }
 
@@ -581,6 +589,7 @@ async fn watch(shared: Arc<Shared>, id: u32, child: Child, stop: oneshot::Receiv
             state: task.state.clone(),
             elapsed: ended.duration_since(task.started),
             tail: last_lines(&buf, NOTICE_LINES, NOTICE_BYTES),
+            by_user: task.stopped_by_user && task.state == TaskState::Killed,
         }
     };
     if let Some(tx) = shared.notices.lock().as_ref() {
@@ -650,6 +659,7 @@ impl ShellRegistry {
             pid: child.id(),
             stop: Some(stop_tx),
             kill_requested: false,
+            stopped_by_user: false,
             detached,
         };
         self.shared.tasks.lock().insert(id, task);
@@ -698,6 +708,15 @@ impl ShellRegistry {
             let _ = stop.send(());
         }
         true
+    }
+
+    /// [`Self::stop`] from the task list: the model is told when it next hears
+    /// from the user.
+    pub fn stop_for_user(&self, id: u32) -> bool {
+        if let Some(task) = self.shared.tasks.lock().get_mut(&id).filter(|t| t.state == TaskState::Running) {
+            task.stopped_by_user = true;
+        }
+        self.stop(id)
     }
 
     /// Waits a moment for the process to be gone, so what is reported is final.
@@ -1060,13 +1079,19 @@ mod tests {
             state: TaskState::Exited(Some(1)),
             elapsed: Duration::from_secs(125),
             tail: last_lines(&output, NOTICE_LINES, NOTICE_BYTES),
+            by_user: false,
         };
         let text = notice.message();
         assert!(text.starts_with("[Background task 7 exited with code 1 after 2m 05s."), "{text}");
         assert!(text.contains("command: npm run build"), "{text}");
         assert!(text.contains("line-50") && text.contains("line-31") && !text.contains("line-30\n"), "{text}");
-        let quiet = TaskNotice { tail: String::new(), ..notice };
+        let quiet = TaskNotice { tail: String::new(), ..notice.clone() };
         assert!(quiet.message().ends_with("(no output)"));
+        // Stopped from the task list: who stopped it, and that it is gone.
+        let stopped = TaskNotice { state: TaskState::Killed, by_user: true, ..notice };
+        let text = stopped.message();
+        assert!(text.starts_with("[Background task 7 was stopped by the user after 2m 05s."), "{text}");
+        assert!(text.ends_with("It is no longer running: start it again only if the user asks for it or the work needs it."), "{text}");
         assert!(last_lines(&"y".repeat(10_000), 20, NOTICE_BYTES).len() <= NOTICE_BYTES);
     }
 }

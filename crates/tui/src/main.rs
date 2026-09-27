@@ -1303,9 +1303,13 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     }
     // The unreadable file keeps its name: saving over it would destroy what may
     // still be recoverable by hand.
-    if resume_session_id.as_deref().is_some_and(|id| !app.resume_at_start(id, &w.memory_block, w.perm)) {
-        session_id = new_session_id();
-        open_snapshots(w.perm, &session_id, &w.cwd);
+    if let Some(id) = resume_session_id.as_deref() {
+        if app.resume_at_start(id, &w.memory_block, w.perm) {
+            app.tell_of_lost_tasks(&w.tools_arc.shells().tasks());
+        } else {
+            session_id = new_session_id();
+            open_snapshots(w.perm, &session_id, &w.cwd);
+        }
     }
     if let Some(note) = session_note {
         app.notice(note);
@@ -1336,6 +1340,7 @@ async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mu
         // Switched here, where the session id and the snapshot store live.
         if let Some(id) = app.pending_resume.take().filter(|id| id != session_id) {
             if app.switch_session(session_id, &id, &w.memory_block, w.perm) {
+                app.tell_of_lost_tasks(&w.tools_arc.shells().tasks());
                 *session_id = id;
                 open_snapshots(w.perm, session_id, &w.cwd);
                 app.warm_prompt_cache(&w.source, w.perm, &w.memory_block);

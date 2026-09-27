@@ -192,7 +192,12 @@ async fn run_ask_user_within(
             },
             None => asked.await,
         };
-        let (answer, is_write_in) = reply.map_err(ToolError::Other)?;
+        let (answer, is_write_in) = match reply {
+            Ok(reply) => reply,
+            // What was answered before still counts.
+            Err(why) if !answered.is_empty() => return Err(ToolError::Other(format!("{why}\nAnswered before that:\n{}", answered.join("\n")))),
+            Err(why) => return Err(ToolError::Other(why)),
+        };
 
         let answer_trimmed = answer.trim();
         let final_answer = if is_write_in {
@@ -338,6 +343,30 @@ mod tests {
         let res = run_ask_user_within(Some(&gate), &goal_flag, args, Duration::from_millis(80)).await.unwrap();
         assert!(res.contains("1. Which database?: SQLite"), "{res}");
         assert!(res.contains("No answer within"), "{res}");
+    }
+
+    #[tokio::test]
+    async fn a_question_closed_after_another_was_answered_keeps_that_answer() {
+        // Answers the first question, then the user closes the card.
+        struct ClosesSecond(parking_lot::Mutex<usize>);
+        #[async_trait]
+        impl QuestionGate for ClosesSecond {
+            async fn ask(&self, _q: &str, _o: Option<&[String]>, _m: bool, _d: Option<std::time::Instant>) -> Result<(String, bool), String> {
+                let mut asked = self.0.lock();
+                *asked += 1;
+                if *asked == 1 { Ok(("SQLite".into(), false)) } else { Err("the user closed the question without answering.".into()) }
+            }
+        }
+        let gate: Arc<dyn QuestionGate> = Arc::new(ClosesSecond(parking_lot::Mutex::new(0)));
+        let args = AskUserArgs {
+            question: None,
+            options: None,
+            multi_select: None,
+            questions: Some(vec![QuestionItemOrString::Simple("Which database?".into()), QuestionItemOrString::Simple("Which port?".into())]),
+        };
+        let err = run_ask_user(Some(&gate), &Arc::new(AtomicBool::new(false)), args).await.unwrap_err().to_string();
+        assert!(err.contains("closed the question without answering"), "{err}");
+        assert!(err.contains("1. Which database?: SQLite"), "{err}");
     }
 
     #[tokio::test]
