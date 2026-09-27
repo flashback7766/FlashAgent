@@ -488,6 +488,8 @@ fn not_run_note(result: &str) -> Option<&'static str> {
         Some("not allowed")
     } else if flashagent_core::stopped_by_user(result) {
         Some("stopped")
+    } else if result.contains(flashagent_core::permissions::QUESTION_CLOSED) {
+        Some("not answered")
     } else {
         None
     }

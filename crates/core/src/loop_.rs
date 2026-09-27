@@ -761,6 +761,7 @@ fn fixable_by_another_call(tool: &str, result: &str) -> bool {
         && !result.starts_with(crate::permissions::DENIED)
         && result != crate::permissions::DECLINED
         && !stopped_by_user(result)
+        && !result.contains(crate::permissions::QUESTION_CLOSED)
         // What timed out may have happened anyway; asked to try again, a model repeats it.
         && !result.contains("timed out")
 }
