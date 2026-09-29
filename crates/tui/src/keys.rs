@@ -548,6 +548,8 @@ impl App {
                     // Not steering: a task may need stopping while the turn runs.
                     self.input.clear();
                     self.open_tasks(cx);
+                } else if self.running && self.input.line_count() == 1 && self.input.starts_with('/') && self.steer_command(cx).await {
+                    // A command, run, queued or refused: not guidance for the model.
                 } else if !self.input.is_empty() && self.running {
                     if let Some(steer_tx) = self.active_steer_tx.clone() {
                         let text = self.input.take();

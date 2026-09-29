@@ -327,7 +327,7 @@ impl App {
                         format!("  \x1b[38;2;160;155;145m{hint}\x1b[0m"),
                     );
                 }
-                if explained.headline != explained.raw.trim() {
+                if !explained.raw.trim().is_empty() && explained.headline != explained.raw.trim() {
                     self.chat.push_line(
                         LineKind::System,
                         format!("  \x1b[38;2;120;115;110m{}\x1b[0m", explained.raw.trim()),
@@ -336,6 +336,7 @@ impl App {
                 self.notice("Ctrl+R retries the last prompt");
             }
         }
+        self.run_queued_commands(cx).await;
         // Notices that came as the turn ended.
         self.deliver_task_notices(cx);
 

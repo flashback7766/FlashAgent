@@ -607,6 +607,8 @@ struct App {
     active_turn_handle: Option<tokio::task::JoinHandle<()>>,
     active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     pending_steers: Vec<String>,
+    /// Commands typed while a turn ran that change the conversation: they run when it ends.
+    queued_commands: Vec<String>,
     /// Notices of background tasks that ended, on their way to the model.
     task_inbox: flashagent_core::NoticeInbox,
     /// Transcript lines of tasks that ended while a turn was writing.
@@ -1114,6 +1116,7 @@ fn initial_app(init: InitialApp) -> App {
         active_turn_handle: None,
         active_steer_tx: None,
         pending_steers: Vec::new(),
+        queued_commands: Vec::new(),
         task_inbox: flashagent_core::NoticeInbox::default(),
         task_lines: Vec::new(),
         tasks_refreshed: std::time::Instant::now(),

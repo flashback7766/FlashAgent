@@ -14,7 +14,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/verbose [all|last|off]", "show thoughts and tool calls (also F2, Alt+O, Ctrl+O)"),
     ("/regenerate, Ctrl+R", "answer the last prompt again from scratch"),
     ("/rewind [n]", "files and conversation go back to before turn n"),
-    ("/diff, /commit <msg>", "git diff --stat; commit the staged changes"),
+    ("/diff, /commit <msg>", "the changed lines and untracked files; commit the staged changes"),
     ("/export [md|html|jsonl]", "write the conversation to a file"),
     ("/editor, Ctrl+X Ctrl+E", "write the prompt in an external editor"),
     ("/mcp [list|market|test|add|reload]", "Model Context Protocol servers"),
@@ -29,7 +29,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
 ];
 
 const HELP_KEYS: &[(&str, &str)] = &[
-    ("Enter", "send; while a turn runs, steer it"),
+    ("Enter", "send; while a turn runs, steer it, or run a /command (/compact, /clear, /export and /rewind wait for the turn to end)"),
     ("Alt+Enter, Ctrl+J, \\ Enter", "a new line in the prompt"),
     ("\u{2190}/\u{2192}, Home/End, Ctrl+A/E, Ctrl+W, Ctrl+U, Alt+K", "move and delete in the prompt, as in a shell"),
     ("Ctrl+F", "search the prompts sent before"),
@@ -79,6 +79,52 @@ fn help_text(width: usize) -> String {
     out.join("\n")
 }
 
+/// `/name arg` as (name, arg); the line starts with a slash.
+fn split_command(line: &str) -> (&str, &str) {
+    let rest = line.strip_prefix('/').unwrap_or(line);
+    match rest.split_once(char::is_whitespace) {
+        Some((name, arg)) => (name, arg.trim()),
+        None => (rest, ""),
+    }
+}
+
+/// What a command does when it is typed while a turn runs.
+#[derive(Debug, PartialEq)]
+enum WhileRunning {
+    /// Not a command: a path, or guidance for the model.
+    Text,
+    /// Nothing it reads or changes belongs to the running turn.
+    Now,
+    /// It changes the conversation, which the turn holds until it ends.
+    AfterTurn,
+    /// It would start or end something under the turn.
+    Refuse,
+    Unknown,
+}
+
+fn while_running(name: &str) -> WhileRunning {
+    match name {
+        "help" | "?" | "whatsnew" | "changelog" | "memory" | "memories" | "context" | "verbose" | "expand" | "think"
+        | "o" | "diff" | "commit" | "settings" | "config" | "sampling" | "params" | "effort" | "thinking" | "t"
+        | "model" | "models" | "m" | "mode" | "skills" => WhileRunning::Now,
+        "compact" | "clear" | "export" | "rewind" => WhileRunning::AfterTurn,
+        "goal" | "resume" | "regenerate" | "retry" | "update" | "channel" | "mcp" | "editor" | "exit" | "quit" | "q"
+        | "uninstall" => WhileRunning::Refuse,
+        _ if name.starts_with("skill:") => WhileRunning::Refuse,
+        _ if name.is_empty() || name.contains(['/', '\\', '.']) => WhileRunning::Text,
+        _ if find_skill_file(name).is_some() => WhileRunning::Refuse,
+        _ => WhileRunning::Unknown,
+    }
+}
+
+fn untracked_list(files: &[&str]) -> String {
+    let mut rows: Vec<String> = files.iter().take(8).map(|f| format!("  {f}")).collect();
+    if files.len() > 8 {
+        rows.push(format!("  \u{2026} and {} more", files.len() - 8));
+    }
+    rows.join("\n")
+}
+
 impl App {
     /// Enter on a non-empty prompt with no turn running.
     pub(crate) async fn submit_input(&mut self, cx: &mut LoopCtx<'_>) -> Flow {
@@ -96,8 +142,49 @@ impl App {
         Flow::Next
     }
 
+    /// Enter on a `/command` while a turn runs. False when the line is not one
+    /// (a path like `/tmp/shot.png` is guidance for the model).
+    pub(crate) async fn steer_command(&mut self, cx: &mut LoopCtx<'_>) -> bool {
+        let line = self.input.trim().to_string();
+        let (name, arg) = split_command(&line);
+        match while_running(name) {
+            WhileRunning::Text => return false,
+            WhileRunning::Now => {
+                self.remember_prompt(&line);
+                self.run_command(cx, name, arg).await;
+            }
+            WhileRunning::AfterTurn => {
+                self.remember_prompt(&line);
+                self.input.clear();
+                if !self.queued_commands.contains(&line) {
+                    self.queued_commands.push(line);
+                }
+            }
+            WhileRunning::Refuse => self.background = Some(BackgroundNotice::fading(format!("/{name} does not run while the model works \u{b7} Esc interrupts the turn first"), 6).warning()),
+            WhileRunning::Unknown => self.unknown_command(name),
+        }
+        self.renderer.request_reprint();
+        true
+    }
+
+    /// What was typed during the turn and waited for it: the conversation is
+    /// whole again. A draft in the prompt is not touched.
+    pub(crate) async fn run_queued_commands(&mut self, cx: &mut LoopCtx<'_>) {
+        let queued = std::mem::take(&mut self.queued_commands);
+        if queued.is_empty() {
+            return;
+        }
+        let draft = self.input.take();
+        for line in queued {
+            let (name, arg) = split_command(&line);
+            self.input.set(line.clone());
+            self.run_command(cx, name, arg).await;
+        }
+        self.input.set(draft);
+    }
+
     /// `None` when it is a path like `/tmp/shot.png`, which goes to the model.
-    async fn run_command(&mut self, cx: &mut LoopCtx<'_>, name: &str, arg: &str) -> Option<Flow> {
+    pub(crate) async fn run_command(&mut self, cx: &mut LoopCtx<'_>, name: &str, arg: &str) -> Option<Flow> {
         // A command takes the line; a typo leaves it to fix.
         let typed = self.input.take();
         self.autocomplete_idx = 0;
@@ -628,29 +715,57 @@ impl App {
         };
     }
 
+    /// The changed lines, not only their count, and the files git does not track yet.
     fn git_diff_summary(&mut self) {
-        match std::process::Command::new("git").args(["diff", "--stat"]).output() {
-            Ok(out) => {
-                let s = String::from_utf8_lossy(&out.stdout);
-                if !s.trim().is_empty() {
-                    self.chat.push_system(&format!("Git diff summary:\n{}", s.trim_end()));
-                    return;
-                }
-                // `git diff` ignores untracked files, and "clean" next to them is a lie.
-                let untracked = std::process::Command::new("git")
-                    .args(["ls-files", "--others", "--exclude-standard"])
-                    .output()
-                    .ok()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
-                    .unwrap_or(0);
-                match untracked {
-                    0 => self.notice("No changes to tracked files"),
-                    1 => self.notice("No changes to tracked files · 1 untracked file"),
-                    n => self.notice(format!("No changes to tracked files · {n} untracked files")),
-                }
+        const SHOWN: usize = 60;
+        let git = |args: &[&str]| -> Result<String, std::io::Error> {
+            let out = std::process::Command::new("git").args(args).output()?;
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        let (stat, patch, untracked) = match (git(&["diff", "--stat"]), git(&["diff", "--no-color", "-U2"]), git(&["ls-files", "--others", "--exclude-standard"])) {
+            (Ok(stat), Ok(patch), Ok(untracked)) => (stat, patch, untracked),
+            (Err(e), ..) | (_, Err(e), _) | (.., Err(e)) => {
+                self.notice(format!("Failed to run git diff: {e}"));
+                return;
             }
-            Err(e) => self.notice(format!("Failed to run git diff: {e}")),
+        };
+        let untracked: Vec<&str> = untracked.lines().collect();
+        if stat.trim().is_empty() {
+            let said = match untracked.len() {
+                0 => "No changes to tracked files".to_string(),
+                1 => "No changes to tracked files \u{b7} 1 untracked file".to_string(),
+                n => format!("No changes to tracked files \u{b7} {n} untracked files"),
+            };
+            if untracked.is_empty() {
+                self.notice(said);
+                return;
+            }
+            self.chat.push_system(&format!("{said}:\n{}", untracked_list(&untracked)));
+            return;
         }
+        let mut out = format!("Git diff:\n{}", stat.trim_end());
+        // Its own lines only: the file headers repeat what the stat above says.
+        let body: Vec<&str> = patch
+            .lines()
+            .filter(|l| !(l.starts_with("diff --git") || l.starts_with("index ") || l.starts_with("--- ") || l.starts_with("+++ ")))
+            .collect();
+        for line in body.iter().take(SHOWN) {
+            let clean: String = line.chars().map(|c| if c.is_control() && c != '\t' { ' ' } else { c }).collect();
+            let color = match clean.as_bytes().first() {
+                Some(b'+') => "\x1b[38;2;145;205;140m",
+                Some(b'-') => "\x1b[38;2;225;115;105m",
+                Some(b'@') => "\x1b[38;2;135;130;125m",
+                _ => "\x1b[38;2;165;160;150m",
+            };
+            out.push_str(&format!("\n{color}{}\x1b[0m", clean.replace('\t', "    ")));
+        }
+        if body.len() > SHOWN {
+            out.push_str(&format!("\n\x1b[38;2;135;130;125m\u{2026} {} more lines (git diff shows all)\x1b[0m", body.len() - SHOWN));
+        }
+        if !untracked.is_empty() {
+            out.push_str(&format!("\n\nUntracked:\n{}", untracked_list(&untracked)));
+        }
+        self.chat.push_system(&out);
     }
 
     fn rewind_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {
@@ -818,5 +933,35 @@ impl App {
         self.input.set(extract_user_prompt(&prompt).to_string());
         self.autosave(cx.session_id, cx.cwd_display);
         self.renderer.request_reprint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_command_typed_during_a_turn_runs_waits_or_is_refused_by_what_it_touches() {
+        for name in ["help", "verbose", "diff", "mode", "effort", "model", "memory", "context"] {
+            assert_eq!(while_running(name), WhileRunning::Now, "{name}");
+        }
+        // The conversation belongs to the turn until it ends.
+        for name in ["compact", "clear", "export", "rewind"] {
+            assert_eq!(while_running(name), WhileRunning::AfterTurn, "{name}");
+        }
+        for name in ["goal", "resume", "regenerate", "exit", "uninstall", "skill:review", "update"] {
+            assert_eq!(while_running(name), WhileRunning::Refuse, "{name}");
+        }
+        // A path is for the model; a misspelt command is not.
+        assert_eq!(while_running("tmp/shot.png"), WhileRunning::Text);
+        assert_eq!(while_running(""), WhileRunning::Text);
+        assert_eq!(while_running("hlep"), WhileRunning::Unknown);
+    }
+
+    #[test]
+    fn a_command_line_splits_into_name_and_argument() {
+        assert_eq!(split_command("/compact keep the schema"), ("compact", "keep the schema"));
+        assert_eq!(split_command("/help"), ("help", ""));
+        assert_eq!(split_command("/tmp/shot.png"), ("tmp/shot.png", ""));
     }
 }

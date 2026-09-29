@@ -13,7 +13,7 @@ async fn client_for(endpoint: &flashagent_llm::Endpoint, model: &str) -> Backend
     // A local server loads the model on its first request, which takes minutes
     // on a CPU; timed as the first scenario, the load failed it.
     if crate::warm::worth_warming(endpoint, source.discovery().map(|d| d.kind)) {
-        println!("  loading the model…");
+        println!("  loading the model (a local server does this once; on a CPU it can take a minute)…");
         load_model(&source).await;
     }
     source
@@ -46,6 +46,7 @@ pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
     }
     println!("\nChecking whether {model} can drive tools…");
     let source = client_for(&endpoint, model).await;
+    println!("  running the scenarios, each is one small task for the model…");
     let report = flashagent_core::toolcheck::check_model(
         &source,
         model,

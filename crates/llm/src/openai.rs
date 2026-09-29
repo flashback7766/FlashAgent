@@ -29,6 +29,9 @@ pub(crate) struct Learned {
     completion_tokens: bool,
     /// DeepSeek's reasoner refuses a history that carries its earlier reasoning.
     no_reasoning_replay: bool,
+    /// OpenRouter answers 402 when the reply the model may write costs more
+    /// than the balance holds, and says how much the balance does buy.
+    token_cap: Option<i64>,
 }
 
 impl Learned {
@@ -64,6 +67,11 @@ impl Learned {
                 map.insert("max_completion_tokens".into(), n);
             }
         }
+        if let Some(cap) = self.token_cap {
+            let key = if self.completion_tokens { "max_completion_tokens" } else { "max_tokens" };
+            let capped = map.get(key).and_then(|n| n.as_i64()).map_or(cap, |n| n.min(cap));
+            map.insert(key.into(), serde_json::json!(capped));
+        }
         if self.no_reasoning_replay {
             for message in map.get_mut("messages").and_then(|m| m.as_array_mut()).into_iter().flatten() {
                 if let Some(message) = message.as_object_mut() {
@@ -83,10 +91,21 @@ impl Learned {
         }
         into.completion_tokens |= self.completion_tokens;
         into.no_reasoning_replay |= self.no_reasoning_replay;
+        into.token_cap = match (into.token_cap, self.token_cap) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         if self.fields.is_some() {
             into.fields = self.fields;
         }
     }
+}
+
+/// The 402 text "... but can only afford 68094": the most the balance buys.
+fn affordable_tokens(error: &str) -> Option<i64> {
+    let rest = &error[error.find("can only afford ")? + "can only afford ".len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok().filter(|n| *n >= 256)
 }
 
 /// `top_p` is named in "top_p is not supported", not in "top_probs".
@@ -165,6 +184,13 @@ pub(crate) async fn stream(
         }
         let status = resp.status().as_u16();
         let body_text = resp.text().await.unwrap_or_default();
+        if status == 402 && adaptive_retries < MAX_ADAPTIVE_RETRIES {
+            if let Some(cap) = affordable_tokens(&body_text).filter(|c| learned.token_cap.is_none_or(|old| *c < old)) {
+                learned.token_cap = Some(cap);
+                adaptive_retries += 1;
+                continue;
+            }
+        }
         // 422: Mistral and other pydantic servers refuse unknown fields with it.
         if !matches!(status, 400 | 422) || adaptive_retries >= MAX_ADAPTIVE_RETRIES {
             return Err(LlmError::Status { status, body: body_text });
@@ -460,6 +486,20 @@ async fn discover_gemini(client: &Client, generation: u64) -> Option<ServerDisco
     apply_listing(client, generation, &url, &val, None)
 }
 
+/// A server on this machine or network answers at once; a cloud API's list
+/// (OpenRouter's is 750 KB) needs seconds.
+fn listing_timeout(base: &str) -> Duration {
+    let host = base.split("://").nth(1).unwrap_or(base).split(['/', ':']).next().unwrap_or("");
+    let near = host == "localhost"
+        || host.ends_with(".local")
+        || host.ends_with(".localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+            std::net::IpAddr::V6(v6) => v6.is_loopback(),
+        });
+    Duration::from_millis(if near { 1500 } else { 15_000 })
+}
+
 /// Tries LM Studio's `/api/v1/models` and `/api/v0/models`, then the standard `/models`.
 pub(crate) async fn discover(client: &Client, generation: u64) -> Option<ServerDiscovery> {
     if let Some(disc) = discover_gemini(client, generation).await {
@@ -468,10 +508,11 @@ pub(crate) async fn discover(client: &Client, generation: u64) -> Option<ServerD
     let base = api_base(client);
     let root = base.strip_suffix("/v1").unwrap_or(&base).to_string();
     let headers = headers(client);
+    let wait = listing_timeout(&base);
     let probe = |url: String| {
         let headers = headers.clone();
         async move {
-            let val = client.get_json(&url, &headers, Duration::from_millis(1500)).await;
+            let val = client.get_json(&url, &headers, wait).await;
             (url, val)
         }
     };
@@ -1123,6 +1164,50 @@ mod tests {
 
     fn sse(body: &str) -> (&'static str, &'static str, String) {
         ("200 OK", "text/event-stream", body.to_string())
+    }
+
+    #[test]
+    fn what_the_balance_buys_is_read_from_the_402_text() {
+        let said = r#"{"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 131072 tokens, but can only afford 68094. To increase, visit https://openrouter.ai/settings/credits"}}"#;
+        assert_eq!(affordable_tokens(said), Some(68094));
+        assert_eq!(affordable_tokens("can only afford 12 tokens"), None, "a cap too small to answer in is not one");
+        assert_eq!(affordable_tokens("insufficient credits"), None);
+    }
+
+    #[test]
+    fn a_cloud_list_gets_seconds_and_a_server_at_hand_gets_one_and_a_half() {
+        assert_eq!(listing_timeout("https://openrouter.ai/api/v1"), Duration::from_secs(15));
+        assert_eq!(listing_timeout("http://localhost:1234/v1"), Duration::from_millis(1500));
+        assert_eq!(listing_timeout("http://127.0.0.1:8080"), Duration::from_millis(1500));
+        assert_eq!(listing_timeout("http://192.168.1.20:11434"), Duration::from_millis(1500));
+        assert_eq!(listing_timeout("http://gpu-box.local:8000/v1"), Duration::from_millis(1500));
+    }
+
+    #[tokio::test]
+    async fn a_402_that_names_the_affordable_reply_is_retried_within_it() {
+        // OpenRouter refuses a reply the balance cannot pay for, and says how big one it can.
+        let (url, log) = test_server::serve(|req| {
+            let asked = req.json()["max_tokens"].as_i64();
+            match asked {
+                Some(n) if n <= 68094 => sse("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+                _ => (
+                    "402 Payment Required",
+                    "application/json",
+                    r#"{"error":{"message":"You requested up to 131072 tokens, but can only afford 68094. To increase, visit"}}"#.into(),
+                ),
+            }
+        })
+        .await;
+        let b = client(format!("{url}/v1"), "m");
+        let events = collect(b.stream(&[ChatMessage::user("hi")], &[]).await.expect("the second request goes through")).await;
+        assert_eq!(text_of(&events), "ok");
+        let sent: Vec<_> = log.lock().unwrap().iter().map(|r| r.json()["max_tokens"].as_i64()).collect();
+        assert_eq!(sent, [None, Some(68094)], "no cap first, the affordable one after the 402");
+
+        // Kept: the next turn does not ask for more than the balance buys.
+        let events = collect(b.stream(&[ChatMessage::user("again")], &[]).await.unwrap()).await;
+        assert_eq!(text_of(&events), "ok");
+        assert_eq!(log.lock().unwrap().len(), 3, "one request, not a refusal and a retry");
     }
 
     #[tokio::test]

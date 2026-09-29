@@ -128,6 +128,8 @@ pub struct SelectMenu<T> {
     pub uncounted: usize,
     /// How many items the last frame had room for: a page is what the user saw.
     shown: std::cell::Cell<usize>,
+    /// What is typed can be chosen as it stands: a model the server did not list.
+    pub custom_entry: bool,
 }
 
 impl<T> SelectMenu<T> {
@@ -141,7 +143,19 @@ impl<T> SelectMenu<T> {
             page_size: 10,
             uncounted: 0,
             shown: std::cell::Cell::new(10),
+            custom_entry: false,
         }
+    }
+
+    pub fn with_custom_entry(mut self) -> Self {
+        self.custom_entry = true;
+        self
+    }
+
+    /// The typed text, when nothing matches it and the menu takes such text.
+    pub fn custom_choice(&self) -> Option<&str> {
+        let typed = self.filter.trim();
+        (self.custom_entry && !typed.is_empty() && self.filtered_indices().is_empty()).then_some(typed)
     }
 
     /// E.g. "options", "models".
@@ -247,7 +261,7 @@ impl<T> SelectMenu<T> {
     /// In at most `max_rows` rows, so the title and the selected item stay on
     /// a short screen: at 80x24 ten two-row items did not fit.
     pub fn render_in(&self, width: usize, max_rows: usize) -> Vec<RenderLine> {
-        let card_w = width.clamp(24, 74);
+        let card_w = width.clamp(24, 96);
         let inner_w = card_w.saturating_sub(2);
         let border_color = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
@@ -292,10 +306,12 @@ impl<T> SelectMenu<T> {
         ));
 
         if matches.is_empty() {
-            lines.push((
-                LineKind::System,
-                pad_row(&format!("  \x1b[38;2;135;130;125m(No matching {item_noun} found)\x1b[0m")),
-            ));
+            let said = match (self.custom_entry, self.filter.trim()) {
+                (true, "") => format!("(No {item_noun} listed \u{b7} type an id and press Enter)"),
+                (true, typed) => format!("(Not listed \u{b7} Enter uses \"{typed}\")"),
+                (false, _) => format!("(No matching {item_noun} found)"),
+            };
+            lines.push((LineKind::System, pad_row(&format!("  \x1b[38;2;135;130;125m{said}\x1b[0m"))));
         } else {
             let cur_pos = matches.iter().position(|&idx| idx == self.selected).unwrap_or(0);
             // Title, bottom border, key hints and the two "more" rows.
@@ -350,7 +366,7 @@ impl<T> SelectMenu<T> {
             LineKind::System,
             format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
         ));
-        let mut hints = vec![("↑/↓", "move"), ("Enter", "select"), ("type", "to filter")];
+        let mut hints = vec![("↑/↓", "move"), ("Enter", "select"), ("type", if self.custom_entry { "to filter or enter an id" } else { "to filter" })];
         if total_matches > self.page() {
             hints.push(("PgUp/PgDn", "page"));
         }
@@ -413,6 +429,24 @@ mod tests {
         assert_eq!(menu.filtered_indices(), [0]);
         let screen: Vec<String> = menu.render(80).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
         assert!(screen.iter().any(|l| l.contains("linker needed libssl")), "{screen:#?}");
+    }
+
+    #[test]
+    fn typed_text_that_matches_nothing_is_a_choice_only_where_the_menu_takes_it() {
+        let items = vec![SelectItem::new("model-a", 1), SelectItem::new("model-b", 2)];
+        let mut open = SelectMenu::new("Select model", items.clone()).with_custom_entry();
+        let mut closed = SelectMenu::new("Select model", items);
+        for menu in [&mut open, &mut closed] {
+            "vendor/new-model".chars().for_each(|c| menu.push_filter_char(c));
+        }
+        assert_eq!(open.custom_choice(), Some("vendor/new-model"));
+        assert_eq!(closed.custom_choice(), None);
+        // A filter that still matches something is a filter.
+        let mut narrowing = SelectMenu::new("Select model", vec![SelectItem::new("model-a", 1)]).with_custom_entry();
+        "model".chars().for_each(|c| narrowing.push_filter_char(c));
+        assert_eq!(narrowing.custom_choice(), None);
+        let screen: Vec<String> = open.render(80).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
+        assert!(screen.iter().any(|l| l.contains("Enter uses \"vendor/new-model\"")), "{screen:#?}");
     }
 
     #[test]

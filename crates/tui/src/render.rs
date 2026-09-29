@@ -69,6 +69,7 @@ pub(crate) struct FrameState<'a> {
     pub(crate) prompt_title: &'a str,
     pub(crate) context_warn_threshold: usize,
     pub(crate) pending_steers: &'a [String],
+    pub(crate) queued_commands: &'a [String],
     /// Background commands still running.
     pub(crate) background_tasks: usize,
     /// A foreground shell command Ctrl+B can move to the background.
@@ -239,7 +240,7 @@ fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u6
         // the key hints give way when both do not fit.
         let esc_does = if st.input.is_empty() { "interrupt" } else { "clear" };
         let esc = key_hints(&[("Esc", esc_does)], width);
-        let steer = key_hints(&[("Enter", "steer"), ("Esc", esc_does)], width);
+        let steer = key_hints(&[("Enter", "steer or /command"), ("Esc", esc_does)], width);
         let head = match st.background {
             Some(text) => format!("{live}{dot}{}", st.background_style.paint(text)),
             None => live.clone(),
@@ -789,6 +790,12 @@ impl Renderer {
             }
         }
 
+        for command in st.queued_commands {
+            let suffix = " \x1b[38;2;135;130;125m· runs when the turn ends\x1b[0m";
+            let shown = flashagent_tui::truncate_middle(command, width.saturating_sub(34).max(10));
+            tail.push((LineKind::User, format!(" \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{shown}\x1b[0m{suffix}")));
+        }
+
         let inner_w = width.saturating_sub(2);
         let t = anim::now_ms();
         let card_key = if gate.pending().is_some() {
@@ -1038,6 +1045,7 @@ impl App {
                 background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                 context_warn_threshold: config.context_warn_threshold,
                 pending_steers: &self.pending_steers,
+                queued_commands: &self.queued_commands,
                 background_tasks: cx.tools_arc.shells().running_count(),
                 shell_running: self.running && cx.tools_arc.shells().foreground_running(),
                 composer_flash,
