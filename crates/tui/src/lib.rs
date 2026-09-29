@@ -662,6 +662,8 @@ impl ChatView {
                 self.tool_finished(*is_error, *result_len, result.as_deref())
             }
             LoopEvent::Usage(_) => {}
+            // The summary is not something the gauge counts up again.
+            LoopEvent::Compacted { .. } => self.forget_counted_context(),
             // Its own line was drawn when the task ended.
             LoopEvent::SteeringInjected(directive) if flashagent_core::is_task_notice(directive) => {}
             LoopEvent::SteeringInjected(directive) => {

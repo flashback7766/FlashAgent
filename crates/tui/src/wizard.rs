@@ -643,6 +643,9 @@ impl SetupWizard {
                     }
                     if !filtered.is_empty() {
                         self.choose_model(filtered[pos]);
+                    } else if !self.model_search.trim().is_empty() {
+                        // Not listed, or the server did not answer: what is typed is the id.
+                        self.profile.model = self.model_search.trim().to_string();
                     }
                     if self.provider_only {
                         return self.finish();
@@ -708,6 +711,23 @@ impl SetupWizard {
             }
             KeyCode::Right | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('l') => {
                 self.next_option();
+                None
+            }
+            // The cloud providers are past the ten with a key of their own.
+            KeyCode::Home if self.step == 0 => {
+                self.select_row(0);
+                None
+            }
+            KeyCode::End if self.step == 0 => {
+                self.select_row(Self::custom_idx());
+                None
+            }
+            KeyCode::PageUp if self.step == 0 => {
+                self.select_row(self.preset_idx.saturating_sub(8));
+                None
+            }
+            KeyCode::PageDown if self.step == 0 => {
+                self.select_row((self.preset_idx + 8).min(Self::custom_idx()));
                 None
             }
             KeyCode::Char(c) => {
@@ -970,6 +990,10 @@ impl SetupWizard {
                     let url = self.profile.url.trim_end_matches('/');
                     let (said, next) = match self.connection_status.as_deref() {
                         Some(status) if status.starts_with("Connecting") => (status.to_string(), String::new()),
+                        Some(status) if !status.starts_with("Connected") && self.is_cloud_backend() => (
+                            format!("Could not get the model list from {url}."),
+                            "Esc tries again. Or type a model id and press Enter, or Enter alone to pick one later with F3.".to_string(),
+                        ),
                         Some(status) if !status.starts_with("Connected") => (
                             format!("No server answered at {url}."),
                             "Start it and press Esc to try again, or Enter to go on and pick a model later with F3.".to_string(),
@@ -982,6 +1006,10 @@ impl SetupWizard {
                     lines.push(pad_row(&format!("  \x1b[38;2;225;175;95m{said}\x1b[0m")));
                     for row in crate::wrap_styled(&next, inner_w.saturating_sub(6)) {
                         lines.push(pad_row(&format!("  \x1b[38;2;160;155;145m{row}\x1b[0m")));
+                    }
+                    if !self.model_search.trim().is_empty() {
+                        lines.push(pad_row(""));
+                        lines.push(pad_row(&format!("  \x1b[38;2;160;155;145mModel id:\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m", self.model_search.trim())));
                     }
                 } else if filtered.is_empty() {
                     lines.push(pad_row("  \x1b[38;2;135;130;125m(No models matching search filter)\x1b[0m"));
@@ -1321,6 +1349,22 @@ mod tests {
         wizard.model_search.clear();
         wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(wizard.step, 3);
+    }
+
+    #[test]
+    fn a_model_id_typed_where_the_server_listed_nothing_is_the_model() {
+        // OpenRouter's list did not arrive: the id can still be typed.
+        let mut wizard = SetupWizard::new(with_provider("https://openrouter.ai/api/v1"));
+        wizard.step = 2;
+        wizard.connection_status = Some("No server answered".to_string());
+        for c in "stealth/space-bunny-alpha".chars() {
+            wizard.handle_key(KeyCode::Char(c), KeyModifiers::empty());
+        }
+        let text = crate::strip_ansi(&wizard.render(100).join("\n"));
+        assert!(text.contains("Could not get the model list") && text.contains("Model id: stealth/space-bunny-alpha"), "{text}");
+        wizard.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(wizard.step, 3);
+        assert_eq!(wizard.profile.model, "stealth/space-bunny-alpha");
     }
 
     #[test]

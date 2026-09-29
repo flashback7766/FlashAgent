@@ -464,9 +464,17 @@ impl ChatView {
         // after what it was about to do, not in red.
         let refused = if is_error && total == 1 { result.and_then(not_run_note) } else { None };
         let running = self.lines[i].text.clone();
-        let text = finished_text(&mut group, is_error, failed, total);
+        let mut text = finished_text(&mut group, is_error, failed, total);
         let grouped = !matches!(group, ToolGroupKind::Custom { .. } | ToolGroupKind::Generic { .. } | ToolGroupKind::Memory { .. });
         let shown_as_error = if grouped { all_failed } else { is_error };
+        if shown_as_error && refused.is_none() {
+            if let Some(reason) = result.and_then(failure_reason) {
+                // Before the chevron: the reason belongs to the line, not to what unfolds.
+                let tail = format!(" {}", chevron());
+                let body = text.strip_suffix(&tail).unwrap_or(&text).to_string();
+                text = format!("{body} {FAINT}\u{b7}{OFF} {FAILED}{reason}{OFF}{tail}");
+            }
+        }
         self.lines[i].kind = if shown_as_error && refused.is_none() { LineKind::ToolError } else { LineKind::Tool };
         self.lines[i].text = match refused {
             Some(note) => {
@@ -493,6 +501,17 @@ fn not_run_note(result: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// The first line of what the tool said, without its "error:" prefixes: enough
+/// to see why a call failed without unfolding it.
+fn failure_reason(result: &str) -> Option<String> {
+    let mut line = result.lines().map(str::trim).find(|l| !l.is_empty())?;
+    while let Some(rest) = ["error:", "Error:", "edit:", "write:", "run_shell:"].iter().find_map(|p| line.strip_prefix(p)) {
+        line = rest.trim_start();
+    }
+    let shown: String = line.chars().take(72).collect();
+    Some(if line.chars().count() > 72 { format!("{}\u{2026}", shown.trim_end()) } else { shown })
 }
 
 /// ` · 1 failed`, in red, after a group some of whose calls failed.
@@ -584,7 +603,7 @@ mod tests {
         for header in ["Running the test suite", "Запускаю тесты"] {
             let mut chat = started("read_file", &format!(r#"{{"header":"{header}","path":"a.rs"}}"#));
             chat.tool_finished(true, 5, Some("error: no such file"));
-            assert_eq!(text_of(&chat), format!("  ▸ {header} · failed ›"));
+            assert_eq!(text_of(&chat), format!("  ▸ {header} · failed · no such file ›"), "the reason is on the line, not only under the fold");
             assert_eq!(chat.lines.last().unwrap().kind, LineKind::ToolError);
         }
         for (result, note) in [
@@ -636,8 +655,17 @@ mod tests {
 
         let mut chat = started("web_fetch", r#"{"url":"https://example.com"}"#);
         chat.tool_finished(true, 0, Some("404"));
-        assert_eq!(text_of(&chat), "  ▸ Failed to fetch https://example.com ›");
+        assert_eq!(text_of(&chat), "  ▸ Failed to fetch https://example.com · 404 ›");
         assert_eq!(chat.lines.last().unwrap().kind, LineKind::ToolError);
+    }
+
+    #[test]
+    fn the_reason_shown_is_the_first_line_without_its_prefixes_and_is_cut_short() {
+        assert_eq!(failure_reason("error: edit: old_string not found in a.py.\nThe closest line is 17").as_deref(), Some("old_string not found in a.py."));
+        assert_eq!(failure_reason("\n\n  boom\n").as_deref(), Some("boom"));
+        assert_eq!(failure_reason("   "), None);
+        let long = failure_reason(&"x".repeat(200)).unwrap();
+        assert_eq!(long.chars().count(), 73, "72 characters and an ellipsis");
     }
 
     #[test]

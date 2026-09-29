@@ -15,7 +15,7 @@
 
 </div>
 
-> **Status:** Beta b453 — actively developed by a solo maintainer. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
+> **Status:** Beta b460 — actively developed by a solo maintainer. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
 
 ## Quick start
 
@@ -50,7 +50,7 @@
 <table>
 <tr>
 <td width="50%"><img src="docs/screenshots/gifs/steering.gif" alt="Mid-flight steering"><br>
-<sub><b>Mid-flight steering</b> — type while the model works and press <kbd>Enter</kbd>: your guidance lands as soon as the tool call in progress returns, before the model's next step. <kbd>Esc</kbd> interrupts and keeps the partial output.</sub></td>
+<sub><b>Mid-flight steering</b> — type while the model works and press <kbd>Enter</kbd>: your guidance lands as soon as the tool call in progress returns, before the model's next step. A `/command` works too: `/diff` or `/verbose` runs at once, `/compact` waits for the turn's end. <kbd>Esc</kbd> interrupts and keeps the partial output.</sub></td>
 <td width="50%"><img src="docs/screenshots/gifs/tools-diff.gif" alt="Tool execution and diff approval"><br>
 <sub><b>Tools & approvals</b> — every write, patch and shell command stops at a card naming the exact target: Allow, Always allow or Deny.</sub></td>
 </tr>
@@ -264,7 +264,7 @@ FlashAgent starts in the mode you left it in. Reads inside the project and web t
 
 | Key | Action |
 | :--- | :--- |
-| <kbd>Enter</kbd> | Send prompt · while the model works: steer it |
+| <kbd>Enter</kbd> | Send prompt · while the model works: steer it, or run a `/command` |
 | <kbd>Alt</kbd>+<kbd>Enter</kbd> / <kbd>Ctrl</kbd>+<kbd>J</kbd> | New line in the prompt (also <kbd>Shift</kbd>+<kbd>Enter</kbd> where the terminal reports it, or `\` then <kbd>Enter</kbd>) |
 | <kbd>Esc</kbd> | Close a menu or card · clear the prompt · then interrupt the running turn · never quits |
 | <kbd>Ctrl</kbd>+<kbd>D</kbd> | Quit (empty prompt) |

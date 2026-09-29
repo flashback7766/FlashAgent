@@ -113,6 +113,21 @@ impl App {
         }
         self.active_steer_tx = Some(steer_tx);
         self.cancel_recap();
+        // A long task fills the window between its own steps; the same threshold
+        // that summarizes between prompts summarizes here.
+        let compactor = (self.config.auto_compact_context && self.context_usage.total_capacity > 0).then(|| {
+            Arc::new(TurnCompactor {
+                source: cx.source.clone(),
+                archive: compaction_archive_path(cx.session_id),
+                memory: cx.memory_block.to_string(),
+                capacity: self.context_usage.total_capacity,
+                fixed: self.context_usage.system_tokens + self.context_usage.memory_tokens + self.context_usage.tools_tokens,
+                threshold_pct: flashagent_core::resolved_compact_threshold(
+                    self.config.context_compact_threshold,
+                    self.context_usage.total_capacity,
+                ),
+            })
+        });
         self.active_turn_handle = Some(spawn_turn(
             cx.cancel.clone(),
             cx.source.clone(),
@@ -124,6 +139,7 @@ impl App {
             steer_rx,
             self.turn_counter,
             self.config.personality.voice_prelude(),
+            compactor,
         ));
     }
 
@@ -327,7 +343,7 @@ impl App {
                         format!("  \x1b[38;2;160;155;145m{hint}\x1b[0m"),
                     );
                 }
-                if explained.headline != explained.raw.trim() {
+                if !explained.raw.trim().is_empty() && explained.headline != explained.raw.trim() {
                     self.chat.push_line(
                         LineKind::System,
                         format!("  \x1b[38;2;120;115;110m{}\x1b[0m", explained.raw.trim()),
@@ -336,6 +352,7 @@ impl App {
                 self.notice("Ctrl+R retries the last prompt");
             }
         }
+        self.run_queued_commands(cx).await;
         // Notices that came as the turn ended.
         self.deliver_task_notices(cx);
 

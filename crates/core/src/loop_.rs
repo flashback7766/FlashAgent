@@ -100,6 +100,8 @@ pub enum LoopEvent {
         result: Option<String>,
     },
     Usage(flashagent_llm::Usage),
+    /// The history was shortened between two steps, by roughly this many tokens.
+    Compacted { saved: usize },
     SteeringInjected(String),
     StepStarted {
         /// 1-based.
@@ -142,11 +144,34 @@ impl LoopError {
     }
 }
 
+/// Shortens the history in the middle of a turn, when the window is nearly full.
+#[async_trait]
+pub trait Compactor: Send + Sync {
+    /// Asked between two steps, when the history ends with tool results and every
+    /// call has its answer. `prompt_tokens` is what the last request reported, if
+    /// the server said. The history is not touched unless it returns `Saved`.
+    async fn compact(&self, history: &mut Vec<ChatMessage>, prompt_tokens: Option<usize>) -> Compaction;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compaction {
+    /// The window has room: asked again at the next step.
+    NotNeeded,
+    /// It was tried and did not shorten anything: asked again a few steps on.
+    Failed,
+    /// Roughly this many tokens fewer.
+    Saved(usize),
+}
+
+/// Steps to wait before asking again: each ask that goes ahead is a model call.
+const COMPACT_RETRY_AFTER: u32 = 4;
+
 /// One instance per run; `cancel` stops it from another task.
 pub struct AgentLoop {
     config: LoopConfig,
     cancel: Arc<AtomicBool>,
     steer_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
+    compactor: Option<Arc<dyn Compactor>>,
 }
 
 async fn wait_cancel(cancel: &Arc<AtomicBool>) {
@@ -168,7 +193,13 @@ impl AgentLoop {
             config,
             cancel,
             steer_rx: std::sync::Mutex::new(None),
+            compactor: None,
         }
+    }
+
+    pub fn with_compactor(mut self, compactor: Arc<dyn Compactor>) -> Self {
+        self.compactor = Some(compactor);
+        self
     }
 
     pub fn with_steering(
@@ -180,6 +211,7 @@ impl AgentLoop {
             config,
             cancel,
             steer_rx: std::sync::Mutex::new(Some(steer_rx)),
+            compactor: None,
         }
     }
 
@@ -209,6 +241,12 @@ impl AgentLoop {
         // The last batch had a call that failed on its own terms: a wrong path,
         // name or argument, which a corrected call can fix.
         let mut call_failed = false;
+        // The same tool failing the same way, call after call: a model in a rut.
+        let mut failing: Option<(String, u32)> = None;
+        // What the last request said the prompt was, and the step before which
+        // compaction may be asked again.
+        let mut last_prompt_tokens: Option<usize> = None;
+        let mut compact_not_before: u32 = 0;
         // A stalled scratchpad reply and the nudge answering it: sent with the next
         // request only, and stored only if the answer is bound to them.
         let mut transient: Vec<ChatMessage> = Vec::new();
@@ -245,6 +283,30 @@ impl AgentLoop {
                 history.push(ChatMessage::user(steer_msg));
                 transient.clear();
                 continuing = false;
+            }
+
+            // A long task fills the window between two of its own steps, not only
+            // between prompts. Not before the first request: a turn that has not
+            // asked anything has nothing of its own to shorten.
+            if let Some(compactor) = self.compactor.as_ref().filter(|_| step > 1 && step >= compact_not_before) {
+                let done = tokio::select! {
+                    done = compactor.compact(&mut history, last_prompt_tokens) => done,
+                    _ = wait_cancel(&self.cancel) => {
+                        events(LoopEvent::Done(DoneReason::Cancelled));
+                        return Ok((history, DoneReason::Cancelled));
+                    }
+                };
+                match done {
+                    Compaction::Saved(saved) => {
+                        events(LoopEvent::Compacted { saved });
+                        // The old figure describes a history that is gone.
+                        last_prompt_tokens = None;
+                        transient.clear();
+                        compact_not_before = step + 1;
+                    }
+                    Compaction::Failed => compact_not_before = step + COMPACT_RETRY_AFTER,
+                    Compaction::NotNeeded => {}
+                }
             }
 
             let assembled: Vec<ChatMessage>;
@@ -372,6 +434,7 @@ impl AgentLoop {
                     LlmEvent::Usage(u) => {
                         tokens_used += u.prompt.unwrap_or(0) + u.completion.unwrap_or(0);
                         output_tokens += u.completion.unwrap_or(0);
+                        last_prompt_tokens = u.prompt.map(|p| p as usize).or(last_prompt_tokens);
                         events(LoopEvent::Usage(u));
                     }
                     LlmEvent::Replay(state) => replay = Some(state),
@@ -623,7 +686,21 @@ impl AgentLoop {
                 });
                 call_failed |= out.is_error && fixable_by_another_call(&call.name, &out.content);
                 let images = out.images;
-                history.push(ChatMessage::tool_result(call.id.clone(), out.content));
+                let mut content = out.content;
+                if out.is_error {
+                    let key = format!("{}: {}", call.name, content.lines().next().unwrap_or("").chars().take(80).collect::<String>());
+                    let streak = match failing.take() {
+                        Some((last, n)) if last == key => n + 1,
+                        _ => 1,
+                    };
+                    if streak >= REPEATED_FAILURE_AT && streak % 2 == 1 {
+                        content.push_str(&format!("\n\n{}", repeated_failure_note(streak)));
+                    }
+                    failing = Some((key, streak));
+                } else {
+                    failing = None;
+                }
+                history.push(ChatMessage::tool_result(call.id.clone(), content));
                 if !images.is_empty() {
                     // A separate message, since a tool result is text only. It is marked so the
                     // model does not read it as the user speaking.
@@ -696,6 +773,17 @@ fn synth_call_id() -> String {
 const STALL_NUDGE: &str = "Please provide your direct, final answer to my request now. Do not repeat the thinking process; output only your final response.";
 
 /// Sent when the model announced a tool call and ended its turn without it.
+/// A tool failing the same way this many calls in a row gets a note with its result.
+const REPEATED_FAILURE_AT: u32 = 3;
+
+fn repeated_failure_note(times: u32) -> String {
+    format!(
+        "[FlashAgent: this is the same failure {times} calls in a row. Repeating the call will not change it. \
+         Read the target again to see its current content, or take a different approach; \
+         if nothing works, tell the user what blocks you.]"
+    )
+}
+
 const PROMISE_NUDGE: &str = "You said what you would do next but did not do it. Make that tool call now.";
 
 pub(crate) const ERROR_NUDGE: &str = "Your last tool call failed and you replied without trying again. If the error shows what to change (a path, a name, an argument), make the corrected call now. Otherwise say in one sentence what blocks you.";
@@ -1631,6 +1719,95 @@ mod tests {
         let (_, done) = run_loop(&l, &llm, &tools, |_| {});
         assert!(matches!(done, DoneReason::Completed));
         assert_eq!(llm.requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_same_failure_three_calls_in_a_row_comes_with_a_note_and_a_success_resets_it() {
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let stuck = "error: edit: old_string not found in a.py";
+        let llm = RecordingLlm::new(vec![
+            tool_turn("read_file", "c1"),
+            tool_turn("read_file", "c2"),
+            tool_turn("read_file", "c3"),
+            text_turn("Stuck."),
+            text_turn("Still stuck."),
+        ]);
+        let tools = ScriptedTools::new(vec![(true, stuck), (true, stuck), (true, stuck)]);
+        let (history, _) = run_loop(&l, &llm, &tools, |_| {});
+        let results: Vec<&str> = history.iter().filter(|m| m.role == Role::Tool).map(|m| m.content.as_str()).collect();
+        assert!(!results[0].contains("FlashAgent:") && !results[1].contains("FlashAgent:"), "{results:?}");
+        assert!(results[2].starts_with(stuck) && results[2].contains("same failure 3 calls in a row"), "{}", results[2]);
+
+        // Another kind of failure, or a success between, starts the count again.
+        let llm = RecordingLlm::new(vec![tool_turn("read_file", "c1"), tool_turn("read_file", "c2"), tool_turn("read_file", "c3"), text_turn("Done."), text_turn("Done.")]);
+        let tools = ScriptedTools::new(vec![(true, stuck), (false, "fine"), (true, stuck)]);
+        let (history, _) = run_loop(&l, &llm, &tools, |_| {});
+        assert!(history.iter().all(|m| !m.content.contains("FlashAgent:")), "a broken streak still counted");
+    }
+
+    /// Says what to do at each ask, and what history it was asked about.
+    struct ScriptedCompactor {
+        answers: std::sync::Mutex<Vec<Compaction>>,
+        asked: std::sync::Mutex<Vec<(usize, Option<usize>)>>,
+    }
+
+    #[async_trait]
+    impl Compactor for ScriptedCompactor {
+        async fn compact(&self, history: &mut Vec<ChatMessage>, prompt_tokens: Option<usize>) -> Compaction {
+            self.asked.lock().unwrap().push((history.len(), prompt_tokens));
+            let answer = {
+                let mut answers = self.answers.lock().unwrap();
+                if answers.is_empty() { Compaction::NotNeeded } else { answers.remove(0) }
+            };
+            if let Compaction::Saved(_) = answer {
+                let first = history[0].clone();
+                let prompt = history.iter().rposition(is_prompt).map(|i| history[i].clone());
+                let tail = history[history.len() - 2..].to_vec();
+                *history = std::iter::once(first).chain(prompt).chain(tail).collect();
+            }
+            answer
+        }
+    }
+
+    #[test]
+    fn a_turn_asks_to_be_compacted_between_its_steps_and_goes_on_with_what_is_left() {
+        let compactor = Arc::new(ScriptedCompactor {
+            answers: std::sync::Mutex::new(vec![Compaction::NotNeeded, Compaction::Saved(9000)]),
+            asked: Default::default(),
+        });
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false))).with_compactor(compactor.clone());
+        let llm = RecordingLlm::new(vec![tool_turn("read_file", "c1"), tool_turn("read_file", "c2"), tool_turn("read_file", "c3"), text_turn("Done.")]);
+        let mut compacted = Vec::new();
+        let (history, done) = run_loop(&l, &llm, &ScriptedTools::new(vec![]), |e| {
+            if let LoopEvent::Compacted { saved } = e {
+                compacted.push(saved);
+            }
+        });
+        assert!(matches!(done, DoneReason::Completed));
+        assert_eq!(compacted, [9000]);
+        let asked = compactor.asked.lock().unwrap();
+        // Not before the first request; then at every step until it is done.
+        assert_eq!(asked[0].0, 3, "step 2 sees the prompt, a call and its result: {asked:?}");
+        assert!(asked.len() >= 2, "{asked:?}");
+        // The request after it was made on the shortened history, and its result is in the end.
+        let requests = llm.requests.lock().unwrap();
+        assert_eq!(requests[2].len(), 4, "the five messages before it were cut to four");
+        assert!(history.iter().any(|m| m.content == "Done."));
+    }
+
+    #[test]
+    fn a_compaction_that_failed_is_not_asked_again_at_once() {
+        let compactor = Arc::new(ScriptedCompactor {
+            answers: std::sync::Mutex::new(vec![Compaction::Failed]),
+            asked: Default::default(),
+        });
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false))).with_compactor(compactor.clone());
+        let mut turns: Vec<_> = (1..=7).map(|i| tool_turn("read_file", &format!("c{i}"))).collect();
+        turns.push(text_turn("Done."));
+        let llm = RecordingLlm::new(turns);
+        let _ = run_loop(&l, &llm, &ScriptedTools::new(vec![]), |_| {});
+        // Asked at step 2 (failed), then not until step 6: every ask that goes ahead is a model call.
+        assert_eq!(compactor.asked.lock().unwrap().len(), 1 + 3, "{:?}", compactor.asked.lock().unwrap());
     }
 
     #[test]

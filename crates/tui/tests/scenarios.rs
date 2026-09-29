@@ -1817,6 +1817,68 @@ fn steering_during_turn_pins_message_until_completion_and_pivots() {
 }
 
 #[test]
+fn a_command_that_changes_the_conversation_waits_for_the_turn_to_end() {
+    let server = MockServer::start(vec![Reply::Held { before: "word1 word2 ".into(), after: "word3 word4".into() }]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("start counting");
+    term.send(ENTER);
+    term.wait_for("word2", WAIT);
+    term.type_text("/compact");
+    term.send(ENTER);
+    let screen = term.wait_for("runs when the turn ends", WAIT);
+    assert!(screen.contains("/compact"), "{screen}");
+    server.release();
+
+    // Run once the answer is whole; one turn has nothing earlier to summarize.
+    term.wait_for("Nothing to compact yet", WAIT);
+    assert!(term.screen().contains("word4"), "the turn was cut off:\n{}", term.screen());
+    assert_eq!(server.turns().len(), 1, "the command was sent to the model as steering");
+    assert!(!sent(&server.turns()[0]).contains("/compact"));
+}
+
+#[test]
+fn a_command_that_only_reads_runs_at_once_while_the_model_works() {
+    let server = MockServer::start(vec![Reply::Held { before: "word1 word2 ".into(), after: "word3".into() }]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("start counting");
+    term.send(ENTER);
+    term.wait_for("word2", WAIT);
+    term.type_text("/help");
+    term.send(ENTER);
+    term.wait_for("/rewind [n]", WAIT);
+    server.release();
+    term.wait_for("word3", WAIT);
+    assert_eq!(server.turns().len(), 1, "/help reached the model");
+}
+
+#[test]
+fn a_typo_or_a_command_that_cannot_run_mid_turn_is_not_guidance_for_the_model() {
+    let server = MockServer::start(vec![Reply::Held { before: "word1 word2 ".into(), after: "word3".into() }]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("start counting");
+    term.send(ENTER);
+    term.wait_for("word2", WAIT);
+    term.type_text("/goal write the report");
+    term.send(ENTER);
+    term.wait_for("does not run while the model works", WAIT);
+    term.send(ESC);
+    term.type_text("/hlep");
+    term.send(ENTER);
+    term.wait_for("did you mean /help", WAIT);
+    server.release();
+    term.wait_for("word3", WAIT);
+    assert_eq!(server.turns().len(), 1, "a command was sent to the model as steering");
+    let history = sent(&server.turns()[0]);
+    assert!(!history.contains("/goal") && !history.contains("/hlep"), "{history}");
+}
+
+#[test]
 fn sending_only_an_image_submits_the_turn_with_image_part_and_no_text() {
     let server = MockServer::start(vec![
         Reply::Text("I see the picture.".into()),
