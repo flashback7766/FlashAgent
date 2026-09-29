@@ -13,8 +13,6 @@ pub(crate) async fn compact_context(
     focus_prompt: Option<&str>,
     archive_path: &std::path::Path,
 ) -> Option<usize> {
-    use futures::StreamExt;
-
     // Keep the current turn intact from its user message: a cut elsewhere can
     // orphan tool results or leave an assistant message first, which strict
     // servers reject.
@@ -23,6 +21,100 @@ pub(crate) async fn compact_context(
     if split_idx <= 1 {
         return None;
     }
+    summarize_before(source, history, split_idx, None, focus_prompt, archive_path).await
+}
+
+/// What one more step of a running turn is assumed to add: a file read, a test log.
+const ASSUMED_STEP_GROWTH: usize = 4_000;
+
+/// Compacts a running turn when the window is nearly full, by the same rule
+/// that compacts between turns.
+pub(crate) struct TurnCompactor {
+    pub(crate) source: Arc<BackendSource>,
+    pub(crate) archive: Option<std::path::PathBuf>,
+    pub(crate) memory: String,
+    pub(crate) capacity: usize,
+    /// System prompt, memory and tool schemas: summarizing never shrinks them.
+    pub(crate) fixed: usize,
+    pub(crate) threshold_pct: usize,
+}
+
+#[async_trait::async_trait]
+impl flashagent_core::Compactor for TurnCompactor {
+    async fn compact(&self, history: &mut Vec<ChatMessage>, prompt_tokens: Option<usize>) -> flashagent_core::Compaction {
+        use flashagent_core::Compaction;
+        // A server that reports no usage is estimated at four characters a token.
+        let used = prompt_tokens.unwrap_or_else(|| history.iter().map(|m| m.content.len() / 4 + 4).sum());
+        let verdict = flashagent_core::should_compact(flashagent_core::CompactionInput {
+            used,
+            capacity: self.capacity,
+            fixed: self.fixed,
+            last_turn_growth: ASSUMED_STEP_GROWTH,
+            threshold_pct: self.threshold_pct,
+        });
+        if !verdict.should() || mid_turn_cut(history).is_none() {
+            return Compaction::NotNeeded;
+        }
+        let Some(archive) = self.archive.as_deref() else { return Compaction::Failed };
+        match compact_running_turn(self.source.as_ref(), history, &self.memory, archive).await {
+            Some(saved) => Compaction::Saved(saved),
+            None => Compaction::Failed,
+        }
+    }
+}
+
+/// Assistant messages kept whole at the end of a turn that is compacted while it runs.
+const KEEP_RECENT_STEPS: usize = 3;
+/// Less than this between the prompt and the kept steps is not worth a summary
+/// (about two thousand tokens).
+const MIN_MIDDLE_CHARS: usize = 8_000;
+
+/// Where the kept end of a running turn starts: at an assistant message, so no
+/// tool result is left without its call, and never before the turn's own prompt.
+pub(crate) fn mid_turn_cut(history: &[ChatMessage]) -> Option<(usize, usize)> {
+    let prompt = history.iter().rposition(flashagent_core::is_prompt)?;
+    let cut = history
+        .iter()
+        .enumerate()
+        .skip(prompt + 1)
+        .filter(|(_, m)| m.role == flashagent_llm::Role::Assistant)
+        .map(|(i, _)| i)
+        .rev()
+        .nth(KEEP_RECENT_STEPS - 1)?;
+    let middle: usize = history[prompt + 1..cut].iter().map(|m| m.content.len()).sum();
+    (cut > prompt + 1 && middle >= MIN_MIDDLE_CHARS).then_some((prompt, cut))
+}
+
+/// The steps a turn has taken so far are summarized, and its prompt and last
+/// steps stay, so the model goes on with the task it was given. `memory` is put
+/// back in front of the prompt if the message that carried it is summarized away.
+pub(crate) async fn compact_running_turn(
+    source: &dyn LlmSource,
+    history: &mut Vec<ChatMessage>,
+    memory: &str,
+    archive_path: &std::path::Path,
+) -> Option<usize> {
+    let (prompt_idx, cut) = mid_turn_cut(history)?;
+    let mut prompt = history[prompt_idx].clone();
+    let carries_memory = |m: &ChatMessage| !memory.is_empty() && m.content.starts_with(memory);
+    let memory_stays = history[cut..].iter().chain(std::iter::once(&prompt)).any(|m| m.role == flashagent_llm::Role::User && carries_memory(m));
+    if !memory.is_empty() && !memory_stays {
+        prompt.content = if prompt.content.trim().is_empty() { memory.to_string() } else { format!("{memory}\n\n---\n\n{}", prompt.content) };
+    }
+    summarize_before(source, history, cut, Some(prompt), None, archive_path).await
+}
+
+/// Replaces `history[1..split_idx]` with a summary in the system message.
+/// `keep_prompt`, when given, goes right after it: the turn's own prompt.
+async fn summarize_before(
+    source: &dyn LlmSource,
+    history: &mut Vec<ChatMessage>,
+    split_idx: usize,
+    keep_prompt: Option<ChatMessage>,
+    focus_prompt: Option<&str>,
+    archive_path: &std::path::Path,
+) -> Option<usize> {
+    use futures::StreamExt;
 
     let before_tokens: usize = history.iter().map(|m| m.content.len() / 4 + 4).sum();
 
@@ -114,11 +206,12 @@ pub(crate) async fn compact_context(
         return None;
     };
 
-    let mut new_history = Vec::with_capacity(history.len() - split_idx + 1);
+    let mut new_history = Vec::with_capacity(history.len() - split_idx + 2);
     new_history.push(ChatMessage::system(format!(
         "{base_system}{COMPACTED_MARK}{COMPACTED_INTRO}{summary}{ARCHIVE_MARK}{}{COMPACTED_OUTRO}",
         archive_path.display()
     )));
+    new_history.extend(keep_prompt);
     new_history.extend_from_slice(&history[split_idx..]);
 
     let after_tokens: usize = new_history.iter().map(|m| m.content.len() / 4 + 4).sum();

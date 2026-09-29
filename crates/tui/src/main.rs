@@ -1506,6 +1506,7 @@ fn spawn_turn(
     steer_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     turn_id: u64,
     voice_prelude: Vec<ChatMessage>,
+    compactor: Option<Arc<TurnCompactor>>,
 ) -> tokio::task::JoinHandle<()> {
     cancel.store(false, Ordering::Relaxed);
     tokio::spawn(async move {
@@ -1517,7 +1518,10 @@ fn spawn_turn(
             voice_prelude,
             ..Default::default()
         };
-        let loop_ = AgentLoop::with_steering(config, cancel, steer_rx);
+        let mut loop_ = AgentLoop::with_steering(config, cancel, steer_rx);
+        if let Some(compactor) = compactor {
+            loop_ = loop_.with_compactor(compactor);
+        }
         let res = loop_
             .run(source.as_ref(), perm, history, |event| {
                 let _ = tx.send(UiEvent::Loop { turn_id, event });
@@ -1650,6 +1654,64 @@ mod tests {
         let records: Vec<SavedMessage> = archived.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
         assert_eq!(records.iter().filter(|m| m.content == "first question").count(), 1);
         assert!(!records.iter().any(|m| m.content == "next"), "the active turn stays live");
+    }
+
+    /// A prompt and `steps` tool-using steps: assistant call, then its result.
+    fn running_turn(steps: usize) -> Vec<ChatMessage> {
+        let mut history = vec![ChatMessage::system("SYSTEM PROMPT"), ChatMessage::user("fix the parser")];
+        for i in 0..steps {
+            let mut call = ChatMessage::assistant(format!("step {i} {}", "work ".repeat(400)));
+            call.tool_calls = vec![flashagent_llm::ToolCall { id: format!("c{i}"), name: "read_file".into(), args_json: "{}".into() }];
+            history.push(call);
+            history.push(ChatMessage::tool_result(format!("c{i}"), format!("body {i} {}", "x".repeat(3000))));
+        }
+        history
+    }
+
+    #[test]
+    fn a_running_turn_is_cut_at_a_step_and_only_when_it_has_enough_behind_it() {
+        // Three steps are kept whole; what is before them must be worth a summary.
+        assert_eq!(mid_turn_cut(&running_turn(3)), None, "nothing before the kept steps");
+        assert_eq!(mid_turn_cut(&running_turn(4)), None, "one step behind, five thousand characters");
+        assert!(mid_turn_cut(&running_turn(5)).is_some(), "two steps behind hold enough");
+        let history = running_turn(8);
+        let (prompt, cut) = mid_turn_cut(&history).expect("eight steps have a middle");
+        assert_eq!(prompt, 1);
+        assert_eq!(history[cut].role, flashagent_llm::Role::Assistant, "a tool result may not start what is kept");
+        assert_eq!(history[cut..].iter().filter(|m| m.role == flashagent_llm::Role::Assistant).count(), 3);
+        // Every kept result still follows its call.
+        assert!(history[cut..].windows(2).all(|w| w[1].role != flashagent_llm::Role::Tool || w[0].tool_calls.iter().any(|c| Some(&c.id) == w[1].tool_call_id.as_ref())));
+        // A steer or a picture inside the turn is not its prompt.
+        assert_eq!(history.iter().rposition(flashagent_core::is_prompt), Some(1));
+    }
+
+    #[tokio::test]
+    async fn compacting_a_running_turn_keeps_its_prompt_and_last_steps_and_the_project_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("conversation.jsonl");
+        let memory = "PROJECT RULES: use tabs";
+        let mut history = running_turn(8);
+        let before = history.clone();
+        let (_, cut) = mid_turn_cut(&history).unwrap();
+        let saved = compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, memory, &archive).await;
+        assert!(saved.is_some_and(|n| n > 0));
+        assert_eq!(history[0].role, flashagent_llm::Role::System);
+        assert!(history[0].content.contains("Compacted Conversation History"));
+        // The task it was given, with the memory the summarized message may have carried.
+        assert_eq!(history[1].role, flashagent_llm::Role::User);
+        assert!(history[1].content.starts_with(memory) && history[1].content.ends_with("fix the parser"), "{}", history[1].content);
+        // The last steps, whole and in order.
+        assert_eq!(history.len(), 2 + before.len() - cut);
+        assert_eq!(history[2].content, before[cut].content);
+        assert_eq!(history.last().unwrap().tool_call_id, before.last().unwrap().tool_call_id);
+        // What went is kept whole for the model to read.
+        let archived = std::fs::read_to_string(&archive).unwrap();
+        assert!(archived.contains("body 0") && !archived.contains(&format!("body {}", before.len() / 2 + 3)));
+
+        // Nothing to cut: untouched.
+        let mut short = running_turn(2);
+        assert_eq!(compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut short, memory, &archive).await, None);
+        assert_eq!(short.len(), 6);
     }
 
     #[tokio::test]
