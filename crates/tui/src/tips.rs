@@ -3,7 +3,7 @@
 pub static TIPS_POOL: &[&str] = &[
     "Shift+Tab cycles the permission mode: Planning, Manual, Accept Edits, Accept All.",
     "Click a thought or a tool call to open or fold just that one; F2 does them all.",
-    "Press Enter while the agent is working to steer it without stopping the turn.",
+    "Press Enter while the agent is working to steer it without stopping the turn; a slash command works too, and /compact runs once the turn ends.",
     "Esc interrupts a running turn and keeps everything it already did.",
     "Ctrl+Z takes back an attached image before it is sent.",
     "Drop an image file on the window to attach it to the next message.",

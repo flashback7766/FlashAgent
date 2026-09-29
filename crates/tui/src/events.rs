@@ -440,6 +440,14 @@ impl App {
             LoopEvent::Usage(u) => {
                 self.token_tracker.on_usage(u);
             }
+            // The window was nearly full; the work goes on. Said on the status line,
+            // not in the transcript: nothing in the conversation changed for the reader.
+            LoopEvent::Compacted { saved } => {
+                self.background = Some(BackgroundNotice::fading(
+                    format!("Context nearly full: older steps summarized mid-turn \u{b7} {} saved", ContextUsage::format_tokens(*saved)),
+                    8,
+                ));
+            }
             LoopEvent::SteeringInjected(directive) if self.task_inbox.injected(directive) => {
                 self.flush_task_lines();
                 self.renderer.request_reprint();

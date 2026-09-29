@@ -1,11 +1,11 @@
 use super::*;
 
 /// Titled with the provider, so a switch shows whose models these are.
-pub(crate) fn build_model_menu(source: &BackendSource, provider: &str) -> Option<SelectMenu<String>> {
-    let disc = source.discovery()?;
-    if disc.models.is_empty() {
-        return None;
-    }
+pub(crate) fn build_model_menu(source: &BackendSource, provider: &str) -> SelectMenu<String> {
+    let title = format!("Select model \u{b7} {provider}");
+    let Some(disc) = source.discovery().filter(|d| !d.models.is_empty()) else {
+        return SelectMenu::new(title, Vec::new()).with_noun("models").with_custom_entry();
+    };
     let is_lm_studio = disc.kind == flashagent_llm::thinking::ServerKind::LmStudio;
     let has_loaded = disc.models.iter().any(|m| m.is_loaded);
     let models: Vec<_> = if is_lm_studio && has_loaded {
@@ -21,7 +21,7 @@ pub(crate) fn build_model_menu(source: &BackendSource, provider: &str) -> Option
         let desc = format!("{load_tag} · {summary}");
         items.push(SelectItem::with_description(m.id.clone(), desc, m.id.clone()));
     }
-    Some(SelectMenu::new(format!("Select model \u{b7} {provider}"), items).with_noun("models"))
+    SelectMenu::new(title, items).with_noun("models").with_custom_entry()
 }
 
 pub(crate) fn build_effort_menu(

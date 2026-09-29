@@ -26,6 +26,24 @@ pub trait QuestionGate: Send + Sync {
     ) -> Result<(String, bool), String>;
 }
 
+/// What a model wrote where a string belongs: `{"label": "A", "description": "…"}`
+/// reads as "A — …", and any other object as its `key: value` pairs, not as JSON.
+fn option_label(item: &serde_json::Value) -> String {
+    let Some(map) = item.as_object() else { return item.to_string() };
+    let text = |v: &serde_json::Value| match v {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        other => other.to_string(),
+    };
+    let name = ["label", "title", "name", "text", "option", "value", "answer"].iter().find_map(|k| map.get(*k).map(text).filter(|t| !t.is_empty()));
+    match name {
+        Some(name) => match map.get("description").map(text).filter(|d| !d.is_empty()) {
+            Some(desc) => format!("{name} \u{2014} {desc}"),
+            None => name,
+        },
+        None => map.iter().map(|(k, v)| format!("{k}: {}", text(v))).collect::<Vec<_>>().join("; "),
+    }
+}
+
 /// Accepts a list of strings or a comma-separated string.
 fn deserialize_flexible_options<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
@@ -43,7 +61,7 @@ where
                         res.push(t.to_string());
                     }
                 } else if !item.is_null() {
-                    res.push(item.to_string());
+                    res.push(option_label(&item));
                 }
             }
             Ok((!res.is_empty()).then_some(res))
@@ -501,6 +519,18 @@ mod tests {
         assert!(res.contains("1. Language?: Python"));
         assert!(res.contains("2. Topic?: arrays"));
         assert!(res.contains("3. Format?: coding challenge"));
+    }
+
+    #[test]
+    fn an_option_written_as_an_object_is_shown_as_words_not_json() {
+        let parsed: QuestionItem = serde_json::from_str(
+            r#"{"question":"Which?","options":[{"label":"Fix the test","description":"edit the expectation"},{"old_string":"a","new_string":"b"},"Skip"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.options,
+            Some(vec!["Fix the test \u{2014} edit the expectation".to_string(), "new_string: b; old_string: a".to_string(), "Skip".to_string()])
+        );
     }
 
     #[test]
