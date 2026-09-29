@@ -131,7 +131,9 @@ impl TokenTracker {
             }
         }
 
-        if self.window.is_empty() {
+        // Nothing came for a while (a tool runs, the model reads): the rate is not
+        // "falling", there is no rate. It would decay to 0.3 t/s on screen.
+        if self.window.back().is_none_or(|(t, _)| now.duration_since(*t) > std::time::Duration::from_millis(1500)) {
             return 0.0;
         }
 

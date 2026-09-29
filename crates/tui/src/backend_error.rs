@@ -67,6 +67,24 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         };
     }
 
+    // 402: the account is out of credit. The provider's message says how much
+    // is left; its JSON (with the account id) stays out of the headline.
+    if lower.contains("returned 402") || lower.contains("insufficient credit") || lower.contains("insufficient_quota") {
+        let said = raw
+            .split_once('{')
+            .and_then(|(_, json)| serde_json::from_str::<serde_json::Value>(&format!("{{{json}")).ok())
+            .and_then(|v| v["error"]["message"].as_str().map(|m| m.split(". To increase").next().unwrap_or(m).trim().to_string()));
+        return Explained {
+            headline: format!("{base} says the account has too little credit"),
+            hint: Some(said.map_or_else(
+                || "Add credit at the provider, or switch to another provider or a free model with /provider and F3.".to_string(),
+                |m| format!("{m}. Add credit, or pick a free model with F3."),
+            )),
+            // The JSON carries the account id and adds nothing to the two lines.
+            raw: String::new(),
+        };
+    }
+
     if lower.contains("401") || lower.contains("403") || lower.contains("unauthorized")
         || lower.contains("invalid api key") || lower.contains("incorrect api key")
         // Gemini answers a bad key with a 400.
@@ -175,6 +193,19 @@ mod tests {
         );
         assert!(e.headline.contains("no longer fits"), "{}", e.headline);
         assert!(e.hint.unwrap().contains("/compact"));
+    }
+
+    #[test]
+    fn an_account_out_of_credit_says_so_without_the_json() {
+        let e = explain(
+            r#"llm: backend returned 402: {"error":{"message":"This request requires more credits. You requested up to 131072 tokens, but can only afford 68094. To increase, visit https://openrouter.ai/settings/credits","code":402},"user_id":"user_abc"}"#,
+            "https://openrouter.ai/api/v1",
+            "m",
+        );
+        assert!(e.headline.contains("too little credit"), "{}", e.headline);
+        let hint = e.hint.unwrap();
+        assert!(hint.contains("can only afford 68094") && !hint.contains("settings/credits"), "{hint}");
+        assert!(e.raw.is_empty(), "the account id stays out of the transcript: {}", e.raw);
     }
 
     #[test]

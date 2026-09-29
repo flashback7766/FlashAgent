@@ -590,7 +590,13 @@ impl App {
     fn model_menu_key(&mut self, cx: &LoopCtx<'_>, mut menu: SelectMenu<String>, code: KeyCode, mods: KeyModifiers) {
         match code {
             KeyCode::Enter => {
-                let Some(val) = menu.selected_value().cloned() else { return };
+                // Typed text that matches nothing is a model id the server did not list.
+                let typed = menu.custom_choice().map(str::to_string);
+                let matching = !menu.filtered_indices().is_empty();
+                let Some(val) = typed.or_else(|| matching.then(|| menu.selected_value().cloned()).flatten()) else {
+                    self.overlay = Some(Overlay::Model(menu));
+                    return;
+                };
                 // The menu lists the connected server's models; during a switch they
                 // are not the active provider's.
                 if self.on_active_provider(cx.source) && self.provider_switch.is_none() {
@@ -705,13 +711,9 @@ impl App {
             self.notice(format!("Still connecting to {name}; its models are listed once it answers"));
             return;
         }
-        match build_model_menu(source, &self.config.active_profile().name) {
-            Some(mut menu) => {
-                menu.select_by_value(&self.current_model);
-                self.open_overlay(Overlay::Model(menu));
-            }
-            None => self.notice("No models discovered from server"),
-        }
+        let mut menu = build_model_menu(source, &self.config.active_profile().name);
+        menu.select_by_value(&self.current_model);
+        self.open_overlay(Overlay::Model(menu));
     }
 
     pub(crate) fn open_effort_menu(&mut self, source: &BackendSource) {

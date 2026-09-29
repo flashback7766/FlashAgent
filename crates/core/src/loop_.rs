@@ -209,6 +209,8 @@ impl AgentLoop {
         // The last batch had a call that failed on its own terms: a wrong path,
         // name or argument, which a corrected call can fix.
         let mut call_failed = false;
+        // The same tool failing the same way, call after call: a model in a rut.
+        let mut failing: Option<(String, u32)> = None;
         // A stalled scratchpad reply and the nudge answering it: sent with the next
         // request only, and stored only if the answer is bound to them.
         let mut transient: Vec<ChatMessage> = Vec::new();
@@ -623,7 +625,21 @@ impl AgentLoop {
                 });
                 call_failed |= out.is_error && fixable_by_another_call(&call.name, &out.content);
                 let images = out.images;
-                history.push(ChatMessage::tool_result(call.id.clone(), out.content));
+                let mut content = out.content;
+                if out.is_error {
+                    let key = format!("{}: {}", call.name, content.lines().next().unwrap_or("").chars().take(80).collect::<String>());
+                    let streak = match failing.take() {
+                        Some((last, n)) if last == key => n + 1,
+                        _ => 1,
+                    };
+                    if streak >= REPEATED_FAILURE_AT && streak % 2 == 1 {
+                        content.push_str(&format!("\n\n{}", repeated_failure_note(streak)));
+                    }
+                    failing = Some((key, streak));
+                } else {
+                    failing = None;
+                }
+                history.push(ChatMessage::tool_result(call.id.clone(), content));
                 if !images.is_empty() {
                     // A separate message, since a tool result is text only. It is marked so the
                     // model does not read it as the user speaking.
@@ -696,6 +712,17 @@ fn synth_call_id() -> String {
 const STALL_NUDGE: &str = "Please provide your direct, final answer to my request now. Do not repeat the thinking process; output only your final response.";
 
 /// Sent when the model announced a tool call and ended its turn without it.
+/// A tool failing the same way this many calls in a row gets a note with its result.
+const REPEATED_FAILURE_AT: u32 = 3;
+
+fn repeated_failure_note(times: u32) -> String {
+    format!(
+        "[FlashAgent: this is the same failure {times} calls in a row. Repeating the call will not change it. \
+         Read the target again to see its current content, or take a different approach; \
+         if nothing works, tell the user what blocks you.]"
+    )
+}
+
 const PROMISE_NUDGE: &str = "You said what you would do next but did not do it. Make that tool call now.";
 
 pub(crate) const ERROR_NUDGE: &str = "Your last tool call failed and you replied without trying again. If the error shows what to change (a path, a name, an argument), make the corrected call now. Otherwise say in one sentence what blocks you.";
@@ -1631,6 +1658,30 @@ mod tests {
         let (_, done) = run_loop(&l, &llm, &tools, |_| {});
         assert!(matches!(done, DoneReason::Completed));
         assert_eq!(llm.requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_same_failure_three_calls_in_a_row_comes_with_a_note_and_a_success_resets_it() {
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let stuck = "error: edit: old_string not found in a.py";
+        let llm = RecordingLlm::new(vec![
+            tool_turn("read_file", "c1"),
+            tool_turn("read_file", "c2"),
+            tool_turn("read_file", "c3"),
+            text_turn("Stuck."),
+            text_turn("Still stuck."),
+        ]);
+        let tools = ScriptedTools::new(vec![(true, stuck), (true, stuck), (true, stuck)]);
+        let (history, _) = run_loop(&l, &llm, &tools, |_| {});
+        let results: Vec<&str> = history.iter().filter(|m| m.role == Role::Tool).map(|m| m.content.as_str()).collect();
+        assert!(!results[0].contains("FlashAgent:") && !results[1].contains("FlashAgent:"), "{results:?}");
+        assert!(results[2].starts_with(stuck) && results[2].contains("same failure 3 calls in a row"), "{}", results[2]);
+
+        // Another kind of failure, or a success between, starts the count again.
+        let llm = RecordingLlm::new(vec![tool_turn("read_file", "c1"), tool_turn("read_file", "c2"), tool_turn("read_file", "c3"), text_turn("Done."), text_turn("Done.")]);
+        let tools = ScriptedTools::new(vec![(true, stuck), (false, "fine"), (true, stuck)]);
+        let (history, _) = run_loop(&l, &llm, &tools, |_| {});
+        assert!(history.iter().all(|m| !m.content.contains("FlashAgent:")), "a broken streak still counted");
     }
 
     #[test]
