@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## b460 — commands while the model works, and a window that does not run out
 
 - **Commands work while the model works.** Type a `/command` and press Enter during a turn. The ones that only read or set something run at once: `/help`, `/verbose`, `/diff`, `/commit`, `/memory`, `/context`, `/settings`, `/mode`, `/effort`, `/model`. The ones that change the conversation the turn is holding wait and run when it ends, shown under the prompt as "runs when the turn ends": `/compact`, `/clear`, `/export`, `/rewind`. `/goal`, `/resume`, `/regenerate`, `/update`, `/exit` and the like say they do not run mid-turn. A misspelt command is no longer sent to the model as guidance; a path such as `/tmp/shot.png` still is.
 - **A long task no longer runs into the end of the window.** The threshold that summarizes between prompts (85% of a 128k window, up to 97% of a million) is now also checked between the steps of one turn. When it is passed, the steps taken so far are summarized and the turn goes on with its prompt, the project memory and its last three steps; the whole text goes to the compaction archive. It is noted on the status line, not in the transcript, and Esc still stops it. Off with Settings → Auto-compact history, as before. Measured on Gemma 4 E2B with the threshold at 10%: 20.9K tokens in the window before, 4.9K after, and the task carried on.
