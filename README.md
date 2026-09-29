@@ -15,7 +15,7 @@
 
 </div>
 
-> **Status:** Beta b460 — actively developed by a solo maintainer. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
+> **Status:** Beta b460 — actively developed by a solo maintainer, and developed with itself: the maintainer uses FlashAgent (Claude Sonnet 5.5 via OpenRouter) to change its own code, alongside other coding agents. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
 
 ## Quick start
 
