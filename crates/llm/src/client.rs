@@ -316,7 +316,15 @@ impl Client {
         // request that the server warns about.
         let profile = self.profile().unwrap_or_default();
         if let Some(effort) = &options.custom_effort {
-            return Some(effort.clone());
+            // A level this model does not have is a level the gateway either
+            // rejects or quietly drops, so the saved setting would read as
+            // applied while nothing was thinking. It falls through to the
+            // ladder like any other level. Only when the model said nothing
+            // about its presets is the name passed through as it came.
+            let known = profile.presets.is_empty() || !profile.supported || profile.presets.iter().any(|p| p.eq_ignore_ascii_case(effort));
+            if known {
+                return Some(effort.clone());
+            }
         }
         match options.thinking {
             ThinkingEffort::Off => Some(profile.resolve_effort(options.thinking).unwrap_or("off").to_string()),
