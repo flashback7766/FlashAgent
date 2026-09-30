@@ -635,6 +635,9 @@ impl App {
             KeyCode::Enter => {
                 if let Some(val) = menu.selected_value().cloned() {
                     self.current_effort = val;
+                    // Saved, not just held: a level chosen in F4 that died with
+                    // the session was the one thing that made this feel broken.
+                    self.save_live_effort();
                     self.refresh_welcome(cx.source, cx.mascot_mood);
                     self.notice(format!("Thinking effort set to: {}", self.current_effort));
                 }

@@ -547,16 +547,16 @@ impl App {
             return;
         };
         self.chat.push_system(&format!(
-            "This session: ${} over {} priced turns",
+            "This session: ${} over {}",
             CostLedger::format_amount(total),
-            self.cost.priced_turns()
+            CostLedger::turns_phrase(self.cost.priced_turns())
         ));
         for row in self.cost.by_provider() {
             self.chat.push_system(&format!(
-                "  {} \u{b7} ${} over {} turns",
+                "  {} \u{b7} ${} over {}",
                 row.name,
                 CostLedger::format_amount(row.total),
-                row.turns
+                CostLedger::turns_phrase(row.turns)
             ));
         }
     }
