@@ -3,7 +3,8 @@
 What the terminal app costs, measured. Each figure comes with the command
 that produces it, so it can be checked instead of believed.
 
-Measured 2026-09-22 on b328 code: AMD Ryzen 7 7735U, 32 GB RAM, Linux 7.2,
+Measured 2026-09-22 on b328 code, and the test and tool counts refreshed
+2026-10-01 on b500: AMD Ryzen 7 7735U, 32 GB RAM, Linux 7.2,
 rustc 1.98.1, release build. Your own figures will differ with the machine.
 What matters is how they grow.
 
@@ -70,14 +71,19 @@ that is a fifth of a 60 Hz frame.
 
 ## Tests
 
-Counted 2026-09-24.
+Counted 2026-10-01 on b500 (`b500-subagents`), release build.
 
 | What | Count |
 |---|---:|
-| Tests in the workspace (`cargo test --workspace`) | 1,077 |
-| Of those, the real binary in a pseudo-terminal (`crates/tui/tests/scenarios.rs`) | 91 |
-| Every built-in tool called for real (`crates/tools/tests/every_tool.rs`) | 14 |
+| Tests in the workspace (`cargo test --workspace`) | 1,248 |
+| Of those, the real binary in a pseudo-terminal (`crates/tui/tests/scenarios.rs`) | 109 |
+| Every built-in tool called for real (`crates/tools/tests/every_tool.rs`) | 15 |
+| Built-in tools the model can call | 24 |
 | Ignored: diagnostics that print screens, measurements, tests that need the internet | 11 |
+
+```bash
+cargo test --workspace
+```
 
 The tests that need the internet run every night in CI
 (`.github/workflows/web-tools.yml`). A release tag builds nothing until the
