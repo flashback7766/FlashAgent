@@ -501,16 +501,26 @@ mod tests {
         assert_eq!(llm.discovery_kind(), llm.discovery().map(|d| d.kind));
 
         *llm.discovery.write() = Some(crate::thinking::ServerDiscovery {
-            reachable_without_listing: false,
             base_url: "http://localhost:1234/v1".into(),
             models: Vec::new(),
             active_model: None,
             kind: crate::thinking::ServerKind::LmStudio,
+            // It answered, it just had nothing loaded to list.
+            reachable_without_listing: true,
         });
         assert!(llm.has_discovery());
-        assert_eq!(llm.has_discovery(), llm.discovery().is_some());
+        assert_eq!(llm.has_discovery(), llm.discovery().is_some_and(|d| d.is_reachable()));
         assert_eq!(llm.discovery_kind(), Some(crate::thinking::ServerKind::LmStudio));
         assert_eq!(llm.discovery_kind(), llm.discovery().map(|d| d.kind));
+
+        // A discovery that saw nothing and got no answer is not a server.
+        *llm.discovery.write() = Some(crate::thinking::ServerDiscovery {
+            base_url: "http://localhost:1234/v1".into(),
+            kind: crate::thinking::ServerKind::LmStudio,
+            reachable_without_listing: false,
+            ..Default::default()
+        });
+        assert!(!llm.has_discovery(), "nothing answered and nothing was seen");
     }
 
     #[test]
