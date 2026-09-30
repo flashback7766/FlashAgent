@@ -15,7 +15,37 @@ pub(crate) fn server_mood(switching: bool, answered: bool, silent: bool, since_s
     }
 }
 
+/// How long a finished compaction keeps the tip's row: ten seconds at the 80 ms
+/// idle tick, the span a tip itself gets. It borrows a tip's place, so it has to
+/// hand that place back.
+pub(crate) const COMPACT_STATUS_HOLD_TICKS: usize = 125;
+
+/// Whether a compaction line has been shown long enough that the row is due back
+/// to the tips. A hold of zero is a line with no deadline — the one written while
+/// `/compact` is still running — and it does not run out on its own.
+fn compact_status_expired(hold: &mut usize) -> bool {
+    match *hold {
+        0 => false,
+        1 => {
+            *hold = 0;
+            true
+        }
+        n => {
+            *hold = n - 1;
+            false
+        }
+    }
+}
+
 impl App {
+    /// Puts the compaction line under the prompt, where the status of the moment
+    /// belongs rather than in the chat. `hold` is how many idle ticks it keeps
+    /// the tip's row for; zero leaves it up for as long as it lasts.
+    pub(crate) fn set_compact_status(&mut self, text: String, hold: usize) {
+        self.compact_status = Some(text);
+        self.compact_status_hold = hold;
+        self.renderer.request_reprint();
+    }
     /// One event from the terminal, the agent loop or a background task.
     pub(crate) async fn on_ui_event(&mut self, cx: &mut LoopCtx<'_>, ev: UiEvent) -> Flow {
         match ev {
@@ -196,6 +226,13 @@ impl App {
             self.background = None;
             self.renderer.request_reprint();
         }
+        // A compaction that has finished reports itself once and then lets the
+        // tips have their row again: the line takes a tip's place, so holding it
+        // forever means no tip ever comes round.
+        if compact_status_expired(&mut self.compact_status_hold) {
+            self.compact_status = None;
+            self.renderer.request_reprint();
+        }
         if self.running && self.cancel_requested.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(3)) {
             self.abort_stuck_turn(cx);
         }
@@ -281,13 +318,15 @@ impl App {
         self.compacting = false;
         self.chat.forget_counted_context();
         update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-        self.compact_status = Some(match saved {
-            Some(saved) => {
-                format!("Compacted · {} saved · {} left in the window", ContextUsage::format_tokens(saved), ContextUsage::format_tokens(self.context_usage.total_used()))
-            }
-            None => "Compaction saved no space · conversation unchanged".to_string(),
-        });
-        self.renderer.request_reprint();
+        self.set_compact_status(
+            match saved {
+                Some(saved) => {
+                    format!("Compacted · {} saved · {} left in the window", ContextUsage::format_tokens(saved), ContextUsage::format_tokens(self.context_usage.total_used()))
+                }
+                None => "Compaction saved no space · conversation unchanged".to_string(),
+            },
+            COMPACT_STATUS_HOLD_TICKS,
+        );
     }
 
     pub(crate) fn on_server_discovered(&mut self, cx: &LoopCtx<'_>, disc: flashagent_llm::ServerDiscovery) {
@@ -589,6 +628,34 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_finished_compaction_hands_the_tip_row_back() {
+        let mut hold = COMPACT_STATUS_HOLD_TICKS;
+        for _ in 1..COMPACT_STATUS_HOLD_TICKS {
+            assert!(!compact_status_expired(&mut hold), "the row went back before the time was up");
+        }
+        assert_eq!(hold, 1);
+        assert!(compact_status_expired(&mut hold), "the row was never handed back: the line stays forever");
+        assert_eq!(hold, 0);
+    }
+
+    #[test]
+    fn a_running_compaction_line_does_not_expire_on_its_own() {
+        let mut hold = 0;
+        for _ in 0..COMPACT_STATUS_HOLD_TICKS * 10 {
+            assert!(!compact_status_expired(&mut hold), "a line about a running compaction vanished mid-write");
+        }
+        assert_eq!(hold, 0);
+    }
+
+    #[test]
+    fn a_cleared_status_does_not_keep_expiring() {
+        let mut hold = 1;
+        assert!(compact_status_expired(&mut hold));
+        for _ in 0..5 {
+            assert!(!compact_status_expired(&mut hold), "clearing again after the row went back");
+        }
+    }
     use super::*;
 
     #[test]

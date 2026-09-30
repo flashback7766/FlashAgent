@@ -1,5 +1,9 @@
 # Changelog
 
+## b473 — a finished compaction gives the row back
+
+- **The compaction line silenced the tips for the rest of the session.** `/compact` reports what it saved in the row under the prompt, and the row it borrows is the one the tips rotate through. Nothing ever handed the row back, so a single compaction meant no tip ever came round again — the line sat there, still, until the session ended. The finished line now keeps the row for as long as a tip would, ten seconds, and then the tips resume. The line written *while* `/compact` is still writing the summary has no deadline: that can take minutes, and a status that expired half-way would be hiding the very thing it reports.
+
 ## b472 — the counters stop guessing, and compaction stops waiting
 
 - **A changed file is counted by the file.** Adding one line under its neighbour used to be reported as `+2 -1`, because the size came from the text the model sent: it asked to put two lines where one was, so one line read as a deletion too. The diff the approval card already showed is now what the header and the finished card count, and a line that was only added is not also printed as `-0`.
