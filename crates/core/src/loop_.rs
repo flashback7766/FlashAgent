@@ -249,6 +249,7 @@ impl AgentLoop {
         let mut promise_nudges: usize = 0;
         let mut error_nudges: usize = 0;
         let mut named_nudges: usize = 0;
+let mut report_nudges: usize = 0;
         // The last batch had a call that failed on its own terms: a wrong path,
         // name or argument, which a corrected call can fix.
         let mut call_failed = false;
@@ -847,6 +848,34 @@ pub(crate) fn named_tool_nudge(history: &[ChatMessage], specs: &[ToolSpec], repl
         .filter_map(|s| asks_for_call(prompt, &s.name).map(|at| (at, &s.name)))
         .min_by_key(|(at, _)| *at)?;
     Some(format!("{NAMED_NUDGE_HEAD}{name}, and you have not made it. Make that call now. If it is not needed after all, say why in one sentence."))
+}
+
+/// "Read status.txt, then report the number it contains with report_status":
+/// the model reads the file, reads it again, and never reports. It is working,
+/// so nothing above fires — it never answers in prose, it just keeps calling
+/// tools and quietly skips the one the request named.
+///
+/// Once per turn, before the next round of calls goes out, it is told plainly
+/// that it already has what it needs and which call is still missing.
+pub(crate) fn unreported_call_nudge(history: &[ChatMessage], specs: &[ToolSpec]) -> Option<String> {
+    let start = history.iter().rposition(is_prompt)?;
+    let called: HashSet<&str> = history[start..].iter().flat_map(|m| m.tool_calls.iter().map(|c| c.name.as_str())).collect();
+    if called.is_empty() {
+        return None;
+    }
+    let prompt = &history[start].content;
+    let (_, name) = specs
+        .iter()
+        .filter(|s| !called.contains(s.name.as_str()))
+        .filter_map(|s| asks_for_call(prompt, &s.name).map(|at| (at, &s.name)))
+        .min_by_key(|(at, _)| *at)?;
+    Some(format!(
+        "You have already made {} call{} this turn, but the request also names {name}, which you have not called. \
+         If you already have what {name} needs, make that call now instead of reading again. \
+         If you genuinely do not have it yet, say in one sentence what is still missing.",
+        called.len(),
+        if called.len() == 1 { "" } else { "s" }
+    ))
 }
 
 /// A sentence with one of these asks for a call only in some case: "ask the
