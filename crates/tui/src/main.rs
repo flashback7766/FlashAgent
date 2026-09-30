@@ -657,6 +657,12 @@ struct App {
     /// What this session has cost, where the backend says. Unpriced backends
     /// leave it empty and the status bar stays quiet.
     cost: flashagent_core::CostLedger,
+    /// The model's own checklist for whatever it is doing, in any session and
+    /// not only under /goal.
+    plan: Vec<flashagent_tools::plan_tool::PlanStep>,
+    /// The arguments of the call now running, so a finished call can be read
+    /// back without the loop having to carry them a second time.
+    last_tool_args: String,
     /// Kept so the prompt can be rebuilt when the voice changes.
     prompt_config: SystemPromptConfig,
     /// E.g. `~/project`.
@@ -1170,6 +1176,8 @@ fn initial_app(init: InitialApp) -> App {
         current_context: context_display,
         current_effort: initial_effort,
         cost: flashagent_core::CostLedger::default(),
+        plan: Vec::new(),
+        last_tool_args: String::new(),
         prompt_config: system_prompt_config,
         cwd_display: cwd_display.clone(),
         memory_docs,

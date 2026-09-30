@@ -1308,11 +1308,11 @@ fn a_goal_shows_its_live_plan_and_updates_it_in_place() {
     term.send(ENTER);
     term.wait_for("Done.", WAIT);
     // A repaint can be caught half-written; check the finished frame.
-    let screen = term.wait_for("[~] fix it", WAIT);
+    let screen = term.wait_for("▸ fix it", WAIT);
 
     assert!(screen.contains("plan: 1/2"), "{screen}");
-    assert!(screen.contains("[x] read the failing test"), "{screen}");
-    assert!(screen.contains("[~] fix it"), "{screen}");
+    assert!(screen.contains("√ read the failing test"), "{screen}");
+    assert!(screen.contains("▸ fix it"), "{screen}");
     assert_eq!(screen.matches("plan:").count(), 1, "the plan updates in place, it does not pile up:\n{screen}");
     // Only the text answer carries a usage chunk in the mock: four tokens.
     let report = term.wait_for("generated tokens", WAIT);

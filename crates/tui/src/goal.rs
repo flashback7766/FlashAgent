@@ -332,12 +332,14 @@ pub fn format_plan(steps: &[flashagent_tools::plan_tool::PlanStep]) -> String {
     let done = steps.iter().filter(|s| s.status == PlanStatus::Completed).count();
     let mut out = format!("  \x1b[38;2;155;165;180mplan:\x1b[0m \x1b[38;2;160;155;145m{done}/{}\x1b[0m", steps.len());
     for step in steps {
-        let color = match step.status {
-            PlanStatus::Completed => "\x1b[38;2;145;205;140m",
-            PlanStatus::InProgress => "\x1b[38;2;225;175;95m",
-            PlanStatus::Pending => "\x1b[38;2;160;155;145m",
+        let (color, text) = match step.status {
+            // A finished step is struck through as well as ticked: on a long
+            // plan the marks alone are read too slowly.
+            PlanStatus::Completed => ("\x1b[38;2;145;205;140m", format!("\x1b[2m{}\x1b[0m", step.text)),
+            PlanStatus::InProgress => ("\x1b[1;38;2;225;175;95m", step.text.clone()),
+            PlanStatus::Pending => ("\x1b[38;2;130;128;135m", step.text.clone()),
         };
-        out.push_str(&format!("\n    {color}[{}]\x1b[0m {}", step.status.glyph(), step.text));
+        out.push_str(&format!("\n    {color}{}\x1b[0m {text}", step.status.glyph()));
     }
     out
 }
@@ -654,9 +656,30 @@ mod tests {
         let text = format_plan(&steps);
         let plain = strip_ansi_for_test(&text);
         assert!(plain.contains("plan: 1/3"), "{plain}");
-        assert!(plain.contains("[x] done step"), "{plain}");
-        assert!(plain.contains("[~] doing step"), "{plain}");
-        assert!(plain.contains("[ ] next step"), "{plain}");
+        assert!(plain.contains("√ done step"), "{plain}");
+        assert!(plain.contains("▸ doing step"), "{plain}");
+        assert!(plain.contains("· next step"), "{plain}");
+        // A finished step is struck through as well as ticked, so a long plan
+        // can be read at a glance.
+        assert!(text.contains("\x1b[2mdone step\x1b[0m"), "a done step is not dimmed: {text:?}");
+    }
+
+    #[test]
+    fn a_plan_says_which_step_is_the_current_one_and_how_many_are_left() {
+        use flashagent_tools::plan_tool::{PlanStatus, PlanStep};
+        // The thing a person reads at a glance while the work goes on: where it
+        // is, and how far along.
+        let steps = vec![
+            PlanStep { text: "one".into(), status: PlanStatus::Completed },
+            PlanStep { text: "two".into(), status: PlanStatus::Completed },
+            PlanStep { text: "three".into(), status: PlanStatus::InProgress },
+            PlanStep { text: "four".into(), status: PlanStatus::Pending },
+        ];
+        let plain = strip_ansi_for_test(&format_plan(&steps));
+        assert!(plain.contains("plan: 2/4"), "{plain}");
+        // Exactly one step is marked as the one being worked on.
+        assert_eq!(plain.matches('▸').count(), 1, "more than one step claims to be current: {plain}");
+        assert_eq!(plain.matches('√').count(), 2, "{plain}");
     }
 
     fn strip_ansi_for_test(s: &str) -> String {

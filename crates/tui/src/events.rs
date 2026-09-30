@@ -482,6 +482,7 @@ impl App {
             }
             LoopEvent::ToolStarted { name, args_json, .. } => {
                 self.last_tool_name = Some(name.clone());
+                self.last_tool_args = args_json.clone();
                 self.turn_outcome.tool_calls += 1;
                 self.token_tracker.on_delta(name);
                 self.token_tracker.on_delta(args_json);
@@ -501,6 +502,17 @@ impl App {
                             format!("{said}  ·  /memory to see or change it"),
                             10,
                         ));
+                    }
+                }
+                // The plan belongs to the session, not to a /goal run: a model
+                // that planned a long task in ordinary chat shows it the same
+                // way, updated in place as it works through the steps.
+                if !*is_error && self.last_tool_name.as_deref() == Some("update_plan") {
+                    if let Some(steps) = flashagent_tools::plan_tool::parse_plan(&self.last_tool_args) {
+                        self.plan = steps;
+                        let block = format_plan(&self.plan);
+                        self.chat.update_or_push_turn_system("plan:", &block);
+                        self.renderer.request_reprint();
                     }
                 }
                 self.turn_phase = TurnPhase::AfterTool;
