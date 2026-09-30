@@ -1,6 +1,6 @@
 # Changelog
 
-## b473 — a finished compaction gives the row back, and the cache stops lying
+## b477 — a finished compaction gives the row back, and the cache stops lying
 
 - **The compaction line silenced the tips for the rest of the session.** `/compact` reports what it saved in the row under the prompt, and the row it borrows is the one the tips rotate through. Nothing ever handed the row back, so a single compaction meant no tip ever came round again — the line sat there, still, until the session ended. The finished line now keeps the row for as long as a tip would, ten seconds, and then the tips resume. The line written *while* `/compact` is still writing the summary has no deadline: that can take minutes, and a status that expired half-way would be hiding the very thing it reports.
 - **Sending a prompt no longer waits for a warm-up that was already running.** The prefix is warmed while you type, but the warm-up was only ever dropped on a change of provider. Pressing Enter mid-warm-up left the server prefilling a prefix the turn was about to prefill again: two requests, and on a server with one slot a wait twice as long. A turn now ends the warm-up on its way out.
