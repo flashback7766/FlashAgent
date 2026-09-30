@@ -153,6 +153,12 @@ pub struct ServerDiscovery {
     pub active_model: Option<DiscoveredModel>,
     #[serde(default)]
     pub kind: ServerKind,
+    /// The server answered, but its model list did not arrive in time or could
+    /// not be read. This is a slow list, not a dead server: OpenRouter's is
+    /// three quarters of a megabyte, and calling that server "no answer" while
+    /// it streams at 68 tokens a second is simply wrong.
+    #[serde(default)]
+    pub reachable_without_listing: bool,
 }
 
 impl ServerDiscovery {
@@ -160,6 +166,12 @@ impl ServerDiscovery {
     /// loaded out of their list, so the active one is looked at too.
     pub fn model(&self, id: &str) -> Option<&DiscoveredModel> {
         self.models.iter().chain(&self.active_model).find(|m| m.id == id)
+    }
+
+    /// The server is up, whether or not it listed anything. A slow model list
+    /// is the server working, not the server being gone.
+    pub fn is_reachable(&self) -> bool {
+        !self.models.is_empty() || self.active_model.is_some() || self.reachable_without_listing
     }
 }
 
