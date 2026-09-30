@@ -2071,6 +2071,7 @@ mod tests {
             models: vec![model("sees", true), model("blind", false)],
             active_model: None,
             kind: Default::default(),
+            reachable_without_listing: false,
         };
         assert!(sees_images(Some(&disc), "sees"));
         assert!(!sees_images(Some(&disc), "blind"));
