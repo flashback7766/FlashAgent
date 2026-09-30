@@ -119,13 +119,17 @@ impl MtpStats {
 }
 
 /// `None` when the backend did not report.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Usage {
     pub prompt: Option<i64>,
     pub completion: Option<i64>,
     /// Prefix cache reuse (f_keep).
     pub cached: Option<i64>,
     pub mtp: Option<MtpStats>,
+    /// What the turn cost, in the account's own currency, when the backend
+    /// prices it (OpenRouter sends `usage.cost`). A local server prices nothing,
+    /// so this stays `None` there rather than being guessed from token counts.
+    pub cost: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
