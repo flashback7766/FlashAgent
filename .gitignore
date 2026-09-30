@@ -39,4 +39,6 @@ Thumbs.db
 .agents/
 AGENTS.md
 CONTEXT.md
+MEMORY.md
+memory/
 __pycache__/
