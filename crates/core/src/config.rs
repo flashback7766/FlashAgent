@@ -1020,7 +1020,14 @@ mod tests {
         let none = no_env;
         let with = |url: &str, model: &str| AppConfig {
             setup_completed: false,
-            providers: vec![ProviderProfile { name: "P".into(), url: url.into(), model: model.into(), ..Default::default() }],
+            providers: vec![ProviderProfile {
+                name: "P".into(),
+                protocol: ApiProtocol::OpenAi,
+                url: url.into(),
+                api_key: None,
+                model: model.into(),
+                context_window: None,
+            }],
             ..AppConfig::default()
         };
         let cfg = with("", "");
