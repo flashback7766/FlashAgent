@@ -1193,10 +1193,13 @@ fn a_goal_runs_without_asking_reports_what_it_did_and_hands_back_the_gates() {
     term.wait_for("Goal report:", WAIT);
     term.wait_gone(RUNNING_HINT, WAIT);
 
-    let screen = term.screen();
-    assert!(screen.contains("+ greeting.txt"), "the report does not list the file:\n{screen}");
-    assert!(screen.contains("Shell commands: 1 ok"), "the report does not count the command:\n{screen}");
-    assert!(screen.contains("ended its turn on its own"), "the report does not say why it stopped:\n{screen}");
+    // Each claim is waited for rather than read off a screen taken afterwards.
+    // The helper's own note says a second look can land mid-repaint, and on a
+    // loaded runner it did: the snapshot arrived while the welcome card was
+    // being drawn again, and the report was nowhere in it.
+    let listed = term.wait_for("+ greeting.txt", WAIT);
+    assert!(listed.contains("Shell commands: 1 ok"), "the report does not count the command:\n{listed}");
+    term.wait_for("ended its turn on its own", WAIT);
     assert_eq!(std::fs::read_to_string(home.work().join("greeting.txt")).unwrap(), "hello\n");
     assert!(home.work().join("goal-marker.txt").exists(), "the goal's command did not run");
 
