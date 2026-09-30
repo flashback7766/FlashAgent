@@ -128,6 +128,7 @@ fn really_invoked() -> BTreeSet<String> {
         "web_fetch",
         "web_search",
         "spawn_agent",
+        "send_message",
         "ask_user",
         "update_plan",
         "review_agent",
@@ -210,7 +211,8 @@ async fn every_tool_the_model_is_offered_is_really_invoked_by_a_test() {
     project.tools.set_goal_mode(true);
     let (composite, _finished) = what_the_model_is_offered(&project);
     let offered: BTreeSet<String> = composite.specs().into_iter().map(|s| s.name).collect();
-    let unrun: Vec<_> = offered.difference(&really_invoked()).collect();
+    let invoked = really_invoked();
+    let unrun: Vec<_> = offered.difference(&invoked).collect();
     assert!(
         unrun.is_empty(),
         "these tools reach the model but no test in this file calls them: {unrun:?}"
@@ -617,7 +619,7 @@ async fn sending_a_message_and_reviewing_a_child_run_through_the_real_composite(
     // `send_message` and `review_agent` only exist once a child is running, so
     // this spawns one first and then uses both against its real id.
     let project = Project::new();
-    let (composite, mut out) = what_the_model_is_offered(&project);
+    let (composite, _out) = what_the_model_is_offered(&project);
     let spawn = composite
         .execute(&ToolCall {
             id: "t".into(),
@@ -653,4 +655,27 @@ async fn sending_a_message_and_reviewing_a_child_run_through_the_real_composite(
     assert!(!review.is_error, "review_agent failed outright: {}", review.content);
     assert!(review.content.contains("checked"), "the review was not recorded: {}", review.content);
     assert!(review.content.contains("checked the answer against the file"), "the note was dropped: {}", review.content);
+
+    // The child has already finished, so a message to it is refused by name,
+    // listing who is actually running. That refusal is the behaviour worth
+    // covering: it must not be a silent no-op.
+    let to_finished = composite
+        .execute(&ToolCall {
+            id: "t".into(),
+            name: "send_message".into(),
+            args_json: serde_json::json!({ "to": id, "message": "wrap it up" }).to_string(),
+        })
+        .await;
+    assert!(to_finished.is_error, "a message to nobody was accepted: {}", to_finished.content);
+    assert!(to_finished.content.contains("Running:"), "it must say who is running: {}", to_finished.content);
+
+    // And the parent, which is always there to be told.
+    let to_parent = composite
+        .execute(&ToolCall {
+            id: "t".into(),
+            name: "send_message".into(),
+            args_json: serde_json::json!({ "to": "parent", "message": "the file is notes.txt:2" }).to_string(),
+        })
+        .await;
+    assert!(!to_parent.is_error, "send_message failed outright: {}", to_parent.content);
 }
