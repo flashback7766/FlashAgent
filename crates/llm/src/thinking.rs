@@ -1146,6 +1146,29 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_whose_model_list_was_too_slow_is_still_a_server_that_answered() {
+        let slow = ServerDiscovery { base_url: "https://openrouter.ai/api/v1".into(), reachable_without_listing: true, ..Default::default() };
+        assert!(slow.is_reachable(), "a list that outran its timeout is a working server, not a dead one");
+        let listed = ServerDiscovery {
+            base_url: "x".into(),
+            models: vec![DiscoveredModel {
+                id: "m".into(),
+                display_name: None,
+                is_loaded: false,
+                context_length: None,
+                max_context_length: None,
+                thinking: ThinkingProfile::unreported(),
+                supports_tools: true,
+                supports_vision: false,
+            }],
+            ..Default::default()
+        };
+        assert!(listed.is_reachable());
+        let dead = ServerDiscovery { base_url: "x".into(), ..Default::default() };
+        assert!(!dead.is_reachable(), "nothing answered and nothing was seen: that one really is down");
+    }
     use crate::ChatMessage;
 
     #[test]
