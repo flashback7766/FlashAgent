@@ -693,7 +693,7 @@ impl AppConfig {
             return false;
         }
         // A local server needs no key at all; anything else needs one.
-        if !crate::permissions::url_host(&profile.url).is_some_and(|h| crate::permissions::is_local_host(h)) {
+        if !crate::permissions::url_host(&profile.url).is_some_and(|h| crate::permissions::is_local_host(&h)) {
             return profile.resolve_key(env).0.is_some();
         }
         true
@@ -1010,6 +1010,36 @@ mod tests {
         cfg.save_provider(cloud);
         cfg.activate("Home");
         cfg
+    }
+
+    #[test]
+    fn a_run_that_already_knows_where_to_go_is_not_asked_again() {
+        fn no_env(_: &str) -> Option<String> {
+            None
+        }
+        let none = no_env;
+        let with = |url: &str, model: &str| AppConfig {
+            setup_completed: false,
+            providers: vec![ProviderProfile { name: "P".into(), url: url.into(), model: model.into(), ..Default::default() }],
+            ..AppConfig::default()
+        };
+        let cfg = with("", "");
+        assert!(!cfg.is_ready_to_run(none), "nothing is known yet: the wizard has a job");
+
+        // --url plus a key from the environment: every question already answered.
+        let ready = with("https://openrouter.ai/api/v1", "stealth/space-bunny-alpha");
+        assert!(!ready.is_ready_to_run(none), "a cloud run with no key anywhere is not ready");
+        assert!(
+            ready.is_ready_to_run(|k| (k == "OPENROUTER_API_KEY").then(|| "sk".into())),
+            "--url, --model and the key: nothing left to ask"
+        );
+
+        // A local server needs no key, only a model.
+        assert!(with("http://localhost:1234/v1", "qwen3").is_ready_to_run(none), "a local model is served without a key");
+        assert!(
+            !with("http://localhost:1234/v1", "").is_ready_to_run(none),
+            "a server with no model named still needs a choice"
+        );
     }
 
     #[test]
