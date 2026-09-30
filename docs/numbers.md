@@ -75,8 +75,8 @@ Counted 2026-10-01 on b500 (`b500-subagents`), release build.
 
 | What | Count |
 |---|---:|
-| Tests in the workspace (`cargo test --workspace`) | 1,248 |
-| Of those, the real binary in a pseudo-terminal (`crates/tui/tests/scenarios.rs`) | 109 |
+| Tests in the workspace (`cargo test --workspace`) | 1,267 |
+| Of those, the real binary in a pseudo-terminal (`crates/tui/tests/scenarios.rs`) | 105 |
 | Every built-in tool called for real (`crates/tools/tests/every_tool.rs`) | 15 |
 | Built-in tools the model can call | 24 |
 | Ignored: diagnostics that print screens, measurements, tests that need the internet | 11 |
