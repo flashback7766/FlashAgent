@@ -74,15 +74,19 @@ impl CostLedger {
         }
     }
 
+    /// `1 turn` or `7 turns`, the way a person would say it.
+    pub fn turns_phrase(turns: u64) -> String {
+        if turns == 1 {
+            "1 turn".to_string()
+        } else {
+            format!("{turns} turns")
+        }
+    }
+
     /// The status-bar line, or `None` when nothing has been priced.
     pub fn summary(&self) -> Option<String> {
         let total = self.total()?;
-        let turns = if self.priced_turns == 1 {
-            "1 turn".to_string()
-        } else {
-            format!("{} turns", self.priced_turns)
-        };
-        Some(format!("${} · {turns}", Self::format_amount(total)))
+        Some(format!("${} · {}", Self::format_amount(total), Self::turns_phrase(self.priced_turns)))
     }
 }
 
@@ -141,6 +145,9 @@ mod tests {
 
     #[test]
     fn the_summary_counts_turns_the_way_a_person_would_say_them() {
+        assert_eq!(CostLedger::turns_phrase(1), "1 turn");
+        assert_eq!(CostLedger::turns_phrase(0), "0 turns");
+        assert_eq!(CostLedger::turns_phrase(7), "7 turns");
         let mut ledger = CostLedger::default();
         assert_eq!(ledger.summary(), None);
         ledger.record("p", Some(0.0));
