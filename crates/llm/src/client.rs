@@ -205,8 +205,11 @@ impl Client {
     /// Whether a discovery has been recorded, without the copy `discovery`
     /// makes: the model list is large on a cloud API, and callers that only want
     /// to know whether the server answered ask it many times a second.
+    /// Whether the server is up. A discovery that only carries "it answered,
+    /// the list did not" still counts: that is a working server, and treating
+    /// it as absent is what made a healthy OpenRouter look dead.
     pub fn has_discovery(&self) -> bool {
-        self.discovery.read().is_some()
+        self.discovery.read().as_ref().is_some_and(|d| d.is_reachable())
     }
 
     /// Only the kind of server, read without copying the model list beside it.
@@ -301,7 +304,7 @@ impl Client {
         if models_url.is_some() {
             *self.working_models_url.write() = models_url;
         }
-        let disc = ServerDiscovery { base_url: endpoint.url.clone(), models, active_model: active, kind };
+        let disc = ServerDiscovery { base_url: endpoint.url.clone(), models, active_model: active, kind, reachable_without_listing: false };
         *self.discovery.write() = Some(disc.clone());
         Some(disc)
     }
@@ -377,6 +380,14 @@ impl Client {
             return None;
         }
         resp.json().await.ok()
+    }
+
+    /// Whether anything at all answered within `timeout`. Any HTTP status
+    /// counts, including 401 and 404: a server that rejects a key is a server
+    /// that is up, and calling that "no answer" sends people to reboot a
+    /// machine that was working the whole time.
+    pub(crate) async fn is_reachable(&self, url: &str, headers: &reqwest::header::HeaderMap, timeout: Duration) -> bool {
+        self.http.get(url).headers(headers.clone()).timeout(timeout).send().await.is_ok()
     }
 
     /// Asks the server what it runs: the models, their context windows,

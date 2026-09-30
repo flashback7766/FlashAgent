@@ -544,7 +544,28 @@ pub(crate) async fn discover(client: &Client, generation: u64) -> Option<ServerD
             return Some(disc);
         }
     }
+
+    // Nothing listed. Before calling the server dead, find out whether it is
+    // merely slow: a cloud list that outran its timeout is a server that is
+    // working, and the status bar saying "no answer" while it streams is the
+    // kind of lie that sends someone to reboot a machine that is fine.
+    if reachable_without_listing(client, &base, &headers).await {
+        let disc = ServerDiscovery {
+            base_url: base.clone(),
+            reachable_without_listing: true,
+            ..Default::default()
+        };
+        client.adopt_discovery(&disc);
+        return Some(disc);
+    }
     None
+}
+
+/// Whether anything at all answers at the endpoint. Any HTTP status counts: a
+/// 401 or a 404 still means the connection was made and a server replied.
+async fn reachable_without_listing(client: &Client, base: &str, headers: &reqwest::header::HeaderMap) -> bool {
+    let root = base.trim_end_matches('/');
+    client.is_reachable(&format!("{root}/models"), headers, Duration::from_secs(5)).await
 }
 
 /// A model list that answered at `url`; `extra_v0` is LM Studio's older list,

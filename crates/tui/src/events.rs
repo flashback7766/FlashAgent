@@ -127,7 +127,10 @@ impl App {
                 // "Start it" is for a server on this machine, not for a cloud API.
                 let local = flashagent_core::url_host(&url).is_some_and(|host| flashagent_core::is_local_host(&host));
                 let next = if local { "start the server" } else { "check the address and the connection" };
-                self.background = Some(BackgroundNotice::sticky(format!("{OFFLINE_NOTICE} {url} \u{b7} {next}, or /provider switches to another")).warning());
+                // Not sticky: a server that comes back must be able to say so
+                // without waiting for a restart, and a warning that never
+                // leaves becomes wallpaper the moment it is a lie.
+                self.background = Some(BackgroundNotice::fading(format!("{OFFLINE_NOTICE} {url} \u{b7} {next}, or /provider switches to another"), 8));
             }
             MascotMood::Happy if previous == MascotMood::Offline => {
                 self.background = Some(BackgroundNotice::fading(
