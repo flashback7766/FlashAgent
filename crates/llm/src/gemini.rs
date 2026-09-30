@@ -549,7 +549,8 @@ fn read_usage(meta: &Value) -> Option<Usage> {
         (None, None) => None,
         (answer, thoughts) => Some(answer.unwrap_or(0) + thoughts.unwrap_or(0)),
     };
-    (prompt.is_some() || completion.is_some()).then_some(Usage { prompt, completion, cached: count("cachedContentTokenCount"), mtp: None })
+    (prompt.is_some() || completion.is_some())
+        .then_some(Usage { prompt, completion, cached: count("cachedContentTokenCount"), mtp: None, cost: None })
 }
 
 fn error_message(error: &Value) -> String {
