@@ -12,6 +12,7 @@ pub mod paths;
 pub mod permissions;
 pub mod personality;
 pub mod prompt;
+pub mod registry;
 mod repetition;
 pub mod snapshots;
 pub mod subagents;
@@ -40,6 +41,7 @@ pub use prompt::{build_system_prompt, SystemPromptConfig};
 pub use task_notices::{is_task_notice, NoticeInbox, TASK_NOTICE_NOTE, TASK_NOTICE_OPENING};
 pub use snapshots::{FilePreview, RewindReport, Rewindable, SnapshotStore};
 pub use subagents::{
-    AgentRole, SubagentHandle, SubagentHost, SubagentResult, SubagentSpec, SubagentTool,
-    SubagentToolFactory,
+    AgentRole, ChildUsage, Mailbox, MessageTool, ReviewTool, SpawnRefused, SubagentEvent,
+    SubagentFinished, SubagentHandle, SubagentHost, SubagentMessage, SubagentOutbound,
+    SubagentResult, SubagentReview, SubagentSpec, SubagentTool, SubagentToolFactory, ReviewVerdict,
 };

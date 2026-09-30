@@ -91,19 +91,12 @@ impl Category {
     /// Unknown names are external. An external tool's name never makes it a read:
     /// the server picks its names, so only the user's config can vouch for it
     /// (see [`PermissionState::set_read_only_hint`]).
+    ///
+    /// The class of a built-in tool is declared once, in [`crate::registry`],
+    /// next to the schema and the diff it shows: the permission layer used to
+    /// keep its own list of every name, which is a list to forget to update.
     pub fn from_tool(tool: &str) -> Self {
-        match tool {
-            "read_file" | "list_dir" | "glob" | "grep" | "outline_file" | "git_status" | "git_diff"
-            // The tool refuses to leave the working directory.
-            | "view_image" | "env_info" | "memory_read" | "ask_user" | "update_plan" => Category::Read,
-            // Every call the child makes goes through this same permission state.
-            "spawn_agent" => Category::Read,
-            "write_file" | "edit_file" | "patch_file" | "memory_create" | "memory_update"
-            | "memory_remove" => Category::Write,
-            "run_shell" => Category::Shell,
-            "web_fetch" | "web_search" => Category::Net,
-            _ => Category::Mcp,
-        }
+        crate::registry::find(tool).map_or(Category::Mcp, |def| def.category)
     }
 }
 
@@ -423,24 +416,26 @@ fn named_paths(tool: &str, args_json: &str) -> Vec<String> {
     let Some(args) = flashagent_llm::effective_args(args_json, tool) else {
         return Vec::new();
     };
+    let Some(def) = crate::registry::find(tool) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    match tool {
-        "read_file" | "write_file" | "edit_file" | "patch_file" | "list_dir" | "outline_file" | "git_status"
-        | "git_diff" | "view_image" => {
+    match def.touches {
+        crate::registry::Touches::Files => {
             push(&mut out, args.get("path"));
             for file in args.get("files").and_then(|f| f.as_array()).into_iter().flatten() {
                 push(&mut out, if file.is_string() { Some(file) } else { file.get("path") });
             }
         }
         // A glob searches from the part before its first wildcard.
-        "glob" => {
+        crate::registry::Touches::Glob => {
             let pattern = args.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
             let fixed = pattern.split(['*', '?', '[', '{']).next().unwrap_or("");
             if !fixed.is_empty() {
                 out.push(fixed.to_string());
             }
         }
-        _ => {}
+        crate::registry::Touches::Nothing => {}
     }
     out
 }

@@ -439,6 +439,7 @@ impl App {
             None => {
                 cx.perm.state().set_mode(chosen_mode);
                 self.current_effort = chosen_effort;
+                self.save_live_effort();
             }
         }
         self.refresh_welcome(cx.source, cx.mascot_mood);

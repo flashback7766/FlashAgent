@@ -24,6 +24,46 @@ pub(crate) fn build_model_menu(source: &BackendSource, provider: &str) -> Select
     SelectMenu::new(title, items).with_noun("models").with_custom_entry()
 }
 
+/// Every effort worth choosing from for the model in use, in the order the
+/// model offers them, plus the two the app adds: `auto`, which learns, and
+/// `default`, the server's own.
+///
+/// Nothing here is invented. A model that reports `xhigh` or `max` gets those
+/// as choices; a model that reports nothing gets `off` alone rather than a
+/// ladder of levels its API would refuse. This is the one list the picker, the
+/// Settings row and `/effort` all read, so they cannot disagree about what the
+/// model takes.
+pub(crate) fn effort_choices(source: &BackendSource) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |value: &str| {
+        if !out.iter().any(|seen| seen.eq_ignore_ascii_case(value)) {
+            out.push(value.to_string());
+        }
+    };
+    push("auto");
+    match source.profile() {
+        Some(prof) if prof.supported && !prof.presets.is_empty() => {
+            if prof.default_preset.is_some() {
+                push("default");
+            }
+            for preset in &prof.presets {
+                push(preset);
+            }
+        }
+        // The server lists no settings: off is the only honest choice, because a
+        // level it never named is one it would refuse.
+        Some(_) => push("off"),
+        // Nothing discovered yet, or the endpoint cannot reason.
+        None => {
+            push("off");
+            push("low");
+            push("medium");
+            push("high");
+        }
+    }
+    out
+}
+
 pub(crate) fn build_effort_menu(
     source: &BackendSource,
     memory: &flashagent_core::EffortMemory,
@@ -106,6 +146,7 @@ pub(crate) fn settings_for_runtime(
     model: &str,
     models: &[String],
     context_capacity: usize,
+    effort_choices: Vec<String>,
 ) -> SettingsView {
     let mut cfg = config.clone();
     cfg.permission_mode = mode;
@@ -115,6 +156,7 @@ pub(crate) fn settings_for_runtime(
     }
     let mut view = SettingsView::new(cfg, models.to_vec());
     view.context_capacity = context_capacity;
+    view.effort_choices = effort_choices;
     view
 }
 

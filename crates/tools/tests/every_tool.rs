@@ -6,7 +6,9 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use flashagent_core::loop_::{ToolExec, ToolOutput};
 use flashagent_llm::ToolCall;
 use flashagent_tools::{BuiltinTools, BuiltinToolsConfig};
@@ -14,7 +16,8 @@ use flashagent_tools::{BuiltinTools, BuiltinToolsConfig};
 /// A few files, a subdirectory, and a git repository.
 struct Project {
     dir: PathBuf,
-    tools: BuiltinTools,
+    /// Shared: the subagent factory hands the same tools to every child.
+    tools: Arc<BuiltinTools>,
 }
 
 impl Project {
@@ -34,14 +37,16 @@ impl Project {
         std::fs::write(dir.join("notes.txt"), "first\nsecond\nthird\n").unwrap();
         std::fs::write(dir.join("README.md"), "# Project\n\nA test project.\n").unwrap();
 
-        let tools = BuiltinTools::new(BuiltinToolsConfig {
-            cwd: dir.clone(),
-            toolset_profile: Some(flashagent_core::ToolsetProfile::Full),
-            web_enabled: Some(true),
-            context_window: Some(200_000),
-            ..Default::default()
-        })
-        .unwrap();
+        let tools = Arc::new(
+            BuiltinTools::new(BuiltinToolsConfig {
+                cwd: dir.clone(),
+                toolset_profile: Some(flashagent_core::ToolsetProfile::Full),
+                web_enabled: Some(true),
+                context_window: Some(200_000),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
         // `view_image` needs vision on. `/goal` stays off: it removes the memory tools.
         tools.set_vision_supported(true);
         Project { dir, tools }
@@ -82,40 +87,75 @@ impl Drop for Project {
     }
 }
 
-const CHECKED: &[&str] = &[
-    "read_file",
-    "write_file",
-    "edit_file",
-    "patch_file",
-    "list_dir",
-    "glob",
-    "grep",
-    "outline_file",
-    "git_status",
-    "git_diff",
-    "run_shell",
-    "env_info",
-    "view_image",
-    "memory_read",
-    "memory_create",
-    "memory_update",
-    "memory_remove",
-    "web_fetch",
-    "web_search",
-    // Need the app: `ask_user` needs someone to ask, `update_plan` a /goal run.
-    // Covered by the terminal scenarios in crates/tui/tests.
-    "ask_user",
-    "update_plan",
-];
+/// The tools this file runs for real, and where the rest are checked.
+///
+/// The list used to be written by hand beside the code, and every tool added
+/// to the registry had to be added here too, or a tool the model is offered
+/// could sit with nobody running it. The registry is that list now: what is
+/// declared there is what is checked, and the two cannot drift apart because
+/// this list is built from the registry rather than beside it.
+fn checked_here() -> BTreeSet<String> {
+    flashagent_core::registry::TOOLS
+        .iter()
+        .map(|def| def.name.to_string())
+        .collect()
+}
+
+/// A model that says one thing and stops, so a child finishes at once.
+struct OneWord;
+
+#[async_trait]
+impl flashagent_core::LlmSource for OneWord {
+    async fn turn(
+        &self,
+        _messages: &[flashagent_llm::ChatMessage],
+        _tools: &[flashagent_llm::ToolSpec],
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>,
+        flashagent_llm::LlmError,
+    > {
+        Ok(Box::pin(futures::stream::iter(vec![
+            Ok(flashagent_llm::LlmEvent::TextDelta("child answer".into())),
+            Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)),
+        ])))
+    }
+}
+
+/// The set the model is really offered: the built-in tools plus `spawn_agent`,
+/// which only the composite in `subagents.rs` puts in front of the model.
+/// Checking `BuiltinTools` alone let `spawn_agent` fall through this guard for
+/// as long as it existed.
+fn what_the_model_is_offered(
+    project: &Project,
+) -> (
+    flashagent_tools::CompositeTools,
+    tokio::sync::mpsc::UnboundedReceiver<flashagent_core::SubagentOutbound>,
+) {
+    use flashagent_core::{PermissionMode, PermissionState};
+
+    struct Allow;
+    #[async_trait]
+    impl flashagent_core::ApprovalGate for Allow {
+        async fn approve(&self, _req: &flashagent_core::ApprovalRequest) -> flashagent_core::Decision {
+            flashagent_core::Decision::Allow
+        }
+    }
+
+    let state = Arc::new(PermissionState::new(PermissionMode::Bypass, Arc::new(Allow)));
+    flashagent_tools::agent_tools(project.tools.clone(), Arc::new(OneWord), state, None)
+}
 
 #[tokio::test]
 async fn every_offered_tool_is_checked_here() {
     let project = Project::new();
     // `update_plan` is offered only during /goal.
     project.tools.set_goal_mode(true);
-    let offered: BTreeSet<String> = project.tools.specs().into_iter().map(|s| s.name).collect();
-    let checked: BTreeSet<String> = CHECKED.iter().map(|s| s.to_string()).collect();
+    let (composite, _finished) = what_the_model_is_offered(&project);
+    let offered: BTreeSet<String> = composite.specs().into_iter().map(|s| s.name).collect();
+    let checked = checked_here();
 
+    // The list is the registry, so the only way to fail is to offer something
+    // the registry does not declare: an MCP tool, or a name from a server.
     let unchecked: Vec<_> = offered.difference(&checked).collect();
     assert!(
         unchecked.is_empty(),
@@ -123,6 +163,56 @@ async fn every_offered_tool_is_checked_here() {
     );
     let gone: Vec<_> = checked.difference(&offered).collect();
     assert!(gone.is_empty(), "these tools are checked here but no longer offered: {gone:?}");
+}
+
+#[tokio::test]
+async fn a_tool_added_to_the_registry_is_covered_without_being_written_down_twice() {
+    // What the hand-written list used to make people do: a tool exists in the
+    // registry, so this file already claims to run it. Whether that claim is
+    // true is the question, and the guard above is what answers it.
+    let project = Project::new();
+    project.tools.set_goal_mode(true);
+    let (composite, _finished) = what_the_model_is_offered(&project);
+    let offered: BTreeSet<String> = composite.specs().into_iter().map(|s| s.name).collect();
+    for name in checked_here() {
+        assert!(offered.contains(&name), "{name} is checked here and not offered at all");
+    }
+    assert!(
+        flashagent_core::registry::TOOLS.len() > 15,
+        "the registry is the list, not an afterthought: {}",
+        flashagent_core::registry::TOOLS.len()
+    );
+}
+
+#[tokio::test]
+async fn a_subagent_is_started_for_real_and_answers_on_its_own() {
+    // `spawn_agent` runs here the way the model calls it: through the same
+    // composite, the same dispatcher and the same permission layer. It must
+    // return an id rather than the child's answer, and the answer must arrive
+    // on the channel the app listens to.
+    let project = Project::new();
+    let (composite, mut finished) = what_the_model_is_offered(&project);
+
+    let out = composite
+        .execute(&ToolCall {
+            id: "t".into(),
+            name: "spawn_agent".into(),
+            args_json: r#"{"role":"researcher","task":"read notes.txt and say what is in it"}"#.into(),
+        })
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("sub1"), "the call names the child it started: {}", out.content);
+    assert!(!out.content.contains("child answer"), "and does not wait for it: {}", out.content);
+
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(10), finished.recv())
+        .await
+        .expect("a child answers without the parent asking again")
+        .expect("the channel stays open");
+    let flashagent_core::SubagentOutbound::Finished(answer) = answer else {
+        panic!("a child that was only started says nothing else")
+    };
+    assert_eq!(answer.answer, "child answer");
+    assert_eq!(answer.done, flashagent_core::DoneReason::Completed);
 }
 
 #[tokio::test]

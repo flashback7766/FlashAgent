@@ -164,17 +164,20 @@ impl BuiltinTools {
             .unwrap_or_else(|_| path.to_string())
     }
 
-    /// `None` when the call is not a write or the file cannot be read.
+    /// `None` when the call is not a write or the file cannot be read. Which
+    /// diff a call needs is declared next to its schema, so a new tool that
+    /// changes files is shown on the card without anyone remembering this.
     fn preview_for(&self, call: &ToolCall) -> Option<String> {
+        use flashagent_core::registry::Preview;
         let v = flashagent_llm::effective_args(&call.args_json, &call.name)?;
-        match call.name.as_str() {
-            "write_file" => {
+        match flashagent_core::registry::find(&call.name)?.preview {
+            Preview::Write => {
                 let path = v.get("path")?.as_str()?;
                 let new = v.get("content")?.as_str()?;
                 let old = fs_tools::read_raw(&self.cwd, path);
                 Some(flashagent_core::unified(old.as_deref(), new, &self.shown_path(path), 3))
             }
-            "edit_file" => {
+            Preview::Edit => {
                 let args: EditArgs = serde_json::from_value(v.clone()).ok()?;
                 // A batch is shown whole, one diff per file. A file named twice
                 // (also as `./a.txt`) is shown from its original to what both
@@ -204,12 +207,12 @@ impl BuiltinTools {
                     Some(diffs.join("\n"))
                 }
             }
-            "patch_file" => {
+            Preview::Patch => {
                 let path = v.get("path")?.as_str()?;
                 let patch_text = v.get("patch")?.as_str()?;
                 patch::preview_patch(&self.cwd, path, patch_text)
             }
-            _ => None,
+            Preview::None => None,
         }
     }
 
@@ -228,16 +231,27 @@ impl BuiltinTools {
     }
 
     async fn dispatch(&self, call: &ToolCall) -> Result<String, ToolError> {
-        match call.name.as_str() {
-            "read_file" => {
+        use flashagent_core::registry::Handler;
+        // A built-in tool runs the handler the registry named for it. The match
+        // is on the handler, not on the name, so a tool declared with no code
+        // anywhere is a compile error rather than a call that answers
+        // "unknown tool" a user has to report.
+        let Some(def) = flashagent_core::registry::find(&call.name) else {
+            if call.name.starts_with("mcp__") || self.mcp_manager.has_tool(&call.name) {
+                return self.mcp_manager.call_tool(&call.name, &call.args_json).await;
+            }
+            return Err(ToolError::Other(format!("unknown tool: {}", call.name)));
+        };
+        match def.handler {
+            Handler::ReadFile => {
                 let a: ReadArgs = parse_args(&call.args_json, &call.name)?;
                 self.off_runtime(move |cwd| a.read(cwd)).await
             }
-            "write_file" => {
+            Handler::WriteFile => {
                 let a: WriteArgs = parse_args(&call.args_json, &call.name)?;
                 fs_tools::write_file(&self.cwd, &a.path, &a.content)
             }
-            "edit_file" => {
+            Handler::EditFile => {
                 let a: EditArgs = parse_args(&call.args_json, &call.name)?;
                 if a.files.is_empty() {
                     if a.path.trim().is_empty() || a.edits.is_empty() {
@@ -247,68 +261,68 @@ impl BuiltinTools {
                 }
                 fs_tools::edit_files(&self.cwd, &a.targets())
             }
-            "patch_file" => {
+            Handler::PatchFile => {
                 let a: PatchArgs = parse_args(&call.args_json, &call.name)?;
                 patch::patch_file(&self.cwd, &a.path, &a.patch)
             }
-            "list_dir" => {
+            Handler::ListDir => {
                 let a: ListArgs = parse_args(&call.args_json, &call.name)?;
                 self.off_runtime(move |cwd| fs_tools::list_dir(cwd, a.path.as_deref().unwrap_or("."))).await
             }
-            "glob" => {
+            Handler::Glob => {
                 let a: GlobArgs = parse_args(&call.args_json, &call.name)?;
                 self.off_runtime(move |cwd| fs_tools::glob_files(cwd, &a.pattern)).await
             }
-            "grep" => {
+            Handler::Grep => {
                 let a: GrepArgs = parse_args(&call.args_json, &call.name)?;
                 self.off_runtime(move |cwd| fs_tools::grep(cwd, &a.pattern, a.glob.as_deref(), a.case_insensitive)).await
             }
-            "outline_file" => {
+            Handler::OutlineFile => {
                 let a: OutlineArgs = parse_args(&call.args_json, &call.name)?;
                 self.off_runtime(move |cwd| outline::outline_file(cwd, &a.path)).await
             }
-            "git_status" => {
+            Handler::GitStatus => {
                 let a: GitStatusArgs = parse_args(&call.args_json, &call.name)?;
                 self.off_runtime(move |cwd| git::git_status(cwd, a.path.as_deref())).await
             }
-            "git_diff" => {
+            Handler::GitDiff => {
                 let a: GitDiffArgs = parse_args(&call.args_json, &call.name)?;
                 self.off_runtime(move |cwd| git::git_diff(cwd, a.staged.unwrap_or(false), a.path.as_deref())).await
             }
-            "run_shell" => {
+            Handler::RunShell => {
                 let a: ShellArgs = parse_args(&call.args_json, &call.name)?;
                 self.run_shell(a).await
             }
-            "env_info" => self.off_runtime(env_tools::env_info).await,
-            "ask_user" => {
+            Handler::EnvInfo => self.off_runtime(env_tools::env_info).await,
+            Handler::AskUser => {
                 let a: ask_user::AskUserArgs = parse_args(&call.args_json, &call.name)?;
                 ask_user::run_ask_user(self.question_gate.as_ref(), &self.is_goal_mode, a).await
             }
-            "update_plan" => plan_tool::run_update_plan(&self.is_goal_mode, &call.args_json),
-            "memory_read" => {
+            Handler::UpdatePlan => plan_tool::run_update_plan(&self.is_goal_mode, &call.args_json),
+            Handler::MemoryRead => {
                 let a: memory_tools::MemoryReadArgs = parse_args(&call.args_json, &call.name)?;
                 self.off_runtime(move |cwd| memory_tools::memory_read(cwd, a)).await
             }
-            "memory_create" => {
+            Handler::MemoryCreate => {
                 let a: memory_tools::MemoryWriteArgs = parse_args(&call.args_json, &call.name)?;
                 memory_tools::memory_create(&self.cwd, &self.is_goal_mode, a)
             }
-            "memory_update" => {
+            Handler::MemoryUpdate => {
                 let a: memory_tools::MemoryWriteArgs = parse_args(&call.args_json, &call.name)?;
                 memory_tools::memory_update(&self.cwd, &self.is_goal_mode, a)
             }
-            "memory_remove" => {
+            Handler::MemoryRemove => {
                 let a: memory_tools::MemoryRemoveArgs = parse_args(&call.args_json, &call.name)?;
                 memory_tools::memory_remove(&self.cwd, &self.is_goal_mode, a)
             }
-            "web_fetch" => {
+            Handler::WebFetch => {
                 if !self.web_enabled.load(Ordering::Relaxed) {
                     return Err(ToolError::Other("web_fetch is turned off in Settings (LLM & Reasoning → Web Tools).".into()));
                 }
                 let a: FetchArgs = parse_args(&call.args_json, &call.name)?;
                 web::fetch_text(&a.url).await
             }
-            "web_search" => {
+            Handler::WebSearch => {
                 if !self.web_enabled.load(Ordering::Relaxed) {
                     return Err(ToolError::Other("web_search is turned off in Settings (LLM & Reasoning → Web Tools).".into()));
                 }
@@ -324,13 +338,27 @@ impl BuiltinTools {
                     None => web::search_free(&self.http, &a.query, count).await,
                 }
             }
-            other => {
-                if other.starts_with("mcp__") || self.mcp_manager.has_tool(other) {
-                    self.mcp_manager.call_tool(other, &call.args_json).await
-                } else {
-                    Err(ToolError::Other(format!("unknown tool: {other}")))
-                }
+            // The only tool whose result is a picture, not text. It is a branch
+            // here rather than a handler because what comes back is not a
+            // string, and the one that reads images is the app above us.
+            Handler::ViewImage => {
+                let args = call.args_json.clone();
+                let vision = self.vision_supported();
+                Err(ToolError::Other(format!(
+                    "view_image: the picture cannot be returned from inside the dispatcher ({args}, vision {vision})"
+                )))
             }
+            // `spawn_agent`, `send_message` and `review_agent` have handlers here
+            // so the registry covers every tool the model is ever offered, but
+            // their code lives in the core crate: they need the mailbox and the
+            // loop, and this is the plain toolset a child is given.
+            Handler::SpawnAgent => Err(ToolError::Other(
+                "spawn_agent is not available in this set: it is added by the app, one level up.".into(),
+            )),
+            Handler::SendMessage | Handler::ReviewAgent => Err(ToolError::Other(format!(
+                "{} is not available in this set: it is added by the app, one level up.",
+                def.name
+            ))),
         }
     }
 
@@ -403,64 +431,9 @@ impl ToolExec for BuiltinTools {
     }
 
     fn specs(&self) -> Vec<ToolSpec> {
-        let mut specs = vec![
-            ToolSpec {
-                name: "read_file".into(),
-                description: "Read a text file with 1-based line numbers. For several files pass files instead of path (up to 20)".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "path": {"type": "string", "description": "File path, relative to working directory or absolute"}, "offset": {"type": "integer", "description": "0-based first line to read"}, "limit": {"type": "integer", "description": "Max lines to read (default 2000)"}, "files": {"type": "array", "description": "Several files in one call, each read like path/offset/limit", "items": {"type": "object", "properties": {"path": {"type": "string", "description": "File path, relative to the working directory or absolute"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}}, "required": ["path"]}}}, "required": ["header"]}"#.into(),
-            },
-            ToolSpec {
-                name: "write_file".into(),
-                description: "Create or fully overwrite a file".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "path": {"type": "string", "description": "File path, relative to the working directory or absolute"}, "content": {"type": "string", "description": "The whole new text of the file, exactly as it must be, every line break and quote included"}}, "required": ["header", "path", "content"]}"#.into(),
-            },
-            ToolSpec {
-                name: "edit_file".into(),
-                description: "Replace exact old_string matches in a file; new_string replaces old_string whole, so to insert a line keep its neighbour in new_string too. For several files pass files instead of path and edits (up to 20); all apply or none do".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "path": {"type": "string", "description": "File path, relative to the working directory or absolute"}, "edits": {"type": "array", "description": "Replacements, applied in order", "items": {"type": "object", "properties": {"old_string": {"type": "string", "description": "Text to replace, copied exactly from the file with its indentation and line breaks; it must match once unless replace_all"}, "new_string": {"type": "string", "description": "The text that replaces old_string whole"}, "replace_all": {"type": "boolean", "description": "Replace every match, not just one"}}, "required": ["old_string", "new_string"]}}, "files": {"type": "array", "description": "Several files changed as one change", "items": {"type": "object", "properties": {"path": {"type": "string", "description": "File path, relative to the working directory or absolute"}, "edits": {"type": "array", "description": "Replacements for this file, applied in order", "items": {"type": "object", "properties": {"old_string": {"type": "string", "description": "Text to replace, copied exactly from the file with its indentation and line breaks; it must match once unless replace_all"}, "new_string": {"type": "string", "description": "The text that replaces old_string whole"}, "replace_all": {"type": "boolean", "description": "Replace every match, not just one"}}, "required": ["old_string", "new_string"]}}}, "required": ["path", "edits"]}}}, "required": ["header"]}"#.into(),
-            },
-            ToolSpec {
-                name: "list_dir".into(),
-                description: "List a directory; directory entries end with /".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "path": {"type": "string", "description": "Defaults to the working directory"}}, "required": ["header"]}"#.into(),
-            },
-            ToolSpec {
-                name: "glob".into(),
-                description: "Find files by glob pattern (e.g. src/**/*.rs), max 500 results".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "pattern": {"type": "string", "description": "Glob pattern, relative to the working directory"}}, "required": ["header", "pattern"]}"#.into(),
-            },
-            ToolSpec {
-                name: "grep".into(),
-                description: "Search file contents by regex; returns path:line:text".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "pattern": {"type": "string", "description": "Regular expression to search for"}, "glob": {"type": "string", "description": "Restrict to files matching this glob"}, "case_insensitive": {"type": "boolean", "description": "Match regardless of case"}}, "required": ["header", "pattern"]}"#.into(),
-            },
-            ToolSpec {
-                name: "run_shell".into(),
-                description: "Run a shell command (timeout_ms, default 120000). background:true for servers, watchers and long builds: returns a task_id at once, and a notice arrives when the task exits, so do not poll in a loop. task_id alone shows its output so far; with kill:true stops it".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "command": {"type": "string", "description": "The command line to run in the working directory"}, "background": {"type": "boolean", "description": "Run it in the background and return a task_id at once"}, "timeout_ms": {"type": "integer", "description": "Kill it after this many milliseconds (default 120000)"}, "task_id": {"type": "integer", "description": "A background task: its output so far, or with kill stop it"}, "kill": {"type": "boolean", "description": "With task_id: kill the task"}}, "required": ["header"]}"#.into(),
-            },
-            ToolSpec {
-                name: "ask_user".into(),
-                description: "The only way to ask the user anything. Give every question 2-6 short, concrete answers to pick from as options (answers, not more questions); the user can still type their own. Put several questions in questions".into(),
-                parameters_json: r#"{"type": "object", "properties": {"question": {"type": "string", "description": "Single question to ask the user"}, "options": {"type": "array", "items": {"type": "string"}, "description": "2-6 answers to pick from"}, "multi_select": {"type": "boolean", "description": "Allow picking several options"}, "questions": {"type": "array", "items": {"type": "object", "properties": {"question": {"type": "string", "description": "One question"}, "options": {"type": "array", "description": "2-6 answers to pick from", "items": {"type": "string"}}, "multi_select": {"type": "boolean", "description": "Allow picking several options"}}, "required": ["question", "options"]}, "description": "Several questions, asked in order"}}, "required": []}"#.into(),
-            },
-            ToolSpec {
-                name: "memory_read".into(),
-                description: "Read one remembered fact in full by name, or list them. The index is already in your context.".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "scope": {"type": "string", "enum": ["project", "global", "all"], "description": "Which memory to look at; 'all' by default."}, "name": {"type": "string", "description": "Name of one memory to read in full. Omit to list what is remembered."}}, "required": ["header"]}"#.into(),
-            },
-        ];
+        use flashagent_core::registry::{self, Handler};
 
-        // Offered always, though it refuses itself outside /goal. The tool list is
-        // part of the cached prompt: adding it when a goal started made the first goal
-        // step re-read the whole conversation (8.5 s on 7k tokens on a laptop model).
-        specs.push(ToolSpec {
-            name: "update_plan".into(),
-            description: "Only during /goal: record the whole step-by-step plan, again each time a step finishes or the plan changes. Does nothing outside /goal.".into(),
-            parameters_json: r#"{"type": "object", "properties": {"steps": {"type": "array", "description": "The whole plan, in order", "items": {"type": "object", "properties": {"text": {"type": "string", "description": "One step, in a few words"}, "status": {"type": "string", "description": "Where the step stands", "enum": ["pending", "in_progress", "completed"]}}, "required": ["text"]}}}, "required": ["steps"]}"#.into(),
-        });
-
-        // Offered unless the context window is too small for their schemas.
+        // The profile the window earns: a small one cannot carry every schema.
         let profile = self.toolset_profile.read().map(|p| *p).unwrap_or(ToolsetProfile::Auto);
         let ctx = self.context_window.read().ok().and_then(|c| *c);
         let effective_profile = match profile {
@@ -468,83 +441,38 @@ impl ToolExec for BuiltinTools {
             ToolsetProfile::Full => ToolsetProfile::Full,
             ToolsetProfile::Auto => {
                 if let Some(c) = ctx {
-                    if c < 40_000 {
-                        ToolsetProfile::Compact
-                    } else {
-                        ToolsetProfile::Auto
-                    }
+                    if c < 40_000 { ToolsetProfile::Compact } else { ToolsetProfile::Auto }
                 } else {
                     ToolsetProfile::Auto
                 }
             }
         };
+        let core = effective_profile != ToolsetProfile::Compact;
+        let web = self.web_enabled.load(Ordering::Relaxed);
+        let vision = self.vision_supported();
 
-        if effective_profile != ToolsetProfile::Compact {
-            specs.push(ToolSpec {
-                name: "patch_file".into(),
-                description: "Apply a standard unified diff patch to a target file".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "path": {"type": "string", "description": "File path to patch"}, "patch": {"type": "string", "description": "Unified diff patch text with @@ hunks"}}, "required": ["header", "path", "patch"]}"#.into(),
-            });
-            specs.push(ToolSpec {
-                name: "outline_file".into(),
-                description: "Extract structural outline of a file (functions, structs, classes, traits, headings) with line numbers without reading the entire content".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "path": {"type": "string", "description": "File path to inspect"}}, "required": ["header", "path"]}"#.into(),
-            });
-            specs.push(ToolSpec {
-                name: "git_status".into(),
-                description: "Inspect git repository status: current branch, staged, unstaged, and untracked files".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "path": {"type": "string", "description": "Optional subpath filter"}}, "required": ["header"]}"#.into(),
-            });
-            specs.push(ToolSpec {
-                name: "git_diff".into(),
-                description: "View unified diff of working tree changes or staged changes".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "staged": {"type": "boolean", "description": "View staged/cached diff if true"}, "path": {"type": "string", "description": "Optional file path filter"}}, "required": ["header"]}"#.into(),
-            });
-            specs.push(ToolSpec {
-                name: "env_info".into(),
-                description: "Inspect OS platform, CPU architecture, working directory, and installed developer toolchain versions".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}}, "required": ["header"]}"#.into(),
-            });
-            specs.push(ToolSpec {
-                name: "memory_create".into(),
-                description: "Remember one fact across sessions: something the user told you about how they work, or a decision about this project and its reason. Not things the code, git history or docs already say. Disabled in autonomous /goal mode".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "title": {"type": "string", "description": "Short title; it becomes the memory's name."}, "content": {"type": "string", "description": "The fact itself, in full sentences, with the reason behind it when there is one."}, "description": {"type": "string", "description": "One line saying what this memory is about. It goes in the index that is loaded every turn, so make it specific."}, "type": {"type": "string", "enum": ["preference", "decision", "reference", "work"], "description": "preference = how the user likes to work; decision = a choice made about this project and why; reference = a pointer outwards (URL, ticket); work = ongoing goals or constraints."}, "scope": {"type": "string", "enum": ["project", "global"], "description": "Use 'global' for anything about the USER — how they work, what they prefer, corrections they gave you — so it follows them into every project. Use 'project' only for facts about this codebase. A sentence that starts with 'I' or 'the user' is global."}}, "required": ["header", "title", "content"]}"#.into(),
-            });
-            specs.push(ToolSpec {
-                name: "memory_update".into(),
-                description: "Correct something already remembered, when it turns out to be wrong or has changed. Disabled in autonomous /goal mode".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "title": {"type": "string", "description": "Name of the memory to correct."}, "content": {"type": "string", "description": "The corrected fact."}, "description": {"type": "string", "description": "One line saying what this memory is about. It goes in the index that is loaded every turn, so make it specific."}, "type": {"type": "string", "enum": ["preference", "decision", "reference", "work"], "description": "preference = how the user likes to work; decision = a choice made about this project and why; reference = a pointer outwards (URL, ticket); work = ongoing goals or constraints."}, "scope": {"type": "string", "enum": ["project", "global"], "description": "Use 'global' for anything about the USER — how they work, what they prefer, corrections they gave you — so it follows them into every project. Use 'project' only for facts about this codebase. A sentence that starts with 'I' or 'the user' is global."}}, "required": ["header", "title", "content"]}"#.into(),
-            });
-            specs.push(ToolSpec {
-                name: "memory_remove".into(),
-                description: "Forget a memory that turned out to be wrong or no longer applies. Disabled in autonomous /goal mode".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "title": {"type": "string", "description": "Name of the memory to forget."}, "scope": {"type": "string", "enum": ["project", "global"], "description": "Use 'global' for anything about the USER — how they work, what they prefer, corrections they gave you — so it follows them into every project. Use 'project' only for facts about this codebase. A sentence that starts with 'I' or 'the user' is global."}}, "required": ["header", "title"]}"#.into(),
-            });
-        // Only when the model can see: otherwise it calls the tool and apologises.
-        if self.vision_supported() {
-            specs.push(ToolSpec {
-                name: "view_image".into(),
-                description: "Look at an image in the project — a diagram, a screenshot, a mockup. The picture itself comes back, so describe what you see rather than guessing from the file name.".into(),
-                parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "path": {"type": "string", "description": "Path to the image inside the project (png, jpg, gif, webp, bmp)."}}, "required": ["header", "path"]}"#.into(),
-            });
-        }
+        // One list, read from the registry: a tool's name, its schema and what it
+        // is for cannot disagree with each other any more.
+        let mut specs: Vec<ToolSpec> = registry::TOOLS
+            .iter()
+            // The three that only make sense at the top, added by the composite
+            // in `subagents.rs`: offering them here too would put two tools with
+            // one name in front of the model.
+            .filter(|def| {
+                !matches!(def.handler, Handler::SpawnAgent | Handler::SendMessage | Handler::ReviewAgent)
+            })
+            // `BuiltinTools` is what a subagent is given, so the parent-only
+            // tools are not offered from here.
+            .filter(|def| registry::offered(def, core, vision, web, false))
+            .map(|def| ToolSpec {
+                name: def.name.to_string(),
+                description: def.description.to_string(),
+                parameters_json: def.schema_json(),
+            })
+            .collect();
 
-            if self.web_enabled.load(Ordering::Relaxed) {
-                specs.push(ToolSpec {
-                    name: "web_fetch".into(),
-                    description: "Fetch a URL as text; HTML is reduced to plain text".into(),
-                    parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "url": {"type": "string", "description": "Full URL, starting with http:// or https://"}}, "required": ["header", "url"]}"#.into(),
-                });
-                specs.push(ToolSpec {
-                    name: "web_search".into(),
-                    description: "Search the web for documentation, articles, and solutions".into(),
-                    parameters_json: r#"{"type": "object", "properties": {"header": {"type": "string", "description": "What this call is for, one short line in the user's language. Shown to the user instead of the call."}, "query": {"type": "string", "description": "What to search for"}, "count": {"type": "integer", "description": "Results to return (default 5)"}}, "required": ["header", "query"]}"#.into(),
-                });
-            }
-        }
-
+        // Names a server chose, with the schemas it chose.
         specs.extend(self.mcp_manager.get_all_tool_specs());
-
         specs
     }
 

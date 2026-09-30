@@ -129,8 +129,21 @@ pub struct SettingsView {
     pub is_dirty: bool,
     /// So an automatic threshold can show what it works out to.
     pub context_capacity: usize,
+    /// The efforts the model in use actually takes, read from what the server
+    /// reported. Settings must not offer a level the API would refuse, and must
+    /// not miss one it would accept.
+    pub effort_choices: Vec<String>,
     /// The provider in use when Settings opened.
     opened_on: Option<String>,
+}
+
+/// What Settings offers before anything is known about the model in use: the
+/// levels every reasoning API is expected to take, and nothing beyond them. A
+/// real list replaces this as soon as the server has said what it has, so that
+/// a model offering `xhigh` or `max` can reach them and a model offering fewer
+/// is never asked for a level it would refuse.
+pub fn effort_choices_defaults() -> Vec<String> {
+    ["auto", "off", "low", "medium", "high"].iter().map(|s| s.to_string()).collect()
 }
 
 impl SettingsView {
@@ -145,6 +158,7 @@ impl SettingsView {
             available_models,
             is_dirty: false,
             context_capacity: 0,
+            effort_choices: effort_choices_defaults(),
             opened_on,
         }
     }
@@ -534,13 +548,19 @@ impl SettingsView {
         self.is_dirty = true;
     }
 
+    /// Steps through what the model in use really accepts. A fixed ladder would
+    /// stop at `high` and never reach the `xhigh` or `max` some models offer,
+    /// and would offer levels the API refuses on a model that has fewer.
     fn cycle_effort(&mut self) {
-        let presets = ["auto", "off", "low", "medium", "high"];
+        let presets: Vec<String> =
+            if self.effort_choices.is_empty() { effort_choices_defaults() } else { self.effort_choices.clone() };
         let cur = self.config.thinking_effort.as_str();
-        let next_idx = presets.iter().position(|&p| p == cur)
-            .map(|i| (i + 1) % presets.len())
-            .unwrap_or(0);
-        self.config.thinking_effort = presets[next_idx].to_string();
+        let next_idx = presets.iter().position(|p| p.eq_ignore_ascii_case(cur)).map(|i| (i + 1) % presets.len());
+        self.config.thinking_effort = match next_idx {
+            Some(i) => presets[i].clone(),
+            // A saved level this model does not offer: the first one it does.
+            None => presets[0].clone(),
+        };
         self.is_dirty = true;
     }
 
@@ -847,6 +867,44 @@ mod tests {
         cfg.save_provider(flashagent_core::config::ProviderProfile::new("Claude", flashagent_llm::ApiProtocol::Anthropic, "https://api.anthropic.com"));
         cfg.activate("Home");
         cfg
+    }
+
+    #[test]
+    fn every_level_the_model_reports_can_be_reached_in_settings() {
+        let cfg = AppConfig { thinking_effort: "auto".into(), ..AppConfig::default() };
+        let mut view = SettingsView::new(cfg, Vec::new());
+        // What a model that reasons deeply actually reports.
+        view.effort_choices = ["auto", "off", "low", "medium", "high", "xhigh", "max"].iter().map(|s| s.to_string()).collect();
+        let reached: Vec<String> = (0..12).map(|_| {
+            view.cycle_effort();
+            view.config.thinking_effort.clone()
+        }).collect();
+        for wanted in ["xhigh", "max", "low", "medium", "high"] {
+            assert!(reached.contains(&wanted.to_string()), "{wanted} was never offered: {reached:?}");
+        }
+    }
+
+    #[test]
+    fn settings_never_offer_a_level_the_model_does_not_have() {
+        let cfg = AppConfig { thinking_effort: "auto".into(), ..AppConfig::default() };
+        let mut view = SettingsView::new(cfg, Vec::new());
+        // A model with two levels only: offering `medium` would be refused.
+        view.effort_choices = ["auto", "off", "high"].iter().map(|s| s.to_string()).collect();
+        let reached: Vec<String> = (0..8).map(|_| {
+            view.cycle_effort();
+            view.config.thinking_effort.clone()
+        }).collect();
+        assert!(!reached.contains(&"medium".to_string()), "{reached:?}");
+        assert!(!reached.contains(&"low".to_string()), "{reached:?}");
+    }
+
+    #[test]
+    fn a_saved_level_the_new_model_lacks_falls_back_instead_of_staying_broken() {
+        let cfg = AppConfig { thinking_effort: "xhigh".into(), ..AppConfig::default() };
+        let mut view = SettingsView::new(cfg, Vec::new());
+        view.effort_choices = ["auto", "off", "high"].iter().map(|s| s.to_string()).collect();
+        view.cycle_effort();
+        assert_eq!(view.config.thinking_effort, "auto", "an unsupported saved level must not linger");
     }
 
     #[test]

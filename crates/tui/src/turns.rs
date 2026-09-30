@@ -294,7 +294,7 @@ impl App {
                         let source_compact = cx.source.clone();
                         let before = self.context_usage.total_used();
                         let compacted = if let Some(archive) = compaction_archive_path(cx.session_id) {
-                            compact_context(source_compact.as_ref(), &mut self.history, None, &archive).await
+                            compact_context(source_compact.as_ref(), &mut self.history, None, &archive, Some(before)).await
                         } else {
                             None
                         };

@@ -100,7 +100,7 @@ impl App {
     }
 
     /// As the session runs now, not as last saved.
-    pub(crate) fn runtime_settings(&self, mode: PermissionMode) -> SettingsView {
+    pub(crate) fn runtime_settings(&self, mode: PermissionMode, source: &BackendSource) -> SettingsView {
         let runtime_mode = self.goal_state.as_ref().map_or(mode, |g| g.mode);
         let effort = self.goal_state.as_ref().map_or(self.current_effort.as_str(), |g| g.effort.as_str());
         settings_for_runtime(
@@ -110,6 +110,7 @@ impl App {
             &self.current_model,
             &self.available_models,
             self.context_usage.total_capacity,
+            crate::menus::effort_choices(source),
         )
     }
 }

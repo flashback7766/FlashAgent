@@ -9,6 +9,7 @@ use flashagent_core::{ApprovalGate, ApprovalRequest, Decision, DoneReason, LoopE
 use parking_lot::Mutex;
 use unicode_width::UnicodeWidthChar;
 
+pub mod agents;
 pub mod anim;
 pub mod autocomplete;
 pub mod backend_error;
@@ -93,6 +94,10 @@ pub enum UiEvent {
     },
     /// A background command of this session ended.
     TaskEnded(flashagent_tools::TaskNotice),
+    /// Something a running subagent did, tagged with which child did it.
+    SubagentEvent(flashagent_core::SubagentEvent),
+    /// What a child has finished, said, or what the parent made of a report.
+    SubagentOutbound(flashagent_core::SubagentOutbound),
     /// `/compact` finished. `saved` is `None` when nothing was compacted: the
     /// history comes back either way, unchanged in that case.
     Compacted { history: Vec<ChatMessage>, saved: Option<usize> },
@@ -108,6 +113,8 @@ pub enum LineKind {
     ToolError,
     Diff,
     System,
+    /// A running subagent: its role, what it is doing now, and what it spent.
+    Subagent,
 }
 
 /// How consecutive tool calls fold into one line.
@@ -163,6 +170,9 @@ pub struct ChatLine {
     /// Per-card expansion override.
     pub is_expanded: Option<bool>,
     pub tool_calls: Vec<ToolCallRecord>,
+    /// Which running subagent this line reports, so its row can be updated in
+    /// place as the child works instead of a new line per event.
+    pub agent_id: Option<String>,
 }
 
 impl ChatLine {
@@ -178,6 +188,7 @@ impl ChatLine {
             tool_result: None,
             is_expanded: None,
             tool_calls: Vec::new(),
+            agent_id: None,
         }
     }
 
@@ -193,6 +204,7 @@ impl ChatLine {
             tool_result: None,
             is_expanded: None,
             tool_calls: Vec::new(),
+            agent_id: None,
         }
     }
 }
@@ -671,6 +683,29 @@ impl ChatView {
         }
     }
 
+    /// A running subagent's row, written over in place. One child is one line
+    /// for as long as it runs, so a long task reads as progress on a row the
+    /// eye can stay on, not as a wall of new lines.
+    pub fn upsert_agent(&mut self, id: &str, text: impl Into<String>) {
+        let text = text.into();
+        match self.lines.iter().position(|l| l.agent_id.as_deref() == Some(id)) {
+            Some(i) => {
+                if self.lines[i].text != text {
+                    self.lines[i].text = text;
+                    *self.settled_cache.lock() = SettledRenderCache::default();
+                    self.needs_reprint = true;
+                }
+            }
+            None => {
+                let mut line = ChatLine::new(LineKind::Subagent, text);
+                line.agent_id = Some(id.to_string());
+                self.lines.push(line);
+                *self.settled_cache.lock() = SettledRenderCache::default();
+                self.needs_reprint = true;
+            }
+        }
+    }
+
 
     pub fn push_line(&mut self, kind: LineKind, text: impl Into<String>) {
         self.streaming = None;
@@ -692,6 +727,9 @@ impl ChatView {
 
     pub fn on_event(&mut self, ev: &LoopEvent) {
         match ev {
+            // Said by the app itself, as a system line; nothing streams for the
+            // half minute a running turn spends summarizing itself.
+            LoopEvent::CompactionStarted => {}
             LoopEvent::TurnDelta(d) => {
                 self.open_tool = None;
                 // The answer has begun, so the thinking is over: its time stops
@@ -726,8 +764,7 @@ impl ChatView {
             }
             LoopEvent::Usage(_) => {}
             // The summary is not something the gauge counts up again.
-            LoopEvent::Compacted { .. } => self.forget_counted_context(),
-            // Its own line was drawn when the task ended.
+            LoopEvent::Compacted { .. } => self.forget_counted_context(),            // Its own line was drawn when the task ended.
             LoopEvent::SteeringInjected(directive) if flashagent_core::is_task_notice(directive) => {}
             LoopEvent::SteeringInjected(directive) => {
                 self.streaming = None;
@@ -979,6 +1016,8 @@ fn block_of(kind: LineKind) -> Block {
         LineKind::Reasoning | LineKind::Tool | LineKind::ToolError => Block::Work,
         LineKind::Assistant => Block::Answer,
         LineKind::Diff | LineKind::System => Block::Other,
+        // A subagent is work under way, next to the parent's own tool calls.
+        LineKind::Subagent => Block::Work,
     }
 }
 

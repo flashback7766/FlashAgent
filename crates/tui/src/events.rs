@@ -90,6 +90,8 @@ impl App {
                 self.on_paste(cx, &pasted);
             }
             UiEvent::TaskEnded(notice) => self.on_task_ended(cx, notice),
+            UiEvent::SubagentEvent(event) => self.on_subagent_event(&event),
+            UiEvent::SubagentOutbound(out) => self.on_subagent_outbound(cx, out),
             UiEvent::Key(code, mods) => {
                 self.postpone_recap();
                 let flow = match self.handle_overlay_key(cx, code, mods).await {
@@ -505,6 +507,17 @@ impl App {
             }
             LoopEvent::Usage(u) => {
                 self.token_tracker.on_usage(u);
+            }
+            // A running turn is about to summarize itself. This one is said in
+            // the transcript, not the status line: nothing streams for the half
+            // minute it takes, and a line that simply stops moving reads as a
+            // hang rather than as work.
+            LoopEvent::CompactionStarted => {
+                self.chat.push_line(
+                    flashagent_tui::LineKind::System,
+                    "Window nearly full: writing a full summary of this task so it can carry on \u{b7} the turn continues in a moment",
+                );
+                self.renderer.request_reprint();
             }
             // The window was nearly full; the work goes on. Said on the status line,
             // not in the transcript: nothing in the conversation changed for the reader.
