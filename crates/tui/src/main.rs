@@ -181,7 +181,12 @@ async fn startup_screens(config: &mut AppConfig, force_setup: bool) -> Option<bo
     // Carried into the first conversation: the screen it was printed on is about
     // to be cleared.
     let mut ran_setup = false;
-    if (!config.setup_completed || force_setup) && std::io::stdout().is_terminal() {
+    // A run that already knows where to go does not get asked where that is.
+    // `--url` and `--model` answer the wizard's questions before it opens, and
+    // asking a person who has just typed both to type them again in a form is
+    // the wizard being noticed rather than being needed.
+    let already_answered = !force_setup && config.is_ready_to_run(|k| std::env::var(k).ok());
+    if (!config.setup_completed || force_setup) && !already_answered && std::io::stdout().is_terminal() {
         let completed = flashagent_tui::run_wizard(config).await.unwrap_or(false);
         if !completed {
             return None;
@@ -190,6 +195,10 @@ async fn startup_screens(config: &mut AppConfig, force_setup: bool) -> Option<bo
         config.last_seen_version = Some(flashagent_svc::updater::current_version().to_string());
         let _ = config.save();
         ran_setup = true;
+    } else if already_answered && !config.setup_completed {
+        // Skipped, so the next launch must not ask either.
+        config.setup_completed = true;
+        let _ = config.save();
     }
 
     // Once, after the binary moved forward, show what arrived. Never right after
