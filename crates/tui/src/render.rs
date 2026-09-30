@@ -60,6 +60,12 @@ pub(crate) struct FrameState<'a> {
     pub(crate) copy_toast: Option<&'a str>,
     pub(crate) prefill_status: Option<&'a str>,
     pub(crate) ttft_display: Option<&'a str>,
+    /// The share of the prompt the server read from its cache.
+    pub(crate) cache_display: Option<&'a str>,
+    /// A model server on this machine or the local network, where a time to
+    /// first token means something about the hardware. A hosted API's is a queue
+    /// and a network, so the cache share is the honest thing to report there.
+    pub(crate) nearby_server: bool,
     pub(crate) background: Option<&'a str>,
     pub(crate) background_style: NoticeStyle,
     pub(crate) turn_phase: Option<&'a TurnPhase>,
@@ -240,8 +246,19 @@ fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u6
         if let Some(draft) = st.draft_acceptance {
             live.push_str(&format!("{dot}{draft}"));
         }
-        if let Some(prefill) = st.ttft_display {
-            live.push_str(&format!("{dot}{prefill}"));
+        // A nearby server is a machine: its time to first token is worth showing
+        // and its cache share beside it. A hosted one is a queue and a network, so
+        // the number on the line was never about the model, and the cache share
+        // says what the prefix actually cost.
+        if st.nearby_server {
+            if let Some(prefill) = st.ttft_display {
+                live.push_str(&format!("{dot}{prefill}"));
+            }
+            if let Some(cache) = st.cache_display {
+                live.push_str(&format!("{dot}{cache}"));
+            }
+        } else if let Some(cache) = st.cache_display {
+            live.push_str(&format!("{dot}{cache}"));
         }
         // The counters show the model is alive and the notice must not be missed;
         // the key hints give way when both do not fit.
@@ -1025,13 +1042,20 @@ impl App {
         let cost_now = self.image_costs.get(&self.current_model);
         let attachment_labels: Vec<String> = self.attachments.iter().map(|a| a.labelled(cost_now)).collect();
         let goal_progress: Option<String> = self.goal_ledger.as_ref().filter(|_| self.running).map(|l| l.progress());
+        // A model server on this machine or the local network: a time to first
+        // token is about its hardware there, and about a queue and a network on a
+        // hosted API.
+        let nearby_server = crate::warm::nearby_server(&cx.source.0.endpoint(), cx.source.discovery().map(|d| d.kind));
         // An estimate of reading the prompt means nothing while no server answers.
-        let live_prefill =
-            self.token_tracker.live_prefill_status().filter(|_| self.announced_mood != MascotMood::Offline);
+        let live_prefill = self
+            .token_tracker
+            .live_prefill_status(nearby_server)
+            .filter(|_| self.announced_mood != MascotMood::Offline);
         let ttft_display = self.token_tracker.ttft_display();
         let tg_speed = self.token_tracker.tg_3s();
         let draft = self.token_tracker.draft_display();
         let config = &self.config;
+        let cache_display = self.token_tracker.cache_display();
 
         self.renderer.frame(
             &self.chat,
@@ -1063,6 +1087,8 @@ impl App {
                 copy_toast: if config.show_toasts { self.copy_toast.as_ref().map(|(msg, _)| msg.as_str()) } else { None },
                 prefill_status: if config.show_ttft { live_prefill.as_deref() } else { None },
                 ttft_display: if config.show_ttft { ttft_display.as_deref() } else { None },
+                cache_display: if config.show_ttft { cache_display.as_deref() } else { None },
+                nearby_server,
                 background: self.background.as_ref().map(|b| b.text.as_str()),
                 channel_prompt: channel_prompt.as_deref(),
                 prompt_title: if self.uninstall_confirm { UNINSTALL_TITLE } else { "Switch release channel" },

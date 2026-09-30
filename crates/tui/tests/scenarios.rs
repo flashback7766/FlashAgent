@@ -244,11 +244,13 @@ fn sending_the_next_prompt_stops_the_recap_still_being_written() {
         assert!(std::time::Instant::now() < deadline, "no recap was asked for");
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(server.side_requests_dropped(), 0);
+    // Only the recap is being waited for here: a warm-up overtaken by a turn is
+    // dropped on purpose and says nothing about the recap.
+    assert_eq!(server.side_requests_dropped_for("conversation analyzer"), 0);
 
     ask(&term, "second question", "Second answer.");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while server.side_requests_dropped() == 0 {
+    while server.side_requests_dropped_for("conversation analyzer") == 0 {
         assert!(
             std::time::Instant::now() < deadline,
             "the recap kept being written after the next prompt was sent"

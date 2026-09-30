@@ -62,8 +62,10 @@ pub struct MockServer {
 #[derive(Default)]
 struct SideRequests {
     per_word: Mutex<Option<Duration>>,
-    /// Slow side answers the app hung up on.
-    dropped: std::sync::atomic::AtomicUsize,
+    /// The body of every side request the app hung up on while it was writing.
+    /// The app abandons more than one kind of side request — a warm-up that a
+    /// turn overtook is dropped on purpose — so which one it was matters.
+    dropped: Mutex<Vec<String>>,
     /// Keyed by a substring anywhere in the request.
     answers: Mutex<Vec<(String, String)>>,
     /// Lets a scenario act while the model is still thinking.
@@ -136,8 +138,10 @@ impl MockServer {
         self.side.released.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    pub fn side_requests_dropped(&self) -> usize {
-        self.side.dropped.load(std::sync::atomic::Ordering::SeqCst)
+    /// Side requests abandoned while writing whose body named `needle`, so a test
+    /// waiting on one kind is not satisfied by the app dropping another.
+    pub fn side_requests_dropped_for(&self, needle: &str) -> usize {
+        self.side.dropped.lock().unwrap().iter().filter(|body| body.contains(needle)).count()
     }
 
     pub fn requests(&self) -> Vec<Request> {
@@ -243,7 +247,7 @@ fn serve(
             out.flush()
         })();
         if finished.is_err() {
-            side.dropped.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            side.dropped.lock().unwrap().push(request.body.to_string());
         }
         return Ok(());
     }

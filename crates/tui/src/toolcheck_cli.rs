@@ -12,7 +12,7 @@ async fn client_for(endpoint: &flashagent_llm::Endpoint, model: &str) -> Backend
     }
     // A local server loads the model on its first request, which takes minutes
     // on a CPU; timed as the first scenario, the load failed it.
-    if crate::warm::worth_warming(endpoint, source.discovery().map(|d| d.kind)) {
+    if crate::warm::nearby_server(endpoint, source.discovery().map(|d| d.kind)) {
         println!("  loading the model (a local server does this once; on a CPU it can take a minute)…");
         load_model(&source).await;
     }
