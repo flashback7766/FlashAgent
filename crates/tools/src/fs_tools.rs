@@ -84,6 +84,14 @@ fn normalize_line(s: &str) -> String {
         .replace(['“', '”'], "\"")
 }
 
+/// Leading indentation is dropped. A model transcribes a block from what it
+/// read and routinely loses or invents leading spaces; that is a mistake about
+/// layout, not about the code being edited, and refusing the edit over it sends
+/// the model round again to no purpose.
+fn normalize_line_loose(s: &str) -> String {
+    normalize_line(s).trim_start().to_string()
+}
+
 /// Tolerates CRLF/LF, curly quotes and trailing whitespace differences, and
 /// the line numbers read_file puts in front of each line when a model copies
 /// them into old_string.
@@ -94,8 +102,15 @@ fn find_actual_string(text: &str, needle: &str) -> Option<String> {
     if let Some(found) = without_read_file_numbers(needle).and_then(|unnumbered| find_actual_string(text, &unnumbered)) {
         return Some(found);
     }
+    match_lines(text, needle, false).or_else(|| match_lines(text, needle, true))
+}
 
-    let needle_lines: Vec<String> = needle.lines().map(normalize_line).collect();
+/// The one run of lines `needle` describes, or `None` if it describes none or
+/// more than one. `loose` stops insisting on leading whitespace.
+fn match_lines(text: &str, needle: &str, loose: bool) -> Option<String> {
+    let line_of = |s: &str| if loose { normalize_line_loose(s) } else { normalize_line(s) };
+
+    let needle_lines: Vec<String> = needle.lines().map(line_of).collect();
     if needle_lines.is_empty() {
         return None;
     }
@@ -104,7 +119,7 @@ fn find_actual_string(text: &str, needle: &str) -> Option<String> {
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
         let len = line.len();
-        text_line_spans.push((offset, offset + len, normalize_line(line)));
+        text_line_spans.push((offset, offset + len, line_of(line)));
         offset += len;
     }
 
@@ -193,15 +208,42 @@ fn not_found(path: &str, text: &str, needle: &str) -> ToolError {
         })
         .max_by(|a, b| a.0.total_cmp(&b.0));
     let mut message = format!("edit: old_string not found in {path}");
-    if let Some((_, line_no, line)) = closest.filter(|c| c.0 >= 0.5) {
+    if let Some((score, line_no, line)) = closest.filter(|c| c.0 >= 0.5) {
         message.push_str(&format!(
-            ". The closest line is {line_no}: `{}`. Copy old_string exactly from the file, without line numbers",
+            ". The closest line is {line_no}: `{}`",
             line.trim_end()
         ));
+        // A near miss is worth naming: the model wrote a line it believes is
+        // in the file, and being told what it got wrong beats being told to
+        // try again.
+        if let Some(differs) = first_difference(first, line.trim()) {
+            message.push_str(&format!(". You wrote {differs}"));
+        }
+        message.push_str(". Copy old_string exactly from the file, without line numbers");
     } else {
         message.push_str(". Read the file again and copy old_string exactly, without line numbers");
     }
     ToolError::Other(message)
+}
+
+/// The first word of `want` that is not in `have`, in the form `you wrote
+/// `foo``; `None` when the difference is not one word or the lines are simply
+/// different lines. Indentation and whitespace alone are not worth naming —
+/// `find_actual_string` already tolerates those.
+fn first_difference(want: &str, have: &str) -> Option<String> {
+    let want_words: Vec<&str> = want.split_whitespace().collect();
+    let have_words: Vec<&str> = have.split_whitespace().collect();
+    if want_words.is_empty() || have_words.is_empty() {
+        return None;
+    }
+    // The lines must agree everywhere except inside one word, otherwise this
+    // is a different line and the closest-line hint already says so.
+    if want_words.len() != have_words.len() {
+        return None;
+    }
+    let differing: Vec<usize> = (0..want_words.len()).filter(|i| want_words[*i] != have_words[*i]).collect();
+    let [i] = differing[..] else { return None };
+    Some(format!("`{}` where the file has `{}`", want_words[i], have_words[i]))
 }
 
 /// The text with every edit applied in order, and how many replacements that
@@ -742,6 +784,59 @@ mod tests {
         let edits = [EditChunk { old_string: "pub fn add(a: u32, b: u32) -> u32 {".into(), new_string: "x".into(), replace_all: false }];
         let err = edit_file(dir.path(), "lib.rs", &edits).unwrap_err().to_string();
         assert!(err.contains("closest line is 3: `pub fn add(a: i32, b: i32) -> i32 {`"), "{err}");
+    }
+
+    #[test]
+    fn an_edit_lands_even_when_the_model_lost_the_indentation() {
+        // Measured: models routinely send `if media:` with 4 spaces for a line
+        // the file indents by 8, or drop a method's indent entirely. Refusing
+        // the edit over layout sends the model round again for nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let body = "async def handle(self):\n        if media:\n            return await send(event)\n";
+        std::fs::write(dir.path().join("a.py"), body).unwrap();
+
+        let under_indented = "    if media:\n        return await send(event)";
+        edit_file(dir.path(), "a.py", &[chunk(under_indented, "if media:\n            return None", false)]).unwrap();
+
+        let no_indent = "async def handle(self):";
+        edit_file(dir.path(), "a.py", &[chunk(no_indent, "async def handle(self, q):", false)]).unwrap();
+
+        let out = std::fs::read_to_string(dir.path().join("a.py")).unwrap();
+        assert_eq!(out, "async def handle(self, q):\n        if media:\n            return None\n");
+    }
+
+    #[test]
+    fn losing_the_indentation_does_not_make_a_match_ambiguous() {
+        // Tolerance must not turn into a guess: two lines differing only by
+        // indentation are still two, and the count is what asks for context.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {\n    call();\n}\nfn b() {\n    call();\n}\n").unwrap();
+        let err = edit_file(dir.path(), "a.rs", &[chunk("call();", "call(1);", false)]).unwrap_err().to_string();
+        assert!(err.contains("matches 2 times"), "{err}");
+    }
+
+    #[test]
+    fn an_invented_keyword_is_named_rather_than_guessed_at() {
+        // Measured: `pub plan: Vec<..>` sent against a field the file declares
+        // without `pub`. No tolerance can absorb that, so the error has to say
+        // what was wrong instead of only "copy it exactly".
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("goal.rs"), "struct S {\n    plan: Vec<PlanStep>,\n}\n").unwrap();
+        let err = edit_file(dir.path(), "goal.rs", &[chunk("    pub plan: Vec<PlanStep>,", "    pub plan: Vec<Step>,", false)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("closest line is 2: `    plan: Vec<PlanStep>,`"), "{err}");
+        assert!(err.contains("You wrote `pub` where the file has `plan:`"), "{err}");
+    }
+
+    #[test]
+    fn a_different_line_is_not_reported_as_a_word_mistake() {
+        // The word hint is only for near misses; on an unrelated line it would
+        // be noise, and the closest-line hint already answers it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {\n    let x = compute(1, 2);\n}\n").unwrap();
+        let err = edit_file(dir.path(), "a.rs", &[chunk("    let x = totally_different(9);", "y", false)]).unwrap_err().to_string();
+        assert!(!err.contains("You wrote"), "{err}");
     }
 
     #[test]
