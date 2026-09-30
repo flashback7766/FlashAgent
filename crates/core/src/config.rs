@@ -682,6 +682,23 @@ impl AppConfig {
             .unwrap_or_else(|| default_profile())
     }
 
+    /// Whether the run can already start on its own: a server to talk to and a
+    /// model named. Used to skip the setup wizard — someone who passed
+    /// `--url` and `--model`, or who has both in the environment, has already
+    /// answered every question the wizard would ask, and being asked them again
+    /// is the wizard insisting on being noticed rather than on being needed.
+    pub fn is_ready_to_run(&self, env: impl Fn(&str) -> Option<String>) -> bool {
+        let profile = self.active_profile();
+        if profile.url.trim().is_empty() || profile.model.trim().is_empty() {
+            return false;
+        }
+        // A local server needs no key at all; anything else needs one.
+        if !crate::permissions::url_host(&profile.url).is_some_and(|h| crate::permissions::is_local_host(h)) {
+            return profile.resolve_key(env).0.is_some();
+        }
+        true
+    }
+
     /// Where a new model or key goes. With nothing saved yet, the default
     /// provider is saved first, as the one they belong to.
     pub fn active_profile_mut(&mut self) -> &mut ProviderProfile {
