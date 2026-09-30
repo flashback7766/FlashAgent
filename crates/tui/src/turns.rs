@@ -1,5 +1,12 @@
 use super::*;
 
+/// How long the run took, and no clock left behind. One operation, so the time
+/// cannot be read after the thing that holds it has been cleared.
+pub(crate) fn elapsed(started: &mut Option<std::time::Instant>) -> Option<f32> {
+    let took = started.take()?.elapsed().as_secs_f32();
+    Some(took)
+}
+
 impl App {
     /// A new turn is starting: on a local server the recap would make it wait, and
     /// its suggestion would be stale. Dropping the request stops the generation.
@@ -177,6 +184,14 @@ impl App {
         true
     }
 
+    /// Stops the turn clock, keeping how long it ran. Reading the instant
+    /// after it is cleared is how the duration came to be `None` in every
+    /// live run while the tests that use it passed: the two were written on
+    /// either side of the clear and the gap was invisible.
+    pub(crate) fn stop_turn_clock(&mut self) {
+        self.turn_elapsed = elapsed(&mut self.turn_started);
+    }
+
     pub(crate) async fn finish_turn(
         &mut self,
         cx: &mut LoopCtx<'_>,
@@ -188,7 +203,7 @@ impl App {
             return Flow::Continue;
         }
         self.running = false;
-        self.turn_started = None;
+        self.stop_turn_clock();
         self.active_turn_handle = None;
         self.active_steer_tx = None;
         self.task_inbox.turn_ended(matches!(res, Ok((_, DoneReason::Cancelled))));
@@ -221,7 +236,7 @@ impl App {
         if self.goal_state.is_none() {
             // How long this turn took, and what it generated: the only way to
             // tell a model that is overthinking from one that is right on time.
-            self.turn_outcome.secs = self.turn_started.map(|start| start.elapsed().as_secs_f32());
+            self.turn_outcome.secs = self.turn_elapsed;
             self.turn_outcome.completion_tokens = self.token_tracker.total_model_tokens;
             let steps = self.effort_memory.observe(&self.current_model, &self.turn_outcome);
             self.effort_memory.save();

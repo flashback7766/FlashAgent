@@ -710,6 +710,11 @@ struct App {
     pending_update: Option<(String, String, String, Option<String>)>,
     last_term_size: (u16, u16),
     turn_started: Option<std::time::Instant>,
+    /// How long the turn that just ended took. Read after `turn_started` is
+    /// cleared, so it has to be kept: the only way to tell a model that is
+    /// overthinking from one that is right on time is how long it took, and
+    /// without this the answer is never None-forever.
+    turn_elapsed: Option<f32>,
     token_tracker: TokenTracker,
     max_steps: Option<u32>,
     goal_state: Option<SavedGoalState>,
@@ -1209,6 +1214,7 @@ fn initial_app(init: InitialApp) -> App {
         pending_update: None,
         last_term_size: crossterm::terminal::size().unwrap_or((100, 24)),
         turn_started: None,
+        turn_elapsed: None,
         max_steps: app_config.max_steps,
         goal_state: None,
         goal_ledger: None,
@@ -1659,6 +1665,19 @@ mod tests {
         assert_ne!(editor_command("$EDITOR"), "$EDITOR");
         assert_ne!(editor_command(""), "");
         assert_eq!(editor_command("code --wait"), "code --wait");
+    }
+
+    #[test]
+    fn a_turn_that_took_time_leaves_the_time_behind_when_its_clock_stops() {
+        // The duration used to be read after the clock was cleared, so it came
+        // back None every time: nothing learned from a slow turn, live, while
+        // every test that handed a duration in by hand stayed green.
+        let mut started = Some(std::time::Instant::now() - std::time::Duration::from_secs(3));
+        let took = turns::elapsed(&mut started);
+        assert!(took.is_some_and(|t| (t - 3.0).abs() < 0.05), "the time the turn took is kept, got {took:?}");
+        assert_eq!(started, None, "and the clock is stopped, in the same step");
+        // A clock that was never started cannot report a time.
+        assert_eq!(turns::elapsed(&mut started), None);
     }
 
     #[test]
