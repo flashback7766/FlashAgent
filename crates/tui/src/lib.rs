@@ -93,6 +93,9 @@ pub enum UiEvent {
     },
     /// A background command of this session ended.
     TaskEnded(flashagent_tools::TaskNotice),
+    /// `/compact` finished. `saved` is `None` when nothing was compacted: the
+    /// history comes back either way, unchanged in that case.
+    Compacted { history: Vec<ChatMessage>, saved: Option<usize> },
 }
 
 /// Drives terminal colours.
@@ -129,6 +132,18 @@ pub struct ToolCallRecord {
     pub result: Option<String>,
     pub is_error: bool,
     pub is_running: bool,
+    /// What the change adds and removes, counted from the real diff when the
+    /// call started. Stored apart from the diff text so the numbers stay right
+    /// however far the text is cut below.
+    pub added: usize,
+    pub deleted: usize,
+    /// The real diff against the files as they were when the call started, cut
+    /// to what a card shows. `None` for a call that changes nothing, and for
+    /// one replayed from a saved session, where the files have moved on since.
+    ///
+    /// This is held for every call of every turn, so it is bounded: a long
+    /// session with hundreds of edits would otherwise carry every diff whole.
+    pub diff: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,10 +301,46 @@ fn paths_label(paths: &[String], list_them: bool) -> String {
     }
 }
 
+/// Characters of diff kept per call. A card shows the first lines of a change
+/// and the rest is still in the file and in the archive; keeping every diff
+/// whole for the life of a session is what turns a long chat into tens of
+/// megabytes of memory.
+pub(crate) const STORED_DIFF_CHARS: usize = 24_000;
+
+/// What one call changed, counted before its text is cut, and the text to keep.
+pub(crate) fn stored_change(diff: &str) -> (usize, usize, String) {
+    let (added, deleted) = counts_from_diff(diff);
+    let kept = if diff.chars().count() > STORED_DIFF_CHARS {
+        crate::truncate_middle(diff, STORED_DIFF_CHARS)
+    } else {
+        diff.to_string()
+    };
+    (added, deleted, kept)
+}
+
+/// Added and removed lines of a unified diff, past its two header lines.
+fn counts_from_diff(diff: &str) -> (usize, usize) {
+    let mut added = 0;
+    let mut removed = 0;
+    for line in diff.lines().skip(2) {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            added += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            removed += 1;
+        }
+    }
+    (added, removed)
+}
+
 /// What a call names: the file and change size for a write, the target for
 /// a read, the command for a shell call. Shown next to the model's header,
 /// which says what it meant to do.
-pub fn call_facts(name: &str, parsed: &serde_json::Value) -> Option<String> {
+///
+/// `diff` is the real change, taken when the call started. Without it the
+/// size is counted off the model's own arguments, which is what it said it
+/// would touch and not what the file loses: replacing one line with two to
+/// add one below reads as `+2 -1`.
+pub fn call_facts(name: &str, parsed: &serde_json::Value, diff: Option<&str>) -> Option<String> {
     let path_of = |key: &str| -> Option<String> {
         let raw = parsed.get(key)?.as_str()?;
         let base = std::path::Path::new(raw)
@@ -301,9 +352,13 @@ pub fn call_facts(name: &str, parsed: &serde_json::Value) -> Option<String> {
     match name {
         "edit_file" => {
             let (mut added, mut deleted) = (0usize, 0usize);
-            for ed in call_edits(parsed) {
-                deleted += ed.get("old_string").and_then(|s| s.as_str()).unwrap_or("").lines().count();
-                added += ed.get("new_string").and_then(|s| s.as_str()).unwrap_or("").lines().count();
+            if let Some(diff) = diff {
+                (added, deleted) = counts_from_diff(diff);
+            } else {
+                for ed in call_edits(parsed) {
+                    deleted += ed.get("old_string").and_then(|s| s.as_str()).unwrap_or("").lines().count();
+                    added += ed.get("new_string").and_then(|s| s.as_str()).unwrap_or("").lines().count();
+                }
             }
             let paths = call_paths(parsed);
             let target = match paths.len() {
@@ -311,8 +366,16 @@ pub fn call_facts(name: &str, parsed: &serde_json::Value) -> Option<String> {
                 1 => path_of("path").unwrap_or_else(|| paths[0].clone()),
                 n => format!("{n} files"),
             };
-            Some(format!("{target} +{added} -{deleted}"))
-        }
+            // A change that only adds is not "+2 -0": the zero reads as a line
+            // taken away. Only the part that is there is written.
+            let mut size = String::new();
+            if added > 0 {
+                size.push_str(&format!(" +{added}"));
+            }
+            if deleted > 0 {
+                size.push_str(&format!(" -{deleted}"));
+            }
+            Some(format!("{target}{size}"))        }
         "write_file" => {
             let lines = parsed.get("content").and_then(|s| s.as_str()).unwrap_or("").lines().count().max(1);
             Some(format!("{} +{lines}", path_of("path")?))
@@ -657,7 +720,7 @@ impl ChatView {
                     }
                 }
             }
-            LoopEvent::ToolStarted { id: _, name, args_json } => self.tool_started(name, args_json),
+            LoopEvent::ToolStarted { id: _, name, args_json } => self.tool_started(name, args_json, None),
             LoopEvent::ToolFinished { is_error, result_len, result, .. } => {
                 self.tool_finished(*is_error, *result_len, result.as_deref())
             }
@@ -832,26 +895,34 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize, waiting: bool) -
             }
             (a, d, Some(patch.to_string()))
         } else {
-            let mut a = 0;
-            let mut d = 0;
-            let mut simulated = String::new();
-            for ed in call_edits(&parsed) {
-                let old_s = ed.get("old_string").and_then(|s| s.as_str()).unwrap_or("");
-                let new_s = ed.get("new_string").and_then(|s| s.as_str()).unwrap_or("");
-                for l in old_s.lines() {
-                    simulated.push('-');
-                    simulated.push_str(l);
-                    simulated.push('\n');
-                    d += 1;
-                }
-                for l in new_s.lines() {
-                    simulated.push('+');
-                    simulated.push_str(l);
-                    simulated.push('\n');
-                    a += 1;
+            // The real diff, taken when the call started. Falling back to the
+            // model's own strings describes what it said it would touch, which
+            // is not the same thing as the change.
+            match call.diff.as_deref() {
+                Some(diff) => (call.added, call.deleted, Some(diff.to_string())),
+                None => {
+                    let mut a = 0;
+                    let mut d = 0;
+                    let mut simulated = String::new();
+                    for ed in call_edits(&parsed) {
+                        let old_s = ed.get("old_string").and_then(|s| s.as_str()).unwrap_or("");
+                        let new_s = ed.get("new_string").and_then(|s| s.as_str()).unwrap_or("");
+                        for l in old_s.lines() {
+                            simulated.push('-');
+                            simulated.push_str(l);
+                            simulated.push('\n');
+                            d += 1;
+                        }
+                        for l in new_s.lines() {
+                            simulated.push('+');
+                            simulated.push_str(l);
+                            simulated.push('\n');
+                            a += 1;
+                        }
+                    }
+                    (a, d, Some(simulated))
                 }
             }
-            (a, d, Some(simulated))
         };
 
         let change = tool_views::EditChange { path, added, deleted, body: diff_text.as_deref(), is_write };
@@ -1188,6 +1259,9 @@ impl ChatView {
                             result: line.tool_result.clone(),
                             is_error: line.kind == LineKind::ToolError,
                             is_running: false,
+                            added: 0,
+                            deleted: 0,
+                            diff: None,
                         };
                         let card_lines = render_single_tool_card(&synthetic_call, width, false);
                         for cl in card_lines {
@@ -2713,6 +2787,58 @@ hm".into()));
 
         chat.render_split(80, true);
         chat.render_split(80, ReasoningExpansion { all: false, last: true });
+    }
+
+    #[test]
+    fn a_kept_diff_is_capped_but_still_counts_every_line() {
+        let mut diff = String::from("--- f\n+++ f\n@@ -1 +1,900 @@\n");
+        for i in 0..900 {
+            // Long enough that nine hundred of them pass the cap.
+            diff.push_str(&format!("+line {i} {}\n", "z".repeat(40)));
+        }
+        let (added, deleted, kept) = stored_change(&diff);
+        assert!(diff.chars().count() > STORED_DIFF_CHARS, "the test must build a diff worth cutting");
+        // The numbers are of the whole change, not of the part kept.
+        assert_eq!((added, deleted), (900, 0));
+        assert!(kept.chars().count() <= STORED_DIFF_CHARS, "kept {} chars", kept.chars().count());
+        assert!(kept.contains('…'), "a cut diff says so");
+    }
+
+    #[test]
+    fn a_small_diff_is_kept_whole() {
+        let diff = "--- f\n+++ f\n@@ -1 +1,2 @@\n one\n+two\n";
+        let (added, deleted, kept) = stored_change(diff);
+        assert_eq!((added, deleted), (1, 0));
+        assert_eq!(kept, diff, "a diff a card can show must not be cut");
+    }
+
+    /// A change that only adds is not "+3 -0": the zero reads as a line taken
+    /// away. Only the part that is there is written.
+    #[test]
+    fn the_header_counts_the_change_to_the_file_not_the_arguments() {
+        let args = serde_json::json!({
+            "path": "notes.md",
+            "edits": [{ "old_string": "first line\n", "new_string": "first line\nsecond line\n" }],
+        });
+        assert_eq!(
+            call_facts("edit_file", &args, None).as_deref(),
+            Some("notes.md +2 -1"),
+            "with no file to read, all that can be counted is what the model asked for"
+        );
+        let diff = "--- notes.md\n+++ notes.md\n@@ -1,3 +1,4 @@\n # Notes\n \n first line\n+second line\n";
+        assert_eq!(
+            call_facts("edit_file", &args, Some(diff)).as_deref(),
+            Some("notes.md +1"),
+            "with the file, the card says what the file gains, and no zero that was not a change"
+        );
+    }
+
+    #[test]
+    fn a_diff_is_counted_past_its_two_header_lines() {
+        assert_eq!(counts_from_diff("--- a.txt\n+++ a.txt\n@@ -1 +1,2 @@\n one\n+two\n"), (1, 0));
+        assert_eq!(counts_from_diff("--- n.txt\n+++ n.txt\n+only\n"), (1, 0));
+        assert_eq!(counts_from_diff("--- n.txt\n+++ n.txt\n"), (0, 0));
+        assert_eq!(counts_from_diff("--- n.txt\n+++ n.txt\n-gone\n"), (0, 1));
     }
 }
 

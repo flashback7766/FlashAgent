@@ -68,6 +68,13 @@ pub(crate) struct FrameState<'a> {
     /// Title of the card `channel_prompt` fills.
     pub(crate) prompt_title: &'a str,
     pub(crate) context_warn_threshold: usize,
+    /// What the server said the window is. `None` before it answers: the
+    /// capacity in use is then a guess, and a percentage off it is a guess
+    /// wearing the clothes of a number.
+    pub(crate) context_reported: bool,
+    /// What `/compact` is doing, in the row under the prompt: a status belongs
+    /// with the other running things, not in the conversation as a line.
+    pub(crate) compact_status: Option<&'a str>,
     pub(crate) pending_steers: &'a [String],
     pub(crate) queued_commands: &'a [String],
     /// Background commands still running.
@@ -273,29 +280,48 @@ fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u6
 }
 
 fn append_tip_rows(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize) {
+    // A running compaction is the status of the moment: it takes the tip's row
+    // rather than pushing the chat down, and it is clipped, never wrapped.
+    if let Some(status) = st.compact_status {
+        tail.push((LineKind::System, format!("  {}", clip_ansi(status, width.saturating_sub(2)))));
+        return;
+    }
     for line in st.tip_lines.unwrap_or_default() {
         tail.push((LineKind::System, clip_ansi(line, width.saturating_sub(2))));
     }
 }
 
-fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>, awaiting_user: bool) -> String {
-    let mode_room = 2 + visible_width(st.mode.label()) + 2 + 1;
+/// What the status line says about the context window, widest first. Until the
+/// server names a window the capacity in use is a guess, and a percentage off
+/// it would be a guess dressed as a fact: only the count is true.
+fn context_gauges(context_usage: &ContextUsage, reported: bool, warn_threshold: usize) -> [String; 3] {
     let percent = context_usage.percentage().clamp(0.0, 100.0);
+    if !reported {
+        let used = format!(
+            "\x1b[38;2;135;215;165m{}\x1b[0m used",
+            ContextUsage::format_tokens(context_usage.total_used())
+        );
+        return [used.clone(), used.clone(), used];
+    }
     // Nearly full, it says what to do about it instead of drawing the bar.
-    let gauges = if st.context_warn_threshold > 0 && percent >= st.context_warn_threshold as f32 {
+    if warn_threshold > 0 && percent >= warn_threshold as f32 {
         let amber = |s: String| format!("\x1b[1;38;2;245;160;80m{s}\x1b[0m");
-        [
+        return [
             amber(format!("context {percent:.0}% full \u{b7} /compact frees it")),
             amber(format!("{percent:.0}% full \u{b7} /compact")),
             amber(format!("{percent:.0}%")),
-        ]
-    } else {
-        [
-            context_usage.format_compact_gauge(10),
-            context_usage.format_compact_gauge(4),
-            format!("\x1b[38;2;135;215;165m{percent:.0}%\x1b[0m"),
-        ]
-    };
+        ];
+    }
+    [
+        context_usage.format_compact_gauge(10),
+        context_usage.format_compact_gauge(4),
+        format!("\x1b[38;2;135;215;165m{percent:.0}%\x1b[0m"),
+    ]
+}
+
+fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>, awaiting_user: bool) -> String {
+    let mode_room = 2 + visible_width(st.mode.label()) + 2 + 1;
+    let gauges = context_gauges(context_usage, st.context_reported, st.context_warn_threshold);
     let gauge_str = gauges.into_iter().find(|g| mode_room + visible_width(g) + 3 <= width).unwrap_or_default();
     let expand_status = if st.reasoning_expand.all {
         " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: all]\x1b[0m"
@@ -1044,6 +1070,8 @@ impl App {
                 attachments: &attachment_labels,
                 background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                 context_warn_threshold: config.context_warn_threshold,
+                context_reported: self.current_context.is_some(),
+                compact_status: self.compact_status.as_deref(),
                 pending_steers: &self.pending_steers,
                 queued_commands: &self.queued_commands,
                 background_tasks: cx.tools_arc.shells().running_count(),
@@ -1106,6 +1134,48 @@ fn key_hints(pairs: &[(&str, &str)], width: usize) -> String {
 #[cfg(test)]
 mod footer_tests {
     use super::*;
+
+    // These cover `context_gauges`, not the wiring: nothing here builds a
+    // `FrameState`, so breaking `footer_status` into always reporting the
+    // window would leave them green. The wiring was checked by running the real
+    // binary; a test for it needs a `FrameState` that can be built cheaply.
+
+    /// 4.7K of a guessed 128K: a percentage here would be about nothing.
+    #[test]
+    fn an_unreported_window_shows_a_count_and_no_percentage() {
+        let mut usage = ContextUsage::new(128_000);
+        usage.system_tokens = 4_700;
+        let gauges = context_gauges(&usage, false, 70);
+        for g in &gauges {
+            let plain = flashagent_tui::strip_ansi(g);
+            assert!(plain.contains("used"), "{plain:?} names it as a count");
+            assert!(!plain.contains('%'), "{plain:?} keeps a guess out of it");
+            assert!(!plain.contains("128"), "{plain:?} does not print the guess");
+        }
+    }
+
+    /// Once the server answers, the window is a fact and the bar is honest.
+    #[test]
+    fn a_reported_window_shows_the_bar_and_the_percentage() {
+        let mut usage = ContextUsage::new(1_000_000);
+        usage.system_tokens = 100_000;
+        let gauges = context_gauges(&usage, true, 97);
+        let plain = flashagent_tui::strip_ansi(&gauges[0]);
+        assert!(plain.contains('%'), "{plain:?}");
+        assert!(plain.contains("1M") || plain.contains("1.0M"), "{plain:?}");
+        assert!(!plain.contains("used"), "{plain:?}");
+    }
+
+    /// The warning still wins over the plain gauge once there is a real number.
+    #[test]
+    fn a_reported_window_that_is_full_says_what_to_do() {
+        let mut usage = ContextUsage::new(100_000);
+        usage.system_tokens = 95_000;
+        let gauges = context_gauges(&usage, true, 70);
+        let plain = flashagent_tui::strip_ansi(&gauges[0]);
+        assert!(plain.contains("/compact"), "{plain:?}");
+        assert!(plain.contains("95%"), "{plain:?}");
+    }
 
     #[test]
     fn the_status_row_never_exceeds_the_window() {
