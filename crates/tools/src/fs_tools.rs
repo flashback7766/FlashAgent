@@ -102,7 +102,7 @@ fn find_actual_string(text: &str, needle: &str) -> Option<(String, Vec<String>)>
     if let Some(found) = without_read_file_numbers(needle).and_then(|unnumbered| find_actual_string(text, &unnumbered)) {
         return Some(found);
     }
-    match_lines(text, needle, false).or_else(|| match_lines(text, needle, true))
+    match_lines(text, needle, false)
 }
 
 /// The one run of lines `needle` describes, or `None` if it describes none or
@@ -239,7 +239,7 @@ fn not_found(path: &str, text: &str, needle: &str) -> ToolError {
         })
         .max_by(|a, b| a.0.total_cmp(&b.0));
     let mut message = format!("edit: old_string not found in {path}");
-    if let Some((score, line_no, line)) = closest.filter(|c| c.0 >= 0.5) {
+    if let Some((_score, line_no, line)) = closest.filter(|c| c.0 >= 0.5) {
         message.push_str(&format!(
             ". The closest line is {line_no}: `{}`",
             line.trim_end()
@@ -275,12 +275,21 @@ fn first_difference(want: &str, have: &str) -> Option<String> {
     }
     // A word added or dropped: the rest has to line up exactly, or these are
     // simply different lines.
-    let (longer, shorter) = if w.len() > h.len() { (&w, &h) } else { (&h, &w) };
+    let (longer, shorter, mine_is_longer) = if w.len() > h.len() { (&w, &h, true) } else { (&h, &w, false) };
     if longer.len() != shorter.len() + 1 {
         return None;
     }
-    let extra = (0..=shorter.len()).find(|skip| longer.iter().enumerate().all(|(i, word)| i == *skip || Some(*word) == shorter.get(i - usize::from(i > *skip)))?;
-    if w.len() > h.len() {
+    let rest_matches_without = |skip: usize| {
+        longer
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != skip)
+            .map(|(_, word)| *word)
+            .eq(shorter.iter().copied())
+    };
+    let skip = (0..=shorter.len()).find(|skip| rest_matches_without(*skip))?;
+    let extra = longer[skip];
+    if mine_is_longer {
         Some(format!("`{extra}` on a line the file has without it"))
     } else {
         Some(format!("the file has `{extra}` on this line"))
@@ -307,7 +316,8 @@ pub(crate) fn apply_edits(path: &str, mut text: String, edits: &[EditChunk]) -> 
             )));
         }
         applied += if edit.replace_all { count } else { 1 };
-        let new_string = in_line_endings_of(&text, &with_file_indent(&edit.new_string, &indents));
+        let reindented = with_file_indent(&edit.new_string, &indents);
+        let new_string = in_line_endings_of(&text, &reindented);
         text = if edit.replace_all {
             text.replace(target.as_str(), &new_string)
         } else {
@@ -815,7 +825,7 @@ mod tests {
     fn line_numbers_copied_from_read_file_still_match() {
         let text = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
         let copied = "     1\tpub fn add(a: i32, b: i32) -> i32 {\n     2\t    a + b";
-        assert_eq!(find_actual_string(text, copied).as_deref(), Some("pub fn add(a: i32, b: i32) -> i32 {\n    a + b"));
+        assert_eq!(find_actual_string(text, copied).as_ref().map(|(t, _)| t.as_str()), Some("pub fn add(a: i32, b: i32) -> i32 {\n    a + b"));
     }
 
     #[test]
