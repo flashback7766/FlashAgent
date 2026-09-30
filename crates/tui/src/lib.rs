@@ -52,7 +52,7 @@ pub use prefill::{BucketStats, ContextBucket, ModelPrefillProfile, PrefillTracke
 pub use providers::{ProvidersAction, ProvidersView};
 pub use sampling::{SamplingAction, SamplingView};
 pub use select::{ConfirmChoice, ConfirmSelect, SelectItem, SelectMenu};
-pub use settings::{SettingsAction, SettingsView};
+pub use settings::{effort_for_model, SettingsAction, SettingsView};
 pub use startup::{StartupAction, TrustScreen, TrustScreenMode};
 pub use tasks_view::{TasksAction, TasksModal};
 pub use tips::{split_tip_at_word_boundary, TipAnimator};
