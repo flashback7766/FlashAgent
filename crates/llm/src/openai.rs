@@ -550,13 +550,18 @@ pub(crate) async fn discover(client: &Client, generation: u64) -> Option<ServerD
     // working, and the status bar saying "no answer" while it streams is the
     // kind of lie that sends someone to reboot a machine that is fine.
     if reachable_without_listing(client, &base, &headers).await {
-        let disc = ServerDiscovery {
-            base_url: base.clone(),
-            reachable_without_listing: true,
-            ..Default::default()
-        };
-        client.adopt_discovery(&disc);
-        return Some(disc);
+        // Through the same gate as a real listing: if the endpoint changed while
+        // the probe was in flight, this answer belongs to a server nobody is
+        // talking to any more.
+        if client.generation() == generation {
+            let disc = ServerDiscovery {
+                base_url: base.clone(),
+                reachable_without_listing: true,
+                ..Default::default()
+            };
+            client.adopt_discovery(&disc);
+            return Some(disc);
+        }
     }
     None
 }
