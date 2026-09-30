@@ -1954,8 +1954,11 @@ mod tests {
         let call = |name: &str, id: &str| ChatMessage {
             role: Role::Assistant,
             content: String::new(),
+            reasoning: None,
+            tool_call_id: None,
             tool_calls: vec![ToolCall { id: id.into(), name: name.into(), args_json: "{}".into() }],
-            ..Default::default()
+            images: Vec::new(),
+            replay: None,
         };
 
         // Before any result has come back, the model is left alone: it has
