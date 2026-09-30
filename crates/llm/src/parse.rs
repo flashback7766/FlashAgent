@@ -296,11 +296,20 @@ impl ChunkParser {
                     rejected_draft_tokens: rejected,
                 })
             });
+            // OpenRouter prices the turn itself: it has already applied the
+            // model rate, the provider and the cache discount, so a number
+            // computed here from token counts would be a different, wrong
+            // number. Absent means the server does not price anything.
+            let cost = usage
+                .get("cost")
+                .or_else(|| usage.get("cost_usd"))
+                .and_then(|c| c.as_f64().filter(|v| v.is_finite() && *v >= 0.0));
             events.push(LlmEvent::Usage(crate::types::Usage {
                 prompt,
                 completion,
                 cached,
                 mtp,
+                cost,
             }));
         } else if let Some((prompt, cached)) = timings {
             events.push(LlmEvent::Usage(crate::types::Usage {
@@ -308,6 +317,7 @@ impl ChunkParser {
                 completion: None,
                 cached: Some(cached),
                 mtp,
+                cost: None,
             }));
         } else if let Some(m) = mtp {
             events.push(LlmEvent::Usage(crate::types::Usage {
@@ -315,6 +325,7 @@ impl ChunkParser {
                 completion: None,
                 cached: None,
                 mtp: Some(m),
+                cost: None,
             }));
         }
 
