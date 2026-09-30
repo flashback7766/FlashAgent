@@ -442,8 +442,13 @@ async fn main() -> Result<()> {
             std::process::exit(code);
         });
     }
-    // The built-in toolset plus `spawn_agent`.
-    let composite = flashagent_tools::agent_tools(tools_arc.clone(), source.clone(), state.clone());
+    // The built-in toolset plus `spawn_agent`. The two channels are made here,
+    // before the toolset that needs them, and the app's event loop reads them:
+    // a running child's steps go to the screen, and a finished child's answer
+    // becomes a notice the model reads without anyone asking for it.
+    let (agent_tx, agent_events) = tokio::sync::mpsc::unbounded_channel();
+    let (composite, agent_finished) =
+        flashagent_tools::agent_tools(tools_arc.clone(), source.clone(), state.clone(), Some(agent_tx));
     let perm: &'static PermissionedTools =
         Box::leak(Box::new(PermissionedTools::new(Arc::new(composite), Some(tools_arc.clone()), state.clone())));
 
@@ -474,6 +479,8 @@ async fn main() -> Result<()> {
         cwd: cwd.clone(),
         first_run_verdict,
         pending_discovery,
+        agent_events,
+        agent_finished,
     }).await
 }
 
@@ -623,6 +630,9 @@ struct App {
     /// Transcript lines of tasks that ended while a turn was writing.
     task_lines: Vec<String>,
     tasks_refreshed: std::time::Instant,
+    /// The subagents of this session: one row each, live, and the notices
+    /// their answers become.
+    agents: flashagent_tui::agents::AgentTree,
     /// A quit refused because background tasks run; another soon after quits.
     quit_armed: Option<std::time::Instant>,
     /// The loop is asked to stop cooperatively so it hands back a consistent
@@ -723,6 +733,10 @@ struct AppContext {
     /// To be said in the conversation.
     first_run_verdict: Option<String>,
     pending_discovery: Option<tokio::task::JoinHandle<Option<flashagent_llm::ServerDiscovery>>>,
+    agent_events: tokio::sync::mpsc::UnboundedReceiver<flashagent_core::SubagentEvent>,
+    /// What running subagents report, and everything the rest of the task says:
+    /// a child that answered, a message between agents, a review of a report.
+    agent_finished: tokio::sync::mpsc::UnboundedReceiver<flashagent_core::SubagentOutbound>,
 }
 
 /// Set while an external editor has the terminal; the key reader waits.
@@ -1130,6 +1144,7 @@ fn initial_app(init: InitialApp) -> App {
         pending_steers: Vec::new(),
         queued_commands: Vec::new(),
         task_inbox: flashagent_core::NoticeInbox::default(),
+        agents: flashagent_tui::agents::AgentTree::default(),
         task_lines: Vec::new(),
         tasks_refreshed: std::time::Instant::now(),
         quit_armed: None,
@@ -1252,6 +1267,35 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     // Start-up already asked, and was told nothing.
     let startup_silent = ctx.pending_discovery.is_none() && ctx.available_models.is_empty();
     start_event_sources(&tx, &ctx.tools_arc, ctx.pending_discovery, ctx.source.0.base_url());
+    // A running subagent reports into its own channel; both are read here and
+    // handed to the loop as its own events, so a child's steps reach the screen
+    // and its answer, its messages and the reviews reach the model.
+    {
+        let (tx_events, mut events) = (tx.clone(), ctx.agent_events);
+        let (tx_done, mut done) = (tx.clone(), ctx.agent_finished);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    event = events.recv() => match event {
+                        Some(event) => {
+                            if tx_events.send(UiEvent::SubagentEvent(event)).is_err() {
+                                return;
+                            }
+                        }
+                        None => return,
+                    },
+                    finished = done.recv() => match finished {
+                        Some(finished) => {
+                            if tx_done.send(UiEvent::SubagentOutbound(finished)).is_err() {
+                                return;
+                            }
+                        }
+                        None => return,
+                    },
+                }
+            }
+        });
+    }
     let (channel_probe_tx, channel_probes) = tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
     let (update_tx, updates) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
     let (channel_watch_tx, channel_watch_rx) = tokio::sync::watch::channel(ctx.config.update_channel);
@@ -1282,7 +1326,10 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         .with_cwd(&w.cwd_display)
         .with_platform(flashagent_tools::shell::platform())
         .with_model(&ctx.model)
-        .with_effort(&ctx.initial_effort);
+        .with_effort(&ctx.initial_effort)
+        // `spawn_agent` is always in the composite, so the rules about a
+        // subagent's report belong in the prompt.
+        .with_subagents(true);
     let system_prompt_text =
         build_system_prompt(&system_prompt_config.clone().with_personality(&ctx.config.personality));
     let (resume_session_id, open_session_picker, session_note) = resolve_session_start(ctx.session_start, &w.cwd_display);
@@ -1500,7 +1547,11 @@ fn build_turn_options(
             "low" => opts.thinking = flashagent_llm::ThinkingEffort::Low,
             "medium" => opts.thinking = flashagent_llm::ThinkingEffort::Medium,
             "high" => opts.thinking = flashagent_llm::ThinkingEffort::High,
-            _ => {}
+            // A level this build never heard of. `custom_effort` is what the
+            // request carries, so the typed intent must not contradict it:
+            // leaving it `Auto` would let any path reading `thinking` alone
+            // quietly override the user's level.
+            _ => opts.thinking = flashagent_llm::ThinkingEffort::Default,
         }
     }
     opts
@@ -1637,7 +1688,7 @@ mod tests {
             ChatMessage::tool_result("c1", "file body"),
             ChatMessage::assistant("here it is"),
         ];
-        let freed = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive).await;
+        let freed = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None).await;
         assert!(freed.is_some());
         assert_eq!(history.iter().filter(|m| m.role == flashagent_llm::Role::System).count(), 1);
         assert!(history[0].content.starts_with("SYSTEM PROMPT"));
@@ -1655,7 +1706,7 @@ mod tests {
         history.push(ChatMessage::user("next"));
         history.push(ChatMessage::assistant("ok"));
         history.push(ChatMessage::assistant("more work".repeat(1000)));
-        assert!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive).await.is_some());
+        assert!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None).await.is_some());
         assert!(history[0].content.contains("first question"));
         assert_eq!(history[0].content.matches(COMPACTED_MARK.trim()).count(), 1);
         assert_eq!(history[0].content.matches("The summary below covers the earlier conversation.").count(), 1);
@@ -1705,7 +1756,7 @@ mod tests {
         let mut history = running_turn(8);
         let before = history.clone();
         let (_, cut) = mid_turn_cut(&history).unwrap();
-        let saved = compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, memory, &archive).await;
+        let saved = compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, memory, &archive, None).await;
         assert!(saved.is_some_and(|n| n > 0));
         assert_eq!(history[0].role, flashagent_llm::Role::System);
         assert!(history[0].content.contains("Compacted Conversation History"));
@@ -1722,17 +1773,20 @@ mod tests {
 
         // Nothing to cut: untouched.
         let mut short = running_turn(2);
-        assert_eq!(compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut short, memory, &archive).await, None);
+        assert_eq!(compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut short, memory, &archive, None).await, None);
         assert_eq!(short.len(), 6);
     }
 
     #[tokio::test]
     async fn single_turn_history_is_already_compact() {
         let mut history = vec![ChatMessage::system("s"), ChatMessage::user("u"), ChatMessage::assistant("a")];
-        assert_eq!(compact_context(&offline_source(), &mut history, None, std::path::Path::new("unused.jsonl")).await, None);
+        assert_eq!(compact_context(&offline_source(), &mut history, None, std::path::Path::new("unused.jsonl"), None).await, None);
         assert_eq!(history.len(), 3);
     }
 
+    /// A `/compact` the person asked for is refused when the summary comes back
+    /// truncated: a reader would take it for the whole conversation, and they
+    /// asked for a summary they can trust.
     #[tokio::test]
     async fn failed_or_truncated_compaction_keeps_the_original_history() {
         let dir = tempfile::tempdir().unwrap();
@@ -1745,20 +1799,45 @@ mod tests {
         ];
         for reason in [flashagent_llm::FinishReason::Length, flashagent_llm::FinishReason::ToolUse] {
             let mut history = original.clone();
-            assert_eq!(compact_context(&ScriptedCompaction(reason), &mut history, None, &archive).await, None);
+            assert_eq!(compact_context(&ScriptedCompaction(reason), &mut history, None, &archive, None).await, None);
             assert_eq!(history.len(), original.len());
             assert_eq!(history[2].content, original[2].content);
         }
         let mut history = original.clone();
-        assert_eq!(compact_context(&offline_source(), &mut history, None, &archive).await, None);
+        assert_eq!(compact_context(&offline_source(), &mut history, None, &archive, None).await, None);
         assert_eq!(history[1].content, "important instruction");
         assert!(!archive.exists());
 
         let blocker = dir.path().join("not_a_directory");
         std::fs::write(&blocker, "file").unwrap();
         let mut history = original.clone();
-        assert_eq!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &blocker.join("archive.jsonl")).await, None);
+        assert_eq!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &blocker.join("archive.jsonl"), None).await, None);
         assert_eq!(history[2].content, original[2].content, "archive failure must not discard history");
+    }
+
+    /// A window that filled up mid-task is the other way round: refusing the
+    /// compaction leaves the model one step from the end of the window, so a
+    /// summary that was cut off is still better than none — as long as it says
+    /// out loud that it was.
+    #[tokio::test]
+    async fn a_window_forced_compaction_keeps_a_cut_summary_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("conversation.jsonl");
+        let before = running_turn(6);
+        let mut history = before.clone();
+        let saved = compact_running_turn(
+            &ScriptedCompaction(flashagent_llm::FinishReason::Length),
+            &mut history,
+            "",
+            &archive,
+            None,
+        )
+        .await;
+        assert!(saved.is_some(), "a cut summary still frees the window");
+        let summary = &history[0].content;
+        assert!(summary.contains("cut off at the output limit"), "and says what it is: {summary}");
+        assert!(summary.contains("1. Primary Request"), "keeping what it reached: {summary}");
+        assert!(history.len() < before.len(), "the window must actually be smaller: {} vs {}", history.len(), before.len());
     }
 
     /// The conversation must arrive exactly as the model saw it during the turn,
@@ -1779,7 +1858,7 @@ mod tests {
             ChatMessage::tool_result("c1", "tests passed"),
             ChatMessage::assistant("Tests pass. Next: check the release notes."),
         ];
-        let request = compaction_request(&conversation, None, None);
+        let request = compaction_request(&conversation, None, None, Detail::Brief);
 
         // The first four messages are the conversation, byte for byte: that is
         // the whole point, so the server's cache of it still applies.
@@ -1806,7 +1885,7 @@ mod tests {
             ChatMessage::tool_result("c1", "out"),
             ChatMessage::tool_result("c2", "out"),
         ];
-        let request = compaction_request(&conversation, None, None);
+        let request = compaction_request(&conversation, None, None, Detail::Brief);
         assert!(!request.iter().any(|m| m.role == flashagent_llm::Role::Tool), "a tool result was left hanging before a user message");
         assert_eq!(request.last().unwrap().role, flashagent_llm::Role::User);
     }
@@ -1814,7 +1893,7 @@ mod tests {
     /// What the user asked to be kept survives into the instruction.
     #[test]
     fn focus_instructions_reach_the_summariser() {
-        let request = compaction_request(&[ChatMessage::user("hi")], None, Some("keep the migration notes"));
+        let request = compaction_request(&[ChatMessage::user("hi")], None, Some("keep the migration notes"), Detail::Brief);
         assert!(request.last().unwrap().content.contains("keep the migration notes"));
     }
 
@@ -1823,6 +1902,53 @@ mod tests {
         assert!(!summary_has_handoff_state("Summary:\n1. Primary Request and Intent: do the work"));
         assert!(!summary_has_handoff_state("Summary:\n1. Goal\n7. Pending Tasks"));
         assert!(summary_has_handoff_state("Summary:\n1. Primary Request and Intent: do the work\n7. Pending Tasks: None\n8. Current Work: waiting for a new task"));
+    }
+
+    /// A window that filled up mid-task has to hand the model everything it
+    /// needs to finish, because the summary is its only memory of the work
+    /// already done.
+    #[test]
+    fn a_window_forced_summary_asks_for_everything_and_leads_with_the_state() {
+        let request = compaction_request(&[ChatMessage::user("do it")], None, None, Detail::Exhaustive);
+        let instruction = &request.last().unwrap().content;
+        assert!(instruction.contains("Keep everything"), "{instruction}");
+        assert!(instruction.contains("Length is not the problem"), "it must not be told to be brief: {instruction}");
+        assert!(instruction.contains("line numbers"), "detail is spelled out, not just requested: {instruction}");
+        assert!(instruction.contains("verbatim"), "errors are kept as they were: {instruction}");
+        // The state comes first, so a summary cut off at the output limit still
+        // says what was done and what is next.
+        let state_at = instruction.find(CURRENT_STATE).expect("no CURRENT STATE block");
+        let first_section = instruction.find("1. Primary Request").expect("no numbered sections");
+        assert!(state_at < first_section, "the state must come before the detail");
+        assert!(!instruction.contains("Drop repeated output and dead ends"), "brevity must not be asked for here");
+    }
+
+    /// A `/compact` the person asked for is a different thing: they are reading
+    /// along, and the archive is the way back to the rest.
+    #[test]
+    fn an_asked_for_summary_stays_short_and_points_at_the_archive() {
+        let request = compaction_request(&[ChatMessage::user("compact")], None, None, Detail::Brief);
+        let instruction = &request.last().unwrap().content;
+        assert!(instruction.contains("Drop repeated output and dead ends"), "{instruction}");
+        assert!(!instruction.contains("Keep everything"), "brevity is not forbidden for a summary a person asked for");
+    }
+
+    /// The detail a caller asks for is the detail that is requested, whichever
+    /// way round the two are passed.
+    #[test]
+    fn the_detail_asked_for_is_the_detail_requested() {
+        for (detail, keeps_everything) in [(Detail::Exhaustive, true), (Detail::Brief, false)] {
+            let request = compaction_request(&[ChatMessage::user("x")], None, None, detail);
+            let instruction = &request.last().unwrap().content;
+            assert_eq!(instruction.contains("Keep everything"), keeps_everything, "{detail:?}");
+        }
+    }
+
+    /// The state a cut-off summary still has to carry.
+    #[test]
+    fn a_summary_that_starts_with_the_state_is_accepted_however_short() {
+        assert!(summary_has_handoff_state("Summary:\nCURRENT STATE:\n- Done: the guard moved\n- Next: run the tests"));
+        assert!(!summary_has_handoff_state("Summary:\nI read some files and then the model stopped"));
     }
 
     #[test]
@@ -1869,6 +1995,20 @@ mod tests {
     }
 
     #[test]
+    fn a_preset_the_code_never_heard_of_still_reaches_the_request_verbatim() {
+        let cfg = AppConfig::default();
+        // Models invent levels: `xhigh`, `max`, `ultra`. The app must not need
+        // to know a name to be able to send it, or such levels are unusable.
+        for preset in ["xhigh", "max", "ultra", "gpt-5-thinking-high", "VeryLow"] {
+            let opts = build_turn_options(&cfg, preset);
+            assert_eq!(opts.custom_effort.as_deref(), Some(preset), "{preset} was rewritten or dropped");
+            // Unknown names keep the typed default so no fixed mapping guesses
+            // over the top of what the user asked for.
+            assert_eq!(opts.thinking, flashagent_llm::ThinkingEffort::Default, "{preset}");
+        }
+    }
+
+    #[test]
     fn default_effort_means_the_server_default_preset() {
         let cfg = AppConfig::default();
         assert_eq!(build_turn_options(&cfg, "default").thinking, flashagent_llm::ThinkingEffort::Default);
@@ -1881,7 +2021,7 @@ mod tests {
     #[test]
     fn opening_settings_never_persists_the_live_mode_as_default() {
         let persisted = AppConfig { permission_mode: PermissionMode::AcceptEdits, thinking_effort: "auto".into(), ..AppConfig::default() };
-        let view = settings_for_runtime(&persisted, PermissionMode::Bypass, "high", "m", &[], 131_072);
+        let view = settings_for_runtime(&persisted, PermissionMode::Bypass, "high", "m", &[], 131_072, flashagent_tui::settings::effort_choices_defaults());
         let saved = persisted_from_view(&view.config, &persisted, PermissionMode::Bypass, "high");
         assert_eq!(saved.permission_mode, PermissionMode::AcceptEdits);
         assert_eq!(saved.thinking_effort, "auto");
@@ -1894,7 +2034,7 @@ mod tests {
     #[test]
     fn settings_open_on_live_session_state() {
         let cfg = AppConfig { permission_mode: PermissionMode::AcceptEdits, thinking_effort: "auto".into(), ..AppConfig::default() };
-        let view = settings_for_runtime(&cfg, PermissionMode::Bypass, "high", "gemma", &[], 131_072);
+        let view = settings_for_runtime(&cfg, PermissionMode::Bypass, "high", "gemma", &[], 131_072, flashagent_tui::settings::effort_choices_defaults());
         assert_eq!(view.config.permission_mode, PermissionMode::Bypass);
         assert_eq!(view.config.thinking_effort, "high");
         assert_eq!(view.config.active_profile().model, "gemma");

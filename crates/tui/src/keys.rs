@@ -20,7 +20,19 @@ impl App {
         }
     }
 
-    /// /update: watch an update already under way in the background,
+    /// Keeps the chosen effort across a restart. Without this the level lived
+    /// only in the running session, and the next launch silently went back to
+    /// whatever the config last held, which looked like the setting not
+    /// applying at all.
+    pub(crate) fn save_live_effort(&mut self) {
+        if self.config.thinking_effort.eq_ignore_ascii_case(&self.current_effort) {
+            return;
+        }
+        self.config.thinking_effort = self.current_effort.clone();
+        self.save_config();
+    }
+
+    /// `/update: watch an update already under way in the background,
     /// or check, download and install in one go.
     /// /editor and Ctrl+X Ctrl+E.
     pub(crate) fn open_external_editor(&mut self) {
@@ -408,7 +420,7 @@ impl App {
                 self.renderer.request_reprint();
             }
             KeyCode::Tab if self.input.is_empty() && cx.gate.pending().is_none() => {
-                let view = self.runtime_settings(cx.perm.state().mode());
+                let view = self.runtime_settings(cx.perm.state().mode(), cx.source);
                 self.open_overlay(Overlay::Settings(Box::new(view)));
             }
             KeyCode::Tab if cx.gate.pending().is_some() => {

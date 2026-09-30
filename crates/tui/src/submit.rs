@@ -200,7 +200,7 @@ impl App {
             "goal" => self.start_goal(cx, arg),
             "skills" => self.list_skills(),
             "settings" | "config" => {
-                let view = self.runtime_settings(cx.perm.state().mode());
+                let view = self.runtime_settings(cx.perm.state().mode(), cx.source);
                 self.open_overlay(Overlay::Settings(Box::new(view)));
             }
             "whatsnew" | "changelog" => self.show_whatsnew(cx).await,
@@ -545,6 +545,7 @@ impl App {
             return;
         }
         self.current_effort = wanted;
+        self.save_live_effort();
         self.refresh_welcome(cx.source, cx.mascot_mood);
         self.notice(format!("Thinking effort set to: {}", self.current_effort));
     }
@@ -711,11 +712,12 @@ impl App {
         // The task owns the history until it is done; there is nothing to send
         // a turn with in the meantime, and a turn would have nothing to keep.
         let mut history = std::mem::take(&mut self.history);
+        let used = self.context_usage.total_used();
         let source = cx.source.clone();
         let focus = (!focus.is_empty()).then(|| focus.to_string());
         let tx = cx.tx.clone();
         tokio::spawn(async move {
-            let saved = compact_context(source.as_ref(), &mut history, focus.as_deref(), &archive).await;
+            let saved = compact_context(source.as_ref(), &mut history, focus.as_deref(), &archive, Some(used)).await;
             let _ = tx.send(UiEvent::Compacted { history, saved });
         });
     }

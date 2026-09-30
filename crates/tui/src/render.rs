@@ -11,6 +11,9 @@ pub(crate) fn color(kind: LineKind) -> crossterm::style::Color {
         LineKind::ToolError => crossterm::style::Color::Rgb { r: 230, g: 110, b: 95 },
         LineKind::Diff => crossterm::style::Color::Rgb { r: 145, g: 205, b: 140 },
         LineKind::System => crossterm::style::Color::Rgb { r: 225, g: 175, b: 95 },
+        // Between the tool colour and the reasoning grey: a child is work in
+        // progress, closer to a tool call than to something said.
+        LineKind::Subagent => crossterm::style::Color::Rgb { r: 150, g: 170, b: 195 },
     }
 }
 

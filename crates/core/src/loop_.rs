@@ -102,6 +102,10 @@ pub enum LoopEvent {
     Usage(flashagent_llm::Usage),
     /// The history was shortened between two steps, by roughly this many tokens.
     Compacted { saved: usize },
+    /// A running turn is about to spend a request on summarizing its own
+    /// history. It happens between two steps and takes long enough that the
+    /// silence would otherwise read as a hang; the turn goes on afterwards.
+    CompactionStarted,
     SteeringInjected(String),
     StepStarted {
         /// 1-based.
@@ -151,6 +155,13 @@ pub trait Compactor: Send + Sync {
     /// call has its answer. `prompt_tokens` is what the last request reported, if
     /// the server said. The history is not touched unless it returns `Saved`.
     async fn compact(&self, history: &mut Vec<ChatMessage>, prompt_tokens: Option<usize>) -> Compaction;
+
+    /// Whether [`Self::compact`] would summarize right now. Asked first, so the
+    /// app can say what it is about to do before the silence: deciding is
+    /// arithmetic over the same numbers, and nothing is spent on the answer.
+    fn will_compact(&self, _history: &[ChatMessage], _prompt_tokens: Option<usize>) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,7 +291,7 @@ impl AgentLoop {
 
             while let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
                 events(LoopEvent::SteeringInjected(steer_msg.clone()));
-                history.push(ChatMessage::user(steer_msg));
+                history.push(steer_as_message(steer_msg));
                 transient.clear();
                 continuing = false;
             }
@@ -289,6 +300,9 @@ impl AgentLoop {
             // between prompts. Not before the first request: a turn that has not
             // asked anything has nothing of its own to shorten.
             if let Some(compactor) = self.compactor.as_ref().filter(|_| step > 1 && step >= compact_not_before) {
+                if compactor.will_compact(&history, last_prompt_tokens) {
+                    events(LoopEvent::CompactionStarted);
+                }
                 let done = tokio::select! {
                     done = compactor.compact(&mut history, last_prompt_tokens) => done,
                     _ = wait_cancel(&self.cancel) => {
@@ -511,7 +525,7 @@ impl AgentLoop {
                 let mut had_steer = false;
                 while let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
                     events(LoopEvent::SteeringInjected(steer_msg.clone()));
-                    history.push(ChatMessage::user(steer_msg));
+                    history.push(steer_as_message(steer_msg));
                     had_steer = true;
                 }
                 if had_steer {
@@ -716,7 +730,7 @@ impl AgentLoop {
 
             while let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
                 events(LoopEvent::SteeringInjected(steer_msg.clone()));
-                history.push(ChatMessage::user(steer_msg));
+                history.push(steer_as_message(steer_msg));
             }
 
             if let Some(reason) = self.budget_spent(tokens_used, output_tokens, started) {
@@ -739,14 +753,32 @@ impl AgentLoop {
 const TOOL_PICTURE_OPENING: &str = "[Image opened by ";
 const TOOL_PICTURE_NOTE: &str = "it is the result of that call, not a new request.]";
 
+/// Steering reaches the model mid-work, and a bare directive reads as the newest
+/// and most urgent thing in the conversation: the model drops what it was doing
+/// and chases it. That is not what was asked. The order is the whole point, so
+/// it is stated in the message rather than left to be inferred — finish the call
+/// or the answer in flight first, then take this on.
+const STEER_QUEUE_NOTE: &str = "[This arrived while you were working. Finish what you are doing first: do not abandon a running call or a half-written answer to chase it. Once that is done, deal with this. If it contradicts what you are in the middle of, say where the conflict is instead of silently dropping either side.]";
+
+/// A steering message as the model should read it. A background notice keeps its
+/// own framing, which tells it apart from something the user said.
+fn steer_as_message(msg: String) -> ChatMessage {
+    if crate::task_notices::is_task_notice(&msg) {
+        return ChatMessage::user(msg);
+    }
+    ChatMessage::user(format!("{STEER_QUEUE_NOTE}\n{msg}"))
+}
+
 /// Something the user said, not the user-role message that carries a tool's
-/// picture, a background task's notice or a nudge from the loop: finding "the
-/// last prompt" must skip those, or Ctrl+R answers a picture and a rewind
-/// takes back a turn too many.
+/// picture, a background task's notice, a queued steering note or a nudge from
+/// the loop: finding "the last prompt" must skip those, or Ctrl+R answers a
+/// picture, a rewind takes back a turn too many, and compaction cuts the running
+/// turn at a directive instead of at the request that started it.
 pub fn is_prompt(msg: &ChatMessage) -> bool {
     let tool_picture = msg.content.starts_with(TOOL_PICTURE_OPENING) && msg.content.contains(TOOL_PICTURE_NOTE);
     let nudge = [STALL_NUDGE, PROMISE_NUDGE, CONTINUE_NUDGE, ERROR_NUDGE].contains(&msg.content.as_str()) || msg.content.starts_with(NAMED_NUDGE_HEAD);
-    msg.role == Role::User && !tool_picture && !nudge && !crate::task_notices::is_task_notice(&msg.content)
+    let steered = msg.content.starts_with(STEER_QUEUE_NOTE);
+    msg.role == Role::User && !tool_picture && !nudge && !steered && !crate::task_notices::is_task_notice(&msg.content)
 }
 
 /// 9 alphanumeric characters (Mistral chat templates insist on it), unique for
@@ -1753,6 +1785,10 @@ mod tests {
 
     #[async_trait]
     impl Compactor for ScriptedCompactor {
+        fn will_compact(&self, _history: &[ChatMessage], _prompt_tokens: Option<usize>) -> bool {
+            !self.answers.lock().unwrap().is_empty()
+        }
+
         async fn compact(&self, history: &mut Vec<ChatMessage>, prompt_tokens: Option<usize>) -> Compaction {
             self.asked.lock().unwrap().push((history.len(), prompt_tokens));
             let answer = {
@@ -1795,9 +1831,38 @@ mod tests {
         assert!(history.iter().any(|m| m.content == "Done."));
     }
 
+    /// Summarizing a running turn takes long enough that the silence would read
+    /// as a hang, so the app is told before the request is spent, and only when
+    /// there is really going to be one.
     #[test]
-    fn a_compaction_that_failed_is_not_asked_again_at_once() {
+    fn a_running_compaction_is_announced_before_it_starts_and_only_when_it_will_happen() {
         let compactor = Arc::new(ScriptedCompactor {
+            answers: std::sync::Mutex::new(vec![Compaction::NotNeeded, Compaction::Saved(9000)]),
+            asked: Default::default(),
+        });
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false))).with_compactor(compactor.clone());
+        let llm = RecordingLlm::new(vec![tool_turn("read_file", "c1"), tool_turn("read_file", "c2"), tool_turn("read_file", "c3"), text_turn("Done.")]);
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let (history, done) = run_loop(&l, &llm, &ScriptedTools::new(vec![]), move |e| {
+            sink.lock().unwrap().push(e);
+        });
+        assert!(matches!(done, DoneReason::Completed));
+        let events = events.lock().unwrap();
+        let saved_at = events.iter().position(|e| matches!(e, LoopEvent::Compacted { .. })).expect("a compaction happened");
+        let announced_at = events.iter().position(|e| matches!(e, LoopEvent::CompactionStarted));
+        assert!(announced_at.is_some(), "the wait has to be explained: {events:?}");
+        // Before the result, so the line is on screen while the request runs.
+        assert!(announced_at.unwrap() < saved_at, "{events:?}");
+        // And not on every step the compactor is merely consulted on.
+        let asked = compactor.asked.lock().unwrap();
+        let announced = events.iter().filter(|e| matches!(e, LoopEvent::CompactionStarted)).count();
+        assert!(announced < asked.len(), "announced {announced} times, asked {} times", asked.len());
+        assert!(history.iter().any(|m| m.content == "Done."));
+    }
+
+    #[test]
+    fn a_compaction_that_failed_is_not_asked_again_at_once() {        let compactor = Arc::new(ScriptedCompactor {
             answers: std::sync::Mutex::new(vec![Compaction::Failed]),
             asked: Default::default(),
         });
@@ -2559,7 +2624,7 @@ mod tests {
     }
 
     #[test]
-    fn test_steering_mid_stream_interrupts_and_pivots() {
+    fn test_steering_mid_stream_queues_behind_the_work_in_flight() {
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
         let steer_tx_clone = steer_tx.clone();
         let sent_steer = Arc::new(AtomicBool::new(false));
@@ -2615,9 +2680,32 @@ mod tests {
         assert_eq!(history[1].role, Role::Assistant);
         assert_eq!(history[1].content, "Starting to write code...");
         assert_eq!(history[2].role, Role::User);
-        assert_eq!(history[2].content, "Use postgres instead of sqlite");
+        assert!(
+            history[2].content.contains("Use postgres instead of sqlite") && history[2].content.contains(STEER_QUEUE_NOTE),
+            "the directive is told to wait its turn, not to derail: {}",
+            history[2].content
+        );
         assert_eq!(history[3].role, Role::Assistant);
         assert_eq!(history[3].content, "Understood, switching to postgres.");
+    }
+
+    #[test]
+    fn a_steering_message_tells_the_model_to_finish_before_it_pivots() {
+        let msg = steer_as_message("use postgres".to_string());
+        assert!(msg.content.contains(STEER_QUEUE_NOTE), "{}", msg.content);
+        assert!(msg.content.contains("use postgres"), "the directive itself survives: {}", msg.content);
+        assert!(msg.content.ends_with("use postgres"), "it goes last, where the model reads it: {}", msg.content);
+        // It is a queued note, not something the user said, so rewinding and
+        // Ctrl+R must still find the real last prompt before it.
+        assert!(!is_prompt(&msg), "a queued steering note is not the user's prompt");
+    }
+
+    #[test]
+    fn a_background_notice_keeps_its_own_framing() {
+        let notice = format!("{}{}{}", crate::task_notices::TASK_NOTICE_OPENING, "shell finished", crate::task_notices::TASK_NOTICE_NOTE);
+        let msg = steer_as_message(notice.clone());
+        assert_eq!(msg.content, notice, "a notice already says what it is; rewrapping hides that");
+        assert!(!is_prompt(&msg));
     }
 
     #[test]
@@ -2664,7 +2752,13 @@ mod tests {
         assert_eq!(history[2].role, Role::Tool);
         assert_eq!(history[2].tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(history[3].role, Role::User);
-        assert_eq!(history[3].content, "Do not run tests after that");
+        // Placed after the tool result, so the protocol still holds: a steering
+        // message never lands between a call and its result.
+        assert!(
+            history[3].content.contains("Do not run tests after that") && history[3].content.contains(STEER_QUEUE_NOTE),
+            "{}",
+            history[3].content
+        );
         assert_eq!(history[4].role, Role::Assistant);
         assert_eq!(history[4].content, "Action adjusted.");
     }
