@@ -1740,6 +1740,74 @@ mod tests {
         assert!(!records.iter().any(|m| m.content == "next"), "the active turn stays live");
     }
 
+    /// Answers with `first` on the first call and `second` after that, and
+    /// counts the calls, so a test can see whether a second ask was made.
+    struct TwoShapeSummaries {
+        first: &'static str,
+        second: &'static str,
+        calls: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmSource for TwoShapeSummaries {
+        async fn turn(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[flashagent_llm::ToolSpec],
+        ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            let text = if *calls == 1 { self.first } else { self.second };
+            let events = vec![
+                Ok(flashagent_llm::LlmEvent::TextDelta(text.into())),
+                Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    /// A conversation long enough to be worth compacting.
+    fn long_history() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage::system("SYSTEM PROMPT"),
+            ChatMessage::user("first question"),
+            ChatMessage::assistant("first answer".repeat(1000)),
+            ChatMessage::user("read a file"),
+            ChatMessage::assistant("here it is"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_summary_without_the_expected_shape_is_asked_for_once_more() {
+        // Seen live: a model that reads and answers well wrote a plain summary,
+        // sections 7 and 8 missing, and the window stayed full behind a message
+        // that said only that it had failed.
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let shapeless = "Summary:\nThe user asked a question and I answered it.";
+        let shaped = "Summary:\n1. Primary Request and Intent: the first question\n7. Pending Tasks: none\n8. Current Work: done";
+
+        let mut history = long_history();
+        let src = TwoShapeSummaries { first: shapeless, second: shaped, calls: std::sync::Mutex::new(0) };
+        assert!(compact_context(&src, &mut history, None, &archive, None).await.is_some(), "the second ask is taken");
+        assert_eq!(*src.calls.lock().unwrap(), 2, "and it is the last one");
+        assert!(history[0].content.contains("7. Pending Tasks: none"));
+
+        // Asked twice and refused twice is still a refusal: the rule is not
+        // relaxed, only the first answer is forgiven for its shape.
+        let mut history = long_history();
+        let src = TwoShapeSummaries { first: shapeless, second: shapeless, calls: std::sync::Mutex::new(0) };
+        assert!(compact_context(&src, &mut history, None, &archive, None).await.is_none());
+        assert_eq!(*src.calls.lock().unwrap(), 2, "no third ask");
+        assert_eq!(history[0].content, "SYSTEM PROMPT", "the conversation is untouched");
+
+        // A first answer that already has the shape is not asked for again.
+        let mut history = long_history();
+        let src = TwoShapeSummaries { first: shaped, second: shapeless, calls: std::sync::Mutex::new(0) };
+        assert!(compact_context(&src, &mut history, None, &archive, None).await.is_some());
+        assert_eq!(*src.calls.lock().unwrap(), 1);
+    }
+
     /// A prompt and `steps` tool-using steps: assistant call, then its result.
     fn running_turn(steps: usize) -> Vec<ChatMessage> {
         let mut history = vec![ChatMessage::system("SYSTEM PROMPT"), ChatMessage::user("fix the parser")];
@@ -1879,7 +1947,7 @@ mod tests {
             ChatMessage::tool_result("c1", "tests passed"),
             ChatMessage::assistant("Tests pass. Next: check the release notes."),
         ];
-        let request = compaction_request(&conversation, None, None, Detail::Brief);
+        let request = compaction_request(&conversation, None, None, Detail::Brief, false);
 
         // The first four messages are the conversation, byte for byte: that is
         // the whole point, so the server's cache of it still applies.
@@ -1906,7 +1974,7 @@ mod tests {
             ChatMessage::tool_result("c1", "out"),
             ChatMessage::tool_result("c2", "out"),
         ];
-        let request = compaction_request(&conversation, None, None, Detail::Brief);
+        let request = compaction_request(&conversation, None, None, Detail::Brief, false);
         assert!(!request.iter().any(|m| m.role == flashagent_llm::Role::Tool), "a tool result was left hanging before a user message");
         assert_eq!(request.last().unwrap().role, flashagent_llm::Role::User);
     }
@@ -1914,7 +1982,7 @@ mod tests {
     /// What the user asked to be kept survives into the instruction.
     #[test]
     fn focus_instructions_reach_the_summariser() {
-        let request = compaction_request(&[ChatMessage::user("hi")], None, Some("keep the migration notes"), Detail::Brief);
+        let request = compaction_request(&[ChatMessage::user("hi")], None, Some("keep the migration notes"), Detail::Brief, false);
         assert!(request.last().unwrap().content.contains("keep the migration notes"));
     }
 
@@ -1930,7 +1998,7 @@ mod tests {
     /// already done.
     #[test]
     fn a_window_forced_summary_asks_for_everything_and_leads_with_the_state() {
-        let request = compaction_request(&[ChatMessage::user("do it")], None, None, Detail::Exhaustive);
+        let request = compaction_request(&[ChatMessage::user("do it")], None, None, Detail::Exhaustive, false);
         let instruction = &request.last().unwrap().content;
         assert!(instruction.contains("Keep everything"), "{instruction}");
         assert!(instruction.contains("Length is not the problem"), "it must not be told to be brief: {instruction}");
@@ -1948,7 +2016,7 @@ mod tests {
     /// along, and the archive is the way back to the rest.
     #[test]
     fn an_asked_for_summary_stays_short_and_points_at_the_archive() {
-        let request = compaction_request(&[ChatMessage::user("compact")], None, None, Detail::Brief);
+        let request = compaction_request(&[ChatMessage::user("compact")], None, None, Detail::Brief, false);
         let instruction = &request.last().unwrap().content;
         assert!(instruction.contains("Drop repeated output and dead ends"), "{instruction}");
         assert!(!instruction.contains("Keep everything"), "brevity is not forbidden for a summary a person asked for");
@@ -1959,7 +2027,7 @@ mod tests {
     #[test]
     fn the_detail_asked_for_is_the_detail_requested() {
         for (detail, keeps_everything) in [(Detail::Exhaustive, true), (Detail::Brief, false)] {
-            let request = compaction_request(&[ChatMessage::user("x")], None, None, detail);
+            let request = compaction_request(&[ChatMessage::user("x")], None, None, detail, false);
             let instruction = &request.last().unwrap().content;
             assert_eq!(instruction.contains("Keep everything"), keeps_everything, "{detail:?}");
         }
