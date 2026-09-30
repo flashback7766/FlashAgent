@@ -1717,6 +1717,7 @@ mod tests {
             models,
             active_model: None,
             kind: flashagent_llm::thinking::ServerKind::LmStudio,
+            reachable_without_listing: false,
         });
 
         // Only the loaded model is kept.

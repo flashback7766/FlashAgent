@@ -534,7 +534,7 @@ mod tests {
 
     fn discovery(models: Vec<DiscoveredModel>, active: Option<&str>) -> ServerDiscovery {
         let active_model = active.and_then(|id| models.iter().find(|m| m.id == id).cloned());
-        ServerDiscovery { base_url: "http://x/v1".into(), models, active_model, kind: Default::default() }
+        ServerDiscovery { base_url: "http://x/v1".into(), models, active_model, kind: Default::default(), reachable_without_listing: false }
     }
 
     fn text(lines: &[RenderLine]) -> String {
