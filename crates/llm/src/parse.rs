@@ -1417,6 +1417,16 @@ mod tests {
         assert_eq!((u.prompt, u.cached), (Some(3515), Some(3500)));
         let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":2913,"completion_tokens":5}}"#);
         assert_eq!(u.cached, None);
+        // OpenRouter prices the turn itself, and only OpenRouter does: a local
+        // server says nothing, and nothing is invented for it.
+        let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"cost":0.00123}}"#);
+        assert!((u.cost.unwrap() - 0.00123).abs() < 1e-12, "{:?}", u.cost);
+        let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":2913,"completion_tokens":5}}"#);
+        assert_eq!(u.cost, None, "an unpriced backend is unknown, not free");
+        // A broken number must not reach the bill.
+        for bad in [r#"{"choices":[],"usage":{"cost":-1}}"#, r#"{"choices":[],"usage":{"cost":"lots"}}"#] {
+            assert_eq!(usage_of(bad).cost, None, "{bad}");
+        }
     }
 
     #[test]

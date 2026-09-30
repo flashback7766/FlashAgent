@@ -550,7 +550,7 @@ fn read_usage(meta: &Value) -> Option<Usage> {
         (answer, thoughts) => Some(answer.unwrap_or(0) + thoughts.unwrap_or(0)),
     };
     (prompt.is_some() || completion.is_some())
-        .then_some(Usage { prompt, completion, cached: count("cachedContentTokenCount"), mtp: None, cost: None })
+        .then_some(Usage { prompt, completion, cached: count("cachedContentTokenCount"), mtp: None, cost: None, cost: None })
 }
 
 fn error_message(error: &Value) -> String {
@@ -1211,7 +1211,7 @@ mod tests {
                 events,
                 vec![
                     LlmEvent::TextDelta("Hello".into()),
-                    LlmEvent::Usage(Usage { prompt: Some(5), completion: Some(1), cached: None, mtp: None }),
+                    LlmEvent::Usage(Usage { prompt: Some(5), completion: Some(1), cached: None, mtp: None, cost: None }),
                     LlmEvent::Done(FinishReason::Stop),
                 ]
             );

@@ -968,7 +968,7 @@ impl Decoder {
                 prompt: Some(t.input + t.written + t.read),
                 completion: Some(t.output),
                 cached: Some(t.read),
-                mtp: None,
+                mtp: None, cost: None,
                 // Anthropic prices per token, not per turn, and this is a stream:
                 // there is no account total to read here.
                 cost: None,
