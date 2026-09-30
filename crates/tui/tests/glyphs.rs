@@ -74,5 +74,9 @@ fn every_symbol_the_ui_draws_is_in_the_windows_console_fonts() {
         }
     }
     drawn_symbols(&root.join("../core/src/context_usage.rs"), &mut found);
+    // Tool glyphs live in the tools crate and are drawn into the same transcript.
+    // They went unchecked here, which is how a plan step could be marked with a
+    // character that renders as a box on half the terminals the app supports.
+    drawn_symbols(&root.join("../tools/src/plan_tool.rs"), &mut found);
     assert!(found.is_empty(), "shown as a box in Consolas or Cascadia Mono: {found:?}");
 }

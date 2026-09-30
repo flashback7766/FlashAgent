@@ -1,8 +1,9 @@
-//! `update_plan`: a checklist the model keeps during `/goal`, shown next to the
-//! goal's progress. Only in `/goal`; in ordinary chat the model would spend
-//! tokens narrating a plan nobody asked for.
+//! The model's own checklist for a long task, shown as it works. Available in
+//! ordinary chat as well as under `/goal`: the model decides whether a task
+//! deserves one, and it only spends tokens on a plan when it is genuinely doing
+//! several things in order.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -27,9 +28,11 @@ impl PlanStatus {
 
     pub fn glyph(self) -> char {
         match self {
-            Self::Pending => ' ',
-            Self::InProgress => '~',
-            Self::Completed => 'x',
+            // From the set the Windows-console font test checks, so a plan
+            // renders on every terminal the app claims to support.
+            Self::Pending => '·',
+            Self::InProgress => '▸',
+            Self::Completed => '√',
         }
     }
 }
@@ -74,11 +77,11 @@ pub fn parse_plan(args_json: &str) -> Option<Vec<PlanStep>> {
     had_field.then_some(steps)
 }
 
-/// Refuses itself outside `/goal`, as `ask_user` does inside it.
-pub fn run_update_plan(is_goal_mode: &Arc<AtomicBool>, args_json: &str) -> Result<String, ToolError> {
-    if !is_goal_mode.load(Ordering::Relaxed) {
-        return Err(ToolError::Other("update_plan is only available during an autonomous /goal run".into()));
-    }
+/// Records a plan. Available in ordinary chat as well as under `/goal`: a long
+/// task is a long task whether or not someone asked for autonomy, and refusing
+/// the call outside `/goal` meant a model that had planned the work silently had
+/// nowhere to show it.
+pub fn run_update_plan(_is_goal_mode: &Arc<AtomicBool>, args_json: &str) -> Result<String, ToolError> {
     let steps = parse_plan(args_json)
         .ok_or_else(|| ToolError::Other("update_plan needs `steps`: a list of {text, status}".into()))?;
     if steps.is_empty() {
@@ -94,10 +97,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn outside_goal_mode_the_tool_refuses_itself() {
+    fn the_plan_is_kept_outside_a_goal_run_too() {
+        // It used to refuse itself here, so a model that had planned a long task
+        // in ordinary chat had nowhere to put the plan.
         let flag = Arc::new(AtomicBool::new(false));
-        let err = run_update_plan(&flag, r#"{"steps":[{"text":"a"}]}"#).unwrap_err();
-        assert!(err.to_string().contains("only available during"), "{err}");
+        let msg = run_update_plan(&flag, r#"{"steps":[{"text":"a"}]}"#).unwrap();
+        assert!(msg.contains("Plan recorded"), "{msg}");
     }
 
     #[test]

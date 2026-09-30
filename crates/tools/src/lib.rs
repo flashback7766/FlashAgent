@@ -904,7 +904,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_plan_is_always_offered_and_only_works_during_a_goal_run() {
+    async fn update_plan_is_offered_and_works_in_ordinary_chat_as_well_as_a_goal() {
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
             toolset_profile: Some(ToolsetProfile::Auto),
@@ -912,10 +912,13 @@ mod tests {
         })
         .unwrap();
         let before = tools.specs();
+        // It used to refuse itself here, so a model that had planned a long
+        // task in ordinary chat had nowhere to show the plan.
         let out = tools
             .execute(&ToolCall { id: "t".into(), name: "update_plan".into(), args_json: r#"{"steps":[{"text":"a"}]}"#.into() })
             .await;
-        assert!(out.is_error, "must refuse itself outside /goal even if called");
+        assert!(!out.is_error, "a plan outside /goal must be kept: {}", out.content);
+        assert!(out.content.contains("1 step"), "{}", out.content);
 
         tools.set_goal_mode(true);
         let names = |specs: Vec<ToolSpec>| specs.into_iter().map(|s| s.name).collect::<Vec<_>>();
