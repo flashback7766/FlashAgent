@@ -11,6 +11,18 @@ impl BackendSource {
         self.0.discovery()
     }
 
+    /// Whether the server has answered at all, without copying what it answered
+    /// with. A cloud API's model list is around 750 KB, and the face in the
+    /// status line asks this on every tick and every delta the model streams.
+    pub(crate) fn has_discovery(&self) -> bool {
+        self.0.has_discovery()
+    }
+
+    /// The kind of server, read without the model list that sits beside it.
+    pub(crate) fn discovery_kind(&self) -> Option<flashagent_llm::thinking::ServerKind> {
+        self.0.discovery_kind()
+    }
+
     pub(crate) fn set_model(&self, model: impl Into<String>) {
         self.0.set_model(model);
     }
