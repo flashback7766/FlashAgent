@@ -56,6 +56,10 @@ pub(crate) struct FrameState<'a> {
     pub(crate) tokens_per_sec: Option<f64>,
     /// `draft 81%`: how much of a draft model's guessing the model kept.
     pub(crate) draft_acceptance: Option<&'a str>,
+    /// What the session has cost, only where the backend prices its turns. Absent
+    /// otherwise: a local model is not free, it is unpriced, and "$0.00" would
+    /// say the wrong thing confidently.
+    pub(crate) cost_display: Option<&'a str>,
     pub(crate) confirm_selection: ConfirmChoice,
     pub(crate) question_state: Option<&'a QuestionUiState>,
     pub(crate) custom_placeholder: Option<&'a str>,
@@ -343,6 +347,15 @@ fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>
     let mode_room = 2 + visible_width(st.mode.label()) + 2 + 1;
     let gauges = context_gauges(context_usage, st.context_reported, st.context_warn_threshold);
     let gauge_str = gauges.into_iter().find(|g| mode_room + visible_width(g) + 3 <= width).unwrap_or_default();
+    // What the session costs sits next to the context gauge, and goes before it
+    // when the window is narrow: the gauge is what stops a turn from fitting,
+    // the bill does not.
+    let gauge_str = match st.cost_display {
+        Some(cost) if mode_room + visible_width(cost) + 3 + visible_width(&gauge_str) <= width => {
+            format!("\x1b[38;2;135;215;165m{cost}\x1b[0m · {gauge_str}")
+        }
+        _ => gauge_str,
+    };
     let expand_status = if st.reasoning_expand.all {
         " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: all]\x1b[0m"
     } else if st.reasoning_expand.last {
@@ -1068,6 +1081,7 @@ impl App {
             autocomplete,
             &self.context_usage,
             FrameState {
+                cost_display: None,
                 input: &self.input,
                 provider: (self.config.active_profile().name.as_str(), self.current_model.as_str()),
                 history_search: self
