@@ -333,7 +333,13 @@ impl ThinkingProfile {
                     .or_else(|| named(&["on"]))
                     .unwrap_or(last / 3)
             }
-            TaskComplexity::Medium => named(&["medium", "standard"]).unwrap_or(last / 2),
+            TaskComplexity::Medium => {
+                // Never weaker than Low: a binary on/off model has no middle,
+                // and "medium" landing on "off" would turn thinking off for
+                // every ordinary request.
+                let floor = self.ladder_index(TaskComplexity::Low);
+                named(&["medium", "standard"]).unwrap_or(floor.max(last / 2))
+            }
             TaskComplexity::High => last,
         }
     }
@@ -1128,6 +1134,7 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ChatMessage;
 
     #[test]
     fn a_loaded_model_left_out_of_the_list_is_still_found() {
@@ -1738,5 +1745,28 @@ mod tests {
 
         assert_eq!(tiered_prof.resolve_dynamic_biased(&hello, 0), Some("low"));
         assert_eq!(tiered_prof.resolve_dynamic_biased(&code, 0), Some("high"));
+    }
+}
+
+#[cfg(test)]
+mod scratch_debug {
+    use super::*;
+    use crate::ChatMessage;
+    fn profile(presets: &[&str], default: &str) -> ThinkingProfile {
+        ThinkingProfile {
+            presets: presets.iter().map(|s| s.to_string()).collect(),
+            protocol: ThinkingProtocol::LmStudio,
+            supported: true,
+            default_preset: Some(default.to_string()),
+        }
+    }
+    #[test]
+    fn dbg_ladder() {
+        for p in [&["off", "on"][..], &["low", "medium", "high"][..]] {
+            let prof = profile(p, p[p.len() - 1]);
+            let msgs = vec![ChatMessage::user("Write a parser for this format in Rust")];
+            let c = ThinkingProfile::analyze_turn_complexity(&msgs);
+            println!("presets={p:?} complexity={c:?} idx={} resolved={:?}", prof.ladder_index(c), prof.resolve_dynamic_biased(&msgs, 0));
+        }
     }
 }
