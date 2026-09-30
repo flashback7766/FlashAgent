@@ -266,7 +266,13 @@ fn the_recap_waits_until_the_user_has_gone_quiet() {
     // visible so the test measures what the app received. The period is long
     // beside the pause between keys: a runner busy with other terminals can
     // take seconds to show one.
-    let term = Term::start_with_env(&home, &["-y"], COLS, ROWS, &[("FLASHAGENT_RECAP_IDLE_SECS", "8")]);
+    // The quiet period is generous because this file runs every scenario in
+    // parallel and each one starts a real binary in a pseudo-terminal: on a
+    // loaded runner the pauses in this test stretch too, and at eight seconds
+    // they crossed the quiet period, so the app — rightly — thought the user
+    // had stopped typing. Typing here has to outlast the period by a clear
+    // margin, and the pause between keys has to sit far inside it.
+    let term = Term::start_with_env(&home, &["-y"], COLS, ROWS, &[("FLASHAGENT_RECAP_IDLE_SECS", "20")]);
     term.wait_for(PROMPT, WAIT);
     let recaps = || server.requests().iter().filter(|r| !r.is_turn() && r.body.to_string().contains("conversation analyzer")).count();
 
@@ -275,20 +281,19 @@ fn the_recap_waits_until_the_user_has_gone_quiet() {
     // period: the model stays free for the next question. A Windows console
     // turns a paste into keys.
     //
-    // The pause between keys is fixed, and nothing waits for the screen in
-    // between: waiting for one character to appear can take longer than the
-    // whole quiet period on a busy runner, and then the app is right to think
-    // the user stopped typing. That is what failed this on Windows. All twenty
-    // are checked at the end instead, which still proves they arrived.
-    for count in 1..=20 {
-        if cfg!(unix) && count > 10 {
+    // The pause between keys is fixed and nothing waits for the screen in
+    // between: waiting for one character to appear is how the gap between two
+    // keys used to grow past the quiet period. All of them are checked at the
+    // end, which still proves the app received them.
+    for count in 1..=32 {
+        if cfg!(unix) && count > 16 {
             term.send("\x1b[200~z\x1b[201~");
         } else {
             term.send("z");
         }
         std::thread::sleep(Duration::from_millis(800));
     }
-    term.wait_for(&format!("› {}", "z".repeat(20)), WAIT);
+    term.wait_for(&format!("› {}", "z".repeat(32)), WAIT);
     assert_eq!(recaps(), 0, "the recap was asked for while the user was typing");
 
     term.send(ESC);
