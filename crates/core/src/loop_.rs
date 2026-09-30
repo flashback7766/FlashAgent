@@ -622,6 +622,17 @@ let mut report_nudges: usize = 0;
                 return Ok((history, DoneReason::Completed));
             }
 
+            // The model keeps working and never makes the call the request named.
+            // Told once, before the next round of calls leaves: a loop of the same
+            // read is what a stuck model does, and it costs a turn every time.
+            if report_nudges < 1 && !truncated {
+                if let Some(nudge) = unreported_call_nudge(&history, &specs) {
+                    report_nudges += 1;
+                    history.push(ChatMessage::user(nudge));
+                    continue;
+                }
+            }
+
             // Never run a call whose arguments may be cut short.
             if truncated {
                 for call in &calls {
@@ -861,6 +872,12 @@ pub(crate) fn unreported_call_nudge(history: &[ChatMessage], specs: &[ToolSpec])
     let start = history.iter().rposition(is_prompt)?;
     let called: HashSet<&str> = history[start..].iter().flat_map(|m| m.tool_calls.iter().map(|c| c.name.as_str())).collect();
     if called.is_empty() {
+        return None;
+    }
+    // Only once a result is actually in hand. Before the first result arrives
+    // the model has nothing to report from, and telling it to report would
+    // stop it making the very call it needs.
+    if !history[start..].iter().any(|m| m.role == Role::Tool) {
         return None;
     }
     let prompt = &history[start].content;
