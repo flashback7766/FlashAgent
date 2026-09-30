@@ -176,13 +176,17 @@ impl EffortMemory {
         }
         entry.score = entry.score.clamp(-1.0, 1.0);
         entry.samples = entry.samples.saturating_add(1);
-        // The baseline moves only on turns that were unremarkable, so a single
-        // slow outlier does not become the norm everything else is judged by.
-        if let Some(secs) = outcome.secs.filter(|s| *s > 0.0) {
-            entry.avg_secs = Some(match entry.avg_secs {
-                Some(avg) => avg + (secs as f64 - avg) * LEARNING_RATE as f64,
-                None => secs as f64,
-            });
+        // The baseline learns only from turns that raised no complaint. If
+        // every slow turn pulled the average up towards itself, the model would
+        // be excused from the very slowness being measured, and "slow" would
+        // mean nothing after a few turns.
+        if signal == 0.0 {
+            if let Some(secs) = outcome.secs.filter(|s| *s > 0.0) {
+                entry.avg_secs = Some(match entry.avg_secs {
+                    Some(avg) => avg + (secs as f64 - avg) * LEARNING_RATE as f64,
+                    None => secs as f64,
+                });
+            }
         }
         if outcome.completion_tokens > 0 {
             let t = outcome.completion_tokens as f64;
@@ -227,6 +231,97 @@ mod tests {
 
     fn ordinary_turn() -> TurnOutcome {
         TurnOutcome { reasoning_chars: 400, answer_chars: 900, tool_calls: 2, ..Default::default() }
+    }
+
+    /// A turn that went fine and took `secs`. Nothing about it is wrong: the
+    /// only thing to notice is that it was slow.
+    fn slow_but_right(secs: f32) -> TurnOutcome {
+        TurnOutcome {
+            reasoning_chars: 400,
+            answer_chars: 900,
+            tool_calls: 1,
+            secs: Some(secs),
+            completion_tokens: 900,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_turn_slower_than_this_models_own_usual_counts_as_overthinking() {
+        let mut mem = EffortMemory::default();
+        // Teach it what "normal" means for this model: four quick turns.
+        for _ in 0..4 {
+            mem.observe("m", &slow_but_right(2.0));
+        }
+        assert_eq!(mem.steps("m"), 0, "nothing to complain about yet");
+        // Now the same model takes four times as long and is still right.
+        for _ in 0..4 {
+            mem.observe("m", &slow_but_right(9.0));
+        }
+        assert_eq!(mem.steps("m"), -1, "right answer, four times the time: less thinking was needed");
+    }
+
+    #[test]
+    fn a_model_with_no_baseline_is_not_judged_on_time_yet() {
+        let mut mem = EffortMemory::default();
+        // The first turn of anything is slow because everything is cold: it
+        // must not immediately teach the model to think less.
+        for _ in 0..6 {
+            mem.observe("m", &slow_but_right(120.0));
+        }
+        assert_eq!(mem.steps("m"), 0, "one sample cannot be a baseline, and 120s may be the whole task");
+    }
+
+    #[test]
+    fn being_slow_for_yourself_depends_on_the_model_not_on_a_constant() {
+        // The same 20s turn is a triumph for a model whose usual is 1s and
+        // nothing at all for one whose usual is 30s.
+        let mut quick = EffortMemory::default();
+        for _ in 0..4 {
+            quick.observe("fast", &slow_but_right(1.0));
+        }
+        for _ in 0..4 {
+            quick.observe("fast", &slow_but_right(20.0));
+        }
+        assert_eq!(quick.steps("fast"), -1);
+
+        let mut slow = EffortMemory::default();
+        for _ in 0..4 {
+            slow.observe("slow", &slow_but_right(30.0));
+        }
+        for _ in 0..4 {
+            slow.observe("slow", &slow_but_right(20.0));
+        }
+        assert_eq!(slow.steps("slow"), 0, "faster than usual is not a complaint");
+    }
+
+    #[test]
+    fn a_failed_turn_outranks_a_slow_one() {
+        let mut mem = EffortMemory::default();
+        for _ in 0..4 {
+            mem.observe("m", &slow_but_right(2.0));
+        }
+        for _ in 0..4 {
+            let mut bad = slow_but_right(30.0);
+            bad.failed_tools = 1;
+            mem.observe("m", &bad);
+        }
+        assert_eq!(mem.steps("m"), 1, "a wrong answer costs more than a slow one");
+    }
+
+    #[test]
+    fn one_slow_outlier_does_not_become_the_baseline() {
+        let mut mem = EffortMemory::default();
+        for _ in 0..4 {
+            mem.observe("m", &slow_but_right(2.0));
+        }
+        // A single stall teaches the average, but not enough to call the next
+        // normal turn slow.
+        mem.observe("m", &slow_but_right(60.0));
+        for _ in 0..3 {
+            mem.observe("m", &slow_but_right(2.0));
+        }
+        assert_eq!(mem.steps("m"), 0, "the stall itself is what was learned from, not the turns after it");
     }
 
     #[test]

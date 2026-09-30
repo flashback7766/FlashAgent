@@ -1746,27 +1746,76 @@ mod tests {
         assert_eq!(tiered_prof.resolve_dynamic_biased(&hello, 0), Some("low"));
         assert_eq!(tiered_prof.resolve_dynamic_biased(&code, 0), Some("high"));
     }
-}
 
-#[cfg(test)]
-mod scratch_debug {
-    use super::*;
-    use crate::ChatMessage;
-    fn profile(presets: &[&str], default: &str) -> ThinkingProfile {
+    /// The model with seven levels, the shape OpenRouter reports today.
+    fn seven() -> ThinkingProfile {
         ThinkingProfile {
-            presets: presets.iter().map(|s| s.to_string()).collect(),
+            presets: ["none", "minimal", "low", "medium", "high", "xhigh", "max"].iter().map(|s| s.to_string()).collect(),
+            protocol: ThinkingProtocol::ReasoningEffort,
+            supported: true,
+            default_preset: Some("high".to_string()),
+        }
+    }
+
+    #[test]
+    fn every_level_a_model_offers_is_reachable_by_auto() {
+        let prof = seven();
+        let code = vec![ChatMessage::user("Fix compilation error in main.rs")];
+        // The deep end of the ladder, and the step either side of it.
+        assert_eq!(prof.resolve_dynamic_biased(&code, 0), Some("max"));
+        assert_eq!(prof.resolve_dynamic_biased(&code, -1), Some("xhigh"));
+        assert_eq!(prof.resolve_dynamic_biased(&code, 1), Some("max"), "+1 saturates, it never invents a level");
+        // And the shallow end: a greeting is not worth seven levels of thinking.
+        let hello = vec![ChatMessage::user("Hello")];
+        assert_eq!(prof.resolve_dynamic_biased(&hello, 0), Some("none"));
+        assert_eq!(prof.resolve_dynamic_biased(&hello, 1), Some("minimal"));
+    }
+
+    #[test]
+    fn the_ladder_only_ever_names_a_preset_the_model_actually_has() {
+        // A model with no level called "medium": the middle must land on a real
+        // preset, not on one that was wished for.
+        let odd = ThinkingProfile {
+            presets: vec!["off".to_string(), "low".to_string(), "high".to_string()],
+            protocol: ThinkingProtocol::ReasoningEffort,
+            supported: true,
+            default_preset: Some("low".to_string()),
+        };
+        for bias in -1..=1 {
+            for prompt in ["Hello", "Write a parser for this format in Rust", "Fix compilation error in main.rs"] {
+                let msgs = vec![ChatMessage::user(prompt)];
+                let got = odd.resolve_dynamic_biased(&msgs, bias);
+                assert!(got.is_some_and(|p| odd.presets.iter().any(|k| k == p)), "{prompt} bias {bias} -> {got:?}");
+            }
+        }
+        assert_eq!(odd.resolve_dynamic_biased(&[ChatMessage::user("Fix compilation error in main.rs")], 0), Some("high"));
+    }
+
+    #[test]
+    fn a_two_level_model_is_never_handled_a_middle_it_does_not_have() {
+        let binary = ThinkingProfile {
+            presets: vec!["off".to_string(), "on".to_string()],
             protocol: ThinkingProtocol::LmStudio,
             supported: true,
-            default_preset: Some(default.to_string()),
-        }
+            default_preset: Some("on".to_string()),
+        };
+        let ordinary = vec![ChatMessage::user("Write a parser function in Rust")];
+        assert_eq!(binary.resolve_dynamic_biased(&ordinary, 0), Some("on"), "an ordinary request must not turn thinking off");
+        let hello = vec![ChatMessage::user("Hello")];
+        assert_eq!(binary.resolve_dynamic_biased(&hello, 0), Some("off"), "but a greeting still may");
     }
+
     #[test]
-    fn dbg_ladder() {
-        for p in [&["off", "on"][..], &["low", "medium", "high"][..]] {
-            let prof = profile(p, p[p.len() - 1]);
-            let msgs = vec![ChatMessage::user("Write a parser for this format in Rust")];
-            let c = ThinkingProfile::analyze_turn_complexity(&msgs);
-            println!("presets={p:?} complexity={c:?} idx={} resolved={:?}", prof.ladder_index(c), prof.resolve_dynamic_biased(&msgs, 0));
+    fn a_model_with_one_level_never_falls_off_the_end() {
+        let single = ThinkingProfile {
+            presets: vec!["medium".to_string()],
+            protocol: ThinkingProtocol::ReasoningEffort,
+            supported: true,
+            default_preset: Some("medium".to_string()),
+        };
+        for bias in -1..=1 {
+            assert_eq!(single.resolve_dynamic_biased(&[ChatMessage::user("Fix compilation error in main.rs")], bias), Some("medium"));
         }
     }
 }
+
