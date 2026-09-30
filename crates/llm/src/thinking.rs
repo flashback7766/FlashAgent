@@ -1123,6 +1123,32 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 };
             }
         }
+
+        // OpenRouter names its levels under `reasoning`: which ones the model
+        // takes, and which it starts at. The list is the whole point -- a model
+        // offering `xhigh` and `max` had them dropped here and the app offered
+        // a ladder of three that stopped short of what the API would accept.
+        if let Some(reasoning) = m.get("reasoning").filter(|r| r.is_object()) {
+            let levels: Vec<String> = reasoning
+                .get("supported_efforts")
+                .or_else(|| reasoning.get("efforts"))
+                .or_else(|| reasoning.get("allowed_options"))
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_lowercase())).collect())
+                .unwrap_or_default();
+            if !levels.is_empty() {
+                thinking = ThinkingProfile {
+                    default_preset: reasoning
+                        .get("default_effort")
+                        .or_else(|| reasoning.get("default"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_lowercase()),
+                    presets: levels,
+                    protocol: ThinkingProtocol::ReasoningEffort,
+                    supported: true,
+                };
+            }
+        }
         supports_vision |= m
             .pointer("/architecture/input_modalities")
             .and_then(|v| v.as_array())
@@ -1146,6 +1172,57 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openrouters_own_list_of_efforts_is_read_rather_than_guessed_at() {
+        // The shape OpenRouter actually sends today. The app used to answer
+        // with a fixed low/medium/high, so `xhigh` and `max` were unreachable
+        // even though the server offered them and accepted them.
+        let listing = serde_json::json!({ "data": [{
+            "id": "stealth/space-bunny-alpha",
+            "supported_parameters": ["reasoning", "tools", "max_tokens"],
+            "reasoning": {
+                "mandatory": true,
+                "supported_efforts": ["max", "xhigh", "high", "medium", "low"],
+                "default_effort": "max"
+            }
+        }]});
+        let disc = parse_server_models(&listing);
+        let m = &disc[0];
+        assert_eq!(
+            m.thinking.presets,
+            vec!["max", "xhigh", "high", "medium", "low"],
+            "the server's own order, not ours"
+        );
+        assert_eq!(m.thinking.default_preset.as_deref(), Some("max"));
+        assert!(m.thinking.supported);
+        // And every one of them can be chosen.
+        for level in ["max", "xhigh", "high", "medium", "low"] {
+            assert!(m.thinking.presets.iter().any(|p| p == level), "{level} was dropped");
+        }
+    }
+
+    #[test]
+    fn a_model_that_reports_no_effort_list_still_claims_it_can_reason() {
+        // Nothing was said about which levels, so the conservative ladder is
+        // kept rather than inventing names the model may refuse.
+        let listing = serde_json::json!({ "data": [{
+            "id": "m",
+            "supported_parameters": ["reasoning", "tools"]
+        }]});
+        let disc = parse_server_models(&listing);
+        assert_eq!(disc[0].thinking.presets, vec!["low", "medium", "high"]);
+    }
+
+    #[test]
+    fn a_model_that_cannot_reason_at_all_is_left_alone() {
+        let listing = serde_json::json!({ "data": [{
+            "id": "m",
+            "supported_parameters": ["tools", "temperature"]
+        }]});
+        let disc = parse_server_models(&listing);
+        assert!(!disc[0].thinking.supported, "no reasoning field means no reasoning claimed");
+    }
 
     #[test]
     fn a_server_whose_model_list_was_too_slow_is_still_a_server_that_answered() {
