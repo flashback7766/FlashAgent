@@ -189,6 +189,7 @@ impl PrefillTracker {
         prompt_tokens: usize,
         cached_tokens: usize,
         elapsed: Duration,
+        nearby: bool,
     ) -> String {
         let (pred_dur, speed) = self.predict_ttft(model, prompt_tokens, cached_tokens);
         let eval_tokens = prompt_tokens.saturating_sub(cached_tokens).max(1);
@@ -215,13 +216,30 @@ impl PrefillTracker {
                 .map(|i| if i < filled { '•' } else { '·' })
                 .collect();
 
+            // How much of the prompt was left to read is not known yet: the server
+            // reports its cache only when the turn is over, so the token count and
+            // the speed on this line come from the previous turn's cache share. A
+            // nearby server is a machine whose rate holds, so its numbers are worth
+            // printing. A hosted one is a queue and a network — there the same two
+            // numbers would be an assumption wearing the clothes of a measurement,
+            // and only the estimate and the bar are left.
+            let detail = if nearby {
+                format!(" \x1b[38;2;140;150;170m({eval_str} @ {speed_str})\x1b[0m")
+            } else {
+                String::new()
+            };
             format!(
-                "\x1b[38;2;120;220;140mPrefill ~{:.1}s\x1b[0m \x1b[38;2;140;150;170m({eval_str} @ {speed_str})\x1b[0m \x1b[38;2;100;140;180m[{bar}]\x1b[0m",
+                "\x1b[38;2;120;220;140mPrefill ~{:.1}s\x1b[0m{detail} \x1b[38;2;100;140;180m[{bar}]\x1b[0m",
                 pred_secs
             )
         } else {
+            let detail = if nearby {
+                format!(" \x1b[38;2;140;150;170m({eval_str} @ {speed_str})...\x1b[0m")
+            } else {
+                String::new()
+            };
             format!(
-                "\x1b[38;2;225;175;95mPrefill {:.1}s\x1b[0m \x1b[38;2;140;150;170m({eval_str} @ {speed_str})...\x1b[0m",
+                "\x1b[38;2;225;175;95mPrefill {:.1}s\x1b[0m{detail}",
                 elapsed_secs
             )
         }
@@ -265,12 +283,20 @@ mod tests {
     }
 
     #[test]
-    fn the_live_prefill_line_says_time_and_speed() {
+    fn a_nearby_server_shows_the_read_speed_and_a_hosted_one_does_not() {
         let mut tracker = PrefillTracker::default();
         tracker.record("test-model", 4000, 0, Duration::from_secs_f64(2.0));
 
-        let live = tracker.format_live_prefill("test-model", 4000, 0, Duration::from_secs_f64(0.8));
-        assert!(live.contains("Prefill"));
-        assert!(live.contains("4.0k @"));
+        let local = tracker.format_live_prefill("test-model", 4000, 0, Duration::from_secs_f64(0.8), true);
+        assert!(local.contains("Prefill"));
+        assert!(local.contains("4.0k @"), "a local server's rate is worth printing: {local}");
+
+        // The same line for a hosted API: the speed and the token count both come
+        // from the previous turn's cache share, so only the estimate and the bar.
+        let cloud = tracker.format_live_prefill("test-model", 4000, 0, Duration::from_secs_f64(0.8), false);
+        assert!(cloud.contains("Prefill"));
+        assert!(cloud.contains('•') || cloud.contains('·'), "the bar is what is left: {cloud}");
+        assert!(!cloud.contains("t/s"), "a hosted rate was printed: {cloud}");
+        assert!(!cloud.contains("4.0k"), "a hosted token count was printed: {cloud}");
     }
 }

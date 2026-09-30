@@ -143,16 +143,25 @@ impl TokenTracker {
         sum as f64 / dt
     }
 
-    pub(crate) fn live_prefill_status(&self) -> Option<String> {
+    pub(crate) fn live_prefill_status(&self, nearby: bool) -> Option<String> {
         if self.is_running && self.first_token_time.is_none() {
             let start = self.turn_start_time?;
             let elapsed = start.elapsed();
             let prompt = self.prompt_tokens.unwrap_or(500);
             let cached = (self.last_f_keep.unwrap_or(0.0) * prompt as f64) as usize;
-            Some(self.prefill_tracker.format_live_prefill(&self.model, prompt, cached, elapsed))
+            Some(self.prefill_tracker.format_live_prefill(&self.model, prompt, cached, elapsed, nearby))
         } else {
             None
         }
+    }
+
+    /// The share of the prompt the server read from its cache, which it reports
+    /// only once the turn is over. Nothing is said on a turn with no hit: on the
+    /// first message there is nothing to have cached, and a 0% would read as a
+    /// fault rather than as the first line of a conversation.
+    pub(crate) fn cache_display(&self) -> Option<String> {
+        let share = self.last_f_keep.filter(|s| *s > 0.0)?;
+        Some(format!("\x1b[38;2;175;170;225mcache {:.0}%\x1b[0m", share * 100.0))
     }
 
     /// E.g. `draft 81%`, while a turn runs on a server that reports it.

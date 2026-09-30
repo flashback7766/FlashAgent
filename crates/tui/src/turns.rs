@@ -94,6 +94,9 @@ impl App {
         self.suggested_prompt = None;
         self.custom_placeholder = None;
         self.running = true;
+        // A warm-up still in flight would prefill the same prefix the turn is
+        // about to prefill; on a one-slot server that is the wait doubled.
+        self.cancel_warm_prompt_cache();
         self.turn_phase = TurnPhase::Waiting;
         self.turn_started = Some(std::time::Instant::now());
         self.token_tracker.on_turn_start(self.current_model.clone(), self.context_usage.total_used());

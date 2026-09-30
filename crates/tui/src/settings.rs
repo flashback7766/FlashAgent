@@ -174,7 +174,7 @@ impl SettingsView {
         SettingsTab::Aesthetics => vec![
             ("Swift mascot", if self.config.show_mascot { "Enabled (animated)".into() } else { "Disabled".into() }),
             ("Developer tips", if self.config.show_tips { "Enabled (rotating deck)".into() } else { "Disabled".into() }),
-            ("Prefill speed", if self.config.show_ttft { "Enabled (TTFT and t/s after a turn starts)".into() } else { "Disabled".into() }),
+            ("Prefill / cache", if self.config.show_ttft { "Enabled (TTFT and t/s on a local server, cache share on a hosted API)".into() } else { "Disabled".into() }),
             ("Generation speed", if self.config.show_tokens { "Enabled (t/s while the model writes)".into() } else { "Disabled".into() }),
             ("Clipboard toasts", if self.config.show_toasts { "Enabled".into() } else { "Disabled".into() }),
             ("Animations", if self.config.animations { "Enabled (sweeps, pulses, unfolding panels)".into() } else { "Reduced (spinners only)".into() }),

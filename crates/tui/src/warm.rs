@@ -33,8 +33,10 @@ pub(crate) fn warm_messages(history: &[ChatMessage], prelude: &[ChatMessage], me
 
 /// A model server on this machine or the local network. Anthropic and Gemini
 /// are never local; an OpenAI-compatible server is local by what it runs
-/// (LM Studio, llama.cpp) or by its address (vLLM on a LAN box).
-pub(crate) fn worth_warming(endpoint: &flashagent_llm::Endpoint, kind: Option<flashagent_llm::thinking::ServerKind>) -> bool {
+/// (LM Studio, llama.cpp) or by its address (vLLM on a LAN box). The same
+/// question decides both what is worth warming and what the status line can
+/// honestly claim about a time to first token.
+pub(crate) fn nearby_server(endpoint: &flashagent_llm::Endpoint, kind: Option<flashagent_llm::thinking::ServerKind>) -> bool {
     use flashagent_llm::ApiProtocol;
     let local_address = || flashagent_core::url_host(&endpoint.url).is_some_and(|host| flashagent_core::is_local_host(&host));
     match endpoint.protocol {
@@ -65,6 +67,16 @@ fn prefix_key(server: &str, model: &str, messages: &[ChatMessage], specs: &[flas
     h.finish()
 }
 
+/// Drops a warm-up that is still in flight. A turn about to start reads this
+/// same prefix itself, so a warm-up running alongside it is not a head start: on
+/// a server with one slot it queues a second prefill in front of the one the
+/// user is waiting for, and the wait is two prefills long.
+fn abort_warm_task(warm: &mut Option<(u64, tokio::task::JoinHandle<bool>)>) {
+    if let Some((_, task)) = warm.take() {
+        task.abort();
+    }
+}
+
 impl App {
     fn warm_key(&self, server: &str, perm: &'static PermissionedTools, memory_block: &str) -> (u64, Vec<ChatMessage>, Vec<flashagent_llm::ToolSpec>) {
         let messages = warm_messages(&self.history, &self.config.personality.voice_prelude(), memory_block);
@@ -74,7 +86,7 @@ impl App {
 
     /// Skipped when already sent or a turn has just read it.
     pub(crate) fn warm_prompt_cache(&mut self, source: &Arc<BackendSource>, perm: &'static PermissionedTools, memory_block: &str) {
-        if self.running || self.current_model.is_empty() || !worth_warming(&source.0.endpoint(), source.discovery().map(|d| d.kind)) {
+        if self.running || self.current_model.is_empty() || !nearby_server(&source.0.endpoint(), source.discovery().map(|d| d.kind)) {
             return;
         }
         if let Some((_, task)) = self.warm_task.as_mut() {
@@ -117,6 +129,12 @@ impl App {
         ));
     }
 
+    /// A turn reads the prefix anyway; warming it first just costs a second
+    /// prefill.
+    pub(crate) fn cancel_warm_prompt_cache(&mut self) {
+        abort_warm_task(&mut self.warm_task);
+    }
+
     /// The next request's prefix is already cached after a turn.
     pub(crate) fn note_prompt_cached(&mut self, source: &BackendSource, perm: &'static PermissionedTools, memory_block: &str) {
         self.cache_warm_key = Some(self.warm_key(&source.0.base_url(), perm, memory_block).0);
@@ -127,10 +145,35 @@ impl App {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_warm_up_in_flight_is_dropped_when_the_turn_starts() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut warm: Option<(u64, tokio::task::JoinHandle<bool>)> = Some((
+            7,
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let _ = tx.send(());
+                true
+            }),
+        ));
+        abort_warm_task(&mut warm);
+        assert!(warm.is_none(), "the task handle was left behind");
+        // What matters is the second prefill stopping, not a handle being dropped:
+        // a task that ran to its end would have sent on the channel before it closed.
+        assert!(rx.await.is_err(), "the warm-up finished its prefill after the turn started");
+    }
+
+    #[test]
+    fn dropping_a_warm_up_with_nothing_running_is_harmless() {
+        let mut warm: Option<(u64, tokio::task::JoinHandle<bool>)> = None;
+        abort_warm_task(&mut warm);
+        assert!(warm.is_none());
+    }
+
     #[test]
     fn only_a_server_nearby_is_warmed() {
         use flashagent_llm::{ApiProtocol, Endpoint};
-        let warm = |protocol, url: &str| worth_warming(&Endpoint::new(protocol, url, None), None);
+        let warm = |protocol, url: &str| nearby_server(&Endpoint::new(protocol, url, None), None);
         assert!(warm(ApiProtocol::OpenAi, "http://localhost:1234/v1"));
         assert!(warm(ApiProtocol::OpenAi, "http://192.168.1.20:8000/v1"), "vLLM on a LAN box");
         assert!(warm(ApiProtocol::Ollama, "http://gpu-box:11434"));
@@ -138,7 +181,7 @@ mod tests {
         assert!(!warm(ApiProtocol::Anthropic, "https://api.anthropic.com"));
         assert!(!warm(ApiProtocol::Gemini, "http://localhost:8080"), "a tunnel to Google is still Google");
         let tunnelled = Endpoint::new(ApiProtocol::OpenAi, "https://llm.example.com/v1", None);
-        assert!(worth_warming(&tunnelled, Some(flashagent_llm::thinking::ServerKind::LmStudio)), "LM Studio behind a proxy caches all the same");
+        assert!(nearby_server(&tunnelled, Some(flashagent_llm::thinking::ServerKind::LmStudio)), "LM Studio behind a proxy caches all the same");
     }
 
     #[test]
