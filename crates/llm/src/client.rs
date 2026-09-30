@@ -501,6 +501,7 @@ mod tests {
         assert_eq!(llm.discovery_kind(), llm.discovery().map(|d| d.kind));
 
         *llm.discovery.write() = Some(crate::thinking::ServerDiscovery {
+            reachable_without_listing: false,
             base_url: "http://localhost:1234/v1".into(),
             models: Vec::new(),
             active_model: None,
