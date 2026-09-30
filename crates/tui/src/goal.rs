@@ -117,6 +117,9 @@ pub struct GoalLedger {
     tool_failures: Vec<String>,
     open_calls: Vec<OpenToolCall>,
     plan: Vec<flashagent_tools::plan_tool::PlanStep>,
+    /// What the run cost, only where the backend priced its turns. The run is
+    /// measured from its own events, never from the model's account.
+    cost: flashagent_core::CostLedger,
 }
 
 impl GoalLedger {
@@ -134,7 +137,13 @@ impl GoalLedger {
             tool_failures: Vec::new(),
             open_calls: Vec::new(),
             plan: Vec::new(),
+            cost: flashagent_core::CostLedger::default(),
         }
+    }
+
+    /// A turn the backend priced. Nothing is claimed for a backend that did not.
+    pub fn record_cost(&mut self, provider: &str, cost: Option<f64>) {
+        self.cost.record(provider, cost);
     }
 
     /// 0 before the first turn.
@@ -255,6 +264,12 @@ impl GoalLedger {
             human_count(self.output_tokens),
             human_duration(self.elapsed())
         ));
+        // The bill, when there is one. Absent for a local backend: an unpriced
+        // run is not a free one, and a fabricated $0.00 would be worse than
+        // saying nothing.
+        if let Some(total) = self.cost.total() {
+            out.push(format!("Cost: ${} over {} priced turns", flashagent_core::CostLedger::format_amount(total), self.cost.priced_turns()));
+        }
 
         let touched = self.written.len() + self.edited.len();
         if touched == 0 {
