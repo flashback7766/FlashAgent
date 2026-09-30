@@ -264,7 +264,7 @@ impl Decoder {
             let count = |key: &str| v.get(key).and_then(Value::as_i64);
             let (prompt, completion) = (count("prompt_eval_count"), count("eval_count"));
             if prompt.is_some() || completion.is_some() {
-                out.push(Ok(LlmEvent::Usage(Usage { prompt, completion, cached: count("prompt_eval_cached_count"), mtp: None, cost: None, cost: None })));
+                out.push(Ok(LlmEvent::Usage(Usage { prompt, completion, cached: count("prompt_eval_cached_count"), mtp: None, cost: None })));
             }
             let reason = if self.calls > 0 {
                 FinishReason::ToolUse
