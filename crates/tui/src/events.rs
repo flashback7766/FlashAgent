@@ -110,7 +110,7 @@ impl App {
     /// a look got no answer, not merely because it is slow: a cloud API's
     /// model list can take longer than a few seconds, and was reported down.
     pub(crate) fn server_mood(&self, source: &BackendSource, started_at: std::time::Instant) -> MascotMood {
-        server_mood(self.provider_switch.is_some(), source.discovery().is_some(), self.server_silent, started_at.elapsed())
+        server_mood(self.provider_switch.is_some(), source.has_discovery(), self.server_silent, started_at.elapsed())
     }
 
     /// An unreachable server is announced once, and taken back when it answers.

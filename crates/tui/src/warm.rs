@@ -86,7 +86,7 @@ impl App {
 
     /// Skipped when already sent or a turn has just read it.
     pub(crate) fn warm_prompt_cache(&mut self, source: &Arc<BackendSource>, perm: &'static PermissionedTools, memory_block: &str) {
-        if self.running || self.current_model.is_empty() || !nearby_server(&source.0.endpoint(), source.discovery().map(|d| d.kind)) {
+        if self.running || self.current_model.is_empty() || !nearby_server(&source.0.endpoint(), source.discovery_kind()) {
             return;
         }
         if let Some((_, task)) = self.warm_task.as_mut() {

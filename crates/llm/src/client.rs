@@ -202,6 +202,18 @@ impl Client {
         self.discovery.read().clone()
     }
 
+    /// Whether a discovery has been recorded, without the copy `discovery`
+    /// makes: the model list is large on a cloud API, and callers that only want
+    /// to know whether the server answered ask it many times a second.
+    pub fn has_discovery(&self) -> bool {
+        self.discovery.read().is_some()
+    }
+
+    /// Only the kind of server, read without copying the model list beside it.
+    pub fn discovery_kind(&self) -> Option<crate::thinking::ServerKind> {
+        self.discovery.read().as_ref().map(|d| d.kind)
+    }
+
     /// Also checks `active_model`: some servers do not list the loaded model in
     /// `models`, and without the fallback no profile was adopted.
     pub fn adopt_discovery(&self, disc: &ServerDiscovery) {
@@ -465,6 +477,28 @@ mod tests {
 
     fn client(model: &str) -> Client {
         Client::new(Endpoint::new(ApiProtocol::OpenAi, "http://localhost:1234/v1", None), model)
+    }
+
+    #[test]
+    fn the_cheap_reads_agree_with_the_copying_one() {
+        // The status line asks these many times a second, and `discovery` copies
+        // a model list that is around 750 KB on a cloud API. They must not drift
+        // apart from what they stand in for.
+        let llm = client("m");
+        assert!(!llm.has_discovery());
+        assert_eq!(llm.discovery_kind(), None);
+        assert_eq!(llm.discovery_kind(), llm.discovery().map(|d| d.kind));
+
+        *llm.discovery.write() = Some(crate::thinking::ServerDiscovery {
+            base_url: "http://localhost:1234/v1".into(),
+            models: Vec::new(),
+            active_model: None,
+            kind: crate::thinking::ServerKind::LmStudio,
+        });
+        assert!(llm.has_discovery());
+        assert_eq!(llm.has_discovery(), llm.discovery().is_some());
+        assert_eq!(llm.discovery_kind(), Some(crate::thinking::ServerKind::LmStudio));
+        assert_eq!(llm.discovery_kind(), llm.discovery().map(|d| d.kind));
     }
 
     #[test]

@@ -1045,7 +1045,7 @@ impl App {
         // A model server on this machine or the local network: a time to first
         // token is about its hardware there, and about a queue and a network on a
         // hosted API.
-        let nearby_server = crate::warm::nearby_server(&cx.source.0.endpoint(), cx.source.discovery().map(|d| d.kind));
+        let nearby_server = crate::warm::nearby_server(&cx.source.0.endpoint(), cx.source.discovery_kind());
         // An estimate of reading the prompt means nothing while no server answers.
         let live_prefill = self
             .token_tracker
