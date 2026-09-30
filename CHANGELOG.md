@@ -1,6 +1,6 @@
 # Changelog
 
-## b470 — the counters stop guessing, and compaction stops waiting
+## b471 — the counters stop guessing, and compaction stops waiting
 
 - **A changed file is counted by the file.** Adding one line under its neighbour used to be reported as `+2 -1`, because the size came from the text the model sent: it asked to put two lines where one was, so one line read as a deletion too. The diff the approval card already showed is now what the header and the finished card count, and a line that was only added is not also printed as `-0`.
 - **A tokenizer that cannot load no longer stops the app.** The count in the status line is an estimate the server corrects with its own usage, and it panicked when the BPE table could not be read. This was the last unwrap in the project that nothing checked.
