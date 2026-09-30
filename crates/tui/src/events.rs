@@ -507,6 +507,9 @@ impl App {
             }
             LoopEvent::Usage(u) => {
                 self.token_tracker.on_usage(u);
+                // Only what the server priced. A local backend reports nothing,
+                // and the ledger stays silent rather than inventing a bill.
+                self.cost.record(&self.config.active_profile().name, u.cost);
             }
             // A running turn is about to summarize itself. This one is said in
             // the transcript, not the status line: nothing streams for the half
