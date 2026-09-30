@@ -548,6 +548,50 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_level_the_model_does_not_have_is_not_sent_as_it_stands() {
+        // Seen live: the setting said xhigh, the model listed
+        // [high, medium, low, minimal, none], and the request still carried
+        // xhigh — the gateway either drops it or refuses it, and the setting
+        // reads as applied while nothing is thinking.
+        let llm = client("m").with_profile(ThinkingProfile {
+            presets: vec!["none".into(), "minimal".into(), "low".into(), "medium".into(), "high".into()],
+            protocol: crate::thinking::ThinkingProtocol::Anthropic,
+            supported: true,
+            default_preset: Some("high".into()),
+        });
+        let asked = |effort: &str, thinking: ThinkingEffort| {
+            llm.resolve_effort(
+                &[ChatMessage::user("hi")],
+                &TurnOptions { thinking, custom_effort: Some(effort.into()), ..Default::default() },
+            )
+        };
+        // xhigh is above everything this model has, so its own default is the
+        // honest answer.
+        assert_eq!(asked("xhigh", ThinkingEffort::Default).as_deref(), Some("high"));
+        // A level it does have is passed through untouched.
+        assert_eq!(asked("medium", ThinkingEffort::Medium).as_deref(), Some("medium"));
+        // "none" is a real level here, so the stall retry keeps working.
+        assert_eq!(asked("none", ThinkingEffort::Off).as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn a_level_the_server_never_described_is_still_sent_as_it_stands() {
+        // Nothing is known about this model's presets, so guessing a ladder
+        // would replace a working setting with a worse one.
+        let llm = client("m").with_profile(ThinkingProfile::unreported());
+        assert_eq!(
+            llm.resolve_effort(&[ChatMessage::user("hi")], &TurnOptions { custom_effort: Some("xhigh".into()), ..Default::default() }).as_deref(),
+            Some("xhigh")
+        );
+        let none = client("m").with_profile(ThinkingProfile::unsupported());
+        assert_eq!(
+            none.resolve_effort(&[ChatMessage::user("hi")], &TurnOptions { custom_effort: Some("xhigh".into()), ..Default::default() }).as_deref(),
+            Some("xhigh"),
+            "a model that cannot think still has its setting passed through unchanged"
+        );
+    }
+
+    #[test]
     fn the_learned_effort_correction_is_never_more_than_one_step() {
         // Clamped, so a bad streak cannot pin the model at "off".
         let llm = client("m");
