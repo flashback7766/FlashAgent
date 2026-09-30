@@ -550,7 +550,7 @@ fn read_usage(meta: &Value) -> Option<Usage> {
         (answer, thoughts) => Some(answer.unwrap_or(0) + thoughts.unwrap_or(0)),
     };
     (prompt.is_some() || completion.is_some())
-        .then_some(Usage { prompt, completion, cached: count("cachedContentTokenCount"), mtp: None, cost: None, cost: None })
+        .then_some(Usage { prompt, completion, cached: count("cachedContentTokenCount"), mtp: None, cost: None })
 }
 
 fn error_message(error: &Value) -> String {
@@ -1057,7 +1057,7 @@ mod tests {
             }),
         ]);
         let usages: Vec<Usage> = ok_events(decode(&[&stream])).into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
-        assert_eq!(usages, vec![Usage { prompt: Some(100), completion: Some(50), cached: Some(64), mtp: None }]);
+        assert_eq!(usages, vec![Usage { prompt: Some(100), completion: Some(50), cached: Some(64), mtp: None, cost: None }]);
     }
 
     #[test]
