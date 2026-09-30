@@ -137,7 +137,10 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
 }
 
 impl ChatView {
-    pub(crate) fn tool_started(&mut self, name: &str, args_json: &str) {
+    /// `diff` is the real change to the files, computed once when the call
+    /// starts: after it runs, the edits no longer apply, so it cannot be
+    /// recovered later.
+    pub fn tool_started(&mut self, name: &str, args_json: &str, diff: Option<String>) {
         self.streaming = None;
         // Taken either way: left over, it would time the next thought from here.
         let started = self.reasoning_start.take();
@@ -160,7 +163,7 @@ impl ChatView {
             .map(format_cmd);
 
         match header {
-            Some(header) => self.header_card(name, args_json, &parsed, &header),
+            Some(header) => self.header_card(name, args_json, &parsed, &header, diff.as_deref()),
             None => match name {
                 "run_shell" => self.shell_card(args_json, &parsed),
                 "read_file" | "list_dir" | "glob" | "grep" => self.explore_card(name, args_json, &parsed),
@@ -174,6 +177,15 @@ impl ChatView {
             },
         }
 
+        // Counted before the text is cut, so the numbers do not change with it.
+        let (added, deleted, diff) = match diff.as_deref() {
+            Some(text) => {
+                let (added, deleted, kept) = crate::stored_change(text);
+                (added, deleted, Some(kept))
+            }
+            None => (0, 0, None),
+        };
+
         if let Some(last_line) = self.lines.last_mut() {
             last_line.tool_calls.push(ToolCallRecord {
                 name: name.to_string(),
@@ -181,6 +193,9 @@ impl ChatView {
                 result: None,
                 is_error: false,
                 is_running: true,
+                added,
+                deleted,
+                diff,
             });
         }
     }
@@ -220,9 +235,9 @@ impl ChatView {
         true
     }
 
-    fn header_card(&mut self, name: &str, args_json: &str, parsed: &serde_json::Value, header: &str) {
+    fn header_card(&mut self, name: &str, args_json: &str, parsed: &serde_json::Value, header: &str, diff: Option<&str>) {
         // The header is the intent; the suffix ("parser.rs +3 -1") is what happened.
-        let facts = call_facts(name, parsed)
+        let facts = call_facts(name, parsed, diff)
             // When the header already names the file, only the change size is added.
             .and_then(|f| {
                 let said = |part: &str| header.to_lowercase().contains(&part.to_lowercase());
@@ -589,7 +604,7 @@ mod tests {
 
     fn started(name: &str, args: &str) -> ChatView {
         let mut chat = ChatView::default();
-        chat.tool_started(name, args);
+        chat.tool_started(name, args, None);
         chat
     }
 
@@ -672,14 +687,14 @@ mod tests {
     fn calls_of_the_same_kind_in_a_row_become_one_line() {
         let mut chat = started("run_shell", r#"{"command":"ls"}"#);
         chat.tool_finished(false, 1, Some("a.txt"));
-        chat.tool_started("run_shell", r#"{"command":"pwd"}"#);
+        chat.tool_started("run_shell", r#"{"command":"pwd"}"#, None);
         chat.tool_finished(false, 1, Some("/tmp"));
         assert_eq!(chat.lines.len(), 1, "two commands should share one line");
         assert_eq!(text_of(&chat), "  ▸ Ran 2 commands ›");
 
         let mut chat = started("read_file", r#"{"path":"a.rs"}"#);
         chat.tool_finished(false, 1, Some("..."));
-        chat.tool_started("grep", r#"{"pattern":"fn main"}"#);
+        chat.tool_started("grep", r#"{"pattern":"fn main"}"#, None);
         chat.tool_finished(false, 1, Some("..."));
         assert_eq!(chat.lines.len(), 1);
         let line = text_of(&chat);
@@ -690,7 +705,7 @@ mod tests {
     fn every_call_of_a_folded_line_is_kept_under_it() {
         let mut chat = started("run_shell", r#"{"command":"ls"}"#);
         chat.tool_finished(false, 1, Some("a.txt"));
-        chat.tool_started("run_shell", r#"{"command":"pwd"}"#);
+        chat.tool_started("run_shell", r#"{"command":"pwd"}"#, None);
         chat.tool_finished(false, 1, Some("/tmp"));
         let line = chat.lines.last().unwrap();
         assert_eq!(line.tool_calls.len(), 2, "both calls are kept for the open card");

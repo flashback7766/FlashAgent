@@ -406,9 +406,16 @@ pub fn render_edit_card(change: &EditChange<'_>, state: CallState, reason: Optio
         (CallState::Failed, false) => "Not edited:",
     };
     let verb_color = if state == CallState::Failed { TEXT_RED } else { TEXT_MUTED };
-    let header = format!(
-        "  {verb_color}{action_verb}{RESET} {TEXT_BRIGHT}{path}{RESET} {TEXT_GREEN}+{added}{RESET} {TEXT_RED}-{deleted}{RESET} {chevron}"
-    );
+    // A change that only adds is not "+3 -0": the zero is noise, and a reader
+    // counts it as a line that was taken away.
+    let mut size = String::new();
+    if added > 0 {
+        size.push_str(&format!(" {TEXT_GREEN}+{added}{RESET}"));
+    }
+    if deleted > 0 {
+        size.push_str(&format!(" {TEXT_RED}-{deleted}{RESET}"));
+    }
+    let header = format!("  {verb_color}{action_verb}{RESET} {TEXT_BRIGHT}{path}{RESET}{size} {chevron}");
     lines.push((LineKind::Tool, header));
 
     if state == CallState::Failed {

@@ -157,7 +157,10 @@ impl App {
                 self.remember_prompt(&line);
                 self.input.clear();
                 if !self.queued_commands.contains(&line) {
-                    self.queued_commands.push(line);
+                    self.queued_commands.push(line.clone());
+                    // A queued command that says nothing looks like the app
+                    // swallowed it, and that reads the same as a hang.
+                    self.background = Some(BackgroundNotice::fading(format!("/{name} will run when this turn finishes \u{b7} Esc ends the turn now instead"), 6).warning());
                 }
             }
             WhileRunning::Refuse => self.background = Some(BackgroundNotice::fading(format!("/{name} does not run while the model works \u{b7} Esc interrupts the turn first"), 6).warning()),
@@ -250,7 +253,7 @@ impl App {
             "channel" => self.channel_command(cx, arg),
             "mcp" => self.mcp_command(cx, arg).await,
             "tasks" | "bg" => self.open_tasks(cx),
-            "compact" => self.compact_command(cx, arg).await,
+            "compact" => self.compact_command(cx, arg),
             "verbose" | "expand" | "think" | "o" => self.verbose_command(arg),
             "exit" | "quit" | "q" => return Some(Flow::Quit),
             "editor" => {
@@ -666,35 +669,50 @@ impl App {
         }
     }
 
-    async fn compact_command(&mut self, cx: &LoopCtx<'_>, focus: &str) {
-        self.chat.push_system("Compacting context…");
+    /// Compaction asks the model to read the whole conversation and write it
+    /// back short. On a laptop model that takes minutes, so it runs on its own
+    /// task: the interface keeps drawing, keeps taking keys, and the line under
+    /// the prompt says what is happening instead of the app looking frozen.
+    fn compact_command(&mut self, cx: &LoopCtx<'_>, focus: &str) {
+        if self.compacting {
+            self.notice("A compaction is already running");
+            return;
+        }
+        if self.running {
+            // The history belongs to the turn in flight: cutting it now would
+            // orphan its tool calls and the turn could never finish.
+            self.notice("/compact waits for the turn to finish · Esc ends the turn first");
+            return;
+        }
+        let Some(archive) = compaction_archive_path(cx.session_id) else {
+            self.chat.push_system("Compaction failed or saved no space · conversation unchanged");
+            return;
+        };
+        let earlier_turns = self.history.iter().filter(|m| flashagent_core::is_prompt(m)).count() > 1;
+        if !earlier_turns {
+            self.chat.push_system("Nothing to compact yet");
+            return;
+        }
+
         self.custom_placeholder = None;
         self.suggested_prompt = None;
-        // Drawn before the wait: the command is already gone from the composer.
-        self.draw(cx, None);
-        let before = self.context_usage.total_used();
-        let focus = (!focus.is_empty()).then_some(focus);
-        let earlier_turns = self.history.iter().filter(|m| flashagent_core::is_prompt(m)).count() > 1;
-        let archive = compaction_archive_path(cx.session_id);
-        let compacted = if let Some(archive) = archive.as_deref() {
-            compact_context(cx.source.as_ref(), &mut self.history, focus, archive).await.is_some()
-        } else {
-            false
-        };
-        if compacted {
-            self.chat.forget_counted_context();
-            update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-            let saved = before.saturating_sub(self.context_usage.total_used());
-            // In the transcript: the conversation itself changed.
-            self.chat.replace_last_system(&format!(
-                "Context compacted · {} saved · the conversation so far is now a summary",
-                ContextUsage::format_tokens(saved)
-            ));
-        } else if earlier_turns {
-            self.chat.replace_last_system("Compaction failed or saved no space · conversation unchanged");
-        } else {
-            self.chat.replace_last_system("Nothing to compact yet");
-        }
+        self.compacting = true;
+        self.compact_status = Some(format!(
+            "Compacting context… {} of {} in the window · the model is writing the summary",
+            ContextUsage::format_tokens(self.context_usage.total_used()),
+            ContextUsage::format_tokens(self.context_usage.total_capacity)
+        ));
+
+        // The task owns the history until it is done; there is nothing to send
+        // a turn with in the meantime, and a turn would have nothing to keep.
+        let mut history = std::mem::take(&mut self.history);
+        let source = cx.source.clone();
+        let focus = (!focus.is_empty()).then(|| focus.to_string());
+        let tx = cx.tx.clone();
+        tokio::spawn(async move {
+            let saved = compact_context(source.as_ref(), &mut history, focus.as_deref(), &archive).await;
+            let _ = tx.send(UiEvent::Compacted { history, saved });
+        });
     }
 
     fn verbose_command(&mut self, arg: &str) {

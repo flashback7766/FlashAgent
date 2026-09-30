@@ -64,7 +64,7 @@ struct SideRequests {
     per_word: Mutex<Option<Duration>>,
     /// Slow side answers the app hung up on.
     dropped: std::sync::atomic::AtomicUsize,
-    /// Keyed by a substring of the system prompt.
+    /// Keyed by a substring anywhere in the request.
     answers: Mutex<Vec<(String, String)>>,
     /// Lets a scenario act while the model is still thinking.
     turn_delay: Mutex<Option<Duration>>,
@@ -257,8 +257,11 @@ fn serve(
     let reply = if request.is_turn() {
         replies.lock().unwrap().pop_front().unwrap_or_else(|| Reply::Text("(the script has no more replies)".into()))
     } else {
-        let system = request.body["messages"][0]["content"].as_str().unwrap_or_default().to_string();
-        let answer = side.answers.lock().unwrap().iter().find(|(key, _)| system.contains(key.as_str())).map(|(_, t)| t.clone());
+        // Anywhere in the request, not just the system prompt: a side request
+        // carries its marker wherever the app puts it, and the compaction one
+        // changed shape to keep the conversation a cacheable prefix.
+        let body = request.body.to_string();
+        let answer = side.answers.lock().unwrap().iter().find(|(key, _)| body.contains(key.as_str())).map(|(_, t)| t.clone());
         Reply::Text(answer.unwrap_or_else(|| "ok".into()))
     };
 

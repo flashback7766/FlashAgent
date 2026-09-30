@@ -1004,7 +1004,7 @@ fn compact_replaces_the_conversation_so_far_with_a_summary() {
         Reply::Text("Second answer.".into()),
         Reply::Text("Third answer, after the summary.".into()),
     ]);
-    server.answer_side_requests("technical context compaction engine", "Summary:\n1. Primary Request and Intent: answer the user's questions.\n7. Pending Tasks: None.\n8. Current Work: continue with the next question.");
+    server.answer_side_requests("Summarize the conversation above", "Summary:\n1. Primary Request and Intent: answer the user's questions.\n7. Pending Tasks: None.\n8. Current Work: continue with the next question.");
     let home = Home::new();
     let term = ready(&home, &server);
 
@@ -1016,14 +1016,17 @@ fn compact_replaces_the_conversation_so_far_with_a_summary() {
     ask(&term, "the second question", "Second answer.");
     term.type_text("/compact");
     term.send(ENTER);
-    term.wait_for("Context compacted", WAIT);
+    term.wait_for("Compacted", WAIT);
+    let screen = term.screen();
+    // The result belongs to the row under the prompt, not to the conversation.
+    assert!(!screen.contains("Context compacted"), "a status was pushed into the chat: {screen}");
     let screen = term.screen();
     assert!(!screen.contains("· 0 saved"), "the transcript was still counted after compaction:
 {screen}");
     ask(&term, "the third question", "Third answer, after the summary.");
 
     assert!(
-        server.requests().iter().any(|r| sent(r).contains("technical context compaction engine")),
+        server.requests().iter().any(|r| sent(r).contains("Summarize the conversation above")),
         "the model was never asked for a summary"
     );
     let turns = server.turns();
@@ -1040,6 +1043,29 @@ fn compact_replaces_the_conversation_so_far_with_a_summary() {
     let saved = std::fs::read_to_string(archive).unwrap();
     assert!(saved.contains("the first question"));
     assert!(saved.contains("First answer."));
+}
+
+/// Compaction during a running turn waits its turn, and says so: a command that
+/// is swallowed silently reads as an app that has hung.
+#[test]
+fn compact_while_a_turn_runs_says_it_will_wait_rather_than_hanging() {
+    let server = MockServer::start(vec![Reply::Text("A slow answer.".into())]);
+    server.delay_turns(Duration::from_secs(20));
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    paste(&term, "a question that takes a while");
+    term.send(ENTER);
+    term.wait_for(RUNNING_HINT, WAIT);
+
+    term.type_text("/compact");
+    term.send(ENTER);
+    let screen = term.wait_for("will run when this turn finishes", WAIT);
+    assert!(
+        !screen.contains("Compacting context"),
+        "a queued compaction must not claim to be running: {screen}"
+    );
+    term.send(ESC);
 }
 
 /// `python3`, or `python` on Windows runners.

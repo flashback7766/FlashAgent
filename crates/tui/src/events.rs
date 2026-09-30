@@ -43,6 +43,7 @@ impl App {
                 self.on_server_discovered(cx, disc)
             }
             UiEvent::ServerSilent(url) => self.server_silent = self.provider_switch.is_none() && url == cx.source.0.base_url(),
+            UiEvent::Compacted { history, saved } => self.on_compacted(cx, history, saved),
             UiEvent::Loop { turn_id, event } => self.on_loop_event(cx, turn_id, &event),
             UiEvent::Finished { turn_id, result } => return self.finish_turn(cx, turn_id, result).await,
             UiEvent::Resize(cols, rows) => {
@@ -272,6 +273,23 @@ impl App {
         });
     }
 
+    /// The compaction task came back with the history it was given, shortened
+    /// or untouched. The line under the prompt keeps the result, so the chat is
+    /// not where a status belongs.
+    pub(crate) fn on_compacted(&mut self, cx: &LoopCtx<'_>, history: Vec<ChatMessage>, saved: Option<usize>) {
+        self.history = history;
+        self.compacting = false;
+        self.chat.forget_counted_context();
+        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        self.compact_status = Some(match saved {
+            Some(saved) => {
+                format!("Compacted · {} saved · {} left in the window", ContextUsage::format_tokens(saved), ContextUsage::format_tokens(self.context_usage.total_used()))
+            }
+            None => "Compaction saved no space · conversation unchanged".to_string(),
+        });
+        self.renderer.request_reprint();
+    }
+
     pub(crate) fn on_server_discovered(&mut self, cx: &LoopCtx<'_>, disc: flashagent_llm::ServerDiscovery) {
         self.available_models = flashagent_tui::providers::offered_models(&disc);
         // A cloud listing names no loaded model, so the one above never
@@ -388,7 +406,16 @@ impl App {
         }
         self.track_turn(e);
         self.track_goal(cx.cwd, e);
-        self.chat.on_event(e);
+        // The real diff is taken now, while the file still is what the call
+        // expects: once the edit lands, its old_string is gone and the change
+        // cannot be worked out from the files afterwards.
+        if let LoopEvent::ToolStarted { name, args_json, .. } = e {
+            let call = flashagent_llm::ToolCall { id: String::new(), name: name.clone(), args_json: args_json.clone() };
+            let diff = flashagent_core::WritePreview::write_preview(cx.tools_arc.as_ref(), &call);
+            self.chat.tool_started(name, args_json, diff);
+        } else {
+            self.chat.on_event(e);
+        }
         if self.chat.take_needs_reprint() {
             self.renderer.request_reprint();
         }

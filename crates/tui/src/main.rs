@@ -586,6 +586,11 @@ struct LoopCtx<'a> {
 struct App {
     question_ui_state: QuestionUiState,
     history: Vec<ChatMessage>,
+    /// Set while `/compact` runs in the background: the line under the prompt
+    /// says so instead of the interface looking frozen.
+    compact_status: Option<String>,
+    /// The history is with the compaction task until it comes back.
+    compacting: bool,
     input: flashagent_tui::Composer,
     custom_placeholder: Option<String>,
     suggested_prompt: Option<String>,
@@ -1099,6 +1104,8 @@ fn initial_app(init: InitialApp) -> App {
     App {
         question_ui_state: QuestionUiState::default(),
         history: vec![ChatMessage::system(system_prompt_text)],
+        compact_status: None,
+        compacting: false,
         input: flashagent_tui::Composer::new(),
         custom_placeholder: None,
         suggested_prompt: None,
@@ -1749,26 +1756,61 @@ mod tests {
         assert_eq!(history[2].content, original[2].content, "archive failure must not discard history");
     }
 
+    /// The conversation must arrive exactly as the model saw it during the turn,
+    /// with the instruction after it. Anything reshaped here — a new system
+    /// prompt, a flattened transcript — shares no prefix with the cache and the
+    /// whole conversation is prefilled again, which is what cost 2.5 minutes
+    /// at 80k tokens.
     #[test]
-    fn compaction_input_keeps_goal_instructions_tool_calls_and_results() {
+    fn the_compaction_request_keeps_the_conversation_as_a_cached_prefix() {
         let mut call = ChatMessage::assistant("");
         call.tool_calls.push(flashagent_llm::ToolCall {
             id: "c1".into(), name: "run_shell".into(), args_json: r#"{"command":"cargo test"}"#.into(),
         });
-        let messages = vec![
+        let conversation = vec![
+            ChatMessage::system("You are FlashAgent, in ~/work.\n\n[memory]"),
             ChatMessage::user("memory preamble\n\n---\n\n[AUTONOMOUS GOAL DIRECTIVE]\nTarget goal: ship the release\nBudget: 8 steps"),
             call,
             ChatMessage::tool_result("c1", "tests passed"),
-            ChatMessage::tool_result("c2", "x".repeat(50_000)),
+            ChatMessage::assistant("Tests pass. Next: check the release notes."),
         ];
-        let transcript = compaction_transcript(&messages, None);
-        assert!(transcript.contains("Target goal: ship the release"));
-        assert!(transcript.contains("Budget: 8 steps"));
-        assert!(transcript.contains("Tool call c1 run_shell: {\"command\":\"cargo test\"}"));
-        assert!(transcript.contains("Tool: tests passed"));
-        assert!(transcript.contains("Tool result for call: c1"));
-        assert!(!transcript.contains("memory preamble"));
-        assert!(transcript.len() < 5_000, "a huge tool result is shortened for the summary request");
+        let request = compaction_request(&conversation, None, None);
+
+        // The first four messages are the conversation, byte for byte: that is
+        // the whole point, so the server's cache of it still applies.
+        for (i, (sent, was)) in request.iter().zip(&conversation).enumerate() {
+            assert_eq!(sent.role, was.role, "message {i} changed role");
+            assert_eq!(sent.content, was.content, "message {i} changed content");
+            assert_eq!(sent.tool_call_id, was.tool_call_id, "message {i} changed its call link");
+            assert_eq!(sent.tool_calls.len(), was.tool_calls.len(), "message {i} lost a tool call");
+        }
+        assert_eq!(request.last().unwrap().role, flashagent_llm::Role::User, "the instruction is the last message");
+        let instruction = &request.last().unwrap().content;
+        assert!(!instruction.contains("Target goal"), "the instruction stands on its own, not wrapped in the user's words");
+        assert!(instruction.contains("Summarize the conversation above"), "{instruction}");
+        // No second system prompt to throw the prefix away.
+        assert_eq!(request.iter().filter(|m| m.role == flashagent_llm::Role::System).count(), 1);
+    }
+
+    /// A user message may not follow a tool result; providers that check the
+    /// pairing reject the request outright. The dropped tail is summarized.
+    #[test]
+    fn a_dangling_tool_result_is_dropped_before_the_instruction() {
+        let conversation = vec![
+            ChatMessage::user("do the thing"),
+            ChatMessage::tool_result("c1", "out"),
+            ChatMessage::tool_result("c2", "out"),
+        ];
+        let request = compaction_request(&conversation, None, None);
+        assert!(!request.iter().any(|m| m.role == flashagent_llm::Role::Tool), "a tool result was left hanging before a user message");
+        assert_eq!(request.last().unwrap().role, flashagent_llm::Role::User);
+    }
+
+    /// What the user asked to be kept survives into the instruction.
+    #[test]
+    fn focus_instructions_reach_the_summariser() {
+        let request = compaction_request(&[ChatMessage::user("hi")], None, Some("keep the migration notes"));
+        assert!(request.last().unwrap().content.contains("keep the migration notes"));
     }
 
     #[test]
