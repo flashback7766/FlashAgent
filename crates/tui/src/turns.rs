@@ -219,6 +219,10 @@ impl App {
             self.last_turn_growth = grown.max(self.last_turn_growth / 2);
         }
         if self.goal_state.is_none() {
+            // How long this turn took, and what it generated: the only way to
+            // tell a model that is overthinking from one that is right on time.
+            self.turn_outcome.secs = self.turn_started.map(|start| start.elapsed().as_secs_f32());
+            self.turn_outcome.completion_tokens = self.token_tracker.total_model_tokens;
             let steps = self.effort_memory.observe(&self.current_model, &self.turn_outcome);
             self.effort_memory.save();
             cx.source.set_effort_bias(steps);

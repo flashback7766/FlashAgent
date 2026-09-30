@@ -305,43 +305,44 @@ impl ThinkingProfile {
         if !self.supported || self.presets.is_empty() {
             return None;
         }
-        let complexity = Self::analyze_turn_complexity(messages).shifted(bias);
-        self.resolve_for_complexity(complexity)
+        // The ladder is the model's own list, in the order the server gave it.
+        // The four complexity bands only say where on that ladder to sit, so a
+        // model offering seven levels gets all seven reachable and a model
+        // offering two is never handed a middle it does not have.
+        let last = self.presets.len() as i32 - 1;
+        let at = self.ladder_index(Self::analyze_turn_complexity(messages)) as i32;
+        // Never more than one step: switching presets between steps costs the
+        // backend its prefix cache, and the cache is worth more than the step.
+        let moved = (at + i32::from(bias).clamp(-1, 1)).clamp(0, last) as usize;
+        self.presets.get(moved).map(String::as_str)
+    }
+
+    /// Where a complexity band sits on the ladder this model actually has.
+    fn ladder_index(&self, complexity: TaskComplexity) -> usize {
+        let last = self.presets.len().saturating_sub(1);
+        let named = |names: &[&str]| {
+            names
+                .iter()
+                .find_map(|want| self.presets.iter().position(|p| p.eq_ignore_ascii_case(want)))
+        };
+        match complexity {
+            TaskComplexity::Minimal => 0,
+            TaskComplexity::Low => {
+                named(&["low", "minimal", "min", "fast", "on"])
+                    // A binary on/off model has no middle to find.
+                    .or_else(|| named(&["on"]))
+                    .unwrap_or(last / 3)
+            }
+            TaskComplexity::Medium => named(&["medium", "standard"]).unwrap_or(last / 2),
+            TaskComplexity::High => last,
+        }
     }
 
     pub fn resolve_for_complexity(&self, complexity: TaskComplexity) -> Option<&str> {
         if !self.supported || self.presets.is_empty() {
             return None;
         }
-        match complexity {
-            TaskComplexity::Minimal => self.min_effort().or(Some("off")),
-            TaskComplexity::Low => {
-                self.low_preset()
-                    .or_else(|| {
-                        // Binary on/off models keep "on": flipping enable_thinking evicts the KV
-                        // prefix cache.
-                        self.presets.iter().find(|p| p.eq_ignore_ascii_case("on")).map(String::as_str)
-                    })
-                    .or_else(|| self.min_effort())
-            }
-            TaskComplexity::Medium => {
-                self.presets
-                    .iter()
-                    .find(|p| p.eq_ignore_ascii_case("medium") || p.eq_ignore_ascii_case("standard"))
-                    .map(String::as_str)
-                    .or_else(|| {
-                        if self.presets.len() <= 2 {
-                            self.max_effort()
-                        } else {
-                            self.presets.get(self.presets.len() / 2).map(String::as_str)
-                        }
-                    })
-                    .or(self.default_preset.as_deref())
-            }
-            TaskComplexity::High => {
-                self.max_effort().or(self.default_preset.as_deref())
-            }
-        }
+        self.presets.get(self.ladder_index(complexity)).map(String::as_str)
     }
 
     pub fn apply_to_request(&self, body: &mut serde_json::Value, effort: &str) {
