@@ -95,9 +95,9 @@ fn normalize_line_loose(s: &str) -> String {
 /// Tolerates CRLF/LF, curly quotes and trailing whitespace differences, and
 /// the line numbers read_file puts in front of each line when a model copies
 /// them into old_string.
-fn find_actual_string(text: &str, needle: &str) -> Option<String> {
+fn find_actual_string(text: &str, needle: &str) -> Option<(String, Vec<String>)> {
     if text.contains(needle) {
-        return Some(needle.to_string());
+        return Some((needle.to_string(), Vec::new()));
     }
     if let Some(found) = without_read_file_numbers(needle).and_then(|unnumbered| find_actual_string(text, &unnumbered)) {
         return Some(found);
@@ -107,8 +107,15 @@ fn find_actual_string(text: &str, needle: &str) -> Option<String> {
 
 /// The one run of lines `needle` describes, or `None` if it describes none or
 /// more than one. `loose` stops insisting on leading whitespace.
-fn match_lines(text: &str, needle: &str, loose: bool) -> Option<String> {
+///
+/// When it is set, the file's own indentation of the matched lines comes back
+/// with the match. A model that under-indents its `old_string` would
+/// otherwise under-indent the `new_string` too, and in Python or YAML that
+/// silently changes what the code means — worse than refusing the edit.
+fn match_lines(text: &str, needle: &str, loose: bool) -> Option<(String, Vec<String>)> {
     let line_of = |s: &str| if loose { normalize_line_loose(s) } else { normalize_line(s) };
+    let indent_of = |s: &str| s.len() - s.trim_start().len();
+    let indents_of = |s: &str| s[..indent_of(s)].to_string();
 
     let needle_lines: Vec<String> = needle.lines().map(line_of).collect();
     if needle_lines.is_empty() {
@@ -119,7 +126,7 @@ fn match_lines(text: &str, needle: &str, loose: bool) -> Option<String> {
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
         let len = line.len();
-        text_line_spans.push((offset, offset + len, line_of(line)));
+        text_line_spans.push((offset, offset + len, line_of(line), indents_of(line)));
         offset += len;
     }
 
@@ -128,7 +135,7 @@ fn match_lines(text: &str, needle: &str, loose: bool) -> Option<String> {
         return None;
     }
 
-    let mut matches = Vec::new();
+    let mut matches: Vec<(String, Vec<String>)> = Vec::new();
     for i in 0..=(text_line_spans.len() - k) {
         let mut all_match = true;
         for j in 0..k {
@@ -147,7 +154,12 @@ fn match_lines(text: &str, needle: &str, loose: bool) -> Option<String> {
             } else {
                 span_str
             };
-            matches.push(target_str.to_string());
+            let indents = if loose {
+                (0..k).map(|j| text_line_spans[i + j].3.clone()).collect()
+            } else {
+                Vec::new()
+            };
+            matches.push((target_str.to_string(), indents));
         }
     }
 
@@ -160,6 +172,25 @@ fn match_lines(text: &str, needle: &str, loose: bool) -> Option<String> {
     } else {
         None
     }
+}
+
+/// `new` re-indented to the file's own layout. Only lines the model wrote with
+/// some indentation are touched; a blank line stays blank. This runs only when
+/// the match needed the loose tier, so an exact match is never disturbed.
+fn with_file_indent(new: &str, indents: &[String]) -> String {
+    if indents.is_empty() {
+        return new.to_string();
+    }
+    new.split_inclusive('\n')
+        .enumerate()
+        .map(|(i, line)| {
+            let Some(indent) = indents.get(i) else { return line.to_string() };
+            if line.trim().is_empty() {
+                return line.to_string();
+            }
+            format!("{indent}{}", line.trim_start())
+        })
+        .collect()
 }
 
 /// new_string in the file's own line endings: models write `\n`, and a CRLF
@@ -226,24 +257,34 @@ fn not_found(path: &str, text: &str, needle: &str) -> ToolError {
     ToolError::Other(message)
 }
 
-/// The first word of `want` that is not in `have`, in the form `you wrote
-/// `foo``; `None` when the difference is not one word or the lines are simply
-/// different lines. Indentation and whitespace alone are not worth naming —
-/// `find_actual_string` already tolerates those.
+/// The first word of `want` that is not in `have`, named so the model can see
+/// what it got wrong; `None` when the lines are different lines rather than one
+/// misremembered one. One added, dropped or swapped word is the case worth
+/// naming — `pub` that the file does not have — and anything further off is
+/// noise that would send the model guessing again.
 fn first_difference(want: &str, have: &str) -> Option<String> {
-    let want_words: Vec<&str> = want.split_whitespace().collect();
-    let have_words: Vec<&str> = have.split_whitespace().collect();
-    if want_words.is_empty() || have_words.is_empty() {
+    let w: Vec<&str> = want.split_whitespace().collect();
+    let h: Vec<&str> = have.split_whitespace().collect();
+    if w.is_empty() || h.is_empty() {
         return None;
     }
-    // The lines must agree everywhere except inside one word, otherwise this
-    // is a different line and the closest-line hint already says so.
-    if want_words.len() != have_words.len() {
+    if w.len() == h.len() {
+        let differing: Vec<usize> = (0..w.len()).filter(|i| w[*i] != h[*i]).collect();
+        let [i] = differing[..] else { return None };
+        return Some(format!("`{}` where the file has `{}`", w[i], h[i]));
+    }
+    // A word added or dropped: the rest has to line up exactly, or these are
+    // simply different lines.
+    let (longer, shorter) = if w.len() > h.len() { (&w, &h) } else { (&h, &w) };
+    if longer.len() != shorter.len() + 1 {
         return None;
     }
-    let differing: Vec<usize> = (0..want_words.len()).filter(|i| want_words[*i] != have_words[*i]).collect();
-    let [i] = differing[..] else { return None };
-    Some(format!("`{}` where the file has `{}`", want_words[i], have_words[i]))
+    let extra = (0..=shorter.len()).find(|skip| longer.iter().enumerate().all(|(i, word)| i == *skip || Some(*word) == shorter.get(i - usize::from(i > *skip)))?;
+    if w.len() > h.len() {
+        Some(format!("`{extra}` on a line the file has without it"))
+    } else {
+        Some(format!("the file has `{extra}` on this line"))
+    }
 }
 
 /// The text with every edit applied in order, and how many replacements that
@@ -256,7 +297,7 @@ pub(crate) fn apply_edits(path: &str, mut text: String, edits: &[EditChunk]) -> 
         if edit.old_string.is_empty() {
             return Err(ToolError::Other("edit: old_string must not be empty".into()));
         }
-        let Some(target) = find_actual_string(&text, &edit.old_string) else {
+        let Some((target, indents)) = find_actual_string(&text, &edit.old_string) else {
             return Err(not_found(path, &text, &edit.old_string));
         };
         let count = text.matches(target.as_str()).count();
@@ -266,7 +307,7 @@ pub(crate) fn apply_edits(path: &str, mut text: String, edits: &[EditChunk]) -> 
             )));
         }
         applied += if edit.replace_all { count } else { 1 };
-        let new_string = in_line_endings_of(&text, &edit.new_string);
+        let new_string = in_line_endings_of(&text, &with_file_indent(&edit.new_string, &indents));
         text = if edit.replace_all {
             text.replace(target.as_str(), &new_string)
         } else {
@@ -826,7 +867,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("closest line is 2: `    plan: Vec<PlanStep>,`"), "{err}");
-        assert!(err.contains("You wrote `pub` where the file has `plan:`"), "{err}");
+        assert!(err.contains("`pub` on a line the file has without it"), "{err}");
     }
 
     #[test]
