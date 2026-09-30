@@ -274,15 +274,21 @@ fn the_recap_waits_until_the_user_has_gone_quiet() {
     // Typing keeps it back, and so does pasting, each for longer than the
     // period: the model stays free for the next question. A Windows console
     // turns a paste into keys.
+    //
+    // The pause between keys is fixed, and nothing waits for the screen in
+    // between: waiting for one character to appear can take longer than the
+    // whole quiet period on a busy runner, and then the app is right to think
+    // the user stopped typing. That is what failed this on Windows. All twenty
+    // are checked at the end instead, which still proves they arrived.
     for count in 1..=20 {
         if cfg!(unix) && count > 10 {
             term.send("\x1b[200~z\x1b[201~");
         } else {
             term.send("z");
         }
-        term.wait_for(&format!("› {}", "z".repeat(count)), WAIT);
         std::thread::sleep(Duration::from_millis(800));
     }
+    term.wait_for(&format!("› {}", "z".repeat(20)), WAIT);
     assert_eq!(recaps(), 0, "the recap was asked for while the user was typing");
 
     term.send(ESC);
