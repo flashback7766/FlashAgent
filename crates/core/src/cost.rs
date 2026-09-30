@@ -77,7 +77,8 @@ impl CostLedger {
     /// The status-bar line, or `None` when nothing has been priced.
     pub fn summary(&self) -> Option<String> {
         let total = self.total()?;
-        Some(format!("${} · {} turns", Self::format_amount(total), self.priced_turns))
+        let turns = if self.priced_turns == 1 { "1 turn" } else { format!("{} turns", self.priced_turns) };
+        Some(format!("${} · {turns}", Self::format_amount(total)))
     }
 }
 
@@ -132,5 +133,15 @@ mod tests {
         assert_eq!(CostLedger::format_amount(0.00042), "0.0004");
         assert_eq!(CostLedger::format_amount(0.5), "0.50");
         assert_eq!(CostLedger::format_amount(12.0), "12.00");
+    }
+
+    #[test]
+    fn the_summary_counts_turns_the_way_a_person_would_say_them() {
+        let mut ledger = CostLedger::default();
+        assert_eq!(ledger.summary(), None);
+        ledger.record("p", Some(0.0));
+        assert_eq!(ledger.summary().as_deref(), Some("$0.00 · 1 turn"), "a free turn is still a turn");
+        ledger.record("p", Some(0.0));
+        assert_eq!(ledger.summary().as_deref(), Some("$0.00 · 2 turns"));
     }
 }
