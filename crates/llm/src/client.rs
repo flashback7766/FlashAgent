@@ -319,9 +319,17 @@ impl Client {
             // A level this model does not have is a level the gateway either
             // rejects or quietly drops, so the saved setting would read as
             // applied while nothing was thinking. It falls through to the
-            // ladder like any other level. Only when the model said nothing
-            // about its presets is the name passed through as it came.
-            let known = profile.presets.is_empty() || !profile.supported || profile.presets.iter().any(|p| p.eq_ignore_ascii_case(effort));
+            // ladder like any other level.
+            //
+            // Only a list the server actually sent may correct it: the
+            // default profile is a guess at [off, low, medium, high], and
+            // holding a name against a guess would throw away a setting that
+            // works.
+            let listed = self.profile().filter(|p| p.supported && !p.presets.is_empty());
+            let known = match listed {
+                Some(p) => p.presets.iter().any(|x| x.eq_ignore_ascii_case(effort)),
+                None => true,
+            };
             if known {
                 return Some(effort.clone());
             }
