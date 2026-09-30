@@ -1072,6 +1072,9 @@ impl App {
         let draft = self.token_tracker.draft_display();
         let config = &self.config;
         let cache_display = self.token_tracker.cache_display();
+        // Only when the backend priced something: a local server bills nothing
+        // and says nothing, and the bar keeps quiet rather than showing $0.00.
+        let cost_display = self.cost.summary();
 
         self.renderer.frame(
             &self.chat,
@@ -1081,7 +1084,7 @@ impl App {
             autocomplete,
             &self.context_usage,
             FrameState {
-                cost_display: None,
+                cost_display: cost_display.as_deref(),
                 input: &self.input,
                 provider: (self.config.active_profile().name.as_str(), self.current_model.as_str()),
                 history_search: self
