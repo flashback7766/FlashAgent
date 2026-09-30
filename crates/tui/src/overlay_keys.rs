@@ -575,10 +575,17 @@ impl App {
                 self.context_usage.total_capacity = len.max(1024);
                 cx.tools_arc.set_context_window(Some(len));
             }
-            // The picked effort survives the switch; a non-reasoning model just gets no
-            // thinking fields.
+            // The picked effort survives the switch only where the new model
+            // has that level. Carrying `xhigh` to a model listing
+            // [high, low, none] left the card claiming a depth the request
+            // never asked for.
+            self.current_effort = flashagent_tui::effort_for_model(&self.current_effort, cx.source.profile().as_ref());
             if self.current_effort.is_empty() {
                 self.current_effort = "auto".to_string();
+            }
+            if self.config.thinking_effort != self.current_effort {
+                self.config.thinking_effort = self.current_effort.clone();
+                self.save_config();
             }
         }
         if !self.running {

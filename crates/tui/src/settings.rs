@@ -146,6 +146,25 @@ pub fn effort_choices_defaults() -> Vec<String> {
     ["auto", "off", "low", "medium", "high"].iter().map(|s| s.to_string()).collect()
 }
 
+/// The level that will really be asked of `model`: a saved level the new model
+/// does not offer cannot be carried across, or the setting would read as
+/// applied while the request asked for something the gateway drops. Mirrors
+/// the rule in `Client::resolve_effort`, so the card, the settings row and the
+/// request cannot tell three different stories.
+///
+/// `None`, a model that cannot reason and a model that named no settings all
+/// keep the level as it is: nothing was learned that contradicts it.
+pub fn effort_for_model(saved: &str, profile: Option<&flashagent_llm::ThinkingProfile>) -> String {
+    let Some(p) = profile.filter(|p| p.supported && !p.presets.is_empty()) else {
+        return saved.to_string();
+    };
+    let level = saved.trim().to_ascii_lowercase();
+    if level.is_empty() || level == "auto" || level == "default" || p.presets.iter().any(|x| x.eq_ignore_ascii_case(&level)) {
+        return saved.to_string();
+    }
+    "auto".to_string()
+}
+
 impl SettingsView {
     pub fn new(config: AppConfig, available_models: Vec<String>) -> Self {
         let opened_on = Some(config.active_profile().name.clone());
@@ -700,6 +719,43 @@ impl SettingsView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn profile(presets: &[&str]) -> flashagent_llm::ThinkingProfile {
+        flashagent_llm::ThinkingProfile {
+            presets: presets.iter().map(|s| s.to_string()).collect(),
+            protocol: flashagent_llm::ThinkingProtocol::Anthropic,
+            supported: true,
+            default_preset: presets.last().map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn a_level_the_new_model_does_not_have_is_not_carried_across() {
+        // Seen live: xhigh saved, a model listing [high, low, none], and the
+        // card still claiming xhigh while the request asked for high.
+        let short = profile(&["high", "low", "none"]);
+        assert_eq!(effort_for_model("xhigh", Some(&short)), "auto");
+        assert_eq!(effort_for_model("high", Some(&short)), "high");
+        assert_eq!(effort_for_model("none", Some(&short)), "none");
+        // The two words that are never a preset are left alone.
+        assert_eq!(effort_for_model("auto", Some(&short)), "auto");
+        assert_eq!(effort_for_model("default", Some(&short)), "default");
+        assert_eq!(effort_for_model("", Some(&short)), "");
+        // Case is not a difference between levels.
+        assert_eq!(effort_for_model("HIGH", Some(&short)), "HIGH");
+        // A model that offers more keeps the level it was given.
+        let deep = profile(&["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(effort_for_model("xhigh", Some(&deep)), "xhigh");
+    }
+
+    #[test]
+    fn nothing_known_about_the_model_keeps_the_level_it_was_given() {
+        // Replacing a working setting with a guess helps nobody, and this is
+        // the same rule `Client::resolve_effort` follows.
+        assert_eq!(effort_for_model("xhigh", None), "xhigh");
+        assert_eq!(effort_for_model("xhigh", Some(&flashagent_llm::ThinkingProfile::unreported())), "xhigh");
+        assert_eq!(effort_for_model("xhigh", Some(&flashagent_llm::ThinkingProfile::unsupported())), "xhigh");
+    }
 
     #[test]
     fn test_settings_tab_navigation() {
