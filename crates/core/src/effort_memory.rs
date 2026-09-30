@@ -14,6 +14,13 @@ const TRIGGER: f32 = 0.4;
 const MIN_SAMPLES: u32 = 3;
 /// How strongly an unremarkable turn pulls the score back to neutral.
 const DECAY: f32 = 0.75;
+/// A turn that took this much longer than this model's own usual, and still
+/// came out right, is the model thinking more than the job needed. The first
+/// turns of any model have no baseline yet, so nothing is claimed from them.
+const SLOW_FACTOR: f32 = 2.0;
+/// Below this a turn is too short to time meaningfully (a local model can
+/// answer a one-liner in a fraction of a second).
+const MIN_BASELINE_SECS: f32 = 0.5;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TurnOutcome {
@@ -24,11 +31,17 @@ pub struct TurnOutcome {
     pub interrupted_while_thinking: bool,
     /// The user asked for the answer again.
     pub regenerated: bool,
+    /// Wall-clock seconds the turn took, once the model had a token to measure
+    /// against. `None` until the first real turn is finished.
+    pub secs: Option<f32>,
+    /// What the model generated, as the server counted it.
+    pub completion_tokens: usize,
 }
 
 impl TurnOutcome {
-    /// `+1` wants more thinking, `-1` less. A turn that both failed a tool and
-    /// ran long counts as a failure: a wrong answer costs more than a slow one.
+    /// `+1` wants more thinking, `-1` less, `0` says nothing on its own. A turn
+    /// that both failed a tool and ran long counts as a failure: a wrong answer
+    /// costs more than a slow one.
     pub fn signal(&self) -> f32 {
         if self.failed_tools > 0 || self.regenerated {
             return 1.0;
@@ -53,6 +66,16 @@ pub struct ModelBias {
     pub score: f32,
     #[serde(default)]
     pub samples: u32,
+    /// What this model usually spends on a turn, learned from its own past
+    /// turns. A turn is only "slow" against this, never against a constant:
+    /// a 2 minute turn is normal for one model and a bug in another.
+    #[serde(default)]
+    pub avg_secs: Option<f64>,
+    /// The same, for what it generates. Recorded but not judged on yet: token
+    /// counts swing with the size of the answer, and time is the steadier
+    /// signal. Kept so the question can be asked of real numbers later.
+    #[serde(default)]
+    pub avg_tokens: Option<f64>,
 }
 
 impl ModelBias {
@@ -119,12 +142,32 @@ impl EffortMemory {
         self.models.get(model)
     }
 
+    /// What this turn says about the level that was used, judged against the
+    /// model's own history rather than a constant: a turn that took twice this
+    /// model's usual and still came out right did not need the thinking.
+    fn slow_but_right(baseline: Option<f64>, outcome: &TurnOutcome, signal: f32) -> f32 {
+        if signal != 0.0 {
+            return signal;
+        }
+        let (Some(secs), Some(avg)) = (outcome.secs, baseline) else {
+            return 0.0;
+        };
+        if secs > MIN_BASELINE_SECS && avg >= MIN_BASELINE_SECS as f64 && secs as f64 > avg * SLOW_FACTOR as f64 {
+            return -1.0;
+        }
+        0.0
+    }
+
+    /// Folds one turn into what is known about the model. Returns the nudge in
+    /// preset steps to apply from the next turn on.
     pub fn observe(&mut self, model: &str, outcome: &TurnOutcome) -> i8 {
         if model.is_empty() {
             return 0;
         }
+        // Read the baseline before borrowing the map mutably.
+        let baseline = self.models.get(model).map(|b| b.avg_secs).unwrap_or(None);
         let entry = self.models.entry(model.to_string()).or_default();
-        let signal = outcome.signal();
+        let signal = Self::slow_but_right(baseline, outcome, outcome.signal());
         if signal == 0.0 {
             // Nothing to complain about: drift back towards neutral.
             entry.score *= DECAY;
@@ -133,6 +176,21 @@ impl EffortMemory {
         }
         entry.score = entry.score.clamp(-1.0, 1.0);
         entry.samples = entry.samples.saturating_add(1);
+        // The baseline moves only on turns that were unremarkable, so a single
+        // slow outlier does not become the norm everything else is judged by.
+        if let Some(secs) = outcome.secs.filter(|s| *s > 0.0) {
+            entry.avg_secs = Some(match entry.avg_secs {
+                Some(avg) => avg + (secs as f64 - avg) * LEARNING_RATE as f64,
+                None => secs as f64,
+            });
+        }
+        if outcome.completion_tokens > 0 {
+            let t = outcome.completion_tokens as f64;
+            entry.avg_tokens = Some(match entry.avg_tokens {
+                Some(avg) => avg + (t - avg) * LEARNING_RATE as f64,
+                None => t,
+            });
+        }
         entry.steps()
     }
 
