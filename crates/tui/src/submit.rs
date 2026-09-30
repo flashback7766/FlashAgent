@@ -203,6 +203,7 @@ impl App {
                 let view = self.runtime_settings(cx.perm.state().mode(), cx.source);
                 self.open_overlay(Overlay::Settings(Box::new(view)));
             }
+            "cost" => self.show_cost(),
             "whatsnew" | "changelog" => self.show_whatsnew(cx).await,
             "memory" | "memories" => {
                 let mut modal = open_memory_modal();
@@ -532,6 +533,32 @@ impl App {
         self.cancel_recap();
         self.chat.clear();
         self.renderer.scroll_to_bottom();
+    }
+
+    /// `/cost`: what the session has cost, and where. Says plainly when the
+    /// backend prices nothing, rather than reporting a confident zero.
+    fn show_cost(&mut self) {
+        use flashagent_core::CostLedger;
+        let Some(total) = self.cost.total() else {
+            self.chat.push_system(&format!(
+                "No backend in this session reported a price \u{b7} {} is running free on your own hardware, or its API does not say what a turn costs",
+                self.config.active_profile().name
+            ));
+            return;
+        };
+        self.chat.push_system(&format!(
+            "This session: ${} over {} priced turns",
+            CostLedger::format_amount(total),
+            self.cost.priced_turns()
+        ));
+        for row in self.cost.by_provider() {
+            self.chat.push_system(&format!(
+                "  {} \u{b7} ${} over {} turns",
+                row.name,
+                CostLedger::format_amount(row.total),
+                row.turns
+            ));
+        }
     }
 
     fn set_effort(&mut self, cx: &LoopCtx<'_>, arg: &str) {
