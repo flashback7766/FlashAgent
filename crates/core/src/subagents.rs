@@ -1022,6 +1022,7 @@ mod tests {
                         completion: Some(20),
                         cached: Some(30),
                         mtp: None,
+                        cost: None,
                     })),
                     Ok(LlmEvent::TextDelta("done".into())),
                     Ok(LlmEvent::Done(FinishReason::Stop)),
