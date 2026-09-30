@@ -77,7 +77,11 @@ impl CostLedger {
     /// The status-bar line, or `None` when nothing has been priced.
     pub fn summary(&self) -> Option<String> {
         let total = self.total()?;
-        let turns = if self.priced_turns == 1 { "1 turn" } else { format!("{} turns", self.priced_turns) };
+        let turns = if self.priced_turns == 1 {
+            "1 turn".to_string()
+        } else {
+            format!("{} turns", self.priced_turns)
+        };
         Some(format!("${} · {turns}", Self::format_amount(total)))
     }
 }
