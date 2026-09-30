@@ -1,5 +1,14 @@
 # Changelog
 
+## b470 — the counters stop guessing, and compaction stops waiting
+
+- **A changed file is counted by the file.** Adding one line under its neighbour used to be reported as `+2 -1`, because the size came from the text the model sent: it asked to put two lines where one was, so one line read as a deletion too. The diff the approval card already showed is now what the header and the finished card count, and a line that was only added is not also printed as `-0`.
+- **A tokenizer that cannot load no longer stops the app.** The count in the status line is an estimate the server corrects with its own usage, and it panicked when the BPE table could not be read. This was the last unwrap in the project that nothing checked.
+- **The context gauge stops measuring a guess.** Before the server says how large its window is, the status line showed a share of a default number. It now shows the count on its own until the real size arrives, rather than a percentage of something nobody has stated.
+- **Compaction is up to three times faster on a warm connection.** It asked for the summary with its own system prompt and the whole conversation flattened into one message, so it shared not a single token with what the server had already cached during the turn and prefilled everything again from zero every time. The conversation now goes as the prefix it already was, and the instruction follows it: measured on a 90k conversation, 11.9s to the first token before, 3.9s after. The gain depends on the cache still being warm; a connection that has been idle pays the full prefill.
+- **The interface does not freeze during a compaction.** It ran on the task that draws the screen, so a slow summary meant no repaint and no keys, which read as a crash. It runs on its own task now, and the line under the prompt says what is happening and what was saved. A `/compact` typed during a turn says it will run when the turn ends instead of vanishing into the queue.
+- **Agent notes stay out of the repository.** `MEMORY.md` and `memory/`, the working notes a coding agent keeps beside a project, are ignored like the other local files that section already lists.
+
 ## b460 — commands while the model works, and a window that does not run out
 
 - **Commands work while the model works.** Type a `/command` and press Enter during a turn. The ones that only read or set something run at once: `/help`, `/verbose`, `/diff`, `/commit`, `/memory`, `/context`, `/settings`, `/mode`, `/effort`, `/model`. The ones that change the conversation the turn is holding wait and run when it ends, shown under the prompt as "runs when the turn ends": `/compact`, `/clear`, `/export`, `/rewind`. `/goal`, `/resume`, `/regenerate`, `/update`, `/exit` and the like say they do not run mid-turn. A misspelt command is no longer sent to the model as guidance; a path such as `/tmp/shot.png` still is.
