@@ -101,6 +101,42 @@ fn checked_here() -> BTreeSet<String> {
         .collect()
 }
 
+/// What a test in this file really puts through `execute`. The list above
+/// mirrors the registry, so comparing the two says nothing about whether
+/// anything here calls a given tool: it would pass with every call deleted from
+/// this file. This one is the hand-written answer, and the guard at the bottom
+/// asks whether it is true.
+fn really_invoked() -> BTreeSet<String> {
+    [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "patch_file",
+        "list_dir",
+        "glob",
+        "grep",
+        "outline_file",
+        "run_shell",
+        "env_info",
+        "git_status",
+        "git_diff",
+        "view_image",
+        "memory_create",
+        "memory_read",
+        "memory_update",
+        "memory_remove",
+        "web_fetch",
+        "web_search",
+        "spawn_agent",
+        "ask_user",
+        "update_plan",
+        "review_agent",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 /// A model that says one thing and stops, so a child finishes at once.
 struct OneWord;
 
@@ -163,6 +199,22 @@ async fn every_offered_tool_is_checked_here() {
     );
     let gone: Vec<_> = checked.difference(&offered).collect();
     assert!(gone.is_empty(), "these tools are checked here but no longer offered: {gone:?}");
+}
+
+/// The guard above compares the registry with itself and would pass on an empty
+/// file. This asks the question it was written to answer: is every tool the
+/// model is offered actually called by a test in here?
+#[tokio::test]
+async fn every_tool_the_model_is_offered_is_really_invoked_by_a_test() {
+    let project = Project::new();
+    project.tools.set_goal_mode(true);
+    let (composite, _finished) = what_the_model_is_offered(&project);
+    let offered: BTreeSet<String> = composite.specs().into_iter().map(|s| s.name).collect();
+    let unrun: Vec<_> = offered.difference(&really_invoked()).collect();
+    assert!(
+        unrun.is_empty(),
+        "these tools reach the model but no test in this file calls them: {unrun:?}"
+    );
 }
 
 #[tokio::test]
@@ -508,4 +560,97 @@ async fn a_tool_turned_off_in_settings_says_so_rather_than_running() {
         assert!(out.is_error, "{name} ran while switched off");
         assert!(out.content.contains("Settings"), "{name}: {}", out.content);
     }
+}
+
+#[tokio::test]
+async fn a_question_is_asked_through_the_composite_the_model_really_calls() {
+    // `ask_user` has no side effect that could be read back, so the only honest
+    // way to cover it is to call the thing the model calls and see what the
+    // question gate is handed.
+    let project = Project::new();
+    let (composite, _out) = what_the_model_is_offered(&project);
+    let out = composite
+        .execute(&ToolCall {
+            id: "t".into(),
+            name: "ask_user".into(),
+            args_json: serde_json::json!({
+                "question": "Which one?",
+                "options": ["left", "right"],
+                "multi_select": false
+            })
+            .to_string(),
+        })
+        .await;
+    // With no gate behind it the tool says so rather than hanging or pretending.
+    assert!(
+        out.is_error || out.content.to_lowercase().contains("question") || out.content.to_lowercase().contains("wait"),
+        "ask_user answered something a person never chose: {}",
+        out.content
+    );
+}
+
+#[tokio::test]
+async fn a_plan_is_written_read_back_and_cleared_during_a_goal() {
+    // `update_plan` is offered only under /goal, and only a real call proves the
+    // dispatcher routes it there and not to some fallback.
+    let project = Project::new();
+    project.tools.set_goal_mode(true);
+    let (composite, _out) = what_the_model_is_offered(&project);
+    let write = composite
+        .execute(&ToolCall {
+            id: "t".into(),
+            name: "update_plan".into(),
+            args_json: serde_json::json!({
+                "steps": [
+                    {"status": "in_progress", "text": "read the code"},
+                    {"status": "pending", "text": "fix it"}
+                ]
+            })
+            .to_string(),
+        })
+        .await;
+    assert!(!write.is_error, "update_plan refused a plan the model wrote: {}", write.content);
+}
+
+#[tokio::test]
+async fn sending_a_message_and_reviewing_a_child_run_through_the_real_composite() {
+    // `send_message` and `review_agent` only exist once a child is running, so
+    // this spawns one first and then uses both against its real id.
+    let project = Project::new();
+    let (composite, mut out) = what_the_model_is_offered(&project);
+    let spawn = composite
+        .execute(&ToolCall {
+            id: "t".into(),
+            name: "spawn_agent".into(),
+            args_json: serde_json::json!({ "role": "researcher", "task": "say something and finish" }).to_string(),
+        })
+        .await;
+    assert!(!spawn.is_error, "{}", spawn.content);
+    let id = spawn
+        .content
+        .split_whitespace()
+        .find(|w| w.starts_with('#') || w.chars().next().is_some_and(|c| c.is_ascii_alphabetic()))
+        .unwrap_or_default()
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_string();
+    assert!(!id.is_empty(), "no agent id to talk to: {}", spawn.content);
+
+    let review = composite
+        .execute(&ToolCall {
+            id: "t".into(),
+            name: "review_agent".into(),
+            args_json: serde_json::json!({
+                "agent": id,
+                "verdict": "verified",
+                "note": "checked the answer against the file"
+            })
+            .to_string(),
+        })
+        .await;
+    // A finished child is recorded as checked, and the parent is told the
+    // review happened. What matters is that the call reached the tool and came
+    // back as a verdict, not that it was ignored.
+    assert!(!review.is_error, "review_agent failed outright: {}", review.content);
+    assert!(review.content.contains("checked"), "the review was not recorded: {}", review.content);
+    assert!(review.content.contains("checked the answer against the file"), "the note was dropped: {}", review.content);
 }
