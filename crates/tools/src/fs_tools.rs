@@ -102,7 +102,7 @@ fn find_actual_string(text: &str, needle: &str) -> Option<(String, Vec<String>)>
     if let Some(found) = without_read_file_numbers(needle).and_then(|unnumbered| find_actual_string(text, &unnumbered)) {
         return Some(found);
     }
-    match_lines(text, needle, false)
+    match_lines(text, needle, false).or_else(|| match_lines(text, needle, true))
 }
 
 /// The one run of lines `needle` describes, or `None` if it describes none or
