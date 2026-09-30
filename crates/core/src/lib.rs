@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod context_usage;
+pub mod cost;
 pub mod diff;
 pub mod effort_memory;
 pub mod loop_;
@@ -20,6 +21,7 @@ pub mod task_notices;
 pub mod toolcheck;
 
 pub use config::{AppConfig, BackendPreset, ColorTheme, SamplingPreset, ToolsetProfile, UpdateChannel};
+pub use cost::{CostLedger, ProviderCost};
 pub use context_usage::{
     default_compact_threshold, resolved_compact_threshold, should_compact, CompactionInput,
     CompactionVerdict, ContextUsage,

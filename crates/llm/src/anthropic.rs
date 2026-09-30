@@ -969,6 +969,9 @@ impl Decoder {
                 completion: Some(t.output),
                 cached: Some(t.read),
                 mtp: None,
+                // Anthropic prices per token, not per turn, and this is a stream:
+                // there is no account total to read here.
+                cost: None,
             })));
         }
         out.push(Ok(LlmEvent::Done(self.stop.unwrap_or(FinishReason::Stop))));
