@@ -1034,6 +1034,9 @@ fn compact_replaces_the_conversation_so_far_with_a_summary() {
     let screen = term.screen();
     assert!(!screen.contains("· 0 saved"), "the transcript was still counted after compaction:
 {screen}");
+    // The status took the tip's row, so no tip is showing while it is up.
+    let screen = term.screen();
+    assert!(!screen.contains("Tip:"), "a tip and the compaction status share the row: {screen}");
     ask(&term, "the third question", "Third answer, after the summary.");
 
     assert!(
@@ -1054,6 +1057,9 @@ fn compact_replaces_the_conversation_so_far_with_a_summary() {
     let saved = std::fs::read_to_string(archive).unwrap();
     assert!(saved.contains("the first question"));
     assert!(saved.contains("First answer."));
+    // The finished line borrows the tip's row; left up it is the only thing that
+    // row ever shows again.
+    term.wait_for("Tip:", WAIT);
 }
 
 /// Compaction during a running turn waits its turn, and says so: a command that

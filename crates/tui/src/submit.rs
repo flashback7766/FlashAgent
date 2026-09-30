@@ -697,11 +697,16 @@ impl App {
         self.custom_placeholder = None;
         self.suggested_prompt = None;
         self.compacting = true;
-        self.compact_status = Some(format!(
-            "Compacting context… {} of {} in the window · the model is writing the summary",
-            ContextUsage::format_tokens(self.context_usage.total_used()),
-            ContextUsage::format_tokens(self.context_usage.total_capacity)
-        ));
+        // No deadline: the write can take minutes, and a line that ran out
+        // half-way through would be hiding the very thing it reports.
+        self.set_compact_status(
+            format!(
+                "Compacting context… {} of {} in the window · the model is writing the summary",
+                ContextUsage::format_tokens(self.context_usage.total_used()),
+                ContextUsage::format_tokens(self.context_usage.total_capacity)
+            ),
+            0,
+        );
 
         // The task owns the history until it is done; there is nothing to send
         // a turn with in the meantime, and a turn would have nothing to keep.

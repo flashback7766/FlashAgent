@@ -589,6 +589,10 @@ struct App {
     /// Set while `/compact` runs in the background: the line under the prompt
     /// says so instead of the interface looking frozen.
     compact_status: Option<String>,
+    /// Idle ticks that line keeps the tip's row for once the compaction is done.
+    /// Zero while it still runs: that takes as long as it takes, and a line that
+    /// expired mid-write would be hiding the very thing it reports.
+    compact_status_hold: usize,
     /// The history is with the compaction task until it comes back.
     compacting: bool,
     input: flashagent_tui::Composer,
@@ -1105,6 +1109,7 @@ fn initial_app(init: InitialApp) -> App {
         question_ui_state: QuestionUiState::default(),
         history: vec![ChatMessage::system(system_prompt_text)],
         compact_status: None,
+        compact_status_hold: 0,
         compacting: false,
         input: flashagent_tui::Composer::new(),
         custom_placeholder: None,
