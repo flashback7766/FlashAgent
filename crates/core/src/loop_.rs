@@ -1946,6 +1946,46 @@ mod tests {
     }
 
     #[test]
+    fn a_model_that_keeps_reading_instead_of_reporting_is_told_once() {
+        let specs = vec![
+            ToolSpec { name: "read_lines".into(), description: String::new(), parameters_json: "{}".into() },
+            ToolSpec { name: "report_status".into(), description: String::new(), parameters_json: "{}".into() },
+        ];
+        let call = |name: &str, id: &str| ChatMessage {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![ToolCall { id: id.into(), name: name.into(), args_json: "{}".into() }],
+            ..Default::default()
+        };
+
+        // Before any result has come back, the model is left alone: it has
+        // nothing to report from yet.
+        let early = vec![ChatMessage::user("Read status.txt, then report it with report_status."), call("read_lines", "c1")];
+        assert!(unreported_call_nudge(&early, &specs).is_none(), "it is told to report before it has seen anything");
+
+        // One read, result in hand, and the named call still missing: exactly
+        // the moment the model starts going round in circles.
+        let stuck = vec![
+            ChatMessage::user("Read status.txt, then report it with report_status."),
+            call("read_lines", "c1"),
+            ChatMessage::tool_result("c1", "status = 7"),
+            call("read_lines", "c2"),
+        ];
+        let nudge = unreported_call_nudge(&stuck, &specs).expect("a model reading a second time is stuck");
+        assert!(nudge.contains("report_status"), "{nudge}");
+        assert!(nudge.contains("instead of reading again"), "{nudge}");
+
+        // Once the named call is made, there is nothing left to report.
+        let done = vec![
+            ChatMessage::user("Read status.txt, then report it with report_status."),
+            call("read_lines", "c1"),
+            ChatMessage::tool_result("c1", "status = 7"),
+            call("report_status", "c2"),
+        ];
+        assert!(unreported_call_nudge(&done, &specs).is_none());
+    }
+
+    #[test]
     fn a_tool_the_request_names_is_asked_for_once_if_the_model_stops_before_it() {
         let asked = |prompt: &str, turns: Vec<MockTurn>| {
             let llm = RecordingLlm::new(turns);
