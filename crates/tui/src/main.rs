@@ -645,6 +645,9 @@ struct App {
     current_model: String,
     current_context: Option<String>,
     current_effort: String,
+    /// What this session has cost, where the backend says. Unpriced backends
+    /// leave it empty and the status bar stays quiet.
+    cost: flashagent_core::CostLedger,
     /// Kept so the prompt can be rebuilt when the voice changes.
     prompt_config: SystemPromptConfig,
     /// E.g. `~/project`.
@@ -1157,6 +1160,7 @@ fn initial_app(init: InitialApp) -> App {
         current_model: model,
         current_context: context_display,
         current_effort: initial_effort,
+        cost: flashagent_core::CostLedger::default(),
         prompt_config: system_prompt_config,
         cwd_display: cwd_display.clone(),
         memory_docs,
