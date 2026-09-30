@@ -158,7 +158,6 @@ async fn summarize_before(
     cut: Cut<'_>,
     archive_path: &std::path::Path,
 ) -> Option<usize> {
-    use futures::StreamExt;
     let Cut { split_idx, keep_prompt, focus_prompt, detail, real_used } = cut;
 
     let before_tokens: usize = history.iter().map(|m| m.content.len() / 4 + 4).sum();
@@ -174,7 +173,6 @@ async fn summarize_before(
         None => (history[0].content.clone(), None),
     };
 
-    let msgs = compaction_request(&history[..split_idx], prior_summary.as_deref(), focus_prompt, detail);
     let opts = flashagent_llm::TurnOptions {
         thinking: flashagent_llm::ThinkingEffort::Off,
         temperature: Some(0.2),
@@ -188,55 +186,33 @@ async fn summarize_before(
         ..Default::default()
     };
 
-    // The old 12 s budget made every summary time out on a laptop 35B model at
-    // 10 tokens/s; prefill of a long history alone can take a minute.
-    let summary = if let Ok(Ok(mut stream)) = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        source.turn_with_options(&msgs, &[], &opts),
-    ).await {
-        let mut text = String::new();
-        // How the answer ended. A summary the person asked for must arrive
-        // whole; one the window forced is judged differently, because refusing
-        // it leaves the model a step from the end of the window.
-        let mut ended_cleanly = false;
-        let mut cut_off = false;
-        loop {
-            match tokio::time::timeout(std::time::Duration::from_secs(120), stream.next()).await {
-                Ok(Some(Ok(flashagent_llm::LlmEvent::TextDelta(d)))) => text.push_str(&d),
-                Ok(Some(Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)))) => {
-                    ended_cleanly = true;
-                    break;
-                }
-                Ok(Some(Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Length)))) => {
-                    cut_off = true;
-                    break;
-                }
-                Ok(Some(Ok(flashagent_llm::LlmEvent::Done(_)))) | Ok(Some(Err(_))) | Err(_) => break,
-                Ok(Some(Ok(_))) => {},
-                Ok(None) => break,
-            }
+    // A summary that answers well but not in the expected shape is a summary
+    // we are throwing away over formatting, and the window stays full for a
+    // reason the person cannot see. Asked once more, with the shape stated as
+    // the first words to write, most models produce it. The rule itself is not
+    // relaxed: a second refusal is a refusal.
+    let mut summary = None;
+    for attempt in 0..2 {
+        let msgs = compaction_request(&history[..split_idx], prior_summary.as_deref(), focus_prompt, detail, attempt == 1);
+        let Some(answer) = ask_for_summary(source, msgs, &opts, detail).await else { break };
+        let trimmed = answer.text.trim();
+        if !summary_has_handoff_state(trimmed) {
+            continue;
         }
-        let trimmed = text.trim();
-        let usable = ended_cleanly || (cut_off && detail == Detail::Exhaustive);
-        if usable && summary_has_handoff_state(trimmed) {
-            let mut summary =
-                if trimmed.starts_with("Summary:") { trimmed.to_string() } else { format!("Summary:\n{trimmed}") };
-            if cut_off {
-                // Said out loud, because a summary that stops mid-section reads
-                // like a summary of everything.
-                summary.push_str(
-                    "\n\n[This summary was cut off at the output limit. What it reached is complete; \
-                     later detail is missing. Re-read the archive above for anything you need that \
-                     is not here.]",
-                );
-            }
-            summary
-        } else {
-            return None;
+        let mut written = if trimmed.starts_with("Summary:") { trimmed.to_string() } else { format!("Summary:\n{trimmed}") };
+        if answer.cut_off {
+            // Said out loud, because a summary that stops mid-section reads
+            // like a summary of everything.
+            written.push_str(
+                "\n\n[This summary was cut off at the output limit. What it reached is complete; \
+                 later detail is missing. Re-read the archive above for anything you need that \
+                 is not here.]",
+            );
         }
-    } else {
-        return None;
-    };
+        summary = Some(written);
+        break;
+    }
+    let summary = summary?;
 
     let mut new_history = Vec::with_capacity(history.len() - split_idx + 2);
     new_history.push(ChatMessage::system(format!(
@@ -304,11 +280,74 @@ pub(crate) enum Detail {
 /// that filled up mid-task needs the state of that task, not a précis of it.
 pub(crate) const CURRENT_STATE: &str = "CURRENT STATE:";
 
+/// The second ask. The first lists nine sections and lets the model decide they
+/// are optional; a model that drops 7 and 8 has then written a summary this
+/// build refuses, and the window stays full for a reason nobody can see. Here
+/// the required shape is short enough to be quoted exactly.
+const RETRY_SHAPE_INSTRUCTION: &str = "\
+Your previous answer was not accepted and the conversation still does not fit. \
+Write the summary again, and this time follow the shape exactly. \
+The first line of your answer must be CURRENT STATE:. \
+Then write these three numbered lines in this order, each present even when the answer is None:\
+1. Primary Request and Intent\
+7. Pending Tasks\
+8. Current Work\
+Output only the summary: no preamble, no apology, nothing about what you were asked.";
+
+/// One summary as it came back from the model.
+struct Summarized {
+    text: String,
+    /// It stopped because it ran out of output room, not because it was done.
+    cut_off: bool,
+}
+
+/// One call for a summary, and how it ended. `None` when the call itself
+/// failed: no stream, a refused request or a broken connection.
+async fn ask_for_summary(
+    source: &dyn LlmSource,
+    msgs: Vec<ChatMessage>,
+    opts: &flashagent_llm::TurnOptions,
+    detail: Detail,
+) -> Option<Summarized> {
+    use futures::StreamExt;
+    // The old 12 s budget made every summary time out on a laptop 35B model at
+    // 10 tokens/s; prefill of a long history alone can take a minute.
+    let started = tokio::time::timeout(std::time::Duration::from_secs(300), source.turn_with_options(&msgs, &[], opts)).await.ok()?;
+    let mut stream = started.ok()?;
+    let mut text = String::new();
+    // How the answer ended. A summary the person asked for must arrive whole;
+    // one the window forced is judged differently, because refusing it leaves
+    // the model a step from the end of the window.
+    let mut ended_cleanly = false;
+    let mut cut_off = false;
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(120), stream.next()).await {
+            Ok(Some(Ok(flashagent_llm::LlmEvent::TextDelta(d)))) => text.push_str(&d),
+            Ok(Some(Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)))) => {
+                ended_cleanly = true;
+                break;
+            }
+            Ok(Some(Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Length)))) => {
+                cut_off = true;
+                break;
+            }
+            Ok(Some(Ok(flashagent_llm::LlmEvent::Done(_)))) | Ok(Some(Err(_))) | Err(_) => break,
+            Ok(Some(Ok(_))) => {},
+            Ok(None) => break,
+        }
+    }
+    let usable = ended_cleanly || (cut_off && detail == Detail::Exhaustive);
+    usable.then_some(Summarized { text, cut_off })
+}
+
 pub(crate) fn compaction_request(
     conversation: &[ChatMessage],
     prior_summary: Option<&str>,
     focus_prompt: Option<&str>,
     detail: Detail,
+    // Asked a second time because the first answer did not take the shape, which
+    // a model that skipped a section it considered empty often will not.
+    retry: bool,
 ) -> Vec<ChatMessage> {
     let focus_text = match focus_prompt {
         Some(focus) => format!("\nSpecial user focus/instructions: preserve details regarding: {focus}\n"),
@@ -318,7 +357,7 @@ pub(crate) fn compaction_request(
         Some(_) => "An earlier summary of what came before this point is already in the system message; fold it in rather than repeating it.\n".to_string(),
         None => String::new(),
     };
-    let instruction = match detail {
+    let mut instruction = match detail {
         Detail::Brief => format!(
             "Summarize the conversation above for the same assistant to continue the task.\n\
          Begin with 'Summary:' and use these numbered sections in this order:\n\
@@ -387,6 +426,9 @@ pub(crate) fn compaction_request(
     // summarized rather than acted on.
     while matches!(msgs.last(), Some(m) if m.role == flashagent_llm::Role::Tool) {
         msgs.pop();
+    }
+    if retry {
+        instruction = format!("{instruction}\n\n{RETRY_SHAPE_INSTRUCTION}");
     }
     msgs.push(ChatMessage::user(instruction));
     msgs
