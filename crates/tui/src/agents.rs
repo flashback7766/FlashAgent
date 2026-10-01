@@ -34,13 +34,38 @@ fn k(n: u64) -> String {
     }
 }
 
+/// What a child is doing right now, in the same words the composer under the
+/// prompt uses for the parent. A prose summary of a child's thoughts read like
+/// the parent was talking about itself; the phase reads like a status, which is
+/// what the row is for. The prose is still kept, for the row the mouse opens.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChildPhase {
+    Waiting,
+    Thinking,
+    Writing,
+    /// Which call is running.
+    Tooling(String),
+}
+
+impl ChildPhase {
+    pub fn label(&self) -> String {
+        match self {
+            ChildPhase::Waiting => "waiting".to_string(),
+            ChildPhase::Thinking => "thinking".to_string(),
+            ChildPhase::Writing => "writing".to_string(),
+            ChildPhase::Tooling(name) => format!("tooling {name}"),
+        }
+    }
+}
+
 /// One running child.
 struct Child {
     id: String,
     role: String,
     /// The last thing it said or did, in one line: what the row reads while
-    /// it works.
+    /// it works once the mouse opens it.
     doing: String,
+    phase: ChildPhase,
     usage: ChildUsage,
     done: Option<DoneReason>,
     /// What the parent made of this child's report, once it has checked it.
@@ -94,21 +119,26 @@ impl AgentTree {
             LoopEvent::TurnDelta(text) => {
                 let said = last_line(text);
                 if !said.is_empty() {
+                    child.phase = ChildPhase::Writing;
                     return set_doing(child, said);
                 }
             }
             LoopEvent::ReasoningDelta(text) => {
                 let thought = last_line(text);
                 if !thought.is_empty() {
+                    child.phase = ChildPhase::Thinking;
                     return set_doing(child, format!("thinking: {thought}"));
                 }
             }
             LoopEvent::ToolStarted { name, .. } => {
                 child.current_call = Some((name.clone(), false));
+                child.phase = ChildPhase::Tooling(name.clone());
                 return set_doing(child, format!("calling {name}"));
             }
             LoopEvent::ToolFinished { is_error, .. } => {
                 let name = child.current_call.take().map(|(n, _)| n).unwrap_or_else(|| "a tool".into());
+                // The result is in; the model has it and has not spoken yet.
+                child.phase = ChildPhase::Thinking;
                 return set_doing(child, if *is_error { format!("{name} failed") } else { format!("{name} done") });
             }
             LoopEvent::StepStarted { step, max_steps } => {
@@ -145,9 +175,9 @@ impl AgentTree {
         }
     }
 
-    /// The line this child is shown on, right now, cut to `width` so a long
-    /// thought never wraps onto a second row and breaks the tree. The counters
-    /// are kept: what a child is doing can be cut, what it cost cannot.
+    /// What a child is doing right now, cut to `width` so a long thought never
+    /// wraps onto a second row and breaks the tree. The counters are kept: what
+    /// a child is doing can be cut, what it cost cannot.
     pub fn line(&self, id: &str, width: usize) -> Option<String> {
         let child = self.children.get(id)?;
         let head = format!("{} {}", icon(child.done), child.role);
@@ -180,17 +210,44 @@ impl AgentTree {
             }
         }
         let used = line.chars().count();
-        let doing = if child.done.is_none() { phrase(&child.doing) } else { String::new() };
-        if !doing.is_empty() {
+        let phase = if child.done.is_none() { child.phase.label() } else { String::new() };
+        if !phase.is_empty() {
             let room = width.saturating_sub(used + 5);
-            if room > 8 {
-                line = format!("{line} · {}", cut(&doing, room));
+            if room > 4 {
+                line = format!("{line} · {}", cut(&phase, room));
             }
         }
         Some(format!("  {}", cut(&line, width)))
     }
 
-    /// The child's answer, and the notice the model reads: a user-role message
+    /// The prose the phase replaced, for the row the mouse opens. F2 does not
+    /// reach it: a subagent's rows are a status, not the transcript, so a
+    /// verbose flip does not reprint them.
+    pub fn detail(&self, id: &str, width: usize) -> Option<String> {
+        let child = self.children.get(id)?;
+        let doing = if child.done.is_none() { phrase(&child.doing) } else { String::new() };
+        if doing.is_empty() {
+            return None;
+        }
+        Some(cut(&format!("      {}", doing), width))
+    }
+
+    /// The prose a phase replaced, for every child that has one. Shown only for
+    /// the rows the mouse has opened.
+    pub fn details(&self, width: usize) -> std::collections::HashMap<String, String> {
+        self.order
+            .iter()
+            .filter_map(|id| self.detail(id, width).map(|d| (id.clone(), d)))
+            .collect()
+    }
+
+/// Every child's row, in the order they were started: the pinned block above
+    /// the composer, with the id the mouse click needs to find its row.
+    pub fn pinned_rows(&self, width: usize) -> Vec<(String, String)> {
+        self.order.iter().filter_map(|id| self.line(id, width).map(|l| (id.clone(), l))).collect()
+    }
+
+/// The child's answer, and the notice the model reads: a user-role message
     /// marked as automatic, so text inside it can never become an instruction.
     /// It is framed as a claim to be checked, because that is what it is.
     pub fn notice(
@@ -222,6 +279,7 @@ impl AgentTree {
                     id: id.to_string(),
                     role: role.to_string(),
                     doing: "starting".to_string(),
+                    phase: ChildPhase::Waiting,
                     usage: ChildUsage::default(),
                     done: None,
                     review: None,
@@ -328,8 +386,21 @@ mod tests {
         })));
         let line = tree.line("sub1", 100).unwrap();
         assert!(line.contains("researcher"), "{line}");
-        assert!(line.contains("calling grep"), "{line}");
+        // The row reads as a status, in the composer's own words; the prose it
+        // replaced is one mouse click away rather than in the row itself.
+        assert!(line.contains("tooling grep"), "{line}");
+        assert!(!line.contains("calling grep"), "a summary of a child's thoughts reads as the parent talking: {line}");
+        assert!(tree.detail("sub1", 100).is_some_and(|d| d.contains("calling grep")), "the prose is still there for the click");
         assert_eq!(tree.order, vec!["sub1"], "one child is one row, however many events");
+    }
+
+    #[test]
+    fn a_child_row_speaks_in_the_same_words_the_composer_uses() {
+        let mut tree = AgentTree::default();
+        tree.apply(&ev("sub1", "researcher", LoopEvent::TurnDelta("reading a".into())));
+        assert!(tree.line("sub1", 100).unwrap().contains("writing"), "a child that is writing is saying so");
+        tree.apply(&ev("sub1", "researcher", LoopEvent::ReasoningDelta("hmm".into())));
+        assert!(tree.line("sub1", 100).unwrap().contains("thinking"));
     }
 
     #[test]
@@ -337,8 +408,11 @@ mod tests {
         let mut tree = AgentTree::default();
         tree.apply(&ev("sub1", "researcher", LoopEvent::TurnDelta("reading a".into())));
         tree.apply(&ev("sub2", "coder", LoopEvent::TurnDelta("writing b".into())));
-        assert!(tree.line("sub1", 100).unwrap().contains("reading a"));
-        assert!(tree.line("sub2", 100).unwrap().contains("writing b"));
+        assert!(tree.pinned_rows(100)[0].1.contains("researcher"));
+        assert!(tree.pinned_rows(100)[1].1.contains("coder"));
+        // Every child is pinned, oldest first, with the id a click needs.
+        assert_eq!(tree.pinned_rows(100).len(), 2);
+        assert_eq!(tree.pinned_rows(100)[0].0, "sub1", "the order they were started in is the order they read in");
         assert_eq!(tree.running(), 2);
     }
 
@@ -468,7 +542,7 @@ mod tests {
             args_json: "{}".into(),
         }));
         let line = tree.line("sub1", 100).unwrap();
-        assert!(line.contains("calling run_shell"), "{line}");
+        assert!(line.contains("tooling run_shell"), "{line}");
     }
 
     #[test]

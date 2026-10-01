@@ -221,6 +221,11 @@ impl App {
     pub(crate) fn on_tick(&mut self, cx: &LoopCtx<'_>) {
         self.tick_n += 1;
         self.tip_animator.tick();
+        // A trackpad flick arrives as a burst; what is left of it is spent here so
+        // it glides instead of stopping at the last event.
+        if self.settle_wheel() {
+            self.renderer.request_reprint();
+        }
         self.start_recap_if_due(cx.source, cx.tx);
         // A question that timed out (a /goal one after 120 s) goes without a
         // key; its selection and half-written answer must not open the next.
@@ -614,10 +619,37 @@ impl App {
             return;
         }
         match m.kind {
-            MouseEventKind::ScrollUp => self.renderer.scroll_up(3),
-            MouseEventKind::ScrollDown => self.renderer.scroll_down(3),
-            // A click on a thought or a tool call opens or folds that one alone.
+            // A trackpad sends many small wheel events where a wheel sends one
+            // per notch; three lines apiece made a two-finger flick jump down the
+            // transcript. One line per event, and the rest of the throw is spent
+            // out over the following frames instead of being cut off at the end.
+            MouseEventKind::ScrollUp => self.wheel(-1),
+            MouseEventKind::ScrollDown => self.wheel(1),
+            // A selection made with a finger or a trackpad is copied as it is
+            // made. Nothing else will copy it: a TUI has no Ctrl+C for text the
+            // terminal itself never held.
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                if let Some((top, left)) = self.selection_anchor {
+                    let picked = self.renderer.text_in(top, m.row, left, m.column);
+                    if picked.chars().count() > 1 && flashagent_tui::clipboard::set_clipboard_text(&picked) {
+                        self.background =
+                            Some(BackgroundNotice::fading(format!("Copied {} characters", picked.chars().count()), 4));
+                        self.renderer.request_reprint();
+                    }
+                }
+            }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                self.selection_anchor = Some((m.row, m.column));
+                // A click on a thought or a tool call opens or folds that one alone.
+                // A subagent row opens its own detail too, and only the mouse does:
+                // F2 is for the transcript and never touches the rows above the composer.
+                if let Some(id) = self.renderer.agent_row_at(m.row).map(str::to_string) {
+                    if !self.expanded_agents.remove(&id) {
+                        self.expanded_agents.insert(id);
+                    }
+                    self.renderer.request_reprint();
+                    return;
+                }
                 let expansion = ReasoningExpansion { all: self.all_expanded, last: self.last_expanded };
                 if let Some(row) = self.renderer.chat_row_at(m.row) {
                     self.chat.toggle_row(row, expansion);
@@ -625,6 +657,29 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// A wheel notch moves one line, not three. `dir` is negative for up.
+    fn wheel(&mut self, dir: i32) {
+        self.wheel_momentum = (self.wheel_momentum + dir).clamp(-24, 24);
+        self.renderer.scroll_by(dir);
+    }
+
+    /// Spends what is left of a wheel throw and lets it decay, so a trackpad
+    /// flick glides to its end instead of stopping where the last event was.
+    pub(crate) fn settle_wheel(&mut self) -> bool {
+        if self.wheel_momentum == 0 {
+            return false;
+        }
+        let step = self.wheel_momentum.signum();
+        self.renderer.scroll_by(step);
+        // Losing a third of the rest each frame is a throw that reads as weight
+        // rather than as a delay.
+        self.wheel_momentum -= step * self.wheel_momentum.abs() / 3;
+        if self.wheel_momentum.abs() < 1 {
+            self.wheel_momentum = 0;
+        }
+        true
     }
 
     /// A paste goes to whatever has the keyboard first: a path pasted as a

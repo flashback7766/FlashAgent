@@ -40,6 +40,28 @@ impl Screen {
         self.valid = false;
     }
 
+    /// The text of the rectangle a mouse drag covers, so a selection made with a
+    /// finger or a trackpad can be copied the moment it is made. Rows are cut by
+    /// visible column, not by bytes: an escape sequence is not a column.
+    pub fn text_in(&self, top: u16, bottom: u16, left: u16, right: u16) -> String {
+        let (top, bottom) = (top.min(bottom) as usize, top.max(bottom) as usize);
+        let (left, right) = (left.min(right) as usize, left.max(right) as usize);
+        let mut out = String::new();
+        for y in top..=bottom {
+            if y != top {
+                out.push('\n');
+            }
+            let Some(raw) = self.rows.get(y) else { break };
+            let plain = crate::text::strip_ansi(raw);
+            let chars: Vec<char> = plain.chars().collect();
+            if left < chars.len() {
+                let end = right.min(chars.len().saturating_sub(1));
+                out.extend(chars[left..=end].iter());
+            }
+        }
+        out.trim().to_string()
+    }
+
     /// Draws `rows` from the top of a `width` x `height` screen and parks the
     /// cursor at `cursor` (row, column), or hides it. Writes nothing when the
     /// frame is the one already shown.

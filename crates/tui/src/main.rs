@@ -642,6 +642,15 @@ struct App {
     /// The subagents of this session: one row each, live, and the notices
     /// their answers become.
     agents: flashagent_tui::agents::AgentTree,
+    /// Subagent rows the mouse has opened. F2 does not touch these: a child's
+    /// row is a status above the composer, not a line of the transcript.
+    expanded_agents: std::collections::HashSet<String>,
+    /// Where a mouse selection started, in (row, column). A drag from here is
+    /// copied as it is made.
+    selection_anchor: Option<(u16, u16)>,
+    /// What a wheel throw still has left to spend: a trackpad's flick arrives as
+    /// a burst of small events and would otherwise stop dead at the end of it.
+    wheel_momentum: i32,
     /// A quit refused because background tasks run; another soon after quits.
     quit_armed: Option<std::time::Instant>,
     /// The loop is asked to stop cooperatively so it hands back a consistent
@@ -1168,6 +1177,9 @@ fn initial_app(init: InitialApp) -> App {
         queued_commands: Vec::new(),
         task_inbox: flashagent_core::NoticeInbox::default(),
         agents: flashagent_tui::agents::AgentTree::default(),
+    expanded_agents: std::collections::HashSet::new(),
+    selection_anchor: None,
+    wheel_momentum: 0,
         task_lines: Vec::new(),
         tasks_refreshed: std::time::Instant::now(),
         quit_armed: None,

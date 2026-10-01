@@ -167,10 +167,12 @@ pub trait SubagentToolFactory: Send + Sync {
 /// Used when `spec.max_steps == 0`.
 const DEFAULT_MAX_STEPS: u32 = 20;
 
-/// How many children may run at once. The model is told when it is refused
-/// rather than left waiting: a coding agent that has three readers going is
-/// already at the point where a fourth one costs more than it finds.
-pub const DEFAULT_MAX_LIVE: usize = 3;
+/// How many children may run at once. Unlimited in stock: the cap was a
+/// judgement about what a model tends to ask for, not a limit the work needs,
+/// and refusing a child the user asked for is worse than the cost of running
+/// it. The rule is still there — `SubagentHost::with_max_live` sets it — for
+/// anyone who wants a ceiling, and a refusal still names itself.
+pub const DEFAULT_MAX_LIVE: usize = usize::MAX;
 
 /// Where a message goes: every agent that is running, and the parent.
 ///
@@ -420,6 +422,20 @@ impl SubagentHost {
             outbound,
             max_live: DEFAULT_MAX_LIVE,
         };
+        (host, done)
+    }
+
+    /// As [`Self::with_channels`], with a ceiling on how many children run at once.
+    /// Nothing sets one in stock; this is here for anyone who wants a limit the
+    /// refusal path can be exercised against.
+    pub fn with_max_live(
+        llm: Arc<dyn LlmSource>,
+        factory: Arc<dyn SubagentToolFactory>,
+        events: Option<mpsc::UnboundedSender<SubagentEvent>>,
+        max_live: usize,
+    ) -> (Self, mpsc::UnboundedReceiver<SubagentOutbound>) {
+        let (mut host, done) = Self::with_channels(llm, factory, events);
+        host.max_live = max_live;
         (host, done)
     }
 
@@ -942,7 +958,9 @@ mod tests {
 
     #[tokio::test]
     async fn no_more_children_run_at_once_than_the_limit() {
-        let (host, _done) = SubagentHost::with_channels(Arc::new(Hang), Arc::new(Factory), None);
+        // The stock limit is none, so the rule is pinned on a host that has one:
+        // the refusal path still has to work for anyone who sets a ceiling.
+        let (host, _done) = SubagentHost::with_max_live(Arc::new(Hang), Arc::new(Factory), None, 2);
         let host = Arc::new(host);
         for _ in 0..host.max_live() {
             host.spawn(SubagentSpec { prompt: "p".into(), ..Default::default() }).expect("under the limit");
@@ -953,6 +971,16 @@ mod tests {
         };
         assert_eq!(refused.running, host.max_live());
         assert!(refused.to_string().contains("Wait for a result"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn a_stock_host_is_not_asked_to_run_a_few_children_but_all_of_them() {
+        let (host, _done) = SubagentHost::with_channels(Arc::new(Hang), Arc::new(Factory), None);
+        let host = Arc::new(host);
+        for n in 0..8 {
+            host.spawn(SubagentSpec { prompt: "p".into(), ..Default::default() }).unwrap_or_else(|e| panic!("child {n} was refused: {e}"));
+        }
+        assert_eq!(host.live(), 8, "the stock limit must not refuse a child the user asked for");
     }
 
     #[tokio::test]

@@ -171,21 +171,15 @@ impl App {
         self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
     }
 
-    /// A child of this session is doing something: its row moves, nothing else
-    /// on screen does. A turn that is writing its answer is left alone.
+    /// A child of this session is doing something. Its row lives above the composer,
+    /// not in the transcript: it is a status, so it does not scroll away with the
+    /// answer, and F2 does not reprint it. A turn that is writing its answer is
+    /// left alone.
     pub(crate) fn on_subagent_event(&mut self, event: &flashagent_core::SubagentEvent) {
         if !self.agents.apply(event) {
             return;
         }
-        if let Some(line) = self.agents.line(&event.id, self.term_cols()) {
-            self.chat.upsert_agent(&event.id, line);
-        }
         self.renderer.request_reprint();
-    }
-
-    /// The width the chat is drawn in, for cutting a row to what fits.
-    fn term_cols(&self) -> usize {
-        crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(100)
     }
 
     /// A child has answered. Its row closes, and the model hears about it the
@@ -199,8 +193,7 @@ impl App {
             role: finished.role.clone(),
             event: flashagent_core::loop_::LoopEvent::Done(finished.done),
         });
-        let line = self.agents.line(&finished.id, self.term_cols()).unwrap_or_default();
-        self.chat.upsert_agent(&finished.id, line);
+        let _ = &finished;
 
         let Some(notice) = self.agents.notice(&finished) else { return };
         // The answer is a lot of text and the transcript already has the row;
@@ -271,9 +264,7 @@ impl App {
             .map(|r| r.role)
             .unwrap_or_else(|| review.agent.clone());
         self.agents.record_review(&review.agent, review.verdict);
-        if let Some(line) = self.agents.line(&review.agent, self.term_cols()) {
-            self.chat.upsert_agent(&review.agent, line);
-        }
+        self.renderer.request_reprint();
         let said = format!("{role} {} \u{b7} {}", review.agent, review.verdict.describe());
         for line in notice_lines(&said) {
             self.chat.push_system(&line);
