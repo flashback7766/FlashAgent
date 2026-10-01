@@ -154,12 +154,10 @@ pub(crate) fn work_box(
 ) -> Vec<(LineKind, String)> {
     let mut body: Vec<(LineKind, String)> = Vec::new();
     for (id, line) in agent_rows {
-        // The same indent a background command gets, and the budget has to
-        // account for it: `AgentTree::line` counts its `width` as the whole row,
-        // mark and indent both included, so what reaches here is
-        // `width - 2` of text behind two columns of indent. Spend those two
-        // twice and the row is clipped at the right wall, where the cut leaves
-        // no ellipsis and the phase reads as "thinkin".
+        // `box_inner` is the room a body row may fill behind the box's own two
+        // columns of indent, so a child's row is handed two columns more than
+        // that: `AgentTree::line` counts its `width` as the whole row, mark
+        // included, and the indent is added on the way in here.
         body.push((LineKind::Tool, live_row(&format!("  {line}"), t)));
         if expanded.contains(&id.as_str()) {
             if let Some(detail) = details.get(id) {
@@ -238,9 +236,9 @@ fn live_row(plain: &str, t: u64) -> String {
 }
 
 /// A background command as a row of the work box. `box_inner` is the room left
-/// inside the box's own frame, so the two columns of indent, the mark and its
-/// trailing space and the ` · {elapsed}` that closes the row all come out of the
-/// command instead of painting through the right edge of the box.
+/// inside the box's own frame once its two columns of indent are spent, so the
+/// mark and its trailing space and the ` · {elapsed}` that closes the row all
+/// come out of the command instead of painting through the right edge.
 ///
 /// The mark turns while the command runs. A `▸` says a command was started and
 /// reads the same for a server that is still serving and for a build that died
@@ -248,7 +246,9 @@ fn live_row(plain: &str, t: u64) -> String {
 /// is the only place the difference between "just started" and "been at it a
 /// while" can be told apart from.
 pub(crate) fn background_row(command: &str, elapsed: &str, box_inner: usize, mark: &str) -> String {
-    let spent = 2 + visible_width(mark) + 1 + 3 + visible_width(elapsed);
+    // The indent is already outside `box_inner`, so counting it again here
+    // would throw two columns away rather than keep the row inside the box.
+    let spent = visible_width(mark) + 1 + 3 + visible_width(elapsed);
     let cmd = flashagent_tui::truncate_middle(command, box_inner.saturating_sub(spent).max(4));
     format!("{mark} {cmd} \u{b7} {elapsed}")
 }
@@ -372,8 +372,8 @@ mod work_box_tests {
     #[test]
     fn a_child_row_fills_the_room_inside_the_box_and_no_more() {
         let width = 60;
-        let fits = format!("  \u{25b8} researcher \u{b7} thinking");
-        let rows = work_box(&[agent("sub1", &fits)], &[], &Default::default(), &[], width, 0);
+        let fits = "  \u{25b8} researcher \u{b7} thinking";
+        let rows = work_box(&[agent("sub1", fits)], &[], &Default::default(), &[], width, 0);
         assert!(
             plain(&rows)[1].contains("thinking"),
             "a row that fits the room must not be cut: {:?}",
@@ -389,7 +389,6 @@ mod work_box_tests {
         );
     }
 
-    #[test]
     #[test]
     fn a_long_phase_stays_inside_its_own_box() {
         let long = format!("  \u{25b8} researcher \u{b7} {}", "grepping the token tracker ".repeat(6));
@@ -407,7 +406,7 @@ mod work_box_tests {
         for inner in [20usize, 40, 76] {
             let row = background_row(cmd, "1h02m", inner, "\u{25b8}");
             assert!(
-                flashagent_tui::visible_width(&row) + 2 <= inner,
+                flashagent_tui::visible_width(&row) <= inner,
                 "the row must fit {inner} columns with its indent: {row:?}"
             );
             assert!(row.contains("1h02m"), "the elapsed time is never the thing that is cut: {row:?}");
@@ -416,6 +415,42 @@ mod work_box_tests {
         // and `pad_box_row` is what keeps it from painting through the side.
         let cramped = background_row(cmd, "1h02m", 10, "\u{25b8}");
         assert!(flashagent_tui::visible_width(&cramped) > 10, "the marks alone overrun a tiny box: {cramped:?}");
+    }
+
+    /// A child's row and a background command's row are two kinds of row in one
+    /// box, so they have to be measured the same way: both fill the room behind
+    /// the box's own two columns of indent, and both land inside `pad_box_row`
+    /// without being cut. The phase is the part that shows the arithmetic -- it
+    /// is at the far end of the row, where a two-column shortfall shows up as
+    /// "thinkin" with no ellipsis.
+    #[test]
+    fn both_kinds_of_row_in_the_box_fill_the_same_room() {
+        for width in [40usize, 80, 120] {
+            let box_inner = width - 4;
+            let mut tree = flashagent_tui::agents::AgentTree::default();
+            tree.apply(&flashagent_core::SubagentEvent {
+                id: "sub1".into(),
+                role: "researcher".into(),
+                event: flashagent_core::LoopEvent::ToolStarted { id: "c1".into(), name: "read_file".into(), args_json: "{}".into() },
+            });
+            // The row is handed the indent back, because `line` counts its
+            // `width` as the whole row while the indent is added by the box.
+            let rows = tree.pinned_rows(box_inner + 2, "\u{25b8}");
+            let bg = background_row("cargo test -p flashagent-core --lib", "12s", box_inner, "\u{25b8}");
+            let boxed = work_box(
+                &rows,
+                &[],
+                &Default::default(),
+                &[bg],
+                width,
+                0,
+            );
+            for row in plain(&boxed) {
+                assert_eq!(row.chars().count(), width, "every row is the width of the box at {width}: {row:?}");
+            }
+            let body = plain(&boxed)[1].clone();
+            assert!(body.contains("read_file"), "the phase has to survive whole at {width}: {body:?}");
+        }
     }
 
     #[test]
@@ -777,6 +812,7 @@ fn approval_preview_rows(height: usize) -> usize {
 /// `joined` is true when the work box above has already drawn the top edge of
 /// this block: the card is then its bottom half, and a second `╭` under the
 /// `├─┤` seam would open a box inside an unclosed one.
+#[allow(clippy::too_many_arguments)]
 fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameState<'_>, width: usize, height: usize, inner_w: usize, border_color: &str, joined: bool) -> usize {
     // A card with nothing pending is nothing to draw. It used to be an `expect`,
     // and it fired: the row an approval card occupies moved once prompts started
@@ -1526,20 +1562,20 @@ impl App {
         // Pinned above the composer, below the steering: the rows are built here
         // rather than in `draw` so a click can be matched against them.
         let pin_width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(100);
-        // The room a pinned row may fill, counted against the helpers that will
-        // hold it. `work_box` frames the row with `pad_box_row(row, box_w)`, so
-        // the room inside the box is `box_w - 2`, which is `width - 2`; the box
-        // then spends two of those on its own indent, so a row built against the
-        // window gets `width - 4`. `AgentTree::line` counts that as the whole row
-        // -- mark, indent and all -- so its text stops exactly at the right wall
-        // instead of two cells past it, where the clip would eat the phase.
+        // The room behind the box's own two columns of indent: `work_box` is
+        // `pin_width` wide, `pad_box_row` keeps `pin_width - 2` inside the frame,
+        // and the indent spends two of those, leaving `pin_width - 4`. Both
+        // kinds of row in the box are measured against that same room -- a
+        // child's row is handed the two columns of indent back because
+        // `AgentTree::line` counts its `width` as the whole row, mark included,
+        // while a background row is measured without them.
         let box_inner = pin_width.saturating_sub(4);
         // Work that is running says so from the clock, not from how often a frame
         // happened to be drawn: two agents listed at once must not tick in
         // lockstep just because they were reported in the same event.
         let mark = anim::spinner(anim::now_ms());
-        let agent_rows = self.agents.pinned_rows(box_inner, mark);
-        let agent_details = self.agents.details(box_inner);
+        let agent_rows = self.agents.pinned_rows(box_inner.saturating_add(2), mark);
+        let agent_details = self.agents.details(box_inner.saturating_add(2));
         // Background commands join the subagents in one box, so each says what
         // it is and for how long, cut to fit like a child's row.
         let background_rows: Vec<String> = cx

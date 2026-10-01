@@ -1,5 +1,43 @@
 # Changelog
 
+## b570 — the bar keeps the work, the box keeps its frame, and a lost frame stops looking like a finished answer
+
+### The frame
+
+- **The work box is part of the input field, and cannot be scrolled away.** `card_start` was taken *after* the box was appended, so the box fell inside the chat slice: scrolling the conversation moved the subagent rows off screen while the composer stayed put, with nothing explaining the gap. It is now taken before, and the five places derived from it — the chat length, the unfold animation, the tall-card trim, the cursor row and the click-to-child mapping — are re-derived against the new boundary.
+- **A card under the box no longer opens a second box.** The `joined` flag reached only the composer, so an approval, channel or question card each drew its own `╭─…─╮` underneath the `├─┤` seam, inside a frame that was never closed. A question is asked precisely while a child is running, so this was the common case and not a rare overlap.
+- **The scrolled marker sits directly above the work box**, and `scroll_max` returns zero when there is no room for it, so an accepted scroll offset always has a marker saying how much is below.
+- **The box is exactly as wide as the composer.** It was drawn two columns narrower, so the right-hand wall stepped at the seam. Subagent rows were also two columns short of the room inside the box, which is why a phase label read as `thinkin`; both are now measured against the same room, and the background-task row stopped counting an indent that is added outside its budget.
+
+### The bar
+
+- **A child's output stopped being counted the moment the app carried its report to the model.** `deliver_task_notices` starts a turn to hand a finished child's answer to the parent, and `on_turn_start` resets the children's total — so every child that finished wiped the bar down to the parent's own output. A turn with three children behind it could read a fraction of what they had actually generated. The count is now put back around that turn; a prompt the user typed still starts the bar over.
+- Counts past 1000k are shown in millions rather than as thousands of thousands.
+
+### The stream
+
+- **A frame lost mid-stream can no longer end a turn as a clean stop.** Two unreadable frames in a row were dropped for tolerance, and if one of them carried the finish reason the stream still reported `Stop`. The guard that refuses to run a possibly-truncated tool call therefore never fired, `repair_json` closed the half-written arguments, and the call ran — a file landing with its tail missing and no error anywhere. The parser now records the loss, and `[DONE]` inferred after one no longer emits a terminal event. The text that did arrive is still delivered, and a gateway's keep-alive noise followed by more real frames still finishes cleanly. The OpenAI reader parses payloads itself and sets the same flag; without that, the fix would not have applied to OpenRouter.
+- **A failed mid-turn compaction is reported.** It announced itself as "writing a full summary of this task" and then, on failure, only set a retry delay. The user was told something was happening that was not.
+- **A turn that answers nothing twice is reported as a failure** instead of completing, and no empty assistant message is left in the history where a strict template would reject it on the next request.
+- **Gemini no longer drops a usage frame** that arrives after the finish reason, which understated a step's tokens and so the compaction threshold. The holdback kept for a continuation now survives the error, cancel and incomplete-call paths too.
+
+### Trust
+
+- **The read-only shell allowlist resolves symlinks**, the way the file tools already did. A link pointing out of the project no longer reads outside it without asking.
+- **The destructive git list covers the worktree discards** — `checkout .`, `restore .`, `switch --discard-changes`, `stash drop`, `stash clear` — and a plain `push`. These reach beyond what `/rewind` can restore, since rewind records only file tools.
+- **An unrecognised subagent role is refused** rather than falling through to the full toolset. A near miss like `"reviewer "` used to hand a child the right to write files and run commands while every surface still echoed the name the user believed was in force. The catch-all is now fenced to read-only as well.
+
+### Sessions
+
+- **A turn that was cut off is marked as such.** The file format had no way to tell a finished answer from half of one, so an autosave taken mid-turn resumed as though the model had simply stopped. It is now marked, and the resume says so on screen and to the model. Files written before the marker still load.
+- **Saves are durable.** The session and config files were already written to a temp file and renamed, but neither the file nor the folder was synced, so a power loss right after the rename could leave the previous save in place despite a "successful" write.
+- **A key pasted into a conversation is not written to the session file**, which is the file a user is most likely to paste into a bug report. Ordinary words that merely begin like a key are left alone.
+- **The session file and the config are no longer world-readable.** Both hold API keys. A save that cannot be written now reports why instead of returning success.
+
+### Measured
+
+797 tests across the llm, core, svc, tools and tui packages, clippy clean across the workspace.
+
 ## b555 — a subagent that dies says so, and a session that survives the crash
 
 ### Trust

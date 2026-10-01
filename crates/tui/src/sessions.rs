@@ -28,8 +28,8 @@ impl From<&ChatMessage> for SavedMessage {
     fn from(m: &ChatMessage) -> Self {
         Self {
             role: m.role.as_str().to_string(),
-            content: m.content.clone(),
-            reasoning: m.reasoning.clone(),
+            content: redact_secrets(&m.content),
+            reasoning: m.reasoning.as_deref().map(redact_secrets),
             tool_call_id: m.tool_call_id.clone(),
             tool_calls: m
                 .tool_calls
@@ -74,6 +74,39 @@ impl From<SavedMessage> for ChatMessage {
     }
 }
 
+/// What a saved copy of a message shows instead of a key-shaped token.
+///
+/// Sessions and archives are the files users paste into a bug report, and a key
+/// reaches them the ordinary way: the agent reads `~/.flashagent/config.json`
+/// or a `.env` and the tool result is kept in the transcript. Losing the tail
+/// of a token costs nothing; leaking one costs the account.
+pub(crate) fn redact_secrets(text: &str) -> String {
+    const PATTERNS: [&str; 8] = [
+        "sk-ant-", "sk-proj-", "sk-or-v1-", "sk-", "AIza", "ghp_", "gho_", "xai-",
+    ];
+    let mut out = text.to_string();
+    for prefix in PATTERNS {
+        let mut from = 0;
+        while let Some(rel) = out[from..].find(prefix) {
+            let at = from + rel;
+            // A token is the run of key characters after the prefix; everything
+            // from the first one that cannot belong to a key is the user's text
+            // again, so words like "sk-learn" or "sketch" are left alone.
+            let end = out[at + prefix.len()..]
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.')
+                .map_or(out.len(), |i| at + prefix.len() + i);
+            if end - at < prefix.len() + 8 {
+                // Too short to be a key: ordinary prose that begins like one.
+                from = at + prefix.len();
+                continue;
+            }
+            out.replace_range(at..end, &format!("{prefix}[redacted]"));
+            from = at + prefix.len() + "[redacted]".len();
+        }
+    }
+    out
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct SavedSession {
     pub(crate) id: String,
@@ -81,7 +114,23 @@ pub(crate) struct SavedSession {
     pub(crate) model: String,
     pub(crate) cwd: String,
     pub(crate) messages: Vec<SavedMessage>,
+    /// True while a turn was still running when this file was written.
+    ///
+    /// Without it the last message of a session interrupted by a reboot is
+    /// indistinguishable from a finished answer: on resume the model reads half
+    /// an answer as if it were the conclusion. Older files have no such field
+    /// and are read as complete, which is what they were.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) turn_in_flight: bool,
 }
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Word for the notice, so the reader and the writer cannot disagree on it.
+pub(crate) const CUT_OFF_NOTICE: &str =
+    "This session was interrupted while FlashAgent was answering. The last answer below may be cut off mid-sentence; ask again if it ends strangely.";
 
 pub(crate) fn flashagent_home_dir() -> Option<std::path::PathBuf> {
     std::env::var("HOME")
@@ -95,8 +144,20 @@ pub(crate) fn flashagent_home_dir() -> Option<std::path::PathBuf> {
 /// are shown, not swallowed: a session the user believes is saved but is not
 /// is found missing only when it is needed.
 pub(crate) fn save_session_file(session_id: &str, model: &str, cwd: &str, history: &[ChatMessage]) -> Result<std::path::PathBuf, String> {
+    save_session_file_marked(session_id, model, cwd, history, false)
+}
+
+/// As [`save_session_file`], but records that the history ends inside a running
+/// turn, so a later resume does not read the last message as a finished answer.
+pub(crate) fn save_session_file_marked(
+    session_id: &str,
+    model: &str,
+    cwd: &str,
+    history: &[ChatMessage],
+    turn_in_flight: bool,
+) -> Result<std::path::PathBuf, String> {
     let base_dir = sessions_dir().ok_or("no home directory to save sessions in")?;
-    save_session_in(&base_dir, session_id, model, cwd, history)
+    save_session_in(&base_dir, session_id, model, cwd, history, turn_in_flight)
 }
 
 /// Earlier turns are removed from the model's live context after compaction.
@@ -149,12 +210,15 @@ pub(crate) fn append_compaction_archive(path: &std::path::Path, messages: &[Chat
     Ok(())
 }
 
+/// `turn_in_flight` says the history ends in the middle of a turn, which is
+/// recorded in the file so a reader can tell a finished answer from half of one.
 pub(crate) fn save_session_in(
     base_dir: &std::path::Path,
     session_id: &str,
     model: &str,
     cwd: &str,
     history: &[ChatMessage],
+    turn_in_flight: bool,
 ) -> Result<std::path::PathBuf, String> {
     std::fs::create_dir_all(base_dir).map_err(|e| format!("cannot create {}: {e}", base_dir.display()))?;
     let path = base_dir.join(format!("{session_id}.json"));
@@ -167,21 +231,50 @@ pub(crate) fn save_session_in(
         model: model.to_string(),
         cwd: cwd.to_string(),
         messages: history.iter().map(SavedMessage::from).collect(),
+        turn_in_flight,
     };
     let data = serde_json::to_string_pretty(&saved).map_err(|e| format!("cannot encode the session: {e}"))?;
     // The pid keeps two instances saving the same id from sharing a temp file.
     let tmp = base_dir.join(format!(".{session_id}.{}.tmp", std::process::id()));
-    let written = std::fs::File::create(&tmp).and_then(|mut f| {
-        use std::io::Write;
-        f.write_all(data.as_bytes())?;
-        f.sync_all()
-    });
+    let written = write_private(&tmp, data.as_bytes());
     if let Err(e) = written.and_then(|_| std::fs::rename(&tmp, &path)) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("cannot write {}: {e}", path.display()));
     }
+    // The rename itself is only durable once the folder says so: a crash after
+    // it but before this can leave the previous save in place, which is how a
+    // session loses the last turn to a machine that lost power.
+    sync_dir(base_dir);
     Ok(path)
 }
+
+/// With the mode set at creation: a session holds the whole conversation,
+/// including whatever the user pasted into it.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    let mut options = {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true).mode(0o600);
+        o
+    };
+    #[cfg(not(unix))]
+    let mut options = std::fs::OpenOptions::new();
+    let mut f = options.write(true).create(true).truncate(true).open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
+#[cfg(unix)]
+fn sync_dir(dir: &std::path::Path) {
+    if let Ok(f) = std::fs::File::open(dir) {
+        let _ = f.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &std::path::Path) {}
 
 /// Nothing retries after it, so an unwritable sessions folder falls back to
 /// the system temp folder, and the message names both.
@@ -191,7 +284,7 @@ pub(crate) fn save_on_exit(session_id: &str, model: &str, cwd: &str, history: &[
         Err(why) => why,
     };
     let spare = std::env::temp_dir().join("flashagent-unsaved");
-    match save_session_in(&spare, session_id, model, cwd, history) {
+    match save_session_in(&spare, session_id, model, cwd, history, false) {
         Ok(path) => Err(format!(
             "{why}.\nA copy was written to {} — move it into ~/.flashagent/sessions/ to resume it.",
             path.display()
@@ -290,7 +383,10 @@ impl App {
         let Some(shared) = self.turn_history.clone() else { return };
         let snapshot = shared.snapshot();
         let model = self.current_model.clone();
-        let err = save_session_file(cx.session_id, &model, cx.cwd_display, &snapshot).err();
+        // The turn has not ended, so whatever the last message holds is a
+        // snapshot of an unfinished answer. Written into the file, so a resume
+        // knows not to read it as the conclusion.
+        let err = save_session_file_marked(cx.session_id, &model, cx.cwd_display, &snapshot, true).err();
         if let Some(why) = err {
             self.notice(format!("Session not saved: {why} · retrying after the next turn and on exit"));
         }
@@ -449,6 +545,11 @@ pub(crate) fn read_session(dir: &std::path::Path, id: &str) -> Result<SavedSessi
 pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history: &mut Vec<ChatMessage>) -> usize {
     use flashagent_core::{DoneReason, LoopEvent};
     let before = history.len();
+    if saved.turn_in_flight {
+        // Said on screen and to the model: the answer underneath may stop
+        // mid-word, and both of them would otherwise take it as finished.
+        chat.push_system(CUT_OFF_NOTICE);
+    }
     // A call is drawn when its result comes, as while it ran.
     let mut calls: std::collections::HashMap<String, flashagent_llm::ToolCall> = std::collections::HashMap::new();
     let mut in_turn = false;
@@ -582,6 +683,7 @@ mod session_tests {
                 SavedMessage::from(&ChatMessage::user(first_prompt)),
                 SavedMessage::from(&ChatMessage::assistant("answer")),
             ],
+            turn_in_flight: false,
         };
         std::fs::write(dir.join(format!("{id}.json")), serde_json::to_string(&saved).unwrap()).unwrap();
     }
@@ -625,10 +727,10 @@ mod session_tests {
     fn saving_replaces_the_file_whole_and_leaves_nothing_behind() {
         let dir = tempfile::tempdir().unwrap();
         let history = vec![ChatMessage::system("sys"), ChatMessage::user("first"), ChatMessage::assistant("one")];
-        let path = save_session_in(dir.path(), "s", "m", "~/p", &history).unwrap();
+        let path = save_session_in(dir.path(), "s", "m", "~/p", &history, false).unwrap();
         let mut longer = history.clone();
         longer.push(ChatMessage::user("second"));
-        save_session_in(dir.path(), "s", "m", "~/p", &longer).unwrap();
+        save_session_in(dir.path(), "s", "m", "~/p", &longer, false).unwrap();
 
         let saved: SavedSession = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved.messages.len(), 4);
@@ -642,8 +744,123 @@ mod session_tests {
         // A file where the folder should be.
         let blocked = dir.path().join("sessions");
         std::fs::write(&blocked, "").unwrap();
-        let err = save_session_in(&blocked, "s", "m", "~/p", &[ChatMessage::user("hi")]).unwrap_err();
+        let err = save_session_in(&blocked, "s", "m", "~/p", &[ChatMessage::user("hi")], false).unwrap_err();
         assert!(err.contains("sessions"), "{err}");
+    }
+
+    #[test]
+    fn an_interrupted_turn_is_marked_so_a_resume_does_not_read_it_as_an_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        // A snapshot taken while the model was still writing.
+        let history = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("write the parser"),
+            ChatMessage::assistant("Sure. First I will open the fi"),
+        ];
+        let path = save_session_in(dir.path(), "s", "m", "~/p", &history, true).unwrap();
+        let saved: SavedSession = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved.turn_in_flight, "the file does not say the answer is unfinished");
+
+        let mut chat = ChatView::default();
+        let mut history = vec![ChatMessage::system("new prompt")];
+        let count = restore_session(saved, &mut chat, &mut history);
+        let shown = chat.render(100).iter().map(|(_, t)| flashagent_tui::strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("interrupted"), "nobody is told the answer stops mid-word:\n{shown}");
+        assert!(shown.contains("First I will open the fi"), "the answer itself must still be there:\n{shown}");
+        // The system message is replaced by the fresh one, so prompt + answer.
+        assert_eq!(count, 2, "the unfinished answer stays in the history, so the model can go on from it");
+        assert!(history.last().unwrap().content.ends_with("the fi"), "the answer was rewritten: {:?}", history.last().unwrap().content);
+    }
+
+    #[test]
+    fn a_finished_turn_says_nothing_about_being_cut_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = save_session_in(dir.path(), "s", "m", "~/p", &[ChatMessage::user("hi"), ChatMessage::assistant("done")], false).unwrap();
+        let saved: SavedSession = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(!saved.turn_in_flight);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("turn_in_flight"), "a whole session needs no marker: it is not noise in the file a user may read");
+        let mut chat = ChatView::default();
+        let mut history = vec![ChatMessage::system("sys")];
+        restore_session(saved, &mut chat, &mut history);
+        let shown = chat.render(100).iter().map(|(_, t)| flashagent_tui::strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(!shown.contains("interrupted"), "a whole turn was called cut off:\n{shown}");
+    }
+
+    /// The files written before this field existed have to keep loading, or every
+    /// session anyone already had becomes unresumable.
+    #[test]
+    fn a_session_file_written_before_the_marker_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        // Exactly the shape an earlier build wrote: no `turn_in_flight`.
+        let old = r#"{
+  "id": "session_1_1",
+  "timestamp": 1700000000,
+  "model": "m",
+  "cwd": "~/proj",
+  "messages": [
+    { "role": "system", "content": "sys", "reasoning": null, "tool_call_id": null, "tool_calls": [], "images": [] },
+    { "role": "user", "content": "the question", "reasoning": null, "tool_call_id": null, "tool_calls": [], "images": [] },
+    { "role": "assistant", "content": "the answer", "reasoning": null, "tool_call_id": null, "tool_calls": [], "images": [] }
+  ]
+}"#;
+        std::fs::write(dir.path().join("session_1_1.json"), old).unwrap();
+        let saved = read_session(dir.path(), "session_1_1").expect("a pre-change session still loads");
+        assert_eq!(saved.messages.len(), 3);
+        assert!(!saved.turn_in_flight, "no marker means the old, whole reading");
+
+        let mut chat = ChatView::default();
+        let mut history = vec![ChatMessage::system("new prompt")];
+        assert_eq!(restore_session(saved, &mut chat, &mut history), 2);
+        let shown = chat.render(100).iter().map(|(_, t)| flashagent_tui::strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("the answer"), "the answer is gone:\n{shown}");
+        assert!(!shown.contains("interrupted"), "an old file was called cut off:\n{shown}");
+
+        // And the picker still lists it.
+        let listed = sessions_in(dir.path(), "~/proj");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title, "the question");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_session_file_is_not_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        // A file already there with open permissions must not keep them.
+        let path = dir.path().join("s.json");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        save_session_in(dir.path(), "s", "m", "~/p", &[ChatMessage::user("hi")], false).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_key_pasted_into_a_conversation_is_not_written_to_the_session_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // What happens when the agent reads the config or a .env: the key comes
+        // back as a tool result and is kept in the transcript.
+        let tool = ChatMessage::tool_result("c1", "ANTHROPIC_API_KEY=sk-ant-api03-AAAABBBBCCCCDDDDEEEE1234\n");
+        let user = ChatMessage::user("my key is sk-ant-api03-9999888877776666555544443333, keep it safe");
+        let path = save_session_in(dir.path(), "s", "m", "~/p", &[user, tool], false).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("sk-ant-api03-AAAABBBB"), "the tool result kept the key:\n{text}");
+        assert!(!text.contains("sk-ant-api03-99998888"), "the prompt kept the key:\n{text}");
+        assert!(text.contains("sk-ant-[redacted]"), "nothing marks what was taken out:\n{text}");
+        assert!(text.contains("keep it safe"), "the user's own words are not the secret:\n{text}");
+    }
+
+    #[test]
+    fn redaction_leaves_ordinary_words_that_begin_like_a_key_alone() {
+        assert_eq!(redact_secrets("I read the sk-learn docs and sketched a parser"), "I read the sk-learn docs and sketched a parser");
+        assert_eq!(redact_secrets("see https://example.com/sketch.png"), "see https://example.com/sketch.png");
+        assert_eq!(redact_secrets("key = sk-short"), "key = sk-short");
+        assert_eq!(
+            redact_secrets("two: sk-ant-api03-AAAAAAAAAAAAAAAAAAAA and sk-proj-bbbbbbbbbbbbbbbbbbbb"),
+            "two: sk-ant-[redacted] and sk-proj-[redacted]"
+        );
+        assert_eq!(redact_secrets("no secrets here"), "no secrets here");
+        // Nothing is invented for text that has none.
+        assert!(!redact_secrets("plain").contains("redacted"));
     }
 
     #[test]
@@ -688,6 +905,7 @@ mod session_tests {
                 SavedMessage::from(&ChatMessage::user("what is 2+2?")),
                 SavedMessage::from(&ChatMessage::assistant("4")),
             ],
+            turn_in_flight: false,
         };
         let mut chat = ChatView::default();
         let mut history = vec![ChatMessage::system("new prompt")];
@@ -723,6 +941,7 @@ mod session_tests {
                 SavedMessage::from(&ChatMessage::user("thanks")),
                 SavedMessage::from(&ChatMessage::assistant("Any time.")),
             ],
+            turn_in_flight: false,
         };
         let mut chat = ChatView::default();
         let mut history = vec![ChatMessage::system("new prompt")];
@@ -755,6 +974,7 @@ mod session_tests {
                 SavedMessage::from(&user_msg),
                 SavedMessage::from(&ChatMessage::assistant("I see an image")),
             ],
+            turn_in_flight: false,
         };
         let mut chat = ChatView::default();
         let mut history = vec![ChatMessage::system("new prompt")];

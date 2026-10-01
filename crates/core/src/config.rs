@@ -931,7 +931,12 @@ impl AppConfig {
     pub fn save(&self) -> Result<(), std::io::Error> {
         match Self::default_path() {
             Some(path) => self.save_to(&path),
-            None => Ok(()),
+            // Reported as a failure: a caller that ignores the error would
+            // otherwise believe a setting was kept when no file was written.
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no home directory, so there is nowhere to save the config",
+            )),
         }
     }
 
@@ -952,9 +957,43 @@ impl AppConfig {
         // Written beside the file and renamed over it: a half-written config reads
         // as no config and sends the user back through the setup wizard.
         let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, path)).inspect_err(|_| {
+        // The file holds API keys: another account on the machine must not read
+        // it. Set on the temp file, so it is never briefly readable at the
+        // final name.
+        let written = Self::write_private(&tmp, json.as_bytes());
+        let result = written.and_then(|_| std::fs::rename(&tmp, path));
+        if result.is_err() {
             let _ = std::fs::remove_file(&tmp);
-        })
+            return result;
+        }
+        // The rename is only durable once the folder has taken it: a crash in
+        // between leaves the previous config, which silently loses the setting
+        // the user just changed.
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(if parent.as_os_str().is_empty() { Path::new(".") } else { parent }) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
+    }
+
+    /// Written with the mode set at creation, never widened afterwards: the
+    /// config holds API keys, and a file that is briefly world-readable has
+    /// already leaked to every other account on the machine.
+    fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        #[cfg(unix)]
+        let mut options = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut o = std::fs::OpenOptions::new();
+            o.write(true).create(true).truncate(true).mode(0o600);
+            o
+        };
+        #[cfg(not(unix))]
+        let mut options = std::fs::OpenOptions::new();
+        let mut f = options.write(true).create(true).truncate(true).open(path)?;
+        f.write_all(bytes)?;
+        f.sync_all()
     }
 
     /// What a build from before providers reads (`backend_url`, `api_key`,
@@ -998,6 +1037,36 @@ mod tests {
         assert_eq!(AppConfig::load_from(&path).unwrap().active_profile().url, "http://second/v1");
         let files: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect();
         assert_eq!(files.len(), 1, "a temporary file was left behind: {files:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_config_holding_api_keys_is_not_readable_by_another_account() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // A file that was already there with open permissions: replacing its
+        // contents must not leave them.
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        two_providers().save_to(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let files: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(files.len(), 1, "a temporary file was left behind: {files:?}");
+    }
+
+    /// A save that goes nowhere must say so, not report success: the callers that
+    /// ignore the error would otherwise leave the user believing a setting was kept.
+    #[test]
+    fn a_config_that_cannot_be_written_reports_why() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file where the folder should be.
+        let blocked = dir.path().join("home");
+        std::fs::write(&blocked, "").unwrap();
+        let err = AppConfig::default().save_to(&blocked.join("config.json")).unwrap_err();
+        assert!(matches!(err.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::AlreadyExists), "{err}");
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 1, "a temporary file was left behind: {left:?}");
     }
 
     fn two_providers() -> AppConfig {
