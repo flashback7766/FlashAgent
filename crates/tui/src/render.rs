@@ -1232,8 +1232,15 @@ impl Renderer {
         };
         let border_color = border_rgb.fg();
         // A blank row between the conversation and the composer or card under it.
+        //
+        // Not when the work box is pinned on top of the composer. Its `├─┤` is
+        // already the separator, and a blank row in between is a blank row with
+        // no sides drawn: it cuts a hole through the left and right walls, and
+        // the composer below stops reading as the bottom half of the same block
+        // and starts reading as a box of its own floating under another one.
+        let joined = self.agent_first.is_some();
         let last_row = tail.last().or_else(|| settled.last()).map(|(_, text)| text.as_str());
-        if last_row.is_some_and(|text| !flashagent_tui::strip_ansi(text).trim().is_empty()) {
+        if !joined && last_row.is_some_and(|text| !flashagent_tui::strip_ansi(text).trim().is_empty()) {
             tail.push((LineKind::System, String::new()));
         }
         let card_start = tail.len();
@@ -1253,7 +1260,7 @@ impl Renderer {
             tail.extend(overlay.render(width, height as usize));
             input_line_idx = tail.len().saturating_sub(1);
         } else {
-            let composer = append_composer(&mut tail, &st, width, height, t, &border_color, self.agent_first.is_some());
+            let composer = append_composer(&mut tail, &st, width, height, t, &border_color, joined);
             input_line_idx = composer.0;
             text_cursor = composer.1;
         }

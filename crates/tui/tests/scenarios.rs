@@ -3090,6 +3090,49 @@ fn background_sleep() -> Vec<Reply> {
 }
 
 #[test]
+fn the_work_box_and_the_input_field_are_one_frame() {
+    let mut replies = background_sleep();
+    replies.push(Reply::Text("Still up.".into()));
+    let server = MockServer::start(replies);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+    ask(&term, "start the server", "The server is starting.");
+    let screen = term.wait_for("subagents & background", WAIT);
+
+    // The block has to be one frame, not two with a hole between them. Every row
+    // from the box's own top edge down to the last row of the field below it is
+    // part of the same frame, so none of them may be empty: a blank row carries
+    // no side, and a missing side in the middle of a frame is a hole in it --
+    // the field then reads as a box floating under another box.
+    let rows: Vec<&str> = screen.lines().collect();
+    let top = rows
+        .iter()
+        .position(|r| r.contains("subagents & background"))
+        .unwrap_or_else(|| panic!("no work box on the screen:\n{screen}"));
+    let bottom = rows
+        .iter()
+        .rposition(|r| r.trim_start().starts_with('\u{2570}'))
+        .unwrap_or_else(|| panic!("the field below the box never closes:\n{screen}"));
+    for (i, row) in rows[top..=bottom].iter().enumerate() {
+        assert!(
+            !row.trim().is_empty(),
+            "row {i} of the pinned block is empty, so the frame has a hole in it:\n{}",
+            rows[top..=bottom].join("\n"),
+        );
+    }
+    // And the sides carry through: one wall, no column shifting along the way.
+    let walls: Vec<usize> = rows[top..=bottom]
+        .iter()
+        .map(|r| r.chars().take_while(|c| !"\u{2502}\u{256d}\u{251c}\u{2570}".contains(*c)).count())
+        .collect();
+    assert!(
+        walls.windows(2).all(|w| w[0] == w[1]),
+        "the block's left wall moves between rows, so it is not one frame:\n{}\n{walls:?}",
+        rows[top..=bottom].join("\n"),
+    );
+}
+
+#[test]
 fn a_task_stopped_from_the_task_list_wakes_nobody() {
     let mut replies = background_sleep();
     replies.push(Reply::Text("It is stopped.".into()));
