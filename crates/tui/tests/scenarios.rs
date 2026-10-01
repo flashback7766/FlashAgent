@@ -3078,12 +3078,16 @@ fn ctrl_b_moves_a_running_command_to_the_background() {
     assert!(told.contains("detach-after"), "the output after the move was lost: {told}");
 }
 
+/// A command that runs for a minute without an external tool. Windows has no
+/// `sleep`, and its `ping` counts differently, so the row on screen carries this
+/// string rather than the one the test would otherwise have to guess.
+const BACKGROUND_COMMAND: &str = if cfg!(windows) { "ping -n 60 127.0.0.1" } else { "sleep 60" };
+
 fn background_sleep() -> Vec<Reply> {
-    let command = if cfg!(windows) { "ping -n 60 127.0.0.1" } else { "sleep 60" };
     vec![
         Reply::ToolCall {
             name: "run_shell".into(),
-            arguments: serde_json::json!({ "header": "Start the server", "command": command, "background": true }),
+            arguments: serde_json::json!({ "header": "Start the server", "command": BACKGROUND_COMMAND, "background": true }),
         },
         Reply::Text("The server is starting.".into()),
     ]
@@ -3297,7 +3301,7 @@ fn reading_back_keeps_the_work_box_on_the_screen() {
         screen.contains("subagents & background"),
         "the work box scrolled away with the conversation:\n{screen}"
     );
-    assert!(screen.contains("sleep 60"), "the running command is gone:\n{screen}");
+    assert!(screen.contains(BACKGROUND_COMMAND), "the running command is gone:\n{screen}");
     assert!(screen.contains(PROMPT), "the composer scrolled away:\n{screen}");
 
     // And the box is still whole, and still where it is: directly under the
