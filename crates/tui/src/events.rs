@@ -124,13 +124,15 @@ impl App {
         match mood {
             MascotMood::Offline => {
                 let url = source.0.base_url();
-                // "Start it" is for a server on this machine, not for a cloud API.
-                let local = flashagent_core::url_host(&url).is_some_and(|host| flashagent_core::is_local_host(&host));
-                let next = if local { "start the server" } else { "check the address and the connection" };
-                // Not sticky: a server that comes back must be able to say so
-                // without waiting for a restart, and a warning that never
-                // leaves becomes wallpaper the moment it is a lie.
-                self.background = Some(BackgroundNotice::fading(format!("{OFFLINE_NOTICE} {url} \u{b7} {next}, or /provider switches to another"), 8));
+                // What actually happened is that the server did not say what it
+                // runs. Saying "no answer" and telling someone to start a server
+                // that is already answering their questions is worse than saying
+                // nothing was learned: reported live against OpenRouter, which
+                // lists models fine but answers nothing to a name it is not given.
+                self.background = Some(BackgroundNotice::fading(
+                    format!("{OFFLINE_NOTICE} · could not read the model list from {url} · /provider picks another"),
+                    8,
+                ));
             }
             MascotMood::Happy if previous == MascotMood::Offline => {
                 self.background = Some(BackgroundNotice::fading(
@@ -469,6 +471,14 @@ impl App {
         }
         self.track_turn(e);
         self.track_goal(cx.cwd, e);
+        // A tool call is where the work of a turn actually lands: a read, an
+        // edit, a command. Written down as it happens (throttled), so a machine
+        // that loses power does not take the work with it. Reported live: a
+        // session saved only after the turn ended kept nothing of a turn that
+        // never finished.
+        if matches!(e, LoopEvent::ToolFinished { .. }) {
+            self.autosave_during_turn(cx);
+        }
         // The real diff is taken now, while the file still is what the call
         // expects: once the edit lands, its old_string is gone and the change
         // cannot be worked out from the files afterwards.
@@ -537,6 +547,11 @@ impl App {
                 self.turn_phase = TurnPhase::AfterTool;
             }
             LoopEvent::StepStarted { step, .. } if *step > 1 => {
+                // Each step is one request to the server, and the server counts
+                // per request: the running estimate starts again so this
+                // request's figure is added rather than read as a correction of
+                // the last one's.
+                self.token_tracker.on_request_start();
                 self.turn_phase = TurnPhase::AfterTool;
             }
             LoopEvent::Usage(u) => {
@@ -673,12 +688,7 @@ impl App {
         }
         let step = self.wheel_momentum.signum();
         self.renderer.scroll_by(step);
-        // Losing a third of the rest each frame is a throw that reads as weight
-        // rather than as a delay.
-        self.wheel_momentum -= step * self.wheel_momentum.abs() / 3;
-        if self.wheel_momentum.abs() < 1 {
-            self.wheel_momentum = 0;
-        }
+        self.wheel_momentum = decayed(self.wheel_momentum);
         true
     }
 
@@ -727,6 +737,15 @@ impl App {
         }
         self.renderer.request_reprint();
     }
+}
+
+/// A wheel throw, one frame older. Losing a third of the rest reads as weight
+/// rather than as a delay, and the floor is what makes it end: a third of one is
+/// zero, so without it a single notch decayed to itself and the view glided for
+/// ever, carrying the conversation off the screen with nobody touching anything.
+fn decayed(momentum: i32) -> i32 {
+    let sign = momentum.signum();
+    sign * (momentum.abs() - (momentum.abs() / 3).max(1))
 }
 
 #[cfg(test)]
@@ -805,5 +824,37 @@ mod tests {
         assert_eq!(server_mood(false, false, false, secs(31)), MascotMood::Offline, "nothing for half a minute");
         assert_eq!(server_mood(false, true, true, secs(40)), MascotMood::Happy);
         assert_eq!(server_mood(true, false, true, secs(40)), MascotMood::Checking);
+    }
+
+    #[test]
+    fn a_wheel_throw_comes_to_a_stop_instead_of_gliding_for_ever() {
+        // Losing a third of the rest is only a decay if a third of one is not
+        // zero. Integer division made a single notch decay to itself, and the
+        // view then scrolled by itself until it ran out of conversation.
+        for start in 1..=24i32 {
+            let mut m = start;
+            let mut frames = 0;
+            while m != 0 {
+                m = decayed(m);
+                frames += 1;
+                assert!(frames < 200, "a throw of {start} never came to rest");
+            }
+            assert!(frames <= 12, "a throw of {start} took {frames} frames to fade");
+        }
+    }
+
+    #[test]
+    fn a_throw_fades_towards_zero_and_never_changes_its_direction() {
+        // 24 -> 16 -> 11 -> 8 -> 6 -> 4 -> 3 -> 2 -> 1 -> 0.
+        assert_eq!(decayed(24), 16);
+        assert_eq!(decayed(16), 11);
+        assert_eq!(decayed(3), 2);
+        assert_eq!(decayed(2), 1);
+        assert_eq!(decayed(1), 0);
+        // A scroll back does not start scrolling forward, or the view would
+        // jitter at the end of a throw.
+        assert_eq!(decayed(-1), 0);
+        assert_eq!(decayed(-24), -16);
+        assert_eq!(decayed(0), 0);
     }
 }

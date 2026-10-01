@@ -38,7 +38,7 @@ impl Default for SubagentSpec {
         Self {
             role: AgentRole { name: "assistant".into(), system_prompt: String::new(), tools: Vec::new() },
             prompt: String::new(),
-            max_steps: 20,
+            max_steps: DEFAULT_MAX_STEPS,
             timeout: None,
             max_output_chars: 32_000,
         }
@@ -164,8 +164,11 @@ pub trait SubagentToolFactory: Send + Sync {
     fn build(&self, id: &str, role: &AgentRole, tools: &[String]) -> Arc<dyn ToolExec>;
 }
 
-/// Used when `spec.max_steps == 0`.
-const DEFAULT_MAX_STEPS: u32 = 20;
+/// Used when `spec.max_steps == 0`. Twenty was a number picked before anything
+/// had run: a child that reads a few files and answers takes six, and one that
+/// audits a repository takes hundreds. The ceiling is here to catch a runaway,
+/// not to end real work, so it sits far above both.
+const DEFAULT_MAX_STEPS: u32 = 500;
 
 /// How many children may run at once. Unlimited in stock: the cap was a
 /// judgement about what a model tends to ask for, not a limit the work needs,
@@ -447,13 +450,16 @@ impl SubagentHost {
 
     /// As [`Self::with_channels`], but with the factory and the host sharing one
     /// mailbox. The parent and its children must share one, or a message written
-    /// by the parent has nowhere to arrive. `outbound` is the same stream the
-    /// host reports on, so a message and a finished report arrive together.
+    /// by the parent has nowhere to arrive: the host used to build a mailbox of
+    /// its own here, so children registered in one and the parent's
+    /// `send_message` looked in another, and every message was refused with
+    /// "no subagent is running" while children were plainly working.
     pub fn with_shared(
         llm: Arc<dyn LlmSource>,
         factory: Arc<dyn SubagentToolFactory>,
         events: Option<mpsc::UnboundedSender<SubagentEvent>>,
         outbound: mpsc::UnboundedSender<SubagentOutbound>,
+        mailbox: Arc<Mailbox>,
     ) -> Self {
         Self {
             llm,
@@ -461,7 +467,7 @@ impl SubagentHost {
             next_id: AtomicU32::new(1),
             live: Arc::new(AtomicUsize::new(0)),
             events,
-            mailbox: Arc::new(Mailbox::new(outbound.clone())),
+            mailbox,
             outbound,
             max_live: DEFAULT_MAX_LIVE,
         }
@@ -524,7 +530,15 @@ impl SubagentHost {
             let _live = LiveGuard(live);
             let _registered = RegisteredGuard(mailbox.clone(), event_id.clone());
             let tools = factory.build(&id, &role, &role.tools);
-            let config = LoopConfig { max_steps: Some(max_steps), max_tokens: None, ..Default::default() };
+            let config = LoopConfig {
+                max_steps: Some(max_steps),
+                max_tokens: None,
+                // A child that runs out of steps is asked to wrap up and say what
+                // it has, rather than cut off holding an unfinished thought: a
+                // report is worth more than the last tool call.
+                wrap_up_at_step_limit: true,
+                ..Default::default()
+            };
             // The child's own steering channel: a message from a sibling or the
             // parent arrives between its steps, exactly as a keystroke does for
             // the conversation at the top.
@@ -689,7 +703,7 @@ impl ToolExec for SubagentTool {
                  a researcher or reviewer cannot write files or run commands.",
                 self.host.max_live()
             ),
-            parameters_json: r#"{"type":"object","properties":{"role":{"type":"string","description":"researcher (reads and searches, cannot write), coder (writes and runs tests), reviewer (reads, reports problems), planner (reads, returns a plan), or a custom role"},"task":{"type":"string","description":"The whole task, self-contained: say what to do, where, and what to report back"},"max_steps":{"type":"integer","description":"Max loop steps (default 20)"},"timeout_secs":{"type":"integer","description":"Max wall-clock seconds (default none)"}},"required":["task"]}"#.into(),
+            parameters_json: r#"{"type":"object","properties":{"role":{"type":"string","description":"researcher (reads and searches, cannot write), coder (writes and runs tests), reviewer (reads, reports problems), planner (reads, returns a plan), or a custom role"},"task":{"type":"string","description":"The whole task, self-contained: say what to do, where, and what to report back"},"max_steps":{"type":"integer","description":"Max loop steps (default 500; the last one asks the subagent to wrap up and report rather than cutting it off)"},"timeout_secs":{"type":"integer","description":"Max wall-clock seconds (default none)"}},"required":["task"]}"#.into(),
         }]
     }
 
@@ -701,7 +715,7 @@ impl ToolExec for SubagentTool {
                            subagent sees this text and nothing of the conversation around it.");
         }
         let role_name = v.get("role").and_then(|x| x.as_str()).unwrap_or("researcher").to_string();
-        let max_steps = v.get("max_steps").and_then(|x| x.as_u64()).unwrap_or(20) as u32;
+        let max_steps = v.get("max_steps").and_then(|x| x.as_u64()).unwrap_or(DEFAULT_MAX_STEPS as u64) as u32;
         let timeout_secs = v.get("timeout_secs").and_then(|x| x.as_u64());
 
         let spec = SubagentSpec {
@@ -1079,6 +1093,33 @@ mod tests {
         let finished = finished(done.recv().await.unwrap());
         assert!(finished.answer.starts_with("chil"), "the head is kept whole: {}", finished.answer);
         assert!(finished.answer.contains("truncated"), "and the cut is admitted: {}", finished.answer);
+    }
+
+    /// The parent's `send_message` and the children it is sending to must share
+    /// one mailbox. They did not: the host built a mailbox of its own, so every
+    /// child registered in that one while the parent's tool looked in another,
+    /// and a message to a plainly running child was refused as "no subagent is
+    /// running". Reported live, and every message between agents was dead.
+    #[tokio::test]
+    async fn a_message_from_the_parent_reaches_a_child_the_host_started() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mailbox = Arc::new(Mailbox::new(tx.clone()));
+        let host = SubagentHost::with_shared(
+            llm(),
+            Arc::new(Factory),
+            None,
+            tx.clone(),
+            mailbox.clone(),
+        );
+        // The parent's tool holds the same mailbox the host registers children in.
+        let parent = MessageTool::new(mailbox, "parent", "the agent you are talking to");
+
+        let _handle = host.spawn(SubagentSpec { prompt: "p".into(), ..Default::default() }).unwrap();
+
+        let sent = parent
+            .execute(&call("send_message", r#"{"to":"sub1","message":"stop, line 41 is wrong"}"#))
+            .await;
+        assert!(!sent.is_error, "a message to a running child was refused: {}", sent.content);
     }
 
     #[tokio::test]

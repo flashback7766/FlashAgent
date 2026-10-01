@@ -29,7 +29,29 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run workspace tests
-        run: cargo test --workspace --verbose --no-fail-fast
+        run: cargo test --workspace --no-fail-fast
+
+  # Clippy is a whole second compilation of the workspace, and it used to run
+  # after the tests in the same job, so the matrix waited for both in turn. Its
+  # own job runs at the same time as the tests instead.
+  clippy:
+    name: Clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Strict Clippy verification
         run: cargo clippy --workspace --all-targets -- -D warnings

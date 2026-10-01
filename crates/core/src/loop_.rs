@@ -69,6 +69,15 @@ pub trait WritePreview: Send + Sync {
 pub struct LoopConfig {
     /// `None` means unlimited.
     pub max_steps: Option<u32>,
+    /// Reaching `max_steps` asks the model to wrap up and says so in its
+    /// history, rather than ending the run mid-thought. A run that ends on a
+    /// hard limit keeps whatever it had already said, but a child that is cut
+    /// off holding an unfinished job has spent its whole budget and reported
+    /// nothing; this lets it hand back a report instead.
+    ///
+    /// The wrap-up costs one extra step, so a run that ignores the request and
+    /// keeps calling tools still stops on the limit.
+    pub wrap_up_at_step_limit: bool,
     /// Soft budget across the whole run; `None` means unlimited.
     pub max_tokens: Option<i64>,
     /// Completion tokens only. With a prefix cache the prompt is re-counted every
@@ -300,11 +309,29 @@ let mut report_nudges: usize = 0;
         let mut continuing = false;
 
         let mut step: u32 = 0;
+        let mut wrapped_up = false;
+        // Steps bought by the wrap-up request. The request itself is worthless
+        // without a step to answer in, so it grants one; a model that ignores it
+        // and calls another tool is stopped at the very next boundary.
+        let mut grace: u32 = 0;
         loop {
             if let Some(limit) = self.config.max_steps {
-                if step >= limit {
-                    events(LoopEvent::Done(DoneReason::StepLimit));
-                    return Ok((history, DoneReason::StepLimit));
+                if step >= limit + grace {
+                    if self.config.wrap_up_at_step_limit && !wrapped_up {
+                        wrapped_up = true;
+                        grace = 1;
+                        history.push(ChatMessage::user(format!(
+                            "[The step budget of {limit} is spent. This is your last step: do not call \
+                             another tool. Say what you found, what you changed and what you could not \
+                             confirm, and finish your answer now. This is a notice from the app, not \
+                             from the user.]"
+                        )));
+                        transient.clear();
+                        events(LoopEvent::SteeringInjected(WRAP_UP_NOTE.to_string()));
+                    } else {
+                        events(LoopEvent::Done(DoneReason::StepLimit));
+                        return Ok((history, DoneReason::StepLimit));
+                    }
                 }
             }
             if self.config.time_budget.is_some_and(|b| started.elapsed() >= b) {
@@ -803,6 +830,11 @@ const TOOL_PICTURE_NOTE: &str = "it is the result of that call, not a new reques
 /// obliges the model to act rather than permitting it to name a conflict and
 /// drop the directive.
 const STEER_QUEUE_NOTE: &str = "[This is the user's own message, sent while you were working. If a tool call is still running or an answer is half-written, let that one finish first rather than cutting it off; the next thing you send is where you take this up. Do not drop it and do not merely acknowledge it: act on it, and if it conflicts with work already done, say what you changed.]";
+
+/// Shown in the event stream when a run is asked to wrap up instead of being
+/// stopped. The full request goes into the history; this is the one line the
+/// row above the composer reads, so a wrap-up looks like the run finishing.
+const WRAP_UP_NOTE: &str = "the step budget is spent, so it is asked to wrap up and report";
 
 /// A steering message as the model should read it. A background notice keeps its
 /// own framing, which tells it apart from something the user said.
@@ -1475,6 +1507,64 @@ mod tests {
         );
         let (_history, done) = run_loop(&l, &llm, &tools, |_| {});
         assert!(matches!(done, DoneReason::TokenBudget));
+    }
+
+    #[test]
+    fn a_child_at_its_step_limit_is_asked_to_wrap_up_and_does_get_to_answer() {
+        // The point of the wrap-up is the report: a child that is cut off holding
+        // an unfinished thought has spent its whole budget and said nothing.
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![
+                tool_turn("shell", "c1"),
+                tool_turn("shell", "c2"),
+                text_turn("Here is what I found and what I could not check."),
+            ]),
+        };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(
+            LoopConfig { max_steps: Some(2), wrap_up_at_step_limit: true, ..Default::default() },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let asked = Arc::new(AtomicBool::new(false));
+        let (_history, done) = run_loop(&l, &llm, &tools, |e| {
+            if matches!(e, LoopEvent::SteeringInjected(t) if t.contains("wrap up")) {
+                asked.store(true, Ordering::Relaxed);
+            }
+        });
+        assert!(asked.load(Ordering::Relaxed), "it was never asked to wrap up");
+        assert_eq!(done, DoneReason::Completed, "it was given the step to answer in");
+    }
+
+    #[test]
+    fn a_child_that_ignores_the_wrap_up_is_still_stopped_on_the_limit() {
+        // The wrap-up is a request, not a pardon: a model that keeps calling
+        // tools after being told to stop must still end on the limit.
+        let turns: Vec<MockTurn> = (0..10).map(|i| tool_turn("shell", &format!("c{i}"))).collect();
+        let llm = MockLlm { turns: std::sync::Mutex::new(turns) };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(
+            LoopConfig { max_steps: Some(3), wrap_up_at_step_limit: true, ..Default::default() },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (_history, done) = run_loop(&l, &llm, &tools, |_| {});
+        assert!(matches!(done, DoneReason::StepLimit), "{done:?}");
+        // Three steps, then one to answer in, and no more: a request is not a
+        // new budget.
+        assert_eq!(tools.calls.lock().unwrap().len(), 4, "the wrap-up bought exactly one step");
+    }
+
+    #[test]
+    fn without_the_wrap_up_a_turn_still_ends_exactly_on_its_limit() {
+        let turns: Vec<MockTurn> = (0..10).map(|i| tool_turn("shell", &format!("c{i}"))).collect();
+        let llm = MockLlm { turns: std::sync::Mutex::new(turns) };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(
+            LoopConfig { max_steps: Some(3), ..Default::default() },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (_history, done) = run_loop(&l, &llm, &tools, |_| {});
+        assert!(matches!(done, DoneReason::StepLimit));
+        assert_eq!(tools.calls.lock().unwrap().len(), 3, "no extra step for a turn that did not ask for one");
     }
 
     fn usage_turn(prompt: i64, completion: i64, id: &str) -> MockTurn {

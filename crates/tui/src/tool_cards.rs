@@ -10,6 +10,42 @@ const STRONG: &str = "\x1b[38;2;225;230;240m";
 const FAILED: &str = "\x1b[38;2;230;120;120m";
 const FAINT: &str = "\x1b[38;2;120;125;140m";
 const OFF: &str = "\x1b[0m";
+/// The same two colours a diff uses for the same two facts, so the number on a
+/// folded line and the line it stands for are read the same way.
+const ADDED_COLOUR: &str = "\x1b[38;2;135;220;145m";
+const REMOVED_COLOUR: &str = "\x1b[38;2;245;120;120m";
+
+/// The `+3` and `-1` of a change, in the colours a diff would give them.
+///
+/// Left in the one muted grey the rest of the line wears, `+3 -1` reads as a
+/// single number and nothing on the screen says which half of the change is
+/// which. A `+` or `-` only counts as a size when a space comes before it and a
+/// digit after, so `my-file.rs +2` keeps its own hyphen in the file's colour.
+pub(crate) fn colored_size(text: &str) -> String {    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let is_size = (c == '+' || c == '-')
+            && (i == 0 || chars[i - 1] == ' ')
+            && chars.get(i + 1).is_some_and(char::is_ascii_digit);
+        if !is_size {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let colour = if c == '+' { ADDED_COLOUR } else { REMOVED_COLOUR };
+        let start = i;
+        i += 1;
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            i += 1;
+        }
+        out.push_str(colour);
+        out.extend(chars[start..i].iter());
+        out.push_str(OFF);
+    }
+    out
+}
 
 /// Says the card can be opened.
 fn chevron() -> String {
@@ -247,7 +283,7 @@ impl ChatView {
                     _ => Some(f),
                 }
             })
-            .map(|f| format!(" {FAINT}·{OFF} {MUTED}{f}{OFF}"))
+            .map(|f| format!(" {FAINT}·{OFF} {MUTED}{}{OFF}", colored_size(&f)))
             .unwrap_or_default();
         let run = format!("  {FAINT}{TOOL_MARK}{OFF} {MUTED}{header}{OFF}{facts} {}", chevron());
         // The model's own words stay as it wrote them, in whatever language and
@@ -610,6 +646,31 @@ mod tests {
 
     fn text_of(chat: &ChatView) -> String {
         strip_ansi(&chat.lines.last().expect("a line was opened").text)
+    }
+
+    #[test]
+    fn a_change_size_says_what_it_added_and_what_it_took_away() {
+        let out = colored_size("notes.md +3 -1");
+        assert!(out.contains(&format!("{ADDED_COLOUR}+3{OFF}")), "what it added is green: {out:?}");
+        assert!(out.contains(&format!("{REMOVED_COLOUR}-1{OFF}")), "what it took away is red: {out:?}");
+        assert_eq!(strip_ansi(&out), "notes.md +3 -1", "and the words are untouched: {out:?}");
+    }
+
+    #[test]
+    fn a_hyphen_in_a_file_name_is_not_mistaken_for_a_removal() {
+        // `my-file.rs` has a hyphen and a dot and no space before it. Read as a
+        // size it would turn the file's own name red.
+        let out = colored_size("my-file.rs +2");
+        assert!(out.contains(&format!("{ADDED_COLOUR}+2{OFF}")), "{out:?}");
+        assert!(!out.contains(REMOVED_COLOUR), "the file's own hyphen stayed uncoloured: {out:?}");
+        assert_eq!(strip_ansi(&out), "my-file.rs +2");
+    }
+
+    #[test]
+    fn a_size_with_no_figures_is_left_alone() {
+        assert_eq!(colored_size("notes.md"), "notes.md", "no change size, nothing to colour");
+        assert_eq!(colored_size("c++ -std=c++20"), "c++ -std=c++20", "a plus and a minus that are not sizes");
+        assert_eq!(colored_size(""), "");
     }
 
     #[test]

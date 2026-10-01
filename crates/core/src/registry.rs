@@ -560,7 +560,7 @@ pub static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "spawn_agent",
-        description: "Start a subagent on a self-contained task and carry on without waiting for it. Returns an agent_id at once, and the answer arrives on its own; up to 3 may run at once, and a researcher or reviewer cannot write files or run commands.",
+        description: "Start a subagent on a self-contained task and carry on without waiting for it. Returns an agent_id at once, and the answer arrives on its own; as many may run at once as the work needs, and a researcher or reviewer cannot write files or run commands.",
         params: &[
             one_of(
                 "role",
@@ -568,7 +568,7 @@ pub static TOOLS: &[ToolDef] = &[
                 &["researcher", "coder", "reviewer", "planner"],
             ),
             s("task", "The whole task, self-contained: say what to do, where, and what to report back"),
-            int("max_steps", "Max loop steps (default 20)"),
+            int("max_steps", "Max loop steps (default 500; the last one asks the subagent to wrap up and report rather than cutting it off)"),
             int("timeout_secs", "Max wall-clock seconds (default none)"),
         ],
         required: &["task"],

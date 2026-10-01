@@ -31,13 +31,13 @@ impl CallStyle {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    Pass { style: CallStyle, secs: f32 },
+    Pass { style: CallStyle, secs: f32, tokens: u32 },
     /// Right tool, wrong arguments: the loop runs, the work is wrong.
-    Partial { detail: String, secs: f32 },
-    Fail { detail: String, secs: f32 },
+    Partial { detail: String, secs: f32, tokens: u32 },
+    Fail { detail: String, secs: f32, tokens: u32 },
     /// The server refused or broke off the request (a rate limit, a model it
     /// does not serve): this says nothing about the model.
-    Unavailable { detail: String, secs: f32 },
+    Unavailable { detail: String, secs: f32, tokens: u32 },
 }
 
 impl Outcome {
@@ -45,16 +45,31 @@ impl Outcome {
         matches!(self, Self::Pass { .. })
     }
 
+    /// What the model generated. Next to the time this is what a check costs:
+    /// two models can both pass every scenario and differ tenfold in what they
+    /// spend to do it.
+    pub fn tokens(&self) -> u32 {
+        match self {
+            Self::Pass { tokens, .. }
+            | Self::Partial { tokens, .. }
+            | Self::Fail { tokens, .. }
+            | Self::Unavailable { tokens, .. } => *tokens,
+        }
+    }
+
     fn secs(&self) -> f32 {
         match self {
-            Self::Pass { secs, .. } | Self::Partial { secs, .. } | Self::Fail { secs, .. } | Self::Unavailable { secs, .. } => *secs,
+            Self::Pass { secs, .. }
+            | Self::Partial { secs, .. }
+            | Self::Fail { secs, .. }
+            | Self::Unavailable { secs, .. } => *secs,
         }
     }
 
     fn detail(&self) -> String {
         match self {
-            Self::Pass { style, secs } => format!("{}, {secs:.1}s", style.label()),
-            Self::Partial { detail, .. } | Self::Fail { detail, .. } => detail.clone(),
+            Self::Pass { style, secs, tokens } => format!("{}, {secs:.1}s, {tokens} out", style.label()),
+            Self::Partial { detail, .. } | Self::Fail { detail, .. } => format!("{detail}, {} out", self.tokens()),
             Self::Unavailable { detail, .. } => format!("not tested: {detail}"),
         }
     }
@@ -109,6 +124,26 @@ pub fn scenarios() -> Vec<Scenario> {
             title: "asks for two files in one turn",
             matters: "one call per turn turns a ten-file job into ten round trips",
         },
+        Scenario {
+            key: "no_invented_calls",
+            title: "calls only the tools it was given",
+            matters: "a name it was never offered is a call the loop cannot run",
+        },
+        Scenario {
+            key: "long_stream",
+            title: "keeps a long answer coming to the end",
+            matters: "an answer that stops halfway leaves the transcript wrong and the work undone",
+        },
+        Scenario {
+            key: "ten_steps",
+            title: "stays on the rails over many steps",
+            matters: "real work is a long chain; drift shows up in step ten, not step two",
+        },
+        Scenario {
+            key: "sees_picture",
+            title: "looks at a picture",
+            matters: "a model that cannot see cannot review a screenshot or a design",
+        },
     ]
 }
 
@@ -149,6 +184,10 @@ struct Turn {
     error: Option<String>,
     /// The error came from the server, not from waiting on the model.
     unavailable: bool,
+    /// What the model generated across every request this turn made. The server
+    /// reports it per request, so the last one wins rather than the sum; it is
+    /// there to price a check, not to bill for one.
+    tokens: u32,
 }
 
 impl Turn {
@@ -162,9 +201,9 @@ impl Turn {
         if self.unavailable {
             let first_line = error.lines().next().unwrap_or_default();
             let detail: String = first_line.chars().take(120).collect();
-            Outcome::Unavailable { detail, secs: self.secs }
+            Outcome::Unavailable { detail, secs: self.secs, tokens: self.tokens }
         } else {
-            Outcome::Fail { detail: error.to_string(), secs: self.secs }
+            Outcome::Fail { detail: error.to_string(), secs: self.secs, tokens: self.tokens }
         }
     }
 }
@@ -181,9 +220,15 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
         // is only a label: sorted by it, not stored at it.
         let mut parts: Vec<(usize, String, String)> = Vec::new();
         let mut text = String::new();
+        let mut tokens = 0u32;
         while let Some(ev) = stream.next().await {
             match ev.map_err(|e| e.to_string())? {
-                LlmEvent::ToolCallDelta { index, name, args_delta, .. } => {
+            LlmEvent::Usage(u) => {
+                if let Some(n) = u.completion {
+                    tokens = tokens.max(n as u32);
+                }
+            }
+            LlmEvent::ToolCallDelta { index, name, args_delta, .. } => {
                     let at = parts.binary_search_by_key(&index, |p| p.0).unwrap_or_else(|at| {
                         parts.insert(at, (index, String::new(), String::new()));
                         at
@@ -200,7 +245,7 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
                 _ => {}
             }
         }
-        Ok::<_, String>((parts, text))
+        Ok::<_, String>((parts, text, tokens))
     };
 
     match tokio::time::timeout(timeout, collect).await {
@@ -210,6 +255,7 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
             secs: started.elapsed().as_secs_f32(),
             error: Some(format!("no answer within {}s", timeout.as_secs())),
             unavailable: false,
+            tokens: 0,
         },
         Ok(Err(e)) => Turn {
             calls: Vec::new(),
@@ -217,8 +263,9 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
             secs: started.elapsed().as_secs_f32(),
             error: Some(e),
             unavailable: true,
+            tokens: 0,
         },
-        Ok(Ok((parts, text))) => {
+        Ok(Ok((parts, text, tokens))) => {
             let secs = started.elapsed().as_secs_f32();
             let mut calls: Vec<(String, String, CallStyle)> = parts
                 .into_iter()
@@ -240,7 +287,7 @@ async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Durati
                     })
                     .collect();
             }
-            Turn { calls, text, secs, error: None, unavailable: false }
+            Turn { calls, text, secs, error: None, unavailable: false, tokens }
         }
     }
 }
@@ -299,6 +346,13 @@ impl CheckReport {
         self.results.iter().map(|(_, o)| o.secs()).sum()
     }
 
+    /// What every scenario together generated. Next to the score this is what a
+    /// check costs, and it is the number that separates two models that both
+    /// pass from a model that is cheaper to run than the other.
+    pub fn total_tokens(&self) -> u32 {
+        self.results.iter().map(|(_, o)| o.tokens()).sum()
+    }
+
     pub fn verdict(&self) -> &'static str {
         let (passed, total) = self.score();
         if self.untested() > 0 {
@@ -347,6 +401,14 @@ impl CheckReport {
     }
 
     /// So a published table can be checked.
+    /// The report without the scenarios nobody asked about, so a narrow check does
+/// not print a table about things it was not measuring.
+pub fn only(&self, keys: &[String]) -> CheckReport {
+        let results: Vec<(String, Outcome)> =
+            self.results.iter().filter(|(k, _)| keys.iter().any(|w| w == k)).cloned().collect();
+        CheckReport { model: self.model.clone(), results }
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
         let (passed, total) = self.score();
         serde_json::json!({
@@ -358,11 +420,13 @@ impl CheckReport {
             "needed_nudge": self.needed_nudge(),
             "untested": self.untested(),
             "seconds": self.total_secs(),
+            "tokens": self.total_tokens(),
             "scenarios": self.results.iter().map(|(key, outcome)| serde_json::json!({
                 "key": key,
                 "pass": outcome.is_pass(),
                 "detail": outcome.detail(),
                 "seconds": outcome.secs(),
+                "tokens": outcome.tokens(),
             })).collect::<Vec<_>>(),
         })
     }
@@ -381,6 +445,17 @@ pub fn is_chat_model(id: &str) -> bool {
 /// calling tools, so a model is measured as the agent runs it.
 fn system(task: &str) -> ChatMessage {
     ChatMessage::system(format!("{task}\n\n{}", crate::prompt::TOOL_CALL_RULES))
+}
+
+/// A one-pixel red square, as a `data:` URL. The smallest thing that can answer
+/// "what colour is this", so the scenario asks a question with exactly one right
+/// answer instead of grading prose.
+const RED_PIXEL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+/// A question about a picture, as the loop sends one: the words and the image
+/// travel together in the same message.
+fn picture(question: &str) -> ChatMessage {
+    ChatMessage { images: vec![RED_PIXEL.to_string()], ..ChatMessage::user(question) }
 }
 
 /// `timeout` caps each turn, not the run.
@@ -441,12 +516,12 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
             (Some(e), _) => turn.failed(e),
             (None, Some((name, _, _))) => Outcome::Fail {
                 detail: format!("called {name} on a question that needed no tool"),
-                secs: turn.secs,
+                secs: turn.secs, tokens: turn.tokens,
             },
             (None, None) if turn.text.trim().is_empty() => {
-                Outcome::Fail { detail: "empty reply".to_string(), secs: turn.secs }
+                Outcome::Fail { detail: "empty reply".to_string(), secs: turn.secs, tokens: turn.tokens }
             }
-            (None, None) => Outcome::Pass { style: CallStyle::Native, secs: turn.secs },
+            (None, None) => Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens },
         },
     ));
 
@@ -474,14 +549,14 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
             (Some(e), _) => turn.failed(e),
             (None, Some((name, _, _))) => Outcome::Fail {
                 detail: format!("called {name} again instead of answering from the result"),
-                secs: turn.secs,
+                secs: turn.secs, tokens: turn.tokens,
             },
             (None, None) if turn.text.contains("4.2.1") => {
-                Outcome::Pass { style: CallStyle::Native, secs: turn.secs }
+                Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens }
             }
             (None, None) => Outcome::Partial {
                 detail: format!("answered without the version: {}", snippet(&turn.text)),
-                secs: turn.secs,
+                secs: turn.secs, tokens: turn.tokens,
             },
         },
     ));
@@ -579,21 +654,208 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
             (Some(e), _) => turn.failed(e),
             (None, 0) => Outcome::Fail {
                 detail: format!("replied with text, no tool call: {}", snippet(&turn.text)),
-                secs: turn.secs,
+                secs: turn.secs, tokens: turn.tokens,
             },
             (None, 1) => Outcome::Partial {
                 detail: "one call for two files — the loop will need a second turn".to_string(),
-                secs: turn.secs,
+                secs: turn.secs, tokens: turn.tokens,
             },
             (None, _) => Outcome::Pass {
                 style: turn.calls.first().map(|c| c.2).unwrap_or(CallStyle::Native),
-                secs: turn.secs,
+                secs: turn.secs, tokens: turn.tokens,
             },
+        },
+    ));
+
+    // 9. Every call has to name a tool that was actually on the table. A model
+    //    that makes one up cannot be served, and the loop answers a name it does
+    //    not have with an error the model then has to talk its way out of.
+    let turn = run_turn(
+        llm,
+        &[
+            system("You are a coding agent. Use the tools to do what is asked."),
+            ChatMessage::user("Delete every file in the build directory."),
+        ],
+        timeout,
+    )
+    .await;
+    let specs = probe_tools();
+    let offered: Vec<&str> = specs.iter().map(|t| t.name.as_str()).collect();
+    results.push((
+        "no_invented_calls".to_string(),
+        match &turn.error {
+            Some(e) => turn.failed(e),
+            None => {
+                let invented: Vec<&str> = turn
+                    .calls
+                    .iter()
+                    .map(|(name, _, _)| name.as_str())
+                    .filter(|n| !offered.contains(n))
+                    .collect();
+                if !invented.is_empty() {
+                    Outcome::Fail {
+                        detail: format!("called {}, which was never offered", invented.join(", ")),
+                        secs: turn.secs,
+                        tokens: turn.tokens,
+                    }
+                } else if turn.calls.is_empty() {
+                    // Not inventing a call is not the same as making one. Without
+                    // this a server that returns nothing at all would score here,
+                    // and a check that passes a dead backend is worse than none.
+                    Outcome::Fail {
+                        detail: "called nothing at all, so nothing was invented".to_string(),
+                        secs: turn.secs,
+                        tokens: turn.tokens,
+                    }
+                } else {
+                    Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens }
+                }
+            }
+        },
+    ));
+
+    // 10. A long answer, all the way to the end. An agent spends most of its
+    //     tokens streaming, and one that stops halfway leaves the transcript
+    //     wrong and the work undone with nothing on screen saying so.
+    let turn = run_turn(
+        llm,
+        &[
+            system("You are a coding agent. Answer in plain text."),
+            ChatMessage::user("Count from 1 to 200, one number per line, and nothing else."),
+        ],
+        timeout,
+    )
+    .await;
+    results.push((
+        "long_stream".to_string(),
+        match &turn.error {
+            Some(e) => turn.failed(e),
+            None => {
+                let words = turn.text.split_whitespace().count();
+                let reaches = turn.text.contains("200");
+                match (reaches, words) {
+                    (true, _) => Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens },
+                    // Short is not broken, and a short answer is not a score of
+                    // zero: it is a rough edge, which is what Partial is for.
+                    (false, w) if w < 30 => Outcome::Partial {
+                        detail: format!("stopped after {w} words, well short of 200 lines"),
+                        secs: turn.secs,
+                        tokens: turn.tokens,
+                    },
+                    (false, w) => Outcome::Fail {
+                        detail: format!("stopped after {w} words, never reaching the end"),
+                        secs: turn.secs,
+                        tokens: turn.tokens,
+                    },
+                }
+            }
+        },
+    ));
+
+    // 11. A chain of steps rather than one. Drift does not show up in step two,
+    //     so a single-call check says nothing about whether the model can be
+    //     left alone for a real job.
+    let mut chain: Vec<ChatMessage> = vec![
+        system("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user("Read src/main.rs, then report what you found. Use one tool call per step."),
+    ];
+    let mut steps = 0usize;
+    let mut drift: Option<String> = None;
+    for _ in 0..TEN_STEPS {
+        let turn = run_turn(llm, &chain, timeout).await;
+        if let Some(e) = turn.error {
+            steps += 1;
+            drift = Some(e);
+            break;
+        }
+        let Some((name, args, _)) = turn.first_call().cloned() else { break };
+        steps += 1;
+        if !offered.contains(&name.as_str()) {
+            drift = Some(format!("called {name}, which was never offered"));
+            break;
+        }
+        chain.push(ChatMessage::assistant(""));
+        chain.last_mut().expect("just pushed").tool_calls = vec![flashagent_llm::ToolCall {
+            id: format!("call_{steps}"),
+            name: name.clone(),
+            args_json: args,
+        }];
+        // What a real loop hands back. The check is that the model keeps working
+        // against results instead of repeating or drifting.
+        chain.push(ChatMessage::tool_result(format!("call_{steps}"), "1: fn main() {\n2:     println!(\"hi\");\n3: }"));
+    }
+    results.push((
+        "ten_steps".to_string(),
+        match &drift {
+            Some(why) => Outcome::Fail {
+                detail: format!("drifted after {steps} steps: {why}"),
+                secs: 0.0,
+                tokens: 0,
+            },
+            // A model that made no call never stayed on the rails; it simply
+            // never got on them. A server returning nothing must not pass here.
+            None if steps == 0 => Outcome::Fail {
+                detail: "made no call, so the chain was never started".to_string(),
+                secs: 0.0,
+                tokens: 0,
+            },
+            // One step is not a chain. A model that answers once and stops has
+            // not shown it can stay on the rails, and passing it would be the
+            // most flattering lie in the report.
+            None if steps < TEN_STEPS => Outcome::Partial {
+                detail: format!("stopped after {steps} of {TEN_STEPS} steps"),
+                secs: 0.0,
+                tokens: 0,
+            },
+            None => Outcome::Pass {
+                style: CallStyle::Native,
+                secs: 0.0,
+                tokens: 0,
+            },
+        },
+    ));
+
+    // 12. A picture. A model that cannot see cannot review a screenshot, a
+    //     design, or a photo of the bug it was asked to fix, and never says so.
+    let turn = run_turn(
+        llm,
+        &[
+            system("You are a coding agent. Answer in plain text."),
+            picture("What single colour fills this image? Answer with one word."),
+        ],
+        timeout,
+    )
+    .await;
+    results.push((
+        "sees_picture".to_string(),
+        match &turn.error {
+            Some(e) => turn.failed(e),
+            None => {
+                let said = turn.text.to_lowercase();
+                if said.contains("red") {
+                    Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens }
+                } else if turn.text.trim().is_empty() {
+                    Outcome::Fail {
+                        detail: "no reply at all to a picture".to_string(),
+                        secs: turn.secs,
+                        tokens: turn.tokens,
+                    }
+                } else {
+                    Outcome::Partial {
+                        detail: format!("answered {} but not \"red\"", snippet(&turn.text)),
+                        secs: turn.secs,
+                        tokens: turn.tokens,
+                    }
+                }
+            }
         },
     ));
 
     CheckReport { model: model.to_string(), results }
 }
+
+/// How many steps the chain scenario gives a model before calling it a drifter.
+const TEN_STEPS: usize = 10;
 
 /// An answer in prose gets the one nudge the agent loop would send, if any.
 async fn nudged_once(llm: &dyn LlmSource, messages: &mut Vec<ChatMessage>, turn: Turn, nudge: Option<String>, timeout: Duration) -> (Turn, bool) {
@@ -611,9 +873,15 @@ async fn nudged_once(llm: &dyn LlmSource, messages: &mut Vec<ChatMessage>, turn:
 
 fn after_nudge(outcome: Outcome, nudged: bool) -> Outcome {
     match outcome {
-        Outcome::Pass { secs, .. } if nudged => Outcome::Pass { style: CallStyle::AfterNudge, secs },
-        Outcome::Fail { detail, secs } if nudged => Outcome::Fail { detail: format!("{detail} (asked twice)"), secs },
-        Outcome::Partial { detail, secs } if nudged => Outcome::Partial { detail: format!("{detail} (asked twice)"), secs },
+        Outcome::Pass { secs, tokens, .. } if nudged => {
+            Outcome::Pass { style: CallStyle::AfterNudge, secs, tokens }
+        }
+        Outcome::Fail { detail, secs, tokens } if nudged => {
+            Outcome::Fail { detail: format!("{detail} (asked twice)"), secs, tokens }
+        }
+        Outcome::Partial { detail, secs, tokens } if nudged => {
+            Outcome::Partial { detail: format!("{detail} (asked twice)"), secs, tokens }
+        }
         other => other,
     }
 }
@@ -629,30 +897,38 @@ fn judge_call(
     let Some((name, args, style)) = turn.first_call() else {
         return Outcome::Fail {
             detail: format!("replied with text, no tool call: {}", snippet(&turn.text)),
-            secs: turn.secs,
+            secs: turn.secs, tokens: turn.tokens,
         };
     };
     if name != expected {
         return Outcome::Fail {
             detail: format!("called {name}, expected {expected}"),
-            secs: turn.secs,
+            secs: turn.secs, tokens: turn.tokens,
         };
     }
     let Some(parsed) = parsed_args(name, args) else {
         return Outcome::Partial {
             detail: format!("arguments were not JSON: {}", snippet(args)),
-            secs: turn.secs,
+            secs: turn.secs, tokens: turn.tokens,
         };
     };
     match check_args(&parsed) {
-        Ok(()) => Outcome::Pass { style: *style, secs: turn.secs },
-        Err(detail) => Outcome::Partial { detail, secs: turn.secs },
+        Ok(()) => Outcome::Pass { style: *style, secs: turn.secs, tokens: turn.tokens },
+        Err(detail) => Outcome::Partial { detail, secs: turn.secs, tokens: turn.tokens },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How many scenarios there are. The scripted tests break exactly one of
+    /// them, so they count against this rather than against a number that a new
+    /// scenario would silently turn into a lie.
+    fn all() -> usize {
+        scenarios().len()
+    }
+    
     use async_trait::async_trait;
     use flashagent_llm::{FinishReason, LlmError};
     use futures::stream::BoxStream;
@@ -723,6 +999,25 @@ mod tests {
                 ("read_lines", r#"{"path":"Cargo.toml","count":10}"#),
                 ("read_lines", r#"{"path":"README.md","count":10}"#),
             ]),
+            // No invented calls: a call it was given, in answer to the question.
+            call("read_lines", r#"{"path":"build/output.bin","count":1}"#),
+            // The long answer, all the way through and past the last line.
+            text(&(1..=200).map(|n| n.to_string()).collect::<Vec<_>>().join("\n")),
+            // The chain: one call per step, all ten of them, and only then an answer.
+            call("read_lines", r#"{"path":"src/main.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/lib.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/config.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/routes.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/state.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/errors.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/agent.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/tasks.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/tools.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/render.rs","count":1}"#),
+            // One word, and the only right one. Ahead of the chain's closing
+            // remark: the loop makes exactly ten requests and never reads it.
+            text("Red."),
+            text("It has a main that prints."),
         ]
     }
 
@@ -755,7 +1050,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let llm = PartlyRefused { inner: Scripted::new(perfect()), refused: vec![0, 2, 3, 4, 5, 6, 7], asked: Mutex::new(0) };
         let report = rt.block_on(check_model(&llm, "rate-limited", Duration::from_secs(5)));
-        assert_eq!(report.score(), (1, 8));
+        // Seven turns are refused, so the rest are scored on their own merits.
+        assert_eq!(report.score(), (all() - 7, all()));
         assert_eq!(report.untested(), 7);
         assert!(report.verdict().starts_with("incomplete"), "{}", report.verdict());
         let lines = report.lines();
@@ -777,7 +1073,7 @@ mod tests {
         turns[6] = text("I apologize, but that file does not exist.");
         turns.insert(7, call("read_lines", r#"{"path":"src/config.rs","count":5}"#));
         let report = run(turns);
-        assert_eq!(report.score(), (8, 8), "{:?}", report.results);
+        assert_eq!(report.score(), (all(), all()), "{:?}", report.results);
         assert!(report.needed_nudge());
         assert_eq!(report.results[6].1.detail().split(',').next(), Some("after a nudge"));
         assert!(report.lines().last().unwrap().contains("some calls made only when asked again"));
@@ -787,8 +1083,8 @@ mod tests {
         turns[6] = text("Sorry, it does not exist.");
         turns.insert(7, text("I cannot read it."));
         let report = run(turns);
-        assert_eq!(report.score(), (7, 8));
-        assert!(report.results[6].1.detail().ends_with("(asked twice)"), "{}", report.results[6].1.detail());
+        assert_eq!(report.score(), (all() - 1, all()));
+        assert!(report.results[6].1.detail().contains("(asked twice)"), "{}", report.results[6].1.detail());
         assert!(!run(perfect()).needed_nudge());
     }
 
@@ -799,14 +1095,14 @@ mod tests {
         turns[4] = text("The number in status.txt is 7.");
         turns.insert(5, call("report_status", r#"{"code":7}"#));
         let report = run(turns);
-        assert_eq!(report.score(), (8, 8), "{:?}", report.results);
+        assert_eq!(report.score(), (all(), all()), "{:?}", report.results);
         assert_eq!(report.results[4].1.detail().split(',').next(), Some("after a nudge"));
 
         // A reply that asks the user something is left alone.
         let mut turns = perfect();
         turns[4] = text("Which file did you mean?");
         let report = run(turns);
-        assert_eq!(report.score(), (7, 8));
+        assert_eq!(report.score(), (all() - 1, all()));
         assert!(!report.needed_nudge());
     }
 
@@ -832,13 +1128,13 @@ mod tests {
         let mut turns = perfect();
         turns[0] = call("report_status", r#"{"code":"42"}"#);
         turns[1] = call("read_lines", r#"{"path":"src/main.rs","count":"20"}"#);
-        assert_eq!(run(turns).score(), (8, 8));
+        assert_eq!(run(turns).score(), (all(), all()));
     }
 
     #[test]
     fn a_model_that_does_everything_right_scores_full_marks() {
         let report = run(perfect());
-        assert_eq!(report.score(), (8, 8), "{:?}", report.results);
+        assert_eq!(report.score(), (all(), all()), "{:?}", report.results);
         assert_eq!(report.verdict(), "drives tools reliably");
         assert!(!report.needed_recovery());
     }
@@ -857,7 +1153,7 @@ mod tests {
             read(u32::MAX as usize, r#"{"path":"README.md","count":10}"#),
             LlmEvent::Done(FinishReason::ToolUse),
         ];
-        assert_eq!(run(turns).score(), (8, 8));
+        assert_eq!(run(turns).score(), (all(), all()));
     }
 
     #[test]
@@ -870,7 +1166,7 @@ mod tests {
             text("I will now report the status."),
         ]);
         // Only the two scenarios that ask for prose can pass.
-        assert_eq!(report.score(), (2, 8), "{:?}", report.results);
+        assert_eq!(report.score(), (2, all()), "{:?}", report.results);
         assert_eq!(report.verdict(), "mostly fails to drive tools");
     }
 
@@ -881,7 +1177,7 @@ mod tests {
         let mut turns = perfect();
         turns[0] = text("<tool_call>{\"name\": \"report_status\", \"arguments\": {\"code\": 42}}</tool_call>");
         let report = run(turns);
-        assert_eq!(report.score(), (8, 8), "{:?}", report.results);
+        assert_eq!(report.score(), (all(), all()), "{:?}", report.results);
         assert!(report.needed_recovery(), "recovery must be visible in the report");
         assert!(report.markdown_row().contains("text, recovered"));
     }
@@ -891,7 +1187,7 @@ mod tests {
         let mut turns = perfect();
         turns[1] = call("read_lines", r#"{"path":"src/lib.rs","count":20}"#);
         let report = run(turns);
-        assert_eq!(report.score(), (7, 8));
+        assert_eq!(report.score(), (all() - 1, all()));
         let (_, outcome) = &report.results[1];
         assert!(matches!(outcome, Outcome::Partial { .. }), "{outcome:?}");
         assert!(outcome.detail().contains("src/main.rs"), "{}", outcome.detail());
@@ -902,7 +1198,7 @@ mod tests {
         let mut turns = perfect();
         turns[2] = call("read_lines", r#"{"path":"compiler.md","count":5}"#);
         let report = run(turns);
-        assert_eq!(report.score(), (7, 8));
+        assert_eq!(report.score(), (all() - 1, all()));
         assert!(report.results[2].1.detail().contains("needed no tool"));
     }
 
@@ -911,14 +1207,14 @@ mod tests {
         let mut turns = perfect();
         turns[3] = call("read_lines", r#"{"path":"version.txt","count":1}"#);
         let report = run(turns);
-        assert_eq!(report.score(), (7, 8));
+        assert_eq!(report.score(), (all() - 1, all()));
         assert!(report.results[3].1.detail().contains("instead of answering"));
     }
 
     #[test]
     fn a_backend_that_says_nothing_fails_rather_than_passes() {
         let report = run(vec![Vec::new(); scenarios().len()]);
-        assert_eq!(report.score(), (0, 8), "{:?}", report.results);
+        assert_eq!(report.score(), (0, all()), "{:?}", report.results);
         assert_eq!(report.verdict(), "cannot drive tools");
     }
 
@@ -928,7 +1224,7 @@ mod tests {
         let mut turns = perfect();
         turns[5] = call("write_file", r#"{"path":"notes.txt","content":"line one quoted end"}"#);
         let report = run(turns);
-        assert_eq!(report.score(), (7, 8));
+        assert_eq!(report.score(), (all() - 1, all()));
         assert!(report.results[5].1.detail().contains("came through as"));
     }
 
@@ -937,7 +1233,7 @@ mod tests {
         let mut turns = perfect();
         turns[6] = call("read_lines", r#"{"path":"src/confg.rs","count":5}"#);
         let report = run(turns);
-        assert_eq!(report.score(), (7, 8));
+        assert_eq!(report.score(), (all() - 1, all()));
         assert!(report.results[6].1.detail().contains("instead of the corrected path"));
     }
 
@@ -946,7 +1242,7 @@ mod tests {
         let mut turns = perfect();
         turns[7] = call("read_lines", r#"{"path":"Cargo.toml","count":10}"#);
         let report = run(turns);
-        assert_eq!(report.score(), (7, 8));
+        assert_eq!(report.score(), (all() - 1, all()));
         assert!(report.results[7].1.detail().contains("second turn"));
     }
 
@@ -955,9 +1251,10 @@ mod tests {
         let report = run(perfect());
         let lines = report.lines();
         assert_eq!(lines.len(), scenarios().len() + 1);
-        assert!(lines.last().unwrap().contains("8/8"));
-        assert!(report.markdown_row().starts_with("| `scripted` | 8/8 |"));
-        assert_eq!(report.to_json()["passed"], 8);
-        assert_eq!(report.to_json()["scenarios"].as_array().unwrap().len(), 8);
+        let full = format!("{}/{}", all(), all());
+        assert!(lines.last().unwrap().contains(&full), "{}", lines.last().unwrap());
+        assert!(report.markdown_row().starts_with(&format!("| `scripted` | {full} |")), "{}", report.markdown_row());
+        assert_eq!(report.to_json()["passed"], all());
+        assert_eq!(report.to_json()["scenarios"].as_array().unwrap().len(), all());
     }
 }

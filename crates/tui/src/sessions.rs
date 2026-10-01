@@ -252,8 +252,10 @@ pub(crate) fn ago(timestamp: u64, now: u64) -> String {
     }
 }
 
+/// How long a running turn waits between writes of the session file.
+const AUTOSAVE_GAP: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl App {
-    /// A failure is shown with when it will be retried; the next turn and quitting both retry.
     pub(crate) fn autosave(&mut self, session_id: &str, cwd_display: &str) {
         if !self.config.auto_save_sessions {
             return;
@@ -261,6 +263,25 @@ impl App {
         if let Err(why) = save_session_file(session_id, &self.current_model, cwd_display, &self.history) {
             self.notice(format!("Session not saved: {why} · retrying after the next turn and on exit"));
         }
+        self.last_autosave = Some(std::time::Instant::now());
+    }
+
+    /// Puts a running turn on disk, but not on every step: the whole
+    /// conversation is written each time, so doing it per step would be
+    /// quadratic in the length of the turn. Five seconds bounds how much a
+    /// crash can take away while leaving the writing flat.
+    ///
+    /// This is the difference between losing a turn and losing the last few
+    /// seconds of it. Reported live: a machine that lost power mid-turn kept
+    /// nothing of the turn, because the only write happened after it ended.
+    pub(crate) fn autosave_during_turn(&mut self, cx: &LoopCtx<'_>) {
+        if !self.config.auto_save_sessions {
+            return;
+        }
+        if self.last_autosave.is_some_and(|last| last.elapsed() < AUTOSAVE_GAP) {
+            return;
+        }
+        self.autosave(cx.session_id, cx.cwd_display);
     }
 
     /// `--resume <id>` before the first frame. False, with the reason in the

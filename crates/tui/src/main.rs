@@ -79,6 +79,8 @@ async fn cli_start(config: &mut AppConfig) -> Result<Option<(bool, bool, Session
     let mut skip_trust = false;
     let mut session_start = SessionStart::New;
     let mut tool_test: Option<bool> = None;
+let mut tool_test_scenario: Vec<String> = Vec::new();
+let mut tool_test_json: Option<String> = None;
     let (mut cli_url, mut cli_model) = (None, None);
     let mut args = std::env::args().skip(1).peekable();
     while let Some(a) = args.next() {
@@ -146,13 +148,25 @@ async fn cli_start(config: &mut AppConfig) -> Result<Option<(bool, bool, Session
             }
             "--tool-test" => tool_test = Some(false),
             "--all-models" => tool_test = Some(true),
+            "--scenario" => {
+                tool_test.get_or_insert(false);
+                let Some(key) = args.next() else { anyhow::bail!("--scenario needs a scenario key, as in --scenario long_stream") };
+                tool_test_scenario.push(key.to_string());
+            }
+            "--json" => {
+                tool_test.get_or_insert(false);
+                let Some(path) = args.next() else { anyhow::bail!("--json needs a file to write the results to") };
+                tool_test_json = Some(path.to_string());
+            }
             "--setup" => force_setup = true,
             "-y" | "--yes" => skip_trust = true,
             "-h" | "--help" => {
-                println!("FlashAgent TUI\n\nUsage: flashagent [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Model to use, saved for the provider in use\n  --url <endpoint>     Talk to this server for this run only (saved providers: /provider)\n  --setup              Run first-time setup wizard\n  --tool-test [--all-models]  Check whether the model can drive tools\n  -r, --resume [id]    Resume a saved session (without an id: pick one from this folder)\n  -c, --continue       Continue the latest session in this folder\n  -y, --yes            Skip directory trust confirmation\n  --uninstall [-y]     Remove FlashAgent; asks what data to delete (-y: take the defaults)\n  -h, --help           Show this help message");
+                println!("FlashAgent TUI\n\nUsage: flashagent [OPTIONS]\n\nOptions:\n  -v, --version        Print version\n  --update             Check and apply updates\n  --channel <name>     Switch release channel (stable, beta)\n  --model <name>       Model to use, saved for the provider in use\n  --url <endpoint>     Talk to this server for this run only (saved providers: /provider)\n  --setup              Run first-time setup wizard\n  --tool-test [--all-models]  Check whether the model can drive tools
+      --scenario <key>  Check one scenario (repeatable)
+      --json <file>      Write the full results as JSON to a file\n  -r, --resume [id]    Resume a saved session (without an id: pick one from this folder)\n  -c, --continue       Continue the latest session in this folder\n  -y, --yes            Skip directory trust confirmation\n  --uninstall [-y]     Remove FlashAgent; asks what data to delete (-y: take the defaults)\n  -h, --help           Show this help message");
                 return Ok(None);
             }
-            other => anyhow::bail!("usage: flashagent [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--tool-test [--all-models]] [--setup] [-r|--resume [id]] [-c|--continue] [-y|--yes] (got {other})"),
+            other => anyhow::bail!("usage: flashagent [-v] [--update] [--channel <stable|beta>] [--model <name>] [--url http://host/v1] [--tool-test [--all-models] [--scenario <key>] [--json <file>]] [--setup] [-r|--resume [id]] [-c|--continue] [-y|--yes] (got {other})"),
         }
     }
 
@@ -166,7 +180,7 @@ async fn cli_start(config: &mut AppConfig) -> Result<Option<(bool, bool, Session
     }
 
     if let Some(all_models) = tool_test {
-        let code = run_tool_check_cli(config, all_models).await;
+        let code = run_tool_check_cli(config, all_models, tool_test_scenario, tool_test_json).await;
         std::process::exit(code);
     }
 
@@ -262,6 +276,15 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
     // Discovery starts now, so models, context window and presets are known by
     // the time the startup screen is done.
     let backend_initial = flashagent_llm::Client::new(endpoint.clone(), &model);
+    // Half a second is right for a server on this machine, where the answer is
+    // already in memory, and badly wrong for one across the internet:
+    // OpenRouter lists hundreds of models and answers in about two seconds, so
+    // the app used to give up, carry on knowing nothing ("Context: not known
+    // yet") and leave the mascot saying the server was dead while it was
+    // answering perfectly well. The wait is bounded by discovery's own timeout
+    // either way, so a server that is truly gone still reaches the prompt.
+    let remote =
+        flashagent_core::url_host(&endpoint.url).is_some_and(|host| !flashagent_core::is_local_host(&host));
     let mut discovery_task = tokio::spawn(async move {
         backend_initial.discover_server().await
     });
@@ -297,7 +320,17 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
     flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(config));
     backend.set_user_sampling(config.sampling_preset == flashagent_core::config::SamplingPreset::Custom);
 
-    let startup_timeout = if model.is_empty() {
+    // How long startup waits for the server to say what it runs. Half a second is
+    // right for a server on this machine, where the answer is already in memory,
+    // and badly wrong for one across the internet: OpenRouter lists hundreds of
+    // models and answers in about two seconds, so the app used to give up, carry
+    // on knowing nothing ("Context: not known yet") and leave the mascot saying
+    // the server was dead while it was answering perfectly well. The wait is
+    // bounded by discovery's own timeout either way, so a server that is truly
+    // gone still gets to the prompt on its own.
+    let startup_timeout = if remote {
+        std::time::Duration::from_secs(15)
+    } else if model.is_empty() {
         std::time::Duration::from_millis(2000)
     } else {
         std::time::Duration::from_millis(500)
@@ -719,6 +752,10 @@ struct App {
     pending_update: Option<(String, String, String, Option<String>)>,
     last_term_size: (u16, u16),
     turn_started: Option<std::time::Instant>,
+/// When the running turn last put its work on disk. A turn writes the whole
+/// conversation, so writing it on every step would be quadratic; the gaps keep
+/// the cost flat while still bounding how much a crash can lose.
+last_autosave: Option<std::time::Instant>,
     /// How long the turn that just ended took. Read after `turn_started` is
     /// cleared, so it has to be kept: the only way to tell a model that is
     /// overthinking from one that is right on time is how long it took, and
@@ -1226,6 +1263,7 @@ fn initial_app(init: InitialApp) -> App {
         pending_update: None,
         last_term_size: crossterm::terminal::size().unwrap_or((100, 24)),
         turn_started: None,
+        last_autosave: None,
         turn_elapsed: None,
         max_steps: app_config.max_steps,
         goal_state: None,

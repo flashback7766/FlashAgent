@@ -671,6 +671,25 @@ impl ChatView {
         self.lines.push(ChatLine::new(LineKind::System, text.to_string()));
     }
 
+    /// One agent wrote to another, shown as a folded line the way a tool call is
+    /// shown: who it is from, who it is for, and the message itself only when the
+    /// line is opened. Dumped as text it read as the user having said it, and a
+    /// long message pushed the conversation off the screen.
+    pub fn push_subagent_message(&mut self, from_role: &str, from: &str, to: &str, text: &str) {
+        self.streaming = None;
+        self.streaming_reasoning = None;
+        let head = format!("message from {from_role} {from} \u{b7} to {to}");
+        let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+        let preview: String =
+            first.chars().take(96).collect::<String>() + if first.chars().count() > 96 { "\u{2026}" } else { "" };
+        let mut line = ChatLine::with_details(LineKind::Subagent, head, text.to_string());
+        line.tool_name = Some("subagent_message".to_string());
+        // The first line of what was said stands in for the whole message while
+        // the card is closed, so a glance shows the point without the wall.
+        line.tool_result = Some(preview);
+        self.lines.push(line);
+    }
+
     /// "Compacting context…" becomes "Context compacted · 12k saved" in place.
     pub fn replace_last_system(&mut self, text: &str) {
         match self.lines.iter().rposition(|l| l.kind == LineKind::System) {
@@ -1350,15 +1369,28 @@ impl ChatView {
             // counted and its end was clipped.
             let safe: Vec<String> = line.text.split('\n').map(terminal_safe).collect();
             let wrapped = wrap(&safe.join("\n"), if line.kind == LineKind::User { width.saturating_sub(2) } else { width });
-            for (j, chunk) in wrapped.into_iter().enumerate() {
+            for chunk in wrapped {
                 let text = match line.kind {
+                    // A prompt the user typed is the one thing on screen they can
+                    // be sure of, and it used to sit in the same plain rows as the
+                    // model's answer. A bar down the side and air around it make
+                    // the two read as different kinds of thing without having to
+                    // read either of them first.
                     LineKind::User => {
-                        if j == 0 { format!("{GLYPH_PROMPT} {chunk}") } else { format!("  {chunk}") }
+                        // Two columns for the bar, on every row: three on the
+                        // continuation rows would push the last one past the
+                        // window and wrap it into a row of its own.
+                        format!("\x1b[38;2;225;175;95m{USER_BAR}\x1b[0m\x1b[1;38;2;245;240;232m {chunk}\x1b[0m")
                     }
                     LineKind::System => chunk,
                     _ => md(&chunk),
                 };
                 target.push((line.kind, text));
+            }
+            // Air under the prompt, so the answer that follows does not read as
+            // more of what was asked.
+            if line.kind == LineKind::User && i + 1 < self.lines.len() {
+                target.push((LineKind::System, String::new()));
             }
         }
         let owners_of = |rows: &[RenderLine], settled_rows: bool| {
@@ -1433,6 +1465,12 @@ pub type RenderLine = (LineKind, String);
 pub const SPINNER: &[&str] = anim::SPINNER;
 
 pub const GLYPH_PROMPT: &str = "›";
+/// The bar down the side of a prompt the user typed.
+///
+/// Not the filled `▌`: that one is the caret on a line the model is writing this
+/// second, and two tests exist to keep it off restored text. A prompt wearing it
+/// reads as an answer still being typed, which is the opposite of what it is.
+pub const USER_BAR: &str = "│";
 
 #[cfg(test)]
 mod tests {
@@ -1475,10 +1513,64 @@ mod tests {
         v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
 
         let lines = v.render(80);
-        assert!(lines.iter().any(|(k, t)| *k == LineKind::User && t.contains(&format!("{GLYPH_PROMPT} hello"))));
+        assert!(lines.iter().any(|(k, t)| *k == LineKind::User && strip_ansi(t).contains(&format!("{USER_BAR} hello"))));
         assert!(lines.iter().any(|(k, t)| *k == LineKind::Assistant && t.contains("Hello!")));
         assert!(lines.iter().any(|(k, t)| *k == LineKind::Tool && (t.contains("Explored") || t.contains("Searched") || t.contains("Grep") || t.contains('x'))));
         assert!(!lines.iter().any(|(k, t)| *k == LineKind::System && t.contains("Completed")));
+    }
+
+    /// Finding one's own prompt in a long transcript is the one thing the
+    /// transcript has to make easy. It used to open with a `›` among many marks,
+    /// in the same rows as the answer.
+    #[test]
+    fn a_prompt_reads_as_a_block_of_its_own_and_not_as_part_of_the_answer() {
+        let mut v = ChatView::default();
+        v.push_user("what does the gate at line 41 do");
+        v.push_assistant("It approves a tool call before it runs.");
+        let lines = v.render(80);
+
+        let bar = lines
+            .iter()
+            .find(|(k, _)| *k == LineKind::User)
+            .expect("the prompt is on screen");
+        assert!(bar.1.contains(USER_BAR), "a bar down the side: {:?}", bar.1);
+        assert!(
+            bar.1.contains("what does the gate"),
+            "and the words the user actually typed: {:?}",
+            bar.1
+        );
+
+        // The answer carries no bar, so the eye separates them without reading.
+        let answer = lines
+            .iter()
+            .find(|(k, _)| *k == LineKind::Assistant)
+            .expect("the answer is on screen");
+        assert!(!answer.1.contains(USER_BAR), "the answer is not marked as a prompt: {:?}", answer.1);
+
+        // Air under the prompt: the answer does not read as more of what was asked.
+        let at = lines.iter().position(|(k, _)| *k == LineKind::User).unwrap();
+        assert!(
+            lines.get(at + 1).is_some_and(|(_, t)| t.trim().is_empty()),
+            "a blank row under the prompt: {:?}",
+            lines.get(at + 1)
+        );
+    }
+
+    #[test]
+    fn a_long_prompt_wraps_and_keeps_its_bar_on_every_row() {
+        let mut v = ChatView::default();
+        v.push_user(&"a fairly long question that has to wrap across several rows to fit the window ".repeat(2));
+        let lines = v.render(40);
+        let rows: Vec<&String> = lines
+            .iter()
+            .filter(|(k, _)| *k == LineKind::User)
+            .map(|(_, t)| t)
+            .collect();
+        assert!(rows.len() > 1, "the prompt wrapped: {rows:?}");
+        for row in &rows {
+            assert!(row.contains(USER_BAR), "every row of a prompt is part of it: {row:?}");
+            assert!(strip_ansi(row).chars().count() <= 40, "and fits the window: {row:?}");
+        }
     }
 
     #[test]
@@ -1685,10 +1777,19 @@ mod tests {
         let lines = v.render(40);
         assert!(lines.len() > 1);
         for (_, l) in &lines {
-            assert!(l.chars().count() <= 40, "too long: {l}");
+            // Colours are in the row on purpose, so it is the visible width that
+            // has to fit and not the character count.
+            assert!(strip_ansi(l).chars().count() <= 40, "too long: {}", strip_ansi(l));
         }
-        // Continuation lines keep the indent.
-        assert!(lines.iter().skip(1).all(|(k, l)| *k == LineKind::User && l.starts_with("  ")));
+        // Every row of a prompt is marked, so a wrapped one still reads as one
+        // block rather than as several separate lines.
+        let prompt: Vec<String> = lines
+            .iter()
+            .filter(|(k, _)| *k == LineKind::User)
+            .map(|(_, l)| strip_ansi(l))
+            .collect();
+        assert!(prompt.len() > 1, "the prompt wrapped: {prompt:?}");
+        assert!(prompt.iter().all(|l| l.starts_with(USER_BAR)), "{prompt:?}");
     }
 
     #[test]

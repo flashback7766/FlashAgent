@@ -101,6 +101,10 @@ impl App {
         self.suggested_prompt = None;
         self.custom_placeholder = None;
         self.running = true;
+        // On disk before the model is asked anything. A machine that loses power
+        // mid-turn used to lose the whole of it, because the only write came
+        // after it ended: the prompt was in the file nowhere at all.
+        self.autosave(cx.session_id, cx.cwd_display);
         // A warm-up still in flight would prefill the same prefix the turn is
         // about to prefill; on a one-slot server that is the wait doubled.
         self.cancel_warm_prompt_cache();
@@ -229,6 +233,15 @@ impl App {
         cx.cancel.store(false, Ordering::Relaxed);
         self.token_tracker.on_finished();
         self.flash_turn_end(res.as_ref().ok().map(|(_, reason)| *reason));
+
+        // The server just answered, so it is not silent, whatever it managed to
+        // say about itself at startup. A server behind a proxy that will not
+        // list its models used to leave the mascot saying "No answer from" for
+        // the whole session, over a server that was answering every question,
+        // and it took switching providers to clear it. Reported live.
+        if matches!(res, Ok((_, DoneReason::Completed))) {
+            self.server_silent = false;
+        }
 
         // Cost against output is the evidence for whether auto guessed right. Goal
         // runs are excluded: their effort is the user's. This turn's growth predicts

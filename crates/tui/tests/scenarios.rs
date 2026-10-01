@@ -16,6 +16,8 @@ const WAIT: Duration = Duration::from_secs(30);
 const PROMPT: &str = "Ask FlashAgent to do anything";
 /// The hint line under an approval card, whatever the call.
 const APPROVAL: &str = "Esc deny";
+/// What the mascot says when it thinks nothing is listening.
+const OFFLINE_NOTICE: &str = "No answer from";
 
 /// Set up against `server`, past the trust question, ready for input.
 fn ready(home: &Home, server: &MockServer) -> Term {
@@ -31,6 +33,129 @@ fn ready_with(home: &Home, server: &MockServer, extra: serde_json::Value) -> Ter
     let term = Term::start(home, &["-y"], COLS, ROWS);
     term.wait_for(PROMPT, WAIT);
     term
+}
+
+/// A server that accepts the request and then says nothing. The turn cannot
+/// finish, so the question is not whether it ends but whether the app can still
+/// be stopped: a prompt that cannot be refused is what "hangs like a dead one"
+/// means to the person in front of it. Checked against a server that never
+/// answers: Ctrl+C comes back cleanly every time, so this pins that down.
+#[test]
+fn a_server_that_stops_answering_can_still_be_stopped() {
+    let server = MockServer::start(vec![Reply::Text("never sent".into())]);
+    server.delay_turns(Duration::from_secs(600));
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+
+    paste(&term, "a question the server will not answer");
+    term.send(ENTER);
+    term.wait_for(RUNNING_HINT, WAIT);
+
+    // The way out has to work: the prompt is refused, so the turn ends and the
+    // app comes back rather than waiting out the server's silence.
+    term.send("\x03");
+    term.wait_for("Request interrupted by user", WAIT);
+    quit(&mut term);
+}
+
+/// A cloud API that will not say what it runs, while answering every question
+/// perfectly well. The app used to answer this with "No answer from <url> ·
+/// start the server" and keep the mascot shut-eyed for the rest of the session:
+/// the flag was only ever cleared by a listing that had already failed, so it
+/// stayed. Reported live against OpenRouter.
+#[test]
+fn a_server_that_answers_is_not_called_dead_and_stops_being_called_dead_after_it_does() {
+    let server = MockServer::start(vec![Reply::Text("An answer, from a server that will not list itself.".into())]);
+    server.serve_as_cloud();
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+
+    // While the listing is still out, the notice may say that nothing came back.
+    // It must not tell someone to start a server that is about to answer them.
+    std::thread::sleep(Duration::from_secs(3));
+    let screen = term.screen();
+    if screen.contains(OFFLINE_NOTICE) {
+        assert!(
+            !screen.contains("start the server"),
+            "the server is up; telling someone to start it sends them to reboot a machine that was working:\n{screen}"
+        );
+    }
+
+    // It answered, so the "no answer" has to go, on its own, without a restart
+    // and without switching providers.
+    paste(&term, "are you there");
+    term.send(ENTER);
+    term.wait_for("An answer, from a server that will not list itself.", WAIT);
+    term.wait_gone(OFFLINE_NOTICE, WAIT);
+    quit(&mut term);
+}
+
+/// A cloud API is far away and has a lot of models to list, so the listing takes
+/// seconds. Half a second is what startup used to allow, which is right for a
+/// server on this machine and badly wrong for one across the internet.
+#[test]
+fn a_cloud_listing_that_takes_its_time_does_not_stop_the_app_from_being_used() {
+    let server = MockServer::start(vec![Reply::Text("An answer.".into())]);
+    server.serve_as_cloud();
+    server.slow_listing(Duration::from_secs(3));
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+
+    // The listing is still coming, and the app is still a working editor: a
+    // prompt goes in and an answer comes back. Nothing waits on the listing.
+    paste(&term, "are you there");
+    term.send(ENTER);
+    term.wait_for("An answer.", WAIT);
+    quit(&mut term);
+}
+
+/// A machine that loses power mid-turn. The turn never ended, so nothing was
+/// saved and the whole of it was gone: the prompt was in no file at all, and the
+/// work the model had already done with it was with it. The session is now
+/// written when the turn starts and again as tools report, so what a crash takes
+/// is the last few seconds rather than the whole conversation.
+#[test]
+fn a_turn_that_never_finished_is_still_on_disk_after_a_crash() {
+    let server = MockServer::start(vec![Reply::Text("never sent".into())]);
+    server.delay_turns(Duration::from_secs(600));
+    let home = Home::new();
+    let session_id;
+    {
+        let term = ready(&home, &server);
+        paste(&term, "the work that must survive a crash");
+        term.send(ENTER);
+        term.wait_for(RUNNING_HINT, WAIT);
+        // Give the turn a moment to start and get the prompt onto disk.
+        std::thread::sleep(Duration::from_millis(600));
+
+        // The power goes: the process is killed without a chance to tidy up.
+        session_id = home
+            .sessions()
+            .first()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        drop(term);
+    }
+
+    assert!(!session_id.is_empty(), "no session file was written while the turn ran");
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.sessions().first().expect("a file")).unwrap())
+            .expect("the session file is readable, not half-written");
+    let text = serde_json::to_string(&saved).unwrap();
+    assert!(
+        text.contains("the work that must survive a crash"),
+        "the prompt of a turn that never finished was lost with it: {text}"
+    );
+
+    // And it comes back: resuming finds the question still asked.
+    let mut term = Term::start(&home, &["-y", "--resume", &session_id], COLS, ROWS);
+    let screen = term.wait_for("the work that must survive a crash", WAIT);
+    assert!(
+        screen.contains("Resumed session"),
+        "the resumed session did not say what it restored:\n{screen}"
+    );
+    quit(&mut term);
 }
 
 #[test]

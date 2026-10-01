@@ -22,3 +22,16 @@ unicode-width = "0.2"
 unicode-segmentation = "1.12"
 rayon = "1.10"
 
+# Tests carry no symbols worth reading: a backtrace through an assert! names a
+# test, not a line inside a dependency. Debug info is the bulk of what cargo
+# spends building this workspace, and it is spent again on every CI run on three
+# systems, so it is switched off where nobody looks at it.
+[profile.test]
+debug = 0
+strip = "debuginfo"
+
+# Integration scenarios spawn the real binary in a pty. Same reasoning, and it
+# is these that pay for it most: a debug-less binary links faster to run.
+[profile.dev]
+debug = 0
+

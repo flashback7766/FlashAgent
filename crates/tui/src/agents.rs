@@ -73,6 +73,11 @@ struct Child {
     /// needs to see: a claim nobody has looked at yet.
     review: Option<flashagent_core::ReviewVerdict>,
     started: Instant,
+    /// How long it ran, fixed the moment it ended. A child that is done is not
+    /// running any more, so the clock on its row has to stop: read live it would
+    /// keep counting the seconds since it started, and a report that landed five
+    /// minutes ago would claim to have taken five minutes.
+    finished_secs: Option<u64>,
     /// The call now running: `ToolFinished` says a call ended but not which,
     /// so the name is remembered from the one that started.
     current_call: Option<(String, bool)>,
@@ -106,7 +111,7 @@ impl AgentTree {
                 usage: c.usage,
                 done: c.done,
                 review: c.review,
-                seconds: c.started.elapsed().as_secs(),
+                seconds: c.seconds(),
             })
             .collect()
     }
@@ -155,6 +160,7 @@ impl AgentTree {
             LoopEvent::Done(done) => {
                 if child.done.is_none() {
                     child.done = Some(*done);
+                    child.finished_secs = Some(child.started.elapsed().as_secs());
                     return true;
                 }
                 return false;
@@ -194,7 +200,7 @@ impl AgentTree {
             parts.push(format!("{} cached", k(child.usage.cached_tokens)));
         }
         if let Some(done) = child.done {
-            parts.push(format!("{} in {}s", outcome(done), child.started.elapsed().as_secs()));
+            parts.push(format!("{} in {}s", outcome(done), child.seconds()));
         }
         if let Some(review) = child.review {
             parts.push(review.describe().to_string());
@@ -243,8 +249,16 @@ impl AgentTree {
 
 /// Every child's row, in the order they were started: the pinned block above
     /// the composer, with the id the mouse click needs to find its row.
+    ///
+    /// Only children still running are pinned. A child that has ended has said
+    /// what it said, and the transcript keeps the line that says it finished, so
+    /// leaving its row up would only fill the box with work that is over.
     pub fn pinned_rows(&self, width: usize) -> Vec<(String, String)> {
-        self.order.iter().filter_map(|id| self.line(id, width).map(|l| (id.clone(), l))).collect()
+        self.order
+            .iter()
+            .filter(|id| self.children.get(*id).is_some_and(|c| c.done.is_none()))
+            .filter_map(|id| self.line(id, width).map(|l| (id.clone(), l)))
+            .collect()
     }
 
 /// The child's answer, and the notice the model reads: a user-role message
@@ -284,11 +298,20 @@ impl AgentTree {
                     done: None,
                     review: None,
                     started: Instant::now(),
+                    finished_secs: None,
                     current_call: None,
                 },
             );
         }
         self.children.get_mut(id).expect("just inserted")
+    }
+}
+
+impl Child {
+    /// How long this child ran. While it runs, that is the time so far; once it
+    /// has ended, it is the time it took, and no longer moves.
+    fn seconds(&self) -> u64 {
+        self.finished_secs.unwrap_or_else(|| self.started.elapsed().as_secs())
     }
 }
 
@@ -452,6 +475,32 @@ mod tests {
         let line = tree.line("sub1", 100).unwrap();
         assert!(line.contains("step limit"), "{line}");
         assert!(line.contains('×'), "{line}");
+    }
+
+    #[test]
+    fn a_child_that_has_ended_leaves_the_pinned_block() {
+        // Its row was a status, and the status is over. Left up, the box fills
+        // with work that finished minutes ago and reads as work still going.
+        let mut tree = AgentTree::default();
+        tree.apply(&ev("sub1", "researcher", LoopEvent::TurnDelta("reading".into())));
+        assert_eq!(tree.pinned_rows(100).len(), 1, "a running child is pinned");
+        tree.apply(&ev("sub1", "researcher", LoopEvent::Done(DoneReason::Completed)));
+        assert!(tree.pinned_rows(100).is_empty(), "a finished one is not pinned");
+        // It is still listed by /agents: gone from the box is not gone.
+        assert_eq!(tree.rows().len(), 1);
+    }
+
+    #[test]
+    fn a_finished_child_stops_counting_the_seconds_it_never_ran_for() {
+        // The clock on a row that has closed has to stand still. Read live it
+        // grows forever, so a report that landed five minutes ago claims to have
+        // taken five minutes.
+        let mut tree = AgentTree::default();
+        tree.apply(&ev("sub1", "researcher", LoopEvent::Done(DoneReason::Completed)));
+        let first = tree.line("sub1", 100).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = tree.line("sub1", 100).unwrap();
+        assert_eq!(first, second, "a child that is done is not still running: {first} / {second}");
     }
 
     #[test]
