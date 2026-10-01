@@ -3192,7 +3192,13 @@ fn a_question_card_under_the_work_box_does_not_open_a_second_box() {
     // The next turn asks the question while the command is still running, so
     // the box and the card are on the screen at once.
     ask(&term, "which port?", "Which port?");
-    let screen = term.wait_for("Which port?", WAIT);
+    // Wait for the card's own row, not for the question text: the turn says
+    // "Asking user: Which port?" into the transcript first, and on a slow
+    // runner that line is on screen several frames before the card replaces the
+    // composer. Not the card's title either — joined under the work box the
+    // card draws no top edge, so its title is not on the screen at all, which
+    // is the point of this test.
+    let screen = term.wait_for("1. 8080", WAIT);
 
     let rows: Vec<&str> = screen.lines().collect();
     let seam = rows
