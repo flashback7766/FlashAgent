@@ -88,7 +88,7 @@ pub(crate) struct FrameState<'a> {
     /// What `/compact` is doing, in the row under the prompt: a status belongs
     /// with the other running things, not in the conversation as a line.
     pub(crate) compact_status: Option<&'a str>,
-    pub(crate) pending_steers: &'a [String],
+    pub(crate) pending_steers: &'a [(String, Vec<Attachment>)],
     pub(crate) queued_commands: &'a [String],
     /// Background commands still running.
     pub(crate) background_tasks: usize,
@@ -834,7 +834,7 @@ impl Renderer {
         let mut tail: Vec<RenderLine> = live;
 
         if !st.pending_steers.is_empty() {
-            for steer in st.pending_steers {
+            for (steer, _) in st.pending_steers {
                 let suffix = " \x1b[38;2;135;130;125m· steer queued\x1b[0m";
                 let avail = width.saturating_sub(18).max(10);
                 let wrapped = wrap_plain(steer, avail);

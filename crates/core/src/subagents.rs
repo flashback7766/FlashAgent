@@ -180,7 +180,7 @@ pub const DEFAULT_MAX_LIVE: usize = 3;
 /// parent leave by the outbound stream instead, because the parent is a
 /// conversation the app owns, not a loop this crate can push into.
 pub struct Mailbox {
-    live: std::sync::Mutex<Vec<(String, String, mpsc::UnboundedSender<String>)>>,
+    live: std::sync::Mutex<Vec<(String, String, mpsc::UnboundedSender<crate::Steer>)>>,
     outbound: mpsc::UnboundedSender<SubagentOutbound>,
 }
 
@@ -193,7 +193,7 @@ impl Mailbox {
     }
 
     /// A child as it starts, so messages can find it.
-    fn register(&self, id: &str, role: &str, tx: mpsc::UnboundedSender<String>) {
+    fn register(&self, id: &str, role: &str, tx: mpsc::UnboundedSender<crate::Steer>) {
         self.live.lock().unwrap_or_else(|p| p.into_inner()).push((id.to_string(), role.to_string(), tx));
     }
 
@@ -231,7 +231,7 @@ impl Mailbox {
             .map(|(_, _, tx)| tx.clone());
         match sender {
             Some(tx) => {
-                tx.send(notice_from_agent(from, from_role, text)).map_err(|_| {
+                tx.send(crate::Steer::text(notice_from_agent(from, from_role, text))).map_err(|_| {
                     format!("{to} has just finished, so it will not read this. Use the report it already sent.")
                 })?;
                 Ok(format!("Delivered to {to} between its steps: {text}"))
@@ -1098,7 +1098,7 @@ mod tests {
         let sent = tool.execute(&call("send_message", r#"{"to":"sub2","message":"the guard is at line 41"}"#)).await;
         assert!(!sent.is_error, "{}", sent.content);
 
-        let delivered = steer_rx.recv().await.expect("the message arrives without anyone polling");
+        let delivered = steer_rx.recv().await.expect("the message arrives without anyone polling").text;
         assert!(delivered.contains("line 41"), "{delivered}");
         // A sibling is as untrusted as a file the task asked it to read.
         assert!(delivered.contains("not from the user"), "{delivered}");

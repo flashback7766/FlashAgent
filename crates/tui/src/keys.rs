@@ -562,14 +562,28 @@ impl App {
                     self.open_tasks(cx);
                 } else if self.running && self.input.line_count() == 1 && self.input.starts_with('/') && self.steer_command(cx).await {
                     // A command, run, queued or refused: not guidance for the model.
-                } else if !self.input.is_empty() && self.running {
+                } else if (!self.input.is_empty() || !self.attachments.is_empty()) && self.running {
+                    // A picture alone is a steer too: this branch used to ask for
+                    // text, so pasting a screenshot mid-turn and pressing Enter
+                    // matched neither branch and did nothing at all.
                     if let Some(steer_tx) = self.active_steer_tx.clone() {
+                        let pictures = std::mem::take(&mut self.attachments);
+                        let labels: Vec<String> = pictures.iter().map(|a| a.label()).collect();
+                        let images: Vec<String> = pictures.iter().map(|a| a.data_url.clone()).collect();
                         let text = self.input.take();
                         self.remember_prompt(&text);
                         self.history_index = None;
                         self.current_draft.clear();
-                        let _ = steer_tx.send(text.clone());
-                        self.pending_steers.push(text);
+                        // What the pinned line shows is the text, or the picture
+                        // that stands in for it.
+                        let shown = match (text.trim().is_empty(), labels.is_empty()) {
+                            (true, true) => String::new(),
+                            (true, false) => format!("[{}]", labels.join(", ")),
+                            (false, true) => text.clone(),
+                            (false, false) => format!("{text}  [{}]", labels.join(", ")),
+                        };
+                        let _ = steer_tx.send(flashagent_core::Steer { text, images });
+                        self.pending_steers.push((shown, pictures));
                         self.renderer.request_reprint();
                     }
                 } else if (!self.input.is_empty() || !self.attachments.is_empty()) && !self.running {

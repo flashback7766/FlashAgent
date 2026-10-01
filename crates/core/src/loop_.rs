@@ -178,10 +178,39 @@ pub enum Compaction {
 const COMPACT_RETRY_AFTER: u32 = 4;
 
 /// One instance per run; `cancel` stops it from another task.
+/// What the user pushed into a turn already running: their words, and any
+/// picture pasted with them. The channel used to carry a bare `String`, so a
+/// screenshot sent as steering was dropped in the composer and never reached
+/// the model.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Steer {
+    pub text: String,
+    /// Data URLs, as the composer already holds them.
+    pub images: Vec<String>,
+}
+
+impl Steer {
+    pub fn text(t: impl Into<String>) -> Self {
+        Self { text: t.into(), images: Vec::new() }
+    }
+}
+
+impl From<&str> for Steer {
+    fn from(text: &str) -> Self {
+        Self::text(text)
+    }
+}
+
+impl From<String> for Steer {
+    fn from(text: String) -> Self {
+        Self::text(text)
+    }
+}
+
 pub struct AgentLoop {
     config: LoopConfig,
     cancel: Arc<AtomicBool>,
-    steer_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
+    steer_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Steer>>>,
     compactor: Option<Arc<dyn Compactor>>,
 }
 
@@ -191,7 +220,7 @@ async fn wait_cancel(cancel: &Arc<AtomicBool>) {
     }
 }
 
-fn try_recv_steer(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>) -> Option<String> {
+fn try_recv_steer(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<Steer>>) -> Option<Steer> {
     match rx {
         Some(r) => r.try_recv().ok(),
         None => None,
@@ -216,7 +245,7 @@ impl AgentLoop {
     pub fn with_steering(
         config: LoopConfig,
         cancel: Arc<AtomicBool>,
-        steer_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+        steer_rx: tokio::sync::mpsc::UnboundedReceiver<Steer>,
     ) -> Self {
         Self {
             config,
@@ -290,9 +319,9 @@ let mut report_nudges: usize = 0;
                 return Ok((history, DoneReason::Cancelled));
             }
 
-            while let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
-                events(LoopEvent::SteeringInjected(steer_msg.clone()));
-                history.push(steer_as_message(steer_msg));
+            while let Some(steer) = try_recv_steer(&mut steer_rx) {
+                events(LoopEvent::SteeringInjected(steer.text.clone()));
+                history.push(steer_as_message(steer));
                 transient.clear();
                 continuing = false;
             }
@@ -524,9 +553,9 @@ let mut report_nudges: usize = 0;
 
             if calls.is_empty() {
                 let mut had_steer = false;
-                while let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
-                    events(LoopEvent::SteeringInjected(steer_msg.clone()));
-                    history.push(steer_as_message(steer_msg));
+                while let Some(steer) = try_recv_steer(&mut steer_rx) {
+                    events(LoopEvent::SteeringInjected(steer.text.clone()));
+                    history.push(steer_as_message(steer));
                     had_steer = true;
                 }
                 if had_steer {
@@ -740,9 +769,9 @@ let mut report_nudges: usize = 0;
             }
             history.append(&mut image_msgs);
 
-            while let Some(steer_msg) = try_recv_steer(&mut steer_rx) {
-                events(LoopEvent::SteeringInjected(steer_msg.clone()));
-                history.push(steer_as_message(steer_msg));
+            while let Some(steer) = try_recv_steer(&mut steer_rx) {
+                events(LoopEvent::SteeringInjected(steer.text.clone()));
+                history.push(steer_as_message(steer));
             }
 
             if let Some(reason) = self.budget_spent(tokens_used, output_tokens, started) {
@@ -767,18 +796,25 @@ const TOOL_PICTURE_NOTE: &str = "it is the result of that call, not a new reques
 
 /// Steering reaches the model mid-work, and a bare directive reads as the newest
 /// and most urgent thing in the conversation: the model drops what it was doing
-/// and chases it. That is not what was asked. The order is the whole point, so
-/// it is stated in the message rather than left to be inferred — finish the call
-/// or the answer in flight first, then take this on.
-const STEER_QUEUE_NOTE: &str = "[This arrived while you were working. Finish what you are doing first: do not abandon a running call or a half-written answer to chase it. Once that is done, deal with this. If it contradicts what you are in the middle of, say where the conflict is instead of silently dropping either side.]";
+/// and chases it. That is not what was asked. The order matters, but only for
+/// work actually in flight: by the time a steer is delivered after a tool
+/// returned or a turn ended, "finish first" ordered the model to protect
+/// nothing and it kept the old task. The deadline is bounded, and the note
+/// obliges the model to act rather than permitting it to name a conflict and
+/// drop the directive.
+const STEER_QUEUE_NOTE: &str = "[This is the user's own message, sent while you were working. If a tool call is still running or an answer is half-written, let that one finish first rather than cutting it off; the next thing you send is where you take this up. Do not drop it and do not merely acknowledge it: act on it, and if it conflicts with work already done, say what you changed.]";
 
 /// A steering message as the model should read it. A background notice keeps its
 /// own framing, which tells it apart from something the user said.
-fn steer_as_message(msg: String) -> ChatMessage {
-    if crate::task_notices::is_task_notice(&msg) {
-        return ChatMessage::user(msg);
-    }
-    ChatMessage::user(format!("{STEER_QUEUE_NOTE}\n{msg}"))
+fn steer_as_message(steer: Steer) -> ChatMessage {
+    let mut msg = if crate::task_notices::is_task_notice(&steer.text) {
+        ChatMessage::user(steer.text)
+    } else {
+        ChatMessage::user(format!("{STEER_QUEUE_NOTE}\n{}", steer.text))
+    };
+    // The picture rides with the directive instead of being left behind.
+    msg.images = steer.images;
+    msg
 }
 
 /// Something the user said, not the user-role message that carries a tool's
@@ -2781,7 +2817,7 @@ mod tests {
 
     #[test]
     fn a_steering_message_tells_the_model_to_finish_before_it_pivots() {
-        let msg = steer_as_message("use postgres".to_string());
+        let msg = steer_as_message("use postgres".into());
         assert!(msg.content.contains(STEER_QUEUE_NOTE), "{}", msg.content);
         assert!(msg.content.contains("use postgres"), "the directive itself survives: {}", msg.content);
         assert!(msg.content.ends_with("use postgres"), "it goes last, where the model reads it: {}", msg.content);
@@ -2791,9 +2827,68 @@ mod tests {
     }
 
     #[test]
+    fn a_steer_is_acted_on_and_only_defers_work_that_is_actually_in_flight() {
+        // The note is what makes a steer obeyed or ignored, so its wording is
+        // checked as wording. Asserting the constant contains the constant
+        // (see a_steering_message_tells_the_model_to_finish_before_it_pivots)
+        // can never fail, which is how an unconditional "finish what you are
+        // doing first" and a licence to drop the directive both shipped.
+        let note = STEER_QUEUE_NOTE.to_lowercase();
+        assert!(
+            note.contains("if a tool call is still running"),
+            "the deferral must be scoped to a call actually in flight: {STEER_QUEUE_NOTE}"
+        );
+        assert!(
+            !note.contains("finish what you are doing first"),
+            "an unconditional finish-first orders the model to protect work that has already finished: {STEER_QUEUE_NOTE}"
+        );
+        assert!(
+            !note.contains("instead of silently dropping either side"),
+            "the old note let the model name the conflict and drop the steer, which is exactly the reported bug: {STEER_QUEUE_NOTE}"
+        );
+        assert!(
+            !note.contains("once that is done"),
+            "an unbounded deadline never fires, so the steer never has to be acted on: {STEER_QUEUE_NOTE}"
+        );
+        assert!(note.contains("act on it"), "the directive must be an obligation, not an acknowledgement: {STEER_QUEUE_NOTE}");
+        assert!(note.contains("the user's own message"), "it is the user's live instruction, not ambient noise: {STEER_QUEUE_NOTE}");
+        // What the other steering tests pin must survive the rewording.
+        let msg = steer_as_message("use postgres".into());
+        assert!(msg.content.ends_with("use postgres"));
+        assert!(msg.content.contains("use postgres"));
+        assert!(!is_prompt(&msg), "a queued steering note is not the user's prompt");
+    }
+
+    #[test]
+    fn a_screenshot_sent_as_steering_reaches_the_model() {
+        // The channel used to carry a bare String, so a picture pasted mid-turn
+        // was still sitting in the composer when Enter was pressed.
+        let msg = steer_as_message(Steer {
+            text: "what does this say?".into(),
+            images: vec!["data:image/png;base64,AAAA".into()],
+        });
+        assert_eq!(
+            msg.images,
+            vec!["data:image/png;base64,AAAA".to_string()],
+            "a pasted screenshot sent as steering was dropped before the model saw it"
+        );
+        assert!(msg.content.contains("what does this say?"), "{}", msg.content);
+        assert!(msg.content.contains(STEER_QUEUE_NOTE));
+        assert!(!is_prompt(&msg), "a steered picture is still not the user's prompt");
+    }
+
+    #[test]
+    fn a_picture_alone_is_a_steer_and_needs_no_text() {
+        let steer = Steer { text: String::new(), images: vec!["data:image/png;base64,AAAA".into()] };
+        let msg = steer_as_message(steer);
+        assert_eq!(msg.images.len(), 1, "a steer that is only a picture still carries it");
+        assert!(!msg.content.trim().is_empty(), "the note still frames it: {:?}", msg.content);
+    }
+
+    #[test]
     fn a_background_notice_keeps_its_own_framing() {
         let notice = format!("{}{}{}", crate::task_notices::TASK_NOTICE_OPENING, "shell finished", crate::task_notices::TASK_NOTICE_NOTE);
-        let msg = steer_as_message(notice.clone());
+        let msg = steer_as_message(notice.clone().into());
         assert_eq!(msg.content, notice, "a notice already says what it is; rewrapping hides that");
         assert!(!is_prompt(&msg));
     }
@@ -2874,7 +2969,7 @@ mod tests {
                 // The task ends while the turn is running a tool.
                 LoopEvent::ToolStarted { .. } => {
                     for n in inbox.lock().unwrap().send_into_turn() {
-                        let _ = steer_tx.send(n);
+                        let _ = steer_tx.send(n.into());
                     }
                 }
                 LoopEvent::SteeringInjected(text) => assert!(inbox.lock().unwrap().injected(&text), "injected twice: {text}"),

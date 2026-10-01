@@ -1,5 +1,15 @@
 # Changelog
 
+## b505 — the window stops lying about itself, and a steer is actually a steer
+
+Hotfix on b500. Three things the release got wrong, all found by using it.
+
+- **A million-token window was treated as 128k, so compaction fired at a third of the window.** A model whose window had not been looked up fell back to a fixed `131_072`, and the only code that could correct it ran when the server named an *active* model. A cloud list never names one — OpenRouter names only the models it has — so on the largest provider the number stayed at 128k for the whole session and the turn summarized itself against a window four times larger than the one it had. A discovery is now resolved by name as well as by active model, so the real size lands as soon as the list arrives.
+- **A steer told the model it was allowed to drop it.** The note carried an unconditional "finish what you are doing first" and then a licence: if the directive contradicted the work in hand, *say where the conflict is instead of silently dropping either side*. That last clause is the whole bug — the model was permitted to name a conflict and move on, which is exactly what it did. The deferral is now scoped to a call actually still running, the deadline is bounded, and the note obliges the model to act rather than to acknowledge. What survives is the original request: a tool call in flight is still allowed to finish first.
+- **A screenshot sent as steering never left the composer.** The steer channel carried a bare `String`, so the text went and the picture stayed behind — and a steer that was *only* a picture matched no branch at all, so Enter did nothing and the image quietly rode along with the next unrelated prompt. Steering now carries the pictures with the words, a picture alone is a steer, and a steer that loses the race with the end of the turn goes back into the composer with its image intact rather than losing it.
+
+Each of the three was checked by breaking it: reverting the name lookup, the note, and the image transfer each fails the test that names it.
+
 ## b500 — a live subagent tree, an effort ladder the model wrote, and a bill
 
 - **Subagents are a tree you can watch, not a claim you have to take on trust.** `spawn_agent` runs up to three children at once, each with its own token count and its own live cost; the sidebar grows as they start, shows what each is doing, and folds away when it finishes. Children talk to each other through a mailbox (`send_message`) and can be asked to check one another's work (`review_agent`), which returns *verified*, *refuted* or *partial* rather than an opinion. Roles are enforced at the tool layer, not in the prompt: a child cannot spawn its own children, and a message cannot be sent to an agent that is not running. Checked live: two children at once, the parent recomputing the result and finding a real disagreement — 48 against 49 — and saying so rather than reporting success.
