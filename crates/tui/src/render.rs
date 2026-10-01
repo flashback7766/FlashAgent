@@ -154,11 +154,12 @@ pub(crate) fn work_box(
 ) -> Vec<(LineKind, String)> {
     let mut body: Vec<(LineKind, String)> = Vec::new();
     for (id, line) in agent_rows {
-        // The same indent a background command gets. A row is framed and
-        // aligned by the box, not by the thing that builds it: `AgentTree::line`
-        // counts `width` as the whole row and so must not spend two of it on
-        // spacing that belongs here, or a child sits flush against the border
-        // while the command under it is indented.
+        // The same indent a background command gets, and the budget has to
+        // account for it: `AgentTree::line` counts its `width` as the whole row,
+        // mark and indent both included, so what reaches here is
+        // `width - 2` of text behind two columns of indent. Spend those two
+        // twice and the row is clipped at the right wall, where the cut leaves
+        // no ellipsis and the phase reads as "thinkin".
         body.push((LineKind::Tool, live_row(&format!("  {line}"), t)));
         if expanded.contains(&id.as_str()) {
             if let Some(detail) = details.get(id) {
@@ -173,7 +174,11 @@ pub(crate) fn work_box(
         return Vec::new();
     }
     let edge = "\x1b[38;2;100;95;90m";
-    let box_w = width.saturating_sub(2);
+    // As wide as the composer block under it, not two columns narrower. Both
+    // start at column 0 and both are closed on the right, so a narrower box
+    // makes the right-hand wall step in exactly at the seam, and a seam that
+    // steps looks like two frames rather than one.
+    let box_w = width;
     // The title is cut to the room the top edge actually has. A title longer than
     // the box made the top edge wider than the window, which pushed the whole
     // layout one row over: the box has to close, so the words give way.
@@ -303,7 +308,7 @@ mod work_box_tests {
         assert!(text[1].contains("researcher"), "the child is in the box: {text:?}");
         assert!(text[2].contains("cargo test"), "and the background command beside it: {text:?}");
         assert_eq!(text[0].chars().count(), text[3].chars().count(), "the edges are the same width: {text:?}");
-        assert_eq!(text[0].chars().count(), 78, "the window less its two columns, like the composer: {text:?}");
+        assert_eq!(text[0].chars().count(), 80, "the whole window, the composer's own width: {text:?}");
     }
 
     #[test]
@@ -316,14 +321,17 @@ mod work_box_tests {
     }
 
     #[test]
-    fn the_box_edges_stay_the_width_of_the_window() {
+    fn the_box_is_exactly_as_wide_as_the_composer_under_it() {
         for width in [20usize, 40, 80, 200] {
             let rows = work_box(&[agent("sub1", "  \u{25b8} coder")], &[], &Default::default(), &[], width, 0);
             let text = plain(&rows);
             let top = text[0].chars().count();
             let bottom = text[2].chars().count();
             assert_eq!(top, bottom, "the box must close at {width}: {text:?}");
-            assert!(top <= width - 2, "the box must fit the window, not stick out of it: {width}: {text:?}");
+            // The composer draws its block at the full width, and both start at
+            // column 0, so a box two columns narrower makes the right-hand wall
+            // step in exactly at the seam.
+            assert_eq!(top, width, "the box must line up with the composer, not sit inside it: {width}: {text:?}");
         }
     }
 
@@ -337,7 +345,7 @@ mod work_box_tests {
             let top = text[0].chars().count();
             let bottom = text[2].chars().count();
             assert_eq!(top, bottom, "the edges must be the same width at {width}: {text:?}");
-            assert!(top <= width.saturating_sub(2), "the box must fit at {width}: {text:?}");
+            assert_eq!(top, width, "the box must close at the window's width at {width}: {text:?}");
         }
     }
 
@@ -356,13 +364,39 @@ mod work_box_tests {
         }
     }
 
+    /// The room a pinned row gets, spelled out: the box is the window wide,
+    /// `pad_box_row` keeps `width - 2` inside its own frame, and the box spends
+    /// two of those on its indent. A row built to that budget survives whole,
+    /// while one cell more of it is cut -- which is what turned a phase label
+    /// into "thinkin" with no ellipsis to say it had been.
+    #[test]
+    fn a_child_row_fills_the_room_inside_the_box_and_no_more() {
+        let width = 60;
+        let fits = format!("  \u{25b8} researcher \u{b7} thinking");
+        let rows = work_box(&[agent("sub1", &fits)], &[], &Default::default(), &[], width, 0);
+        assert!(
+            plain(&rows)[1].contains("thinking"),
+            "a row that fits the room must not be cut: {:?}",
+            plain(&rows)[1]
+        );
+        let over = format!("{fits} and a good deal more than the box has room for");
+        let rows = work_box(&[agent("sub1", &over)], &[], &Default::default(), &[], width, 0);
+        let body = plain(&rows)[1].clone();
+        assert_eq!(body.chars().count(), width, "the row is still the width of the box: {body:?}");
+        assert!(
+            !body.trim_end().ends_with("room for"),
+            "the row must stop at the wall: {body:?}"
+        );
+    }
+
+    #[test]
     #[test]
     fn a_long_phase_stays_inside_its_own_box() {
         let long = format!("  \u{25b8} researcher \u{b7} {}", "grepping the token tracker ".repeat(6));
         for width in [30usize, 60, 120] {
             let rows = work_box(&[agent("sub1", &long)], &[], &Default::default(), &[], width, 0);
             for row in plain(&rows) {
-                assert!(row.chars().count() <= width - 2, "a row paints through the box at {width}: {row:?}");
+                assert_eq!(row.chars().count(), width, "every row of the box is exactly the window wide: {width}: {row:?}");
             }
         }
     }
@@ -740,7 +774,10 @@ fn approval_preview_rows(height: usize) -> usize {
     height.saturating_sub(16).max(6)
 }
 
-fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameState<'_>, width: usize, height: usize, inner_w: usize, border_color: &str) -> usize {
+/// `joined` is true when the work box above has already drawn the top edge of
+/// this block: the card is then its bottom half, and a second `╭` under the
+/// `├─┤` seam would open a box inside an unclosed one.
+fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameState<'_>, width: usize, height: usize, inner_w: usize, border_color: &str, joined: bool) -> usize {
     // A card with nothing pending is nothing to draw. It used to be an `expect`,
     // and it fired: the row an approval card occupies moved once prompts started
     // taking a row of their own, and a stale match drew one over a screen that
@@ -768,10 +805,12 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
     };
     let title = format!(" \x1b[1;38;2;225;175;95m{question}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m ", req.tool);
     let dash_w = inner_w.saturating_sub(visible_width(&title) + 1);
-    tail.push((
-        LineKind::System,
-        format!("{border_color}╭─{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
-    ));
+    if !joined {
+        tail.push((
+            LineKind::System,
+            format!("{border_color}╭─{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
+        ));
+    }
 
     let field = |k: &str| args.get(k).and_then(|v| v.as_str()).map(card_safe);
     let label_row = |label: &str, value: &str| {
@@ -851,7 +890,10 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
     input_line_idx
 }
 
-fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionGate, st: &FrameState<'_>, width: usize, inner_w: usize, border_color: &str) -> usize {
+/// `joined` is true when the work box above has already drawn the top edge of
+/// this block: the card is then its bottom half, and a second `╭` under the
+/// `├─┤` seam would open a box inside an unclosed one.
+fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionGate, st: &FrameState<'_>, width: usize, inner_w: usize, border_color: &str, joined: bool) -> usize {
     let req = question_gate.pending().expect("question card needs a pending request");
     let reset = "\x1b[0m";
     // The composer becomes the question card.
@@ -859,10 +901,12 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
     let vis_title_len = visible_width(title);
     let dash_w = inner_w.saturating_sub(vis_title_len + 1);
 
-    tail.push((
-        LineKind::System,
-        format!("{border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
-    ));
+    if !joined {
+        tail.push((
+            LineKind::System,
+            format!("{border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
+        ));
+    }
 
     // Wrapped: the question is what the user answers, so none of it is cut.
     // Line by line: a newline kept inside one row would misplace every row after it.
@@ -1101,7 +1145,7 @@ fn append_composer(
     (input_line_idx, text_cursor)
 }
 
-fn append_channel_card(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize, inner_w: usize, t: u64) -> usize {
+fn append_channel_card(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize, inner_w: usize, t: u64, joined: bool) -> usize {
     let prompt = st.channel_prompt.expect("channel card needs a prompt");
     let title = format!(" {} ", st.prompt_title);
     let title = title.as_str();
@@ -1109,10 +1153,12 @@ fn append_channel_card(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: u
     let border_color = anim::pulse(t, 1800, Rgb(225, 175, 95), Rgb(250, 215, 150)).fg();
     let reset = "\x1b[0m";
     let dash_w = inner_w.saturating_sub(visible_width(title) + 1);
-    tail.push((
-        LineKind::System,
-        format!("{border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
-    ));
+    if !joined {
+        tail.push((
+            LineKind::System,
+            format!("{border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_w)),
+        ));
+    }
     // Word-wrapped: a sentence to read, not a command to inspect.
     for row in wrap_plain(prompt, inner_w.saturating_sub(3)) {
         tail.push((
@@ -1137,6 +1183,7 @@ struct LayoutInputs<'a> {
     height: u16,
     card_key: CardKey,
     card_start: usize,
+    paint_start: usize,
     input_line_idx: usize,
     text_cursor: Option<u16>,
     border_color: &'a str,
@@ -1199,16 +1246,38 @@ impl Renderer {
             width,
             box_t,
         );
-        // The rows a click may land on start under the box's own top edge, and
-        // they are counted from where they sit in the tail, not from the end of
-        // the composer: the box is the tail of the conversation, and the composer
-        // block under it has rows of its own that are not a child's.
+        // The rows a click may land on start under the box's own top edge. Kept
+        // as a tail index: the box goes into the pinned block, whose rows the
+        // composer under it shares, and `card_start` below is what turns this
+        // into an offset inside that block.
         self.agent_first = if box_rows.is_empty() {
             None
         } else {
             Some(tail.len() + WORK_BOX_EDGES - 1)
         };
+
+        // A blank row between the conversation and the composer or card under it.
+        //
+        // Not when the work box is pinned on top of the composer. Its `├─┤` is
+        // already the separator, and a blank row in between is a blank row with
+        // no sides drawn: it cuts a hole through the left and right walls, and
+        // the composer below stops reading as the bottom half of the same block
+        // and starts reading as a box of its own floating under another one.
+        let joined = self.agent_first.is_some();
+        let last_row = tail.last().or_else(|| settled.last()).map(|(_, text)| text.as_str());
+        if !joined && last_row.is_some_and(|text| !flashagent_tui::strip_ansi(text).trim().is_empty()) {
+            tail.push((LineKind::System, String::new()));
+        }
+
+        // The pinned block -- work box, separator, card -- is the floor of the
+        // frame, not part of the conversation. `card_start` is taken before the
+        // box is appended so that scrolling back can never take it off the
+        // screen: the box is what the user is working next to.
+        let card_start = tail.len();
         tail.extend(box_rows);
+        // Where the card itself starts, one row set below the box's own top edge.
+        // Painting, unfolding and trimming act on the card and leave the box be.
+        let paint_start = tail.len();
 
         let inner_w = width.saturating_sub(2);
         let t = anim::now_ms();
@@ -1231,30 +1300,16 @@ impl Renderer {
             _ => BORDER,
         };
         let border_color = border_rgb.fg();
-        // A blank row between the conversation and the composer or card under it.
-        //
-        // Not when the work box is pinned on top of the composer. Its `├─┤` is
-        // already the separator, and a blank row in between is a blank row with
-        // no sides drawn: it cuts a hole through the left and right walls, and
-        // the composer below stops reading as the bottom half of the same block
-        // and starts reading as a box of its own floating under another one.
-        let joined = self.agent_first.is_some();
-        let last_row = tail.last().or_else(|| settled.last()).map(|(_, text)| text.as_str());
-        if !joined && last_row.is_some_and(|text| !flashagent_tui::strip_ansi(text).trim().is_empty()) {
-            tail.push((LineKind::System, String::new()));
-        }
-        let card_start = tail.len();
-
         let mut input_line_idx;
         // Where the user types, when they type into the composer.
         let mut text_cursor: Option<u16> = None;
 
         if gate.pending().is_some() {
-            input_line_idx = append_approval_card(&mut tail, gate, &st, width, height as usize, inner_w, &border_color);
+            input_line_idx = append_approval_card(&mut tail, gate, &st, width, height as usize, inner_w, &border_color, joined);
         } else if st.channel_prompt.is_some() {
-            input_line_idx = append_channel_card(&mut tail, &st, width, inner_w, t);
+            input_line_idx = append_channel_card(&mut tail, &st, width, inner_w, t, joined);
         } else if question_gate.pending().is_some() {
-            input_line_idx = append_question_card(&mut tail, question_gate, &st, width, inner_w, &border_color);
+            input_line_idx = append_question_card(&mut tail, question_gate, &st, width, inner_w, &border_color, joined);
         } else if let Some(overlay) = overlay {
             // The composer turns into the open menu or screen.
             tail.extend(overlay.render(width, height as usize));
@@ -1267,7 +1322,7 @@ impl Renderer {
 
         // The sides of a boxed card match its top and bottom.
         if border_rgb != BORDER && !matches!(card_key, CardKey::Overlay(_)) {
-            for (_, row) in tail[card_start..].iter_mut() {
+            for (_, row) in tail[paint_start..].iter_mut() {
                 *row = row.replace(BORDER_ESC, &border_color);
             }
         }
@@ -1275,13 +1330,13 @@ impl Renderer {
         if self.card.0 != card_key {
             self.card = (card_key, t);
         }
-        let total = tail.len() - card_start;
+        let total = tail.len() - paint_start;
         if card_key != CardKey::Composer && total > 2 {
             let k = anim::progress(self.card.1, t, UNFOLD_MS);
             let shown = ((total as f32 * k).ceil() as usize).clamp(2, total);
             if shown < total {
                 let bottom = tail.len() - 1;
-                tail.drain(card_start + shown - 1..bottom);
+                tail.drain(paint_start + shown - 1..bottom);
                 input_line_idx = input_line_idx.min(tail.len() - 1);
             }
         }
@@ -1307,11 +1362,11 @@ impl Renderer {
         self.agent_plan = st.agent_rows.to_vec();
         self.agent_open = st.agent_rows.iter().map(|(id, _)| id.clone()).filter(|id| open(id)).collect();
         self.paint_layout(&settled, &mut tail, LayoutInputs {
-            width, height, card_key, card_start, input_line_idx, text_cursor, border_color: &border_color,
+            width, height, card_key, card_start, paint_start, input_line_idx, text_cursor, border_color: &border_color,
         });
     }
     fn paint_layout(&mut self, settled: &[RenderLine], tail: &mut Vec<RenderLine>, layout: LayoutInputs<'_>) {
-        let LayoutInputs { width, height, card_key, card_start, mut input_line_idx, text_cursor, border_color } = layout;
+        let LayoutInputs { width, height, card_key, card_start, paint_start, mut input_line_idx, text_cursor, border_color } = layout;
     // The conversation scrolls; the composer and the footer under it stay where
     // they are, so a reply can be written while reading back.
     let height = height as usize;
@@ -1322,9 +1377,9 @@ impl Renderer {
     if matches!(card_key, CardKey::Approval | CardKey::Question | CardKey::Channel) {
         const HEAD: usize = 2;
         const END: usize = 6;
-        let card_rows = tail.len() - card_start;
+        let card_rows = tail.len() - paint_start;
         if card_rows > height && card_rows > HEAD + END {
-            let from = card_start + HEAD;
+            let from = paint_start + HEAD;
             let to = (from + card_rows - height + 1).min(tail.len() - END);
             if to > from + 1 {
                 let hidden = to - from;
@@ -1350,8 +1405,12 @@ impl Renderer {
         self.scroll_offset += chat_len - self.total_lines;
     }
     self.total_lines = chat_len;
-    // One row of the room goes to the line that says the view is scrolled.
-    self.max_scroll = chat_len.saturating_sub(chat_room.saturating_sub(1).max(1));
+    // A row of the room goes to the line that says the view is scrolled, so the
+    // last line that can be read is one row up from the bottom. With no room for
+    // that line there is nothing to read back into: the view is pinned, and an
+    // accepted offset that changes nothing on screen is an offset the user cannot
+    // undo by scrolling.
+    self.max_scroll = scroll_max(chat_len, chat_room);
     self.scroll_offset = self.scroll_offset.min(self.max_scroll);
 
     // Every row gets its kind's colour, restored after each reset inside it,
@@ -1368,6 +1427,10 @@ impl Renderer {
         let start = end.saturating_sub(chat_room - 1);
         first_chat_row = start;
         let mut rows: Vec<String> = chat().skip(start).take(end - start).map(styled).collect();
+        // The last row of the conversation, and with the box pinned directly
+        // under it that is also the row directly above the box -- the same
+        // place, so it says there is more above the block the user works in,
+        // not above some composer floating in the middle of the chat.
         let marker = format!(
             " \x1b[38;2;100;95;90m── \x1b[38;2;225;175;95m↓ {} below\x1b[38;2;100;95;90m · End or Esc to return ──\x1b[0m",
             flashagent_tui::plural(self.scroll_offset, "more line", "more lines")
@@ -1384,18 +1447,20 @@ impl Renderer {
     // A composer taller than the screen keeps its end, where the typing is.
     let cut = rows.len().saturating_sub(height);
     rows.drain(..cut);
-    let scrolled_marker = usize::from(self.scroll_offset > 0 && chat_room > 1);
+    let scrolled_marker = usize::from(self.scroll_offset > 0);
     self.chat_view = (first_chat_row + cut, chat_rows.saturating_sub(scrolled_marker).saturating_sub(cut));
     self.agent_screen.clear();
     // Where the pinned rows landed, for a click to find: inside the work box,
     // under its top edge, one row per child plus a detail row for one the mouse
-    // has opened. Counted from where the box sits in the tail, because the
-    // composer block under it has rows of its own that belong to no child.
+    // has opened. `first` is where the first child sits in the tail, and the box
+    // now lives in the bottom block, so its row is counted from where the block
+    // starts on screen -- the rows under the box belong to no child.
     if let Some(first) = self.agent_first {
+        let base = chat_rows + first - card_start;
         let mut opened = 0usize;
         for (i, (id, _)) in self.agent_plan.iter().enumerate() {
-            let at = settled.len() + first + i + opened;
-            if let Some(screen) = at.checked_sub(first_chat_row + cut) {
+            let at = base + i + opened;
+            if let Some(screen) = at.checked_sub(cut) {
                 self.agent_screen.push((screen, id.clone()));
             }
             if self.agent_open.contains(id) {
@@ -1461,9 +1526,13 @@ impl App {
         // Pinned above the composer, below the steering: the rows are built here
         // rather than in `draw` so a click can be matched against them.
         let pin_width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(100);
-        // What is left of the window once the box has its own two columns of
-        // border: a row built against the terminal paints straight through the
-        // side of the box it is in.
+        // The room a pinned row may fill, counted against the helpers that will
+        // hold it. `work_box` frames the row with `pad_box_row(row, box_w)`, so
+        // the room inside the box is `box_w - 2`, which is `width - 2`; the box
+        // then spends two of those on its own indent, so a row built against the
+        // window gets `width - 4`. `AgentTree::line` counts that as the whole row
+        // -- mark, indent and all -- so its text stops exactly at the right wall
+        // instead of two cells past it, where the clip would eat the phase.
         let box_inner = pin_width.saturating_sub(4);
         // Work that is running says so from the clock, not from how often a frame
         // happened to be drawn: two agents listed at once must not tick in
@@ -1602,14 +1671,38 @@ fn key_hints(pairs: &[(&str, &str)], width: usize) -> String {
     flashagent_tui::key_hints(pairs, width)
 }
 
+/// How far back the view may go: every row of the room but the one the scrolled
+/// marker takes. With no room for that marker the view is pinned -- an offset
+/// that changes nothing on screen, and that no marker explains, is an offset the
+/// user can neither see nor scroll back from.
+fn scroll_max(chat_len: usize, chat_room: usize) -> usize {
+    if chat_room > 1 { chat_len.saturating_sub(chat_room - 1) } else { 0 }
+}
+
 #[cfg(test)]
 mod footer_tests {
     use super::*;
 
-    // These cover `context_gauges`, not the wiring: nothing here builds a
-    // `FrameState`, so breaking `footer_status` into always reporting the
-    // window would leave them green. The wiring was checked by running the real
-    // binary; a test for it needs a `FrameState` that can be built cheaply.
+    // These cover `context_gauges` and `scroll_max`, not the wiring: nothing here
+    // builds a `FrameState`, so breaking `footer_status` into always reporting
+    // the window would leave them green. The wiring was checked by running the
+    // real binary; a test for it needs a `FrameState` that can be built cheaply.
+
+    /// A room of one row cannot hold the marker, so nothing may be scrolled back.
+    /// Taking an offset here would move no line on screen and say nothing about
+    /// it, leaving the view scrolled with no way back.
+    #[test]
+    fn a_room_too_small_for_the_marker_cannot_be_scrolled_back() {
+        assert_eq!(scroll_max(500, 0), 0);
+        assert_eq!(scroll_max(500, 1), 0);
+    }
+
+    /// With room for the marker, every row above it is reachable.
+    #[test]
+    fn a_scrolled_view_stops_one_row_short_of_the_end() {
+        assert_eq!(scroll_max(10, 2), 9);
+        assert_eq!(scroll_max(2, 5), 0, "a short conversation has nothing to scroll");
+    }
 
     /// 4.7K of a guessed 128K: a percentage here would be about nothing.
     #[test]

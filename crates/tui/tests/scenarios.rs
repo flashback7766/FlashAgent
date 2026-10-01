@@ -3132,6 +3132,204 @@ fn the_work_box_and_the_input_field_are_one_frame() {
     );
 }
 
+/// A question card arrives exactly when the parent is waiting on a child, and a
+/// child is what puts the work box on the screen -- so this is the ordinary
+/// case, not a rare overlap. The card has to be the bottom half of the pinned
+/// block: a second `╭` under the `├─┤` seam opens a box inside an unclosed one.
+#[test]
+fn a_question_card_under_the_work_box_does_not_open_a_second_box() {
+    let mut replies = background_sleep();
+    replies.push(Reply::ToolCall {
+        name: "ask_user".into(),
+        arguments: serde_json::json!({ "question": "Which port?", "options": ["8080", "9090"] }),
+    });
+    replies.push(Reply::Text("8080 it is.".into()));
+    let server = MockServer::start(replies);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+    ask(&term, "start the server", "The server is starting.");
+    // The next turn asks the question while the command is still running, so
+    // the box and the card are on the screen at once.
+    ask(&term, "which port?", "Which port?");
+    let screen = term.wait_for("Which port?", WAIT);
+
+    let rows: Vec<&str> = screen.lines().collect();
+    let seam = rows
+        .iter()
+        .position(|r| r.contains('\u{251c}') && r.contains('\u{2524}'))
+        .unwrap_or_else(|| panic!("the box never closed its own top half:\n{screen}"));
+    let top = rows
+        .iter()
+        .position(|r| r.contains("subagents & background"))
+        .unwrap_or_else(|| panic!("no work box on the screen:\n{screen}"));
+    // The question also appears in the transcript above, as the line the turn
+    // said; the card's own copy is the one under the box.
+    let question = rows
+        .iter()
+        .skip(top)
+        .position(|r| r.contains("Which port?"))
+        .map(|i| i + top)
+        .unwrap_or_else(|| panic!("no question on the screen:\n{screen}"));
+    assert!(
+        seam < question,
+        "the question card opened above the seam:\n{}",
+        rows[seam..].join("\n"),
+    );
+    // One top edge for the whole pinned block, not one per box in it. Counted
+    // from the box itself: the welcome card above it is a box of its own.
+    let opens: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .skip(top)
+        .filter(|(_, r)| r.contains('\u{256d}'))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        opens.len(),
+        1,
+        "a second box opened inside the unclosed one:\n{}",
+        rows[opens.first().copied().unwrap_or(0)..].join("\n"),
+    );
+    // And the card is the bottom half of the same frame: its first row carries
+    // the wall the box has been drawing, with nothing above it but the seam.
+    assert!(
+        rows[question].contains('\u{2502}'),
+        "the card does not carry the frame's side:\n{}",
+        rows[seam..].join("\n"),
+    );
+}
+
+/// The box and the composer below it are one frame, so their right-hand walls
+/// have to stand in the same column. The box was two columns narrower, which
+/// made the wall step in exactly at the seam.
+#[test]
+fn the_work_box_and_the_composer_share_one_right_wall() {
+    let mut replies = background_sleep();
+    replies.push(Reply::Text("Still up.".into()));
+    let server = MockServer::start(replies);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+    ask(&term, "start the server", "The server is starting.");
+    let screen = term.wait_for("subagents & background", WAIT);
+
+    let rows: Vec<&str> = screen.lines().collect();
+    let top = rows
+        .iter()
+        .position(|r| r.contains("subagents & background"))
+        .unwrap_or_else(|| panic!("no work box on the screen:\n{screen}"));
+    let field = rows
+        .iter()
+        .rposition(|r| r.trim_start().starts_with('\u{2570}'))
+        .unwrap_or_else(|| panic!("the field below the box never closes:\n{screen}"));
+    // A `vt100` screen keeps trailing cells only where something was drawn, so
+    // the two edges are compared where both are painted: their closing corners.
+    let right = |row: &str, corner: char| row.chars().rev().position(|c| c == corner).unwrap_or(0);
+    assert_eq!(
+        right(rows[top], '\u{256e}'),
+        right(rows[field], '\u{256f}'),
+        "the right-hand wall steps between the box and the field:\n{}",
+        rows[top..=field].join("\n"),
+    );
+    assert_eq!(
+        rows[top].chars().count(),
+        COLS as usize,
+        "the box is not the width of the window:\n{}",
+        rows[top..=field].join("\n"),
+    );
+}
+
+/// The work box is pinned, not part of the conversation. Reading back through a
+/// long answer must not take it off the screen: it is the work in flight, the
+/// one thing the user is looking at while reading, and a box that scrolls away
+/// with the transcript is a box the user has to scroll back down to find.
+#[test]
+fn reading_back_keeps_the_work_box_on_the_screen() {
+    let story: String = (0..120).map(|i| format!("line{i}\n\n")).collect();
+    let mut replies = background_sleep();
+    replies.push(Reply::Text(story));
+    let server = MockServer::start(replies);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+    ask(&term, "start the server", "The server is starting.");
+    ask(&term, "tell me a long story", "line119");
+    term.wait_for("subagents & background", WAIT);
+
+    term.send("\x1b[5~");
+    let screen = term.wait_for("more lines below", WAIT);
+    assert!(
+        screen.contains("subagents & background"),
+        "the work box scrolled away with the conversation:\n{screen}"
+    );
+    assert!(screen.contains("sleep 60"), "the running command is gone:\n{screen}");
+    assert!(screen.contains(PROMPT), "the composer scrolled away:\n{screen}");
+
+    // And the box is still whole, and still where it is: directly under the
+    // line that says how far below the view is. That row used to sit at the end
+    // of the chat, which with the box inside the chat was somewhere else
+    // entirely -- so the count of what is below pointed at a composer floating
+    // in the middle of the transcript.
+    let rows: Vec<&str> = screen.lines().collect();
+    let marker = rows
+        .iter()
+        .position(|r| r.contains("more lines below"))
+        .unwrap_or_else(|| panic!("no scrolled marker:\n{screen}"));
+    let top = rows
+        .iter()
+        .position(|r| r.contains("subagents & background"))
+        .unwrap_or_else(|| panic!("the work box left the screen:\n{screen}"));
+    assert_eq!(
+        top,
+        marker + 1,
+        "the scrolled marker is not directly above the work box:\n{}",
+        rows[marker.min(rows.len() - 1)..].join("\n"),
+    );
+
+    // Reading to the top and back is still the whole conversation, and the box
+    // never leaves the frame on the way.
+    term.send("\x1b[5~");
+    let screen = term.wait_for("more lines", WAIT);
+    assert!(screen.contains("subagents & background"), "the box scrolled away at the top:\n{screen}");
+    term.send("\x1b[F");
+    term.wait_gone("more lines below", WAIT);
+    let screen = term.screen();
+    assert!(screen.contains("subagents & background"), "the box scrolled away on the way back:\n{screen}");
+}
+
+/// A window with no room for the scrolled marker cannot be scrolled back: the
+/// offset would move nothing and say nothing, so the view stays pinned and the
+/// composer keeps its own rows.
+#[test]
+fn a_window_with_no_room_to_scroll_keeps_the_work_box_pinned() {
+    let story: String = (0..120).map(|i| format!("line{i}\n\n")).collect();
+    let mut replies = background_sleep();
+    replies.push(Reply::Text(story));
+    let server = MockServer::start(replies);
+    let home = Home::new();
+    home.set_up_with(&server.url, serde_json::json!({ "permission_mode": "Bypass" }));
+    // Short enough that the pinned block fills the window: there is no chat room
+    // left at all, and so nowhere for the marker that explains a scroll.
+    let term = Term::start(&home, &["-y"], COLS, 9);
+    term.wait_for(PROMPT, WAIT);
+    ask(&term, "start the server", "The server is starting.");
+    // The answer cannot be seen at this height, so the turn is waited for by the
+    // hint line going rather than by its text arriving on the screen.
+    paste(&term, "tell me a long story");
+    term.send(ENTER);
+    term.wait_gone(RUNNING_HINT, WAIT);
+    term.wait_for("subagents & background", WAIT);
+
+    term.send("\x1b[5~");
+    let screen = term.screen();
+    assert!(
+        !screen.contains("more lines below"),
+        "a view that could not move claimed to be scrolled back:\n{screen}"
+    );
+    assert!(
+        screen.contains("subagents & background"),
+        "the work box is not on the screen:\n{screen}"
+    );
+}
+
 #[test]
 fn a_task_stopped_from_the_task_list_wakes_nobody() {
     let mut replies = background_sleep();

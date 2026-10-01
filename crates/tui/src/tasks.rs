@@ -168,7 +168,14 @@ impl App {
         self.suggested_prompt = None;
         self.history.push(ChatMessage::user(message));
         self.renderer.scroll_to_bottom();
+        // This turn is the app carrying a notice to the model, not a prompt the
+        // user sent, and it is the same turn continuing: the children that made
+        // those notices are this turn's work and their tokens are already on the
+        // bar. `start_turn` starts the count again because a new prompt should,
+        // so what they had produced is put back afterwards.
+        let children_so_far = self.token_tracker.subagent_tokens;
         self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
+        self.token_tracker.restore_children(children_so_far);
     }
 
     /// A child of this session is doing something. Its row lives above the composer,
