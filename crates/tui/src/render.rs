@@ -1209,11 +1209,13 @@ impl App {
         );
     }
 
-    /// `1.2k out`, or nothing when the turn has not generated anything yet: a zero
-    /// on the line every turn would be a number nobody reads.
+    /// What this turn has generated, read live: `turn_outcome.completion_tokens`
+    /// is only filled in when the turn ends, so reading it while the turn runs
+    /// is how this ended up showing nothing at all. `1.2k out`, or nothing at
+    /// zero — a number nobody reads is not a statistic.
     pub(crate) fn turn_token_phrase(&self) -> Option<String> {
-        let out = self.turn_outcome.completion_tokens;
-        if !self.running || out == 0 {
+        let out = self.token_tracker.total_model_tokens;
+        if out == 0 {
             return None;
         }
         Some(if out >= 1000 { format!("{:.1}k out", out as f64 / 1000.0) } else { format!("{out} out") })
