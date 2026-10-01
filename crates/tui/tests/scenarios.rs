@@ -3132,6 +3132,43 @@ fn the_work_box_and_the_input_field_are_one_frame() {
     );
 }
 
+/// The block's right-hand wall has to stand in one column from top to bottom.
+/// The box used to be two columns narrower than the composer under it, so the
+/// wall stepped in exactly at the `├─┤` seam: two frames, not one, and the
+/// field's frame is what a user reads as "something is wrong with the input".
+#[test]
+fn every_row_of_the_work_box_is_exactly_as_wide_as_the_composer() {
+    let mut replies = background_sleep();
+    replies.push(Reply::Text("Still up.".into()));
+    let server = MockServer::start(replies);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+    ask(&term, "start the server", "The server is starting.");
+    let screen = term.wait_for("subagents & background", WAIT);
+
+    let rows: Vec<&str> = screen.lines().collect();
+    let top = rows
+        .iter()
+        .position(|r| r.contains("subagents & background"))
+        .unwrap_or_else(|| panic!("no work box on the screen:\n{screen}"));
+    let bottom = rows
+        .iter()
+        .rposition(|r| r.trim_start().starts_with('\u{2570}'))
+        .unwrap_or_else(|| panic!("the field below the box never closes:\n{screen}"));
+    // The composer is the widest thing in the block, so it sets the width every
+    // row of the box has to match: the top edge, the body rows, the `├─┤` seam
+    // and the field's own edges.
+    let composer = rows[bottom].chars().count();
+    for (i, row) in rows[top..=bottom].iter().enumerate() {
+        assert_eq!(
+            row.chars().count(),
+            composer,
+            "row {i} of the pinned block is {composer} wide in the composer but not in the box:\n{}",
+            rows[top..=bottom].join("\n"),
+        );
+    }
+}
+
 /// A question card arrives exactly when the parent is waiting on a child, and a
 /// child is what puts the work box on the screen -- so this is the ordinary
 /// case, not a rare overlap. The card has to be the bottom half of the pinned
