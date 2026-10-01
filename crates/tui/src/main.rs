@@ -630,8 +630,8 @@ struct App {
     chat: ChatView,
     running: bool,
     active_turn_handle: Option<tokio::task::JoinHandle<()>>,
-    active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    pending_steers: Vec<String>,
+    active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<flashagent_core::Steer>>,
+    pending_steers: Vec<(String, Vec<Attachment>)>,
     /// Commands typed while a turn ran that change the conversation: they run when it ends.
     queued_commands: Vec<String>,
     /// Notices of background tasks that ended, on their way to the model.
@@ -1593,7 +1593,7 @@ fn spawn_turn(
     budgets: GoalBudgets,
     turn_opts: flashagent_llm::TurnOptions,
     tx: tokio::sync::mpsc::UnboundedSender<UiEvent>,
-    steer_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    steer_rx: tokio::sync::mpsc::UnboundedReceiver<flashagent_core::Steer>,
     turn_id: u64,
     voice_prelude: Vec<ChatMessage>,
     compactor: Option<Arc<TurnCompactor>>,
@@ -2063,11 +2063,11 @@ mod tests {
     fn steering_injected_event_unpins_pending_steer_and_adds_user_message() {
         let mut chat = ChatView::default();
         chat.push_user("first prompt");
-        let mut pending_steers = vec!["please use postgres".to_string()];
+        let mut pending_steers: Vec<(String, Vec<Attachment>)> = vec![("please use postgres".to_string(), Vec::new())];
 
         let ev = LoopEvent::SteeringInjected("please use postgres".to_string());
         if let LoopEvent::SteeringInjected(ref directive) = ev {
-            if let Some(pos) = pending_steers.iter().position(|s| s == directive) {
+            if let Some(pos) = pending_steers.iter().position(|(text, _)| text == directive) {
                 pending_steers.remove(pos);
             }
         }

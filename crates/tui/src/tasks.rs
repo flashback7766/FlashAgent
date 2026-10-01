@@ -144,7 +144,7 @@ impl App {
             // None while the turn is being stopped: the notices wait.
             if let Some(tx) = self.active_steer_tx.clone() {
                 for notice in self.task_inbox.send_into_turn() {
-                    let _ = tx.send(notice);
+                    let _ = tx.send(flashagent_core::Steer::text(notice));
                 }
             }
             return;

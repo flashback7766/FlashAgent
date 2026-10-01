@@ -334,6 +334,18 @@ impl App {
         );
     }
 
+    /// The model a discovery answers for. A cloud listing names no active model
+    /// but does name the one in use, and resolving by name is what stops the
+    /// 131k fallback from outliving the discovery: corrected only on the
+    /// active_model branch, a 1M model on OpenRouter stayed at 128k and
+    /// compacted against a third of the window it actually had.
+    pub(crate) fn resolve_discovered_model(
+        disc: &flashagent_llm::ServerDiscovery,
+        current: &str,
+    ) -> Option<flashagent_llm::DiscoveredModel> {
+        disc.active_model.clone().or_else(|| disc.model(current).cloned())
+    }
+
     pub(crate) fn on_server_discovered(&mut self, cx: &LoopCtx<'_>, disc: flashagent_llm::ServerDiscovery) {
         self.available_models = flashagent_tui::providers::offered_models(&disc);
         // A cloud listing names no loaded model, so the one above never
@@ -355,7 +367,9 @@ impl App {
             self.suggested_prompt = None;
             self.renderer.request_reprint();
         }
-        if let Some(active) = disc.active_model {
+        // A cloud listing names no active model, but it does name the one in use.
+        let resolved = Self::resolve_discovered_model(&disc, &self.current_model);
+        if let Some(active) = resolved {
             let new_ctx_len = active.context_length.or(active.max_context_length).unwrap_or(131_072);
             let new_ctx_disp = active.context_display();
             let model_changed = active.id != self.current_model;
@@ -553,7 +567,7 @@ impl App {
                 self.renderer.request_reprint();
             }
             LoopEvent::SteeringInjected(directive) => {
-                if let Some(pos) = self.pending_steers.iter().position(|s| s == directive) {
+                if let Some(pos) = self.pending_steers.iter().position(|(text, _)| text == directive) {
                     self.pending_steers.remove(pos);
                 } else if !self.pending_steers.is_empty() {
                     self.pending_steers.remove(0);
@@ -691,6 +705,40 @@ mod tests {
         }
     }
     use super::*;
+
+    #[test]
+    fn a_cloud_listing_still_fixes_the_window_for_the_model_in_use() {
+        // Reported live: compaction began at 131k on a model with 1M, because
+        // the 128k fallback was only corrected when the server named an active
+        // model, and a cloud list never does.
+        let listed = flashagent_llm::DiscoveredModel {
+            id: "stealth/space-bunny-alpha".into(),
+            display_name: None,
+            is_loaded: false,
+            context_length: Some(1_000_000),
+            max_context_length: None,
+            thinking: flashagent_llm::ThinkingProfile::unreported(),
+            supports_tools: true,
+            supports_vision: false,
+        };
+        let cloud = flashagent_llm::ServerDiscovery {
+            base_url: "https://openrouter.ai/api/v1".into(),
+            models: vec![listed.clone()],
+            active_model: None,
+            kind: Default::default(),
+            reachable_without_listing: true,
+        };
+        let got = App::resolve_discovered_model(&cloud, "stealth/space-bunny-alpha").expect("the model in use was never resolved");
+        assert_eq!(got.context_length, Some(1_000_000), "the window stays 128k without this");
+
+        // A local server still speaks for itself first.
+        let mut local = cloud.clone();
+        local.active_model = Some(listed.clone());
+        assert!(App::resolve_discovered_model(&local, "whatever").is_some());
+
+        // A model the listing does not name is not guessed at.
+        assert!(App::resolve_discovered_model(&cloud, "some-other-model").is_none());
+    }
 
     #[test]
     fn a_slow_server_is_not_called_down_until_a_look_gets_no_answer() {

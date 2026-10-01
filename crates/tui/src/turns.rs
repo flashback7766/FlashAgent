@@ -119,7 +119,7 @@ impl App {
         // Notices that waited (a draft, an Esc) ride along with this turn.
         self.task_inbox.turn_started();
         for notice in self.task_inbox.send_into_turn() {
-            let _ = steer_tx.send(notice);
+            let _ = steer_tx.send(flashagent_core::Steer::text(notice));
         }
         self.active_steer_tx = Some(steer_tx);
         self.cancel_recap();
@@ -209,12 +209,16 @@ impl App {
         self.task_inbox.turn_ended(matches!(res, Ok((_, DoneReason::Cancelled))));
         self.flush_task_lines();
         // A steer typed as the turn ended never reached the model; it goes back into
-        // the prompt.
+        // the prompt, with any picture it carried, which used to be dropped here
+        // and lost for good.
         let unsent = std::mem::take(&mut self.pending_steers);
         if !unsent.is_empty() {
             // Ahead of a draft typed since: that draft is newer.
             let draft = self.input.text().to_string();
-            let restored = unsent.join("\n");
+            let restored = unsent.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>().join("\n");
+            for (_, pictures) in unsent {
+                self.attachments.extend(pictures);
+            }
             self.input.set(if draft.trim().is_empty() { restored } else { format!("{restored}\n{draft}") });
             self.background = Some(BackgroundNotice::fading(
                 "The turn ended before your message reached it · Enter sends it now",
