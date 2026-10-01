@@ -1,5 +1,10 @@
 # Changelog
 
+## b530 — the model stops waiting for work it already made asynchronous, and a free model says so
+
+- **A backgrounded command was waited for anyway.** The plumbing was right: the model was told plainly, "a notice will arrive when it exits, so there is no need to poll it", and it did it anyway — calling a second tool that blocked on the first, so the turn sat there exactly as long as the long build it had just made asynchronous. Moving the command to the background by hand did not help either, because the system prompt said nothing at all about work in the background: the rule existed only on the tool that starts it, and behaviour between calls is decided by the prompt. There is a section there now, and it covers the case where the user does the moving.
+- **A free model was shown as `$0.00 · 64 turns`.** The server priced every turn at nothing, which is a fact about the model, and writing it as an amount with a turn count beside it reads as a bill that came out empty rather than as one that does not exist. The status bar says `free`, `/cost` says `free` per provider, and `/goal` says the backend prices every turn at nothing. A server that reports *no* price is still left silent: that is unknown, not free.
+
 ## b525 — a session that survives the machine, and a subagent you can actually talk to
 
 - **A turn that never finished was gone entirely.** The session file was written only after a turn ended, so a machine that lost power mid-turn kept nothing: not the prompt, not the work the model had already done with it, and `--resume` had nothing to resume. The prompt now goes to disk the moment the turn starts, and again as each tool reports — throttled to five seconds, because a turn writes the whole conversation and writing it per step would be quadratic. What a crash takes is now the last few seconds rather than the whole conversation. Reported live: this was found the hard way, by the power going off.

@@ -84,8 +84,17 @@ impl CostLedger {
     }
 
     /// The status-bar line, or `None` when nothing has been priced.
+    ///
+    /// A total of zero is said as `free` and not as `$0.00`: the server priced
+    /// every turn at nothing, which is a fact about the model, and writing it as
+    /// an amount with a turn count beside it reads as a bill that came out empty
+    /// rather than as one that does not exist. The turn count goes with the
+    /// money, not with the word.
     pub fn summary(&self) -> Option<String> {
         let total = self.total()?;
+        if total == 0.0 {
+            return Some("free".to_string());
+        }
         Some(format!("${} · {}", Self::format_amount(total), Self::turns_phrase(self.priced_turns)))
     }
 }
@@ -151,8 +160,20 @@ mod tests {
         let mut ledger = CostLedger::default();
         assert_eq!(ledger.summary(), None);
         ledger.record("p", Some(0.0));
-        assert_eq!(ledger.summary().as_deref(), Some("$0.00 · 1 turn"), "a free turn is still a turn");
+        assert_eq!(ledger.summary().as_deref(), Some("free"), "a model the server prices at nothing is free, and saying so beats writing $0.00");
         ledger.record("p", Some(0.0));
-        assert_eq!(ledger.summary().as_deref(), Some("$0.00 · 2 turns"));
+        assert_eq!(ledger.summary().as_deref(), Some("free"), "and it stays that way however many turns go by");
+        ledger.record("p", Some(0.25));
+        assert_eq!(ledger.summary().as_deref(), Some("$0.25 · 3 turns"), "once there is money, the bill is back");
+    }
+
+    #[test]
+    fn a_free_model_and_an_unpriced_one_are_not_confused() {
+        let mut free = CostLedger::default();
+        free.record("p", Some(0.0));
+        assert_eq!(free.summary().as_deref(), Some("free"), "the server said zero, so the model is free");
+        let mut local = CostLedger::default();
+        local.record("p", None);
+        assert_eq!(local.summary(), None, "a server that says nothing is not free, it is unknown");
     }
 }
