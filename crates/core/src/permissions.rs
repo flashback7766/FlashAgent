@@ -1335,6 +1335,11 @@ mod tests {
         }
     }
 
+    /// Only where symlinks can be made without asking for a privilege: creating
+    /// one on Windows needs Developer Mode or an elevated token, and a CI
+    /// runner has neither, so the test would fail there for a reason that has
+    /// nothing to do with the code under test. The resolver itself is shared.
+    #[cfg(unix)]
     #[test]
     fn planning_resolves_an_operand_through_a_symlink_before_vouching_for_it() {
         let outside = tempfile::tempdir().unwrap();
