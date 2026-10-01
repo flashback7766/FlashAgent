@@ -463,8 +463,36 @@ pub fn path_is_inside(root: &std::path::Path, raw: &str) -> bool {
             }
         }
     }
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root = canonicalise_best_effort(root);
     normal.starts_with(&root)
+}
+
+/// The root resolved as far as it can be. A root that does not exist yet still
+/// has to be compared against operands that [`path_is_inside`] resolves
+/// component by component, and on a system whose own path contains a link
+/// (`/tmp` -> `/private/tmp` on macOS) an unresolved root and a resolved
+/// operand are not the same path, so every read looks like it left the
+/// project. Deepest existing ancestor, canonicalised, with the rest put back.
+fn canonicalise_best_effort(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(p) = path.canonicalize() {
+        return p;
+    }
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut cur = path;
+    while let Some(parent) = cur.parent() {
+        if let Some(name) = cur.file_name() {
+            tail.push(name);
+        }
+        if let Ok(p) = parent.canonicalize() {
+            let mut out = p;
+            for name in tail.iter().rev() {
+                out.push(name);
+            }
+            return out;
+        }
+        cur = parent;
+    }
+    path.to_path_buf()
 }
 
 /// Planning runs these without asking. A short list of programs with known
@@ -1068,7 +1096,14 @@ mod tests {
     /// works because an operand only has to exist inside it, and it keeps these
     /// tests from depending on the checkout they happen to run in.
     fn here() -> std::path::PathBuf {
-        std::env::temp_dir().join("flashagent-read-only-shell-tests")
+        // A real directory, canonicalised: a project root always exists, and an
+        // uncanonicalised one is compared against operands that `path_is_inside`
+        // resolves component by component. On a system whose temp path is itself
+        // a link (`/tmp` -> `/private/tmp` on macOS) the two sides then diverge
+        // and every read is judged as reaching outside the project.
+        let dir = std::env::temp_dir().join("flashagent-read-only-shell-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap_or(dir)
     }
 
     fn call(name: &str, args: &str) -> ToolCall {
@@ -1363,6 +1398,34 @@ mod tests {
         assert!(is_read_only_shell_in(root, "ls -la", posix), "an option takes no path");
         // An ordinary read still needs no card.
         assert!(is_read_only_shell_in(&here(), "cat src/main.rs", posix));
+    }
+
+    /// A project reached through a link in its own path — `/tmp` on macOS, a
+    /// linked workspace anywhere — used to compare an unresolved root against an
+    /// operand that had been resolved component by component, so every read
+    /// looked like it left the project and Planning asked about all of them.
+    #[cfg(unix)]
+    #[test]
+    fn a_project_reached_through_a_link_in_its_own_path_still_contains_its_files() {
+        let real = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(real.path().join("src")).unwrap();
+        let link_parent = tempfile::tempdir().unwrap();
+        let link = link_parent.path().join("linked");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        // The root as a caller names it: through the link, and not existing
+        // itself, which is what makes the two sides diverge.
+        let root = link.join("not-built-yet");
+
+        assert!(path_is_inside(&link, "src/main.rs"), "a real path under a linked root is inside it");
+        assert!(
+            path_is_inside(&root, "src/main.rs"),
+            "a root that does not exist yet still contains what is under it: {root:?}"
+        );
+        assert!(!path_is_inside(&link, "../outside.txt"), "a parent still leaves it");
+        assert!(
+            !path_is_inside(&root, "../outside.txt"),
+            "an unresolved root must not become an escape hatch: {root:?}"
+        );
     }
 
     #[test]
