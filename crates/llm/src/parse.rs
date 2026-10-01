@@ -109,6 +109,10 @@ pub struct ChunkParser {
     /// Readers stop at the first `Done`, so there is only one: a finish
     /// reason followed by `[DONE]` must not end the stream twice.
     done: bool,
+    /// A frame arrived that could not be read and no readable frame has come
+    /// since. Whatever it carried may be the finish reason, so a terminal
+    /// inferred after it — `[DONE]` — cannot be called a clean stop.
+    lost: bool,
 }
 
 const THOUGHT_OPEN: &str = "<thought>";
@@ -207,7 +211,15 @@ impl ChunkParser {
         if payload.trim() == "[DONE]" {
             self.end(&mut events);
         } else if let Ok(v) = serde_json::from_str::<Value>(payload) {
+            // A readable frame means the answer went on after the unreadable
+            // one, which is a gateway's stray keepalive rather than a lost end.
+            self.lost = false;
             self.feed_value(v, &mut events);
+        } else {
+            // Dropped for tolerance, which is what makes this necessary: the
+            // frame that said why the answer ended is among the ones that may
+            // be lost, so the end of the stream is no longer trustworthy.
+            self.lost = true;
         }
         events
     }
@@ -225,9 +237,25 @@ impl ChunkParser {
         self.done
     }
 
+    /// A frame the reader could not parse. Everything it carried may be gone,
+    /// including the reason the answer ended, so a terminal inferred after it
+    /// cannot be called a clean stop.
+    pub(crate) fn note_lost_frame(&mut self) {
+        self.lost = true;
+    }
+
     /// `[DONE]`.
     pub(crate) fn end(&mut self, events: &mut Vec<LlmEvent>) {
         self.flush_carry(events);
+        // The reason the answer ended is unverified and may be unreadable, and
+        // the body does not get a second chance to say it. Saying `Stop` here
+        // would tell the caller the turn is whole when it may be cut in half,
+        // and a tool call whose arguments were in that frame would then run
+        // `repair_json`'d. Left un-terminated, the reader reports it.
+        if self.lost {
+            self.lost = false;
+            return;
+        }
         self.finish_with(FinishReason::Stop, events);
     }
 
@@ -242,6 +270,11 @@ impl ChunkParser {
 
     /// One chunk, already parsed.
     pub(crate) fn feed_value(&mut self, mut v: Value, events: &mut Vec<LlmEvent>) {
+        // A readable frame means the answer went on after the unreadable one,
+        // which is a gateway's stray keepalive rather than a lost end. Owned
+        // here rather than in [`Self::feed`] because not every reader parses
+        // the payload itself: the OpenAI reader does, and calls this directly.
+        self.lost = false;
         let mtp = v.get("stats").or_else(|| v.get("speculative_stats")).and_then(|s| {
             let total = s.get("total_draft_tokens_count")
                 .or_else(|| s.get("total_draft_tokens"))
@@ -1097,6 +1130,40 @@ mod tests {
         let (text, calls) = scan(&["Here:\n", "{", "\"id\": 1}\n"]);
         assert!(calls.is_empty());
         assert_eq!(text, "Here:\n{\"id\": 1}\n");
+    }
+
+    /// A gateway mangling the frame that carries the finish reason, then sending
+    /// `[DONE]`, must not produce a clean stop: the loop trusts that stop to run
+    /// a tool call whose arguments were in the frame that was lost.
+    #[test]
+    fn a_lost_finish_reason_frame_does_not_end_the_stream_as_a_clean_stop() {
+        let good = r#"{"choices":[{"delta":{"content":"a"}}]}"#;
+        // The frame a gateway mangles: the finish reason is in here.
+        let mangled = r#"{"choices":[{"delta":{"content":"b"},"finish_reason":"stop"}"#;
+        let mut p = ChunkParser::default();
+        let mut events = p.feed(good);
+        events.extend(p.feed(mangled));
+        events.extend(p.feed("[DONE]"));
+        assert!(!events.iter().any(|e| matches!(e, LlmEvent::Done(FinishReason::Stop))), "a clean stop after a lost finish frame: {events:?}");
+        assert!(!p.saw_terminal(), "so the reader is told the end was never stated: {:?}", events);
+        // The text that did arrive is still the user's.
+        let text: String = events.iter().filter_map(|e| match e { LlmEvent::TextDelta(t) => Some(t.as_str()), _ => None }).collect();
+        assert_eq!(text, "a");
+    }
+
+    /// Tolerance is not the thing being traded away: noise the stream reads
+    /// through is not a lost end, and the answer still finishes cleanly.
+    #[test]
+    fn keepalive_noise_before_more_frames_is_not_a_lost_end() {
+        let mut p = ChunkParser::default();
+        let mut events = p.feed(r#"{"choices":[{"delta":{"content":"a"}}]}"#);
+        events.extend(p.feed(": ping"));
+        events.extend(p.feed(r#"{"choices":[{"delta":{"content":"b"},"finish_reason":"stop"}]}"#));
+        events.extend(p.feed("[DONE]"));
+        assert!(p.saw_terminal(), "{events:?}");
+        assert!(matches!(events.iter().rev().find(|e| matches!(e, LlmEvent::Done(_))), Some(LlmEvent::Done(FinishReason::Stop))), "{events:?}");
+        let text: String = events.iter().filter_map(|e| match e { LlmEvent::TextDelta(t) => Some(t.as_str()), _ => None }).collect();
+        assert_eq!(text, "ab");
     }
 
     #[test]

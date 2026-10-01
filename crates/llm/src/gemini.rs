@@ -417,6 +417,9 @@ struct Decoder {
     replay: Replay,
     /// Every chunk repeats the running totals; the last one is sent, once.
     usage: Option<Usage>,
+    /// Whether the counts have already gone out, so a frame repeating them after
+    /// the finish reason is not added to them a second time.
+    usage_sent: bool,
     thought: crate::parse::ThoughtTags,
     done: bool,
     /// The stream has already ended in a failure of its own, so a body that
@@ -464,15 +467,21 @@ impl Decoder {
 
     fn flush_usage(&mut self, out: &mut Vec<Result<LlmEvent, LlmError>>) {
         if let Some(usage) = self.usage.take() {
+            self.usage_sent = true;
             out.push(Ok(LlmEvent::Usage(usage)));
         }
     }
 
     /// False once the stream has failed.
     fn read(&mut self, payload: &str, out: &mut Vec<Result<LlmEvent, LlmError>>) -> bool {
-        if self.done || self.failed {
+        if self.failed {
             return true;
         }
+        // A chunk after the finish reason still carries the counts on several
+        // Gemini-compatible gateways: they put usage in a frame of their own
+        // after the candidate that ended the turn. Skipping it understated the
+        // token budget and the compaction threshold, so it is read for its
+        // usage and nothing else.
         let Ok(chunk) = serde_json::from_str::<Value>(payload) else {
             // One bad frame is a nuisance to drop: the frames carrying the
             // finish reason may still arrive. A run of them means the framing
@@ -485,6 +494,20 @@ impl Decoder {
             return true;
         };
         self.malformed.ok();
+        let was_done = self.done;
+        if let Some(usage) = chunk.get("usageMetadata").and_then(read_usage) {
+            // Several Gemini-compatible gateways end the turn with a frame
+            // carrying nothing but the counts. It arrives after the finish
+            // reason, and reading it is what keeps the token budget and the
+            // compaction threshold honest.
+            self.usage = Some(usage);
+            if was_done && !self.usage_sent {
+                self.flush_usage(out);
+            }
+        }
+        if self.done {
+            return true;
+        }
         // Failures after the 200 (quota, overload) arrive in-stream.
         if let Some(error) = chunk.get("error").filter(|e| !e.is_null()) {
             self.failed = true;
@@ -527,6 +550,11 @@ impl Decoder {
                 return false;
             }
         };
+        // The counts go out with the terminal frame, as they always have, so the
+        // order a reader sees them in does not change. A frame that carries
+        // them again afterwards is ignored; one that carries them for the first
+        // time here is read above, which is the gateway shape that used to
+        // leave the turn's budget understated.
         self.flush_usage(out);
         out.push(Ok(LlmEvent::Done(finish)));
         self.done = true;
@@ -1088,6 +1116,27 @@ mod tests {
         ]);
         let usages: Vec<Usage> = ok_events(decode(&[&stream])).into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
         assert_eq!(usages, vec![Usage { prompt: Some(100), completion: Some(50), cached: Some(64), mtp: None, cost: None }]);
+    }
+
+    /// Several Gemini-compatible gateways send the counts in a usage-only frame
+    /// of their own, after the candidate that ended the turn. Reading it is what
+    /// keeps the token budget and the compaction threshold honest.
+    #[test]
+    fn a_usage_frame_after_the_finish_reason_is_still_read() {
+        let stream = sse(&[
+            // The terminal frame carries no counts of its own: this is the
+            // gateway shape that used to leave the budget understated.
+            json!({ "candidates": [{ "content": { "parts": [{ "text": "a" }] }, "finishReason": "STOP" }] }),
+            json!({ "usageMetadata": { "promptTokenCount": 100, "candidatesTokenCount": 20, "totalTokenCount": 120 } }),
+        ]);
+        let events = ok_events(decode(&[&stream]));
+        assert!(events.contains(&LlmEvent::Done(FinishReason::Stop)), "{events:?}");
+        let usages: Vec<Usage> = events.into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
+        assert_eq!(
+            usages,
+            vec![Usage { prompt: Some(100), completion: Some(20), cached: None, mtp: None, cost: None }],
+            "the later counts are the ones the turn is billed on, and nothing is counted twice"
+        );
     }
 
     #[test]
