@@ -203,6 +203,19 @@ impl TokenTracker {
         self.total_model_tokens + self.subagent_tokens
     }
 
+    /// Puts back what the children had already produced, for a turn the app
+    /// started for itself rather than one the user asked for.
+    ///
+    /// `spawn_agent` hands the child a thread and returns, so the parent's turn
+    /// is over long before the children are. Each finished child then wakes a
+    /// turn of the app's own to carry its report to the model, and
+    /// `on_turn_start` -- right for a prompt, wrong here -- zeroed the count
+    /// those children had already earned. The tokens were not undercounted by
+    /// the delta; they were added and then dropped, once per finished child.
+    pub(crate) fn restore_children(&mut self, produced: usize) {
+        self.subagent_tokens = produced;
+    }
+
     pub(crate) fn on_finished(&mut self) {
         self.is_running = false;
     }
@@ -441,6 +454,124 @@ mod tests {
             recorded.overall_speed_tok_s,
             2_000.0 / ttft
         );
+    }
+
+    /// What `App::on_subagent_event` does with one child's event, and what
+    /// `App::deliver_task_notices` does when a finished child's report wakes a
+    /// turn of the app's own. Spelled out here rather than driven through a live
+    /// `App`, because this accounting is the whole of what is under test.
+    struct Session {
+        tree: flashagent_tui::agents::AgentTree,
+        tokens: TokenTracker,
+    }
+
+    impl Session {
+        fn new() -> Self {
+            let mut s = Self { tree: flashagent_tui::agents::AgentTree::default(), tokens: TokenTracker::new("m".into()) };
+            s.tokens.on_turn_start("m".into(), 0);
+            s
+        }
+
+        /// The turn the app starts for itself when a notice is waiting and
+        /// nobody is typing.
+        fn start_continuation_turn(&mut self) {
+            let children_so_far = self.tokens.subagent_tokens;
+            self.tokens.on_turn_start("m".into(), 0);
+            self.tokens.restore_children(children_so_far);
+        }
+
+        fn child_event(&mut self, id: &str, event: flashagent_core::loop_::LoopEvent) {
+            let event = flashagent_core::SubagentEvent { id: id.into(), role: "researcher".into(), event };
+            if !self.tree.apply(&event) {
+                return;
+            }
+            let spent: usize = self.tree.rows().iter().map(|r| r.usage.completion_tokens as usize).sum();
+            self.tokens.on_subagent_usage(spent);
+        }
+
+        fn child_step(&mut self, id: &str, completion: i64) {
+            self.child_event(
+                id,
+                flashagent_core::loop_::LoopEvent::Usage(flashagent_llm::Usage {
+                    prompt: Some(90_000),
+                    completion: Some(completion),
+                    cached: Some(85_000),
+                    ..Default::default()
+                }),
+            );
+        }
+
+        fn child_finishes(&mut self, id: &str) {
+            self.child_event(id, flashagent_core::loop_::LoopEvent::Done(flashagent_core::DoneReason::Completed));
+        }
+    }
+
+    #[test]
+    fn a_turn_the_app_started_for_itself_does_not_take_the_childrens_work_off_the_bar() {
+        // A live run against a real model, where the parent delegated and walked
+        // away: the rows read 997.0k, 2598.6k, 3224.8k and 1792.9k tokens, and the
+        // status bar read 72.1k. The children were not undercounted by the delta
+        // the bar adds -- they were counted, and then thrown away.
+        //
+        // `spawn_agent` hands the child a thread and returns, so the parent's
+        // turn ends while the children are still working. When the first of them
+        // reports, `deliver_task_notices` finds nobody typing and starts a turn
+        // of its own to carry the notice -- and `on_turn_start`, which is right
+        // for a new prompt, zeroes what the children had produced. Every child
+        // that finished took the bar back to nothing, and the turn that was live
+        // when the last one answered held only the parent's own 72.1k.
+        let mut s = Session::new();
+        let mut children_total = 0i64;
+
+        // Four children, over many steps each, interleaved the way they run.
+        for (id, steps) in [("sub1", 20usize), ("sub2", 31), ("sub3", 39), ("sub4", 29)] {
+            for _ in 0..steps {
+                s.child_step(id, 8_000);
+                children_total += 8_000;
+            }
+        }
+        // The parent's own answer to the prompt that started all this.
+        s.tokens.on_usage(&usage(20_000));
+        assert_eq!(s.tokens.turn_output() as i64, children_total + 20_000, "one turn: every child's output, once");
+
+        // The parent's turn ends; the children go on. Their work is still on the
+        // bar, and the rows still say what they spent.
+        s.tokens.on_finished();
+        for _ in 0..5 {
+            s.child_step("sub4", 8_000);
+            children_total += 8_000;
+        }
+        assert_eq!(s.tokens.turn_output() as i64, children_total + 20_000, "the turn is over and the children are still counted");
+
+        // Each finished child wakes a turn of the app's own to carry its report.
+        for id in ["sub1", "sub2", "sub3"] {
+            s.child_finishes(id);
+            s.start_continuation_turn();
+        }
+        s.child_finishes("sub4");
+        s.start_continuation_turn();
+        s.tokens.on_usage(&usage(5_000));
+
+        assert_eq!(
+            s.tokens.turn_output() as i64,
+            children_total + 5_000,
+            "four children, four continuation turns, and not one of their tokens off the bar"
+        );
+        // The parent's own earlier output stays with the earlier turn, which is
+        // what `on_turn_start` has always done; only the children are put back.
+    }
+
+    #[test]
+    fn a_new_prompt_still_starts_the_bar_over() {
+        // The fix above must not turn `turn_output` into a session total: a
+        // prompt the user typed is a new turn, and the last turn's tokens are
+        // not this one's output.
+        let mut t = TokenTracker::new("m".into());
+        t.on_turn_start("m".into(), 0);
+        t.on_usage(&usage(20_000));
+        t.on_subagent_usage(500_000);
+        t.on_turn_start("m".into(), 0);
+        assert_eq!(t.turn_output(), 0, "a new prompt starts its own count");
     }
 
     #[test]

@@ -564,7 +564,7 @@ pub static TOOLS: &[ToolDef] = &[
         params: &[
             one_of(
                 "role",
-                "researcher (reads and searches, cannot write), coder (writes and runs tests), reviewer (reads, reports problems), planner (reads, returns a plan), or a custom role",
+                "researcher (reads and searches, cannot write), coder (writes and runs tests), reviewer (reads, reports problems), planner (reads, returns a plan)",
                 &["researcher", "coder", "reviewer", "planner"],
             ),
             s("task", "The whole task, self-contained: say what to do, where, and what to report back"),

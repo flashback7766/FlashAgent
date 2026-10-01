@@ -520,6 +520,21 @@ impl SubagentHost {
         AgentRole { name: name.to_string(), system_prompt: prompt, tools }
     }
 
+    /// The role the model asked for, or why it cannot have one. Rejecting
+    /// beats guessing: `role_definition` answers an unrecognised name with the
+    /// full toolset, so a near miss like `"reviewer "` would hand a child the
+    /// right to write files and run commands while every surface still echoes
+    /// back the name the user believes was in force.
+    pub fn known_role(name: &str) -> Result<&'static str, String> {
+        KNOWN_ROLES.iter().copied().find(|r| *r == name).ok_or_else(|| {
+            format!(
+                "`{name}` is not a role. Use one of {}, and nothing else: a role sets what the \
+                 subagent may do, and an unrecognised one would silently widen it.",
+                KNOWN_ROLES.join(", ")
+            )
+        })
+    }
+
     /// Refused, with the reason, once `max_live` children are running.
     pub fn spawn(&self, spec: SubagentSpec) -> Result<SubagentHandle, SpawnRefused> {
         if self.live() >= self.max_live {
@@ -842,7 +857,7 @@ impl ToolExec for SubagentTool {
                  a researcher or reviewer cannot write files or run commands.",
                 self.host.max_live()
             ),
-            parameters_json: r#"{"type":"object","properties":{"role":{"type":"string","description":"researcher (reads and searches, cannot write), coder (writes and runs tests), reviewer (reads, reports problems), planner (reads, returns a plan), or a custom role"},"task":{"type":"string","description":"The whole task, self-contained: say what to do, where, and what to report back"},"max_steps":{"type":"integer","description":"Max loop steps (default and maximum 500; the last one asks the subagent to wrap up and report rather than cutting it off)"},"timeout_secs":{"type":"integer","description":"Max wall-clock seconds (default and maximum 3600)"}},"required":["task"]}"#.into(),
+            parameters_json: spawn_agent_schema(),
         }]
     }
 
@@ -853,7 +868,13 @@ impl ToolExec for SubagentTool {
             return refused("spawn_agent: `task` is required and must stand on its own: the \
                            subagent sees this text and nothing of the conversation around it.");
         }
-        let role_name = v.get("role").and_then(|x| x.as_str()).unwrap_or("researcher").to_string();
+        // Normalised before it is matched: a name that is a near miss must not
+        // fall through to the catch-all below and pick up the full toolset.
+        let asked = v.get("role").and_then(|x| x.as_str()).unwrap_or("researcher");
+        let role_name = match SubagentHost::known_role(asked.trim().to_ascii_lowercase().as_str()) {
+            Ok(role) => role,
+            Err(why) => return refused(format!("spawn_agent: {why}")),
+        };
         let max_steps = clamp_steps(v.get("max_steps").and_then(|x| x.as_u64()).unwrap_or(0));
         // Same rule for the clock: the model may ask for less time, never more,
         // so a miscounted number cannot buy a child a week.
@@ -864,7 +885,7 @@ impl ToolExec for SubagentTool {
             .filter(|n| *n > 0);
 
         let spec = SubagentSpec {
-            role: self.host.role(&role_name),
+            role: self.host.role(role_name),
             prompt: task,
             max_steps,
             timeout: timeout_secs.map(Duration::from_secs),
@@ -891,6 +912,42 @@ impl ToolExec for SubagentTool {
         self
     }
 }
+
+/// Built rather than written out, so the enum the model reads is the same
+/// `KNOWN_ROLES` the matcher checks against. The registry's own `ToolDef` for
+/// this tool is never seen by a model: `BuiltinTools::specs` drops the
+/// spawn_agent handler, so this hand-written schema is the one that counts.
+fn spawn_agent_schema() -> String {
+    let s = |description: &str| serde_json::json!({ "type": "string", "description": description });
+    let steps = |description: &str| serde_json::json!({ "type": "integer", "description": description });
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "role": {
+                "type": "string",
+                "enum": KNOWN_ROLES,
+                // Said plainly, because "or a custom role" used to be offered
+                // here and was never a thing: the name only reached a
+                // catch-all that granted the whole toolset.
+                "description": "researcher (reads and searches, cannot write), coder (writes and \
+                                runs tests), reviewer (reads, reports problems), planner (reads, \
+                                returns a plan). A name outside this list is refused rather than \
+                                guessed at.",
+            },
+            "task": s("The whole task, self-contained: say what to do, where, and what to report back"),
+            "max_steps": steps("Max loop steps (default and maximum 500; the last one asks the \
+                                subagent to wrap up and report rather than cutting it off)"),
+            "timeout_secs": steps("Max wall-clock seconds (default and maximum 3600)"),
+        },
+        "required": ["task"],
+    })
+    .to_string()
+}
+
+/// Every role that exists. The schema the model reads and the match in
+/// `role_definition` are both built from this, so the two cannot drift and
+/// leave a name offered that grants something.
+pub const KNOWN_ROLES: &[&str] = &["researcher", "coder", "reviewer", "planner"];
 
 /// What a role that may not change anything is given. Public because the
 /// registry's own test checks that every name here is a tool that cannot write:
@@ -948,8 +1005,12 @@ fn role_definition(role: &str) -> (Vec<String>, String) {
              plan back instead of starting it."
                 .to_string(),
         ),
+        // Unreachable through `spawn_agent`, which validates first. Kept narrow
+        // rather than empty on purpose: an empty list means the parent's whole
+        // toolset, so a future caller that skips validation gets a child that
+        // can write, not one that cannot.
         _ => (
-            Vec::new(),
+            owned(READ_ONLY_TOOLS),
             "You are a subagent carrying out the task described below. Work autonomously within \
              your permissions and report a concise final answer."
                 .to_string(),
@@ -1186,6 +1247,78 @@ mod tests {
         let reviewer = host.role("reviewer");
         assert!(!reviewer.tools.is_empty(), "a reviewer is fenced in");
         assert!(!reviewer.tools.iter().any(|t| t == "write_file"));
+    }
+
+    #[tokio::test]
+    async fn a_role_the_model_nearly_got_right_cannot_widen_a_child() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = RecordingFactory { seen: seen.clone() };
+        let (host, mut done) = SubagentHost::with_channels(llm(), Arc::new(recorder), None);
+        let tool = SubagentTool::new(Arc::new(host));
+        let spawn = async |role: &str| {
+            tool.execute(&ToolCall {
+                id: "t".into(),
+                name: "spawn_agent".into(),
+                args_json: serde_json::json!({ "role": role, "task": "look around" }).to_string(),
+            })
+            .await
+        };
+
+        // A name that is merely spelled differently is the same role.
+        for role in [" Reviewer ", "REVIEWER", "reviewer"] {
+            let out = spawn(role).await;
+            assert!(!out.is_error, "`{role}` is the reviewer, only typed differently: {}", out.content);
+            assert!(out.content.contains("reviewer"), "the refusal names the roles: {}", out.content);
+            let _ = done.recv().await;
+            let given = seen.lock().unwrap().clone();
+            assert!(given.iter().any(|t| t == "read_file"), "`{role}` reads: {given:?}");
+            assert!(!given.iter().any(|t| t == "write_file"), "`{role}` must not write: {given:?}");
+            assert!(!given.iter().any(|t| t == "run_shell"), "`{role}` must not run commands: {given:?}");
+        }
+
+        // Anything else is refused with the list, rather than quietly becoming
+        // a child that can do everything. `coder` with a stray space is not in
+        // here: it normalises to a real role, and coder really may write.
+        seen.lock().unwrap().clear();
+        for role in ["reviewer2", "", "engineer", "RESEARCHER2", "review"] {
+            let out = spawn(role).await;
+            assert!(out.is_error, "`{role}` is not a role: {}", out.content);
+            assert!(out.content.contains("reviewer"), "the refusal lists the roles: {}", out.content);
+        }
+        assert!(seen.lock().unwrap().is_empty(), "a refused role never starts a child");
+    }
+
+    #[tokio::test]
+    async fn an_unrecognised_role_is_never_given_the_full_toolset() {
+        // The catch-all in role_definition is the one place an unknown name
+        // could widen itself, so it is fenced in as well as refused.
+        let (host, _done) = SubagentHost::with_channels(llm(), Arc::new(Factory), None);
+        for name in ["reviewer ", "Reviewer", "engineer", ""] {
+            let role = host.role(name);
+            assert!(
+                !role.tools.is_empty(),
+                "an unrecognised role must not mean the full toolset: {name}"
+            );
+            assert!(!role.tools.iter().any(|t| t == "write_file" || t == "run_shell"), "{name}: {role:?}");
+        }
+        assert_eq!(KNOWN_ROLES, &["researcher", "coder", "reviewer", "planner"]);
+    }
+
+    #[test]
+    fn the_schema_the_model_reads_states_the_roles_it_may_ask_for() {
+        let (host, _done) = SubagentHost::with_channels(llm(), Arc::new(Factory), None);
+        let spec = SubagentTool::new(Arc::new(host))
+            .specs()
+        .into_iter()
+        .find(|s| s.name == "spawn_agent")
+        .expect("spawn_agent is a tool");
+        let json: serde_json::Value = serde_json::from_str(&spec.parameters_json).unwrap();
+        let roles = json["properties"]["role"]["enum"].as_array().expect("role is an enum, not free text");
+        let names: Vec<&str> = roles.iter().map(|r| r.as_str().unwrap()).collect();
+        assert_eq!(names, KNOWN_ROLES.to_vec(), "the schema and the matcher must list the same roles");
+        // The model used to be offered "or a custom role", which was never a
+        // thing: the name only ever reached the catch-all.
+        assert!(!spec.parameters_json.contains("custom role"), "{}", spec.parameters_json);
     }
 
     #[tokio::test]

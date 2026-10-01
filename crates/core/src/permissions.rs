@@ -471,17 +471,39 @@ pub fn path_is_inside(root: &std::path::Path, raw: &str) -> bool {
 /// effects, minus the flags that make them write or run something else.
 /// Builds like `cargo check` are refused: build scripts run arbitrary code.
 pub fn is_read_only_shell(cmd: &str) -> bool {
-    is_read_only_shell_in(cmd, shell_dialects())
+    is_read_only_shell_under(std::env::current_dir().unwrap_or_default().as_path(), cmd)
 }
 
-fn is_read_only_shell_in(cmd: &str, dialects: &[ShellDialect]) -> bool {
+/// As [`is_read_only_shell`], but judging paths against the project the run is
+/// rooted at rather than the process's working directory.
+pub fn is_read_only_shell_under(root: &std::path::Path, cmd: &str) -> bool {
+    is_read_only_shell_in(root, cmd, shell_dialects())
+}
+
+fn is_read_only_shell_in(root: &std::path::Path, cmd: &str, dialects: &[ShellDialect]) -> bool {
     if smuggles_side_effects(cmd, dialects) {
         return false;
     }
     dialects.iter().all(|&dialect| {
         let segments = split_chain(cmd, dialect, true);
-        !segments.is_empty() && segments.iter().all(|seg| read_only_segment(seg))
+        !segments.is_empty() && segments.iter().all(|seg| read_only_segment(root, seg))
     })
+}
+
+/// Programs whose non-option arguments are files or folders. Their operands go
+/// through the same resolver as the file tools, so a symlink pointing out of
+/// the project cannot be read by asking for it through the shell instead.
+///
+/// Grep and friends take a pattern first, but a pattern that happens to be the
+/// name of a symlink out of the project is no reason to let the file through,
+/// so they are judged the same way.
+fn names_files(prog: &str) -> bool {
+    matches!(
+        prog,
+        "ls" | "cat" | "head" | "tail" | "wc" | "stat" | "file" | "du" | "realpath" | "readlink" | "nl"
+            | "cmp" | "sha256sum" | "sha1sum" | "md5sum" | "grep" | "egrep" | "fgrep" | "diff"
+            | "rg" | "sort"
+    )
 }
 
 /// A word as the shell passes it on: quotes and backslashes go, so
@@ -500,7 +522,8 @@ fn long_option_prefix_of(arg: &str, names: &[&str]) -> bool {
 
 /// Leaves the project or names a variable: `/etc`, `C:\x`, `~/.ssh`,
 /// `../..`, `$HOME`, also as an option's value (`--from-file=/etc/passwd`,
-/// `-f/etc/passwd`).
+/// `-f/etc/passwd`). Purely textual; a path that reads as relative can still
+/// resolve outside through a symlink, which is [`path_is_inside`]'s job.
 fn reaches_outside(arg: &str) -> bool {
     let outside = |a: &str| {
         let bytes = a.as_bytes();
@@ -520,7 +543,7 @@ fn reaches_outside(arg: &str) -> bool {
     outside(arg) || value.is_some_and(outside) || attached.is_some_and(outside)
 }
 
-fn read_only_segment(segment: &str) -> bool {
+fn read_only_segment(root: &std::path::Path, segment: &str) -> bool {
     let words: Vec<String> = segment.split_whitespace().map(shell_word).collect();
     // `{~,x}/.ssh` expands to a path no single word shows.
     if words.iter().any(|w| w.contains('{')) {
@@ -536,6 +559,11 @@ fn read_only_segment(segment: &str) -> bool {
     // An argument leaving the project (`/etc`, `~/.ssh`, `../..`) or naming a
     // variable (`$HOME`) is not a read Planning can vouch for.
     if args.iter().any(|a| reaches_outside(a)) {
+        return false;
+    }
+    // Lexical checks passed, so the operands still have to be looked at as
+    // paths: `cat link/id_rsa` says nothing about where `link` points.
+    if names_files(prog.as_str()) && args.iter().filter(|a| !a.starts_with('-')).any(|a| !path_is_inside(root, a)) {
         return false;
     }
     let has = |bad: &[&str]| args.iter().any(|a| bad.iter().any(|b| a.strip_prefix(b).is_some_and(|rest| rest.is_empty() || rest.starts_with('='))));
@@ -633,6 +661,16 @@ fn blacklisted_segment(segment: &str) -> Option<&'static str> {
     // Any abbreviation git or getopt would take: `--har` is `--hard`.
     let has_long = |name: &str| long_flags.iter().any(|f| !f.is_empty() && name.starts_with(f));
     let refspec = |c: char| flag_args.iter().any(|a| a.starts_with(c));
+    // `.`, `./` and a bare `--` are the shapes that mean "the whole tree" (or
+    // "these paths") rather than a branch: `checkout .`, `checkout -- .`,
+    // `restore --staged .`. `--staged` alone moves the change into the index
+    // instead of losing it, so it is the one spelling left alone.
+    let pathspec_discard = {
+        let staged_only = has_long("staged") && !has_long("worktree");
+        !staged_only
+            && flag_args.iter().any(|a| matches!(a.as_str(), "." | "./" | ":/" | ":/." | "--")
+                || a.ends_with("/."))
+    };
 
     match prog {
         "rm" if (has_short('r') || has_short('R') || has_long("recursive")) && (has_short('f') || has_long("force")) => {
@@ -654,6 +692,27 @@ fn blacklisted_segment(segment: &str) -> Option<&'static str> {
             Some("clean") if has_short('f') || has_long("force") => Some("git clean -f deletes untracked files for good"),
             Some("branch") if has_short('D') || (has_short('d') || has_long("delete")) && (has_short('f') || has_long("force")) => {
                 Some("git branch -D force-deletes a branch")
+            }
+            // Nothing here is in a snapshot: run_shell is not one of the tools
+            // /rewind records, so the work is only recoverable by hand.
+            Some("checkout" | "restore") if pathspec_discard => Some(
+                "git checkout/restore of the whole tree discards uncommitted work, which /rewind cannot bring back",
+            ),
+            Some("checkout" | "restore" | "switch")
+                if has_short('f') || has_long("force") || has_long("discard-changes") =>
+            {
+                Some("git checkout/restore --force discards uncommitted work, which /rewind cannot bring back")
+            }
+            Some("stash") if flag_args.iter().any(|a| a == "drop" || a == "clear") => {
+                Some("git stash drop/clear destroys stashed work for good")
+            }
+            // Bare `git push <remote> <branch>` publishes the work off this
+            // machine, which nothing here can take back. `--dry-run` only says
+            // what it would do, so it stays ordinary.
+            Some("push")
+                if !has_long("dry-run") && !has_short('n') && flag_args.iter().any(|a| !a.starts_with('-')) =>
+            {
+                Some("git push leaves the machine; whatever it publishes cannot be recalled")
             }
             _ => None,
         },
@@ -891,7 +950,13 @@ impl PermissionState {
                 }
                 match mode {
                     PermissionMode::Bypass => Verdict::Allow,
-                    PermissionMode::Planning if cmd.as_deref().is_some_and(is_read_only_shell) => Verdict::Allow,
+                    PermissionMode::Planning if cmd.as_deref().is_some_and(|c| {
+                        let root = self.project_root.lock().expect("root lock").clone();
+                        is_read_only_shell_under(root.as_deref().unwrap_or(std::path::Path::new("")), c)
+                    }) =>
+                    {
+                        Verdict::Allow
+                    }
                     PermissionMode::Planning => Verdict::Deny(
                         "planning mode only runs commands that just read (ls, cat, grep, git log, ...)".into(),
                     ),
@@ -999,6 +1064,13 @@ impl ToolExec for PermissionedTools {
 mod tests {
     use super::*;
 
+    /// The root the read-only shell tests judge paths against. A scratch folder
+    /// works because an operand only has to exist inside it, and it keeps these
+    /// tests from depending on the checkout they happen to run in.
+    fn here() -> std::path::PathBuf {
+        std::env::temp_dir().join("flashagent-read-only-shell-tests")
+    }
+
     fn call(name: &str, args: &str) -> ToolCall {
         ToolCall { id: "t".into(), name: name.into(), args_json: args.into() }
     }
@@ -1041,7 +1113,7 @@ mod tests {
         let rules = RuleSet { shell_prefixes: vec!["npm test".into()], ..Default::default() };
         let hidden = "npm test #'\nrm -rf ~ #'";
         assert!(!rules.shell_allows_in(hidden, &[ShellDialect::Posix]));
-        assert!(!is_read_only_shell_in("ls #'\ntouch pwned #'", &[ShellDialect::Posix]));
+        assert!(!is_read_only_shell_in(&here(), "ls #'\ntouch pwned #'", &[ShellDialect::Posix]));
         assert!(blacklisted_shell_reason("echo x #'\nrm -rf / #'").is_some());
         // bash drops the comment, so the line after it is a command of its own.
         assert_eq!(parse_chain("ls # a 'quote\ncat x"), vec!["ls".to_string(), "cat x".to_string()]);
@@ -1063,13 +1135,13 @@ mod tests {
             "cat {~,x}/.ssh/id_rsa",
             "cat {/,}etc/passwd",
         ] {
-            assert!(!is_read_only_shell_in(cmd, posix), "must not count as read-only: {cmd}");
+            assert!(!is_read_only_shell_in(&here(), cmd, posix), "must not count as read-only: {cmd}");
         }
         for cmd in ["git log --oneline -n 5", "cut -d/ -f1 paths.txt", "grep -rn TODO src"] {
-            assert!(is_read_only_shell_in(cmd, posix), "should count as read-only: {cmd}");
+            assert!(is_read_only_shell_in(&here(), cmd, posix), "should count as read-only: {cmd}");
         }
         // cmd.exe runs `git grep -e x;echo -Orm` as one git command.
-        assert!(!is_read_only_shell_in("git grep -e x;echo -Orm", &[ShellDialect::Cmd]));
+        assert!(!is_read_only_shell_in(&here(), "git grep -e x;echo -Orm", &[ShellDialect::Cmd]));
     }
 
     #[test]
@@ -1107,15 +1179,15 @@ mod tests {
     fn cmd_exe_is_judged_by_its_own_quoting() {
         let cmd = &[ShellDialect::Cmd];
         let rules = RuleSet { shell_prefixes: vec!["npm test".into()], ..Default::default() };
-        assert!(!is_read_only_shell_in("echo '& powershell -c calc &'", cmd));
+        assert!(!is_read_only_shell_in(&here(), "echo '& powershell -c calc &'", cmd));
         assert!(!rules.shell_allows_in("npm test '& calc'", cmd));
-        assert!(!is_read_only_shell_in("echo hi '> C:/x'", cmd));
-        assert!(!is_read_only_shell_in("echo ^& calc", cmd));
-        assert!(!is_read_only_shell_in("echo %USERPROFILE%", cmd));
+        assert!(!is_read_only_shell_in(&here(), "echo hi '> C:/x'", cmd));
+        assert!(!is_read_only_shell_in(&here(), "echo ^& calc", cmd));
+        assert!(!is_read_only_shell_in(&here(), "echo %USERPROFILE%", cmd));
         assert!(blacklisted_shell_reason("echo '& rm -rf build &'").is_some());
         // Unknown on Windows means both readings must pass.
-        assert!(!is_read_only_shell_in("echo '& calc &'", &[ShellDialect::Posix, ShellDialect::Cmd]));
-        assert!(is_read_only_shell_in("echo '& calc &'", &[ShellDialect::Posix]));
+        assert!(!is_read_only_shell_in(&here(), "echo '& calc &'", &[ShellDialect::Posix, ShellDialect::Cmd]));
+        assert!(is_read_only_shell_in(&here(), "echo '& calc &'", &[ShellDialect::Posix]));
     }
 
     #[test]
@@ -1215,6 +1287,16 @@ mod tests {
             "git clean -df",
             "git branch -D old-feature",
             "git branch --delete --force old-feature",
+            "git checkout .",
+            "git checkout -- .",
+            "git checkout -- src",
+            "git restore .",
+            "git restore --source=HEAD~1 .",
+            "git checkout -f main",
+            "git stash drop",
+            "git stash clear",
+            "git push origin main",
+            "git push origin feature",
             "echo hi && rm -rf /tmp/x",
         ] {
             assert!(blacklisted_shell_reason(cmd).is_some(), "should be caught: {cmd}");
@@ -1227,15 +1309,134 @@ mod tests {
             "rm file.txt",
             "rm -f file.txt",
             "rmdir empty_dir",
-            "git push origin main",
+            "git push --dry-run origin main",
+            "git push -n origin main",
             "git reset --mixed",
             "git reset HEAD~1",
             "git clean -n",
             "git clean --dry-run",
             "git branch -d merged-feature",
             "git branch feature",
+            "git checkout main",
+            "git checkout -b feature",
+            "git checkout HEAD~1",
+            "git restore --staged src",
+            "git stash list",
+            "git stash show",
+            "git log --oneline -5",
+            "git status",
+            "git diff HEAD~1",
+            "git show HEAD",
+            "git rev-parse HEAD",
             "cargo test",
             "npm run build",
+        ] {
+            assert!(blacklisted_shell_reason(cmd).is_none(), "should not be caught: {cmd}");
+        }
+    }
+
+    #[test]
+    fn planning_resolves_an_operand_through_a_symlink_before_vouching_for_it() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("id_rsa"), "PRIVATE KEY").unwrap();
+        let project = project();
+        // A link that reads as relative, so the lexical guard sees nothing.
+        std::os::unix::fs::symlink(outside.path().join("id_rsa"), project.path().join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), project.path().join("outdir")).unwrap();
+        let root = project.path();
+        let posix = &[ShellDialect::Posix];
+
+        assert!(!is_read_only_shell_in(root, "cat link", posix), "a symlink to a private key is not a project file");
+        assert!(!is_read_only_shell_in(root, "cat link/id_rsa", posix));
+        assert!(!is_read_only_shell_in(root, "grep -r secret outdir", posix), "the folder link is the same escape");
+        assert!(!is_read_only_shell_in(root, "head -20 outdir/id_rsa", posix));
+        // A link that stays inside is no reason to ask, or the file tools would
+        // refuse plain paths too.
+        std::os::unix::fs::symlink(project.path().join("src/main.rs"), project.path().join("inside")).unwrap();
+        assert!(is_read_only_shell_in(root, "cat inside", posix));
+        assert!(is_read_only_shell_in(root, "cat src/main.rs", posix));
+        assert!(is_read_only_shell_in(root, "ls -la", posix), "an option takes no path");
+        // An ordinary read still needs no card.
+        assert!(is_read_only_shell_in(&here(), "cat src/main.rs", posix));
+    }
+
+    #[test]
+    fn find_destructive_options_are_refused_in_planning_however_they_are_spelled() {
+        let posix = &[ShellDialect::Posix];
+        // `-delete`, `-exec`, ... are single-dash only: this find rejects the
+        // `--` spelling outright, so the guard is not allowed to rely on it.
+        for cmd in [
+            "find . -delete",
+            "find . -name '*.tmp' -de''lete",
+            "find . -exec rm {} ;",
+            "find . -execdir rm {} ;",
+            "find . -ok rm {} ;",
+            "find . -fprint out.txt",
+            "find . -fprint0 out.txt",
+            "find . -fprintf out.txt %p",
+            "find . -fls out.txt",
+        ] {
+            assert!(!is_read_only_shell_in(&here(), cmd, posix), "must not count as read-only: {cmd}");
+        }
+        for cmd in [
+            "find . -name '*.rs'",
+            "find src -type f",
+            // The `-f` of `-fprint` is not a match of it, and `-print` is not
+            // `-fprint`: the guard has to be about the whole flag.
+            "find . -type f -print",
+            "find . -name Cargo.toml",
+            "find . -newer setup.rs -print",
+        ] {
+            assert!(is_read_only_shell_in(&here(), cmd, posix), "should count as read-only: {cmd}");
+        }
+    }
+
+    #[test]
+    fn the_destructive_git_arm_spells_out_what_snapshots_cannot_restore() {
+        for cmd in [
+            "git checkout .",
+            "git checkout -- .",
+            "git checkout ./",
+            "git checkout --",
+            "git checkout -- src",
+            // The `--` makes it a pathspec checkout, which overwrites the worktree.
+            "git checkout feature -- src/main.rs",
+            "git checkout -f main",
+            "git checkout --force feature",
+            "git restore .",
+            "git restore -- .",
+            "git restore --worktree .",
+            "git restore --staged --worktree .",
+            "git restore --source=HEAD~1 .",
+            "git switch --discard-changes feature",
+            "git stash drop",
+            "git stash drop stash@{0}",
+            "git stash clear",
+            "git push origin main",
+            "git push origin feature",
+            "git -C . push origin main",
+            // The option-skip loop and the abbreviation rule still apply.
+            "git -c core.sshCommand=x push origin main",
+            "git push --dry-run --force origin main",
+        ] {
+            let caught = blacklisted_shell_reason(cmd);
+            assert!(caught.is_some(), "should be caught: {cmd}");
+        }
+        for cmd in [
+            "git status",
+            "git log --oneline -5",
+            "git diff HEAD~1",
+            "git show HEAD",
+            "git rev-parse HEAD",
+            "git checkout main",
+            "git checkout -b feature",
+            "git checkout HEAD~1",
+            "git restore --staged src",
+            "git stash list",
+            "git stash show",
+            "git push --dry-run origin main",
+            "git push -n origin main",
+            "git remote -v",
         ] {
             assert!(blacklisted_shell_reason(cmd).is_none(), "should not be caught: {cmd}");
         }
