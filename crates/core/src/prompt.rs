@@ -69,6 +69,21 @@ pub const TOOL_CALL_RULES: &str = "CALLING TOOLS:\n\
      - When a call fails, do not explain the error: make a corrected call, fixing the path, name or argument it points to.\n\
      - Content you write to a file is its exact text.";
 
+/// What to do when work is going to take a while.
+///
+/// Without this the model started a command in the background and then waited
+/// for it: it would call a second tool that blocked on the first, and the turn
+/// sat there exactly as long as the long job it had just made asynchronous —
+/// the whole point of the background, spent. Reported live: moving the command
+/// to the background by hand did not help either, because the model was never
+/// told that the work was now on its own, only that it existed.
+pub const BACKGROUND_WORK_RULES: &str = "WORK THAT TAKES A WHILE:\n\
+     - A server, a watcher, a build or anything else that runs for minutes goes in the background: background:true, which returns at once with a task_id.\n\
+     - When a call comes back saying the work is now a background task, the turn is over. Say what you started and stop. A notice arrives when it exits, and you will be told.\n\
+     - Do not call another tool to wait for it, and do not re-run the command in the foreground. Nothing is gained: the work is already running, and a second call that blocks on it puts the turn back to waiting exactly as long as the job it made asynchronous.\n\
+     - The same is true when the user moves a command to the background by hand. It keeps running without you. End the turn; you will be told when it ends.\n\
+     - To check on one, read the task by its id once if you must, but do not poll it in a loop and do not wait for it.";
+
 /// What a subagent reported is a claim, not a fact: it comes back to the parent
 /// as an unverified report, and acting on it unchecked is how a wrong reading
 /// of a file becomes a change nobody looked at.
@@ -170,6 +185,11 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
             .to_string(),
     );
     sections.push(TOOL_CALL_RULES.to_string());
+    // What to do with work that takes minutes is the one thing a model gets
+    // wrong by default: it starts the job in the background and then waits for
+    // it, which puts the turn back to exactly as long as the job it made
+    // asynchronous.
+    sections.push(BACKGROUND_WORK_RULES.to_string());
     // A subagent's answer crosses back into this conversation as a report, so
     // the rule about it belongs with the rules about tool results.
     if config.subagents_available {
@@ -196,6 +216,19 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_prompt_says_what_to_do_with_work_that_takes_a_while() {
+        // The model waits for a job it made asynchronous, which is the same as
+        // not having made it: the turn sits there exactly as long as the long
+        // build it had just made asynchronous. The rule belongs in the prompt,
+        // where behaviour between calls is decided, and not only on the tool
+        // that starts the work.
+        let prompt = build_system_prompt(&SystemPromptConfig::new());
+        assert!(prompt.contains("the turn is over"), "{prompt}");
+        assert!(prompt.contains("do not poll"), "{prompt}");
+        assert!(prompt.contains("moves a command to the background by hand"), "and for the case where the user does it instead: {prompt}");
+    }
 
     #[test]
     fn a_voice_with_emoji_drops_the_rule_against_them() {

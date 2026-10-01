@@ -552,12 +552,20 @@ impl App {
             CostLedger::turns_phrase(self.cost.priced_turns())
         ));
         for row in self.cost.by_provider() {
-            self.chat.push_system(&format!(
-                "  {} \u{b7} ${} over {}",
-                row.name,
-                CostLedger::format_amount(row.total),
-                CostLedger::turns_phrase(row.turns)
-            ));
+            // A model the backend prices at nothing has no bill to break down:
+            // saying "$0.00 over 12 turns" reads as an empty account rather than
+            // as one that does not exist.
+            let line = if row.total == 0.0 {
+                format!("  {} \u{b7} free", row.name)
+            } else {
+                format!(
+                    "  {} \u{b7} ${} over {}",
+                    row.name,
+                    CostLedger::format_amount(row.total),
+                    CostLedger::turns_phrase(row.turns)
+                )
+            };
+            self.chat.push_system(&line);
         }
     }
 

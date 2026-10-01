@@ -268,11 +268,15 @@ impl GoalLedger {
         // run is not a free one, and a fabricated $0.00 would be worse than
         // saying nothing.
         if let Some(total) = self.cost.total() {
-            out.push(format!(
-                "Cost: ${} over {}",
-                flashagent_core::CostLedger::format_amount(total),
-                flashagent_core::CostLedger::turns_phrase(self.cost.priced_turns())
-            ));
+            out.push(if total == 0.0 {
+                "Cost: free \u{b7} the backend prices every turn at nothing".to_string()
+            } else {
+                format!(
+                    "Cost: ${} over {}",
+                    flashagent_core::CostLedger::format_amount(total),
+                    flashagent_core::CostLedger::turns_phrase(self.cost.priced_turns())
+                )
+            });
         }
 
         let touched = self.written.len() + self.edited.len();
