@@ -251,6 +251,10 @@ impl Decoder {
                     out.push(Err(self.malformed.message()));
                     return out;
                 }
+                // Dropped for tolerance, which is what makes this necessary: the
+                // frame that said why the answer ended is among the ones that may
+                // be lost, so a `[DONE]` after it cannot be called a clean stop.
+                self.parser.note_lost_frame();
                 continue;
             };
             self.malformed.ok();
@@ -815,6 +819,48 @@ mod tests {
     fn body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: &TurnOptions) -> serde_json::Value {
         let learned = client.learned.read().clone();
         body_at(client, messages, tools, options, Fields::All, &learned)
+    }
+
+    #[test]
+    fn a_lost_finish_frame_over_the_openai_path_is_not_a_clean_stop() {
+        // This reader parses payloads itself and never goes through
+        // `ChunkParser::feed`, so the frame that says why the answer ended is
+        // lost the same way but has to be noticed here. OpenRouter speaks this
+        // protocol, so a gap in this reader is a gap in the real thing.
+        let mut d = Decoder::default();
+        let events = d.payloads(vec![
+            r#"{"choices":[{"delta":{"content":"part one"}}]}"#.into(),
+            "{ this frame carries the finish reason but is not json".into(),
+            "[DONE]".into(),
+        ]);
+        let all: Vec<LlmEvent> = events.into_iter().map(|e| e.expect("no error expected")).collect();
+        assert!(
+            !all.iter().any(|e| matches!(e, LlmEvent::Done(FinishReason::Stop))),
+            "a clean stop after the finish frame was lost: {all:?}"
+        );
+        // The text that did arrive is still the user's; only the ending is unproven.
+        assert!(
+            all.iter().any(|e| matches!(e, LlmEvent::TextDelta(t) if t.contains("part one"))),
+            "the readable part of the answer was thrown away with the frame: {all:?}"
+        );
+    }
+
+    #[test]
+    fn keepalive_noise_on_the_openai_path_still_finishes_cleanly() {
+        // The other half of the tolerance: noise followed by more real frames is
+        // a gateway keeping the connection warm, not a lost end.
+        let mut d = Decoder::default();
+        let events = d.payloads(vec![
+            r#"{"choices":[{"delta":{"content":"a"}}]}"#.into(),
+            "ping".into(),
+            r#"{"choices":[{"delta":{"content":"b"},"finish_reason":"stop"}]}"#.into(),
+            "[DONE]".into(),
+        ]);
+        let all: Vec<LlmEvent> = events.into_iter().map(|e| e.expect("no error expected")).collect();
+        assert!(
+            all.iter().any(|e| matches!(e, LlmEvent::Done(FinishReason::Stop))),
+            "keepalive noise cost the stream its clean finish: {all:?}"
+        );
     }
 
     #[test]

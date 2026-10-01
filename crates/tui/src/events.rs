@@ -582,6 +582,17 @@ impl App {
                 );
                 self.renderer.request_reprint();
             }
+            // Nothing was saved: the summarizing failed. The promise
+            // CompactionStarted made is withdrawn here, in the transcript
+            // where it was made, because the window is still full and the next
+            // steps go on filling it.
+            LoopEvent::Compacted { saved: 0 } => {
+                self.chat.push_line(
+                    flashagent_tui::LineKind::System,
+                    "Could not summarize this task \u{b7} the conversation is unchanged and the window is still full",
+                );
+                self.renderer.request_reprint();
+            }
             // The window was nearly full; the work goes on. Said on the status line,
             // not in the transcript: nothing in the conversation changed for the reader.
             LoopEvent::Compacted { saved } => {

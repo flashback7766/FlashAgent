@@ -109,12 +109,15 @@ pub enum LoopEvent {
         result: Option<String>,
     },
     Usage(flashagent_llm::Usage),
-    /// The history was shortened between two steps, by roughly this many tokens.
-    Compacted { saved: usize },
     /// A running turn is about to spend a request on summarizing its own
     /// history. It happens between two steps and takes long enough that the
     /// silence would otherwise read as a hang; the turn goes on afterwards.
     CompactionStarted,
+    /// The outcome of that summarizing, mid-turn. `saved` of 0 means it did
+    /// not happen: the history is unchanged and the window is still full, so
+    /// the promise of [`LoopEvent::CompactionStarted`] has to be withdrawn
+    /// rather than left standing.
+    Compacted { saved: usize },
     SteeringInjected(String),
     StepStarted {
         /// 1-based.
@@ -525,7 +528,13 @@ let mut report_nudges: usize = 0;
                         transient.clear();
                         compact_not_before = step + 1;
                     }
-                    Compaction::Failed => compact_not_before = step + COMPACT_RETRY_AFTER,
+                    // Said, not just retried: the window this was for keeps
+                    // filling, so the next request is likelier to fail for the
+                    // same reason the summary did.
+                    Compaction::Failed => {
+                        events(LoopEvent::Compacted { saved: 0 });
+                        compact_not_before = step + COMPACT_RETRY_AFTER;
+                    }
                     Compaction::NotNeeded => {}
                 }
             }
@@ -589,7 +598,10 @@ let mut report_nudges: usize = 0;
                         // replace a file with half its content. As when the stream breaks,
                         // the half-written call is dropped unrun.
                         None if !finished && indexed_calls.iter().any(|(_, c)| !flashagent_llm::is_complete_json(&c.args_json)) => {
-                            keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
+                            // The words held back to spot a repeated start are part of
+                        // what the user is told was cut short.
+                        drain_held(&mut held, &prefix, &known_tools, &mut scanner, &mut assistant_text, &mut text_calls, &mut events);
+                        keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
                             history.sync();
                             let source = LlmError::Stream("the server closed the connection in the middle of a tool call, which was not run".into());
                             return Err(LoopError::Llm { source, history: history.into_shared().snapshot() });
@@ -598,6 +610,7 @@ let mut report_nudges: usize = 0;
                     },
                     _ = &mut cancelled => {
                         // Keep what the user already saw; half-streamed tool calls are dropped unrun.
+                        drain_held(&mut held, &prefix, &known_tools, &mut scanner, &mut assistant_text, &mut text_calls, &mut events);
                         keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
                         history.sync();
                         events(LoopEvent::Done(DoneReason::Cancelled));
@@ -607,6 +620,7 @@ let mut report_nudges: usize = 0;
                 let item = match item {
                     Ok(item) => item,
                     Err(source) => {
+                        drain_held(&mut held, &prefix, &known_tools, &mut scanner, &mut assistant_text, &mut text_calls, &mut events);
                         keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
                         history.sync();
                         return Err(LoopError::Llm { source, history: history.into_shared().snapshot() });
@@ -668,11 +682,7 @@ let mut report_nudges: usize = 0;
                     }
                 }
             }
-            if let Some(buf) = held.take() {
-                for ev in scanner.feed(strip_repeated_tail(&prefix, &buf)) {
-                    absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
-                }
-            }
+            drain_held(&mut held, &prefix, &known_tools, &mut scanner, &mut assistant_text, &mut text_calls, &mut events);
             for ev in scanner.finish() {
                 absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
             }
@@ -827,6 +837,25 @@ let mut report_nudges: usize = 0;
                         transient = history.pop().into_iter().chain([ChatMessage::user(STALL_NUDGE)]).collect();
                         continue;
                     }
+                }
+
+                // Nothing to show and nothing to retry: the nudge above was
+                // already spent, so the turn really produced nothing. Saying
+                // `Completed` would flash a turn end over an empty composer,
+                // and the empty assistant message now in the history is one
+                // strict templates reject on the next request.
+                if assistant_text.trim().is_empty() {
+                    let last_empty = history
+                        .last()
+                        .is_some_and(|m| m.role == Role::Assistant && m.content.trim().is_empty() && m.tool_calls.is_empty());
+                    if last_empty {
+                        history.pop();
+                    }
+                    events(LoopEvent::Done(DoneReason::Failed));
+                    let source = LlmError::Stream(
+                        "the model ended the turn without saying anything, twice in a row; nothing was answered".to_string(),
+                    );
+                    return Err(LoopError::Llm { source, history: history.into_shared().snapshot() });
                 }
 
                 events(LoopEvent::Done(DoneReason::Completed));
@@ -1290,6 +1319,25 @@ fn finishes_when_stopped(tool: &str) -> bool {
 
 const TRUNCATED_RESULT: &str = "not executed: your output hit the token limit while writing this call, so its arguments may be incomplete. Send the call again, shorter if needed (e.g. split a large write).";
 
+/// A continuation's first words are held back to see whether the new answer
+/// repeats them. On a path that ends the turn there is no more text coming, so
+/// what is held is not a repeated start: it is the answer, and dropping it
+/// loses the part of it the user has not been shown.
+fn drain_held(
+    held: &mut Option<String>,
+    prefix: &str,
+    known_tools: &HashSet<String>,
+    scanner: &mut TextToolScanner,
+    text: &mut String,
+    calls: &mut Vec<ToolCall>,
+    events: &mut impl FnMut(LoopEvent),
+) {
+    let Some(buf) = held.take() else { return };
+    for ev in scanner.feed(strip_repeated_tail(prefix, &buf)) {
+        absorb_scanned(ev, known_tools, text, calls, events);
+    }
+}
+
 fn answer_cancelled(history: &mut Vec<ChatMessage>, pending: &[ToolCall]) {
     for call in pending {
         history.push(ChatMessage::tool_result(call.id.clone(), CANCELLED_RESULT));
@@ -1516,6 +1564,29 @@ mod tests {
         (history.snapshot(), done)
     }
 
+    /// As [`run_loop`], for a turn that is expected to fail: the history it kept
+    /// is what the caller needs to see, and it is only on the error.
+    fn run_loop_result(
+        l: &AgentLoop,
+        llm: &dyn LlmSource,
+        tools: &dyn ToolExec,
+        mut on_event: impl FnMut(LoopEvent),
+    ) -> Result<(Vec<ChatMessage>, DoneReason), LoopError> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(l.run(llm, tools, SharedHistory::new(vec![ChatMessage::user("x")]), &mut on_event))
+            .map(|(h, done)| (h.snapshot(), done))
+    }
+
+    /// A turn that streams reasoning and nothing else: no answer to show.
+    fn thinking_turn() -> MockTurn {
+        MockTurn {
+            events: vec![
+                Ok(LlmEvent::ReasoningDelta("Thinking about it.".into())),
+                Ok(LlmEvent::Done(FinishReason::Stop)),
+            ],
+        }
+    }
+
     #[test]
     fn plain_text_completes_in_one_turn() {
         let llm = MockLlm { turns: std::sync::Mutex::new(vec![text_turn("Hello!")]) };
@@ -1527,6 +1598,84 @@ mod tests {
         assert!(evs.lock().unwrap().contains(&LoopEvent::TurnDelta("Hello!".into())));
         assert_eq!(history.len(), 2);
         assert!(tools.calls.lock().unwrap().is_empty());
+    }
+
+    /// A turn that says nothing twice is not an answer, and reporting it as one
+    /// leaves the user with a cleared composer, no text and no error. The retry
+    /// is still spent first, and the empty assistant message is not kept: a
+    /// strict template rejects it on the next request.
+    #[test]
+    fn a_turn_that_answers_nothing_twice_is_reported_as_a_failure_and_keeps_no_empty_message() {
+        let llm = MockLlm { turns: std::sync::Mutex::new(vec![thinking_turn(), thinking_turn()]) };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let evs = std::sync::Mutex::new(Vec::new());
+        let err = run_loop_result(&l, &llm, &tools, |e| evs.lock().unwrap().push(e)).unwrap_err();
+        let source = err.to_string();
+        assert!(source.contains("without saying anything"), "{source}");
+        let history = err.into_history();
+        assert!(
+            !history.iter().any(|m| m.role == Role::Assistant && m.content.trim().is_empty()),
+            "an empty assistant message is not protocol-valid to send again: {history:?}"
+        );
+        assert!(history.iter().all(|m| m.role != Role::Assistant), "nothing was answered, so nothing is stored as an answer: {history:?}");
+    }
+
+    /// The words held back to spot a continuation repeating itself are part of
+    /// what the user is shown when the turn is cut short.
+    #[test]
+    fn the_words_held_back_from_a_continuation_survive_a_broken_stream() {
+        let held = "The file has three lines and the third one is cut off right here";
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![
+                // Cut off at the output limit, so the next turn continues it.
+                MockTurn {
+                    events: vec![
+                        Ok(LlmEvent::TextDelta("Reading the file.".into())),
+                        Ok(LlmEvent::Done(FinishReason::Length)),
+                    ],
+                },
+                // The continuation: short enough to still be held back when the
+                // stream breaks under it.
+                MockTurn {
+                    events: vec![
+                        Ok(LlmEvent::TextDelta(held.to_string())),
+                        Err(LlmError::Stream("the stream broke".into())),
+                    ],
+                },
+            ]),
+        };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let err = run_loop_result(&l, &llm, &tools, |_| {}).unwrap_err();
+        let history = err.into_history();
+        let said = history.iter().filter(|m| m.role == Role::Assistant).map(|m| m.content.as_str()).collect::<Vec<_>>().join("");
+        assert!(said.contains(held), "the held prefix is dropped from an answer the user is told was cut off: {said:?}");
+    }
+
+    /// A summarizing that failed is announced as having been promised and never
+    /// done: the window it was for is still full and still filling.
+    #[test]
+    fn a_failed_mid_turn_compaction_is_reported_and_not_only_retried() {
+        let compactor = Arc::new(ScriptedCompactor {
+            answers: std::sync::Mutex::new(vec![Compaction::Failed]),
+            asked: Default::default(),
+        });
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false))).with_compactor(compactor.clone());
+        let llm = RecordingLlm::new(vec![tool_turn("read_file", "c1"), tool_turn("read_file", "c2"), tool_turn("read_file", "c3"), text_turn("Done.")]);
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let (_history, done) = run_loop(&l, &llm, &ScriptedTools::new(vec![]), move |e| {
+            sink.lock().unwrap().push(e);
+        });
+        assert!(matches!(done, DoneReason::Completed));
+        let events = events.lock().unwrap();
+        let announced = events.iter().position(|e| matches!(e, LoopEvent::CompactionStarted)).expect("it was announced");
+        let outcome = events[announced..].iter().find_map(|e| match e {
+            LoopEvent::Compacted { saved } => Some(*saved),
+            _ => None,
+        });
+        assert_eq!(outcome, Some(0), "the promise is withdrawn, not left standing: {events:?}");
     }
 
     #[test]
