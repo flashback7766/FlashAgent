@@ -70,6 +70,7 @@ struct SideRequests {
     answers: Mutex<Vec<(String, String)>>,
     /// Lets a scenario act while the model is still thinking.
     turn_delay: Mutex<Option<Duration>>,
+    listing_delay: Mutex<Option<Duration>>,
     cloud: std::sync::atomic::AtomicBool,
     released: std::sync::atomic::AtomicBool,
 }
@@ -115,6 +116,12 @@ impl MockServer {
     /// Lets the scenario press a key that must land before the answer.
     pub fn delay_turns(&self, delay: Duration) {
         *self.side.turn_delay.lock().unwrap() = Some(delay);
+    }
+
+    /// A listing that takes its time before it answers, the way a cloud API does
+    /// when it is far away and has hundreds of models to page through.
+    pub fn slow_listing(&self, delay: Duration) {
+        *self.side.listing_delay.lock().unwrap() = Some(delay);
     }
 
     /// Instead of "ok".
@@ -214,6 +221,9 @@ fn serve(
 
     let mut out = stream;
     if method == "GET" {
+        if let Some(delay) = *side.listing_delay.lock().unwrap() {
+            std::thread::sleep(delay);
+        }
         return if path.ends_with("/api/v1/models") {
             match v1_models.lock().unwrap().clone() {
                 Some(body) => json(&mut out, &body),

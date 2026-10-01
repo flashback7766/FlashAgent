@@ -65,7 +65,7 @@ Models and data stay on the machine by default. What FlashAgent sends out:
 - Limits: steps, generated tokens and time, all set in Settings and unlimited by default; dangerous commands are refused outright. A question to the user waits two minutes, then the agent picks the most reasonable answer itself.
 - A live plan on screen and a report at the end: done, left out, needs checking by hand.
 - Files are snapshotted before the run and committed at milestones.
-- Subagents: roles chosen per task, a limit on how many run at once, the parent reviews their work, they can message each other; the UI shows them as a live tree with tabs.
+- Subagents: roles chosen per task, as many at once as the work needs, the parent reviews their work, they can message each other; the UI shows them as a live tree with tabs.
 
 ## 8. Memory
 

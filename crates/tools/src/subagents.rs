@@ -73,7 +73,7 @@ pub fn agent_tools(
     let (outbound, done) = tokio::sync::mpsc::unbounded_channel();
     let mailbox = Arc::new(flashagent_core::Mailbox::new(outbound.clone()));
     let factory = Arc::new(BuiltinSubagentFactory::with_mailbox(builtin.clone(), state.clone(), mailbox.clone()));
-    let host = flashagent_core::SubagentHost::with_shared(llm, factory, events, outbound);
+    let host = flashagent_core::SubagentHost::with_shared(llm, factory, events, outbound, mailbox.clone());
     // The parent gets the two tools that only make sense at the top: recording
     // what it made of a report, and writing to whoever is running.
     let review = host.review_tool();

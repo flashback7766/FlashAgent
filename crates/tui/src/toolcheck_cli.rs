@@ -75,10 +75,18 @@ pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
 }
 
 /// `--tool-test`, for the configured model or every listed one. Exits non-zero
-/// when a model cannot drive tools, so it works as a check.
-pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool) -> i32 {
+/// when a model cannot drive tools, so it works as a check. `only` narrows it
+/// to named scenarios; `json` is where the machine-readable copy goes.
+pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool, only: Vec<String>, json: Option<String>) -> i32 {
     let timeout = std::time::Duration::from_secs(120);
     let endpoint = config.endpoint();
+    if let Some(want) = only.first() {
+        if !flashagent_core::toolcheck::scenarios().iter().any(|s| s.key == *want) {
+            let known: Vec<&str> = flashagent_core::toolcheck::scenarios().iter().map(|s| s.key).collect();
+            eprintln!("No scenario called {want}. The ones there are: {}", known.join(", "));
+            return 2;
+        }
+    }
     let mut models = vec![config.active_profile().model.clone()];
     if all_models {
         let probe = BackendSource(flashagent_llm::Client::new(endpoint.clone(), &models[0]));
@@ -102,10 +110,18 @@ pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool) -> 
     for model in &models {
         println!("\n{model}");
         let source = client_for(&endpoint, model).await;
-        let report = flashagent_core::toolcheck::check_model(&source, model, timeout).await;
+        let full = flashagent_core::toolcheck::check_model(&source, model, timeout).await;
+        // Narrowed after the run, so a check that names no scenario still costs
+        // the same as one that names several: the work is the model's, not ours.
+        let report = if only.is_empty() {
+            full
+        } else {
+            full.only(&only)
+        };
         for line in report.lines() {
             println!("{line}");
         }
+        println!("  {} out, {:.1}s", report.total_tokens(), report.total_secs());
         reports.push(report);
     }
 
@@ -115,10 +131,12 @@ pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool) -> 
             println!("{}", r.markdown_row());
         }
     }
-    let json: Vec<_> = reports.iter().map(|r| r.to_json()).collect();
-    if let Ok(path) = std::env::var("FLASHAGENT_TOOL_TEST_JSON") {
+    let payload: Vec<_> = reports.iter().map(|r| r.to_json()).collect();
+    // The environment variable still works; the flag is how it is done now.
+    let path = json.or_else(|| std::env::var("FLASHAGENT_TOOL_TEST_JSON").ok());
+    if let Some(path) = path {
         // Raw results, so a published table can be checked.
-        if let Ok(text) = serde_json::to_string_pretty(&json) {
+        if let Ok(text) = serde_json::to_string_pretty(&payload) {
             let _ = std::fs::write(&path, text);
             println!("\nRaw results written to {path}");
         }

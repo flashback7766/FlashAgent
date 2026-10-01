@@ -106,6 +106,10 @@ pub(crate) struct FrameState<'a> {
     pub(crate) agent_expanded: &'a [&'a str],
     /// The prose a phase replaced, by id.
     pub(crate) agent_details: &'a std::collections::HashMap<String, String>,
+    /// Background commands still running, one line each: they belong in the same
+    /// box as the subagents, because both are work under way that the transcript
+    /// does not show.
+    pub(crate) background_rows: &'a [String],
     pub(crate) queued_commands: &'a [String],
     /// Background commands still running.
     pub(crate) background_tasks: usize,
@@ -128,6 +132,126 @@ enum CardKey {
 const UNFOLD_MS: u64 = 180;
 const BORDER: Rgb = Rgb(95, 90, 85);
 const BORDER_ESC: &str = "\x1b[38;2;95;90;85m";
+
+/// The rows for the box that sits above the composer: the subagents under way,
+/// the background commands under way, and the edges that say this is not the
+/// conversation. Empty when nothing is running, so an idle screen has no box
+/// standing there with nothing in it.
+///
+/// Pure, so the shape of the box can be checked without a terminal.
+pub(crate) fn work_box(
+    agent_rows: &[(String, String)],
+    expanded: &[&str],
+    details: &std::collections::HashMap<String, String>,
+    background_rows: &[String],
+    width: usize,
+) -> Vec<(LineKind, String)> {
+    let mut body: Vec<(LineKind, String)> = Vec::new();
+    for (id, line) in agent_rows {
+        body.push((LineKind::Tool, format!("\x1b[38;2;150;155;170m{line}\x1b[0m")));
+        if expanded.contains(&id.as_str()) {
+            if let Some(detail) = details.get(id) {
+                body.push((LineKind::Tool, format!("\x1b[38;2;120;125;140m{detail}\x1b[0m")));
+            }
+        }
+    }
+    for row in background_rows {
+        body.push((LineKind::Tool, format!("\x1b[38;2;150;155;170m  {row}\x1b[0m")));
+    }
+    if body.is_empty() {
+        return Vec::new();
+    }
+    let edge = "\x1b[38;2;100;95;90m";
+    let box_w = width.saturating_sub(2);
+    // The title is cut to the room the top edge actually has. A title longer than
+    // the box made the top edge wider than the window, which pushed the whole
+    // layout one row over: the box has to close, so the words give way.
+    //
+    // Three fixed columns go to `╭`, the `─` that follows it, and `╮`; what is
+    // left is the title and the run of dashes that closes the edge.
+    let room = box_w.saturating_sub(3);
+    let full = " subagents & background ";
+    let title: String = if full.chars().count() <= room {
+        full.to_string()
+    } else if " work ".chars().count() <= room {
+        " work ".to_string()
+    } else {
+        format!(" {}\u{2026}", full.trim().chars().take(room.saturating_sub(1)).collect::<String>())
+    };
+    let dashes = room.saturating_sub(visible_width(&title));
+    let mut out = vec![(
+        LineKind::Tool,
+        format!("{edge}\u{256d}\u{2500}{title}{edge}{}\u{256e}\x1b[0m", "\u{2500}".repeat(dashes)),
+    )];
+    out.extend(body);
+    out.push((
+        LineKind::Tool,
+        format!("{edge}\u{2570}{}\u{256f}\x1b[0m", "\u{2500}".repeat(box_w.saturating_sub(2))),
+    ));
+    out
+}
+
+/// The box's own top and bottom edges. A click has to skip them to land on the
+/// row it belongs to, so the caller needs the count rather than guessing.
+pub(crate) const WORK_BOX_EDGES: usize = 2;
+
+#[cfg(test)]
+mod work_box_tests {
+    use super::*;
+
+    fn plain(rows: &[(LineKind, String)]) -> Vec<String> {
+        rows.iter().map(|(_, t)| flashagent_tui::strip_ansi(t)).collect()
+    }
+
+    fn agent(id: &str, line: &str) -> (String, String) {
+        (id.to_string(), line.to_string())
+    }
+
+    #[test]
+    fn an_idle_screen_has_no_box_at_all() {
+        assert!(work_box(&[], &[], &Default::default(), &[], 80).is_empty(), "an empty box would stand there saying nothing");
+    }
+
+    #[test]
+    fn subagents_and_background_commands_share_one_box() {
+        let rows = work_box(
+            &[agent("sub1", "  \u{25b8} researcher \u{b7} tooling grep")],
+            &[],
+            &Default::default(),
+            &["  \u{25b8} cargo test \u{b7} 12s".to_string()],
+            80,
+        );
+        let text = plain(&rows);
+        assert_eq!(text.len(), 4, "two edges around two rows: {text:?}");
+        assert!(text[0].contains('\u{256d}') && text[0].contains('\u{256e}'), "the top edge is closed: {text:?}");
+        assert!(text[3].contains('\u{2570}') && text[3].contains('\u{256f}'), "the bottom edge is closed: {text:?}");
+        assert!(text[1].contains("researcher"), "the child is in the box: {text:?}");
+        assert!(text[2].contains("cargo test"), "and the background command beside it: {text:?}");
+        assert_eq!(text[0].chars().count(), text[3].chars().count(), "the edges are the same width: {text:?}");
+        assert_eq!(text[0].chars().count(), 78, "the window less its two columns, like the composer: {text:?}");
+    }
+
+    #[test]
+    fn an_opened_child_adds_its_detail_inside_the_same_box() {
+        let details: std::collections::HashMap<String, String> =
+            [("sub1".to_string(), "      grepping for the token tracker".to_string())].into_iter().collect();
+        let rows = work_box(&[agent("sub1", "  \u{25b8} researcher")], &["sub1"], &details, &[], 80);
+        let text = plain(&rows);
+        assert!(text[2].contains("grepping for the token tracker"), "{text:?}");
+    }
+
+    #[test]
+    fn the_box_edges_stay_the_width_of_the_window() {
+        for width in [20usize, 40, 80, 200] {
+            let rows = work_box(&[agent("sub1", "  \u{25b8} coder")], &[], &Default::default(), &[], width);
+            let text = plain(&rows);
+            let top = text[0].chars().count();
+            let bottom = text[2].chars().count();
+            assert_eq!(top, bottom, "the box must close at {width}: {text:?}");
+            assert!(top <= width - 2, "the box must fit the window, not stick out of it: {width}: {text:?}");
+        }
+    }
+}
 
 impl Renderer {
     pub(crate) fn new() -> Self {
@@ -475,7 +599,12 @@ fn approval_preview_rows(height: usize) -> usize {
 }
 
 fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameState<'_>, width: usize, height: usize, inner_w: usize, border_color: &str) -> usize {
-    let req = gate.pending().expect("approval card needs a pending request");
+    // A card with nothing pending is nothing to draw. It used to be an `expect`,
+    // and it fired: the row an approval card occupies moved once prompts started
+    // taking a row of their own, and a stale match drew one over a screen that
+    // had already answered the request. Rendering answers the screen; it does
+    // not assert about it.
+    let Some(req) = gate.pending() else { return 0 };
     let reset = "\x1b[0m";
     // The composer becomes the approval card.
     // Shows exactly what is approved, and never lets model-supplied escape codes
@@ -901,13 +1030,19 @@ impl Renderer {
         // Every child, pinned above the composer and below the steering above
         // it. These are a status, not transcript: F2 does not reach them, and
         // the mouse opens the line a phase replaced.
-        for (id, line) in st.agent_rows {
-            tail.push((LineKind::Tool, format!("\x1b[38;2;150;155;170m{line}\x1b[0m")));
-            if st.agent_expanded.contains(&id.as_str()) {
-                if let Some(detail) = st.agent_details.get(id) {
-                    tail.push((LineKind::Tool, format!("\x1b[38;2;120;125;140m{detail}\x1b[0m")));
-                }
-            }
+        //
+        // Subagents and background commands share one box, because both are work
+        // under way that the conversation does not show. A box rather than bare
+        // lines: without its edges these read as part of the chat, and the eye
+        // has to work out that they are not what was said.
+        for (kind, text) in work_box(
+            st.agent_rows,
+            st.agent_expanded,
+            st.agent_details,
+            st.background_rows,
+            width,
+        ) {
+            tail.push((kind, text));
         }
 
         let inner_w = width.saturating_sub(2);
@@ -997,11 +1132,9 @@ impl Renderer {
 
 
         let open = |id: &str| st.agent_expanded.contains(&id) && st.agent_details.contains_key(id);
-    self.agent_plan = st.agent_rows.to_vec();
-    self.agent_open = st.agent_rows.iter().map(|(id, _)| id.clone()).filter(|id| open(id)).collect();
-    self.agent_plan = st.agent_rows.to_vec();
-    self.agent_open = st.agent_rows.iter().map(|(id, _)| id.clone()).filter(|id| open(id)).collect();
-    self.paint_layout(&settled, &mut tail, LayoutInputs {
+        self.agent_plan = st.agent_rows.to_vec();
+        self.agent_open = st.agent_rows.iter().map(|(id, _)| id.clone()).filter(|id| open(id)).collect();
+        self.paint_layout(&settled, &mut tail, LayoutInputs {
             width, height, card_key, card_start, input_line_idx, text_cursor, border_color: &border_color,
         });
     }
@@ -1082,11 +1215,10 @@ impl Renderer {
     let scrolled_marker = usize::from(self.scroll_offset > 0 && chat_room > 1);
     self.chat_view = (first_chat_row + cut, chat_rows.saturating_sub(scrolled_marker).saturating_sub(cut));
     // Where the pinned subagent rows landed, for a click to find. The block sits
-    // Where the pinned subagent rows landed, for a click to find. The block sits
     // at the end of `bottom`: one row per child, plus a detail row for one the
-    // mouse has opened.
+    // mouse has opened, inside a box that has edges of its own.
     self.agent_screen.clear();
-    let block = self.agent_plan.len() + self.agent_open.len();
+    let block = self.agent_plan.len() + self.agent_open.len() + WORK_BOX_EDGES;
     let first = bottom.len().saturating_sub(block);
     for (i, (id, _)) in self.agent_plan.iter().enumerate() {
         if let Some(screen) = (chat_rows + first + i).checked_sub(cut) {
@@ -1153,6 +1285,19 @@ impl App {
         let pin_width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(100);
         let agent_rows = self.agents.pinned_rows(pin_width);
         let agent_details = self.agents.details(pin_width);
+        // Background commands join the subagents in one box, so each says what
+        // it is and for how long, cut to fit like a child's row.
+        let background_rows: Vec<String> = cx
+            .tools_arc
+            .shells()
+            .tasks()
+            .into_iter()
+            .filter(|t| matches!(t.state, flashagent_tools::TaskState::Running))
+            .map(|t| {
+                let cmd = flashagent_tui::truncate_middle(&t.command, pin_width.saturating_sub(28).max(12));
+                format!("\u{25b8} {cmd} \u{b7} {}", flashagent_tools::shell::format_elapsed(t.elapsed))
+            })
+            .collect();
         let expanded: Vec<&str> = self.expanded_agents.iter().map(String::as_str).collect();
         self.renderer.frame(
             &self.chat,
@@ -1202,6 +1347,7 @@ impl App {
                 agent_rows: &agent_rows,
                 agent_expanded: &expanded,
                 agent_details: &agent_details,
+                background_rows: &background_rows,
                 background_tasks: cx.tools_arc.shells().running_count(),
                 shell_running: self.running && cx.tools_arc.shells().foreground_running(),
                 composer_flash,
@@ -1209,12 +1355,11 @@ impl App {
         );
     }
 
-    /// What this turn has generated, read live: `turn_outcome.completion_tokens`
-    /// is only filled in when the turn ends, so reading it while the turn runs
-    /// is how this ended up showing nothing at all. `1.2k out`, or nothing at
-    /// zero — a number nobody reads is not a statistic.
+    /// What this turn has generated: the parent's own output and its children's,
+    /// summed over every request the turn made. A turn with tools is many
+    /// requests, and each one is added rather than replacing what came before.
     pub(crate) fn turn_token_phrase(&self) -> Option<String> {
-        let out = self.token_tracker.total_model_tokens;
+        let out = self.token_tracker.turn_output();
         if out == 0 {
             return None;
         }
