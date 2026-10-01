@@ -1,5 +1,47 @@
 # Changelog
 
+## b555 — a subagent that dies says so, and a session that survives the crash
+
+### Trust
+
+- **A subagent's report reached the model as the user's own words.** `is_task_notice` knew one kind of notice — the shell's, by its `"[Background task "` prefix — so the other three (`[Subagent …`, `[Message from …`, `[Review of subagent …]`) fell through to the steering framing that opens with *"This is the user's own message, sent while you were working."* That line sat directly above the report's own *"not a message from the user"*: in one message the model was told both. Worse for siblings — `notice_from_agent` delivers one agent's untrusted text to another, and that text was wearing the user's name. All four kinds are told apart now. Both halves of the guard stay: a notice must open like one *and* claim to be one, so text quoted from a tool or a sibling cannot opt out of the framing.
+- **The top thinking level was one rung below the top.** `max_effort()` probed `"xhigh", "extra-high", "high", "max"` — in that order, so on a model offering both `xhigh` and `max` it returned `high` and never reached `max`. A user who asked for the most thinking got the top of nothing.
+- **Two tool schemas lied.** `run_shell` advertised a `content` parameter, copied whole from `write_file`, that its handler never reads, so a model filling it in had it dropped in silence. `edit_file` required `path` and `edits` while its own description said to pass `files` instead — following its own instruction was a schema violation that strict providers reject. Two guards now cover the class.
+
+### Crashes and background work
+
+- **A crash mid-turn lost the whole turn, not the last five seconds.** The loop was handed a clone of the history and the app kept its own copy, only replaced when the turn ended, so the save taken every five seconds during a turn rewrote the same pre-turn bytes. A test written alongside it checked that a session file *existed* and that it held the prompt — which was written before the turn started anyway — so it was green with the feature broken. The loop now publishes its growing history through a shared handle and a save mid-turn writes what the turn has actually done.
+- **A turn that failed or was abandoned never saved at all.** The cut-short note that tells the next turn to verify side effects was the exact message most worth keeping, and it never reached disk.
+- **Finished background tasks were never dropped.** Every finished task kept its command and up to 16 KB of output for the life of the process, and `/tasks` grew without bound. The newest 32 stay readable; a running task is never a candidate however old.
+- **A second subscriber silently orphaned the first**, and with no subscriber the notice was dropped entirely.
+
+### Network
+
+- **A server sending heartbeats could hang a turn for ever.** `reqwest`'s `read_timeout` is per read and resets after each one; Anthropic sends `ping` events during long thinking blocks. There is now a real deadline over the whole response.
+- **A subagent that panicked, was aborted, or lost its connection left a row pinned for ever** and never told the parent, which had already been promised its answer would arrive. A guard armed before anything that can fail now closes the row and reports, and a run cut short says what the cause was in the backend's own words — the only thing that distinguishes "wait" from "try again" — along with the partial work that used to be thrown away.
+- **A connection that dropped mid-answer was committed to history as a finished one.** A TCP FIN with no error is indistinguishable from a completed reply, so the model wrote half a sentence down as though it were whole. Every decoder now says whether it ever saw a terminal frame, and a stream that ends without one is an error rather than a confident stop. What did arrive is still delivered first, so the screen shows both.
+- **Malformed frames vanished silently.** A run of frames that are not JSON passed as a clean stream, because the frames carrying `finish_reason` could be the ones that failed to parse. Three bad frames in a row ends the stream; one is still dropped, which is what real noise looks like.
+- **The turn that failed on a network cut did not say so.** The screen now states that the answer is cut off rather than finished, and how much of it arrived, because "it failed" reads as though nothing was written and the text above it looks whole.
+- **A retry setting that was quietly ignored.** `set_max_retries(0)` still got two attempts, because a floor of two was applied underneath it. A public setting whose value is ignored at the low end is the same dishonesty as a stream reported as finished; zero means zero now. The backoff can no longer overflow, and it carries jitter, so several agents retrying one gateway no longer march in lockstep.
+
+### Recaps
+
+- **A recap was written while work was still in flight** — with subagents running, with a background task running, or as the model was about to answer, each of which makes it wrong and spends a whole extra request. It waits for all of that now, and postpones rather than cancels: the old code cleared the timer on anything but "no turn running", and since only the end of a turn re-armed it, one moment of work cost the recap for the rest of the session.
+
+### Counting
+
+- **A tool call's name and arguments were counted twice.** The server's `completion` figure already covers them; they were then added again on top, which for a large `write_file` is about a thousand tokens per call.
+- **Switching sessions carried the old session's bill into the new one**, so a local session could be told it had cost money.
+- **`1000k` read as `4621.2k` in the status bar** while `/goal` said `4.6M` for the same work: the bar had its own formatter that stopped at `k`.
+
+### What you can see
+
+- **A subagent's answer could not be read anywhere.** When a child finished, the screen showed that it finished and nothing else: the full report went to the model and was thrown away from the transcript. It is now a folded card — who answered, steps, tokens, time — with the report behind a click and a first line as the preview. It never reads as something the user said, which is the whole reason the card exists.
+- **The work box had no sides.** Its top and bottom edges were closed and every row between them was bare text, so the frame appeared on two rows and vanished on all the others. The rows are framed and clipped like every other box in the app now.
+- **Its rows were built against the terminal, not against the box,** so a long phase description painted straight through the right-hand edge of the frame and into the last column of the window.
+- **The box and the input field were two boxes in a row.** There was never a blank line between them — the seam you saw was two separate frames meeting. They are one block now: the box ends on a rule the field's sides continue from.
+- **The box's top edge was wider than its bottom below eleven columns,** where the truncated title was built one cell wider than the room it had. Every width from 4 to 32 is now checked, and the two edges are asserted equal rather than merely inside the window.
+
 ## b530 — the model stops waiting for work it already made asynchronous, and a free model says so
 
 - **A backgrounded command was waited for anyway.** The plumbing was right: the model was told plainly, "a notice will arrive when it exits, so there is no need to poll it", and it did it anyway — calling a second tool that blocked on the first, so the turn sat there exactly as long as the long build it had just made asynchronous. Moving the command to the background by hand did not help either, because the system prompt said nothing at all about work in the background: the rule existed only on the tool that starts it, and behaviour between calls is decided by the prompt. There is a section there now, and it covers the case where the user does the moving.

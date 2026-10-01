@@ -663,6 +663,10 @@ struct App {
     chat: ChatView,
     running: bool,
     active_turn_handle: Option<tokio::task::JoinHandle<()>>,
+    /// The running turn's own history, held here so a save taken while it runs
+    /// writes what it has done so far rather than the conversation as it stood
+    /// when the turn started. `None` when no turn is running.
+    turn_history: Option<flashagent_core::loop_::SharedHistory>,
     active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<flashagent_core::Steer>>,
     pending_steers: Vec<(String, Vec<Attachment>)>,
     /// Commands typed while a turn ran that change the conversation: they run when it ends.
@@ -1209,6 +1213,7 @@ fn initial_app(init: InitialApp) -> App {
         chat: ChatView::default(),
         running: false,
         active_turn_handle: None,
+        turn_history: None,
         active_steer_tx: None,
         pending_steers: Vec::new(),
         queued_commands: Vec::new(),
@@ -1639,7 +1644,7 @@ fn spawn_turn(
     cancel: Arc<std::sync::atomic::AtomicBool>,
     source: Arc<BackendSource>,
     perm: &'static PermissionedTools,
-    history: Vec<ChatMessage>,
+    history: flashagent_core::loop_::SharedHistory,
     budgets: GoalBudgets,
     turn_opts: flashagent_llm::TurnOptions,
     tx: tokio::sync::mpsc::UnboundedSender<UiEvent>,
@@ -1667,7 +1672,7 @@ fn spawn_turn(
                 let _ = tx.send(UiEvent::Loop { turn_id, event });
             })
             .await;
-        let result = res.map_err(|e| (e.to_string(), e.into_history()));
+        let result = res.map_err(|e| (e.to_string(), e.into_history())).map(|(shared, done)| (shared.snapshot(), done));
         let _ = tx.send(UiEvent::Finished { turn_id, result });
     })
 }

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use flashagent_llm::{ChatMessage, ToolCall, ToolSpec};
 use tokio::sync::mpsc;
 
-use crate::loop_::{AgentLoop, DoneReason, LlmSource, LoopConfig, LoopEvent, ToolExec, ToolOutput};
+use crate::loop_::{AgentLoop, DoneReason, LlmSource, LoopConfig, LoopError, LoopEvent, ToolExec, ToolOutput};
 
 /// A system prompt plus which of the parent's tools the role may use.
 #[derive(Debug, Clone)]
@@ -27,7 +27,7 @@ pub struct SubagentSpec {
     /// Goes into the child's first user message.
     pub prompt: String,
     pub max_steps: u32,
-    /// `None` means no limit.
+    /// `None` means [`DEFAULT_CHILD_TIMEOUT`], never "forever".
     pub timeout: Option<Duration>,
     /// Cap on output fed back to the parent.
     pub max_output_chars: usize,
@@ -164,11 +164,37 @@ pub trait SubagentToolFactory: Send + Sync {
     fn build(&self, id: &str, role: &AgentRole, tools: &[String]) -> Arc<dyn ToolExec>;
 }
 
-/// Used when `spec.max_steps == 0`. Twenty was a number picked before anything
+/// Used when `spec.max_steps == 0`, and the ceiling on what a model may ask for.
+/// Twenty was a number picked before anything
 /// had run: a child that reads a few files and answers takes six, and one that
 /// audits a repository takes hundreds. The ceiling is here to catch a runaway,
-/// not to end real work, so it sits far above both.
+/// not to end real work, so it sits far above both — and because the tool clamps
+/// to it, a model cannot lift it by asking for more.
 const DEFAULT_MAX_STEPS: u32 = 500;
+
+/// The wall clock a child gets when neither the caller nor the model set one.
+/// 500 steps is not a bound on anything if a step may be a slow request or a
+/// long test run, so the budget is the real backstop. An hour is far longer than
+/// the work a background child should take — the parent is carrying on in the
+/// meantime — and short enough that a wedged child is stopped while its result
+/// is still worth something.
+const DEFAULT_CHILD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+/// What a requested step count is worth once the ceiling has had its say. The
+/// model may ask for less than the default, never more, and never zero: zero
+/// meant "the default" before any of this.
+fn clamp_steps(requested: u64) -> u32 {
+    if requested == 0 {
+        return DEFAULT_MAX_STEPS;
+    }
+    requested.min(DEFAULT_MAX_STEPS as u64) as u32
+}
+
+/// The clock a child runs on. Never none: a run with no deadline is a run that
+/// only ends when the parent is closed.
+fn child_timeout(requested: Option<Duration>) -> Duration {
+    requested.unwrap_or(DEFAULT_CHILD_TIMEOUT)
+}
 
 /// How many children may run at once. Unlimited in stock: the cap was a
 /// judgement about what a model tends to ask for, not a limit the work needs,
@@ -508,7 +534,11 @@ impl SubagentHost {
         let factory = self.factory.clone();
         let live = self.live.clone();
         let SubagentSpec { role, prompt, max_steps, timeout, max_output_chars } = spec;
-        let max_steps = if max_steps == 0 { DEFAULT_MAX_STEPS } else { max_steps };
+        let max_steps = clamp_steps(max_steps as u64);
+        // Steps alone do not bound the work: one step may be a slow request or a
+        // test run. A child that has no wall clock of its own gets the default,
+        // so "500 steps" cannot mean 500 arbitrarily long steps.
+        let timeout = child_timeout(timeout);
         live.fetch_add(1, Ordering::Relaxed);
 
         let events = self.events.clone();
@@ -519,8 +549,6 @@ impl SubagentHost {
         // The child's own channel to hear on, and its way to answer.
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         mailbox.register(&id, &role.name, steer_tx.clone());
-        let finish_id = id.clone();
-        let finish_role = role.name.clone();
         let handle_id = id.clone();
 
         let task = tokio::spawn(async move {
@@ -529,6 +557,23 @@ impl SubagentHost {
             // refused, not dropped.
             let _live = LiveGuard(live);
             let _registered = RegisteredGuard(mailbox.clone(), event_id.clone());
+            // What the child spent, counted as it happens so a child that is
+            // killed mid-run still reports what it burned.
+            let usage = Arc::new(std::sync::Mutex::new(ChildUsage::default()));
+            // The loop sends its own Done on every clean exit; only a run that
+            // failed inside it (loop_.rs returns Err) leaves the row unclosed.
+            let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            // Armed before anything that can fail, so a child that never
+            // reaches its last line still tells the parent it is over.
+            let reporting = ReportGuard {
+                outbound,
+                events: events.clone(),
+                id: event_id.clone(),
+                role: event_role.clone(),
+                usage: usage.clone(),
+                closed: closed.clone(),
+                reported: std::sync::atomic::AtomicBool::new(false),
+            };
             let tools = factory.build(&id, &role, &role.tools);
             let config = LoopConfig {
                 max_steps: Some(max_steps),
@@ -547,16 +592,21 @@ impl SubagentHost {
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 steer_rx,
             );
-            let history = vec![ChatMessage::system(role.system_prompt), ChatMessage::user(prompt)];
+            let history = crate::loop_::SharedHistory::new(vec![ChatMessage::system(role.system_prompt), ChatMessage::user(prompt)]);
 
-            // What the child spent, counted as it happens so a child that is
-            // killed mid-run still reports what it burned.
-            let usage = Arc::new(std::sync::Mutex::new(ChildUsage::default()));
+            // The loop sends its own Done on every clean exit; only a run that
+            // failed inside it (loop_.rs returns Err) leaves the row unclosed.
             let counted = usage.clone();
             let tag = events.clone();
             let id_for_events = event_id.clone();
             let role_for_events = event_role.clone();
+            // The same flag the guard reads: this loop is what closes a row the
+            // child closed itself, and the guard is what closes the rest.
+            let closed_ref = closed.clone();
             let mut report = move |event: LoopEvent| {
+                if matches!(&event, LoopEvent::Done(_)) {
+                    closed_ref.store(true, Ordering::Relaxed);
+                }
                 if let LoopEvent::StepStarted { step, .. } = &event {
                     if let Ok(mut u) = counted.lock() {
                         u.steps = u.steps.max(*step);
@@ -580,20 +630,33 @@ impl SubagentHost {
 
             let run = async {
                 match loop_.run(llm.as_ref(), tools.as_ref(), history, &mut report).await {
-                    Ok((final_history, done)) => (last_assistant_text(&final_history), done),
-                    Err(e) => (format!("[subagent failed: {e}]"), DoneReason::Failed),
+                    Ok((history, done)) => (last_assistant_text(&history.snapshot()), done),
+                    // The loop hands back everything that did run, so the parent
+                    // is told what the child managed as well as why it stopped.
+                    // The backend's own words are the only thing that says
+                    // whether waiting helps or another try does, and a child
+                    // killed by a dropped connection must not look like one that
+                    // finished: the model would build on an answer nobody wrote.
+                    Err(e) => {
+                        let cause = match &e {
+                            LoopError::Llm { source, .. } => source.to_string(),
+                        };
+                        (interrupted_report(&cause, &e.into_history()), DoneReason::Failed)
+                    }
                 }
             };
 
-            let (body, done) = if let Some(t) = timeout {
-                tokio::time::timeout(t, run)
-                    .await
-                    .unwrap_or_else(|_| ("[subagent timed out]".to_string(), DoneReason::Failed))
-            } else {
-                run.await
+            let (body, done) = match tokio::time::timeout(timeout, run).await {
+                Ok(ran) => ran,
+                Err(_) => (
+                    // "timed out" is the word the rest of the app has always used
+                    // for this, and the parent's row is closed by the same guard
+                    // as a death, so the two are not the same thing to the model.
+                    interrupted_report("it timed out: the wall-clock time it was given ran out", &[]),
+                    DoneReason::Failed,
+                ),
             };
 
-            let spent = usage.lock().map(|u| *u).unwrap_or_default();
             let cut = body.chars().count() > max_output_chars;
             let answer: String = if cut {
                 let mut head: String = body.chars().take(max_output_chars).collect();
@@ -605,22 +668,11 @@ impl SubagentHost {
             } else {
                 body
             };
-            // The last event, so a child that died mid-stream still closes its
-            // row on screen.
-            if let Some(tx) = &events {
-                let _ = tx.send(SubagentEvent {
-                    id: event_id.clone(),
-                    role: event_role.clone(),
-                    event: LoopEvent::Done(done),
-                });
-            }
-            let _ = outbound.send(SubagentOutbound::Finished(SubagentFinished {
-                id: finish_id,
-                role: finish_role,
-                answer: answer.clone(),
-                done,
-                usage: spent,
-            }));
+            // The guard is the single place a child is announced: taking the
+            // straight path spends it, and any other way out of this task drops
+            // it, which is what makes a panic or an abort close the row and
+            // tell the parent instead of leaving it pinned for ever.
+            reporting.report(answer.clone(), done);
             SubagentResult { answer, done }
         });
 
@@ -663,6 +715,93 @@ impl Drop for RegisteredGuard {
     }
 }
 
+/// Announces a finished child to the parent, and closes its row, from whichever
+/// way the run ended.
+///
+/// A child that returns takes the straight path and reports itself. Every other
+/// way out — a panic in a tool factory, a future unwinding mid-stream when the
+/// connection drops, the task being aborted — drops this guard instead, and the
+/// parent hears about it either way. That matters because `spawn_agent` already
+/// promised the model the answer would arrive on its own: a child that died
+/// quietly left its row pinned for ever, `AgentTree::running()` over by one, and
+/// the model waiting for an answer that was never on its way.
+struct ReportGuard {
+    outbound: mpsc::UnboundedSender<SubagentOutbound>,
+    events: Option<mpsc::UnboundedSender<SubagentEvent>>,
+    id: String,
+    role: String,
+    usage: Arc<std::sync::Mutex<ChildUsage>>,
+    /// Set once the loop ends itself, so the row is not closed a second time.
+    closed: Arc<std::sync::atomic::AtomicBool>,
+    /// Which of the two paths got here first.
+    reported: std::sync::atomic::AtomicBool,
+}
+
+impl ReportGuard {
+    /// The one place a child is announced. Returns whether this call was the one
+    /// that sent it: the swap, not a check, so a path that is cut off between
+    /// the two cannot produce two reports.
+    fn report(&self, answer: String, done: DoneReason) -> bool {
+        if self.reported.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        // A run the loop ended itself has already closed its row.
+        if !self.closed.load(Ordering::Relaxed) {
+            if let Some(tx) = &self.events {
+                let _ = tx.send(SubagentEvent {
+                    id: self.id.clone(),
+                    role: self.role.clone(),
+                    event: LoopEvent::Done(done),
+                });
+            }
+        }
+        let _ = self.outbound.send(SubagentOutbound::Finished(SubagentFinished {
+            id: self.id.clone(),
+            role: self.role.clone(),
+            answer,
+            done,
+            usage: self.usage.lock().map(|u| *u).unwrap_or_default(),
+        }));
+        true
+    }
+}
+
+impl Drop for ReportGuard {
+    fn drop(&mut self) {
+        self.report(DIED_IN_FLIGHT.to_string(), DoneReason::Failed);
+    }
+}
+
+/// What the parent is told about a child that never reached its own last line.
+/// It has to say the work is not done, because a child that looks finished but
+/// is not is worse than one that plainly failed: the model goes on believing
+/// somebody already read the files.
+const DIED_IN_FLIGHT: &str = "[The subagent was stopped before it could answer: something it did \
+     panicked, or its task was aborted. It never reported a result, so treat the task as NOT done. \
+     Anything it had already written to disk is still there; check it yourself, then finish the \
+     work here or start another subagent on it.]";
+
+/// What the parent gets when a child's run was cut short rather than ended: a
+/// dropped connection, a backend that refused, a wall clock that ran out.
+///
+/// The cause is kept in the backend's own words because it is the only thing
+/// that says whether waiting helps or another try does, and so is whatever the
+/// child had managed to say, which is real work and is lost otherwise.
+fn interrupted_report(cause: &str, history: &[ChatMessage]) -> String {
+    let said = last_assistant_text(history);
+    let said = said.trim();
+    let what_it_had = if said.is_empty() {
+        "It had not written an answer before it stopped.".to_string()
+    } else {
+        format!("This much of its answer had arrived before it stopped:\n---\n{said}\n---")
+    };
+    format!(
+        "[The subagent did NOT finish. It stopped because {cause}. {what_it_had}\n\
+         This is a failure report, not a result: the task is not done. Check anything above \
+         yourself, then do what is left here or start another subagent on it.]"
+    )
+}
+
 fn last_assistant_text(history: &[ChatMessage]) -> String {
     history
         .iter()
@@ -703,7 +842,7 @@ impl ToolExec for SubagentTool {
                  a researcher or reviewer cannot write files or run commands.",
                 self.host.max_live()
             ),
-            parameters_json: r#"{"type":"object","properties":{"role":{"type":"string","description":"researcher (reads and searches, cannot write), coder (writes and runs tests), reviewer (reads, reports problems), planner (reads, returns a plan), or a custom role"},"task":{"type":"string","description":"The whole task, self-contained: say what to do, where, and what to report back"},"max_steps":{"type":"integer","description":"Max loop steps (default 500; the last one asks the subagent to wrap up and report rather than cutting it off)"},"timeout_secs":{"type":"integer","description":"Max wall-clock seconds (default none)"}},"required":["task"]}"#.into(),
+            parameters_json: r#"{"type":"object","properties":{"role":{"type":"string","description":"researcher (reads and searches, cannot write), coder (writes and runs tests), reviewer (reads, reports problems), planner (reads, returns a plan), or a custom role"},"task":{"type":"string","description":"The whole task, self-contained: say what to do, where, and what to report back"},"max_steps":{"type":"integer","description":"Max loop steps (default and maximum 500; the last one asks the subagent to wrap up and report rather than cutting it off)"},"timeout_secs":{"type":"integer","description":"Max wall-clock seconds (default and maximum 3600)"}},"required":["task"]}"#.into(),
         }]
     }
 
@@ -715,8 +854,14 @@ impl ToolExec for SubagentTool {
                            subagent sees this text and nothing of the conversation around it.");
         }
         let role_name = v.get("role").and_then(|x| x.as_str()).unwrap_or("researcher").to_string();
-        let max_steps = v.get("max_steps").and_then(|x| x.as_u64()).unwrap_or(DEFAULT_MAX_STEPS as u64) as u32;
-        let timeout_secs = v.get("timeout_secs").and_then(|x| x.as_u64());
+        let max_steps = clamp_steps(v.get("max_steps").and_then(|x| x.as_u64()).unwrap_or(0));
+        // Same rule for the clock: the model may ask for less time, never more,
+        // so a miscounted number cannot buy a child a week.
+        let timeout_secs = v
+            .get("timeout_secs")
+            .and_then(|x| x.as_u64())
+            .map(|n| n.min(DEFAULT_CHILD_TIMEOUT.as_secs()))
+            .filter(|n| *n > 0);
 
         let spec = SubagentSpec {
             role: self.host.role(&role_name),
@@ -925,6 +1070,19 @@ mod tests {
         assert_eq!(result.done, DoneReason::Failed);
     }
 
+    /// A child that asks for no timeout gets the default one rather than none:
+    /// steps are not a bound on wall clock, so "500 steps" must not mean 500
+    /// arbitrarily long ones.
+    #[test]
+    fn a_child_with_no_timeout_of_its_own_still_has_one() {
+        assert_eq!(child_timeout(None), DEFAULT_CHILD_TIMEOUT);
+        assert_eq!(child_timeout(Some(Duration::from_millis(50))), Duration::from_millis(50));
+        assert_eq!(SubagentSpec::default().timeout, None, "the caller still asks for nothing");
+        // Long enough not to cut a real audit short, short enough to stop a
+        // wedged one while its answer is still worth something.
+        assert!(DEFAULT_CHILD_TIMEOUT >= Duration::from_secs(30 * 60));
+    }
+
     #[tokio::test]
     async fn role_system_prompt_is_used() {
         let host = SubagentHost::new(llm(), Arc::new(Factory));
@@ -1045,7 +1203,10 @@ mod tests {
             seen.iter().any(|e| matches!(e.event, LoopEvent::TurnDelta(_))),
             "the child's own words must reach the app, not be dropped: {seen:?}"
         );
-        assert!(seen.iter().any(|e| matches!(e.event, LoopEvent::Done(_))), "the row must close");
+        let closes = seen.iter().filter(|e| matches!(e.event, LoopEvent::Done(_))).count();
+        // Exactly one. It used to be two: the loop's own Done was forwarded and
+        // then another was sent after the run, so every child closed its row twice.
+        assert_eq!(closes, 1, "exactly one Done closes the row, not two: {seen:?}");
     }
 
     #[tokio::test]
@@ -1080,6 +1241,58 @@ mod tests {
         // Cached reads are inside the prompt count, so they are not added again.
         assert_eq!(finished.usage.sent(), 100, "what the child sent is the prompt it was given");
         assert_eq!(finished.usage.total_tokens(), 120);
+    }
+
+    /// A child that fails inside the loop emits no Done of its own, so the host
+    /// has to close the row — once, and only when nothing else did.
+    #[tokio::test]
+    async fn a_child_that_failed_still_closes_its_row_once() {
+        struct Broken;
+        #[async_trait]
+        impl LlmSource for Broken {
+            async fn turn(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> Result<futures::stream::BoxStream<'static, Result<LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+                Err(flashagent_llm::LlmError::Stream("boom".into()))
+            }
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (host, _out) = SubagentHost::with_channels(Arc::new(Broken), Arc::new(Factory), Some(tx));
+        let result = host
+            .spawn(SubagentSpec { prompt: "p".into(), ..Default::default() })
+            .unwrap()
+            .task
+            .await
+            .unwrap();
+
+        let mut seen = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            seen.push(event);
+        }
+        assert_eq!(result.done, DoneReason::Failed);
+        let closes = seen.iter().filter(|e| matches!(e.event, LoopEvent::Done(_))).count();
+        assert_eq!(closes, 1, "a dead child closes its row exactly once too: {seen:?}");
+    }
+
+    /// The step ceiling is a ceiling: a model that asks for more is given the
+    /// default, or the number is a suggestion rather than a limit.
+    #[tokio::test]
+    async fn a_model_cannot_ask_a_child_for_more_than_the_default_steps() {
+        let (host, _out) = SubagentHost::with_channels(llm(), Arc::new(Factory), None);
+        let tool = SubagentTool::new(Arc::new(host));
+        let out = tool
+            .execute(&ToolCall {
+                id: "t".into(),
+                name: "spawn_agent".into(),
+                args_json: r#"{"task":"go","max_steps":100000}"#.into(),
+            })
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(clamp_steps(100_000), DEFAULT_MAX_STEPS);
+        assert_eq!(clamp_steps(0), DEFAULT_MAX_STEPS);
+        assert_eq!(clamp_steps(12), 12);
     }
 
     #[tokio::test]
@@ -1266,5 +1479,146 @@ mod tests {
         assert!(!crate::registry::offered(review, true, true, true, false), "a child must not");
         let talk = crate::registry::find("send_message").expect("declared");
         assert!(crate::registry::offered(talk, true, true, true, false), "a child has it too");
+    }
+
+    /// A child whose own work panics never reaches the line that reports it. It
+    /// used to: the parent's row stayed pinned for ever, `running()` never
+    /// dropped, and the model waited for an answer that was never coming —
+    /// while `spawn_agent` had already promised the answer would arrive on its
+    /// own.
+    #[tokio::test]
+    async fn a_child_that_panics_still_tells_the_parent_it_is_over() {
+        struct Panicky;
+        #[async_trait]
+        impl LlmSource for Panicky {
+            async fn turn(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> Result<futures::stream::BoxStream<'static, Result<LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+                panic!("the backend adapter fell over mid-request")
+            }
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (host, mut out) = SubagentHost::with_channels(Arc::new(Panicky), Arc::new(Factory), Some(tx));
+        let host = Arc::new(host);
+        // The child dies rather than returning: the join handle is the panic.
+        let _ = host.spawn(SubagentSpec { prompt: "p".into(), ..Default::default() }).unwrap().task.await;
+
+        let reported = finished(out.recv().await.expect("a dead child is still announced"));
+        assert_eq!(reported.done, DoneReason::Failed, "a panic is not an answer");
+        assert!(reported.answer.contains("stopped before"), "{}", reported.answer);
+        assert_eq!(host.live(), 0, "a child that died is not running");
+        assert!(out.try_recv().is_err(), "exactly one Finished, not a second one: {reported:?}");
+
+        let mut seen = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            seen.push(event);
+        }
+        let closes = seen.iter().filter(|e| matches!(e.event, LoopEvent::Done(_))).count();
+        assert_eq!(closes, 1, "the row closes once, on the way out: {seen:?}");
+    }
+
+    /// The same for a child whose task is aborted: nothing returns, so nothing
+    /// reports, unless the drop does it.
+    #[tokio::test]
+    async fn a_child_whose_task_is_aborted_still_tells_the_parent() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (host, mut out) = SubagentHost::with_channels(Arc::new(Hang), Arc::new(Factory), Some(tx));
+        let host = Arc::new(host);
+        let handle = host.spawn(SubagentSpec { prompt: "p".into(), ..Default::default() }).unwrap();
+        // Let it get as far as the stream before pulling the plug.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(host.live(), 1);
+        handle.task.abort();
+        let _ = handle.task.await;
+
+        let reported = finished(out.recv().await.expect("an aborted child is still announced"));
+        assert_eq!(reported.id, "sub1");
+        assert_eq!(reported.done, DoneReason::Failed);
+        assert!(out.try_recv().is_err(), "exactly one Finished: {reported:?}");
+        assert_eq!(host.live(), 0, "an aborted child is not running");
+
+        let mut seen = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            seen.push(event);
+        }
+        assert_eq!(
+            seen.iter().filter(|e| matches!(e.event, LoopEvent::Done(_))).count(),
+            1,
+            "the row closes once, on the way out: {seen:?}"
+        );
+    }
+
+    /// A connection that dies mid-stream is the realistic version of the above,
+    /// and the one the report has to be honest about: the steps that did run are
+    /// real, the answer is not, and the cause is what tells the model whether
+    /// another try is worth anything.
+    #[tokio::test]
+    async fn a_child_whose_stream_dies_says_why_and_keeps_what_it_managed() {
+        struct Dropped;
+        #[async_trait]
+        impl LlmSource for Dropped {
+            async fn turn(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> Result<futures::stream::BoxStream<'static, Result<LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+                Ok(Box::pin(futures::stream::iter(vec![
+                    Ok(LlmEvent::TextDelta("I read the ledger and ".into())),
+                    Err(flashagent_llm::LlmError::Stream("connection reset by peer".into())),
+                ])))
+            }
+        }
+        let (host, mut out) = SubagentHost::with_channels(Arc::new(Dropped), Arc::new(Factory), None);
+        host.spawn(SubagentSpec { prompt: "p".into(), ..Default::default() }).unwrap().task.await.unwrap();
+
+        let reported = finished(out.recv().await.unwrap());
+        assert_eq!(reported.done, DoneReason::Failed, "a dead stream is not an answer");
+        assert!(reported.answer.contains("connection reset by peer"), "the cause is kept: {}", reported.answer);
+        assert!(reported.answer.contains("did NOT finish"), "and it is not dressed up as one: {}", reported.answer);
+        assert!(reported.answer.contains("I read the ledger and"), "the work that did run is not lost: {}", reported.answer);
+    }
+
+    /// The straight path and the drop guard share one announcement, so a child
+    /// that ends normally is still announced exactly once — the double Done this
+    /// crate used to send is not back.
+    #[tokio::test]
+    async fn a_child_that_ends_normally_is_announced_once_and_only_once() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (host, mut out) = SubagentHost::with_channels(llm(), Arc::new(Factory), Some(tx));
+        host.spawn(SubagentSpec { prompt: "p".into(), ..Default::default() }).unwrap().task.await.unwrap();
+
+        let reported = finished(out.recv().await.unwrap());
+        assert_eq!(reported.answer, "child answer");
+        assert_eq!(reported.done, DoneReason::Completed);
+        assert!(out.try_recv().is_err(), "the guard did not report behind the tail: {reported:?}");
+
+        let mut seen = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            seen.push(event);
+        }
+        assert_eq!(seen.iter().filter(|e| matches!(e.event, LoopEvent::Done(_))).count(), 1, "{seen:?}");
+    }
+
+    /// The guard reports once and only once, which is what keeps a child from
+    /// being announced as both finished and dead.
+    #[tokio::test]
+    async fn the_report_guard_speaks_once() {
+        let (tx, mut out) = mpsc::unbounded_channel();
+        let guard = ReportGuard {
+            outbound: tx,
+            events: None,
+            id: "sub1".into(),
+            role: "researcher".into(),
+            usage: Arc::new(std::sync::Mutex::new(ChildUsage::default())),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reported: std::sync::atomic::AtomicBool::new(false),
+        };
+        assert!(guard.report("the answer".into(), DoneReason::Completed));
+        assert!(!guard.report("something else".into(), DoneReason::Failed));
+        let first = finished(out.recv().await.expect("the first report"));
+        assert_eq!(first.answer, "the answer", "the first report is the one that stands");
+        assert!(out.try_recv().is_err(), "and there is no second");
     }
 }

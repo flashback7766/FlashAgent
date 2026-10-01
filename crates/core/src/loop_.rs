@@ -157,6 +157,144 @@ impl LoopError {
     }
 }
 
+/// The conversation as it grows, shared with whoever has to save it.
+///
+/// The loop used to take the history by value and return it at the end, which
+/// meant anything outside saw nothing until the turn was over: a save in the
+/// middle of a turn wrote the conversation as it stood before it, and a crash
+/// lost the whole turn rather than the last few seconds. Sharing the vec fixes
+/// both, as long as the loop publishes as it goes: this handle is the
+/// conversation, and a save that reads it mid-turn writes the turn so far.
+///
+/// It is cheap to clone and never held across a model call: the lock is taken
+/// for one push, pop or rewrite and not for the time in between.
+#[derive(Clone, Default, Debug)]
+pub struct SharedHistory(Arc<std::sync::Mutex<Vec<ChatMessage>>>);
+
+impl SharedHistory {
+    pub fn new(history: Vec<ChatMessage>) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(history)))
+    }
+
+    /// Everything said so far, for a save, a display or an export.
+    pub fn snapshot(&self) -> Vec<ChatMessage> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn push(&self, message: ChatMessage) {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).push(message);
+    }
+
+    fn pop(&self) -> Option<ChatMessage> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).pop()
+    }
+
+    /// A message the loop edited in place, kept in step with the copy the loop
+    /// is working on.
+    fn replace_last(&self, message: ChatMessage) {
+        let mut held = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(last) = held.last_mut() {
+            *last = message;
+        }
+    }
+
+    /// The whole conversation, after a rewrite (compaction). The shared handle
+    /// is written from the rewritten history, not left holding the longer one
+    /// it used to have.
+    fn replace_all(&self, history: &[ChatMessage]) {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = history.to_vec();
+    }
+}
+
+impl From<Vec<ChatMessage>> for SharedHistory {
+    fn from(history: Vec<ChatMessage>) -> Self {
+        Self::new(history)
+    }
+}
+
+/// The loop's own working copy of the conversation, kept in step with the
+/// [`SharedHistory`] it came from. The lock is never held across a model call:
+/// only the push, pop or rewrite it belongs to.
+struct GrowingHistory {
+    shared: SharedHistory,
+    local: Vec<ChatMessage>,
+}
+
+impl GrowingHistory {
+    fn new(shared: SharedHistory) -> Self {
+        let local = shared.snapshot();
+        Self { shared, local }
+    }
+
+    fn push(&mut self, message: ChatMessage) {
+        self.shared.push(message.clone());
+        self.local.push(message);
+    }
+
+    fn pop(&mut self) -> Option<ChatMessage> {
+        let popped = self.local.pop();
+        // The shared side is the same conversation, so it must lose it too.
+        if popped.is_some() {
+            self.shared.pop();
+        }
+        popped
+    }
+
+    fn extend(&mut self, messages: impl IntoIterator<Item = ChatMessage>) {
+        for message in messages {
+            self.push(message);
+        }
+    }
+
+    fn append(&mut self, messages: &mut Vec<ChatMessage>) {
+        for message in messages.drain(..) {
+            self.push(message);
+        }
+    }
+
+    /// The message the loop edited in place: both copies must see it.
+    fn replace_last(&mut self, message: ChatMessage) {
+        if let Some(last) = self.local.last_mut() {
+            *last = message.clone();
+        }
+        self.shared.replace_last(message);
+    }
+
+    /// After something rewrote the working copy outright — compaction, a partial
+    /// reply kept on the way out — the shared handle is told the new whole.
+    fn sync(&mut self) {
+        self.shared.replace_all(&self.local);
+    }
+
+    /// The finished conversation, published in full: what the caller gets is
+    /// what a save at this instant would have written.
+    fn into_shared(self) -> SharedHistory {
+        self.shared.replace_all(&self.local);
+        self.shared
+    }
+}
+
+impl std::ops::Deref for GrowingHistory {
+    type Target = Vec<ChatMessage>;
+    fn deref(&self) -> &Self::Target {
+        &self.local
+    }
+}
+
+impl std::ops::DerefMut for GrowingHistory {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.local
+    }
+}
+
 /// Shortens the history in the middle of a turn, when the window is nearly full.
 #[async_trait]
 pub trait Compactor: Send + Sync {
@@ -268,14 +406,20 @@ impl AgentLoop {
         self.cancel.clone()
     }
 
-    /// Returns every event plus the final history for the caller to persist.
+    /// Runs until the model stops or a guardrail trips.
+    ///
+    /// The conversation is a [`SharedHistory`] rather than a value passed in and
+    /// returned, so it grows in the open: a save or a display reads what has
+    /// been said so far while the turn is still running, and a crash costs the
+    /// last few seconds rather than the whole turn. Returns that same handle.
     pub async fn run(
         &self,
         llm: &dyn LlmSource,
         tools: &dyn ToolExec,
-        mut history: Vec<ChatMessage>,
+        shared: SharedHistory,
         mut events: impl FnMut(LoopEvent),
-    ) -> Result<(Vec<ChatMessage>, DoneReason), LoopError> {
+    ) -> Result<(SharedHistory, DoneReason), LoopError> {
+        let mut history = GrowingHistory::new(shared);
         let specs = tools.specs();
         let known_tools: HashSet<String> = specs.iter().map(|s| s.name.clone()).collect();
         let schemas: std::collections::HashMap<&str, serde_json::Value> =
@@ -316,7 +460,10 @@ let mut report_nudges: usize = 0;
         let mut grace: u32 = 0;
         loop {
             if let Some(limit) = self.config.max_steps {
-                if step >= limit + grace {
+                // Saturating: a caller may legitimately set `u32::MAX` as "no
+                // limit", and `limit + grace` would wrap to 0 and stop the run
+                // at step 1 with a StepLimit that says nothing true.
+                if step >= limit.saturating_add(grace) {
                     if self.config.wrap_up_at_step_limit && !wrapped_up {
                         wrapped_up = true;
                         grace = 1;
@@ -330,20 +477,20 @@ let mut report_nudges: usize = 0;
                         events(LoopEvent::SteeringInjected(WRAP_UP_NOTE.to_string()));
                     } else {
                         events(LoopEvent::Done(DoneReason::StepLimit));
-                        return Ok((history, DoneReason::StepLimit));
+                        return Ok((history.into_shared(), DoneReason::StepLimit));
                     }
                 }
             }
             if self.config.time_budget.is_some_and(|b| started.elapsed() >= b) {
                 events(LoopEvent::Done(DoneReason::TimeLimit));
-                return Ok((history, DoneReason::TimeLimit));
+                return Ok((history.into_shared(), DoneReason::TimeLimit));
             }
             step += 1;
             events(LoopEvent::StepStarted { step, max_steps: self.config.max_steps });
 
             if self.cancel.load(Ordering::Relaxed) {
                 events(LoopEvent::Done(DoneReason::Cancelled));
-                return Ok((history, DoneReason::Cancelled));
+                return Ok((history.into_shared(), DoneReason::Cancelled));
             }
 
             while let Some(steer) = try_recv_steer(&mut steer_rx) {
@@ -364,12 +511,15 @@ let mut report_nudges: usize = 0;
                     done = compactor.compact(&mut history, last_prompt_tokens) => done,
                     _ = wait_cancel(&self.cancel) => {
                         events(LoopEvent::Done(DoneReason::Cancelled));
-                        return Ok((history, DoneReason::Cancelled));
+                        return Ok((history.into_shared(), DoneReason::Cancelled));
                     }
                 };
                 match done {
                     Compaction::Saved(saved) => {
                         events(LoopEvent::Compacted { saved });
+                        // The shortened history is the conversation now, so the
+                        // shared copy must lose the messages that are gone.
+                        history.sync();
                         // The old figure describes a history that is gone.
                         last_prompt_tokens = None;
                         transient.clear();
@@ -398,12 +548,12 @@ let mut report_nudges: usize = 0;
                 res = llm.turn_with_options(request, &specs, &turn_opts) => res,
                 _ = wait_cancel(&self.cancel) => {
                     events(LoopEvent::Done(DoneReason::Cancelled));
-                    return Ok((history, DoneReason::Cancelled));
+                    return Ok((history.into_shared(), DoneReason::Cancelled));
                 }
             };
             let mut stream = match opened {
                 Ok(stream) => stream,
-                Err(source) => return Err(LoopError::Llm { source, history }),
+                Err(source) => return Err(LoopError::Llm { source, history: history.into_shared().snapshot() }),
             };
             turn_opts = self.config.base_turn_options.clone();
             let mut assistant_text = String::new();
@@ -440,23 +590,26 @@ let mut report_nudges: usize = 0;
                         // the half-written call is dropped unrun.
                         None if !finished && indexed_calls.iter().any(|(_, c)| !flashagent_llm::is_complete_json(&c.args_json)) => {
                             keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
+                            history.sync();
                             let source = LlmError::Stream("the server closed the connection in the middle of a tool call, which was not run".into());
-                            return Err(LoopError::Llm { source, history });
+                            return Err(LoopError::Llm { source, history: history.into_shared().snapshot() });
                         }
                         None => break,
                     },
                     _ = &mut cancelled => {
                         // Keep what the user already saw; half-streamed tool calls are dropped unrun.
                         keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
+                        history.sync();
                         events(LoopEvent::Done(DoneReason::Cancelled));
-                        return Ok((history, DoneReason::Cancelled));
+                        return Ok((history.into_shared(), DoneReason::Cancelled));
                     }
                 };
                 let item = match item {
                     Ok(item) => item,
                     Err(source) => {
                         keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
-                        return Err(LoopError::Llm { source, history });
+                        history.sync();
+                        return Err(LoopError::Llm { source, history: history.into_shared().snapshot() });
                     }
                 };
                 match item {
@@ -561,7 +714,7 @@ let mut report_nudges: usize = 0;
             }
             let merge = !bound && was_continuation && history.last().is_some_and(|m| m.role == Role::Assistant);
             if merge {
-                if let Some(last) = history.last_mut() {
+                if let Some(mut last) = history.last().cloned() {
                     last.content.push_str(&assistant_msg.content);
                     if let Some(more) = assistant_msg.reasoning {
                         last.reasoning = Some(match last.reasoning.take() {
@@ -573,6 +726,7 @@ let mut report_nudges: usize = 0;
                     if assistant_msg.replay.is_some() {
                         last.replay = assistant_msg.replay;
                     }
+                    history.replace_last(last);
                 }
             } else {
                 history.push(assistant_msg);
@@ -604,7 +758,7 @@ let mut report_nudges: usize = 0;
                 if was_continuation {
                     // The stall nudges below would discard the answer so far.
                     events(LoopEvent::Done(DoneReason::Completed));
-                    return Ok((history, DoneReason::Completed));
+                    return Ok((history.into_shared(), DoneReason::Completed));
                 }
 
                 let is_scratchpad = is_pure_thinking_scratchpad(&assistant_text);
@@ -662,8 +816,9 @@ let mut report_nudges: usize = 0;
                     };
                     if let Some(draft) = extract_draft_from_steps(fallback_source) {
                         events(LoopEvent::TurnDelta(draft.clone()));
-                        if let Some(last) = history.last_mut() {
+                        if let Some(mut last) = history.last().cloned() {
                             last.content = draft;
+                            history.replace_last(last);
                         }
                     } else if assistant_text.trim().is_empty() && stall_nudges < 1 {
                         stall_nudges += 1;
@@ -675,7 +830,7 @@ let mut report_nudges: usize = 0;
                 }
 
                 events(LoopEvent::Done(DoneReason::Completed));
-                return Ok((history, DoneReason::Completed));
+                return Ok((history.into_shared(), DoneReason::Completed));
             }
 
             // The model keeps working and never makes the call the request named.
@@ -704,7 +859,7 @@ let mut report_nudges: usize = 0;
                 // A model that keeps hitting the length limit mid-call still spends the budget.
                 if let Some(reason) = self.budget_spent(tokens_used, output_tokens, started) {
                     events(LoopEvent::Done(reason));
-                    return Ok((history, reason));
+                    return Ok((history.into_shared(), reason));
                 }
                 continue;
             }
@@ -717,9 +872,10 @@ let mut report_nudges: usize = 0;
             for (i, call) in calls.iter().enumerate() {
                 if self.cancel.load(Ordering::Relaxed) {
                     answer_cancelled(&mut history, &calls[i..]);
+                    history.sync();
                     history.append(&mut image_msgs);
                     events(LoopEvent::Done(DoneReason::Cancelled));
-                    return Ok((history, DoneReason::Cancelled));
+                    return Ok((history.into_shared(), DoneReason::Cancelled));
                 }
                 // `"20"` where the schema wants 20: run, shown and checked as the tool reads it.
                 let typed;
@@ -755,9 +911,10 @@ let mut report_nudges: usize = 0;
                         });
                         history.push(ChatMessage::tool_result(call.id.clone(), content));
                         answer_cancelled(&mut history, &calls[i + 1..]);
+                        history.sync();
                         history.append(&mut image_msgs);
                         events(LoopEvent::Done(DoneReason::Cancelled));
-                        return Ok((history, DoneReason::Cancelled));
+                        return Ok((history.into_shared(), DoneReason::Cancelled));
                     }
                 };
                 events(LoopEvent::ToolFinished {
@@ -803,7 +960,7 @@ let mut report_nudges: usize = 0;
 
             if let Some(reason) = self.budget_spent(tokens_used, output_tokens, started) {
                 events(LoopEvent::Done(reason));
-                return Ok((history, reason));
+                return Ok((history.into_shared(), reason));
             }
         }
     }
@@ -1355,7 +1512,8 @@ mod tests {
         mut on_event: impl FnMut(LoopEvent),
     ) -> (Vec<ChatMessage>, DoneReason) {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(l.run(llm, tools, vec![ChatMessage::user("x")], &mut on_event)).unwrap()
+        let (history, done) = rt.block_on(l.run(llm, tools, SharedHistory::new(vec![ChatMessage::user("x")]), &mut on_event)).unwrap();
+        (history.snapshot(), done)
     }
 
     #[test]
@@ -1427,7 +1585,7 @@ mod tests {
         let tools = MockTools::new();
         let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(l.run(&llm, &tools, vec![ChatMessage::user("x")], |_| {}));
+        let result = rt.block_on(l.run(&llm, &tools, SharedHistory::new(vec![ChatMessage::user("x")]), |_| {}));
         assert!(result.is_err(), "stream break must surface as LoopError, not silence");
     }
 
@@ -2123,12 +2281,13 @@ mod tests {
             let mut shown = String::new();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let (history, _) = rt
-                .block_on(l.run(&llm, &tools, vec![ChatMessage::user(prompt)], &mut |e| {
+                .block_on(l.run(&llm, &tools, SharedHistory::new(vec![ChatMessage::user(prompt)]), &mut |e| {
                     if let LoopEvent::TurnDelta(d) = e {
                         shown.push_str(&d);
                     }
                 }))
                 .unwrap();
+            let history = history.snapshot();
             let names: Vec<String> = tools.calls.lock().unwrap().iter().map(|c| c.name.clone()).collect();
             let requests = llm.requests.lock().unwrap().clone();
             (names, requests, history, shown)
@@ -2290,8 +2449,9 @@ mod tests {
         let l = AgentLoop::new(config, Arc::new(AtomicBool::new(false)));
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (history, _) = rt
-            .block_on(l.run(&llm, &tools, vec![ChatMessage::system("sys"), ChatMessage::user("real question")], |_| {}))
+            .block_on(l.run(&llm, &tools, SharedHistory::new(vec![ChatMessage::system("sys"), ChatMessage::user("real question")]), |_| {}))
             .unwrap();
+        let history = history.snapshot();
 
         let sent: Vec<String> = llm.requests.lock().unwrap()[0].iter().map(|m| m.content.clone()).collect();
         assert_eq!(sent, ["sys", "sample question", "sample answer", "real question"]);
@@ -2325,6 +2485,103 @@ mod tests {
 
     /// Every tool call must be answered before the next non-tool message, as
     /// strict servers require.
+    /// A save in the middle of a turn must write the turn so far. It used to
+    /// write the conversation as it stood before the turn: the loop worked on a
+    /// copy and handed it back at the end, so a crash lost the whole turn.
+    #[test]
+    fn the_history_grows_in_the_open_while_the_turn_runs() {
+        let llm = MockLlm { turns: std::sync::Mutex::new(vec![tool_turn("read_file", "c1"), text_turn("a.txt says hi.")]) };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let shared = SharedHistory::new(vec![ChatMessage::user("read a.txt")]);
+        let mid_turn = std::sync::Mutex::new(Vec::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(l.run(&llm, &tools, shared.clone(), |e| {
+            // Read while the turn is running, the way a save on a timer does.
+            if matches!(e, LoopEvent::ToolStarted { .. }) {
+                *mid_turn.lock().unwrap() = shared.snapshot();
+            }
+        }))
+        .unwrap();
+
+        let saved = mid_turn.into_inner().unwrap();
+        assert_eq!(saved.len(), 2, "the question and the call that made the tool run are both saved: {saved:?}");
+        assert_eq!(saved[1].tool_calls.len(), 1, "not just a half turn: {saved:?}");
+        assert_eq!(shared.len(), 4, "and the finished conversation is the same one: {:?}", shared.snapshot());
+    }
+
+    /// Compaction rewrites the conversation, so the shared handle must be
+    /// rewritten too. Otherwise a save after it writes messages that are gone.
+    #[test]
+    fn a_shortened_history_is_what_a_save_writes_afterwards() {
+        struct Shortener;
+        #[async_trait]
+        impl Compactor for Shortener {
+            async fn compact(&self, history: &mut Vec<ChatMessage>, _prompt_tokens: Option<usize>) -> Compaction {
+                history.truncate(1);
+                Compaction::Saved(900)
+            }
+            fn will_compact(&self, _history: &[ChatMessage], _prompt_tokens: Option<usize>) -> bool {
+                true
+            }
+        }
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![tool_turn("read_file", "c1"), tool_turn("write_file", "c2"), text_turn("done.")]),
+        };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false))).with_compactor(Arc::new(Shortener));
+        let shared = SharedHistory::new(vec![ChatMessage::user("read a.txt")]);
+        let mid_turn = std::sync::Mutex::new(Vec::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (returned, _) = rt
+            .block_on(l.run(&llm, &tools, shared.clone(), |e| {
+                // Read between two steps, after compaction has happened.
+                if let LoopEvent::ToolStarted { name, .. } = &e {
+                    if name == "write_file" {
+                        *mid_turn.lock().unwrap() = shared.snapshot();
+                    }
+                }
+            }))
+            .unwrap();
+
+        let saved = mid_turn.into_inner().unwrap();
+        let ids: Vec<&str> = saved.iter().flat_map(|m| m.tool_calls.iter()).map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["c2"], "a save after compaction must not write the call that was summarized away: {saved:?}");
+
+        assert_eq!(shared.len(), returned.len(), "the handle is the returned conversation, not a stale longer one");
+        let said = |h: SharedHistory| -> Vec<String> { h.snapshot().iter().map(|m| m.content.clone()).collect() };
+        assert_eq!(said(shared), said(returned));
+    }
+
+    /// `u32::MAX` is a legitimate "no step limit". `limit + grace` wrapped to 0
+    /// and ended the run at step 1 with a StepLimit that said nothing true.
+    #[test]
+    fn a_step_limit_of_u32_max_is_no_limit_and_does_not_wrap() {
+        let llm = MockLlm { turns: std::sync::Mutex::new(vec![tool_turn("read_file", "c1"), text_turn("done.")]) };
+        let tools = MockTools::new();
+        let l = AgentLoop::new(
+            LoopConfig { max_steps: Some(u32::MAX), wrap_up_at_step_limit: true, ..Default::default() },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let steps = std::sync::Mutex::new(Vec::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (history, done) = rt
+            .block_on(l.run(
+                &llm,
+                &tools,
+                SharedHistory::new(vec![ChatMessage::user("go")]),
+                |e| {
+                    if let LoopEvent::StepStarted { step, .. } = e {
+                        steps.lock().unwrap().push(step);
+                    }
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(done, DoneReason::Completed, "it was stopped before it began: {history:?}");
+        assert_eq!(*steps.lock().unwrap(), vec![1, 2]);
+    }
+
     fn assert_protocol_valid(history: &[ChatMessage]) {
         let mut i = 0;
         while i < history.len() {
@@ -2530,7 +2787,7 @@ mod tests {
         let tools = MockTools::new();
         let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let err = rt.block_on(l.run(&llm, &tools, vec![ChatMessage::user("x")], |_| {})).unwrap_err();
+        let err = rt.block_on(l.run(&llm, &tools, SharedHistory::new(vec![ChatMessage::user("x")]), |_| {})).unwrap_err();
         assert!(err.to_string().contains("context length exceeded"));
         let history = err.into_history();
         // The tool ran, so the model must remember it.
@@ -2625,7 +2882,7 @@ mod tests {
         let tools = MockTools::new();
         let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(l.run(&llm, &tools, vec![ChatMessage::user("x")], &mut |_| {}));
+        let result = rt.block_on(l.run(&llm, &tools, SharedHistory::new(vec![ChatMessage::user("x")]), &mut |_| {}));
         assert!(tools.calls.lock().unwrap().is_empty(), "a call cut off by the connection ran: {:?}", tools.calls.lock().unwrap());
         match result {
             Err(LoopError::Llm { source, history }) => {
@@ -2876,7 +3133,7 @@ mod tests {
             l.run(
                 &llm,
                 &tools,
-                vec![ChatMessage::user("Write a server")],
+                SharedHistory::new(vec![ChatMessage::user("Write a server")]),
                 |e| {
                     if matches!(e, LoopEvent::TurnDelta(_)) && !sent_steer.swap(true, Ordering::Relaxed) {
                         let _ = steer_tx_clone.send("Use postgres instead of sqlite".into());
@@ -2888,6 +3145,7 @@ mod tests {
         });
 
         let (history, done) = result.unwrap();
+        let history = history.snapshot();
         assert!(matches!(done, DoneReason::Completed));
 
         assert!(evs.lock().unwrap().iter().any(|e| matches!(e, LoopEvent::SteeringInjected(msg) if msg.contains("postgres"))));
@@ -3006,7 +3264,7 @@ mod tests {
             l.run(
                 &llm,
                 &tools,
-                vec![ChatMessage::user("Run build")],
+                SharedHistory::new(vec![ChatMessage::user("Run build")]),
                 |e| {
                     if matches!(e, LoopEvent::ToolStarted { .. }) {
                         let _ = steer_tx_clone.send("Do not run tests after that".into());
@@ -3017,6 +3275,7 @@ mod tests {
         });
 
         let (history, done) = result.unwrap();
+        let history = history.snapshot();
         assert!(matches!(done, DoneReason::Completed));
 
         // The steering message comes after the tool result, never between a call and
@@ -3055,7 +3314,7 @@ mod tests {
         inbox.lock().unwrap().push(notice.clone());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (history, done) = rt
-            .block_on(l.run(&llm, &tools, vec![ChatMessage::user("Build it in the background")], |e| match e {
+            .block_on(l.run(&llm, &tools, SharedHistory::new(vec![ChatMessage::user("Build it in the background")]), |e| match e {
                 // The task ends while the turn is running a tool.
                 LoopEvent::ToolStarted { .. } => {
                     for n in inbox.lock().unwrap().send_into_turn() {
@@ -3067,6 +3326,7 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(done, DoneReason::Completed);
+        let history = history.snapshot();
         let delivered: Vec<&ChatMessage> = history.iter().filter(|m| m.content == notice).collect();
         assert_eq!(delivered.len(), 1, "{history:?}");
         assert!(!is_prompt(delivered[0]), "a notice is not something the user said");

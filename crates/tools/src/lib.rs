@@ -103,8 +103,8 @@ impl BuiltinTools {
             .mcp_manager
             .unwrap_or_else(|| mcp::McpManager::new(config.cwd.clone()));
         Ok(Self {
-            cwd: config.cwd,
-            shells: ShellRegistry::new(),
+            cwd: config.cwd.clone(),
+            shells: ShellRegistry::with_cwd(config.cwd),
             http,
             brave_key: config.brave_api_key,
             question_gate: config.question_gate,

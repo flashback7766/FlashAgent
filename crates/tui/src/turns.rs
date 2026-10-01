@@ -31,14 +31,35 @@ impl App {
         }
     }
 
-    /// Once due, with no turn running.
-    pub(crate) fn start_recap_if_due(&mut self, source: &Arc<BackendSource>, tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>) {
-        if self.running || self.recap_due.is_none_or(|due| std::time::Instant::now() < due) {
+    /// What the app knows about work in flight, gathered for [`recap_blocked_by`].
+    pub(crate) fn recap_blocked_by(&self, cx: &LoopCtx<'_>) -> Option<&'static str> {
+        recap_blocked_by(RecapBusy {
+            model_answering: self.running || self.active_turn_handle.is_some(),
+            stopping: self.cancel_requested.is_some(),
+            subagents: self.agents.running(),
+            background_tasks: cx.tools_arc.shells().running_count(),
+            compacting: self.compacting,
+            queued_commands: self.queued_commands.len(),
+        })
+    }
+
+    /// Once due, with no turn running and nothing else in flight.
+    pub(crate) fn start_recap_if_due(&mut self, cx: &LoopCtx<'_>) {
+        if self.recap_due.is_none_or(|due| std::time::Instant::now() < due) {
+            return;
+        }
+        // Postponed, not dropped: the recap is still wanted, only not yet, and
+        // the conversation it would describe keeps growing. Clearing the timer
+        // here meant one moment of work in flight — a child finishing, a shell
+        // task starting — cost the recap for the rest of the session, since
+        // nothing else arms it except the end of a turn.
+        if self.recap_blocked_by(cx).is_some() {
+            self.recap_due = Some(std::time::Instant::now() + recap_idle());
             return;
         }
         self.recap_due = None;
-        let source_bg = source.clone();
-        let tx_bg = tx.clone();
+        let source_bg = cx.source.clone();
+        let tx_bg = cx.tx.clone();
         let history_bg = self.history.clone();
         let turn_id = self.chat.user_turn_count() as u64;
         self.recap_task = Some(tokio::spawn(async move {
@@ -142,11 +163,18 @@ impl App {
                 ),
             })
         });
+        // The turn works on a handle the app also holds, so a save taken while it
+        // runs writes what the turn has actually done so far. It used to hand
+        // over a clone and keep its own, which is why a crash mid-turn lost the
+        // whole turn and not the last few seconds of it: the only copy on disk
+        // was the one written before the turn started.
+        let shared = flashagent_core::loop_::SharedHistory::new(self.history.clone());
+        self.turn_history = Some(shared.clone());
         self.active_turn_handle = Some(spawn_turn(
             cx.cancel.clone(),
             cx.source.clone(),
             cx.perm,
-            self.history.clone(),
+            shared,
             budgets,
             turn_opts,
             cx.tx.clone(),
@@ -285,6 +313,7 @@ impl App {
         match res {
             Ok((h, reason)) => {
                 self.history = h;
+                self.turn_history = None;
                 // A style picked while the turn ran was applied to the history it replaced.
                 self.apply_personality();
                 update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
@@ -364,17 +393,30 @@ impl App {
             Err((e, h)) => {
                 // Keep the steps that already ran and changed files.
                 self.history = h;
+                self.turn_history = None;
                 self.apply_personality();
                 flashagent_core::mark_cut_short(&mut self.history, flashagent_core::CutShort::ByError);
+                // The steps that did run changed files, and this note is what tells
+                // the next turn to check them. Losing power here is the one moment
+                // that note has to survive, so it goes to disk with the history.
+                self.autosave(cx.session_id, cx.cwd_display);
                 update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                 self.chat.on_event(&LoopEvent::Done(DoneReason::Failed));
-                // Plain explanation first, the raw text underneath.
+                // Plain explanation first, the raw text underneath. A connection that
+                // dropped is told apart from a server that refused: only the first one
+                // can leave a half-written answer on screen, and that is what the user
+                // is looking at when they read the rest of this.
+                let cut_off = cut_off_notice(&e, self.token_tracker.turn_output());
                 let explained = flashagent_tui::backend_error::explain(
                     &e,
                     &cx.source.0.base_url(),
                     &self.current_model,
                 );
-                self.chat.push_line(LineKind::ToolError, explained.headline.clone());
+                let headline = match cut_off {
+                    Some(why) => why,
+                    None => explained.headline.clone(),
+                };
+                self.chat.push_line(LineKind::ToolError, headline);
                 if let Some(hint) = &explained.hint {
                     // Its own line: the renderer clips embedded newlines instead of wrapping.
                     self.chat.push_line(
@@ -399,6 +441,97 @@ impl App {
     }
 }
 
+/// Whether a failed turn ended because the connection went away rather than
+/// because the server said no. Only the first can leave an answer on screen
+/// that stops in the middle of a sentence, and that is the one the user has to
+/// be told about rather than left to infer from a half paragraph.
+///
+/// Matched on the text because the error arrives as one: `LoopError` is
+/// displayed into the string the loop sends, and the llm crate reports a stream
+/// that closed without a finish reason as `stream interrupted: …`.
+pub(crate) fn is_transport_cut(raw: &str) -> bool {
+    let lower = raw.to_lowercase();
+    [
+        // The llm crate's own wording for a stream that ended with no reason.
+        "closed before saying why",
+        "stream interrupted",
+        // reqwest and the transports under it.
+        "connection reset",
+        "connection closed",
+        "connection aborted",
+        "error sending request",
+        "broken pipe",
+        "body stream",
+        "incomplete message",
+    ]
+    .iter()
+    .any(|m| lower.contains(m))
+}
+
+/// What a turn cut off by a dropped connection is told: that it was cut off,
+/// and how much of it arrived. The count is the part that matters — without it
+/// "it failed" reads as though nothing was written, and the text that is on
+/// screen looks like the whole answer. `None` for every other failure, which
+/// said no before there was anything to cut.
+pub(crate) fn cut_off_notice(raw: &str, arrived: usize) -> Option<String> {
+    if !is_transport_cut(raw) {
+        return None;
+    }
+    Some(if arrived == 0 {
+        "The connection to the model server dropped before the answer began \u{b7} nothing of this turn was written".to_string()
+    } else {
+        format!(
+            "The connection to the model server dropped mid-answer \u{b7} about {} arrived and the answer above is cut off, not finished",
+            flashagent_tui::goal::human_count(arrived as i64)
+        )
+    })
+}
+
+/// What is still in flight, as far as a recap is concerned.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RecapBusy {
+    /// A turn is running, or one has a handle and has not reported back.
+    pub(crate) model_answering: bool,
+    /// Esc was pressed and the loop has not wound down yet.
+    pub(crate) stopping: bool,
+    pub(crate) subagents: usize,
+    pub(crate) background_tasks: usize,
+    pub(crate) compacting: bool,
+    pub(crate) queued_commands: usize,
+}
+
+/// Why a recap may not be written right now, if it may not. A recap is one
+/// whole extra request to the model, spent on a conversation that is still
+/// moving: summarising work in progress describes a state that lasts no longer
+/// than the summary.
+///
+/// `turn_phase` is deliberately not one of these. It has no idle variant, so a
+/// phase left over from the last turn would read as "the model is busy" for the
+/// rest of the session and no recap would ever be written again. What says the
+/// model is answering is the turn itself: the running flag, the handle it runs
+/// on, and a cancel it has not yet obeyed.
+pub(crate) fn recap_blocked_by(busy: RecapBusy) -> Option<&'static str> {
+    if busy.model_answering {
+        return Some("the model is answering");
+    }
+    if busy.stopping {
+        return Some("the last turn is still stopping");
+    }
+    if busy.subagents > 0 {
+        return Some("subagents are working");
+    }
+    if busy.background_tasks > 0 {
+        return Some("a background task is running");
+    }
+    if busy.compacting {
+        return Some("the context is being compacted");
+    }
+    if busy.queued_commands > 0 {
+        return Some("a queued command is about to start a turn");
+    }
+    None
+}
+
 /// Three minutes without a key or a turn. `FLASHAGENT_RECAP_IDLE_SECS` sets it
 /// (the scenario tests use 0).
 fn recap_idle() -> std::time::Duration {
@@ -407,4 +540,85 @@ fn recap_idle() -> std::time::Duration {
         let secs = std::env::var("FLASHAGENT_RECAP_IDLE_SECS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(180);
         std::time::Duration::from_secs(secs)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dropped_connection_says_the_answer_was_cut_off_and_how_much_arrived() {
+        // The wording the llm crate now uses when a stream ends with no finish
+        // reason, wrapped the way LoopError displays it.
+        let raw = "llm: stream interrupted: the server closed before saying why";
+        assert!(is_transport_cut(raw), "not recognised as a transport cut: {raw}");
+        let said = cut_off_notice(raw, 812).expect("a cut-off answer gets its own line");
+        assert!(said.contains("cut off"), "it does not say it was cut off: {said}");
+        assert!(said.contains("812"), "it does not say how much arrived: {said}");
+
+        // Nothing arrived is a different sentence: "cut off" would describe a
+        // paragraph that is not on screen.
+        let empty = cut_off_notice(raw, 0).unwrap();
+        assert!(empty.contains("before the answer began"), "{empty}");
+        assert!(!empty.contains("cut off"), "{empty}");
+    }
+
+    #[test]
+    fn a_server_that_refused_is_not_reported_as_a_cut_off_answer() {
+        // A rejected key, a full context, a rate limit: nothing was streaming, so
+        // calling it a half-written answer would be a lie in the other direction.
+        for raw in [
+            "llm: backend returned 401: unauthorized",
+            "llm: backend returned 429: rate limit exceeded",
+            "llm: forbidden: Gemini refused the request (SAFETY)",
+            "llm: backend returned 404: {\"error\":{\"message\":\"model_not_found\"}}",
+        ] {
+            assert!(!is_transport_cut(raw), "wrongly a cut off: {raw}");
+            assert_eq!(cut_off_notice(raw, 400), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn the_other_ways_a_connection_dies_are_a_cut_off_too() {
+        for raw in [
+            "llm: stream interrupted: connection reset by peer",
+            "llm: http: error sending request for url (http://localhost:1234/v1/chat/completions)",
+            "llm: stream interrupted: body stream ended unexpectedly",
+        ] {
+            assert!(is_transport_cut(raw), "not recognised: {raw}");
+        }
+    }
+
+    #[test]
+    fn a_recap_waits_for_the_work_in_flight_and_does_not_wait_for_nothing() {
+        let idle = RecapBusy::default();
+        assert_eq!(recap_blocked_by(idle), None, "an idle conversation gets its recap");
+
+        // Each of the three the user named, on its own.
+        let subagent = RecapBusy { subagents: 2, ..idle };
+        assert_eq!(recap_blocked_by(subagent), Some("subagents are working"));
+        let task = RecapBusy { background_tasks: 1, ..idle };
+        assert_eq!(recap_blocked_by(task), Some("a background task is running"));
+        let answering = RecapBusy { model_answering: true, ..idle };
+        assert_eq!(recap_blocked_by(answering), Some("the model is answering"));
+
+        // And the rest of the in-flight states that make a recap wrong the same way.
+        for (busy, why) in [
+            (RecapBusy { stopping: true, ..idle }, "the last turn is still stopping"),
+            (RecapBusy { compacting: true, ..idle }, "the context is being compacted"),
+            (RecapBusy { queued_commands: 1, ..idle }, "a queued command is about to start a turn"),
+        ] {
+            assert_eq!(recap_blocked_by(busy), Some(why));
+        }
+    }
+
+    #[test]
+    fn the_model_phase_is_not_what_says_the_model_is_busy() {
+        // A recap gate built on turn_phase never opens again: the phase has no
+        // idle variant, so whatever the last turn ended on reads as "busy" for
+        // the rest of the session and no recap is ever written. Only the turn
+        // itself says so, and it does.
+        let busy = RecapBusy { model_answering: false, ..RecapBusy::default() };
+        assert_eq!(recap_blocked_by(busy), None, "a phase left over from a finished turn must not block");
+    }
 }

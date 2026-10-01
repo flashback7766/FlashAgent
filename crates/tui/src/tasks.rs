@@ -198,18 +198,19 @@ impl App {
             role: finished.role.clone(),
             event: flashagent_core::loop_::LoopEvent::Done(finished.done),
         });
-        let _ = &finished;
+        // The answer goes to the model as a notice, and to the screen as a card.
+        // The model cannot show it to the user and the user cannot ask the model
+        // for it again for free, so a report that only the model read was a
+        // report thrown away after it was paid for.
+        let row = self.agents.rows().into_iter().find(|r| r.id == finished.id);
+        let role = row.as_ref().map(|r| r.role.clone()).unwrap_or_else(|| finished.role.clone());
+        let secs = row.as_ref().map(|r| r.seconds).unwrap_or_default();
+        self.chat.push_subagent_answer(&finished, &role, secs);
 
-        let Some(notice) = self.agents.notice(&finished) else { return };
-        // The answer is a lot of text and the transcript already has the row;
-        // the full report goes to the model, not onto the screen twice.
-        let role = self
-            .agents
-            .rows()
-            .into_iter()
-            .find(|r| r.id == finished.id)
-            .map(|r| r.role)
-            .unwrap_or_else(|| finished.role.clone());
+        let Some(notice) = self.agents.notice(&finished) else {
+            self.renderer.request_reprint();
+            return;
+        };
         let said = format!(
             "{role} {} {}",
             finished.id,

@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde_json::{json, Value};
 
-use crate::client::{pump, Client, EventStream, WireDecoder};
+use crate::client::{pump, Client, EventStream, Malformed, WireDecoder};
 use crate::repair::repair_json;
 use crate::thinking::{DiscoveredModel, ServerDiscovery, ServerKind, ThinkingProfile, ThinkingProtocol};
 use crate::types::{ChatMessage, FinishReason, LlmError, LlmEvent, Role, ThinkingEffort, ToolCall, ToolSpec, TurnOptions, Usage};
@@ -803,6 +803,11 @@ struct Decoder {
     tokens: Tokens,
     stop: Option<FinishReason>,
     done: bool,
+    /// A `message_stop`: the frame that says the message ended. A stop reason
+    /// alone means the same thing about the answer, but this is what a server
+    /// sends last.
+    stopped: bool,
+    malformed: Malformed,
 }
 
 impl WireDecoder for Decoder {
@@ -819,8 +824,16 @@ impl WireDecoder for Decoder {
         for (name, data) in self.sse.finish() {
             self.event(&name, &data, &mut out);
         }
+        // `end` here and not `Done(Stop)`: without a `message_stop` the body
+        // stopped mid-answer, and that is an error, not a turn that finished.
         self.end(&mut out);
         out
+    }
+
+    /// A stop reason or a `message_stop`: either one is the server saying the
+    /// answer is over and why. Without both, the body was cut off.
+    fn saw_terminal(&self) -> bool {
+        self.stopped || self.stop.is_some()
     }
 }
 
@@ -829,7 +842,18 @@ impl Decoder {
         if self.done {
             return;
         }
-        let Ok(v) = serde_json::from_str::<Value>(data) else { return };
+        let Ok(v) = serde_json::from_str::<Value>(data) else {
+            // A malformed frame is dropped, because one is enough of a nuisance
+            // and a proxy's stray keepalive should not end a turn. A run of
+            // them is not a nuisance: it means the frames carrying
+            // `message_stop` are among those being lost.
+            if self.malformed.bad() {
+                out.push(Err(self.malformed.message()));
+                self.done = true;
+            }
+            return;
+        };
+        self.malformed.ok();
         let index = v["index"].as_u64().unwrap_or(0);
         match v["type"].as_str().unwrap_or(name) {
             "message_start" => self.tokens.read_from(&v["message"]["usage"]),
@@ -850,7 +874,10 @@ impl Decoder {
                     self.stop = Some(self.finish_reason(reason, &v["delta"]["stop_details"], out));
                 }
             }
-            "message_stop" => self.end(out),
+            "message_stop" => {
+                self.stopped = true;
+                self.end(out)
+            }
             "error" => {
                 let error = &v["error"];
                 let message = error["message"].as_str().or(error["type"].as_str()).map(str::to_string).unwrap_or_else(|| v.to_string());
@@ -974,7 +1001,17 @@ impl Decoder {
                 cost: None,
             })));
         }
-        out.push(Ok(LlmEvent::Done(self.stop.unwrap_or(FinishReason::Stop))));
+        // Without a stop reason and without a `message_stop`, the body stopped
+        // mid-answer: `self.stop.unwrap_or(FinishReason::Stop)` reported that
+        // as a turn that finished, and half a reply went into the history as
+        // if it were whole.
+        match self.stop {
+            Some(reason) => out.push(Ok(LlmEvent::Done(reason))),
+            // `message_stop` alone is Anthropic saying the message is over
+            // without giving a reason; a plain stop is what that means.
+            None if self.stopped => out.push(Ok(LlmEvent::Done(FinishReason::Stop))),
+            None => out.push(Err(LlmError::Stream(crate::client::CLOSED_EARLY.into()))),
+        }
     }
 
     /// The signed thinking, verbatim, and where it stood among the text and
@@ -1279,7 +1316,19 @@ mod tests {
             let messages = [ChatMessage::user("hi")];
             body(model, &messages, &[], &options, &plan(&llm, model, &messages, &options))["output_config"]["effort"].clone()
         };
-        assert_eq!(preset("claude-opus-4-8", ThinkingEffort::High), "xhigh", "the most the model offers");
+        // opus-4-8 is the model whose listing says `"max": {"supported": false}`
+        // (line 1741), so the presets it is really offered stop at xhigh. The
+        // fallback family still names max, which is why this pins the answer to
+        // the listing rather than to the guess: picking the top rung has to mean
+        // the top rung *the server acknowledged*, not the highest name we know.
+        let no_max = Family { efforts: &["low", "medium", "high", "xhigh"], ..family("claude-opus-4-8") };
+        let listed = client("https://api.anthropic.com", "claude-opus-4-8").with_profile(profile(&no_max));
+        let options = TurnOptions { thinking: ThinkingEffort::High, ..Default::default() };
+        let messages = [ChatMessage::user("hi")];
+        let sent = body("claude-opus-4-8", &messages, &[], &options, &plan(&listed, "claude-opus-4-8", &messages, &options))
+            ["output_config"]["effort"]
+            .clone();
+        assert_eq!(sent, "xhigh", "the most the model offers");
         assert_eq!(preset("claude-opus-5-5", ThinkingEffort::Off), "low");
         assert_eq!(preset("claude-opus-5-5", ThinkingEffort::Default), "medium");
     }
@@ -1577,11 +1626,50 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_cut_short_still_reports_what_it_had() {
+    fn a_stream_cut_short_reports_what_it_had_and_then_that_it_was_cut_short() {
         let transcript = sse(&[opening(json!({ "input_tokens": 7 })), start(0, json!({ "type": "text", "text": "" })), delta(0, text_delta("half"))]);
-        let out = events(&transcript[..transcript.len() - 2], 9);
-        assert_eq!(said(&out), "half");
-        assert!(matches!(out.last(), Some(LlmEvent::Done(FinishReason::Stop))));
+        let out = decode(&transcript[..transcript.len() - 2], 9);
+        let said_so_far: String = out.iter().filter_map(|e| match e { Ok(LlmEvent::TextDelta(t)) => Some(t.as_str()), _ => None }).collect();
+        assert_eq!(said_so_far, "half", "what did arrive is still reported");
+        // The bug: this used to end `Done(Stop)`, and the loop committed half a
+        // reply to the history as though the model had finished it.
+        assert!(matches!(out.last(), Some(Err(LlmError::Stream(m))) if m == crate::client::CLOSED_EARLY), "{out:?}");
+        assert!(!out.iter().any(|e| matches!(e, Ok(LlmEvent::Done(_)))), "no finished turn out of a stream that was not finished: {out:?}");
+    }
+
+    #[test]
+    fn a_tool_call_the_server_stopped_streaming_is_not_a_finished_turn() {
+        // The worst shape: the model had said it was calling a tool, and the
+        // arguments stopped mid-JSON. Committing that as a whole call runs the
+        // tool on half its input.
+        let transcript = sse(&[
+            opening(json!({ "input_tokens": 7 })),
+            start(0, json!({ "type": "tool_use", "id": "toolu_a", "name": "run_shell", "input": {} })),
+            delta(0, json!({ "type": "input_json_delta", "partial_json": "{\"comm" })),
+        ]);
+        let out = decode(&transcript, 7);
+        assert!(matches!(out.last(), Some(Err(LlmError::Stream(_)))), "{out:?}");
+    }
+
+    #[test]
+    fn a_run_of_frames_that_are_not_json_ends_the_stream() {
+        // The frames carrying `message_stop` are among the ones that fail to
+        // parse, which is what makes the stream look clean when it is not.
+        // Junk spliced in before the frames that end the turn, so they are the ones
+        // that fail to parse: the stream then looks clean when it is not.
+        let good = |junk: usize| {
+            let mut stream = sse(&[opening(json!({ "input_tokens": 1 })), delta(0, text_delta("hi"))]);
+            for _ in 0..junk {
+                stream.push_str("data: {not json}\n\n");
+            }
+            stream.push_str(&sse(&[ending("end_turn", 1), json!({ "type": "message_stop" })]));
+            stream
+        };
+        let out = decode(&good(crate::client::MALFORMED_LIMIT as usize - 1), 13);
+        assert!(out.iter().all(Result::is_ok), "a stray bad frame is dropped: {out:?}");
+        assert!(matches!(out.last(), Some(Ok(LlmEvent::Done(FinishReason::Stop)))), "{out:?}");
+        let out = decode(&good(crate::client::MALFORMED_LIMIT as usize), 13);
+        assert!(matches!(out.last(), Some(Err(LlmError::Stream(m))) if m.contains("in a row")), "{out:?}");
     }
 
     /// Reads one HTTP request, headers and body.

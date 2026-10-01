@@ -36,6 +36,11 @@ pub(crate) struct Renderer {
     /// matched here rather than against the transcript: these rows are not part
     /// of it, so F2 never reaches them.
     agent_screen: Vec<(usize, String)>,
+    /// Where the first pinned subagent row sits in the tail, when the work box
+    /// is up. A click is matched against this rather than counted back from the
+    /// end of the composer: the composer block below the box has rows of its
+    /// own that belong to no child.
+    agent_first: Option<usize>,
     /// The pinned rows and the ones the mouse has opened, handed from `frame`
     /// to `paint_layout`, which is where they land on a screen row.
     agent_plan: Vec<(String, String)>,
@@ -148,7 +153,12 @@ pub(crate) fn work_box(
 ) -> Vec<(LineKind, String)> {
     let mut body: Vec<(LineKind, String)> = Vec::new();
     for (id, line) in agent_rows {
-        body.push((LineKind::Tool, format!("\x1b[38;2;150;155;170m{line}\x1b[0m")));
+        // The same indent a background command gets. A row is framed and
+        // aligned by the box, not by the thing that builds it: `AgentTree::line`
+        // counts `width` as the whole row and so must not spend two of it on
+        // spacing that belongs here, or a child sits flush against the border
+        // while the command under it is indented.
+        body.push((LineKind::Tool, format!("\x1b[38;2;150;155;170m  {line}\x1b[0m")));
         if expanded.contains(&id.as_str()) {
             if let Some(detail) = details.get(id) {
                 body.push((LineKind::Tool, format!("\x1b[38;2;120;125;140m{detail}\x1b[0m")));
@@ -168,27 +178,58 @@ pub(crate) fn work_box(
     // layout one row over: the box has to close, so the words give way.
     //
     // Three fixed columns go to `╭`, the `─` that follows it, and `╮`; what is
-    // left is the title and the run of dashes that closes the edge.
-    let room = box_w.saturating_sub(3);
+    // left is the title and the run of dashes that closes the edge. Every branch
+    // has to land on exactly that room, or the top edge and the bottom one stop
+    // being the same width and the box no longer closes. A box too narrow for
+    // even that one `─` drops it, rather than pushing the edge a column wider
+    // than the bottom of its own frame.
+    let lead = usize::from(box_w >= 3);
+    let room = box_w.saturating_sub(2 + lead);
     let full = " subagents & background ";
     let title: String = if full.chars().count() <= room {
         full.to_string()
     } else if " work ".chars().count() <= room {
         " work ".to_string()
+    } else if room == 0 {
+        String::new()
     } else {
-        format!(" {}\u{2026}", full.trim().chars().take(room.saturating_sub(1)).collect::<String>())
+        // Narrower than the word: what is left says there was more.
+        let mut cut_title: String = full.trim().chars().take(room - 1).collect();
+        cut_title.push('\u{2026}');
+        cut_title
     };
     let dashes = room.saturating_sub(visible_width(&title));
     let mut out = vec![(
         LineKind::Tool,
-        format!("{edge}\u{256d}\u{2500}{title}{edge}{}\u{256e}\x1b[0m", "\u{2500}".repeat(dashes)),
+        format!(
+            "{edge}\u{256d}{}{title}{edge}{}\u{256e}\x1b[0m",
+            "\u{2500}".repeat(lead),
+            "\u{2500}".repeat(dashes)
+        ),
     )];
-    out.extend(body);
+    // The sides run the height of the box, not only its edges: a body row
+    // pushed raw left the frame open down both sides, so the rows read as
+    // transcript rather than as work in progress.
+    for (kind, row) in body {
+        out.push((kind, pad_box_row(&row, box_w)));
+    }
+    // `├─┤`, not `╰─╯`: the composer draws its own bottom edge, and this is the
+    // top of that half of the block, so the sides carry on unbroken.
     out.push((
         LineKind::Tool,
-        format!("{edge}\u{2570}{}\u{256f}\x1b[0m", "\u{2500}".repeat(box_w.saturating_sub(2))),
+        format!("{edge}\u{251c}{}\u{2524}\x1b[0m", "\u{2500}".repeat(box_w.saturating_sub(2))),
     ));
     out
+}
+
+/// A background command as a row of the work box. `box_inner` is the room left
+/// inside the box's own frame, so the two columns of indent, the `▸ ` mark and
+/// the ` · {elapsed}` that closes the row all come out of the command instead
+/// of painting through the right edge of the box.
+pub(crate) fn background_row(command: &str, elapsed: &str, box_inner: usize) -> String {
+    let spent = 2 + 2 + 3 + visible_width(elapsed);
+    let cmd = flashagent_tui::truncate_middle(command, box_inner.saturating_sub(spent).max(4));
+    format!("\u{25b8} {cmd} \u{b7} {elapsed}")
 }
 
 /// The box's own top and bottom edges. A click has to skip them to land on the
@@ -224,7 +265,7 @@ mod work_box_tests {
         let text = plain(&rows);
         assert_eq!(text.len(), 4, "two edges around two rows: {text:?}");
         assert!(text[0].contains('\u{256d}') && text[0].contains('\u{256e}'), "the top edge is closed: {text:?}");
-        assert!(text[3].contains('\u{2570}') && text[3].contains('\u{256f}'), "the bottom edge is closed: {text:?}");
+        assert!(text[3].contains('\u{251c}') && text[3].contains('\u{2524}'), "the bottom edge is closed: {text:?}");
         assert!(text[1].contains("researcher"), "the child is in the box: {text:?}");
         assert!(text[2].contains("cargo test"), "and the background command beside it: {text:?}");
         assert_eq!(text[0].chars().count(), text[3].chars().count(), "the edges are the same width: {text:?}");
@@ -251,6 +292,71 @@ mod work_box_tests {
             assert!(top <= width - 2, "the box must fit the window, not stick out of it: {width}: {text:?}");
         }
     }
+
+    #[test]
+    fn the_edges_are_equal_at_every_narrow_width_too() {
+        // Below eleven columns the title is cut rather than shortened, and that
+        // branch used to hand the top edge one more column than the bottom one.
+        for width in 4usize..=32 {
+            let rows = work_box(&[agent("sub1", "  \u{25b8} coder")], &[], &Default::default(), &[], width);
+            let text = plain(&rows);
+            let top = text[0].chars().count();
+            let bottom = text[2].chars().count();
+            assert_eq!(top, bottom, "the edges must be the same width at {width}: {text:?}");
+            assert!(top <= width.saturating_sub(2), "the box must fit at {width}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn the_box_is_framed_on_both_sides_for_its_whole_height() {
+        let rows = work_box(
+            &[agent("sub1", "  \u{25b8} researcher")],
+            &[],
+            &Default::default(),
+            &["  \u{25b8} cargo test".to_string()],
+            40,
+        );
+        for row in plain(&rows).iter().skip(1).take(2) {
+            assert!(row.starts_with('\u{2502}') && row.ends_with('\u{2502}'), "a body row has no sides: {row:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_phase_stays_inside_its_own_box() {
+        let long = format!("  \u{25b8} researcher \u{b7} {}", "grepping the token tracker ".repeat(6));
+        for width in [30usize, 60, 120] {
+            let rows = work_box(&[agent("sub1", &long)], &[], &Default::default(), &[], width);
+            for row in plain(&rows) {
+                assert!(row.chars().count() <= width - 2, "a row paints through the box at {width}: {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_background_row_fits_the_room_left_inside_the_box() {
+        let cmd = "cargo test -p flashagent-core --lib --release -- --nocapture";
+        for inner in [20usize, 40, 76] {
+            let row = background_row(cmd, "1h02m", inner);
+            assert!(
+                flashagent_tui::visible_width(&row) + 2 <= inner,
+                "the row must fit {inner} columns with its indent: {row:?}"
+            );
+            assert!(row.contains("1h02m"), "the elapsed time is never the thing that is cut: {row:?}");
+        }
+        // Narrower than the marks themselves: the row is longer than the box,
+        // and `pad_box_row` is what keeps it from painting through the side.
+        let cramped = background_row(cmd, "1h02m", 10);
+        assert!(flashagent_tui::visible_width(&cramped) > 10, "the marks alone overrun a tiny box: {cramped:?}");
+    }
+
+    #[test]
+    fn the_box_closes_onto_the_composer_rather_than_starting_a_second_one() {
+        let rows = work_box(&[agent("sub1", "  \u{25b8} coder")], &[], &Default::default(), &[], 80);
+        let text = plain(&rows);
+        let edges = text.iter().filter(|r| r.starts_with('\u{256d}') || r.starts_with('\u{251c}')).count();
+        assert_eq!(edges, WORK_BOX_EDGES, "the box has two edges of its own: {text:?}");
+        assert!(text.last().unwrap().starts_with('\u{251c}'), "the box opens into the composer: {text:?}");
+    }
 }
 
 impl Renderer {
@@ -261,6 +367,7 @@ impl Renderer {
             total_lines: 0,
             chat_view: (0, 0),
     agent_screen: Vec::new(),
+            agent_first: None,
     agent_plan: Vec::new(),
     agent_open: Vec::new(),
             screen: flashagent_tui::screen::Screen::new(),
@@ -837,13 +944,26 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
     input_line_idx
 }
 
-fn append_composer(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize, height: u16, t: u64, border_color: &str) -> (usize, Option<u16>) {
+/// `joined` is true when the work box is already the top of this block: its
+/// `├─┤` is the seam, so drawing a `╭───╮` here would start a second box where
+/// the first one has not ended.
+fn append_composer(
+    tail: &mut Vec<RenderLine>,
+    st: &FrameState<'_>,
+    width: usize,
+    height: u16,
+    t: u64,
+    border_color: &str,
+    joined: bool,
+) -> (usize, Option<u16>) {
     let inner_w = width.saturating_sub(2);
     let reset = "\x1b[0m";
-    tail.push((
-        LineKind::System,
-        format!("{border_color}╭{}╮{reset}", "─".repeat(inner_w)),
-    ));
+    if !joined {
+        tail.push((
+            LineKind::System,
+            format!("{border_color}╭{}╮{reset}", "─".repeat(inner_w)),
+        ));
+    }
 
     // Attachments go above the line they go with.
     if !st.attachments.is_empty() {
@@ -1035,15 +1155,23 @@ impl Renderer {
         // under way that the conversation does not show. A box rather than bare
         // lines: without its edges these read as part of the chat, and the eye
         // has to work out that they are not what was said.
-        for (kind, text) in work_box(
+        let box_rows = work_box(
             st.agent_rows,
             st.agent_expanded,
             st.agent_details,
             st.background_rows,
             width,
-        ) {
-            tail.push((kind, text));
-        }
+        );
+        // The rows a click may land on start under the box's own top edge, and
+        // they are counted from where they sit in the tail, not from the end of
+        // the composer: the box is the tail of the conversation, and the composer
+        // block under it has rows of its own that are not a child's.
+        self.agent_first = if box_rows.is_empty() {
+            None
+        } else {
+            Some(tail.len() + WORK_BOX_EDGES - 1)
+        };
+        tail.extend(box_rows);
 
         let inner_w = width.saturating_sub(2);
         let t = anim::now_ms();
@@ -1088,7 +1216,7 @@ impl Renderer {
             tail.extend(overlay.render(width, height as usize));
             input_line_idx = tail.len().saturating_sub(1);
         } else {
-            let composer = append_composer(&mut tail, &st, width, height, t, &border_color);
+            let composer = append_composer(&mut tail, &st, width, height, t, &border_color, self.agent_first.is_some());
             input_line_idx = composer.0;
             text_cursor = composer.1;
         }
@@ -1214,15 +1342,21 @@ impl Renderer {
     rows.drain(..cut);
     let scrolled_marker = usize::from(self.scroll_offset > 0 && chat_room > 1);
     self.chat_view = (first_chat_row + cut, chat_rows.saturating_sub(scrolled_marker).saturating_sub(cut));
-    // Where the pinned subagent rows landed, for a click to find. The block sits
-    // at the end of `bottom`: one row per child, plus a detail row for one the
-    // mouse has opened, inside a box that has edges of its own.
     self.agent_screen.clear();
-    let block = self.agent_plan.len() + self.agent_open.len() + WORK_BOX_EDGES;
-    let first = bottom.len().saturating_sub(block);
-    for (i, (id, _)) in self.agent_plan.iter().enumerate() {
-        if let Some(screen) = (chat_rows + first + i).checked_sub(cut) {
-            self.agent_screen.push((screen, id.clone()));
+    // Where the pinned rows landed, for a click to find: inside the work box,
+    // under its top edge, one row per child plus a detail row for one the mouse
+    // has opened. Counted from where the box sits in the tail, because the
+    // composer block under it has rows of its own that belong to no child.
+    if let Some(first) = self.agent_first {
+        let mut opened = 0usize;
+        for (i, (id, _)) in self.agent_plan.iter().enumerate() {
+            let at = settled.len() + first + i + opened;
+            if let Some(screen) = at.checked_sub(first_chat_row + cut) {
+                self.agent_screen.push((screen, id.clone()));
+            }
+            if self.agent_open.contains(id) {
+                opened += 1;
+            }
         }
     }
     // The terminal's cursor is shown only where text is typed; cards and menus
@@ -1283,8 +1417,12 @@ impl App {
         // Pinned above the composer, below the steering: the rows are built here
         // rather than in `draw` so a click can be matched against them.
         let pin_width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(100);
-        let agent_rows = self.agents.pinned_rows(pin_width);
-        let agent_details = self.agents.details(pin_width);
+        // What is left of the window once the box has its own two columns of
+        // border: a row built against the terminal paints straight through the
+        // side of the box it is in.
+        let box_inner = pin_width.saturating_sub(4);
+        let agent_rows = self.agents.pinned_rows(box_inner);
+        let agent_details = self.agents.details(box_inner);
         // Background commands join the subagents in one box, so each says what
         // it is and for how long, cut to fit like a child's row.
         let background_rows: Vec<String> = cx
@@ -1293,10 +1431,7 @@ impl App {
             .tasks()
             .into_iter()
             .filter(|t| matches!(t.state, flashagent_tools::TaskState::Running))
-            .map(|t| {
-                let cmd = flashagent_tui::truncate_middle(&t.command, pin_width.saturating_sub(28).max(12));
-                format!("\u{25b8} {cmd} \u{b7} {}", flashagent_tools::shell::format_elapsed(t.elapsed))
-            })
+            .map(|t| background_row(&t.command, &flashagent_tools::shell::format_elapsed(t.elapsed), box_inner))
             .collect();
         let expanded: Vec<&str> = self.expanded_agents.iter().map(String::as_str).collect();
         self.renderer.frame(
@@ -1363,7 +1498,10 @@ impl App {
         if out == 0 {
             return None;
         }
-        Some(if out >= 1000 { format!("{:.1}k out", out as f64 / 1000.0) } else { format!("{out} out") })
+        // Through the shared formatter rather than a second one: this line had its
+        // own `k`-only rule, so a turn that spent four million tokens read as
+        // "4621.2k out" while `/goal` said "4.6M" for the same work.
+        Some(format!("{} out", flashagent_tui::goal::human_count(out as i64)))
     }
 
     pub(crate) fn animating(&self) -> bool {

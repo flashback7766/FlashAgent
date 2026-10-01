@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::client::{pump, Client, EventStream, WireDecoder};
+use crate::client::{pump, Client, EventStream, Malformed, WireDecoder};
 use crate::parse::SseDecoder;
 use crate::thinking::{
     gemini_profile, gemini_thinking_config, gemini_version, parse_gemini_models, DiscoveredModel, ServerDiscovery, ServerKind,
@@ -419,6 +419,10 @@ struct Decoder {
     usage: Option<Usage>,
     thought: crate::parse::ThoughtTags,
     done: bool,
+    /// The stream has already ended in a failure of its own, so a body that
+    /// stops after it is not a second thing to report.
+    failed: bool,
+    malformed: Malformed,
 }
 
 impl WireDecoder for Decoder {
@@ -437,7 +441,17 @@ impl WireDecoder for Decoder {
         let mut out = self.feed(b"\n\n");
         self.flush_text(&mut out);
         self.flush_usage(&mut out);
+        // No `finishReason` anywhere: the body stopped mid-answer. Say so,
+        // rather than letting the pump call it a finished turn.
+        if !self.done && !self.failed {
+            self.done = true;
+            out.push(Err(LlmError::Stream(crate::client::CLOSED_EARLY.into())));
+        }
         out
+    }
+
+    fn saw_terminal(&self) -> bool {
+        self.done
     }
 }
 
@@ -456,12 +470,24 @@ impl Decoder {
 
     /// False once the stream has failed.
     fn read(&mut self, payload: &str, out: &mut Vec<Result<LlmEvent, LlmError>>) -> bool {
-        if self.done {
+        if self.done || self.failed {
             return true;
         }
-        let Ok(chunk) = serde_json::from_str::<Value>(payload) else { return true };
+        let Ok(chunk) = serde_json::from_str::<Value>(payload) else {
+            // One bad frame is a nuisance to drop: the frames carrying the
+            // finish reason may still arrive. A run of them means the framing
+            // is broken, and that frame is among the ones being lost.
+            if self.malformed.bad() {
+                out.push(Err(self.malformed.message()));
+                self.failed = true;
+                return false;
+            }
+            return true;
+        };
+        self.malformed.ok();
         // Failures after the 200 (quota, overload) arrive in-stream.
         if let Some(error) = chunk.get("error").filter(|e| !e.is_null()) {
+            self.failed = true;
             out.push(Err(LlmError::Stream(error_message(error))));
             return false;
         }
@@ -472,6 +498,7 @@ impl Decoder {
             let blocked = chunk.pointer("/promptFeedback/blockReason").and_then(Value::as_str).filter(|r| *r != "BLOCK_REASON_UNSPECIFIED");
             if let Some(reason) = blocked {
                 self.flush_usage(out);
+                self.failed = true;
                 out.push(Err(LlmError::Forbidden(format!("Gemini refused the request ({reason}) because {}", why_blocked(reason)))));
                 return false;
             }
@@ -495,6 +522,7 @@ impl Decoder {
             "MAX_TOKENS" => FinishReason::Length,
             other => {
                 self.flush_usage(out);
+                self.failed = true;
                 out.push(Err(stopped(other, candidate.get("finishMessage").and_then(Value::as_str))));
                 return false;
             }
@@ -949,6 +977,8 @@ mod tests {
         // As gemini-3.5-flash-lite answered "hi": the thought opened a tag and
         // the answer began by closing it, so both were on screen.
         let part = |text: &str, thought: bool| json!({ "candidates": [{ "content": { "role": "model", "parts": [{ "text": text, "thought": thought }] } }] });
+        // Every stream here ends the way Gemini's does: a frame with no parts and a reason.
+        let stopped = || json!({ "candidates": [{ "content": { "role": "model", "parts": [] }, "finishReason": "STOP" }] });
         let stream = sse(&[
             part("**Analyzing Request**\n\n<thought>Acknowledge and Note\n\nHi.", true),
             part("</tho", false),
@@ -962,11 +992,11 @@ mod tests {
         assert_eq!(events.last(), Some(&LlmEvent::Done(FinishReason::Stop)));
 
         // A tag a thought opens and nothing closes does not swallow the answer.
-        let stream = sse(&[part("<thought>Planning", true), part("The answer.", false)]);
+        let stream = sse(&[part("<thought>Planning", true), part("The answer.", false), stopped()]);
         assert_eq!(split_text(&ok_events(decode(&[&stream]))), ("Planning".into(), "The answer.".into()));
 
         // Tags the answer itself carries are reasoning between them, as on the OpenAI path.
-        let stream = sse(&[part("<thought>Checking</thought>Done. a < b", false)]);
+        let stream = sse(&[part("<thought>Checking</thought>Done. a < b", false), stopped()]);
         assert_eq!(split_text(&ok_events(decode(&[&stream]))), ("Checking".into(), "Done. a < b".into()));
     }
 

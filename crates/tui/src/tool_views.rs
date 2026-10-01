@@ -74,7 +74,7 @@ fn box_text(line: &str) -> String {
 }
 
 /// `│  text  │`, padded or clipped to the box.
-fn box_row(styled: &str, style: &str, inner_w: usize) -> RenderLine {
+pub(crate) fn box_row(styled: &str, style: &str, inner_w: usize) -> RenderLine {
     let clipped = clip_ellipsis(styled, inner_w);
     let pad = " ".repeat(inner_w.saturating_sub(visible_width(&clipped)));
     (LineKind::Tool, format!("{BORDER_DIM}│{RESET}  {style}{clipped}{RESET}{pad}  {BORDER_DIM}│{RESET}"))

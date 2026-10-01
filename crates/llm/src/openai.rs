@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use crate::client::{pump, Client, EventStream, WireDecoder};
+use crate::client::{pump, Client, EventStream, Malformed, WireDecoder};
 use crate::parse::{ChunkParser, SseDecoder};
 use crate::thinking::{ServerDiscovery, ServerKind, ThinkingProfile, ThinkingProtocol};
 use crate::types::{ChatMessage, LlmError, LlmEvent, Role, ToolSpec, TurnOptions};
@@ -135,6 +135,11 @@ impl Fields {
     }
 }
 
+/// The host of an endpoint, without its port, scheme or path.
+fn host_of(url: &str) -> Option<&str> {
+    url.split("://").nth(1).unwrap_or(url).split(['/', ':']).next().filter(|h| !h.is_empty())
+}
+
 /// Where the API lives. A bare `http://host:port` means its `/v1`: that is
 /// where every local server that copies OpenAI serves it (LM Studio, vLLM,
 /// llama.cpp, Ollama, LocalAI, …), and several serve nothing at the root.
@@ -221,6 +226,7 @@ struct Decoder {
     whole_reply: Option<bool>,
     reply: Vec<u8>,
     failed: bool,
+    malformed: Malformed,
 }
 
 impl Decoder {
@@ -235,7 +241,19 @@ impl Decoder {
                 continue;
             }
             // Parsed once, for the error check and the events both.
-            let Ok(chunk) = serde_json::from_str::<serde_json::Value>(&payload) else { continue };
+            let Ok(chunk) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                // One unreadable chunk is dropped; the chunks that carry the
+                // finish reason may still be coming. A run of them means those
+                // are among the ones being lost.
+                if self.malformed.bad() {
+                    self.failed = true;
+                    let mut out: Vec<_> = events.into_iter().map(Ok).collect();
+                    out.push(Err(self.malformed.message()));
+                    return out;
+                }
+                continue;
+            };
+            self.malformed.ok();
             // Failures after the 200 (context overflow, crash) arrive in-stream.
             if let Some(msg) = stream_error(&chunk) {
                 self.failed = true;
@@ -279,8 +297,19 @@ impl WireDecoder for Decoder {
         let mut out = self.payloads(payloads);
         if !self.failed {
             out.extend(self.parser.finish().into_iter().map(Ok));
+            // No finish reason and no `[DONE]`: the body stopped mid-answer.
+            // Servers that ignore `stream: true` are covered too, as their
+            // one reply carries a finish reason or this says the same.
+            if !self.parser.saw_terminal() {
+                self.failed = true;
+                out.push(Err(LlmError::Stream(crate::client::CLOSED_EARLY.into())));
+            }
         }
         out
+    }
+
+    fn saw_terminal(&self) -> bool {
+        self.parser.saw_terminal()
     }
 }
 
@@ -378,6 +407,16 @@ fn body_at(
         "stream": true,
         "stream_options": { "include_usage": true },
     });
+
+    // OpenRouter prices the turn itself and only says so when asked, with
+    // `usage: {include: true}` in the body. `stream_options` is what OpenAI
+    // takes; OpenRouter ignores it, so without this the cost never arrives and
+    // the ledger records nothing. Its host, not its protocol or its port: every
+    // one of these servers speaks the same protocol, and the field is refused
+    // by name elsewhere.
+    if host_of(&client.base_url()).is_some_and(|h| h.eq_ignore_ascii_case("openrouter.ai") || h.ends_with(".openrouter.ai")) {
+        body["usage"] = serde_json::json!({ "include": true });
+    }
 
     if let Some(t) = options.temperature {
         body["temperature"] = serde_json::json!(t);

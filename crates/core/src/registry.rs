@@ -291,7 +291,7 @@ pub static TOOLS: &[ToolDef] = &[
                 &[PATH, EDITS],
             ),
         ],
-        required: &["path", "edits"],
+        required: &[],
         has_header: true,
         handler: Handler::EditFile,
         category: Category::Write,
@@ -345,9 +345,9 @@ pub static TOOLS: &[ToolDef] = &[
         name: "run_shell",
         description: "Run a shell command (timeout_ms, default 120000). background:true for servers, watchers and long builds: returns a task_id at once, and a notice arrives when the task exits, so do not poll in a loop. task_id alone shows its output so far; with kill:true stops it",
         params: &[
-            s("command", "The command line to run in the working directory"),            s("content", "The whole new text of the file, exactly as it must be, every line break and quote included"),
+            s("command", "The command line to run in the working directory"),
             opt_bool("background", "Run it in the background and return a task_id at once"),
-            opt_int("timeout_ms", "Kill it after this many milliseconds (default 120000)"),
+            opt_int("timeout_ms", "Kill it after this many milliseconds (default 120000); ignored once it runs in the background"),
             opt_int("task_id", "A background task: its output so far, or with kill stop it"),
             opt_bool("kill", "With task_id: kill the task"),
         ],
@@ -568,7 +568,7 @@ pub static TOOLS: &[ToolDef] = &[
                 &["researcher", "coder", "reviewer", "planner"],
             ),
             s("task", "The whole task, self-contained: say what to do, where, and what to report back"),
-            int("max_steps", "Max loop steps (default 500; the last one asks the subagent to wrap up and report rather than cutting it off)"),
+            int("max_steps", "Max loop steps (default and maximum 500; the last one asks the subagent to wrap up and report rather than cutting it off)"),
             int("timeout_secs", "Max wall-clock seconds (default none)"),
         ],
         required: &["task"],
@@ -899,6 +899,78 @@ mod tests {
                 matches!(def.category, Category::Read | Category::Net),
                 "a read-only role may use {tool}, which is a {:?}",
                 def.category
+            );
+        }
+    }
+
+    /// A description pasted from another tool is a schema that promises the
+    /// model a parameter nobody reads. `run_shell` carried `content`, copied
+    /// whole from `write_file`, for a whole release: the handler has no such
+    /// field, so a model that filled it in had it dropped in silence, and the
+    /// only symptom was a wasted argument in a prompt that a size test guarded
+    /// for length and never for meaning.
+    #[test]
+    fn a_description_never_travels_under_a_name_of_another_tool_s_parameter() {
+        let mut seen: std::collections::BTreeMap<&str, (&str, &str)> = std::collections::BTreeMap::new();
+        for def in TOOLS {
+            let mut mine: std::collections::BTreeSet<(&str, &str)> = std::collections::BTreeSet::new();
+            for param in all_params(def) {
+                mine.insert((param.description, param.name));
+            }
+            for (description, name) in mine {
+                let previous = seen.insert(description, (def.name, name));
+                // The same argument described twice is a list form reusing its
+                // parent's parameter, or a shared constant like PATH. Both are the
+                // shape working as intended; only a description travelling under
+                // a different name is a paste.
+                if let Some((other_tool, other_name)) = previous {
+                    assert_eq!(
+                        other_name, name,
+                        "{other_tool} and {} both describe a parameter as {description:?}, under the names {other_name:?} and {name:?}: one is advertising the other's argument",
+                        def.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// `run_shell` spent a release carrying `content`, pasted whole from
+    /// `write_file` — the handler has no such field, so a model that filled it
+    /// in had it dropped without a word. The check above cannot see that, being
+    /// in the crate that declares the schemas rather than the one that reads
+    /// them, so the argument list is pinned here instead.
+    #[test]
+    fn run_shell_offers_only_the_arguments_it_actually_reads() {
+        let def = TOOLS.iter().find(|d| d.name == "run_shell").expect("run_shell is registered");
+        let names: std::collections::BTreeSet<&str> = all_params(def).iter().map(|p| p.name).collect();
+        let expected: std::collections::BTreeSet<&str> =
+            ["command", "background", "timeout_ms", "task_id", "kill"].into_iter().collect();
+        assert_eq!(names, expected, "run_shell advertises an argument its handler never reads");
+    }
+
+    /// A tool whose description offers a list instead of the single form cannot
+    /// require the parameters the list carries: following its own description is
+    /// then a schema violation, which strict providers reject outright.
+    #[test]
+    fn a_tool_cannot_require_exactly_what_its_list_form_offers_instead() {
+        for def in TOOLS {
+            let mut in_list: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for param in def.params {
+                if let Kind::Objects(props) = param.kind {
+                    for p in props {
+                        in_list.insert(p.name.to_string());
+                    }
+                }
+            }
+            if in_list.is_empty() {
+                continue;
+            }
+            let all_required_are_in_the_list =
+                !def.required.is_empty() && def.required.iter().all(|r| in_list.contains(*r));
+            assert!(
+                !all_required_are_in_the_list,
+                "{} describes {} as an alternative to {:?}, and then requires exactly those, so following its own description breaks its own schema",
+                def.name, def.params.iter().find(|p| matches!(p.kind, Kind::Objects(_))).map(|p| p.name).unwrap_or("?"), def.required
             );
         }
     }
