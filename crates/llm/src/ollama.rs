@@ -16,7 +16,7 @@ use futures::StreamExt;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 
-use crate::client::{pump, Client, EventStream, WireDecoder};
+use crate::client::{pump, Client, EventStream, Malformed, WireDecoder};
 use crate::repair::repair_json;
 use crate::thinking::{DiscoveredModel, ServerDiscovery, ServerKind, ThinkingProfile, ThinkingProtocol};
 use crate::types::{ChatMessage, FinishReason, LlmError, LlmEvent, Role, ToolSpec, TurnOptions, Usage};
@@ -227,6 +227,9 @@ struct Decoder {
     /// Calls so far: each arrives whole and takes the next index.
     calls: usize,
     finished: bool,
+    /// A line with `done: true`, which is what says the body ended on purpose.
+    ended: bool,
+    malformed: Malformed,
 }
 
 impl Decoder {
@@ -235,7 +238,16 @@ impl Decoder {
         if line.is_empty() || self.finished {
             return;
         }
-        let Ok(mut v) = serde_json::from_slice::<Value>(line) else { return };
+        let Ok(mut v) = serde_json::from_slice::<Value>(line) else {
+            // One unparseable line is dropped; a run of them means the lines
+            // that carry `done` are among the ones being lost.
+            if self.malformed.bad() {
+                self.finished = true;
+                out.push(Err(self.malformed.message()));
+            }
+            return;
+        };
+        self.malformed.ok();
         // Failures after the 200 (out of memory, a crashed runner) arrive as a line.
         if let Some(msg) = crate::openai::stream_error(&v) {
             self.finished = true;
@@ -261,6 +273,7 @@ impl Decoder {
         }
         if v.get("done").and_then(Value::as_bool) == Some(true) {
             self.finished = true;
+            self.ended = true;
             let count = |key: &str| v.get(key).and_then(Value::as_i64);
             let (prompt, completion) = (count("prompt_eval_count"), count("eval_count"));
             if prompt.is_some() || completion.is_some() {
@@ -325,7 +338,18 @@ impl WireDecoder for Decoder {
         let mut out = Vec::new();
         let rest = std::mem::take(&mut self.partial);
         self.line(&rest, &mut out);
+        // Ollama always ends with a `done: true` line. Without one the model
+        // was still generating when the body stopped, and saying so beats
+        // reporting half an answer as a whole one.
+        if !self.finished {
+            self.finished = true;
+            out.push(Err(LlmError::Stream(crate::client::CLOSED_EARLY.into())));
+        }
         out
+    }
+
+    fn saw_terminal(&self) -> bool {
+        self.ended
     }
 }
 

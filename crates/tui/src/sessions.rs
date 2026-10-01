@@ -260,7 +260,9 @@ impl App {
         if !self.config.auto_save_sessions {
             return;
         }
-        if let Err(why) = save_session_file(session_id, &self.current_model, cwd_display, &self.history) {
+        let model = self.current_model.clone();
+        let err = save_session_file(session_id, &model, cwd_display, &self.history).err();
+        if let Some(why) = err {
             self.notice(format!("Session not saved: {why} · retrying after the next turn and on exit"));
         }
         self.last_autosave = Some(std::time::Instant::now());
@@ -281,7 +283,18 @@ impl App {
         if self.last_autosave.is_some_and(|last| last.elapsed() < AUTOSAVE_GAP) {
             return;
         }
-        self.autosave(cx.session_id, cx.cwd_display);
+        // The running turn's own history, not this app's copy of it. `self.history`
+        // is only replaced when the turn ends, so writing that here wrote the
+        // same pre-turn bytes every five seconds and lost the whole turn to a
+        // crash — which is the thing this function exists to prevent.
+        let Some(shared) = self.turn_history.clone() else { return };
+        let snapshot = shared.snapshot();
+        let model = self.current_model.clone();
+        let err = save_session_file(cx.session_id, &model, cx.cwd_display, &snapshot).err();
+        if let Some(why) = err {
+            self.notice(format!("Session not saved: {why} · retrying after the next turn and on exit"));
+        }
+        self.last_autosave = Some(std::time::Instant::now());
     }
 
     /// `--resume <id>` before the first frame. False, with the reason in the
@@ -333,6 +346,11 @@ impl App {
         self.chat.clear();
         let restored = restore_session(saved, &mut self.chat, &mut self.history);
         self.latest_suggestion = None;
+        // The bill belongs to the session that earned it. The status bar and
+        // /cost read these, and carrying the old session's spend into the new
+        // one charged a conversation for work it never did.
+        self.cost = flashagent_core::CostLedger::default();
+        self.token_tracker = TokenTracker::new(self.current_model.clone());
         update_context_usage(&mut self.context_usage, &self.history, memory_block, &self.chat, perm);
         self.notice(format!("Resumed session {id} · {}", flashagent_tui::plural(restored, "message", "messages")));
         true

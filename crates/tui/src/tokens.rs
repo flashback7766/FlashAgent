@@ -18,7 +18,15 @@ pub(crate) struct TokenTracker {
     /// what its children produced after it started.
     pub(crate) subagent_seen: usize,
     pub(crate) window: std::collections::VecDeque<(std::time::Instant, usize)>,
+    /// The share of the prompt the last turn read from the server's cache. It
+    /// describes that turn and nothing else: kept into the next one it turned a
+    /// cold prompt into a borrowed cache hit, and that figure was recorded as a
+    /// measurement before the server said anything.
     pub(crate) last_f_keep: Option<f64>,
+    /// Whether this server prices its own requests at all. Where it does, the
+    /// whole assistant message is billed, tool name and arguments included, so
+    /// counting those again locally charged a large write_file twice.
+    reported_usage: bool,
     pub(crate) turn_start_time: Option<std::time::Instant>,
     pub(crate) first_token_time: Option<std::time::Instant>,
     pub(crate) prompt_tokens: Option<usize>,
@@ -41,6 +49,7 @@ impl TokenTracker {
             subagent_seen: 0,
             window: std::collections::VecDeque::new(),
             last_f_keep: None,
+            reported_usage: false,
             turn_start_time: None,
             first_token_time: None,
             prompt_tokens: None,
@@ -61,6 +70,10 @@ impl TokenTracker {
         // turn, and only what it produces from here belongs to this one.
         self.subagent_tokens = 0;
         self.window.clear();
+        // The previous turn's cache share says nothing about this prompt. Carried
+        // over it made a cold start look like a nearly-free prefill, live and in
+        // the learned prefill stats, before the server reported the real one.
+        self.last_f_keep = None;
         self.turn_start_time = Some(std::time::Instant::now());
         self.draft_acceptance = None;
         self.first_token_time = None;
@@ -85,11 +98,18 @@ impl TokenTracker {
                 let ttft = now.duration_since(start);
                 self.last_ttft = Some(ttft);
                 let prompt = self.prompt_tokens.unwrap_or(0);
-                let cached = (self.last_f_keep.unwrap_or(0.0) * prompt as f64) as usize;
+                // What the server read of this prompt is not known yet, and the
+                // last turn's share is not a substitute: a sample recorded with a
+                // borrowed cache hit is a wrong measurement that the real usage
+                // only corrects afterwards. So the whole prompt is taken as read,
+                // and only a server that prices nothing at all gets this recorded.
+                let cached = 0;
                 let eval = prompt.saturating_sub(cached).max(1);
                 let spd = eval as f64 / ttft.as_secs_f64().max(0.001);
                 self.last_prefill_speed = Some(spd);
-                self.prefill_tracker.record(&self.model, prompt, cached, ttft);
+                if !self.reported_usage {
+                    self.prefill_tracker.record(&self.model, prompt, cached, ttft);
+                }
             }
         }
         let count = flashagent_llm::count_tokens(&self.model, text).max(1);
@@ -99,6 +119,9 @@ impl TokenTracker {
     }
 
     pub(crate) fn on_usage(&mut self, usage: &flashagent_llm::Usage) {
+        if usage.completion.is_some() || usage.prompt.is_some() {
+            self.reported_usage = true;
+        }
         if let Some(mtp) = usage.mtp.filter(|m| m.total_draft_tokens > 0) {
             self.draft_acceptance = Some(mtp.acceptance_rate());
         }
@@ -153,6 +176,19 @@ impl TokenTracker {
         self.request_tokens = 0;
     }
 
+    /// A tool call's name and arguments. Where the server prices the request it
+    /// has already billed them, as part of the assistant message that carried
+    /// them, and counting them here charged a 1000-token write_file as 2000. A
+    /// local model that reports no usage has nobody to correct it, so there the
+    /// estimate is the only figure and its tools must not come out free.
+    pub(crate) fn on_tool_call(&mut self, name: &str, args_json: &str) {
+        if self.reported_usage {
+            return;
+        }
+        self.on_delta(name);
+        self.on_delta(args_json);
+    }
+
     /// What every child has produced this session, so the turn can count the
     /// difference since it started and nothing twice.
     pub(crate) fn on_subagent_usage(&mut self, session_total: usize) {
@@ -199,6 +235,9 @@ impl TokenTracker {
         if self.is_running && self.first_token_time.is_none() {
             let start = self.turn_start_time?;
             let elapsed = start.elapsed();
+            // Only a prediction: nothing measured is written from here, so the
+            // last turn's cache share may stand in for this turn's. The prefill
+            // tracker is never fed from this line.
             let prompt = self.prompt_tokens.unwrap_or(500);
             let cached = (self.last_f_keep.unwrap_or(0.0) * prompt as f64) as usize;
             Some(self.prefill_tracker.format_live_prefill(&self.model, prompt, cached, elapsed, nearby))
@@ -255,6 +294,35 @@ mod tests {
 
     fn usage(completion: usize) -> flashagent_llm::Usage {
         flashagent_llm::Usage { completion: Some(completion as i64), ..Default::default() }
+    }
+
+    #[test]
+    fn children_keep_counting_after_the_turn_that_started_them_has_ended() {
+        // The parent stops and the children go on: the work is still this
+        // session's work, and a counter that froze at the parent's last word
+        // made a background agent look free.
+        let mut t = TokenTracker::new("m".into());
+        t.on_turn_start("m".into(), 0);
+        t.on_usage(&usage(500));
+        t.on_subagent_usage(1000);
+        assert_eq!(t.turn_output(), 1500);
+        t.on_finished();
+        // The parent is idle now. Three children carry on.
+        t.on_subagent_usage(3400);
+        assert_eq!(t.turn_output(), 3900, "500 of parent, 3400 of children, counted while nobody was typing");
+        t.on_subagent_usage(4600);
+        assert_eq!(t.turn_output(), 5100, "and the next slice, not the whole session total again");
+    }
+
+    #[test]
+    fn millions_of_tokens_read_as_millions_and_not_as_thousands_of_thousands() {
+        // The status bar had its own rule that stopped at `k`, so the same work
+        // read as "4621.2k out" there and "4.6M" in /goal.
+        assert_eq!(flashagent_tui::goal::human_count(4_621_200), "4.6M");
+        assert_eq!(flashagent_tui::goal::human_count(999_999), "1000.0k");
+        assert_eq!(flashagent_tui::goal::human_count(1_000_000), "1.0M");
+        assert_eq!(flashagent_tui::goal::human_count(12_500), "12.5k");
+        assert_eq!(flashagent_tui::goal::human_count(950), "950");
     }
 
     #[test]
@@ -328,6 +396,51 @@ mod tests {
         t.on_usage(&usage(30));
         assert_eq!(t.turn_output(), 50, "20 for the first request plus 30 for the next");
         assert!(estimated > 20, "the deltas had over-counted, which is what made this worth correcting");
+    }
+
+    #[test]
+    fn a_new_turn_does_not_measure_its_prefill_with_the_last_turns_cache_share() {
+        // The learned prefill stats are what the MTP presets are tuned by, and
+        // they are written from the first token of a turn — before the server has
+        // reported this turn's cache hit. Carrying the previous turn's share
+        // into it recorded a 90%-cached sample for a cold prompt, and a cold
+        // prompt's real figure (every token evaluated) only corrected it
+        // afterwards.
+        let mut t = TokenTracker::new("m".into());
+        t.on_turn_start("m".into(), 20_000);
+        // A turn that ran against a warm prefix: 90% of its prompt came from the
+        // cache. `on_usage` is what says so.
+        t.on_usage(&flashagent_llm::Usage { prompt: Some(20_000), cached: Some(18_000), ..Default::default() });
+        assert_eq!(t.last_f_keep, Some(0.9), "the sample turn really was mostly cached");
+
+        // The next turn starts cold. Nothing of the last one may stand in for it,
+        // which is what stopped a 90%-hit figure being read as this prompt's.
+        t.on_turn_start("m".into(), 20_000);
+        assert_eq!(t.last_f_keep, None, "the previous turn's cache share outlived its turn");
+
+        // And the sample a turn records takes no share at all, however the field
+        // came to be set: the whole prompt is taken as read, because the server
+        // has not yet said how much of it it had cached. This tracker prices
+        // nothing, which is the only case where a sample is taken from the first
+        // token here rather than from the server's own report afterwards.
+        let mut unpriced = TokenTracker::new("m".into());
+        unpriced.prefill_tracker = flashagent_tui::prefill::PrefillTracker::default();
+        unpriced.on_turn_start("m".into(), 20_000);
+        unpriced.last_f_keep = Some(0.9);
+        // A real prompt takes longer than a few milliseconds to read; a sample
+        // faster than that is a timer artefact and is dropped, not recorded.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        unpriced.on_delta("the first words of a new answer");
+        let ttft = unpriced.last_ttft.unwrap().as_secs_f64();
+        let recorded = unpriced.prefill_tracker.profiles.get("m").expect("the sample was recorded");
+        assert_eq!(recorded.total_samples, 1, "the first token of the turn records a sample");
+        let whole_prompt_read = 20_000.0 / ttft;
+        assert!(
+            (recorded.overall_speed_tok_s - whole_prompt_read).abs() < whole_prompt_read * 0.01,
+            "recorded {:?}, which is the whole prompt read; a borrowed 90% hit would read about {:?}",
+            recorded.overall_speed_tok_s,
+            2_000.0 / ttft
+        );
     }
 
     #[test]

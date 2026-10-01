@@ -238,7 +238,12 @@ fn cmd_exe(cmd: &str) -> tokio::process::Command {
     c
 }
 
-fn shell_command(cmd: &str) -> tokio::process::Command {
+/// Everything runs here, not in the cwd of whoever started the process: a
+/// session resumed from elsewhere, a wrapper script or the installer would
+/// otherwise put the model's commands in the wrong directory. Empty means
+/// "wherever this process already is", which is what a bare `ShellRegistry`
+/// and the old free function do.
+fn shell_command(cmd: &str, cwd: &std::path::Path) -> tokio::process::Command {
     announce_dialect();
     #[cfg(windows)]
     let mut c = match git_bash() {
@@ -260,6 +265,9 @@ fn shell_command(cmd: &str) -> tokio::process::Command {
         c
     };
     c.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+    if !cwd.as_os_str().is_empty() {
+        c.current_dir(cwd);
+    }
     #[cfg(unix)]
     c.process_group(0);
     c
@@ -315,7 +323,13 @@ async fn drain_pumps(p1: tokio::task::JoinHandle<()>, p2: tokio::task::JoinHandl
 
 /// A non-zero exit is an error whose text still carries the output.
 pub async fn run_foreground(cmd: &str, timeout: Duration) -> Result<String, ToolError> {
-    run(cmd, timeout, None).await
+    let cwd = std::env::current_dir().unwrap_or_default();
+    run_in(&cwd, cmd, timeout, None).await
+}
+
+/// As [`run_foreground`], in a directory the caller chose.
+pub async fn run_foreground_in(cwd: &std::path::Path, cmd: &str, timeout: Duration) -> Result<String, ToolError> {
+    run_in(cwd, cmd, timeout, None).await
 }
 
 /// Resolves when the user asks to move the command to the background; never
@@ -329,10 +343,10 @@ async fn detach_requested(slot: Option<&mut ForegroundSlot>) {
     std::future::pending::<()>().await
 }
 
-async fn run(cmd: &str, timeout: Duration, registry: Option<&ShellRegistry>) -> Result<String, ToolError> {
+async fn run_in(cwd: &std::path::Path, cmd: &str, timeout: Duration, registry: Option<&ShellRegistry>) -> Result<String, ToolError> {
     let started = Instant::now();
     let mut child =
-        shell_command(cmd).spawn().map_err(|e| ToolError::Other(format!("spawn: {e}")))?;
+        shell_command(cmd, cwd).spawn().map_err(|e| ToolError::Other(format!("spawn: {e}")))?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let buffer = Arc::new(Mutex::new(String::new()));
@@ -501,7 +515,15 @@ fn last_lines(text: &str, lines: usize, bytes: usize) -> String {
 /// What a finished task keeps of its output: enough to read its end.
 const FINISHED_KEEP: usize = 16_000;
 
+/// How many finished tasks stay in the list. A finished task is read by id
+/// after it ended -- the TUI shows its result, the model asks `task_id` --
+/// and its notice may still be queued, so a finished task cannot go at once.
+/// A bounded window of the newest ones is the whole contract: recent is
+/// readable, a long session is not.
+const FINISHED_HISTORY: usize = 32;
+
 struct ShellTask {
+    id: u32,
     command: String,
     started: Instant,
     ended: Option<Instant>,
@@ -518,12 +540,55 @@ struct ShellTask {
 
 #[derive(Default)]
 struct Shared {
+    /// Where every command runs.
+    cwd: std::path::PathBuf,
     next_id: AtomicU32,
     tasks: Mutex<BTreeMap<u32, ShellTask>>,
-    notices: Mutex<Option<mpsc::UnboundedSender<TaskNotice>>>,
+    notices: Mutex<Subscribers>,
     next_foreground: AtomicU64,
     /// Foreground commands that can be moved to the background.
     foreground: Mutex<HashMap<u64, oneshot::Sender<()>>>,
+}
+
+/// Everyone listening for task notices, and the ones nobody was there for.
+///
+/// One sender per subscriber rather than one sender that the next subscriber
+/// replaces: with a single slot a second `subscribe` orphaned the first
+/// receiver and every later notice went to a channel nobody reads.
+#[derive(Default)]
+struct Subscribers {
+    senders: Vec<mpsc::UnboundedSender<TaskNotice>>,
+    /// Ended while no receiver existed. Bounded: a session nobody listens to
+    /// is a session that will not remember all of them.
+    pending: std::collections::VecDeque<TaskNotice>,
+}
+
+const PENDING_NOTICES: usize = 64;
+
+impl Subscribers {
+    fn publish(&mut self, notice: TaskNotice) {
+        // A receiver dropped long ago is not worth a slot.
+        self.senders.retain(|tx| !tx.is_closed());
+        let delivered = self.senders.iter().filter(|tx| tx.send(notice.clone()).is_ok()).count();
+        if delivered == 0 {
+            if self.pending.len() >= PENDING_NOTICES {
+                self.pending.pop_front();
+            }
+            self.pending.push_back(notice);
+        }
+    }
+
+    fn add(&mut self) -> mpsc::UnboundedReceiver<TaskNotice> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.senders.retain(|t| !t.is_closed());
+        // Hand over what ended before anyone was listening, oldest first. The
+        // extra sender is dropped with this call, closing the channel after.
+        for notice in self.pending.drain(..) {
+            let _ = tx.send(notice);
+        }
+        self.senders.push(tx);
+        rx
+    }
 }
 
 /// A foreground command's claim on the detach key, given up when it ends.
@@ -592,8 +657,23 @@ async fn watch(shared: Arc<Shared>, id: u32, child: Child, stop: oneshot::Receiv
             by_user: task.stopped_by_user && task.state == TaskState::Killed,
         }
     };
-    if let Some(tx) = shared.notices.lock().as_ref() {
-        let _ = tx.send(notice);
+    shared.notices.lock().publish(notice);
+    // Only now that the notice exists: a pruned task would leave the model
+    // hearing about one it can no longer ask for.
+    let mut tasks = shared.tasks.lock();
+    prune_finished(&mut tasks);
+}
+
+/// Keeps the newest finished tasks; a running one is never dropped, whatever
+/// its age. Ids only grow, so the newest are the last keys.
+fn prune_finished(tasks: &mut BTreeMap<u32, ShellTask>) {
+    let mut finished: Vec<u32> = tasks.values().filter(|t| t.ended.is_some()).map(|t| t.id).collect();
+    if finished.len() <= FINISHED_HISTORY {
+        return;
+    }
+    finished.truncate(finished.len() - FINISHED_HISTORY);
+    for id in finished {
+        tasks.remove(&id);
     }
 }
 
@@ -602,12 +682,15 @@ impl ShellRegistry {
         Self::default()
     }
 
-    /// Each background task's end, once. A second call takes the notices
-    /// from the first.
+    /// Every background task's end, once. Each call adds a receiver: an
+    /// earlier one keeps its notices.
     pub fn subscribe(&self) -> mpsc::UnboundedReceiver<TaskNotice> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        *self.shared.notices.lock() = Some(tx);
-        rx
+        self.shared.notices.lock().add()
+    }
+
+    /// Commands run here.
+    pub fn with_cwd(cwd: impl Into<std::path::PathBuf>) -> Self {
+        Self { shared: Arc::new(Shared { cwd: cwd.into(), ..Shared::default() }) }
     }
 
     fn foreground_slot(&self) -> ForegroundSlot {
@@ -620,7 +703,7 @@ impl ShellRegistry {
     /// Runs `cmd` until it exits or times out, or until
     /// [`Self::detach_foreground`] makes it a background task.
     pub async fn run_foreground(&self, cmd: &str, timeout: Duration) -> Result<String, ToolError> {
-        run(cmd, timeout, Some(self)).await
+        run_in(&self.shared.cwd, cmd, timeout, Some(self)).await
     }
 
     /// While true, [`Self::detach_foreground`] has something to move.
@@ -651,6 +734,7 @@ impl ShellRegistry {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (stop_tx, stop_rx) = oneshot::channel();
         let task = ShellTask {
+            id,
             command: cmd.to_string(),
             started,
             ended: None,
@@ -662,14 +746,17 @@ impl ShellRegistry {
             stopped_by_user: false,
             detached,
         };
-        self.shared.tasks.lock().insert(id, task);
+        let mut tasks = self.shared.tasks.lock();
+        prune_finished(&mut tasks);
+        tasks.insert(id, task);
+        drop(tasks);
         tokio::spawn(watch(self.shared.clone(), id, child, stop_rx, pumps));
         id
     }
 
     pub fn spawn_background(&self, cmd: &str) -> Result<String, ToolError> {
         let mut child =
-            shell_command(cmd).spawn().map_err(|e| ToolError::Other(format!("spawn: {e}")))?;
+            shell_command(cmd, &self.shared.cwd).spawn().map_err(|e| ToolError::Other(format!("spawn: {e}")))?;
         let buffer = Arc::new(Mutex::new(String::new()));
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -1049,6 +1136,102 @@ mod tests {
         drop(registry);
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert!(!marker.exists(), "a background task outlived FlashAgent");
+    }
+
+    #[tokio::test]
+    async fn a_long_session_keeps_only_the_newest_finished_tasks() {
+        let registry = ShellRegistry::new();
+        let mut notices = registry.subscribe();
+        let total = super::FINISHED_HISTORY + 20;
+        for _ in 0..total {
+            registry.spawn_background("echo finished-marker").unwrap();
+        }
+        // They end in whatever order the OS decides, so ids are collected, not
+        // assumed to come back in order.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..total {
+            let notice = next_notice(&mut notices, Duration::from_secs(10)).await.expect("a task never announced its end");
+            seen.insert(notice.id);
+        }
+        assert_eq!(seen.len(), total, "a task was announced twice");
+        // Every command and up to FINISHED_KEEP bytes of its output, once per
+        // task, forever: this is the session that ran out of memory.
+        let listed = registry.tasks();
+        assert!(listed.len() <= super::FINISHED_HISTORY, "{} finished tasks kept", listed.len());
+        // ... and what is kept is readable, because that is the contract: the
+        // TUI shows a finished task and the model may still ask for it by id.
+        let newest = listed.iter().map(|t| t.id).max().expect("no task kept");
+        assert_eq!(registry.state(newest), Some(TaskState::Exited(Some(0))));
+        assert!(registry.status(newest).unwrap().contains("exited with code 0"));
+        assert!(registry.output(newest).unwrap().contains("finished-marker"));
+    }
+
+    #[tokio::test]
+    async fn pruning_never_takes_a_task_that_is_still_running() {
+        let registry = ShellRegistry::new();
+        let mut notices = registry.subscribe();
+        registry.spawn_background("sleep 30").unwrap();
+        for _ in 0..(super::FINISHED_HISTORY + 5) {
+            registry.spawn_background("echo short-lived").unwrap();
+        }
+        for ended in 0..(super::FINISHED_HISTORY + 5) {
+            assert!(next_notice(&mut notices, Duration::from_secs(10)).await.is_some(), "task {ended} never ended");
+        }
+        assert_eq!(registry.state(1), Some(TaskState::Running), "the long task was pruned while running");
+        assert!(registry.status(1).unwrap().contains("running for"));
+        assert!(registry.kill(1).await.unwrap().contains("task 1 killed"));
+    }
+
+    #[tokio::test]
+    async fn a_command_runs_in_the_directory_the_registry_was_given() {
+        let dir = crate::testing::tempdir();
+        let registry = ShellRegistry::with_cwd(dir.clone());
+        let marker = format!("fa-cwd-fg-{}", std::process::id());
+        let out = registry.run_foreground(&format!("echo cwd-marker > {marker}"), Duration::from_secs(10)).await.unwrap();
+        assert!(out.contains("exit code: 0"), "{out}");
+        assert!(dir.join(&marker).is_file(), "the command ran in the process cwd, not the session one");
+        assert!(!std::env::current_dir().unwrap().join(&marker).exists(), "it wrote into the test runner's cwd");
+        let _ = std::fs::remove_file(dir.join(&marker));
+    }
+
+    #[tokio::test]
+    async fn a_background_command_runs_in_the_directory_the_registry_was_given() {
+        let dir = crate::testing::tempdir();
+        let registry = ShellRegistry::with_cwd(dir.clone());
+        let mut notices = registry.subscribe();
+        let marker = format!("fa-cwd-bg-{}.txt", std::process::id());
+        registry.spawn_background(&format!("echo cwd-marker > {marker}")).unwrap();
+        next_notice(&mut notices, Duration::from_secs(10)).await.expect("no notice of the exit");
+        assert!(dir.join(&marker).is_file(), "the background command ran in the process cwd");
+        let _ = std::fs::remove_file(dir.join(&marker));
+    }
+
+    #[tokio::test]
+    async fn a_second_subscriber_is_not_orphaned() {
+        let registry = ShellRegistry::new();
+        let mut first = registry.subscribe();
+        let mut second = registry.subscribe();
+        registry.spawn_background("echo to-both").unwrap();
+        for (who, rx) in [("first", &mut first), ("second", &mut second)] {
+            let notice = next_notice(rx, Duration::from_secs(10)).await.unwrap_or_else(|| panic!("the {who} subscriber got nothing"));
+            assert_eq!(notice.id, 1);
+            assert!(notice.tail.contains("to-both"), "{who}: {notice:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_end_nobody_was_listening_for_is_kept_for_the_next_one() {
+        let registry = ShellRegistry::new();
+        registry.spawn_background("echo too-early").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !matches!(registry.state(1), Some(TaskState::Exited(_))) {
+            assert!(Instant::now() < deadline, "the task never ended");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut late = registry.subscribe();
+        let notice = next_notice(&mut late, Duration::from_secs(5)).await.expect("the notice was dropped with nobody listening");
+        assert_eq!(notice.id, 1);
+        assert!(notice.tail.contains("too-early"), "{notice:?}");
     }
 
     #[tokio::test]

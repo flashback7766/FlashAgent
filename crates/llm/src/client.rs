@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::protocol::{ApiProtocol, Endpoint};
 use crate::thinking::{DiscoveredModel, ServerDiscovery, ServerKind, ThinkingProfile};
-use crate::types::{ChatMessage, FinishReason, LlmError, LlmEvent, ThinkingEffort, ToolSpec, TurnOptions};
+use crate::types::{ChatMessage, LlmError, LlmEvent, ThinkingEffort, ToolSpec, TurnOptions};
 
 pub type EventStream = BoxStream<'static, Result<LlmEvent, LlmError>>;
 
@@ -29,8 +29,12 @@ pub struct Client {
     discovery: RwLock<Option<ServerDiscovery>>,
     /// The model list that answered last, where a server has several.
     pub(crate) working_models_url: RwLock<Option<String>>,
-    /// Retries after a connection failure only. HTTP errors and mid-stream drops
-    /// are not retried: the request may already have had effects.
+    /// How many tries a request that has not been answered yet may get: a
+    /// connection that never opened, and a rate limit or an overloaded gateway
+    /// whose wait is short. Every one of them happens strictly before the
+    /// first 2xx, before a single event has been streamed, so none of them can
+    /// run a tool call twice. A stream that dropped or ended without saying
+    /// why is never retried: the request may already have had effects.
     max_retries: AtomicUsize,
     /// Sampling the user set by hand. Without it, APIs whose makers tune
     /// their own models (Anthropic, Gemini) get none of the presets, which are
@@ -55,6 +59,9 @@ impl Drop for Busy {
     }
 }
 
+/// What a stream says when it ends without saying why.
+pub(crate) const CLOSED_EARLY: &str = "the server closed before saying why";
+
 /// Turns a response body into events. One per request; bytes arrive in order.
 pub(crate) trait WireDecoder: Send + 'static {
     fn feed(&mut self, bytes: &[u8]) -> Vec<Result<LlmEvent, LlmError>>;
@@ -62,6 +69,45 @@ pub(crate) trait WireDecoder: Send + 'static {
     /// The body has ended: whatever is still buffered.
     fn finish(&mut self) -> Vec<Result<LlmEvent, LlmError>> {
         Vec::new()
+    }
+
+    /// Whether a frame that ends the answer has been seen: `[DONE]`,
+    /// `message_stop`, a `finishReason`, an Ollama `done`. A body that stops
+    /// without one was cut off, not finished, and saying `Done(Stop)` for it
+    /// would commit half an answer to the history as if it were whole.
+    fn saw_terminal(&self) -> bool;
+}
+
+/// Frames in a row that were not JSON. One is a gateway's stray keepalive or
+/// a single mangled line; a healthy stream never has two in a row, so a run
+/// of them means the framing is broken — and the frames carrying the finish
+/// reason are among the ones being lost, which is what makes the stream look
+/// clean when it is not.
+pub(crate) const MALFORMED_LIMIT: u32 = 3;
+
+/// The run of unparseable frames a decoder is counting, shared by every
+/// protocol so the threshold means one thing.
+#[derive(Default)]
+pub(crate) struct Malformed(u32);
+
+impl Malformed {
+    /// A frame parsed: whatever went wrong before is over.
+    pub(crate) fn ok(&mut self) {
+        self.0 = 0;
+    }
+
+    /// The frame did not parse. True once too many in a row have failed.
+    pub(crate) fn bad(&mut self) -> bool {
+        self.0 = self.0.saturating_add(1);
+        self.0 >= MALFORMED_LIMIT
+    }
+
+    /// The message the run of failures is reported with.
+    pub(crate) fn message(&self) -> LlmError {
+        LlmError::Stream(format!(
+            "{} frames in a row were not JSON; the ones that say why the answer ended may be among them",
+            self.0
+        ))
     }
 }
 
@@ -71,8 +117,9 @@ impl Client {
             endpoint: RwLock::new(endpoint),
             generation: AtomicU64::new(0),
             model: RwLock::new(model.into()),
-            // No total timeout: a slow local model can stream for many minutes. The idle
-            // read timeout catches a server that stopped sending.
+            // No total timeout here: a slow local model can stream for many
+            // minutes. This one is idle-only, and the stream pump carries the
+            // deadline for the response as a whole.
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(3))
                 .read_timeout(Duration::from_secs(300))
@@ -139,6 +186,10 @@ impl Client {
         Busy(self.in_flight.clone())
     }
 
+    /// How many times one request may be sent again while nothing has been
+    /// generated: a connection that never opened, and a rate limit or an
+    /// overloaded gateway whose wait is short enough. Zero means one attempt
+    /// and no second one, for any reason.
     pub fn set_max_retries(&self, retries: usize) {
         self.max_retries.store(retries, Ordering::Relaxed);
     }
@@ -342,9 +393,14 @@ impl Client {
         }
     }
 
-    /// POSTs `body`. Rate limits and an overloaded gateway are waited out when
-    /// the server's wait is short; a connection that never opened is retried
-    /// as configured. Anything else is returned as it came.
+    /// POSTs `body`. Rate limits and an overloaded gateway are waited out
+    /// while the server's wait is short, and a connection that never opened is
+    /// tried again, both only up to `max_retries` and only while nothing has
+    /// been generated. Anything else is returned as it came.
+    ///
+    /// Every path here ends at a response that has not been read yet, so no
+    /// retry can reach events a reader has already seen — and so no retry can
+    /// repeat a tool call the previous attempt streamed.
     pub(crate) async fn post(
         &self,
         url: &str,
@@ -358,7 +414,7 @@ impl Client {
             match req.send().await {
                 // Nothing was generated: rate limits and an overloaded gateway
                 // are worth waiting for, as long as the server's wait is short.
-                Ok(resp) if attempt < retries.max(2) && matches!(resp.status().as_u16(), 429 | 502 | 503 | 504 | 529) => {
+                Ok(resp) if attempt < retries && matches!(resp.status().as_u16(), 429 | 502 | 503 | 504 | 529) => {
                     attempt += 1;
                     let wait = resp
                         .headers()
@@ -367,7 +423,7 @@ impl Client {
                         .and_then(|v| v.trim().parse::<f64>().ok())
                         // Negative, NaN or infinite would panic in `from_secs_f64`.
                         .and_then(|s| Duration::try_from_secs_f64(s).ok())
-                        .unwrap_or(Duration::from_secs(2u64.pow(attempt as u32)));
+                        .unwrap_or_else(|| backoff(attempt));
                     if wait > Duration::from_secs(30) {
                         return Ok(resp);
                     }
@@ -377,7 +433,7 @@ impl Client {
                 // Connect errors only: after connecting, the server may already be generating.
                 Err(e) if attempt < retries && e.is_connect() => {
                     attempt += 1;
-                    tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
+                    tokio::time::sleep(backoff(attempt)).await;
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -430,27 +486,98 @@ impl Client {
     }
 }
 
+/// The wait before retry number `attempt`, which is at least 1 in every
+/// caller. Doubling from there, a third of it taken off at random, and never
+/// past half a minute: several agents pointed at one gateway otherwise take
+/// their 429 and hit it again on the same second, in lockstep, and the gateway
+/// keeps saying no. `attempt` is `usize` and this is reachable from a public,
+/// unclamped setting, so the doubling saturates rather than overflowing into
+/// a panic or a zero-length sleep.
+fn backoff(attempt: usize) -> Duration {
+    const CAP: u64 = 30;
+    let millis = 2u64.saturating_pow(attempt.min(16) as u32).saturating_mul(1000).min(CAP * 1000);
+    let spread = millis / 3;
+    Duration::from_millis(millis.saturating_sub(jitter(spread)))
+}
+
+/// A number in `0..bound`, without a dependency to draw it from: the clock
+/// and the address of the call, which differ between agents and between
+/// retries.
+fn jitter(bound: u64) -> u64 {
+    if bound == 0 {
+        return 0;
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    let mut x = nanos ^ (bound.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    x ^= x >> 29;
+    x % bound
+}
+
+/// How long one whole response may take, bytes or not. Generous: a slow local
+/// model streams for many minutes. `FLASHAGENT_STREAM_DEADLINE_SECS` overrides
+/// it, and a test uses [`pump_within`] directly.
+fn stream_deadline() -> Duration {
+    static DEADLINE: std::sync::LazyLock<Duration> = std::sync::LazyLock::new(|| {
+        std::env::var("FLASHAGENT_STREAM_DEADLINE_SECS")
+            .ok()
+            .and_then(|v| Duration::try_from_secs_f64(v.trim().parse().ok()?).ok())
+            .filter(|d| !d.is_zero())
+            .unwrap_or(Duration::from_secs(3600))
+    });
+    *DEADLINE
+}
+
 /// Streams a successful response through `decoder`. The request counts as
-/// running until the last byte, and a stream that ends without saying why
-/// ends with [`FinishReason::Stop`].
-pub(crate) fn pump(resp: reqwest::Response, busy: Busy, mut decoder: impl WireDecoder) -> EventStream {
+/// running until the last byte. A body that ends without a frame saying why
+/// the answer ended ends with [`LlmError::Stream`]: a TCP FIN with no error is
+/// what flaky wifi and a proxy killing an idle upstream look like, and
+/// reporting that as a finished answer puts half a reply into the history.
+///
+/// The read timeout on the client is per read, not per response: a server that
+/// trickles bytes (Anthropic's `ping` during a long thinking block, any gateway
+/// that keeps an SSE comment alive) resets it forever, and the turn never ends.
+/// So the whole read is under one deadline here.
+pub(crate) fn pump(resp: reqwest::Response, busy: Busy, decoder: impl WireDecoder) -> EventStream {
+    pump_within(resp, busy, decoder, stream_deadline())
+}
+
+/// [`pump`], with the deadline the caller wants.
+pub(crate) fn pump_within(resp: reqwest::Response, busy: Busy, mut decoder: impl WireDecoder, deadline: Duration) -> EventStream {
     let (tx, rx) = mpsc::channel::<Result<LlmEvent, LlmError>>(256);
     tokio::spawn(async move {
         // The server keeps generating while this task reads.
         let _busy = busy;
         let mut done_sent = false;
         let mut body = resp.bytes_stream();
-        while let Some(chunk) = body.next().await {
-            let items = match chunk {
-                Ok(bytes) => decoder.feed(&bytes),
-                Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
-            };
-            if !forward(&tx, items, &mut done_sent).await {
+        let read = async {
+            while let Some(chunk) = body.next().await {
+                let items = match chunk {
+                    Ok(bytes) => decoder.feed(&bytes),
+                    Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
+                };
+                if !forward(&tx, items, &mut done_sent).await {
+                    return;
+                }
+            }
+            if !forward(&tx, decoder.finish(), &mut done_sent).await {
                 return;
             }
-        }
-        if forward(&tx, decoder.finish(), &mut done_sent).await && !done_sent {
-            let _ = tx.send(Ok(LlmEvent::Done(FinishReason::Stop))).await;
+            if !done_sent && !decoder.saw_terminal() {
+                let _ = tx.send(Err(LlmError::Stream(CLOSED_EARLY.into()))).await;
+            }
+        };
+        // An error, not a hang: what was streamed so far is already out, and a
+        // turn that has been reading for this long has heard the server say
+        // nothing for all of it.
+        if tokio::time::timeout(deadline, read).await.is_err() {
+            let _ = tx
+                .send(Err(LlmError::Stream(format!(
+                    "the stream did not end within {}s and was cut off",
+                    deadline.as_secs()
+                ))))
+                .await;
         }
     });
     Box::pin(futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) }))
@@ -504,6 +631,118 @@ mod tests {
 
     fn client(model: &str) -> Client {
         Client::new(Endpoint::new(ApiProtocol::OpenAi, "http://localhost:1234/v1", None), model)
+    }
+
+    #[test]
+    fn the_backoff_grows_and_stays_inside_its_ceiling() {
+        // `set_max_retries` is public and unclamped, so a large setting really
+        // does reach an attempt where `2u64.pow(attempt)` would overflow.
+        for attempt in 1..200 {
+            let wait = backoff(attempt);
+            assert!(wait <= Duration::from_secs(30), "attempt {attempt} waited {wait:?}");
+            // Jitter only ever takes a third off, so the wait stays inside the
+            // envelope the doubling asked for.
+            let asked = Duration::from_millis((2u64.saturating_pow(attempt.min(16) as u32) * 1000).min(30_000));
+            assert!(wait >= asked * 2 / 3, "attempt {attempt} waited {wait:?}, asked for {asked:?}");
+        }
+        // Jitter: two calls at the same attempt are not the same wait, so
+        // several agents pointed at one gateway do not march in lockstep.
+        let draws: Vec<u64> = (0..32).map(|_| backoff(5).as_millis() as u64).collect();
+        assert!(draws.iter().any(|&d| d != draws[0]), "every draw was {draws:?}");
+        assert!(jitter(0) == 0 && jitter(10) < 10);
+    }
+
+    // The invariant every retry path has to keep: a request that has already
+    // streamed events is never sent again, because a tool call in those
+    // events may already have been run.
+    #[tokio::test]
+    async fn no_retry_ever_re_sends_a_request_that_streamed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // Answers the first attempt with a stream that stops mid tool call, and
+        // counts every request it is given.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let asked = Arc::new(std::sync::Mutex::new(0usize));
+        let counted = asked.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                *counted.lock().unwrap() += 1;
+                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+                sock.write_all(head.as_bytes()).await.ok();
+                for frame in [
+                    r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_a","name":"run_shell","input":{}}}"#,
+                r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"comm"}}"#,
+                ] {
+                    let piece = format!("{frame}\n\n");
+                    let chunked = format!("{:x}\r\n{piece}\r\n", piece.len());
+                    if sock.write_all(chunked.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+                // The chunked body ends cleanly: a FIN with no error, which is
+                // what flaky wifi and a proxy killing an idle upstream look like.
+                let _ = sock.write_all(b"0\r\n\r\n").await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let llm = Client::new(Endpoint::new(ApiProtocol::Anthropic, url, None), "m");
+        llm.set_max_retries(3);
+        let mut events = <Client as crate::LlmBackend>::stream_with_options(&llm, &[ChatMessage::user("run a tool")], &[], &TurnOptions::default())
+            .await
+            .expect("the request was accepted");
+        let mut seen = Vec::new();
+        while let Some(item) = events.next().await {
+            seen.push(item);
+            // Nothing here may re-send: the tool call is already half on screen.
+            assert_eq!(*asked.lock().unwrap(), 1, "the request was sent again after it had streamed");
+        }
+        assert!(
+            matches!(seen.last(), Some(Err(LlmError::Stream(m))) if m == CLOSED_EARLY),
+            "a stream cut mid tool call is not a finished turn: {seen:?}"
+        );
+        assert!(!seen.iter().any(|e| matches!(e, Ok(LlmEvent::Done(_)))), "{seen:?}");
+    }
+
+    /// A rate limit is waited out, but only while the request has generated
+    /// nothing: `max_retries` bounds those attempts too, so asking for none
+    /// really means none.
+    #[tokio::test]
+    async fn a_rate_limit_is_waited_out_only_as_many_times_as_was_asked_for() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let serve = |status: &'static str, asked: Arc<std::sync::Mutex<usize>>| async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/v1", listener.local_addr().unwrap());
+            let counted = asked.clone();
+            tokio::spawn(async move {
+                while let Ok((mut sock, _)) = listener.accept().await {
+                    let mut buf = [0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    *counted.lock().unwrap() += 1;
+                    let resp = format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                }
+            });
+            url
+        };
+
+        let zero = Arc::new(std::sync::Mutex::new(0usize));
+        let llm = Client::new(Endpoint::new(ApiProtocol::OpenAi, serve("429 Too Many Requests", zero.clone()).await, None), "m");
+        llm.set_max_retries(0);
+        // The retries are used up, so the last 429 is returned as it came:
+        // what to do about a rate limit is the caller's, not this layer's.
+        let resp = llm.post(&llm.base_url(), &reqwest::header::HeaderMap::new(), &serde_json::json!({})).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 429, "the rate limit is passed back, not hidden");
+        assert_eq!(*zero.lock().unwrap(), 1, "zero retries asked for, and got");
+
+        let few = Arc::new(std::sync::Mutex::new(0usize));
+        let llm = Client::new(Endpoint::new(ApiProtocol::OpenAi, serve("429 Too Many Requests", few.clone()).await, None), "m");
+        llm.set_max_retries(2);
+        let resp = llm.post(&llm.base_url(), &reqwest::header::HeaderMap::new(), &serde_json::json!({})).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 429);
+        assert_eq!(*few.lock().unwrap(), 3, "two retries, so three attempts");
     }
 
     #[test]

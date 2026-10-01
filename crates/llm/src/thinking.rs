@@ -276,11 +276,18 @@ impl ThinkingProfile {
             .map(String::as_str)
     }
 
+    /// The highest preset the server actually offers.
+    ///
+    /// The probe order is the whole point: a level named for how much thinking it
+    /// buys, most first. `high` sat above `max` here, so on a model advertising
+    /// both — `claude-opus-5` builds `off, low, medium, high, max` — the
+    /// function named for the maximum returned the rung below it. A user who
+    /// picked the top of the ladder got the top of nothing.
     pub fn max_effort(&self) -> Option<&str> {
         if !self.supported || self.presets.is_empty() {
             return None;
         }
-        for high in &["xhigh", "extra-high", "high", "max", "deep", "on"] {
+        for high in &["max", "xhigh", "extra-high", "highest", "deep", "high", "on"] {
             if let Some(p) = self.presets.iter().find(|p| p.eq_ignore_ascii_case(high)) {
                 return Some(p.as_str());
             }
@@ -1200,6 +1207,37 @@ mod tests {
         for level in ["max", "xhigh", "high", "medium", "low"] {
             assert!(m.thinking.presets.iter().any(|p| p == level), "{level} was dropped");
         }
+    }
+
+    #[test]
+    fn the_highest_preset_is_the_one_the_server_calls_the_highest() {
+        // `off, low, medium, high, max` is what anthropic.rs builds for a model
+        // with a top level above xhigh. Probing "high" before "max" made the
+        // function named for the maximum return the rung below it, so a user
+        // asking for the most thinking got the top of nothing.
+        let both = ThinkingProfile {
+            supported: true,
+            presets: vec!["off".into(), "low".into(), "medium".into(), "high".into(), "max".into()],
+            ..ThinkingProfile::unreported()
+        };
+        assert_eq!(both.max_effort(), Some("max"), "a level named max must beat one named high");
+
+        let xhigh_only = ThinkingProfile {
+            supported: true,
+            presets: vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
+            ..ThinkingProfile::unreported()
+        };
+        assert_eq!(xhigh_only.max_effort(), Some("xhigh"), "and with no max, xhigh is still the top");
+
+        let plain = ThinkingProfile {
+            supported: true,
+            presets: vec!["low".into(), "medium".into(), "high".into()],
+            ..ThinkingProfile::unreported()
+        };
+        assert_eq!(plain.max_effort(), Some("high"), "a ladder with nothing above high ends at high");
+
+        let cant = ThinkingProfile { supported: false, presets: vec!["max".into()], ..ThinkingProfile::unreported() };
+        assert_eq!(cant.max_effort(), None, "a model that cannot reason has no maximum to offer");
     }
 
     #[test]

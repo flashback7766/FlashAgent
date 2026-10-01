@@ -690,6 +690,36 @@ impl ChatView {
         self.lines.push(line);
     }
 
+    /// What a finished child answered, as a card in the shape of a tool call.
+    /// The answer used to reach the model as a notice and stop there: the user
+    /// could see that a child had finished and never read what it found. Folded,
+    /// the line is the child's own row plus what the answer cost; opened, it is
+    /// the report. Dumped as plain rows it read as something the user had said,
+    /// which is the one thing a report from a child must not read as.
+    pub fn push_subagent_answer(
+        &mut self,
+        finished: &flashagent_core::SubagentFinished,
+        role: &str,
+        secs: u64,
+    ) {
+        let answer = finished.answer.as_str();
+        self.streaming = None;
+        self.streaming_reasoning = None;
+        let said = if finished.done == DoneReason::Completed { "answered" } else { "stopped early" };
+        let head = format!(
+            "{role} {} {said} \u{b7} {} \u{b7} {} tokens \u{b7} {secs}s",
+            finished.id,
+            plural(finished.usage.steps as usize, "step", "steps"),
+            goal::human_count(finished.usage.total_tokens() as i64),
+        );
+        let mut line = ChatLine::with_details(LineKind::Tool, tool_line(&head, answer), answer.to_string());
+        line.tool_name = Some("subagent_answer".to_string());
+        // The first line of the report stands in for the whole of it while the
+        // card is closed, so a glance says what was found without the wall.
+        line.tool_result = Some(answer.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string());
+        self.lines.push(line);
+    }
+
     /// "Compacting context…" becomes "Context compacted · 12k saved" in place.
     pub fn replace_last_system(&mut self, text: &str) {
         match self.lines.iter().rposition(|l| l.kind == LineKind::System) {
@@ -861,7 +891,59 @@ impl From<bool> for ReasoningExpansion {
     }
 }
 
-fn render_single_tool_card(call: &ToolCallRecord, width: usize, waiting: bool) -> Vec<RenderLine> {
+/// A tool line the way a tool line reads: the margin mark, the words, and the
+/// chevron that says the row opens. `subject` is what the call was about, and
+/// sits in the same bright grey every other tool line puts it in.
+fn tool_line(head: &str, subject_source: &str) -> String {
+    const MUTED: &str = "\x1b[38;2;160;165;180m";
+    const STRONG: &str = "\x1b[38;2;225;230;240m";
+    const FAINT: &str = "\x1b[38;2;120;125;140m";
+    const OFF: &str = "\x1b[0m";
+    let subject = subject_source.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let mut out = format!("  {FAINT}{}{OFF} {MUTED}{head}{OFF}", tool_cards::TOOL_MARK);
+    if !subject.is_empty() {
+        let clipped: String = subject.chars().take(72).collect();
+        let ellipsis = if subject.chars().count() > 72 { "\u{2026}" } else { "" };
+        out.push_str(&format!(" {STRONG}{clipped}{ellipsis}{OFF}"));
+    }
+    out.push_str(&format!(" {FAINT}\u{203a}{OFF}"));
+    out
+}
+
+/// The report a finished child left, in a box. `folded` is the row the closed
+/// card showed, already styled; it goes on top of the box so that opening the
+/// card adds the report instead of replacing the line the eye was on.
+fn render_subagent_answer_card(folded: &str, answer: &str, width: usize) -> Vec<RenderLine> {
+    /// Enough of a report to read at a glance; past this the row is a wall, and
+    /// the rest is in the answer the model already has.
+    const MAX_LINES: usize = 20;
+    const MUTED: &str = "\x1b[38;2;120;125;140m";
+    let mut lines = vec![(LineKind::Tool, folded.to_string())];
+    let top = tool_views::render_card_top("Answer", width);
+    // The box draws its own padding, so a row inside it is that much narrower
+    // than the border it sits between.
+    let inner_w = visible_width(&top).saturating_sub(6);
+    lines.push((LineKind::Tool, top));
+    // A carriage return would redraw the row from its start and a tab would
+    // step off the frame; both are the answer's business, not the box's.
+    let rows: Vec<String> =
+        answer.trim().lines().map(|l| terminal_safe(l.rsplit('\r').next().unwrap_or("").trim())).collect();
+    for row in rows.iter().take(MAX_LINES) {
+        lines.push(tool_views::box_row(row, MUTED, inner_w));
+    }
+    if rows.len() > MAX_LINES {
+        lines.push(tool_views::box_row(&format!("+{}\u{b7} the report continues", rows.len() - MAX_LINES), MUTED, inner_w));
+    }
+    lines.push((LineKind::Tool, tool_views::render_card_bottom(width)));
+    lines
+}
+
+fn render_single_tool_card(
+    call: &ToolCallRecord,
+    width: usize,
+    waiting: bool,
+    folded: Option<&str>,
+) -> Vec<RenderLine> {
     let state = tool_views::CallState::of(call.is_running, call.is_error, waiting);
     let tool_name = call.name.as_str();
     let details_str = call.args_json.as_str();
@@ -983,6 +1065,14 @@ fn render_single_tool_card(call: &ToolCallRecord, width: usize, waiting: bool) -
 
         let change = tool_views::EditChange { path, added, deleted, body: diff_text.as_deref(), is_write };
         return card(tool_views::render_edit_card(&change, state, call.result.as_deref(), width));
+    }
+
+    if tool_name == "subagent_answer" {
+        return render_subagent_answer_card(
+            folded.unwrap_or("A subagent answered"),
+            call.args_json.as_str(),
+            width,
+        );
     }
 
     if tool_name == "spawn_agent" {
@@ -1304,7 +1394,7 @@ impl ChatView {
                         // The call in flight waits while an approval or question card is up.
                         let waiting = self.awaiting_user && self.open_tool == Some(i);
                         for call in &line.tool_calls {
-                            let card_lines = render_single_tool_card(call, width, waiting);
+                            let card_lines = render_single_tool_card(call, width, waiting, None);
                             for cl in card_lines {
                                 target.push(cl);
                             }
@@ -1321,7 +1411,7 @@ impl ChatView {
                             deleted: 0,
                             diff: None,
                         };
-                        let card_lines = render_single_tool_card(&synthetic_call, width, false);
+                        let card_lines = render_single_tool_card(&synthetic_call, width, false, Some(&line.text));
                         for cl in card_lines {
                             target.push(cl);
                         }
@@ -2418,6 +2508,62 @@ hm".into()));
         let failed = collapsed(&v);
         assert!(failed.contains("Add the missing null check to parser.rs · failed"), "{failed}");
         assert!(!failed.contains("Failed to"), "{failed}");
+    }
+
+    /// A child that finished, as the app hears about it.
+    fn finished(answer: &str) -> flashagent_core::SubagentFinished {
+        flashagent_core::SubagentFinished {
+            id: "sub1".into(),
+            role: "researcher".into(),
+            answer: answer.into(),
+            done: DoneReason::Completed,
+            usage: flashagent_core::ChildUsage { steps: 4, prompt_tokens: 9_000, completion_tokens: 3_500, cached_tokens: 0 },
+        }
+    }
+
+    #[test]
+    fn a_subagent_answer_reaches_the_transcript_as_a_folded_card() {
+        let mut v = ChatView::default();
+        v.push_subagent_answer(&finished("The retry loop drops the last error.\nIt lives in loop_.rs, not in the client."), "researcher", 7);
+        let line = v.lines.last().expect("the answer is a line of the transcript");
+        assert_eq!(line.kind, LineKind::Tool, "a report is work, not a message from the user");
+        assert_eq!(line.tool_name.as_deref(), Some("subagent_answer"));
+        assert_eq!(line.details.as_deref(), Some("The retry loop drops the last error.\nIt lives in loop_.rs, not in the client."));
+
+        // Folded: what it found, and what it cost, without the report itself.
+        let folded = {
+            let (settled, live) = v.render_split(100, ReasoningExpansion::default());
+            strip_ansi(&settled.iter().chain(live.iter()).map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n"))
+        };
+        assert!(folded.contains("researcher sub1 answered \u{b7} 4 steps \u{b7} 12.5k tokens \u{b7} 7s"), "{folded}");
+        assert!(folded.contains("The retry loop drops the last error."), "{folded}");
+        assert!(!folded.contains("loop_.rs"), "the report stays folded: {folded}");
+
+        // Opened, the whole report is there.
+        let opened = strip_ansi(&v.render(100).iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n"));
+        assert!(opened.contains("It lives in loop_.rs, not in the client."), "{opened}");
+    }
+
+    #[test]
+    fn the_answer_card_folds_and_unfolds_on_a_click() {
+        let mut v = ChatView::default();
+        v.push_subagent_answer(&finished("Found it in the retry loop.\nSecond line."), "researcher", 3);
+        let row = 0;
+        let frame = |v: &ChatView| -> String {
+            let (settled, live) = v.render_split(100, ReasoningExpansion::default());
+            settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n")
+        };
+        assert!(!frame(&v).contains("Second line."), "folded to begin with");
+
+        // owners_of only marks Reasoning | Tool | ToolError | Assistant rows, so
+        // this is the part that has to work rather than be assumed.
+        assert!(v.toggle_row(row, ReasoningExpansion::default()), "the folded card is a click target");
+        let opened = frame(&v);
+        assert!(opened.contains("Found it in the retry loop."), "{opened}");
+        assert!(opened.contains("Second line."), "{opened}");
+
+        assert!(v.toggle_row(row, ReasoningExpansion::default()), "the opened card folds again");
+        assert!(!frame(&v).contains("Second line."), "the click closed it again");
     }
 
     #[test]

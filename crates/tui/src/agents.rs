@@ -184,10 +184,17 @@ impl AgentTree {
     /// What a child is doing right now, cut to `width` so a long thought never
     /// wraps onto a second row and breaks the tree. The counters are kept: what
     /// a child is doing can be cut, what it cost cannot.
+    ///
+    /// `width` is what the WHOLE row may use, its mark and the space beside it
+    /// included. The row is drawn inside the work box, which has a frame of its
+    /// own, so a row built against the terminal width paints straight through
+    /// the side of the box it is in.
     pub fn line(&self, id: &str, width: usize) -> Option<String> {
         let child = self.children.get(id)?;
-        let head = format!("{} {}", icon(child.done), child.role);
-        let mut parts = vec![head];
+        // Two columns go to the mark and the space after it: `▸ researcher`,
+        // not a row built against the window and indented by the caller.
+        let room = width.saturating_sub(2);
+        let mut parts = vec![child.role.clone()];
         if child.usage.steps > 0 {
             parts.push(format!("{} steps", child.usage.steps));
         }
@@ -211,19 +218,19 @@ impl AgentTree {
         let mut line = parts[0].clone();
         for part in &parts[1..] {
             let piece = format!("{line} · {part}");
-            if piece.chars().count() + 2 <= width {
+            if piece.chars().count() <= room {
                 line = piece;
             }
         }
         let used = line.chars().count();
         let phase = if child.done.is_none() { child.phase.label() } else { String::new() };
         if !phase.is_empty() {
-            let room = width.saturating_sub(used + 5);
-            if room > 4 {
-                line = format!("{line} · {}", cut(&phase, room));
+            let left = room.saturating_sub(used + 5);
+            if left > 4 {
+                line = format!("{line} · {}", cut(&phase, left));
             }
         }
-        Some(format!("  {}", cut(&line, width)))
+        Some(format!("{} {}", icon(child.done), cut(&line, room)))
     }
 
     /// The prose the phase replaced, for the row the mouse opens. F2 does not
@@ -235,7 +242,9 @@ impl AgentTree {
         if doing.is_empty() {
             return None;
         }
-        Some(cut(&format!("      {}", doing), width))
+        // Six columns of indent come out of `width` as well, for the same
+        // reason the mark does in `line`.
+        Some(format!("      {}", cut(&doing, width.saturating_sub(6))))
     }
 
     /// The prose a phase replaced, for every child that has one. Shown only for
@@ -464,7 +473,10 @@ mod tests {
         tree.apply(&ev("sub1", "planner", LoopEvent::Done(DoneReason::Completed)));
         let line = tree.line("sub1", 100).unwrap();
         assert!(line.contains("answered"), "{line}");
-        assert!(line.starts_with("  √"), "a child that is done is not still running: {line}");
+        // The mark says how it ended. The indent is the box's business: a row is
+        // aligned by whatever frames it, so `line()` spends its width on the mark
+        // and the words and nothing else.
+        assert!(line.starts_with('\u{221a}'), "a child that is done is not still running: {line}");
         assert_eq!(tree.running(), 0);
     }
 

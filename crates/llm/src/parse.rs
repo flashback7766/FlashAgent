@@ -219,6 +219,12 @@ impl ChunkParser {
         events
     }
 
+    /// Whether a finish reason or `[DONE]` has been seen. Without one the body
+    /// stopped mid-answer, however much of it was readable.
+    pub(crate) fn saw_terminal(&self) -> bool {
+        self.done
+    }
+
     /// `[DONE]`.
     pub(crate) fn end(&mut self, events: &mut Vec<LlmEvent>) {
         self.flush_carry(events);

@@ -228,7 +228,7 @@ impl App {
         if self.settle_wheel() {
             self.renderer.request_reprint();
         }
-        self.start_recap_if_due(cx.source, cx.tx);
+        self.start_recap_if_due(cx);
         // A question that timed out (a /goal one after 120 s) goes without a
         // key; its selection and half-written answer must not open the next.
         if cx.question_gate.pending().is_none() {
@@ -281,7 +281,16 @@ impl App {
         self.turn_started = None;
         self.cancel_requested = None;
         self.aborted_turn = Some(self.turn_counter);
+        // The turn's own history, dropped with the turn. Left set, the next
+        // turn's autosave_during_turn wrote this one back over the session file
+        // for as long as it kept running: the abandoned turn's half steps
+        // resurrected behind the new one.
+        self.turn_history = None;
         flashagent_core::mark_cut_short(&mut self.history, flashagent_core::CutShort::Abandoned);
+        // A turn that will not wind down is a turn whose tools have already
+        // changed files, and the note that tells the next one to check them is
+        // the part that must not be lost with the process.
+        self.autosave(cx.session_id, cx.cwd_display);
         self.task_inbox.turn_aborted();
         self.flush_task_lines();
         self.token_tracker.on_finished();
@@ -513,8 +522,7 @@ impl App {
                 self.last_tool_name = Some(name.clone());
                 self.last_tool_args = args_json.clone();
                 self.turn_outcome.tool_calls += 1;
-                self.token_tracker.on_delta(name);
-                self.token_tracker.on_delta(args_json);
+                self.token_tracker.on_tool_call(name, args_json);
                 self.turn_phase = TurnPhase::Tool;
             }
             LoopEvent::ToolFinished { is_error, result, .. } => {

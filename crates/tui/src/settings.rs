@@ -224,7 +224,17 @@ impl SettingsView {
                 }
             } else { "Disabled".into() }),
             ("Web tools", if self.config.web_tools { "Enabled (web_fetch, web_search)".into() } else { "Disabled".into() }),
-            ("Network retries", format!("{} on connection failure", crate::plural(self.config.network_retries, "retry", "retries"))),
+            // Not "on connection failure" any more: the retries also wait out the statuses
+// a gateway returns while it is busy, and zero means zero. A label that named
+// one of the two reasons was wrong about the other, and the setting it
+// describes now does exactly what it says.
+("Network retries", {
+                let n = crate::plural(self.config.network_retries, "retry", "retries");
+                match self.config.network_retries {
+                    0 => "None · a rate limit is reported instead of waited out".into(),
+                    _ => format!("{n} · before anything is generated, so never twice"),
+                }
+            }),
             // Last, and for those who know what the numbers do.
             ("Sampling (advanced)", {
                 // Mirrors `Client::set_user_sampling`: the presets are tuned for local models.
