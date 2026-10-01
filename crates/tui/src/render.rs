@@ -150,6 +150,7 @@ pub(crate) fn work_box(
     details: &std::collections::HashMap<String, String>,
     background_rows: &[String],
     width: usize,
+    t: u64,
 ) -> Vec<(LineKind, String)> {
     let mut body: Vec<(LineKind, String)> = Vec::new();
     for (id, line) in agent_rows {
@@ -158,7 +159,7 @@ pub(crate) fn work_box(
         // counts `width` as the whole row and so must not spend two of it on
         // spacing that belongs here, or a child sits flush against the border
         // while the command under it is indented.
-        body.push((LineKind::Tool, format!("\x1b[38;2;150;155;170m  {line}\x1b[0m")));
+        body.push((LineKind::Tool, live_row(&format!("  {line}"), t)));
         if expanded.contains(&id.as_str()) {
             if let Some(detail) = details.get(id) {
                 body.push((LineKind::Tool, format!("\x1b[38;2;120;125;140m{detail}\x1b[0m")));
@@ -166,7 +167,7 @@ pub(crate) fn work_box(
         }
     }
     for row in background_rows {
-        body.push((LineKind::Tool, format!("\x1b[38;2;150;155;170m  {row}\x1b[0m")));
+        body.push((LineKind::Tool, live_row(&format!("  {row}"), t)));
     }
     if body.is_empty() {
         return Vec::new();
@@ -222,14 +223,29 @@ pub(crate) fn work_box(
     out
 }
 
+/// Every row the box holds is work that is under way: a child leaves the box when
+/// it ends, and a command is listed only while it runs. So the whole box sweeps,
+/// at the period and between the colours the call in flight uses — one movement
+/// across the interface rather than a second one invented here. Animations off
+/// leaves it still, which is the setting's promise and not a special case here.
+fn live_row(plain: &str, t: u64) -> String {
+    anim::shimmer(plain, t, 1800, anim::Rgb(150, 160, 175), anim::Rgb(240, 245, 255))
+}
+
 /// A background command as a row of the work box. `box_inner` is the room left
-/// inside the box's own frame, so the two columns of indent, the `▸ ` mark and
-/// the ` · {elapsed}` that closes the row all come out of the command instead
-/// of painting through the right edge of the box.
-pub(crate) fn background_row(command: &str, elapsed: &str, box_inner: usize) -> String {
-    let spent = 2 + 2 + 3 + visible_width(elapsed);
+/// inside the box's own frame, so the two columns of indent, the mark and its
+/// trailing space and the ` · {elapsed}` that closes the row all come out of the
+/// command instead of painting through the right edge of the box.
+///
+/// The mark turns while the command runs. A `▸` says a command was started and
+/// reads the same for a server that is still serving and for a build that died
+/// four minutes ago, and this box only ever lists the running ones — so the mark
+/// is the only place the difference between "just started" and "been at it a
+/// while" can be told apart from.
+pub(crate) fn background_row(command: &str, elapsed: &str, box_inner: usize, mark: &str) -> String {
+    let spent = 2 + visible_width(mark) + 1 + 3 + visible_width(elapsed);
     let cmd = flashagent_tui::truncate_middle(command, box_inner.saturating_sub(spent).max(4));
-    format!("\u{25b8} {cmd} \u{b7} {elapsed}")
+    format!("{mark} {cmd} \u{b7} {elapsed}")
 }
 
 /// The box's own top and bottom edges. A click has to skip them to land on the
@@ -238,6 +254,23 @@ pub(crate) const WORK_BOX_EDGES: usize = 2;
 
 #[cfg(test)]
 mod work_box_tests {
+    /// The colours a body row carries at one moment, for comparing two.
+    fn row_colour(t: u64) -> String {
+        work_box(&[("sub1".into(), "\u{25b8} researcher".into())], &[], &Default::default(), &[], 60, t)[1].1.clone()
+    }
+
+    /// The box sweeps because every row in it is work that is running: a child
+    /// leaves when it ends, and a command is listed only while it runs. With
+    /// animations off it must still be readable, which is that setting's promise
+    /// rather than a special case made here.
+    #[test]
+    fn the_box_sweeps_while_its_work_runs_and_is_still_when_animations_are_off() {
+        flashagent_tui::anim::set_enabled(true);
+        assert_ne!(row_colour(0), row_colour(900), "the sweep has to differ from one moment to the next");
+        flashagent_tui::anim::set_enabled(false);
+        assert_eq!(row_colour(0), row_colour(900), "animations off is still: no sweep at all");
+        flashagent_tui::anim::set_enabled(true);
+    }
     use super::*;
 
     fn plain(rows: &[(LineKind, String)]) -> Vec<String> {
@@ -250,7 +283,7 @@ mod work_box_tests {
 
     #[test]
     fn an_idle_screen_has_no_box_at_all() {
-        assert!(work_box(&[], &[], &Default::default(), &[], 80).is_empty(), "an empty box would stand there saying nothing");
+        assert!(work_box(&[], &[], &Default::default(), &[], 80, 0).is_empty(), "an empty box would stand there saying nothing");
     }
 
     #[test]
@@ -261,6 +294,7 @@ mod work_box_tests {
             &Default::default(),
             &["  \u{25b8} cargo test \u{b7} 12s".to_string()],
             80,
+            0,
         );
         let text = plain(&rows);
         assert_eq!(text.len(), 4, "two edges around two rows: {text:?}");
@@ -276,7 +310,7 @@ mod work_box_tests {
     fn an_opened_child_adds_its_detail_inside_the_same_box() {
         let details: std::collections::HashMap<String, String> =
             [("sub1".to_string(), "      grepping for the token tracker".to_string())].into_iter().collect();
-        let rows = work_box(&[agent("sub1", "  \u{25b8} researcher")], &["sub1"], &details, &[], 80);
+        let rows = work_box(&[agent("sub1", "  \u{25b8} researcher")], &["sub1"], &details, &[], 80, 0);
         let text = plain(&rows);
         assert!(text[2].contains("grepping for the token tracker"), "{text:?}");
     }
@@ -284,7 +318,7 @@ mod work_box_tests {
     #[test]
     fn the_box_edges_stay_the_width_of_the_window() {
         for width in [20usize, 40, 80, 200] {
-            let rows = work_box(&[agent("sub1", "  \u{25b8} coder")], &[], &Default::default(), &[], width);
+            let rows = work_box(&[agent("sub1", "  \u{25b8} coder")], &[], &Default::default(), &[], width, 0);
             let text = plain(&rows);
             let top = text[0].chars().count();
             let bottom = text[2].chars().count();
@@ -298,7 +332,7 @@ mod work_box_tests {
         // Below eleven columns the title is cut rather than shortened, and that
         // branch used to hand the top edge one more column than the bottom one.
         for width in 4usize..=32 {
-            let rows = work_box(&[agent("sub1", "  \u{25b8} coder")], &[], &Default::default(), &[], width);
+            let rows = work_box(&[agent("sub1", "  \u{25b8} coder")], &[], &Default::default(), &[], width, 0);
             let text = plain(&rows);
             let top = text[0].chars().count();
             let bottom = text[2].chars().count();
@@ -315,6 +349,7 @@ mod work_box_tests {
             &Default::default(),
             &["  \u{25b8} cargo test".to_string()],
             40,
+            0,
         );
         for row in plain(&rows).iter().skip(1).take(2) {
             assert!(row.starts_with('\u{2502}') && row.ends_with('\u{2502}'), "a body row has no sides: {row:?}");
@@ -325,7 +360,7 @@ mod work_box_tests {
     fn a_long_phase_stays_inside_its_own_box() {
         let long = format!("  \u{25b8} researcher \u{b7} {}", "grepping the token tracker ".repeat(6));
         for width in [30usize, 60, 120] {
-            let rows = work_box(&[agent("sub1", &long)], &[], &Default::default(), &[], width);
+            let rows = work_box(&[agent("sub1", &long)], &[], &Default::default(), &[], width, 0);
             for row in plain(&rows) {
                 assert!(row.chars().count() <= width - 2, "a row paints through the box at {width}: {row:?}");
             }
@@ -336,7 +371,7 @@ mod work_box_tests {
     fn a_background_row_fits_the_room_left_inside_the_box() {
         let cmd = "cargo test -p flashagent-core --lib --release -- --nocapture";
         for inner in [20usize, 40, 76] {
-            let row = background_row(cmd, "1h02m", inner);
+            let row = background_row(cmd, "1h02m", inner, "\u{25b8}");
             assert!(
                 flashagent_tui::visible_width(&row) + 2 <= inner,
                 "the row must fit {inner} columns with its indent: {row:?}"
@@ -345,13 +380,13 @@ mod work_box_tests {
         }
         // Narrower than the marks themselves: the row is longer than the box,
         // and `pad_box_row` is what keeps it from painting through the side.
-        let cramped = background_row(cmd, "1h02m", 10);
+        let cramped = background_row(cmd, "1h02m", 10, "\u{25b8}");
         assert!(flashagent_tui::visible_width(&cramped) > 10, "the marks alone overrun a tiny box: {cramped:?}");
     }
 
     #[test]
     fn the_box_closes_onto_the_composer_rather_than_starting_a_second_one() {
-        let rows = work_box(&[agent("sub1", "  \u{25b8} coder")], &[], &Default::default(), &[], 80);
+        let rows = work_box(&[agent("sub1", "  \u{25b8} coder")], &[], &Default::default(), &[], 80, 0);
         let text = plain(&rows);
         let edges = text.iter().filter(|r| r.starts_with('\u{256d}') || r.starts_with('\u{251c}')).count();
         assert_eq!(edges, WORK_BOX_EDGES, "the box has two edges of its own: {text:?}");
@@ -1155,12 +1190,14 @@ impl Renderer {
         // under way that the conversation does not show. A box rather than bare
         // lines: without its edges these read as part of the chat, and the eye
         // has to work out that they are not what was said.
+        let box_t = anim::now_ms();
         let box_rows = work_box(
             st.agent_rows,
             st.agent_expanded,
             st.agent_details,
             st.background_rows,
             width,
+            box_t,
         );
         // The rows a click may land on start under the box's own top edge, and
         // they are counted from where they sit in the tail, not from the end of
@@ -1421,7 +1458,11 @@ impl App {
         // border: a row built against the terminal paints straight through the
         // side of the box it is in.
         let box_inner = pin_width.saturating_sub(4);
-        let agent_rows = self.agents.pinned_rows(box_inner);
+        // Work that is running says so from the clock, not from how often a frame
+        // happened to be drawn: two agents listed at once must not tick in
+        // lockstep just because they were reported in the same event.
+        let mark = anim::spinner(anim::now_ms());
+        let agent_rows = self.agents.pinned_rows(box_inner, mark);
         let agent_details = self.agents.details(box_inner);
         // Background commands join the subagents in one box, so each says what
         // it is and for how long, cut to fit like a child's row.
@@ -1431,7 +1472,7 @@ impl App {
             .tasks()
             .into_iter()
             .filter(|t| matches!(t.state, flashagent_tools::TaskState::Running))
-            .map(|t| background_row(&t.command, &flashagent_tools::shell::format_elapsed(t.elapsed), box_inner))
+            .map(|t| background_row(&t.command, &flashagent_tools::shell::format_elapsed(t.elapsed), box_inner, mark))
             .collect();
         let expanded: Vec<&str> = self.expanded_agents.iter().map(String::as_str).collect();
         self.renderer.frame(

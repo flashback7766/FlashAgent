@@ -189,7 +189,7 @@ impl AgentTree {
     /// included. The row is drawn inside the work box, which has a frame of its
     /// own, so a row built against the terminal width paints straight through
     /// the side of the box it is in.
-    pub fn line(&self, id: &str, width: usize) -> Option<String> {
+    pub fn line(&self, id: &str, width: usize, running_mark: &str) -> Option<String> {
         let child = self.children.get(id)?;
         // Two columns go to the mark and the space after it: `▸ researcher`,
         // not a row built against the window and indented by the caller.
@@ -230,7 +230,7 @@ impl AgentTree {
                 line = format!("{line} · {}", cut(&phase, left));
             }
         }
-        Some(format!("{} {}", icon(child.done), cut(&line, room)))
+        Some(format!("{} {}", icon(child.done, running_mark), cut(&line, room)))
     }
 
     /// The prose the phase replaced, for the row the mouse opens. F2 does not
@@ -262,11 +262,11 @@ impl AgentTree {
     /// Only children still running are pinned. A child that has ended has said
     /// what it said, and the transcript keeps the line that says it finished, so
     /// leaving its row up would only fill the box with work that is over.
-    pub fn pinned_rows(&self, width: usize) -> Vec<(String, String)> {
+    pub fn pinned_rows(&self, width: usize, running_mark: &str) -> Vec<(String, String)> {
         self.order
             .iter()
             .filter(|id| self.children.get(*id).is_some_and(|c| c.done.is_none()))
-            .filter_map(|id| self.line(id, width).map(|l| (id.clone(), l)))
+            .filter_map(|id| self.line(id, width, running_mark).map(|l| (id.clone(), l)))
             .collect()
     }
 
@@ -332,13 +332,21 @@ fn set_doing(child: &mut Child, text: String) -> bool {
     true
 }
 
-fn icon(done: Option<DoneReason>) -> &'static str {
+/// The mark in the margin of a child's row.
+///
+/// A running child gets a moving mark rather than a still one: `▸` says a tool
+/// was called, and it reads the same whether that call is a second old or just
+/// began. The frames are the ones the rest of the interface turns, so the whole
+/// app moves at one speed and off the clock rather than off how often a frame
+/// happened to be drawn. A finished child stops moving — a spinner that kept
+/// turning on a dead row is the one way to say "working" about work that is over.
+fn icon(done: Option<DoneReason>, running_mark: &str) -> String {
     // From the set the rest of the interface draws from, so these show on a
     // Windows console as themselves and not as a box.
     match done {
-        None => "▸",
-        Some(DoneReason::Completed) => "√",
-        Some(_) => "×",
+        None => running_mark.to_string(),
+        Some(DoneReason::Completed) => "\u{221a}".to_string(),
+        Some(_) => "\u{d7}".to_string(),
     }
 }
 
@@ -403,6 +411,11 @@ mod tests {
     use super::*;
     use flashagent_llm::Usage;
 
+    /// What a running row carries when nothing is turning: the mark is the
+    /// caller's clock to choose, so the tests that are about the words pass one
+    /// in rather than depending on which frame the test happened to run at.
+    const STILL: &str = "\u{25b8}";
+
     fn ev(id: &str, role: &str, event: LoopEvent) -> SubagentEvent {
         SubagentEvent { id: id.into(), role: role.into(), event }
     }
@@ -416,7 +429,7 @@ mod tests {
             name: "grep".into(),
             args_json: "{}".into(),
         })));
-        let line = tree.line("sub1", 100).unwrap();
+        let line = tree.line("sub1", 100, STILL).unwrap();
         assert!(line.contains("researcher"), "{line}");
         // The row reads as a status, in the composer's own words; the prose it
         // replaced is one mouse click away rather than in the row itself.
@@ -430,9 +443,9 @@ mod tests {
     fn a_child_row_speaks_in_the_same_words_the_composer_uses() {
         let mut tree = AgentTree::default();
         tree.apply(&ev("sub1", "researcher", LoopEvent::TurnDelta("reading a".into())));
-        assert!(tree.line("sub1", 100).unwrap().contains("writing"), "a child that is writing is saying so");
+        assert!(tree.line("sub1", 100, STILL).unwrap().contains("writing"), "a child that is writing is saying so");
         tree.apply(&ev("sub1", "researcher", LoopEvent::ReasoningDelta("hmm".into())));
-        assert!(tree.line("sub1", 100).unwrap().contains("thinking"));
+        assert!(tree.line("sub1", 100, STILL).unwrap().contains("thinking"));
     }
 
     #[test]
@@ -440,11 +453,11 @@ mod tests {
         let mut tree = AgentTree::default();
         tree.apply(&ev("sub1", "researcher", LoopEvent::TurnDelta("reading a".into())));
         tree.apply(&ev("sub2", "coder", LoopEvent::TurnDelta("writing b".into())));
-        assert!(tree.pinned_rows(100)[0].1.contains("researcher"));
-        assert!(tree.pinned_rows(100)[1].1.contains("coder"));
+        assert!(tree.pinned_rows(100, STILL)[0].1.contains("researcher"));
+        assert!(tree.pinned_rows(100, STILL)[1].1.contains("coder"));
         // Every child is pinned, oldest first, with the id a click needs.
-        assert_eq!(tree.pinned_rows(100).len(), 2);
-        assert_eq!(tree.pinned_rows(100)[0].0, "sub1", "the order they were started in is the order they read in");
+        assert_eq!(tree.pinned_rows(100, STILL).len(), 2);
+        assert_eq!(tree.pinned_rows(100, STILL)[0].0, "sub1", "the order they were started in is the order they read in");
         assert_eq!(tree.running(), 2);
     }
 
@@ -461,7 +474,7 @@ mod tests {
             })));
         }
         tree.apply(&ev("sub1", "coder", LoopEvent::StepStarted { step: 2, max_steps: Some(20) }));
-        let line = tree.line("sub1", 100).unwrap();
+        let line = tree.line("sub1", 100, STILL).unwrap();
         assert!(line.contains("2 steps"), "{line}");
         assert!(line.contains("2.4k tokens"), "prompt and completion, cache not counted twice: {line}");
         assert!(line.contains("600 cached"), "{line}");
@@ -471,7 +484,7 @@ mod tests {
     fn a_finished_child_says_how_it_ended() {
         let mut tree = AgentTree::default();
         tree.apply(&ev("sub1", "planner", LoopEvent::Done(DoneReason::Completed)));
-        let line = tree.line("sub1", 100).unwrap();
+        let line = tree.line("sub1", 100, STILL).unwrap();
         assert!(line.contains("answered"), "{line}");
         // The mark says how it ended. The indent is the box's business: a row is
         // aligned by whatever frames it, so `line()` spends its width on the mark
@@ -484,7 +497,7 @@ mod tests {
     fn a_child_that_hit_its_limit_does_not_say_it_answered() {
         let mut tree = AgentTree::default();
         tree.apply(&ev("sub1", "coder", LoopEvent::Done(DoneReason::StepLimit)));
-        let line = tree.line("sub1", 100).unwrap();
+        let line = tree.line("sub1", 100, STILL).unwrap();
         assert!(line.contains("step limit"), "{line}");
         assert!(line.contains('×'), "{line}");
     }
@@ -495,9 +508,9 @@ mod tests {
         // with work that finished minutes ago and reads as work still going.
         let mut tree = AgentTree::default();
         tree.apply(&ev("sub1", "researcher", LoopEvent::TurnDelta("reading".into())));
-        assert_eq!(tree.pinned_rows(100).len(), 1, "a running child is pinned");
+        assert_eq!(tree.pinned_rows(100, STILL).len(), 1, "a running child is pinned");
         tree.apply(&ev("sub1", "researcher", LoopEvent::Done(DoneReason::Completed)));
-        assert!(tree.pinned_rows(100).is_empty(), "a finished one is not pinned");
+        assert!(tree.pinned_rows(100, STILL).is_empty(), "a finished one is not pinned");
         // It is still listed by /agents: gone from the box is not gone.
         assert_eq!(tree.rows().len(), 1);
     }
@@ -509,9 +522,9 @@ mod tests {
         // taken five minutes.
         let mut tree = AgentTree::default();
         tree.apply(&ev("sub1", "researcher", LoopEvent::Done(DoneReason::Completed)));
-        let first = tree.line("sub1", 100).unwrap();
+        let first = tree.line("sub1", 100, STILL).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        let second = tree.line("sub1", 100).unwrap();
+        let second = tree.line("sub1", 100, STILL).unwrap();
         assert_eq!(first, second, "a child that is done is not still running: {first} / {second}");
     }
 
@@ -575,7 +588,7 @@ mod tests {
         tree.apply(&ev("sub1", "researcher", LoopEvent::TurnDelta(
             "Let me check whether the overdraft guard runs before the mutation, because if it runs after".into(),
         )));
-        let line = tree.line("sub1", 46).unwrap();
+        let line = tree.line("sub1", 46, STILL).unwrap();
         assert!(line.chars().count() <= 46, "{} chars: {line}", line.chars().count());
         assert!(line.contains("4.5k tokens"), "the cost stays: {line}");
         assert!(line.contains("researcher"), "and who it is: {line}");    }
@@ -602,7 +615,7 @@ mod tests {
             name: "run_shell".into(),
             args_json: "{}".into(),
         }));
-        let line = tree.line("sub1", 100).unwrap();
+        let line = tree.line("sub1", 100, STILL).unwrap();
         assert!(line.contains("tooling run_shell"), "{line}");
     }
 
