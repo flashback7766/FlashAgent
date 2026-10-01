@@ -32,6 +32,14 @@ pub(crate) struct Renderer {
     /// The conversation rows on screen: the first one's index (settled, then live)
     /// and how many, from the top of the screen. For clicks.
     chat_view: (usize, usize),
+    /// Screen row of each pinned subagent row, with the id to open. A click is
+    /// matched here rather than against the transcript: these rows are not part
+    /// of it, so F2 never reaches them.
+    agent_screen: Vec<(usize, String)>,
+    /// The pinned rows and the ones the mouse has opened, handed from `frame`
+    /// to `paint_layout`, which is where they land on a screen row.
+    agent_plan: Vec<(String, String)>,
+    agent_open: Vec<String>,
     screen: flashagent_tui::screen::Screen,
     /// The card on screen last frame and when it opened.
     card: (CardKey, u64),
@@ -56,6 +64,9 @@ pub(crate) struct FrameState<'a> {
     pub(crate) tokens_per_sec: Option<f64>,
     /// `draft 81%`: how much of a draft model's guessing the model kept.
     pub(crate) draft_acceptance: Option<&'a str>,
+    /// Tokens this turn has generated, so what a turn cost is on the line that
+    /// is already reporting its speed, rather than only in `/goal`.
+    pub(crate) turn_tokens: Option<String>,
     /// What the session has cost, only where the backend prices its turns. Absent
     /// otherwise: a local model is not free, it is unpriced, and "$0.00" would
     /// say the wrong thing confidently.
@@ -89,6 +100,12 @@ pub(crate) struct FrameState<'a> {
     /// with the other running things, not in the conversation as a line.
     pub(crate) compact_status: Option<&'a str>,
     pub(crate) pending_steers: &'a [(String, Vec<Attachment>)],
+    /// Every subagent row, pinned above the composer: id and the line itself.
+    pub(crate) agent_rows: &'a [(String, String)],
+    /// The rows the mouse has opened, by id.
+    pub(crate) agent_expanded: &'a [&'a str],
+    /// The prose a phase replaced, by id.
+    pub(crate) agent_details: &'a std::collections::HashMap<String, String>,
     pub(crate) queued_commands: &'a [String],
     /// Background commands still running.
     pub(crate) background_tasks: usize,
@@ -119,6 +136,9 @@ impl Renderer {
             max_scroll: 0,
             total_lines: 0,
             chat_view: (0, 0),
+    agent_screen: Vec::new(),
+    agent_plan: Vec::new(),
+    agent_open: Vec::new(),
             screen: flashagent_tui::screen::Screen::new(),
             card: (CardKey::Composer, 0),
         }
@@ -158,6 +178,26 @@ impl Renderer {
     pub(crate) fn chat_row_at(&self, y: u16) -> Option<usize> {
         let (first, count) = self.chat_view;
         ((y as usize) < count).then_some(first + y as usize)
+    }
+
+    /// The subagent row on screen row `y`, if one is there.
+    pub(crate) fn agent_row_at(&self, y: u16) -> Option<&str> {
+        self.agent_screen.iter().find(|(row, _)| *row == y as usize).map(|(_, id)| id.as_str())
+    }
+
+    /// `dir` negative scrolls back. One line at a time; a throw is spent a few
+    /// lines at a time by the caller.
+    pub(crate) fn scroll_by(&mut self, dir: i32) {
+        if dir > 0 {
+            self.scroll_down(dir as usize);
+        } else if dir < 0 {
+            self.scroll_up(dir.unsigned_abs() as usize);
+        }
+    }
+
+    /// What a mouse drag has covered, as plain text.
+    pub(crate) fn text_in(&self, top: u16, bottom: u16, left: u16, right: u16) -> String {
+        self.screen.text_in(top, bottom, left, right)
     }
 }
 
@@ -249,6 +289,9 @@ fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u6
         let mut live = format!("  {}", anim::spinner(t));
         if let Some(speed) = st.tokens_per_sec.filter(|s| *s > 0.0) {
             live.push_str(&format!(" \x1b[38;2;194;231;255m{speed:.1} t/s\x1b[0m"));
+        }
+        if let Some(turn) = st.turn_tokens.as_deref() {
+            live.push_str(&format!("{dot}{turn}"));
         }
         if let Some(draft) = st.draft_acceptance {
             live.push_str(&format!("{dot}{draft}"));
@@ -855,6 +898,18 @@ impl Renderer {
             tail.push((LineKind::User, format!(" \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{shown}\x1b[0m{suffix}")));
         }
 
+        // Every child, pinned above the composer and below the steering above
+        // it. These are a status, not transcript: F2 does not reach them, and
+        // the mouse opens the line a phase replaced.
+        for (id, line) in st.agent_rows {
+            tail.push((LineKind::Tool, format!("\x1b[38;2;150;155;170m{line}\x1b[0m")));
+            if st.agent_expanded.contains(&id.as_str()) {
+                if let Some(detail) = st.agent_details.get(id) {
+                    tail.push((LineKind::Tool, format!("\x1b[38;2;120;125;140m{detail}\x1b[0m")));
+                }
+            }
+        }
+
         let inner_w = width.saturating_sub(2);
         let t = anim::now_ms();
         let card_key = if gate.pending().is_some() {
@@ -941,7 +996,12 @@ impl Renderer {
         tail.push((LineKind::System, footer_status(width, context_usage, &st, awaiting_user)));
 
 
-        self.paint_layout(&settled, &mut tail, LayoutInputs {
+        let open = |id: &str| st.agent_expanded.contains(&id) && st.agent_details.contains_key(id);
+    self.agent_plan = st.agent_rows.to_vec();
+    self.agent_open = st.agent_rows.iter().map(|(id, _)| id.clone()).filter(|id| open(id)).collect();
+    self.agent_plan = st.agent_rows.to_vec();
+    self.agent_open = st.agent_rows.iter().map(|(id, _)| id.clone()).filter(|id| open(id)).collect();
+    self.paint_layout(&settled, &mut tail, LayoutInputs {
             width, height, card_key, card_start, input_line_idx, text_cursor, border_color: &border_color,
         });
     }
@@ -1021,6 +1081,18 @@ impl Renderer {
     rows.drain(..cut);
     let scrolled_marker = usize::from(self.scroll_offset > 0 && chat_room > 1);
     self.chat_view = (first_chat_row + cut, chat_rows.saturating_sub(scrolled_marker).saturating_sub(cut));
+    // Where the pinned subagent rows landed, for a click to find. The block sits
+    // Where the pinned subagent rows landed, for a click to find. The block sits
+    // at the end of `bottom`: one row per child, plus a detail row for one the
+    // mouse has opened.
+    self.agent_screen.clear();
+    let block = self.agent_plan.len() + self.agent_open.len();
+    let first = bottom.len().saturating_sub(block);
+    for (i, (id, _)) in self.agent_plan.iter().enumerate() {
+        if let Some(screen) = (chat_rows + first + i).checked_sub(cut) {
+            self.agent_screen.push((screen, id.clone()));
+        }
+    }
     // The terminal's cursor is shown only where text is typed; cards and menus
     // mark their own choice.
     let cursor = text_cursor.and_then(|col| {
@@ -1076,6 +1148,12 @@ impl App {
         // and says nothing, and the bar keeps quiet rather than showing $0.00.
         let cost_display = self.cost.summary();
 
+        // Pinned above the composer, below the steering: the rows are built here
+        // rather than in `draw` so a click can be matched against them.
+        let pin_width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(100);
+        let agent_rows = self.agents.pinned_rows(pin_width);
+        let agent_details = self.agents.details(pin_width);
+        let expanded: Vec<&str> = self.expanded_agents.iter().map(String::as_str).collect();
         self.renderer.frame(
             &self.chat,
             cx.gate,
@@ -1100,6 +1178,7 @@ impl App {
                 running: self.running,
                 tokens_per_sec: config.show_tokens.then_some(tg_speed),
                 draft_acceptance: draft.as_deref().filter(|_| config.show_tokens),
+                turn_tokens: config.show_tokens.then(|| self.turn_token_phrase()).flatten(),
                 confirm_selection: self.confirm_select.choice(),
                 question_state: Some(&self.question_ui_state),
                 custom_placeholder: self.custom_placeholder.as_deref(),
@@ -1120,11 +1199,24 @@ impl App {
                 compact_status: self.compact_status.as_deref(),
                 pending_steers: &self.pending_steers,
                 queued_commands: &self.queued_commands,
+                agent_rows: &agent_rows,
+                agent_expanded: &expanded,
+                agent_details: &agent_details,
                 background_tasks: cx.tools_arc.shells().running_count(),
                 shell_running: self.running && cx.tools_arc.shells().foreground_running(),
                 composer_flash,
             },
         );
+    }
+
+    /// `1.2k out`, or nothing when the turn has not generated anything yet: a zero
+    /// on the line every turn would be a number nobody reads.
+    pub(crate) fn turn_token_phrase(&self) -> Option<String> {
+        let out = self.turn_outcome.completion_tokens;
+        if !self.running || out == 0 {
+            return None;
+        }
+        Some(if out >= 1000 { format!("{:.1}k out", out as f64 / 1000.0) } else { format!("{out} out") })
     }
 
     pub(crate) fn animating(&self) -> bool {
