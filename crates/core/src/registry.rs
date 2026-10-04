@@ -862,9 +862,9 @@ mod tests {
     /// when it earns it and cannot grow quietly past that.
     #[test]
     fn the_whole_tool_list_stays_a_size_a_prompt_can_carry() {
-        let total = budget::tool_cost("gpt-4o", "", &TOOLS.iter().map(|d| d.schema_json()).collect::<Vec<_>>().join(""), "");
+        let total = crate::budget::tool_cost("gpt-4o", "", &TOOLS.iter().map(|d| d.schema_json()).collect::<Vec<_>>().join(""), "");
         let prompt = flashagent_llm::count_tokens("gpt-4o", &crate::prompt::METHOD);
-        let tightest = budget::Budget::for_window(Some(64_000));
+        let tightest = crate::budget::Budget::for_window(Some(64_000));
         let allowance = tightest.tool_allowance(prompt);
         assert!(
             total < allowance,
