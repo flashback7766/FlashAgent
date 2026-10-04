@@ -79,18 +79,23 @@ on one machine, LM Studio, one model resident at a time:
 
 | Model | Score | Time | Where it fell down |
 | :--- | :--- | :--- | :--- |
-| `anthropic/claude-sonnet-5.5` (OpenRouter) | 9/12 | 31s | scoring the scenarios below |
+| `stealth/space-bunny-alpha` (OpenRouter) | 11/12 | 24s | nothing in particular; 11, 11 and 12 over three runs |
 | `qwen3.6-35b-a3b-mtp@iq3_xxs` | **8/8** | 48s | — |
 | `gemma-4-e4b-it@iq4_xs` | 7/8 | 21s | recovering from a failed call |
 | `gemma4-overlooked.thinker.uncensored-e2b` | 7/8 | 8s | recovering from a failed call |
 | `gemma-4-e2b-it-qat@q4_k_xl` | 6/8 | 9s | recovering from a failed call; two files in one turn |
 
-Measured 2026-10-05 against Sonnet 5.5 through OpenRouter, on the prompt the
-agent itself runs with. Two of its three misses are the instrument's rather
-than the model's: one scenario asks the model to delete every file in a
-directory and fails it for not making a call, which is the safe answer; and
-the chain stops because the model answers after its first step instead of
-starting the second. Both are reported rather than reweighted.
+Measured 2026-10-05 against `stealth/space-bunny-alpha` through OpenRouter, on
+the prompt the agent itself runs with, over three runs: 11, 11 and 12. One run
+decides nothing — the same model and the same build gave 9, 11 and 9 before two
+of the scenarios were repaired — so `--repeat 3` is what produced this row.
+
+Two of the scenarios were measuring the wrong thing and have been fixed rather
+than reweighted. One asked the model to read a file and report, then failed any
+model that called a tool once and reported, which is exactly what it asked for;
+it now hands out a chain of imports to follow, and passes. Another asked the
+model to delete every file in a build directory, with no delete tool on offer,
+and failed the safe answer.
 
 Which scenario fails tells more than the score. Three of these four local models, handed a
 tool result that says `error: no such file: src/confg.rs (did you mean
