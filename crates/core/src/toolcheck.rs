@@ -324,6 +324,41 @@ impl CheckReport {
         (self.results.iter().filter(|(_, o)| o.is_pass()).count(), self.results.len())
     }
 
+    /// Which scenarios a model failed every time, and which it failed only
+    /// sometimes.
+    ///
+    /// A single run of this check does not decide anything. Measured on the same
+    /// model and the same code, three runs of twelve scenarios came out 9, 11
+    /// and 9 — so a number from one run is worth about as much as a coin. What
+    /// separates a real weakness from a coin flip is whether it survives the
+    /// repeats, and that is what this is for.
+    pub fn stability(runs: &[&CheckReport]) -> (Vec<String>, Vec<String>) {
+        let (always, sometimes) = if runs.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            let names: Vec<&str> = runs[0].results.iter().map(|(key, _)| key.as_str()).collect();
+            let mut always = Vec::new();
+            let mut sometimes = Vec::new();
+            for (i, name) in names.iter().enumerate() {
+                let failures = runs.iter().filter(|run| !run.results[i].1.is_pass()).count();
+                if failures == runs.len() {
+                    always.push((*name).to_string());
+                } else if failures > 0 {
+                    sometimes.push((*name).to_string());
+                }
+            }
+            (always, sometimes)
+        };
+        (always, sometimes)
+    }
+
+    /// The middle score of several runs. No `f64` sort: these are counts.
+    pub fn median_score(runs: &[&CheckReport]) -> usize {
+        let mut passed: Vec<usize> = runs.iter().map(|r| r.score().0).collect();
+        passed.sort_unstable();
+        passed.get(passed.len() / 2).copied().unwrap_or(0)
+    }
+
     /// Scenarios the server did not let run.
     pub fn untested(&self) -> usize {
         self.results.iter().filter(|(_, o)| matches!(o, Outcome::Unavailable { .. })).count()
@@ -1138,6 +1173,46 @@ mod tests {
         // contract works.
         assert!(systems.iter().all(|s| s.contains("HOW TO WORK:")), "{systems:?}");
         assert!(systems.iter().all(|s| s.contains("CALLING TOOLS:")), "{systems:?}");
+    }
+
+    #[test]
+    fn a_scenario_that_failed_every_time_is_not_the_same_as_one_that_flipped() {
+        // The measurement this was built for: three runs of one model and one
+        // build came out 9, 11 and 9, so one run decides nothing. What survives
+        // the repeats is the finding.
+        let report = |passing: &[&str]| {
+            let results: Vec<(String, Outcome)> = scenarios()
+                .into_iter()
+                .map(|s| {
+                    (
+                        s.key.to_string(),
+                        if passing.contains(&s.key) {
+                            Outcome::Pass { style: CallStyle::Native, secs: 0.0, tokens: 0 }
+                        } else {
+                            Outcome::Fail { detail: "x".into(), secs: 0.0, tokens: 0 }
+                        },
+                    )
+                })
+                .collect();
+            CheckReport { model: "m".into(), results }
+        };
+        let a = report(&["single_call", "second_step"]);
+        let b = report(&["single_call"]);
+        let c = report(&["single_call", "second_step"]);
+        let runs = vec![&a, &b, &c];
+        let (always, sometimes) = CheckReport::stability(&runs);
+        // The one that flipped is not a finding; the ones that never passed are.
+        assert!(!always.contains(&"second_step".to_string()), "a scenario that passed once is not a stable failure");
+        assert_eq!(sometimes, vec!["second_step".to_string()]);
+        assert!(!always.contains(&"single_call".to_string()));
+        assert!(!sometimes.contains(&"single_call".to_string()));
+        assert_eq!(CheckReport::median_score(&runs), a.score().0);
+    }
+
+    #[test]
+    fn no_runs_is_not_a_stable_failure() {
+        let (always, sometimes) = CheckReport::stability(&[]);
+        assert!(always.is_empty() && sometimes.is_empty());
     }
 
     #[test]

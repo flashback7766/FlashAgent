@@ -77,7 +77,7 @@ pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
 /// `--tool-test`, for the configured model or every listed one. Exits non-zero
 /// when a model cannot drive tools, so it works as a check. `only` narrows it
 /// to named scenarios; `json` is where the machine-readable copy goes.
-pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool, only: Vec<String>, json: Option<String>) -> i32 {
+pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool, only: Vec<String>, json: Option<String>, repeat: usize) -> i32 {
     let timeout = std::time::Duration::from_secs(120);
     let endpoint = config.endpoint();
     if let Some(want) = only.first() {
@@ -110,18 +110,39 @@ pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool, onl
     for model in &models {
         println!("\n{model}");
         let source = client_for(&endpoint, model).await;
-        let full = flashagent_core::toolcheck::check_model(&source, model, timeout).await;
-        // Narrowed after the run, so a check that names no scenario still costs
-        // the same as one that names several: the work is the model's, not ours.
-        let report = if only.is_empty() {
-            full
-        } else {
-            full.only(&only)
-        };
+        // One run of this check does not decide anything: measured on one model
+        // and one build, three runs of the same twelve scenarios came out 9, 11
+        // and 9. Repeats are what turn a coin into a measurement.
+        let mut runs = Vec::new();
+        for _ in 0..repeat {
+            let full = flashagent_core::toolcheck::check_model(&source, model, timeout).await;
+            // Narrowed after the run, so a check that names no scenario still costs
+            // the same as one that names several: the work is the model's, not ours.
+            runs.push(if only.is_empty() { full } else { full.only(&only) });
+        }
+        let report = runs.last().cloned().expect("at least one run");
         for line in report.lines() {
             println!("{line}");
         }
         println!("  {} out, {:.1}s", report.total_tokens(), report.total_secs());
+        if runs.len() > 1 {
+            let refs: Vec<&_> = runs.iter().collect();
+            let (always, sometimes) = flashagent_core::toolcheck::CheckReport::stability(&refs);
+            let scores: Vec<String> = runs.iter().map(|r| r.score().0.to_string()).collect();
+            let (_, total) = report.score();
+            println!(
+                "  ran {} times: {} — median {}/{total}",
+                runs.len(),
+                scores.join(", "),
+                flashagent_core::toolcheck::CheckReport::median_score(&refs)
+            );
+            if !always.is_empty() {
+                println!("  failed every time: {}", always.join(", "));
+            }
+            if !sometimes.is_empty() {
+                println!("  failed sometimes: {}", sometimes.join(", "));
+            }
+        }
         reports.push(report);
     }
 
