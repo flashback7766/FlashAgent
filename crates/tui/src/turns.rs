@@ -118,12 +118,43 @@ impl App {
         }
     }
 
-    pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
+    /// Marks where the live context line starts, so the next turn replaces it
+/// rather than stacking another one underneath.
+const CONTEXT_LINE_MARK: &str = "\n\n[Context]";
+
+/// Rewrites the last line of the system prompt with what the context costs
+/// now, so the model can see the room it has left instead of finding out by
+/// being cut off.
+///
+/// It goes at the very end for the same reason the compacted summary does: the
+/// provider caches the prefix, and a line that changes every turn would cost the
+/// conversation its cache if it sat at the front.
+pub(crate) fn refresh_context_line(&mut self) {
+    let used = self.context_usage.total_used();
+    let capacity = self.context_usage.total_capacity;
+    let line = if capacity > 0 {
+        format!("\n\n[Context] {used} of {capacity} tokens used, {} left.", capacity.saturating_sub(used))
+    } else {
+        format!(
+            "\n\n[Context] {used} tokens used. The size of this window is not known, so nothing is counted against it."
+        )
+    };
+    let Some(system) = self.history.first_mut().filter(|m| m.role == flashagent_llm::Role::System) else {
+        return;
+    };
+    if let Some(at) = system.content.find(Self::CONTEXT_LINE_MARK) {
+        system.content.truncate(at);
+    }
+    system.content.push_str(&line);
+}
+
+pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         self.sync_system_prompt();
         // Here, not only for typed prompts: a /goal, a skill or Ctrl+R measured
         // their growth from a turn long gone and compacted too early.
         self.context_before_turn = self.context_usage.total_used();
         update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        self.refresh_context_line();
         cx.cancel.store(false, Ordering::Relaxed);
         self.suggested_prompt = None;
         self.custom_placeholder = None;
