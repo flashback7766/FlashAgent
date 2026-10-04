@@ -441,10 +441,23 @@ pub fn is_chat_model(id: &str) -> bool {
     !(lower.contains("embed") || lower.contains("rerank") || lower.contains("whisper"))
 }
 
-/// A scenario's instruction and the rules the agent's own prompt gives for
-/// calling tools, so a model is measured as the agent runs it.
+/// A scenario's instruction, and the prompt the agent actually runs with, so a
+/// model is measured as it runs rather than against a fragment of it.
+///
+/// The rules for calling tools are inside that prompt. Sending those alone
+/// measured a harness nobody ships, and it hid exactly the two failures the
+/// prompt exists to fix: a model that answers in prose instead of making the
+/// call, and one that stops after the first step of a chain. Both scored the
+/// same with and without it, which is what made the instrument worth trusting
+/// enough to look at — and worth checking against the real thing.
 fn system(task: &str) -> ChatMessage {
-    ChatMessage::system(format!("{task}\n\n{}", crate::prompt::TOOL_CALL_RULES))
+    static PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let prompt = PROMPT.get_or_init(|| {
+        crate::prompt::build_system_prompt(
+            &crate::prompt::SystemPromptConfig::new().with_platform(std::env::consts::OS),
+        )
+    });
+    ChatMessage::system(format!("{task}\n\n{prompt}"))
 }
 
 /// A one-pixel red square, as a `data:` URL. The smallest thing that can answer
@@ -1120,7 +1133,11 @@ mod tests {
         tokio::runtime::Runtime::new().unwrap().block_on(check_model(&seen, "m", Duration::from_secs(5)));
         let systems = seen.0.lock().unwrap();
         assert!(systems.len() >= 8);
-        assert!(systems.iter().all(|s| s.ends_with(crate::prompt::TOOL_CALL_RULES)), "{systems:?}");
+        // The same prompt the app sends, not the tool rules on their own: a
+        // check that grades a fragment of the contract cannot tell whether the
+        // contract works.
+        assert!(systems.iter().all(|s| s.contains("HOW TO WORK:")), "{systems:?}");
+        assert!(systems.iter().all(|s| s.contains("CALLING TOOLS:")), "{systems:?}");
     }
 
     #[test]
