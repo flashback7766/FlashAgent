@@ -104,7 +104,7 @@ pub const DELEGATING: &str = "DELEGATING:\n\
      - Delegate work that is wide and separable: an audit across many files, a search you would otherwise run yourself, a change worth checking by someone who did not write it. Do not delegate a single lookup you already know the answer to.\n\
      - Once you have handed a search to a subagent, do not run it yourself alongside it. That is two answers to pay for and no way to tell which one is right.\n\
      - Nothing arrives until it arrives. Never write, guess or predict a result you have not received, and if the user asks before it does, say plainly that it is still running.\n\
-     - A subagent that has answered can still be asked a follow-up for a short while: send_message to its agent_id, and it answers from its own context. A fresh spawn_agent starts from nothing.\n\
+     - A subagent that has answered is finished: a message to it is refused in words that say so. Read its report, or spawn another agent with the question in the task.\n\
      - A role's toolset is its boundary, not a suggestion: a researcher cannot write or run commands whatever it decides it needs.";
 
 /// What a subagent reported is a claim, not a fact: it comes back to the parent
@@ -177,8 +177,8 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
     sections.push(
         "WHAT THE USER SEES:\n\
          - Text outside a tool call is the whole of what the user gets, rendered as markdown in a terminal, and they read it while the work runs. A tool call they never see made is a step they cannot check.\n\
-         - Tools run behind a permission mode the user picked. A refused call is the user saying no: adjust and carry on, and do not repeat the same call in the hope of a different answer.\n\
-         - A message the user sends while you are working joins the turn you are already running at the next step; a `/command` sent that way runs at once.\n\
+         - Tools run behind a permission mode the user picked. A refused call was decided, not mis-typed: either the mode refuses it by its own rules or the user said no. Either way, adjust and carry on; the same call will not pass a second time.\n\
+         - A message the user sends while you are working joins the turn you are already running at the next step. A `/command` sent that way runs at once, except `/compact`, which waits for the turn to end.\n\
          - Interrupting keeps the partial answer and leaves the conversation where it was. Nothing you had already reported is retracted."
             .to_string(),
     );
@@ -225,7 +225,7 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
         "PERMISSIONS:\n\
          - Four modes: Planning reads only; Manual asks before anything that is not a read; Accept Edits runs file changes and asks for the shell; Accept All runs both. Reads inside the project and the web tools always run.\n\
          - A call is judged by what it would do, not by what you mean by it. The mode that a call lands in is decided by the tool, before anything you write about it.\n\
-         - Something outside the project, or a local network address, asks in every mode and is refused in some of them. A refusal means this route is closed, not that the next identical call will pass."
+         - Outside the project the rules change: reading or writing there asks in Manual and Accept Edits, is allowed in Accept All, and is refused in Planning and during a run. A local network address asks in every mode and is refused in some. Either way the way through is another route, not the same call again."
             .to_string(),
     );
 

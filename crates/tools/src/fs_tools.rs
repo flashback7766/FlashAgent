@@ -669,6 +669,54 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_is_not_there_names_the_one_that_is() {
+        // The scenario `docs/tool-calling.md` measures: handed a bare "no such
+        // file", a small model explains it in prose and leaves the next step to
+        // the user. Handed the near miss, it calls again.
+        let dir = tempdir();
+        write_file(&dir, "src/config.rs", "x").unwrap();
+        let err = read_file(&dir, "src/confg.rs", 0, 10).unwrap_err().to_string();
+        assert!(err.contains("no such file"), "{err}");
+        assert!(err.contains("did you mean src/config.rs"), "{err}");
+        assert!(!err.contains("os error"), "the raw io error says nothing the model can use: {err}");
+    }
+
+    #[test]
+    fn a_file_with_nearby_name_but_no_near_match_is_not_a_typo() {
+        let dir = tempdir();
+        write_file(&dir, "src/config.rs", "x").unwrap();
+        let err = read_file(&dir, "src/completely_different.rs", 0, 10).unwrap_err().to_string();
+        assert!(err.contains("no such file"), "{err}");
+        assert!(!err.contains("did you mean"), "a different file is not a misspelling: {err}");
+    }
+
+    #[test]
+    fn the_suggestion_keeps_the_shape_the_model_wrote() {
+        let dir = tempdir();
+        write_file(&dir, "README.md", "x").unwrap();
+        for written in ["READM.md", "./READM.md"] {
+            let err = read_file(&dir, written, 0, 10).unwrap_err().to_string();
+            assert!(err.contains("did you mean"), "{written}: {err}");
+            assert!(err.contains("README.md"), "{written}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_directory_nobody_wrote_has_nothing_to_suggest() {
+        let dir = tempdir();
+        let err = read_file(&dir, "nothing-here.rs", 0, 10).unwrap_err().to_string();
+        assert_eq!(err, "read nothing-here.rs: no such file");
+    }
+
+    #[test]
+    fn an_edit_of_a_misspelled_file_says_which_one_it_meant() {
+        let dir = tempdir();
+        write_file(&dir, "lib.rs", "fn a() {}").unwrap();
+        let err = edit_file(&dir, "lib.rss", &[chunk("fn a() {}", "fn b() {}", false)]).unwrap_err().to_string();
+        assert!(err.contains("did you mean lib.rs"), "{err}");
+    }
+
+    #[test]
     fn an_edit_keeps_a_crlf_file_in_crlf() {
         let dir = tempdir();
         write_file(&dir, "w.txt", "one\r\ntwo\r\nthree\r\n").unwrap();

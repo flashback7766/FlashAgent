@@ -88,6 +88,12 @@ pub struct BuiltinTools {
     toolset_profile: std::sync::RwLock<ToolsetProfile>,
     web_enabled: Arc<AtomicBool>,
     context_window: Arc<std::sync::RwLock<Option<usize>>>,
+    /// What the system prompt actually costs, in tokens. The schemas are given
+    /// what a tier leaves once this has taken its share, and the prompt is not
+    /// something a tier may shrink, so this number decides how many schemas
+    /// there is room for. Defaults to the ceiling, which is the safe direction:
+    /// if the prompt ever really fills it, a small window still gets tools.
+    prompt_tokens: Arc<std::sync::atomic::AtomicUsize>,
     /// Set from what the server said about the model.
     vision_supported: Arc<std::sync::atomic::AtomicBool>,
     mcp_manager: Arc<mcp::McpManager>,
@@ -112,6 +118,9 @@ impl BuiltinTools {
             toolset_profile: std::sync::RwLock::new(config.toolset_profile.unwrap_or(ToolsetProfile::Auto)),
             web_enabled: Arc::new(AtomicBool::new(config.web_enabled.unwrap_or(true))),
             context_window: Arc::new(std::sync::RwLock::new(config.context_window)),
+            prompt_tokens: Arc::new(std::sync::atomic::AtomicUsize::new(
+                flashagent_core::budget::PROMPT_CEILING,
+            )),
             vision_supported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_manager,
         })
