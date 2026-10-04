@@ -340,7 +340,7 @@ impl App {
         self.history = history;
         self.compacting = false;
         self.chat.forget_counted_context();
-        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
         self.set_compact_status(
             match saved {
                 Some(saved) => {
@@ -402,9 +402,12 @@ impl App {
                 cx.tools_arc.set_prompt_tokens(self.prompt_tokens);
                 cx.tools_arc.set_context_window(Some(new_ctx_len));
                 cx.source.set_model(&self.current_model);
+                // The schemas are counted for this model, not for whatever was
+                // in use when the window was first read.
+                cx.tools_arc.set_model_name(&self.current_model);
                 cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
                 cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
-                update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
 
                 // Only for the provider the client talks to: another's model
                 // must not be written beside it.
@@ -504,7 +507,7 @@ impl App {
         if self.chat.take_needs_reprint() {
             self.renderer.request_reprint();
         }
-        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
     }
 
     /// The live phase, the token rate and what the turn did, for the status
