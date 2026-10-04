@@ -282,7 +282,7 @@ fn a_provider_switch_waits_for_the_running_answer() {
     // With a draft, the running turn's hint is "Enter steer"; this one is the idle prompt's.
     term.wait_for("Enter send", WAIT);
     assert!(second.requests().iter().all(|r| !r.is_turn()), "nothing may reach the other server mid-turn");
-    assert!(!sent(first.turns().last().unwrap()).contains("/provider"), "the command was sent to the model as steering");
+    assert!(!last_user_message(first.turns().last().unwrap()).contains("/provider"), "the command was sent to the model as steering");
 
     // Still typed, it switches once the answer is done.
     term.send(ENTER);
@@ -901,6 +901,19 @@ fn ask(term: &Term, prompt: &str, answer: &str) {
 /// As text to search.
 fn sent(request: &support::mock_server::Request) -> String {
     request.body["messages"].to_string()
+}
+
+/// What the user themselves last said, as opposed to the whole conversation.
+///
+/// The system prompt names the slash commands it supports, so a search for one
+/// across every message finds it there too and the check says nothing about
+/// what was sent as steering.
+fn last_user_message(request: &support::mock_server::Request) -> String {
+    request.body["messages"]
+        .as_array()
+        .and_then(|messages| messages.iter().rev().find(|msg| msg["role"] == "user"))
+        .map(|msg| msg["content"].to_string())
+        .unwrap_or_default()
 }
 
 fn shell_call(command: &str) -> Reply {
@@ -2008,7 +2021,7 @@ fn a_command_that_changes_the_conversation_waits_for_the_turn_to_end() {
     term.wait_for("Nothing to compact yet", WAIT);
     assert!(term.screen().contains("word4"), "the turn was cut off:\n{}", term.screen());
     assert_eq!(server.turns().len(), 1, "the command was sent to the model as steering");
-    assert!(!sent(&server.turns()[0]).contains("/compact"));
+    assert!(!last_user_message(&server.turns()[0]).contains("/compact"));
 }
 
 #[test]

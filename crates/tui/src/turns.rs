@@ -91,7 +91,13 @@ impl App {
 
     /// Keeps a compacted summary at the end of the system prompt.
     pub(crate) fn apply_personality(&mut self) {
-        let base = build_system_prompt(&self.prompt_config.clone().with_personality(&self.config.personality));
+        let base = build_system_prompt(
+            &self
+                .prompt_config
+                .clone()
+                .with_personality(&self.config.personality)
+                .with_goal_mode(self.goal_active),
+        );
         if let Some(first) = self.history.first_mut().filter(|m| m.role == flashagent_llm::Role::System) {
             let summary = first.content.find(COMPACTED_MARK).map(|i| first.content[i..].to_string()).unwrap_or_default();
             first.content = base + &summary;
