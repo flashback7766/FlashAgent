@@ -28,6 +28,77 @@ fn resolve(cwd: &Path, path: &str) -> PathBuf {
     flashagent_core::resolve_path(cwd, path)
 }
 
+/// How an io failure is put to the model.
+///
+/// A file that is not there is not a dead end, and a model handed "No such file
+/// or directory (os error 2)" answers it the way a person does: with a sentence
+/// about the file, or by asking which one. A model handed the near miss makes
+/// the corrected call without being told to. In `docs/tool-calling.md` this one
+/// scenario is what a small local model either recovers from or does not, and it
+/// is the reason for this shape rather than the raw error.
+fn io_error(action: &str, cwd: &Path, path: &str, e: &std::io::Error) -> ToolError {
+    if e.kind() != std::io::ErrorKind::NotFound {
+        return ToolError::Other(format!("{action} {path}: {e}"));
+    }
+    match nearest_sibling(cwd, path) {
+        Some(near) => ToolError::Other(format!("{action} {path}: no such file (did you mean {near}?)")),
+        None => ToolError::Other(format!("{action} {path}: no such file")),
+    }
+}
+
+fn nearest_sibling(cwd: &Path, path: &str) -> Option<String> {
+    nearest_sibling_of(&resolve(cwd, path), path)
+}
+
+/// The nearest name in the same directory, if one is close enough to be a
+/// misspelling rather than a different file.
+fn nearest_sibling_of(full: &Path, written: &str) -> Option<String> {
+    let wanted = full.file_name()?.to_string_lossy().to_string();
+    let mut best: Option<(usize, String)> = None;
+    for entry in std::fs::read_dir(full.parent()?).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Half the word apart is a different name; a typo is closer than that.
+        let distance = edit_distance(&wanted.to_lowercase(), &name.to_lowercase());
+        if distance * 2 >= wanted.len().max(name.len()) + 2 {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(best, _)| distance < *best) {
+            best = Some((distance, name));
+        }
+    }
+    // Answered in the shape the model wrote the path, so the corrected call is
+    // a paste rather than something to reformat.
+    let name = best?.1;
+    Some(match Path::new(written).parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(name).to_string_lossy().into_owned(),
+        _ => name,
+    })
+}
+
+/// [`io_error`] for a caller that already resolved the path.
+fn io_error_at(action: &str, full: &Path, written: &str, e: &std::io::Error) -> ToolError {
+    if e.kind() != std::io::ErrorKind::NotFound {
+        return ToolError::Other(format!("{action} {written}: {e}"));
+    }
+    match nearest_sibling_of(full, written) {
+        Some(near) => ToolError::Other(format!("{action} {written}: no such file (did you mean {near}?)")),
+        None => ToolError::Other(format!("{action} {written}: no such file")),
+    }
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut next = vec![i + 1];
+        for (j, &cb) in b.iter().enumerate() {
+            next.push((row[j] + usize::from(ca != cb)).min(row[j + 1] + 1).min(next[j] + 1));
+        }
+        row = next;
+    }
+    row.last().copied().unwrap_or(0)
+}
+
 /// Returns 1-based numbered lines, reading one line at a time so a small
 /// window of a big log stays cheap. A non-text file says so plainly: "stream
 /// did not contain valid UTF-8" does not tell the model to use another tool.
@@ -35,7 +106,7 @@ pub(crate) fn read_file(cwd: &Path, path: &str, offset: usize, limit: usize) -> 
     use std::io::{BufRead, BufReader};
 
     let file = std::fs::File::open(resolve(cwd, path))
-        .map_err(|e| ToolError::Other(format!("read {path}: {e}")))?;
+        .map_err(|e| io_error("read", cwd, path, &e))?;
     let mut reader = BufReader::new(file);
     let mut out = String::new();
     let mut line = Vec::new();
@@ -330,7 +401,7 @@ pub(crate) fn apply_edits(path: &str, mut text: String, edits: &[EditChunk]) -> 
 pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<String, ToolError> {
     let file = resolve(cwd, path);
     let text = std::fs::read_to_string(&file)
-        .map_err(|e| ToolError::Other(format!("read {path}: {e}")))?;
+        .map_err(|e| io_error("read", cwd, path, &e))?;
     let (text, applied) = apply_edits(path, text, edits)?;
     std::fs::write(&file, &text)?;
     Ok(format!("applied {applied} edit(s) to {path}"))
@@ -435,7 +506,13 @@ fn write_planned(planned: &[PlannedFile]) -> Result<String, ToolError> {
             } else {
                 format!("rollback failed for {}", rollback_failed.join(", "))
             };
-            return Err(ToolError::Other(format!("write {}: {e}; {done}", target.path)));
+            return Err(match io_error_at("write", &target.file, &target.path, &e) {
+                ToolError::Other(mut message) => {
+                    let _ = write!(message, "; {done}");
+                    ToolError::Other(message)
+                }
+                other => other,
+            });
         }
     }
     let total: usize = planned.iter().map(|p| p.edits).sum();
@@ -447,7 +524,7 @@ fn write_planned(planned: &[PlannedFile]) -> Result<String, ToolError> {
 pub(crate) fn list_dir(cwd: &Path, path: &str) -> Result<String, ToolError> {
     let dir = resolve(cwd, path);
     let mut entries: Vec<String> = Vec::new();
-    let rd = std::fs::read_dir(&dir).map_err(|e| ToolError::Other(format!("list {path}: {e}")))?;
+    let rd = std::fs::read_dir(&dir).map_err(|e| io_error("list", cwd, path, &e))?;
     for entry in rd {
         let entry = entry.map_err(|e| ToolError::Other(format!("entry: {e}")))?;
         let name = entry.file_name().to_string_lossy().into_owned();
