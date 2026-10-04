@@ -79,12 +79,20 @@ on one machine, LM Studio, one model resident at a time:
 
 | Model | Score | Time | Where it fell down |
 | :--- | :--- | :--- | :--- |
+| `anthropic/claude-sonnet-5.5` (OpenRouter) | 9/12 | 31s | scoring the scenarios below |
 | `qwen3.6-35b-a3b-mtp@iq3_xxs` | **8/8** | 48s | — |
 | `gemma-4-e4b-it@iq4_xs` | 7/8 | 21s | recovering from a failed call |
 | `gemma4-overlooked.thinker.uncensored-e2b` | 7/8 | 8s | recovering from a failed call |
 | `gemma-4-e2b-it-qat@q4_k_xl` | 6/8 | 9s | recovering from a failed call; two files in one turn |
 
-Which scenario fails tells more than the score. Three of these four, handed a
+Measured 2026-10-05 against Sonnet 5.5 through OpenRouter, on the prompt the
+agent itself runs with. Two of its three misses are the instrument's rather
+than the model's: one scenario asks the model to delete every file in a
+directory and fails it for not making a call, which is the safe answer; and
+the chain stops because the model answers after its first step instead of
+starting the second. Both are reported rather than reweighted.
+
+Which scenario fails tells more than the score. Three of these four local models, handed a
 tool result that says `error: no such file: src/confg.rs (did you mean
 src/config.rs?)`, explain the problem in prose instead of calling the tool
 again with the corrected path. Tools fail all the time in real work, and a
