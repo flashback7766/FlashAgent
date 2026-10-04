@@ -94,6 +94,8 @@ pub struct BuiltinTools {
     /// there is room for. Defaults to the ceiling, which is the safe direction:
     /// if the prompt ever really fills it, a small window still gets tools.
     prompt_tokens: Arc<std::sync::atomic::AtomicUsize>,
+    /// Which model the schemas are going to, because the count is that model's.
+    model_name: Arc<std::sync::RwLock<String>>,
     /// Set from what the server said about the model.
     vision_supported: Arc<std::sync::atomic::AtomicBool>,
     mcp_manager: Arc<mcp::McpManager>,
@@ -121,6 +123,7 @@ impl BuiltinTools {
             prompt_tokens: Arc::new(std::sync::atomic::AtomicUsize::new(
                 flashagent_core::budget::PROMPT_CEILING,
             )),
+            model_name: Arc::new(std::sync::RwLock::new(String::new())),
             vision_supported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_manager,
         })
@@ -168,6 +171,14 @@ impl BuiltinTools {
     /// What the system prompt measured this session, in tokens.
     pub fn set_prompt_tokens(&self, tokens: usize) {
         self.prompt_tokens.store(tokens, Ordering::Relaxed);
+    }
+
+    /// The model the schemas are counted for. A budget measured with another
+    /// model's tokenizer is another model's budget.
+    pub fn set_model_name(&self, name: &str) {
+        if let Ok(mut lock) = self.model_name.write() {
+            *lock = name.to_string();
+        }
     }
 
     /// Relative to the project when inside it; models often return absolute paths.
@@ -490,6 +501,7 @@ impl ToolExec for BuiltinTools {
         // window the optional end of the list goes first, and the tools a task
         // cannot happen without are offered whatever it costs.
         let budget = flashagent_core::budget::Budget::for_window(ctx);
+        let model_name = self.model_name.read().ok().map(|m| m.clone()).unwrap_or_default();
         let allowance = budget.tool_allowance(self.prompt_tokens.load(Ordering::Relaxed));
         let measured: Vec<(&str, bool, usize)> = specs
             .iter()
@@ -501,6 +513,7 @@ impl ToolExec for BuiltinTools {
                         .find(|def| def.name == spec.name)
                         .is_some_and(|def| matches!(def.availability, flashagent_core::registry::Availability::Always)),
                     flashagent_core::budget::tool_cost(
+                        &model_name,
                         &spec.name,
                         &spec.description,
                         &spec.parameters_json,

@@ -87,10 +87,12 @@ impl Budget {
     }
 }
 
-/// Tokens a tool costs the model: its name, what it says and what it takes.
-pub fn tool_cost(name: &str, description: &str, parameters_json: &str) -> usize {
+/// Tokens a tool costs the model: its name, what it says and what it takes,
+/// counted with the tokenizer of the model it will be sent to. A budget decided
+/// on another model's tokenizer is a budget for another model.
+pub fn tool_cost(model: &str, name: &str, description: &str, parameters_json: &str) -> usize {
     let text = format!("{name}{description}{parameters_json}");
-    flashagent_llm::estimate_tokens(&text).max(1) as usize
+    flashagent_llm::count_tokens(model, &text).max(1)
 }
 
 /// Tools offered in registry order until the budget is spent. `Always` tools
@@ -225,7 +227,7 @@ mod tests {
     fn the_registry_measures_against_the_ladder() {
         let mut total = 0;
         for def in crate::registry::TOOLS {
-            let cost = tool_cost(def.name, def.description, &def.schema_json());
+            let cost = tool_cost("gpt-4o", def.name, def.description, &def.schema_json());
             total += cost;
             println!("{:>6}  {}", cost, def.name);
         }

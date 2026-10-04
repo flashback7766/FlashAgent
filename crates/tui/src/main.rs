@@ -1447,7 +1447,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         effort_memory,
     });
     app.server_silent = startup_silent;
-    update_context_usage(&mut app.context_usage, &app.history, &w.memory_block, &app.chat, w.perm);
+    update_context_usage(&app.current_model, &mut app.context_usage, &app.history, &w.memory_block, &app.chat, w.perm);
 
     // Before anything is drawn. A resumed session's card is drawn whole: the
     // reveal stops once the transcript has a user message.

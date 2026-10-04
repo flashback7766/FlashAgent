@@ -121,6 +121,7 @@ impl App {
         self.current_context = None;
         self.context_usage.total_capacity = UNKNOWN_CONTEXT;
         cx.tools_arc.set_context_window(Some(UNKNOWN_CONTEXT));
+        cx.tools_arc.set_model_name(&model);
         self.switch_model(cx, &model);
         if !model.is_empty() && model != saved {
             self.config.active_profile_mut().model = model.clone();
