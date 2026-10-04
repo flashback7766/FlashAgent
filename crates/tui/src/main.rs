@@ -1201,7 +1201,7 @@ fn initial_app(init: InitialApp) -> App {
     let InitialApp { app_config, model, context_display, context_capacity, cwd_display, initial_effort, available_models, system_prompt_text, system_prompt_config, memory_docs, effort_memory } = init;
     // Measured before the text moves into the history: what the schemas are
     // given is what the prompt actually costs, not what its ceiling allows.
-    let prompt_tokens = flashagent_llm::estimate_tokens(&system_prompt_text).max(0) as usize;
+    let prompt_tokens = flashagent_llm::count_tokens(&model, &system_prompt_text);
     App {
         question_ui_state: QuestionUiState::default(),
         history: vec![ChatMessage::system(system_prompt_text)],
@@ -1567,24 +1567,29 @@ async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mu
 }
 
 fn update_context_usage(
+    model: &str,
     usage: &mut ContextUsage,
     history: &[ChatMessage],
     memory_block: &str,
     chat: &ChatView,
     tools: &dyn flashagent_core::ToolExec,
 ) {
-    let system_chars: usize = history
+    // One counter for the model in use, everywhere. This used to be a fourth
+    // of the character count while the status line counted with a real
+    // tokenizer and the budget with a third rule, so the bar, the budget and
+    // the speed readout could each be a different number for the same text.
+    let count = |text: &str| flashagent_llm::count_tokens(model, text);
+    usage.system_tokens = history
         .iter()
         .filter(|m| m.role == flashagent_llm::Role::System)
-        .map(|m| m.content.len())
+        .map(|m| count(&m.content))
         .sum();
-    usage.system_tokens = (system_chars / 4).max(150);
-    usage.memory_tokens = memory_block.len() / 4;
+    usage.memory_tokens = count(memory_block);
     // Every advertised schema, MCP included.
     usage.tools_tokens = tools
         .specs()
         .iter()
-        .map(|t| (t.name.len() + t.description.len() + t.parameters_json.len()) / 4 + 8)
+        .map(|t| count(&t.name) + count(&t.description) + count(&t.parameters_json))
         .sum();
 
     let (chat_user, chat_assistant, chat_reasoning, chat_tools) = chat.raw_content_chars();
@@ -1608,6 +1613,10 @@ fn update_context_usage(
         user = user.saturating_sub(memory_block.len());
     }
 
+    // The conversation itself is left on the character estimate on purpose: it
+    // is recounted on every keystroke and every token of it, and a server that
+    // reports usage corrects the total anyway. What the budget is decided on is
+    // the three above, and those are counted with the model's own tokenizer.
     usage.user_tokens = user.max(chat_user) / 4;
     usage.assistant_tokens = assistant.max(chat_assistant) / 4;
     usage.reasoning_tokens = reasoning.max(chat_reasoning) / 4;
