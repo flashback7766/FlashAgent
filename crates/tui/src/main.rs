@@ -81,6 +81,7 @@ async fn cli_start(config: &mut AppConfig) -> Result<Option<(bool, bool, Session
     let mut tool_test: Option<bool> = None;
 let mut tool_test_scenario: Vec<String> = Vec::new();
 let mut tool_test_json: Option<String> = None;
+let mut tool_test_repeat: usize = 1;
     let (mut cli_url, mut cli_model) = (None, None);
     let mut args = std::env::args().skip(1).peekable();
     while let Some(a) = args.next() {
@@ -148,6 +149,13 @@ let mut tool_test_json: Option<String> = None;
             }
             "--tool-test" => tool_test = Some(false),
             "--all-models" => tool_test = Some(true),
+            "--repeat" => {
+                tool_test.get_or_insert(false);
+                let Some(times) = args.next().and_then(|v| v.parse::<usize>().ok()) else {
+                    anyhow::bail!("--repeat needs a number of runs, as in --repeat 3");
+                };
+                tool_test_repeat = times.clamp(1, 20);
+            }
             "--scenario" => {
                 tool_test.get_or_insert(false);
                 let Some(key) = args.next() else { anyhow::bail!("--scenario needs a scenario key, as in --scenario long_stream") };
@@ -180,7 +188,7 @@ let mut tool_test_json: Option<String> = None;
     }
 
     if let Some(all_models) = tool_test {
-        let code = run_tool_check_cli(config, all_models, tool_test_scenario, tool_test_json).await;
+        let code = run_tool_check_cli(config, all_models, tool_test_scenario, tool_test_json, tool_test_repeat).await;
         std::process::exit(code);
     }
 
