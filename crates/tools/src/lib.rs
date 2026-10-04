@@ -165,6 +165,11 @@ impl BuiltinTools {
         }
     }
 
+    /// What the system prompt measured this session, in tokens.
+    pub fn set_prompt_tokens(&self, tokens: usize) {
+        self.prompt_tokens.store(tokens, Ordering::Relaxed);
+    }
+
     /// Relative to the project when inside it; models often return absolute paths.
     fn shown_path(&self, path: &str) -> String {
         std::path::Path::new(path)
@@ -479,6 +484,33 @@ impl ToolExec for BuiltinTools {
                 parameters_json: def.schema_json(),
             })
             .collect();
+
+        // What the window earns. The prompt has already taken its share and is
+        // not negotiable, so the schemas are what a tier has left: on a small
+        // window the optional end of the list goes first, and the tools a task
+        // cannot happen without are offered whatever it costs.
+        let budget = flashagent_core::budget::Budget::for_window(ctx);
+        let allowance = budget.tool_allowance(self.prompt_tokens.load(Ordering::Relaxed));
+        let measured: Vec<(&str, bool, usize)> = specs
+            .iter()
+            .map(|spec| {
+                (
+                    spec.name.as_str(),
+                    registry::TOOLS
+                        .iter()
+                        .find(|def| def.name == spec.name)
+                        .is_some_and(|def| matches!(def.availability, flashagent_core::registry::Availability::Always)),
+                    flashagent_core::budget::tool_cost(
+                        &spec.name,
+                        &spec.description,
+                        &spec.parameters_json,
+                    ),
+                )
+            })
+            .collect();
+        let (kept, _dropped) = flashagent_core::budget::fit_builtin(measured.into_iter(), allowance);
+        let kept: std::collections::HashSet<String> = kept.into_iter().map(str::to_string).collect();
+        specs.retain(|spec| kept.contains(&spec.name));
 
         // Names a server chose, with the schemas it chose.
         specs.extend(self.mcp_manager.get_all_tool_specs());
@@ -979,9 +1011,34 @@ mod tests {
         assert!(!specs.iter().any(|s| s.name == "patch_file"));
 
         tools.set_context_window(Some(65_536));
+        // What the app has measured: the schemas are given what a tier has left
+        // after the prompt, not after its ceiling.
+        tools.set_prompt_tokens(3_900);
         let specs_large = tools.specs();
         assert_eq!(specs_large.len(), 18);
         assert!(specs_large.iter().any(|s| s.name == "patch_file"));
+    }
+
+    #[test]
+    fn a_window_that_cannot_hold_the_prompt_keeps_the_tools_a_task_needs() {
+        // A prompt that fills its whole ceiling on a 64k window leaves nothing
+        // for schemas. What is left must still be the set a task happens with,
+        // not an agent with no way to read or write anything.
+        let tools = BuiltinTools::new(BuiltinToolsConfig {
+            cwd: testing::tempdir(),
+            toolset_profile: Some(ToolsetProfile::Auto),
+            web_enabled: Some(false),
+            context_window: Some(65_536),
+            ..Default::default()
+        })
+        .unwrap();
+        tools.set_prompt_tokens(flashagent_core::budget::PROMPT_CEILING);
+        let specs = tools.specs();
+        for needed in ["read_file", "write_file", "edit_file", "glob", "grep", "run_shell", "ask_user"] {
+            assert!(specs.iter().any(|s| s.name == needed), "{needed} is gone at {specs:?}");
+        }
+        // And what did not fit is reported rather than silently dropped.
+        assert!(!specs.iter().any(|s| s.name == "web_search"), "the optional end still goes first");
     }
 
     #[test]
