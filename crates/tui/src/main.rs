@@ -1448,6 +1448,10 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     });
     app.server_silent = startup_silent;
     update_context_usage(&app.current_model, &mut app.context_usage, &app.history, &w.memory_block, &app.chat, w.perm);
+    // Before the warm-up: it exists to prefill exactly the prefix the first turn
+    // will send, and a system message that gains a line after it went out is no
+    // longer that prefix.
+    app.refresh_context_line();
 
     // Before anything is drawn. A resumed session's card is drawn whole: the
     // reveal stops once the transcript has a user message.

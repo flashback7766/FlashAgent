@@ -126,12 +126,23 @@ const CONTEXT_LINE_MARK: &str = "\n\n[Context]";
 /// now, so the model can see the room it has left instead of finding out by
 /// being cut off.
 ///
-/// It goes at the very end for the same reason the compacted summary does: the
-/// provider caches the prefix, and a line that changes every turn would cost the
-/// conversation its cache if it sat at the front.
+/// It goes at the very end for the same reason the compacted summary does, and
+/// it moves in steps for a third reason: see below.
 pub(crate) fn refresh_context_line(&mut self) {
     let used = self.context_usage.total_used();
     let capacity = self.context_usage.total_capacity;
+    // Quantised, and this is the whole trick. The provider caches the prefix of
+    // a request, so a system message that changes on every turn invalidates
+    // everything after it: the memory block and the whole conversation are
+    // read again for a number that moved by a few hundred tokens. Rounding down
+    // to a twentieth of the window moves this line about twenty times in a
+    // session instead of once a turn, and between those the prefix holds.
+    let (used, capacity) = if capacity > 0 {
+        let step = (capacity / 20).max(1);
+        (used / step * step, capacity)
+    } else {
+        (used / 4_000 * 4_000, capacity)
+    };
     let line = if capacity > 0 {
         format!("\n\n[Context] {used} of {capacity} tokens used, {} left.", capacity.saturating_sub(used))
     } else {
