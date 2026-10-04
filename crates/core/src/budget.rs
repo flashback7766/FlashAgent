@@ -20,8 +20,12 @@
 /// way.
 pub const ASSUMED_WINDOW: usize = 128_000;
 
-/// What the prompt may cost at any window, from the owner, 2026-09-30.
-pub const PROMPT_CEILING: usize = 4_000;
+/// What the prompt may cost at any window, from the owner, 2026-10-05.
+///
+/// A full contract runs to about this, and it is the same at every window: a
+/// shorter one is not a cheaper agent, it is a different one. What the window
+/// decides is what is left over for schemas.
+pub const PROMPT_CEILING: usize = 10_000;
 
 /// Total tokens of static context per tier, largest window first. What is left
 /// after the prompt is split two ways and keeps a tenth spare, in the ratio the
@@ -132,10 +136,9 @@ mod tests {
     fn the_top_tier_is_the_ladder_the_owner_gave() {
         let b = Budget::for_window(Some(1_000_000));
         assert_eq!(b.total, 160_000);
-        assert_eq!(b.prompt, 4_000, "the prompt is the same at every tier");
-        // 156k left, two ways, a tenth spare: the ratio, not the old numbers.
-        assert_eq!(b.builtin_tools, 156_000 * 20 / 36);
-        assert_eq!(b.mcp_tools, 156_000 * 12 / 36);
+        assert_eq!(b.prompt, PROMPT_CEILING, "the prompt is the same at every tier");
+        assert_eq!(b.builtin_tools, (160_000 - PROMPT_CEILING) * 20 / 36);
+        assert_eq!(b.mcp_tools, (160_000 - PROMPT_CEILING) * 12 / 36);
     }
 
     #[test]

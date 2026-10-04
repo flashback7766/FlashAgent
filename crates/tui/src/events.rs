@@ -297,6 +297,8 @@ impl App {
         if let Some(saved) = self.goal_state.take() {
             cx.tools_arc.set_goal_mode(false);
             cx.perm.state().set_goal_active(false);
+            self.goal_active = false;
+            self.apply_personality();
             cx.perm.state().set_mode(saved.mode);
             self.current_effort = saved.effort.clone();
             self.max_steps = saved.max_steps;

@@ -711,6 +711,9 @@ struct App {
     last_tool_args: String,
     /// Kept so the prompt can be rebuilt when the voice changes.
     prompt_config: SystemPromptConfig,
+    /// A `/goal` run is under way: the rules that only hold inside one belong in
+    /// the prompt, and they are not there the rest of the time.
+    goal_active: bool,
     /// E.g. `~/project`.
     cwd_display: String,
     /// For the welcome card.
@@ -1238,6 +1241,7 @@ fn initial_app(init: InitialApp) -> App {
         plan: Vec::new(),
         last_tool_args: String::new(),
         prompt_config: system_prompt_config,
+        goal_active: false,
         cwd_display: cwd_display.clone(),
         memory_docs,
         turn_flash: None,

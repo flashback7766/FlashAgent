@@ -420,6 +420,8 @@ impl App {
         cx.perm.state().set_goal_active(true);
         self.current_effort = "high".to_string();
         cx.tools_arc.set_goal_mode(true);
+        self.goal_active = true;
+        self.apply_personality();
 
         let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
         let card_w = (w as usize).saturating_sub(4).clamp(20, 110);
