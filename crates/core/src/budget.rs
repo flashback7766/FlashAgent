@@ -2,11 +2,17 @@
 //! the tool schemas. It is paid on every step of every turn, so it is budgeted
 //! against the window the server reported.
 //!
-//! A bigger window carries a richer contract and a small one a shorter
-//! contract, but neither loses the tools that make a task possible at all. The
-//! split inside a tier is the owner's, measured rather than guessed: on a 1M
-//! window the prompt gets 4k tokens, the built-in tools 20k and the schemas a
-//! connected MCP server adds 12k, which is 40k in total.
+//! The prompt gets the same ceiling at every tier. It is the one part that
+//! cannot be scaled down without making the model worse, and a shorter version
+//! of it is not a cheaper version of it: it is a different agent. What the
+//! window buys is the room for tool schemas, which are the interchangeable part.
+//!
+//! The ladder is the owner's, 2026-10-05: 160k of static context on a 1M
+//! window, halving down to 10k at 64k. A prompt of 4k plus the schemas the
+//! product ships costs about 7.6k, so the bottom tier has to be at least that
+//! for the agent on a small window to still be the same agent. What is left in
+//! a tier is split two ways and keeps a tenth spare, because a tier is a
+//! ceiling and a set measured against it lands under.
 
 /// The window assumed when the server said nothing about its own. Mid, so a
 /// provider that omits `context_length` keeps the extended toolset while a
@@ -14,14 +20,23 @@
 /// way.
 pub const ASSUMED_WINDOW: usize = 128_000;
 
-/// Total tokens of static context per tier, largest window first.
+/// What the prompt may cost at any window, from the owner, 2026-09-30.
+pub const PROMPT_CEILING: usize = 4_000;
+
+/// Total tokens of static context per tier, largest window first. What is left
+/// after the prompt is split two ways and keeps a tenth spare, in the ratio the
+/// owner's first figures gave: 20 parts built-in to 12 to MCP.
 const TOTALS: &[(usize, usize)] = &[
-    (1_000_000, 40_000),
-    (512_000, 30_000),
-    (256_000, 20_000),
-    (128_000, 10_000),
-    (64_000, 5_000),
+    (1_000_000, 160_000),
+    (512_000, 80_000),
+    (256_000, 40_000),
+    (128_000, 20_000),
+    (64_000, 10_000),
 ];
+
+const BUILTIN_SHARE: usize = 20;
+const MCP_SHARE: usize = 12;
+const SHARE_TOTAL: usize = BUILTIN_SHARE + MCP_SHARE + 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
@@ -29,17 +44,12 @@ pub struct Budget {
     pub window_floor: usize,
     /// Everything static, together.
     pub total: usize,
+    /// [`PROMPT_CEILING`] at every tier.
     pub prompt: usize,
     pub builtin_tools: usize,
     pub mcp_tools: usize,
-}
-
-/// The owner's split of a total: a tenth for the prompt, half for the built-in
-/// tools, three tenths for what MCP servers add. Ten per cent is left over on
-/// purpose, because a tier is a ceiling and a schema set measured against it
-/// lands just under it.
-const fn split(total: usize) -> (usize, usize, usize) {
-    (total / 10, total / 2, total * 3 / 10)
+    /// Left unspent on purpose: a tier is a ceiling.
+    pub reserve: usize,
 }
 
 impl Budget {
@@ -50,15 +60,26 @@ impl Budget {
             .find(|(floor, _)| window >= *floor)
             .copied()
             .unwrap_or_else(|| TOTALS.last().copied().expect("the ladder has a floor"));
-        let (prompt, builtin_tools, mcp_tools) = split(total);
-        Budget { window_floor, total, prompt, builtin_tools, mcp_tools }
+        let share = total.saturating_sub(PROMPT_CEILING);
+        let builtin_tools = share * BUILTIN_SHARE / SHARE_TOTAL;
+        let mcp_tools = share * MCP_SHARE / SHARE_TOTAL;
+        let reserve = share - builtin_tools - mcp_tools;
+        Budget { window_floor, total, prompt: PROMPT_CEILING, builtin_tools, mcp_tools, reserve }
     }
 
-    /// The tools every task needs: read, write, search, shell, the question
-    /// tool. They are offered whatever the budget says, so a tier can only make
-    /// the toolset smaller around them and never hollow it out.
-    pub fn floor_is_always(&self) -> bool {
-        true
+    /// What the built-in schemas get once the prompt has taken what it actually
+    /// measures, not what it is allowed.
+    ///
+    /// The ceiling is 4k and the prompt is written to fill it, but on a small
+    /// window a full prompt plus the MCP share would leave nothing for the
+    /// tools that make any task possible, so the schemas are given what is
+    /// really left. MCP is charged first: those schemas come and go with the
+    /// servers a user happens to have configured, the built-in ones are the
+    /// product.
+    pub fn tool_allowance(&self, prompt_tokens: usize) -> usize {
+        self.total
+            .saturating_sub(prompt_tokens)
+            .saturating_sub(self.mcp_tools)
     }
 }
 
@@ -108,9 +129,20 @@ mod tests {
     }
 
     #[test]
-    fn the_top_tier_is_the_split_the_owner_gave() {
+    fn the_top_tier_is_the_ladder_the_owner_gave() {
         let b = Budget::for_window(Some(1_000_000));
-        assert_eq!((b.total, b.prompt, b.builtin_tools, b.mcp_tools), (40_000, 4_000, 20_000, 12_000));
+        assert_eq!(b.total, 160_000);
+        assert_eq!(b.prompt, 4_000, "the prompt is the same at every tier");
+        // 156k left, two ways, a tenth spare: the ratio, not the old numbers.
+        assert_eq!(b.builtin_tools, 156_000 * 20 / 36);
+        assert_eq!(b.mcp_tools, 156_000 * 12 / 36);
+    }
+
+    #[test]
+    fn the_prompt_costs_the_same_at_every_window() {
+        for window in [1_000_000, 512_000, 256_000, 128_000, 64_000, 8_000] {
+            assert_eq!(Budget::for_window(Some(window)).prompt, PROMPT_CEILING, "at {window}");
+        }
     }
 
     #[test]
@@ -120,15 +152,15 @@ mod tests {
         }
         // A window just under a floor belongs to the tier below it, so a model
         // that reports 999_999 is not given the 1M budget.
-        assert_eq!(Budget::for_window(Some(999_999)).total, 30_000);
-        assert_eq!(Budget::for_window(Some(511_999)).total, 20_000);
-        assert_eq!(Budget::for_window(Some(127_999)).total, 5_000);
+        assert_eq!(Budget::for_window(Some(999_999)).total, 80_000);
+        assert_eq!(Budget::for_window(Some(511_999)).total, 40_000);
+        assert_eq!(Budget::for_window(Some(127_999)).total, 10_000);
     }
 
     #[test]
     fn a_small_window_lands_on_the_floor_rather_than_nothing() {
-        assert_eq!(Budget::for_window(Some(8_000)).total, 5_000);
-        assert_eq!(Budget::for_window(Some(0)).total, 5_000);
+        assert_eq!(Budget::for_window(Some(8_000)).total, 10_000);
+        assert_eq!(Budget::for_window(Some(0)).total, 10_000);
     }
 
     #[test]
@@ -142,6 +174,21 @@ mod tests {
             let b = Budget::for_window(Some(*floor));
             assert!(b.prompt + b.builtin_tools + b.mcp_tools <= b.total, "{floor}");
             assert!(*total == b.total);
+        }
+    }
+
+    #[test]
+    fn a_small_window_does_not_spend_its_budget_on_the_prompt() {
+        // The prompt is a fixed cost: 1,778 tokens whatever the window is.
+        // Enforced literally, its 10% share would be 500 at 64k and the schemas
+        // would be left with nothing, so it takes what it measures and the
+        // schemas take the rest. What has to hold is that it cannot crowd them
+        // out, at any tier.
+        let prompt_tokens = 1_778;
+        for (floor, _) in TOTALS {
+            let b = Budget::for_window(Some(*floor));
+            assert!(b.tool_allowance(prompt_tokens) > 0, "at {floor} no schema fits");
+            assert!(prompt_tokens * 3 < b.total * 2, "at {floor} the prompt takes over half the budget");
         }
     }
 
