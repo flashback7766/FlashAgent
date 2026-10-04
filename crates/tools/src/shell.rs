@@ -408,10 +408,19 @@ async fn run_in(cwd: &std::path::Path, cmd: &str, timeout: Duration, registry: O
     let complete = drain_pumps(p1, p2).await;
     let out = buffer.lock();
     let out = tail_noted(&out, 16_000);
-    let out = if out.trim().is_empty() { "(no output)" } else { &out };
+    // A search that matched nothing exits 1 and prints nothing: `grep`, `rg`
+    // and the diff tools all report "no matches" that way. An agent reading it
+    // as a failure cannot tell that apart from a tool that broke, and answers
+    // such a call by retrying or by asking the user. Exit 1 with nothing to say
+    // is an answer, not an error.
+    let silence = out.trim().is_empty();
+    let out = if silence { "(no output)" } else { &out };
     let note = if complete { "" } else { "\n[a background process still holds the output pipe; later output is not captured]" };
-    if status.success() {
-        Ok(format!("exit code: 0\noutput:\n{out}{note}"))
+    if status.success() || (silence && status.code() == Some(1)) {
+        // The real code either way: this project has been bitten by a status
+        // line showing a number that was not true, and "not an error" has to be
+        // said without inventing a 0.
+        Ok(format!("exit code: {}\noutput:\n{out}{note}", status.code().unwrap_or(0)))
     } else {
         Err(ToolError::Other(format!(
             "exit code: {}\noutput:\n{out}{note}",
@@ -978,6 +987,21 @@ mod tests {
         let err = run_foreground(cmd, Duration::from_secs(10)).await.unwrap_err();
         assert!(err.to_string().contains("exit code: 3"));
         assert!(err.to_string().contains("bad"));
+    }
+
+    #[tokio::test]
+    async fn a_search_that_matched_nothing_is_an_answer_not_a_failure() {
+        // `grep` exits 1 on no match and says nothing else. Read as a tool that
+        // broke, an agent either retries the same search or hands the question
+        // back to the user instead of saying the file is not there.
+        #[cfg(windows)]
+        let cmd = "exit 1";
+        #[cfg(not(windows))]
+        let cmd = "printf 'a\\n' | grep -q zzz-not-there";
+        let out = run_foreground(cmd, Duration::from_secs(10)).await.unwrap();
+        assert!(out.contains("(no output)"), "{out}");
+        // The code stays what it was: "not an error" must not be told as a 0.
+        assert!(out.contains("exit code: 1"), "{out}");
     }
 
     #[tokio::test]

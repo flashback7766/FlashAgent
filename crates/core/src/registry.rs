@@ -397,10 +397,11 @@ pub static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "update_plan",
-        // Offered always, though it refuses itself outside /goal. The tool list
-        // is part of the cached prompt: adding it when a goal started made the
-        // first goal step re-read the whole conversation.
-        description: "Only during /goal: record the whole step-by-step plan, again each time a step finishes or the plan changes. Does nothing outside /goal.",
+        // Offered always: the tool list is part of the cached prompt, and adding
+        // a tool when a goal started made the first goal step re-read the whole
+        // conversation. The plan is drawn in ordinary chat too, and a model told
+        // it was a no-op here kept planning in prose instead of calling this.
+        description: "Record the whole step-by-step plan, again each time a step finishes or the plan changes. Available in any session, not only an autonomous run.",
         params: &[list(
             "steps",
             "The whole plan, in order",
