@@ -123,7 +123,7 @@ impl App {
         // Here, not only for typed prompts: a /goal, a skill or Ctrl+R measured
         // their growth from a turn long gone and compacted too early.
         self.context_before_turn = self.context_usage.total_used();
-        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
         cx.cancel.store(false, Ordering::Relaxed);
         self.suggested_prompt = None;
         self.custom_placeholder = None;
@@ -322,7 +322,7 @@ impl App {
                 self.turn_history = None;
                 // A style picked while the turn ran was applied to the history it replaced.
                 self.apply_personality();
-                update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                 // The turn just read all of it. A later change (interrupted turn closed,
                 // compaction) makes a new prefix, which is warmed.
                 self.note_prompt_cached(cx.source, cx.perm, cx.memory_block);
@@ -372,7 +372,7 @@ impl App {
                         match compacted {
                             Some(_) => {
                                 self.chat.forget_counted_context();
-                                update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                                 let saved = before.saturating_sub(self.context_usage.total_used());
                                 self.chat.replace_last_system(&format!(
                                     "Context compacted · {} saved · the conversation so far is now a summary",
@@ -406,7 +406,7 @@ impl App {
                 // the next turn to check them. Losing power here is the one moment
                 // that note has to survive, so it goes to disk with the history.
                 self.autosave(cx.session_id, cx.cwd_display);
-                update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                 self.chat.on_event(&LoopEvent::Done(DoneReason::Failed));
                 // Plain explanation first, the raw text underneath. A connection that
                 // dropped is told apart from a server that refused: only the first one
