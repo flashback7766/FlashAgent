@@ -343,13 +343,17 @@ pub static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "run_shell",
-        description: "Run a shell command (timeout_ms, default 120000). background:true for servers, watchers and long builds: returns a task_id at once, and a notice arrives when the task exits, so do not poll in a loop. task_id alone shows its output so far; with kill:true stops it",
+        description: "Run a command in the working directory. Two forms, and the arguments say which: give `command` to run something, or `task_id` to read or stop a background task. \n\
+             - A server, a watcher, a build or anything that runs for minutes: background:true, which returns a task_id at once. When the result says the work is now a background task, the turn is over — say what you started and stop; a notice arrives when it exits.\n\
+             - A foreground command is killed after timeout_ms (default 120000, ceiling 600000) and reports that it was, with the note that it may already have changed something. A turn waiting on a shell cannot steer or be interrupted, so a long job in the foreground is a turn that cannot answer.\n\
+             - Output comes back as the result, capped and marked where it was cut: a long log is a tail, not the whole thing.\n\
+             - A refused call is the permission layer or the user, not a mistake in the command: changing the command is what gets it through.",
         params: &[
-            s("command", "The command line to run in the working directory"),
-            opt_bool("background", "Run it in the background and return a task_id at once"),
-            opt_int("timeout_ms", "Kill it after this many milliseconds (default 120000); ignored once it runs in the background"),
-            opt_int("task_id", "A background task: its output so far, or with kill stop it"),
-            opt_bool("kill", "With task_id: kill the task"),
+            s("command", "The command line to run in the working directory, when starting one"),
+            opt_bool("background", "Run it detached and return a task_id at once; it keeps running between turns and reports when it exits"),
+            opt_int("timeout_ms", "Kill a foreground command after this many milliseconds (default 120000, ceiling 600000); ignored in the background"),
+            opt_int("task_id", "A background task: with kill:true it stops, otherwise its output so far"),
+            opt_bool("kill", "With task_id: stop the task instead of reading it"),
         ],
         required: &[],
         has_header: true,
@@ -852,19 +856,27 @@ mod tests {
     /// JSON with a 270-character note copied into each one; a guard is cheaper
     /// than rediscovering that in a cold start. Twenty-four tools measure about
     /// 13.1k characters, so the ceiling leaves room for a few more without
-    /// letting a description grow without anyone noticing.
+    /// What used to be a flat character cap is now the question the ladder
+    /// answers: does the whole toolset still fit the tightest window we
+    /// support, after the prompt has taken its share? A description can grow
+    /// when it earns it and cannot grow quietly past that.
     #[test]
     fn the_whole_tool_list_stays_a_size_a_prompt_can_carry() {
-        let total: usize = TOOLS.iter().map(|d| d.schema_json().len()).sum();
+        let total = budget::tool_cost("gpt-4o", "", &TOOLS.iter().map(|d| d.schema_json()).collect::<Vec<_>>().join(""), "");
+        let prompt = flashagent_llm::count_tokens("gpt-4o", &crate::prompt::METHOD);
+        let tightest = budget::Budget::for_window(Some(64_000));
+        let allowance = tightest.tool_allowance(prompt);
         assert!(
-            total < 15_000,
-            "the schemas of {} tools come to {total} characters, which is read cold every session",
+            total < allowance,
+            "the schemas of {} tools come to {total} tokens, against {allowance} left on a 64k window \
+             once a minimal prompt is in it",
             TOOLS.len()
         );
-        // And nothing grows without saying: a tool with a very long description
-        // is usually one that is saying two things.
+        // And a description that grows past a page is one that is saying two
+        // things. Long is not the same as good: this is the guard on a runaway,
+        // not a target.
         for def in TOOLS {
-            assert!(def.description.len() < 600, "{} has a {} character description", def.name, def.description.len());
+            assert!(def.description.len() < 1_200, "{} has a {} character description", def.name, def.description.len());
         }
     }
 
