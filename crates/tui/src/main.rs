@@ -714,6 +714,10 @@ struct App {
     /// A `/goal` run is under way: the rules that only hold inside one belong in
     /// the prompt, and they are not there the rest of the time.
     goal_active: bool,
+    /// What the system prompt measured this session. The tool schemas are given
+    /// what the context window has left after this, so it is kept here rather
+    /// than measured again at every model switch.
+    prompt_tokens: usize,
     /// E.g. `~/project`.
     cwd_display: String,
     /// For the welcome card.
@@ -1195,6 +1199,9 @@ struct InitialApp {
 
 fn initial_app(init: InitialApp) -> App {
     let InitialApp { app_config, model, context_display, context_capacity, cwd_display, initial_effort, available_models, system_prompt_text, system_prompt_config, memory_docs, effort_memory } = init;
+    // Measured before the text moves into the history: what the schemas are
+    // given is what the prompt actually costs, not what its ceiling allows.
+    let prompt_tokens = flashagent_llm::estimate_tokens(&system_prompt_text).max(0) as usize;
     App {
         question_ui_state: QuestionUiState::default(),
         history: vec![ChatMessage::system(system_prompt_text)],
@@ -1242,6 +1249,7 @@ fn initial_app(init: InitialApp) -> App {
         last_tool_args: String::new(),
         prompt_config: system_prompt_config,
         goal_active: false,
+        prompt_tokens,
         cwd_display: cwd_display.clone(),
         memory_docs,
         turn_flash: None,

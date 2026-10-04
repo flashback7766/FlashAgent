@@ -399,7 +399,7 @@ impl App {
                 self.current_model = active.id.clone();
                 self.current_context = new_ctx_disp;
                 self.context_usage.total_capacity = new_ctx_len.max(1024);
-                cx.tools_arc.set_prompt_tokens(flashagent_llm::estimate_tokens(&system_prompt_text).max(0) as usize);
+                cx.tools_arc.set_prompt_tokens(self.prompt_tokens);
                 cx.tools_arc.set_context_window(Some(new_ctx_len));
                 cx.source.set_model(&self.current_model);
                 cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
