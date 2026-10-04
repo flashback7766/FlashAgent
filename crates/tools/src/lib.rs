@@ -51,6 +51,11 @@ fn parse_args<T: DeserializeOwned>(json: &str, tool: &str) -> Result<T, ToolErro
     serde_json::from_value(value).map_err(|e| ToolError::Other(format!("bad arguments: {e}")))
 }
 
+/// How long one foreground command may hold a turn. A turn waiting on a shell
+/// cannot steer, cannot be interrupted and cannot answer; anything longer than
+/// this is a background task, which returns at once and reports when it exits.
+pub const MAX_FOREGROUND_TIMEOUT_MS: u64 = 600_000;
+
 /// Cut in place, looking no further than the cut: a diff or a log can be
 /// megabytes.
 fn truncate_output(mut text: String) -> String {
@@ -397,8 +402,22 @@ impl BuiltinTools {
         if a.background.unwrap_or(false) {
             self.shells.spawn_background(&cmd)
         } else {
-            let timeout = Duration::from_millis(a.timeout_ms.unwrap_or(120_000));
-            self.shells.run_foreground(&cmd, timeout).await
+            // A turn that waits is a turn that cannot steer, interrupt or answer.
+            // Past this the job belongs in the background, and the schema says so.
+            let asked = a.timeout_ms.unwrap_or(120_000);
+            let timeout = Duration::from_millis(asked.min(MAX_FOREGROUND_TIMEOUT_MS));
+            self.shells
+                .run_foreground(&cmd, timeout)
+                .await
+                .map_err(|e| match e {
+                    ToolError::Other(message) if asked > MAX_FOREGROUND_TIMEOUT_MS && message.contains("timeout") => {
+                        ToolError::Other(format!(
+                            "{message} (asked for {asked}ms, the ceiling for a foreground command is \
+                             {MAX_FOREGROUND_TIMEOUT_MS}ms — run it with background:true instead)"
+                        ))
+                    }
+                    other => other,
+                })
         }
     }
 }
