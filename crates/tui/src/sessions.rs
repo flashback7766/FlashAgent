@@ -402,7 +402,7 @@ impl App {
         {
             Ok(saved) => {
                 let restored = restore_session(saved, &mut self.chat, &mut self.history);
-                update_context_usage(&mut self.context_usage, &self.history, memory_block, &self.chat, perm);
+                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, memory_block, &self.chat, perm);
                 self.notice(format!("Resumed session {id} · {}", flashagent_tui::plural(restored, "message", "messages")));
                 true
             }
@@ -447,7 +447,7 @@ impl App {
         // one charged a conversation for work it never did.
         self.cost = flashagent_core::CostLedger::default();
         self.token_tracker = TokenTracker::new(self.current_model.clone());
-        update_context_usage(&mut self.context_usage, &self.history, memory_block, &self.chat, perm);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, memory_block, &self.chat, perm);
         self.notice(format!("Resumed session {id} · {}", flashagent_tui::plural(restored, "message", "messages")));
         true
     }

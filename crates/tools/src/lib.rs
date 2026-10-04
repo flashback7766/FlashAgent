@@ -500,6 +500,9 @@ impl ToolExec for BuiltinTools {
         // not negotiable, so the schemas are what a tier has left: on a small
         // window the optional end of the list goes first, and the tools a task
         // cannot happen without are offered whatever it costs.
+        // `Full` is the user asking for the whole toolset whatever the window says,
+        // so the ladder does not apply to it.
+        if !matches!(profile, ToolsetProfile::Full) {
         let budget = flashagent_core::budget::Budget::for_window(ctx);
         let model_name = self.model_name.read().ok().map(|m| m.clone()).unwrap_or_default();
         let allowance = budget.tool_allowance(self.prompt_tokens.load(Ordering::Relaxed));
@@ -524,6 +527,7 @@ impl ToolExec for BuiltinTools {
         let (kept, _dropped) = flashagent_core::budget::fit_builtin(measured.into_iter(), allowance);
         let kept: std::collections::HashSet<String> = kept.into_iter().map(str::to_string).collect();
         specs.retain(|spec| kept.contains(&spec.name));
+        }
 
         // Names a server chose, with the schemas it chose.
         specs.extend(self.mcp_manager.get_all_tool_specs());

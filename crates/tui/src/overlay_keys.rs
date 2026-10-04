@@ -590,8 +590,10 @@ impl App {
         }
         if !self.running {
             self.sync_system_prompt();
+            cx.tools_arc.set_model_name(&self.current_model);
+            cx.tools_arc.set_prompt_tokens(self.prompt_tokens);
         }
-        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
         self.warm_prompt_cache(cx.source, cx.perm, cx.memory_block);
     }
 

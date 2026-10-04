@@ -217,7 +217,7 @@ impl App {
                 self.open_overlay(Overlay::Memory(modal));
             }
             "context" => {
-                update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                 self.open_overlay(Overlay::Context(ContextModal::new(self.context_usage.clone())));
             }
             "clear" => self.clear_chat(),
@@ -986,7 +986,7 @@ impl App {
         }
         self.chat.truncate_before_nth_last_user(taken_back);
         self.renderer.scroll_to_bottom();
-        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
         self.suggested_prompt = None;
         self.latest_suggestion = None;
         self.custom_placeholder = None;
