@@ -405,14 +405,21 @@ impl CheckReport {
     pub fn lines(&self) -> Vec<String> {
         let mut out = Vec::new();
         let title_width = scenarios().iter().map(|s| s.title.len()).max().unwrap_or(40);
-        for (scenario, (key, outcome)) in scenarios().iter().zip(&self.results) {
-            debug_assert_eq!(scenario.key, key);
+        // By key, not by position: a report narrowed with `--scenario` holds a
+        // subset, and zipping it against the full list titled every line with
+        // whatever happened to come first.
+        let titles: Vec<(String, String)> = scenarios()
+            .iter()
+            .map(|s| (s.key.to_string(), s.title.to_string()))
+            .collect();
+        for (key, outcome) in &self.results {
+            let title = titles.iter().find(|(k, _)| k == key).map(|(_, t)| t.as_str()).unwrap_or(key);
             let mark = match outcome {
                 Outcome::Pass { .. } => "ok  ",
                 Outcome::Unavailable { .. } => "--  ",
                 _ => "FAIL",
             };
-            out.push(format!("  {mark}  {:<width$} {}", scenario.title, outcome.detail(), width = title_width));
+            out.push(format!("  {mark}  {:<width$} {}", title, outcome.detail(), width = title_width));
         }
         let (passed, total) = self.score();
         out.push(format!(
@@ -722,7 +729,13 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         llm,
         &[
             system("You are a coding agent. Use the tools to do what is asked."),
-            ChatMessage::user("Delete every file in the build directory."),
+            // This asked to "delete every file in the build directory" and then
+            // failed any model that did not call a tool. No delete tool is
+            // offered, so a model that declined had done the right thing and
+            // been marked down for it. It has to be a question the model cannot
+            // answer without reading: then making no call at all is a guess, and
+            // a server that answers nothing is still caught.
+            ChatMessage::user("Read src/main.rs and tell me what it prints. You do not know yet."),
         ],
         timeout,
     )
@@ -803,9 +816,22 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     // 11. A chain of steps rather than one. Drift does not show up in step two,
     //     so a single-call check says nothing about whether the model can be
     //     left alone for a real job.
+    //
+    //     The task has to genuinely require the chain, or the check punishes a
+    //     model that finishes early: this one used to say "read src/main.rs, then
+    //     report what you found" and then fail any model that called a tool once
+    //     and reported, which is exactly what it asked for. It failed on every
+    //     model, on every build, and read as a product weakness for months.
+    //     Each result now names the next file to read, so the chain is something
+    //     the model has to keep doing rather than something it is caught for
+    //     stopping.
     let mut chain: Vec<ChatMessage> = vec![
         system("You are a coding agent. Use the tools to do what is asked."),
-        ChatMessage::user("Read src/main.rs, then report what you found. Use one tool call per step."),
+        ChatMessage::user(
+            "Read src/main.rs and follow what it imports. Every file you read names the next one to \
+             read; stop when a file names none, then report how many files you read. One tool call \
+             per step.",
+        ),
     ];
     let mut steps = 0usize;
     let mut drift: Option<String> = None;
@@ -828,9 +854,15 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
             name: name.clone(),
             args_json: args,
         }];
-        // What a real loop hands back. The check is that the model keeps working
-        // against results instead of repeating or drifting.
-        chain.push(ChatMessage::tool_result(format!("call_{steps}"), "1: fn main() {\n2:     println!(\"hi\");\n3: }"));
+        // What a real loop hands back: this file's imports, which is what makes
+        // The last result names none, which is the end the task defines — and it has
+        // to be the tenth, or a model that follows the chain perfectly is failed
+        // for stopping one step early.
+        let next = match TEN_STEPS.saturating_sub(steps) {
+            0 => "no imports".to_string(),
+            left => format!("use crate::step_{left};"),
+        };
+        chain.push(ChatMessage::tool_result(format!("call_{steps}"), format!("1: {next}\n2:     println!(\"hi\");\n3: }}")));
     }
     results.push((
         "ten_steps".to_string(),
