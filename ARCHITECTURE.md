@@ -107,6 +107,45 @@ none of them; otherwise cmd.exe, and the system prompt names the shell
 either way. Output that is not UTF-8 is decoded from the console's OEM code
 page, which is what cmd.exe and most Windows tools write to a pipe.
 
+## What the model is given before it answers
+
+The system prompt and the tool schemas are a fixed cost on every step of
+every turn, so they are budgeted against the window the server reported
+(`core::budget`): 160k of static context on a 1M window, halving down to
+10k at 64k.
+
+The prompt gets the same ceiling at every tier — 10k — because it is the one
+part that cannot be scaled down without making the model worse, and a
+shorter version of it is a different agent rather than a cheaper one. What
+the window buys is the room for schemas, which are the interchangeable part.
+What is left after the prompt is split between the built-in schemas and
+what MCP servers add, and a tenth of a tier is kept spare: a tier is a
+ceiling and a set measured against it lands under.
+
+`BuiltinTools::specs` drops schemas from the optional end until that
+allowance is spent. What did not fit is reported rather than left silently
+missing, and the tools a task cannot happen without are offered whatever it
+costs. `ToolsetProfile::Full` skips the ladder: it is the user asking for the
+whole toolset.
+
+Counting is done with the tokenizer of the model in use, for the static
+parts. The conversation itself stays on a character estimate, which is
+re-counted on every keystroke and corrected by the server's own usage.
+
+The last line of the system prompt carries what the context has used and
+what is left, rounded down to a twentieth of the window. It moves in steps
+rather than every turn because the provider caches the prefix of a request:
+a system message that changed each turn would invalidate the memory block
+and the whole conversation behind it. It is written before the warm-up,
+which exists to prefill exactly the prefix the first turn will send.
+
+The prompt itself is a method followed by repairs on it — decide what done
+means, take the next step, check it, say what happened — and every section
+below that is something that was seen to go wrong. A test holds them in that
+order and holds a rule to a single place, because a rule stated twice is a
+rule to keep in sync. Sections that only apply in one mode are left out
+otherwise: the rules for a `/goal` run and the rules for delegating.
+
 ## Permissions
 
 Four modes: Planning (read-only; shell commands on a short list of programs
