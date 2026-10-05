@@ -159,11 +159,44 @@ pub fn scenarios() -> Vec<Scenario> {
             title: "still knows a fact from the start",
             matters: "this is what compaction has to keep, or every trim costs a re-read",
         },
+        Scenario {
+            key: "delegates_wide_work",
+            title: "hands over a wide job, whole",
+            matters: "a child cannot ask what was meant, so a topic comes back as a summary or as nothing",
+        },
+        Scenario {
+            key: "does_not_duplicate_a_search",
+            title: "does not run a search it handed over",
+            matters: "two answers to pay for and no way to tell which one is right",
+        },
+        Scenario {
+            key: "never_invents_a_pending_answer",
+            title: "invents nothing while an agent is still running",
+            matters: "the one failure a user cannot tell from a real one until they open the file",
+        },
+        Scenario {
+            key: "checks_a_report_before_acting",
+            title: "reads the file a report named, then acts",
+            matters: "a report is a claim, and acting on it unchecked is a wrong reading made permanent",
+        },
+        Scenario {
+            key: "does_not_delegate_a_lookup",
+            title: "does not delegate one file it could open itself",
+            matters: "the other half of the same rule: delegation has a cost and a point",
+        },
     ]
 }
 
 fn probe_tools() -> Vec<ToolSpec> {
-    vec![
+    probe_tools_with(&[])
+}
+
+/// [`probe_tools`] plus the tools a model delegates through. Kept apart so the
+/// delegation scenarios advertise them and nothing else does: a model told a
+/// subagent exists, on a table with no way to spawn one, is being asked a
+/// question about a tool it does not have.
+fn probe_tools_with(extra: &[ToolSpec]) -> Vec<ToolSpec> {
+    let mut tools = vec![
         ToolSpec {
             name: "read_lines".into(),
             description: "Read the first N lines of a file.".into(),
@@ -179,7 +212,25 @@ fn probe_tools() -> Vec<ToolSpec> {
             description: "Report a numeric status code back to the harness.".into(),
             parameters_json: r#"{"type":"object","properties":{"code":{"type":"integer","description":"The status code"}},"required":["code"]}"#.into(),
         },
-    ]
+    ];
+    tools.extend_from_slice(extra);
+    tools
+}
+
+/// The two tools a model delegates through, as the app offers them.
+fn delegation_tools() -> Vec<ToolSpec> {
+    probe_tools_with(&[
+        ToolSpec {
+            name: "spawn_agent".into(),
+            description: "Start a separate agent with its own tools and its own context. It cannot see this conversation and cannot ask the user anything.".into(),
+            parameters_json: r#"{"type":"object","properties":{"role":{"type":"string","description":"Which kind of agent to start"},"task":{"type":"string","description":"The whole job for it, self-contained: what to look at, what to decide, and what an answer worth reading looks like"}},"required":["role","task"]}"#.into(),
+        },
+        ToolSpec {
+            name: "send_message".into(),
+            description: "Send a message to another agent by name.".into(),
+            parameters_json: r#"{"type":"object","properties":{"to":{"type":"string","description":"Name of the agent"},"text":{"type":"string","description":"What to say"}},"required":["to","text"]}"#.into(),
+        },
+    ])
 }
 
 fn opts() -> TurnOptions {
@@ -224,11 +275,19 @@ impl Turn {
 }
 
 async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Duration) -> Turn {
-    let started = Instant::now();
     let tools = probe_tools();
+    run_turn_with(llm, messages, &tools, timeout).await
+}
+
+/// The same turn with a different table in front of the model. The delegation
+/// scenarios need `spawn_agent` on offer, and adding it to [`probe_tools`] for
+/// every scenario would hand the other fourteen an extra reason to call
+/// something.
+async fn run_turn_with(llm: &dyn LlmSource, messages: &[ChatMessage], tools: &[ToolSpec], timeout: Duration) -> Turn {
+    let started = Instant::now();
     let collect = async {
         let mut stream = llm
-            .turn_with_options(messages, &tools, &opts())
+            .turn_with_options(messages, tools, &opts())
             .await
             .map_err(|e| e.to_string())?;
         // Deltas arrive interleaved by index, as in the agent loop, and the index
@@ -512,6 +571,22 @@ fn system(task: &str) -> ChatMessage {
     let prompt = PROMPT.get_or_init(|| {
         crate::prompt::build_system_prompt(
             &crate::prompt::SystemPromptConfig::new().with_platform(std::env::consts::OS),
+        )
+    });
+    ChatMessage::system(format!("{task}\n\n{prompt}"))
+}
+
+/// The same, for the delegation scenarios. [`system`] builds the prompt the
+/// agent runs with in a session with no subagents, which leaves out every rule
+/// about handing work over — so a check on delegation built that way would be
+/// grading a model on rules it was never told.
+fn system_delegating(task: &str) -> ChatMessage {
+    static PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let prompt = PROMPT.get_or_init(|| {
+        crate::prompt::build_system_prompt(
+            &crate::prompt::SystemPromptConfig::new()
+                .with_platform(std::env::consts::OS)
+                .with_subagents(true),
         )
     });
     ChatMessage::system(format!("{task}\n\n{prompt}"))
@@ -1080,7 +1155,198 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         },
     ));
 
+CheckReport { model: model.to_string(), results }
+}
+
+/// Delegation scenarios use a different system prompt (with subagents enabled)
+/// and different tools (spawn_agent, send_message). They are run separately so
+/// the scripted model can be given the right responses for each conversation.
+pub async fn check_delegation_model(llm: &dyn LlmSource, model: &str, timeout: Duration) -> CheckReport {
+    let mut results = Vec::new();
+    let delegation = delegation_tools();
+
+    // 16. Hand work over, and hand over the whole job.
+    let turn = run_turn_with(llm,
+        &[system_delegating("You are a coding agent. Use the tools to do what is asked."), ChatMessage::user(AUDIT)],
+        &delegation,
+        timeout,
+    )
+    .await;
+    results.push((
+        "delegates_wide_work".to_string(),
+        judge_call(&turn, "spawn_agent", |args| {
+            let task = args.get("task").and_then(|t| t.as_str()).unwrap_or_default();
+            task_is_whole(task)
+        }),
+    ));
+
+    // 17. The search has been handed over already, and the agent is running.
+    let messages = vec![
+        system_delegating("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user(AUDIT),
+        called("call_1", "spawn_agent", r#"{"role":"researcher","task":"Search every .rs file under src/ for a hardcoded password or API key. Report each hit as the file path and the line number, and say which files you checked."}"#),
+        still_running(),
+    ];
+    let turn = run_turn_with(llm, &messages, &delegation, timeout).await;
+    let outcome = match &turn.error {
+        Some(e) => turn.failed(e),
+        None => match turn.first_call().cloned() {
+            Some((name, args, _)) if name == "read_lines" => {
+                let path = parsed_args("read_lines", &args)
+                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
+                    .unwrap_or_default();
+                Outcome::Fail {
+                    detail: format!("read {path:?} itself while agent-1 was still searching for it"),
+                    secs: turn.secs,
+                    tokens: turn.tokens,
+                }
+            }
+            None if turn.text.trim().is_empty() => Outcome::Fail {
+                detail: "nothing while the agent it started was still running".to_string(),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+            _ => Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens },
+        },
+    };
+    results.push(("does_not_duplicate_a_search".to_string(), outcome));
+
+    // 18. Nothing is back yet, and the user is asking.
+    let messages = vec![
+        system_delegating("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user(AUDIT),
+        called("call_1", "spawn_agent", r#"{"role":"researcher","task":"Search every .rs file under src/ for a hardcoded password or API key. Report each hit as the file path and the line number, and say which files you checked."}"#),
+        still_running(),
+        ChatMessage::user("Which file is it? Just the path."),
+    ];
+    let turn = run_turn_with(llm, &messages, &delegation, timeout).await;
+    let outcome = match &turn.error {
+        Some(e) => turn.failed(e),
+        None => match invented_path(&turn.text) {
+            Some(path) => Outcome::Fail {
+                detail: format!("named {path} before anything came back"),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+            None if turn.text.trim().is_empty() => Outcome::Fail {
+                detail: "said nothing at all to a question it could not answer yet".to_string(),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+            None => Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens },
+        },
+    };
+    results.push(("never_invents_a_pending_answer".to_string(), outcome));
+
+    // 19. A child reported something.
+    let messages = vec![
+        system_delegating("You are a coding agent. Use the tools to do what is asked."),
+        called("call_1", "spawn_agent", r#"{"role":"researcher","task":"Find the file under src/ holding a hardcoded password, and report which file and which line."}"#),
+        ChatMessage::tool_result("call_1", "agent-1 finished. It says: src/auth.rs:42 holds a hardcoded password, AB-9f2-key."),
+        ChatMessage::user("That file needs the key out of it. Go ahead."),
+    ];
+    let turn = run_turn_with(llm, &messages, &delegation, timeout).await;
+    let outcome = match &turn.error {
+        Some(e) => turn.failed(e),
+        None => match turn.first_call().cloned() {
+            Some((name, args, _)) if name == "read_lines" => {
+                let path = parsed_args("read_lines", &args)
+                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
+                    .unwrap_or_default();
+                if path.contains("auth.rs") {
+                    Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens }
+                } else {
+                    Outcome::Fail {
+                        detail: format!("opened {path:?}, which is not the file the report named"),
+                        secs: turn.secs,
+                        tokens: turn.tokens,
+                    }
+                }
+            }
+            Some((name, _, _)) => Outcome::Fail {
+                detail: format!("called {name} on a claim it had not looked at"),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+            None => Outcome::Fail {
+                detail: "set about it without reading the file the report named".to_string(),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+        },
+    };
+    results.push(("checks_a_report_before_acting".to_string(), outcome));
+
+    // 20. One file the agent can open itself is not delegation.
+    let turn = run_turn_with(llm, &[system_delegating("You are a coding agent. Use the tools to do what is asked."), ChatMessage::user("What is on line 2 of src/main.rs?")], &delegation, timeout).await;
+    results.push((
+        "does_not_delegate_a_lookup".to_string(),
+        match &turn.error {
+            Some(e) => turn.failed(e),
+            None => match turn.first_call().map(|(name, _, _)| name.as_str()) {
+                Some("spawn_agent") => Outcome::Fail {
+                    detail: "handed a one-file lookup to a subagent".to_string(),
+                    secs: turn.secs,
+                    tokens: turn.tokens,
+                },
+                Some(_) => Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens },
+                None => Outcome::Fail {
+                    detail: format!("answered without reading anything: {}", snippet(&turn.text)),
+                    secs: turn.secs,
+                    tokens: turn.tokens,
+                },
+            },
+        },
+    ));
+
     CheckReport { model: model.to_string(), results }
+}
+
+/// The job the delegation scenarios hand over: wide, and not something to do
+/// from one chair.
+const AUDIT: &str = "Every .rs file under src/ is a candidate. Find the ones holding a hardcoded \
+                    password or API key and tell me which file and which line. Do not change \
+                    anything.";
+
+/// A task worth handing over: it says what to look at, and what an answer worth
+/// reading looks like. "Look into the performance problem" is a topic, and a
+/// child that gets one comes back with a summary or with nothing.
+fn task_is_whole(task: &str) -> Result<(), String> {
+    let words = task.split_whitespace().count();
+    if words < 12 {
+        return Err(format!("handed over {words} words: {task:?}"));
+    }
+    let lower = task.to_lowercase();
+    if !["src", ".rs", "every", "all ", "each", "across", "under", "directory"]
+        .iter()
+        .any(|m| lower.contains(m))
+    {
+        return Err(format!("never says what to look at: {task:?}"));
+    }
+    if !["file", "line", "where", "which", "path", "number", "list"]
+        .iter()
+        .any(|m| lower.contains(m))
+    {
+        return Err(format!("never says what an answer should contain: {task:?}"));
+    }
+    Ok(())
+}
+
+/// A concrete path the model could only have made up. A wildcard is not one: it
+/// is a way of saying "not yet" that a check can still read as not knowing.
+fn invented_path(text: &str) -> Option<&str> {
+    text.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-'))
+        .find(|w| w.ends_with(".rs") && !w.contains('*') && w.len() > "src/".len() + 3)
+}
+
+/// A run where the agent never finished: it is on offer, and nothing is back.
+fn still_running() -> ChatMessage {
+    ChatMessage::tool_result(
+        "call_1",
+        "agent-1 started, role researcher, running. Its answer will arrive on its own; nothing \
+         to do but wait.",
+    )
 }
 
 /// An assistant turn that calls one tool, the way a loop hands it back.
@@ -1158,11 +1424,16 @@ fn judge_call(
 mod tests {
     use super::*;
 
-    /// How many scenarios there are. The scripted tests break exactly one of
-    /// them, so they count against this rather than against a number that a new
-    /// scenario would silently turn into a lie.
+    /// How many non-delegation scenarios there are. The scripted tests break
+    /// exactly one of them, so they count against this rather than against a
+    /// number that a new scenario would silently turn into a lie.
     fn all() -> usize {
-        scenarios().len()
+        scenarios().iter().filter(|s| !s.key.starts_with("delegates_") && !s.key.starts_with("does_not_") && s.key != "never_invents_a_pending_answer" && s.key != "checks_a_report_before_acting").count()
+    }
+
+    /// How many delegation scenarios there are.
+    fn all_delegation() -> usize {
+        scenarios().len() - all()
     }
     
     use async_trait::async_trait;
@@ -1270,6 +1541,31 @@ mod tests {
             // The port it was told eight turns ago.
             text("It is set to 8080."),
             text("It has a main that prints."),
+        ]
+    }
+
+    /// Perfect responses for the five delegation scenarios, in the order
+    /// [`check_delegation_model`] runs them. Each scenario uses
+    /// [`system_delegating`] and the delegation tool set, so the scripted model
+    /// must produce `spawn_agent` and `read_lines` calls appropriate to those
+    /// conversations.
+    fn perfect_delegating() -> Vec<Vec<LlmEvent>> {
+        vec![
+            // 16. Delegates the whole job: model receives AUDIT task, calls spawn_agent.
+            calls(&[(
+                "spawn_agent",
+                r#"{"role":"researcher","task":"Search every .rs file under src/ for a hardcoded password or API key. Report each hit as the file path and the line number, and say which files you checked."}"#
+            )]),
+            // 17. Does not run the search it handed over; agent is running.
+            //     Model receives history with spawn_agent + still_running, responds with text.
+            text("agent-1 is still searching. I will wait for its report."),
+            // 18. Nothing back yet, user asks — model invents nothing.
+            //     Model receives history with spawn_agent + still_running + user question.
+            text("agent-1 is still running. I have no file to name yet."),
+            // 19. Child reported a finding; model reads that file.
+            call("read_lines", r#"{"path":"src/auth.rs","count":10}"#),
+            // 20. One file is not delegation; model reads it itself.
+            call("read_lines", r#"{"path":"src/main.rs","count":2}"#),
         ]
     }
 
@@ -1436,6 +1732,16 @@ mod tests {
     }
 
     #[test]
+    fn a_delegating_model_that_does_everything_right_scores_full_marks() {
+        let llm = Scripted::new(perfect_delegating());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let report = rt.block_on(check_delegation_model(&llm, "scripted-delegation", Duration::from_secs(5)));
+        assert_eq!(report.score(), (all_delegation(), all_delegation()), "{:?}", report.results);
+        assert_eq!(report.verdict(), "drives tools reliably");
+        assert!(!report.needed_recovery());
+    }
+
+    #[test]
     fn calls_numbered_far_apart_are_still_two_calls() {
         let read = |index: usize, args: &str| LlmEvent::ToolCallDelta {
             index,
@@ -1546,7 +1852,8 @@ mod tests {
     fn the_report_renders_for_humans_and_for_a_table() {
         let report = run(perfect());
         let lines = report.lines();
-        assert_eq!(lines.len(), scenarios().len() + 1);
+        // check_model runs only the non-delegation scenarios (all()), plus one summary line.
+        assert_eq!(lines.len(), all() + 1);
         let full = format!("{}/{}", all(), all());
         assert!(lines.last().unwrap().contains(&full), "{}", lines.last().unwrap());
         assert!(report.markdown_row().starts_with(&format!("| `scripted` | {full} |")), "{}", report.markdown_row());
