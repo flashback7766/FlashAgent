@@ -80,6 +80,7 @@ subagents.
 
 | Model | Score | Time | Where it fell down |
 | :--- | :--- | :--- | :--- |
+| `nvidia/nemotron-3-ultra-550b-a55b:free` (OpenRouter) | 13/15 | 46s | `long_stream` stopped at 0 words; `sees_picture` not tested (no image support) |
 | `stealth/space-bunny-alpha` (OpenRouter) | 12/15 | 24s | nothing in particular; 12, 11 and 11 over three runs |
 
 The local models below were measured on an earlier eight-scenario set that has
