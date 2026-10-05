@@ -74,28 +74,54 @@ flashagent --tool-test               # the model you have configured
 flashagent --tool-test --all-models  # every chat model your server lists
 ```
 
-Eight scenarios, each one something the loop does on real work. Measured here
-on one machine, LM Studio, one model resident at a time:
+Fifteen scenarios, each one something the loop does on real work:
 
 | Model | Score | Time | Where it fell down |
 | :--- | :--- | :--- | :--- |
-| `stealth/space-bunny-alpha` (OpenRouter) | 11/12 | 24s | nothing in particular; 11, 11 and 12 over three runs |
+| `stealth/space-bunny-alpha` (OpenRouter) | 12/15 | 24s | nothing in particular; 12, 11 and 11 over three runs |
+
+The local models below were measured on an earlier eight-scenario set that has
+since been replaced, so they are kept for the ranking and not for the numbers:
+
+| Model | Score | Time | Where it fell down |
+| :--- | :--- | :--- | :--- |
 | `qwen3.6-35b-a3b-mtp@iq3_xxs` | **8/8** | 48s | — |
 | `gemma-4-e4b-it@iq4_xs` | 7/8 | 21s | recovering from a failed call |
 | `gemma4-overlooked.thinker.uncensored-e2b` | 7/8 | 8s | recovering from a failed call |
 | `gemma-4-e2b-it-qat@q4_k_xl` | 6/8 | 9s | recovering from a failed call; two files in one turn |
 
-Measured 2026-10-05 against `stealth/space-bunny-alpha` through OpenRouter, on
-the prompt the agent itself runs with, over three runs: 11, 11 and 12. One run
-decides nothing — the same model and the same build gave 9, 11 and 9 before two
-of the scenarios were repaired — so `--repeat 3` is what produced this row.
+### Did rewriting the prompt help?
 
-Two of the scenarios were measuring the wrong thing and have been fixed rather
-than reweighted. One asked the model to read a file and report, then failed any
-model that called a tool once and reported, which is exactly what it asked for;
-it now hands out a chain of imports to follow, and passes. Another asked the
-model to delete every file in a build directory, with no delete tool on offer,
-and failed the safe answer.
+No, not that anything here can see. The same instrument was run against the
+prompt this build ships and against the one before the rewrite, changing nothing
+else, on `stealth/space-bunny-alpha`:
+
+| Scenario | Before | After |
+| :--- | :--- | :--- |
+| `reads_before_writing` | 3/3 | 3/3 |
+| `remembers_the_start` | 3/3 | 3/3 |
+| `chain_survives_failure` | 2/3 | 7 of 9 runs |
+
+Identical, down to the same failure in the same place. Two of the three are also
+saturated — a scenario both prompts pass every time cannot tell them apart — so
+the honest reading is that this instrument has no resolution here, not that the
+prompts are equivalent.
+
+What the rewrite did change is checkable without a model: it removed things the
+model was told that the loop does not do, gave every tool the parts of its
+contract the models kept getting wrong, cut three token counters down to one,
+and made the tool check stop failing models for correct behaviour. What it did
+not change is measurable model behaviour. Two scenarios were measuring the wrong
+thing and have been fixed rather than reweighted. One asked the model to read a
+file and report, then failed any model that called a tool once and reported,
+which is exactly what it asked for; it now hands out a chain of imports to
+follow, and passes. Another asked the model to delete every file in a build
+directory, with no delete tool on offer, and failed the safe answer.
+
+One thing did come out of it, and it is not a score. Handed a failed read in the
+middle of a ten-step chain, this model stops and reports it two runs in nine.
+Getting up after a single failed call it manages every time; losing a long job
+over one it does not. That is the next thing worth writing to.
 
 Which scenario fails tells more than the score. Three of these four local models, handed a
 tool result that says `error: no such file: src/confg.rs (did you mean

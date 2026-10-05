@@ -144,6 +144,21 @@ pub fn scenarios() -> Vec<Scenario> {
             title: "looks at a picture",
             matters: "a model that cannot see cannot review a screenshot or a design",
         },
+        Scenario {
+            key: "chain_survives_failure",
+            title: "keeps a long job going through a failure",
+            matters: "one bad read is routine; a model that stops the whole job over it never finishes anything",
+        },
+        Scenario {
+            key: "reads_before_writing",
+            title: "reads a file before changing it",
+            matters: "writing blind costs the rest of the file, which is the whole file",
+        },
+        Scenario {
+            key: "remembers_the_start",
+            title: "still knows a fact from the start",
+            matters: "this is what compaction has to keep, or every trim costs a re-read",
+        },
     ]
 }
 
@@ -931,7 +946,148 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         },
     ));
 
+    // 13. A chain that hits a wall halfway. Scenario 7 covers getting up after one
+    //     failed call; it cannot show whether a long job survives one, which is
+    //     where an agent is actually lost.
+    let mut chain: Vec<ChatMessage> = vec![
+        system("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user(
+            "Read src/main.rs and follow what it imports. Every file you read names the next one to \
+             read; stop when a file names none, then report how many files you read. One tool call \
+             per step.",
+        ),
+    ];
+    let mut steps = 0usize;
+    let mut stop: Option<String> = None;
+    for _ in 0..TEN_STEPS {
+        let turn = run_turn(llm, &chain, timeout).await;
+        if let Some(e) = turn.error {
+            stop = Some(e);
+            break;
+        }
+        let Some((name, args, _)) = turn.first_call().cloned() else { break };
+        steps += 1;
+        if !offered.contains(&name.as_str()) {
+            stop = Some(format!("called {name}, which was never offered"));
+            break;
+        }
+        chain.push(called(&format!("call_{steps}"), &name, &args));
+        let next = match TEN_STEPS.saturating_sub(steps) {
+            0 => "no imports".to_string(),
+            left => format!("use crate::step_{left};"),
+        };
+        // One read fails. It is not a dead end — the chain is still walkable —
+        // and abandoning a long job because one read failed is the thing worth
+        // knowing about.
+        let body = if steps == TEN_STEPS / 2 {
+            format!("error: src/step_{}.rs is temporarily unreadable (locked by another process)", TEN_STEPS - steps)
+        } else {
+            format!("1: {next}\n2:     println!(\"hi\");\n3: }}")
+        };
+        chain.push(ChatMessage::tool_result(format!("call_{steps}"), body));
+    }
+    results.push((
+        "chain_survives_failure".to_string(),
+        match (stop, steps) {
+            (Some(why), _) => Outcome::Fail { detail: format!("stopped at {steps} of {TEN_STEPS}: {why}"), secs: 0.0, tokens: 0 },
+            (None, s) if s >= TEN_STEPS => Outcome::Pass { style: CallStyle::Native, secs: 0.0, tokens: 0 },
+            // A model that stopped here stopped right after the failed read.
+            (None, s) => Outcome::Fail { detail: format!("gave up at step {s}, right after the read failed"), secs: 0.0, tokens: 0 },
+        },
+    ));
+
+    // 14. Change something in a file that has not been read. The prompt tells
+    //     the model to read before it changes; nothing above measured whether
+    //     it listens, and writing blind is how the rest of a file gets lost.
+    let mut messages = vec![
+        system("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user(
+            "In notes.txt, change the line reading PORT=1 to read PORT=2. Leave every other line \
+             exactly as it is.",
+        ),
+    ];
+    let first = run_turn(llm, &messages, timeout).await;
+    let outcome = match &first.error {
+        Some(e) => first.failed(e),
+        None => match first.first_call().cloned() {
+            Some((name, args, _)) if name == "read_lines" => {
+                messages.push(called("call_1", &name, &args));
+                messages.push(ChatMessage::tool_result(
+                    "call_1",
+                    "1: NAME=payments\n2: PORT=1\n3: WORKERS=4",
+                ));
+                let second = run_turn(llm, &messages, timeout).await;
+                judge_call(&second, "write_file", |args| {
+                    let content = args.get("content").and_then(|c| c.as_str()).unwrap_or_default();
+                    let kept = ["NAME=payments", "WORKERS=4"].iter().all(|line| content.contains(line));
+                    if content.contains("PORT=2") && kept {
+                        Ok(())
+                    } else if !kept {
+                        Err(format!("rewrote the file down to {content:?}, losing the lines it was told to keep"))
+                    } else {
+                        Err("never actually changed PORT".to_string())
+                    }
+                })
+            }
+            Some((name, _, _)) => Outcome::Fail {
+                detail: format!("called {name} without reading the file first"),
+                secs: first.secs,
+                tokens: first.tokens,
+            },
+            None => Outcome::Fail {
+                detail: "answered without reading the file".to_string(),
+                secs: first.secs,
+                tokens: first.tokens,
+            },
+        },
+    };
+    results.push(("reads_before_writing".to_string(), outcome));
+
+    // 15. A fact from the first turn, needed in the last. This is what
+    //     compaction has to get right: drop it and the model re-reads the file
+    //     to find out what it was told twenty turns ago, which costs a round
+    //     trip every time the transcript is trimmed.
+    let mut messages = vec![
+        system("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user("Read src/app.conf and remember what it says."),
+        called("call_1", "read_lines", r#"{"path":"src/app.conf","count":4}"#),
+        ChatMessage::tool_result("call_1", "1: NAME=payments\n2: PORT=8080\n3: WORKERS=4"),
+    ];
+    for n in 1..=8 {
+        let id = format!("fill{n}");
+        messages.push(called(&id, "read_lines", &format!(r#"{{"path":"src/filler_{n}.rs","count":2}}"#)));
+        messages.push(ChatMessage::tool_result(&id, format!("{n}: filler_{n} does nothing\n{}: filler_{n} returns nothing", n + 1)));
+    }
+    messages.push(ChatMessage::user(
+        "Without reading anything else: what is PORT set to in src/app.conf?",
+    ));
+    let turn = run_turn(llm, &messages, timeout).await;
+    results.push((
+        "remembers_the_start".to_string(),
+        match &turn.error {
+            Some(e) => turn.failed(e),
+            None if turn.text.contains("8080") => Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens },
+            None if turn.text.trim().is_empty() => Outcome::Fail {
+                detail: "called a tool instead of answering from what it was told".to_string(),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+            None => Outcome::Fail {
+                detail: format!("answered {} without the port it was given", snippet(&turn.text)),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+        },
+    ));
+
     CheckReport { model: model.to_string(), results }
+}
+
+/// An assistant turn that calls one tool, the way a loop hands it back.
+fn called(id: &str, name: &str, args: &str) -> ChatMessage {
+    let mut m = ChatMessage::assistant("");
+    m.tool_calls = vec![flashagent_llm::ToolCall { id: id.into(), name: name.into(), args_json: args.into() }];
+    m
 }
 
 /// How many steps the chain scenario gives a model before calling it a drifter.
@@ -1097,6 +1253,22 @@ mod tests {
             // One word, and the only right one. Ahead of the chain's closing
             // remark: the loop makes exactly ten requests and never reads it.
             text("Red."),
+            // The chain again, this time through a failed read.
+            call("read_lines", r#"{"path":"src/main.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/lib.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/config.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/routes.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/state.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/errors.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/agent.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/tasks.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/tools.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/render.rs","count":1}"#),
+            // Read first, then write: one line changed, the rest kept.
+            call("read_lines", r#"{"path":"notes.txt","count":3}"#),
+            call("write_file", r#"{"path":"notes.txt","content":"NAME=payments\nPORT=2\nWORKERS=4"}"#),
+            // The port it was told eight turns ago.
+            text("It is set to 8080."),
             text("It has a main that prints."),
         ]
     }
