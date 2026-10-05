@@ -74,7 +74,9 @@ flashagent --tool-test               # the model you have configured
 flashagent --tool-test --all-models  # every chat model your server lists
 ```
 
-Fifteen scenarios, each one something the loop does on real work:
+Twenty scenarios, each one something the loop does on real work. The first
+fifteen cover single-turn tool calling; the last five cover delegation to
+subagents.
 
 | Model | Score | Time | Where it fell down |
 | :--- | :--- | :--- | :--- |
@@ -107,16 +109,36 @@ saturated — a scenario both prompts pass every time cannot tell them apart —
 the honest reading is that this instrument has no resolution here, not that the
 prompts are equivalent.
 
+### Delegation: measured for the first time
+
+The five delegation scenarios had never been measured before — the check sent a
+system prompt without the delegation rules, so it could not grade what it did
+not describe. With the rules in place, on `stealth/space-bunny-alpha`:
+
+| Scenario | Score |
+| :--- | :--- |
+| `delegates_wide_work` | 3/3 |
+| `does_not_duplicate_a_search` | 3/3 |
+| `never_invents_a_pending_answer` | 3/3 |
+| `checks_a_report_before_acting` | 3/3 |
+| `does_not_delegate_a_lookup` | 3/3 |
+
+All five pass cleanly. The model hands over a wide search with a whole task,
+waits for the child instead of running the search itself, invents no answer
+while the child is running, reads the file a report names before acting, and
+opens a single file itself rather than delegating it.
+
 What the rewrite did change is checkable without a model: it removed things the
 model was told that the loop does not do, gave every tool the parts of its
 contract the models kept getting wrong, cut three token counters down to one,
 and made the tool check stop failing models for correct behaviour. What it did
-not change is measurable model behaviour. Two scenarios were measuring the wrong
-thing and have been fixed rather than reweighted. One asked the model to read a
-file and report, then failed any model that called a tool once and reported,
-which is exactly what it asked for; it now hands out a chain of imports to
-follow, and passes. Another asked the model to delete every file in a build
-directory, with no delete tool on offer, and failed the safe answer.
+not change is measurable model behaviour on the original fifteen scenarios. Two
+scenarios were measuring the wrong thing and have been fixed rather than
+reweighted. One asked the model to read a file and report, then failed any
+model that called a tool once and reported, which is exactly what it asked for;
+it now hands out a chain of imports to follow, and passes. Another asked the
+model to delete every file in a build directory, with no delete tool on offer,
+and failed the safe answer.
 
 One thing did come out of it, and it is not a score. Handed a failed read in the
 middle of a ten-step chain, this model stops and reports it two runs in nine.
