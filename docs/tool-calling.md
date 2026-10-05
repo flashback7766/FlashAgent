@@ -15,7 +15,7 @@ so a published table can be checked instead of believed.
 
 ## What is measured
 
-Eight small scenarios, each one something the agent loop does on real work.
+Fifteen small scenarios, each one something the agent loop does on real work.
 A model that fails one fails a real task the same way, later.
 
 | Scenario | The model is asked to | Why a failure hurts |
@@ -28,6 +28,18 @@ A model that fails one fails a real task the same way, later.
 | **keeps content exact through JSON** | write a file containing quotes and newlines | content mangled in transit corrupts the file being written |
 | **recovers from a failed tool call** | after `error: no such file …`, retry with the corrected path | tools fail constantly; a model that cannot adapt stalls on the first one |
 | **asks for two files in one turn** | read two files with two calls in one turn | one call per turn turns a ten-file job into ten round trips |
+| **calls only the tools it was given** | answer a question only a read can answer | a name it was never offered is a call the loop cannot run |
+| **keeps a long answer coming to the end** | keep going past two hundred lines | an answer that stops halfway leaves the transcript wrong and the work undone |
+| **stays on the rails over many steps** | follow a chain of ten imports, one call a step | drift shows up in step ten, not step two |
+| **looks at a picture** | name the colour in an image | a model that cannot see cannot review a screenshot, and never says so |
+| **keeps a long job going through a failure** | follow the same ten-step chain with one read failing halfway | one bad read is routine; a model that stops the whole job over it never finishes anything |
+| **reads a file before changing it** | change one line of a file it has not read | writing blind costs the rest of the file, which is the whole file |
+| **still knows a fact from the start** | answer a question about a fact given nine turns earlier | this is what compaction has to keep, or every trim costs a re-read |
+
+The last three exist because the twelve before them all asked for one tool call
+and graded it, which says nothing about multi-step work — and two of them pass on
+almost every model, so they are there to catch a regression rather than to
+separate prompts.
 
 Sampling is the same for every model: temperature 0, reasoning off, 1024
 output tokens, one attempt per scenario. The fixtures leave nothing open to
