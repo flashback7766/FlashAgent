@@ -15,7 +15,7 @@
 
 </div>
 
-> **Status:** Beta b477 — actively developed by a solo maintainer, and developed with itself: the maintainer uses FlashAgent (Claude Sonnet 5.5 via OpenRouter) to change its own code, alongside other coding agents. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
+> **Status:** Beta b573 — non-actively developed by a solo maintainer, and developed with itself: the maintainer uses FlashAgent (Ornith 1.5 35B A3B Locally in IQ3_M) to change its own code, alongside other coding agents. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
 
 ## Quick start
 
