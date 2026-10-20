@@ -548,6 +548,8 @@ async fn main() -> Result<()> {
         web_enabled: Some(config.web_tools),
         context_window: Some(context_capacity),
         mcp_manager: Some(mcp_manager.clone()),
+        // The tools the owner has switched off: not offered, and refused.
+        disabled_tools: Some(config.disabled_tools.clone()),
     })?);
     // A closed terminal window (SIGHUP) or a kill (SIGTERM) skips the normal
     // exit; the background tasks run in their own process groups and would
@@ -579,6 +581,9 @@ async fn main() -> Result<()> {
         flashagent_tools::agent_tools(tools_arc.clone(), source.clone(), state.clone(), Some(agent_tx));
     let perm: &'static PermissionedTools =
         Box::leak(Box::new(PermissionedTools::new(Arc::new(composite), Some(tools_arc.clone()), state.clone())));
+    // The three tools only the top has are not the built-in ones, so the
+    // permission layer is where their switch is kept.
+    perm.set_disabled_tools(config.disabled_tools.clone());
 
     // Project and global memory docs, injected into the system prompt.
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_default();

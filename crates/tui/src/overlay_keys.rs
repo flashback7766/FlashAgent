@@ -74,6 +74,7 @@ impl App {
                 Overlay::Providers(view) => self.providers_key(cx, view, code, mods).await,
                 Overlay::Rewind(card) => self.rewind_key(cx, card, code),
                 Overlay::Effort(menu) => self.effort_menu_key(cx, menu, code),
+                Overlay::Tools(view) => self.tools_key(cx, view, code, mods),
                 Overlay::Palette(menu) => {
                     let flow = self.palette_key(cx, menu, code, mods).await;
                     self.renderer.request_reprint();
@@ -284,6 +285,11 @@ impl App {
         let shown_effort = self.goal_state.as_ref().map_or(self.current_effort.clone(), |g| g.effort.clone());
         match settings.handle_key(code, mods) {
             SettingsAction::Close => self.close_settings(cx, settings, shown_mode, &shown_effort),
+            SettingsAction::OpenTools => {
+                // The list of tools, with what is off in it already.
+                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
+                self.tools_command(cx);
+            }
             SettingsAction::OpenProviders => {
                 self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
                 self.open_providers_view();
@@ -509,6 +515,44 @@ impl App {
                 let _ = cx.tx.send(UiEvent::Key(KeyCode::Enter, KeyModifiers::NONE));
             }
         }
+    }
+
+    /// The list of tools: Space turns one on or off, and the switch takes
+    /// effect in the conversation that is running.
+    fn tools_key(&mut self, cx: &LoopCtx<'_>, mut view: flashagent_tui::tools_view::ToolsView, code: KeyCode, mods: KeyModifiers) {
+        use flashagent_tui::tools_view::ToolsAction;
+        match view.handle_key(code, mods) {
+            ToolsAction::Close => return,
+            ToolsAction::Toggle(name, on) => {
+                self.set_tool_switched(cx, &name, on);
+                // The list says what is off, so it is read from the view.
+                let off = view.disabled();
+                self.save_disabled_tools(cx, off);
+            }
+            ToolsAction::None => {}
+        }
+        self.overlay = Some(Overlay::Tools(view));
+    }
+
+    /// One tool was turned on or off: the schemas the model reads and the
+    /// calls it may make both follow at once.
+    pub(crate) fn set_tool_switched(&mut self, cx: &LoopCtx<'_>, name: &str, on: bool) {
+        let mut off = cx.perm.disabled_tools();
+        off.retain(|n| n != name);
+        if !on {
+            off.push(name.to_string());
+        }
+        self.save_disabled_tools(cx, off);
+    }
+
+    /// The tools that are off, in the two places that keep them: the built-in
+    /// ones (which a subagent gets too) and the permission layer (which holds
+    /// the three only the top has). The config keeps them for the next run.
+    pub(crate) fn save_disabled_tools(&mut self, cx: &LoopCtx<'_>, off: Vec<String>) {
+        cx.tools_arc.set_disabled_tools(off.clone());
+        cx.perm.set_disabled_tools(off.clone());
+        self.config.disabled_tools = off;
+        self.save_config();
     }
 
     async fn mcp_key(&mut self, cx: &LoopCtx<'_>, mut modal: McpModal, code: KeyCode, mods: KeyModifiers) {

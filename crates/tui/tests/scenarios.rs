@@ -1252,6 +1252,35 @@ fn an_export_can_be_written_where_the_person_says() {
 }
 
 #[test]
+fn a_tool_that_is_turned_off_is_not_offered_to_the_model() {
+    let server = MockServer::start(vec![Reply::Text("Hello.".into()), Reply::Text("After.".into())]);
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+    ask(&term, "hello", "Hello.");
+
+    // The list of tools, with the first one under the cursor.
+    term.type_text("/tools");
+    term.send(ENTER);
+    term.wait_for("Tools", WAIT);
+    term.send(" ");
+    std::thread::sleep(Duration::from_millis(200));
+    term.send(ESC);
+    std::thread::sleep(Duration::from_millis(200));
+
+    ask(&term, "after", "After.");
+    let tools = &server.turns()[1].body["tools"];
+    let names: Vec<&str> = tools
+        .as_array()
+        .expect("the request has tools")
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap_or_default())
+        .collect();
+    assert!(!names.contains(&"read_file"), "the tool is still offered: {names:?}");
+    assert!(names.contains(&"write_file"), "the other tools are: {names:?}");
+    quit(&mut term);
+}
+
+#[test]
 fn a_misspelled_model_is_offered_the_closest_one() {
     let server = MockServer::start(vec![Reply::Text("Hello.".into())]);
     let home = Home::new();

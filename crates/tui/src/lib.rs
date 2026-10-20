@@ -26,6 +26,7 @@ pub mod select;
 pub mod settings;
 pub mod startup;
 pub mod tasks_view;
+pub mod tools_view;
 pub mod theme;
 mod tool_cards;
 pub mod tips;

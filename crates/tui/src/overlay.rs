@@ -24,6 +24,8 @@ pub(crate) enum Overlay {
     Tasks(flashagent_tui::TasksModal),
     /// Ctrl+K: every command, searched by typing.
     Palette(SelectMenu<String>),
+    /// /tools: what the model may call, and what it may not.
+    Tools(flashagent_tui::tools_view::ToolsView),
 }
 
 impl Overlay {
@@ -50,6 +52,7 @@ impl Overlay {
             Overlay::Memory(modal) => modal.render(width),
             Overlay::Mcp(modal) => modal.render(width),
             Overlay::Tasks(modal) => modal.render(width),
+            Overlay::Tools(view) => view.render(width),
         }
     }
 }

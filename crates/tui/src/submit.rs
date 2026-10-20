@@ -37,6 +37,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/diff, /commit <msg>", "the changed lines and untracked files; commit the staged changes"),
     ("/export [md|html|jsonl] [path]", "write the conversation to a file, where you say"),
     ("/editor, Ctrl+X Ctrl+E", "write the prompt in an external editor"),
+    ("/tools", "what the model may call, and what it may not"),
     ("/mcp [list|market|test|add|reload]", "Model Context Protocol servers"),
     ("/tasks", "background commands: their output, and stopping one"),
     ("/sampling", "sampling parameters (advanced)"),
@@ -126,7 +127,7 @@ fn while_running(name: &str) -> WhileRunning {
     match name {
         "help" | "?" | "whatsnew" | "changelog" | "memory" | "memories" | "context" | "verbose" | "expand" | "think"
         | "o" | "diff" | "commit" | "settings" | "config" | "sampling" | "params" | "effort" | "thinking" | "t"
-        | "model" | "models" | "m" | "mode" | "skills" => WhileRunning::Now,
+        | "model" | "models" | "m" | "mode" | "skills" | "tools" => WhileRunning::Now,
         "compact" | "clear" | "export" | "rewind" => WhileRunning::AfterTurn,
         "goal" | "resume" | "regenerate" | "retry" | "update" | "channel" | "mcp" | "editor" | "exit" | "quit" | "q"
         | "uninstall" => WhileRunning::Refuse,
@@ -134,6 +135,16 @@ fn while_running(name: &str) -> WhileRunning {
         _ if name.is_empty() || name.contains(['/', '\\', '.']) => WhileRunning::Text,
         _ if find_skill_file(name).is_some() => WhileRunning::Refuse,
         _ => WhileRunning::Unknown,
+    }
+}
+
+/// The first sentence of a tool's description: the list is a list, not a
+/// manual.
+fn first_sentence(text: &str) -> String {
+    let text = text.trim();
+    match text.find(". ") {
+        Some(at) => text[..at + 1].to_string(),
+        None => text.chars().take(90).collect(),
     }
 }
 
@@ -387,6 +398,7 @@ impl App {
             "rewind" => self.rewind_command(cx, arg),
             "commit" => self.git_commit(arg),
             "export" => self.export_conversation(cx, arg),
+            "tools" => self.tools_command(cx),
             _ => {
                 if let Some(skill) = name.strip_prefix("skill:") {
                     self.run_skill(cx, skill);
@@ -1028,6 +1040,27 @@ impl App {
 
     /// `/export <format> [path]`: the format is the first word, the path is
     /// what is left of it. A path with spaces is written in quotes.
+    /// `/tools`: the list of tools, and which of them the model may call. A
+    /// tool that is off is not in the schemas the model reads, and a call to
+    /// one is refused.
+    pub(crate) fn tools_command(&mut self, cx: &LoopCtx<'_>) {
+        use flashagent_tui::tools_view::{ToolRow, ToolsView};
+        let off = cx.perm.disabled_tools();
+        let core = self.config.toolset_profile != flashagent_core::ToolsetProfile::Compact;
+        let web = self.config.web_tools;
+        let vision = cx.tools_arc.vision_supported();
+        let rows: Vec<ToolRow> = flashagent_core::registry::TOOLS
+            .iter()
+            .map(|def| ToolRow {
+                name: def.name.to_string(),
+                description: first_sentence(def.description),
+                on: !off.iter().any(|n| n == def.name),
+                available: flashagent_core::registry::offered(def, core, vision, web, true),
+            })
+            .collect();
+        self.open_overlay(Overlay::Tools(ToolsView::new(rows)));
+    }
+
     fn export_conversation(&mut self, cx: &LoopCtx<'_>, arg: &str) {
         // A file with only a header, in the project folder, helps nobody.
         if !self.history.iter().any(flashagent_core::is_prompt) {

@@ -20,6 +20,8 @@ pub enum SettingsAction {
     OpenSamplingMenu,
     CheckUpdatesNow,
     OpenMcpMenu,
+    /// Settings -> Tools: what the model may call.
+    OpenTools,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -274,6 +276,10 @@ impl SettingsView {
         }
         SettingsTab::Tools => vec![
             ("Toolset profile", self.config.toolset_profile.label().to_string()),
+            ("Tools on/off", {
+                let off = self.config.disabled_tools.len();
+                if off == 0 { "Every tool is on".into() } else { format!("{} switched off", crate::plural(off, "tool", "tools")) }
+            }),
             ("MCP servers", "Configured servers and the marketplace".into()),
             ("Run tool test", self.tool_test_status.clone().unwrap_or_else(|| "Probe function calling".into())),
         ],
@@ -473,8 +479,9 @@ impl SettingsView {
                     self.is_dirty = true;
                     SettingsAction::None
                 }
-                1 => SettingsAction::OpenMcpMenu,
-                2 => SettingsAction::RunToolTest,
+                1 => SettingsAction::OpenTools,
+                2 => SettingsAction::OpenMcpMenu,
+                3 => SettingsAction::RunToolTest,
                 _ => SettingsAction::None,
             },
         }
@@ -830,6 +837,8 @@ mod tests {
 
         view.handle_key(KeyCode::Char('6'), KeyModifiers::empty());
         assert_eq!(view.active_tab, SettingsTab::Tools);
+        view.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(view.handle_key(KeyCode::Enter, KeyModifiers::empty()), SettingsAction::OpenTools);
         view.handle_key(KeyCode::Down, KeyModifiers::empty());
         assert_eq!(view.handle_key(KeyCode::Enter, KeyModifiers::empty()), SettingsAction::OpenMcpMenu);
         view.handle_key(KeyCode::Down, KeyModifiers::empty());

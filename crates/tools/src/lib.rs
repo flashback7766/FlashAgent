@@ -80,6 +80,9 @@ pub struct BuiltinToolsConfig {
     /// Small windows get fewer tools.
     pub context_window: Option<usize>,
     pub mcp_manager: Option<Arc<mcp::McpManager>>,
+    /// Tools the owner has switched off. They are not offered, and a call to
+    /// one is refused.
+    pub disabled_tools: Option<Vec<String>>,
 }
 
 /// One per session.
@@ -104,6 +107,9 @@ pub struct BuiltinTools {
     /// Set from what the server said about the model.
     vision_supported: Arc<std::sync::atomic::AtomicBool>,
     mcp_manager: Arc<mcp::McpManager>,
+    /// The tools that are off. Shared with the app, so the switch takes effect
+    /// in the conversation that is running.
+    disabled: Arc<std::sync::RwLock<Vec<String>>>,
 }
 
 impl BuiltinTools {
@@ -131,6 +137,7 @@ impl BuiltinTools {
             model_name: Arc::new(std::sync::RwLock::new(String::new())),
             vision_supported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_manager,
+            disabled: Arc::new(std::sync::RwLock::new(config.disabled_tools.unwrap_or_default())),
         })
     }
 
@@ -151,6 +158,23 @@ impl BuiltinTools {
         if let Ok(mut lock) = self.toolset_profile.write() {
             *lock = profile;
         }
+    }
+
+    /// The tools that are off. The app changes them while the session runs.
+    pub fn set_disabled_tools(&self, names: Vec<String>) {
+        if let Ok(mut off) = self.disabled.write() {
+            *off = names;
+        }
+    }
+
+    /// The tools that are off right now.
+    pub fn disabled_tools(&self) -> Vec<String> {
+        self.disabled.read().map(|d| d.clone()).unwrap_or_default()
+    }
+
+    /// Whether this tool is one of the ones that are off.
+    pub fn tool_disabled(&self, name: &str) -> bool {
+        self.disabled.read().map(|d| d.iter().any(|n| n == name)).unwrap_or(false)
     }
 
     pub fn set_web_enabled(&self, enabled: bool) {
@@ -461,6 +485,16 @@ impl WritePreview for BuiltinTools {
 #[async_trait]
 impl ToolExec for BuiltinTools {
     async fn execute(&self, call: &ToolCall) -> ToolOutput {
+        if self.tool_disabled(&call.name) {
+            return ToolOutput {
+                content: format!(
+                    "the tool '{}' is switched off in this session · the user turned it off, so do not call it",
+                    call.name
+                ),
+                is_error: true,
+                images: Vec::new(),
+            };
+        }
         // The only tool whose result is a picture, not text.
         if call.name == "view_image" {
             let args = call.args_json.clone();
@@ -498,6 +532,8 @@ impl ToolExec for BuiltinTools {
             // `BuiltinTools` is what a subagent is given, so the parent-only
             // tools are not offered from here.
             .filter(|def| registry::offered(def, core, vision, web, false))
+            // A tool the owner has switched off is not on the table at all.
+            .filter(|def| !self.tool_disabled(def.name))
             .map(|def| ToolSpec {
                 name: def.name.to_string(),
                 description: def.description.to_string(),
