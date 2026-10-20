@@ -419,6 +419,13 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                         self.draw(cx, None);
                         let source_compact = cx.source.clone();
                         let before = self.context_usage.total_used();
+                        // The room one request may carry: the window minus the
+                        // prompt, the schemas and what the turn holds now.
+                        let room = self
+                            .context_usage
+                            .total_capacity
+                            .saturating_sub(self.context_usage.system_tokens + self.context_usage.tools_tokens)
+                            .saturating_sub(before);
                         let compacted = if let Some(archive) = compaction_archive_path(cx.session_id) {
                             // This handler is the event loop, so awaiting the compaction
                             // straight through would freeze the card until the summary
@@ -437,6 +444,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                                     Some(before),
                                     Some(&sink),
                                     false,
+                                    Some(room),
                                 );
                                 tokio::pin!(fut);
                                 let mut tick = tokio::time::interval_at(

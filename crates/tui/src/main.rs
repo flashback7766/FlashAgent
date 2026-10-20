@@ -2104,7 +2104,7 @@ mod tests {
         ];
         // A compaction the person asked for: it happens even when the summary
         // is longer than the exchange it replaces.
-        let result = compact_context_with_sink(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None, None, true)
+        let result = compact_context_with_sink(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None, None, true, None)
             .await
             .expect("one exchange is enough to compact");
         assert!(history[0].content.contains("Compacted Conversation History"), "{}", history[0].content);
@@ -2190,7 +2190,7 @@ mod tests {
         let mut history = long_history();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let sink = SummarySink::ui(tx);
-        let result = compact_context_with_sink(&SplitCompaction, &mut history, None, &archive, None, Some(&sink), true)
+        let result = compact_context_with_sink(&SplitCompaction, &mut history, None, &archive, None, Some(&sink), true, None)
             .await
             .expect("the summary is accepted");
         assert!(result.summary.contains("## Objective"));
@@ -2232,6 +2232,57 @@ mod tests {
     }
 
     /// A conversation long enough to be worth compacting.
+    /// A conversation that does not fit in one request is summarized in parts,
+    /// and the parts are summarized into one.
+    struct CountingCompaction {
+        calls: std::sync::Mutex<Vec<usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmSource for CountingCompaction {
+        async fn turn(
+            &self,
+            messages: &[ChatMessage],
+            _tools: &[flashagent_llm::ToolSpec],
+        ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+            let parts = messages.iter().filter(|m| m.role == flashagent_llm::Role::User).count();
+            self.calls.lock().unwrap().push(parts);
+            let events = vec![
+                Ok(flashagent_llm::LlmEvent::TextDelta(SHAPED_SUMMARY.into())),
+                Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_conversation_too_long_for_one_request_is_summarized_in_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let mut history = long_history();
+        // Big enough that the parts have to be cut.
+        history.push(ChatMessage::assistant("a long middle ".repeat(4000)));
+        history.push(ChatMessage::user("second question"));
+        history.push(ChatMessage::assistant("second answer"));
+
+        let source = CountingCompaction { calls: std::sync::Mutex::new(Vec::new()) };
+        // A room of 4k tokens: the conversation is far bigger.
+        let result = compact_context_with_sink(&source, &mut history, None, &archive, None, None, true, Some(4_000))
+            .await
+            .expect("the summary is accepted");
+        assert!(result.summary.contains("## Objective"));
+
+        let calls = source.calls.lock().unwrap().clone();
+        assert!(calls.len() >= 3, "the parts are summarized one by one and then together: {calls:?}");
+        // The last call is the reduction: the parts, not the conversation.
+        assert_eq!(calls.last().copied(), Some(2), "the reduction asks with the instruction alone: {calls:?}");
+        // The archive keeps what was replaced; the last turn stays live.
+        let archived = std::fs::read_to_string(&archive).unwrap();
+        assert!(archived.contains("first question"));
+        assert!(archived.contains("a long middle"));
+        assert!(!archived.contains("second answer"), "the current turn stays live");
+    }
+
     fn long_history() -> Vec<ChatMessage> {
         vec![
             ChatMessage::system("SYSTEM PROMPT"),
