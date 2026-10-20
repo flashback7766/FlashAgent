@@ -3799,7 +3799,7 @@ fn the_interface_speaks_the_language_the_config_names() {
     assert!(screen.contains("Ctrl+D"), "the keys are gone:\n{screen}");
 
     // The tips under the composer.
-    assert!(screen.contains("Tip:"), "the tips lost their row:\n{screen}");
+    assert!(screen.contains("Совет:"), "the tips lost their row:\n{screen}");
 
     // /help is in Russian too. The list is longer than the window, so the
     // check is on what is on screen: the keys section and a command row.
