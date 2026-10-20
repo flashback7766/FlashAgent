@@ -57,9 +57,9 @@ few lines of Markdown):
 
 | Turns | First frame | Each frame while the model streams | 2026-09-22 (first / stream) |
 |---:|---:|---:|---:|
-| 100 | 1.7 ms | 0.08 ms | 0.6 ms / 0.03 ms |
-| 1,000 | 16.4 ms | 0.86 ms | 6.6 ms / 0.37 ms |
-| 10,000 | 179.8 ms | 10.19 ms | 64 ms / 3.4 ms |
+| 100 | 1.2 ms | 0.01 ms | 0.6 ms / 0.03 ms |
+| 1,000 | 13.5 ms | 0.17 ms | 6.6 ms / 0.37 ms |
+| 10,000 | 151.1 ms | 1.78 ms | 64 ms / 3.4 ms |
 
 ```bash
 cargo test --release -p flashagent-tui --test numbers -- --ignored --nocapture
@@ -67,15 +67,18 @@ cargo test --release -p flashagent-tui --test numbers -- --ignored --nocapture
 
 The first frame renders everything once. After that, rows that can no longer
 change are kept and shared between frames. Only the turn in progress is
-rendered again.
+rendered again. A new question used to throw the kept rows away and draw the
+whole session again; since the cache survives a new question, only the new
+turn is drawn.
 
 The 2026-09-22 column was measured on a quieter machine: the same commit
 measured on this laptop in 2026-10-20 gives 9.4 ms for a 1,000-turn frame
-against the 6.6 ms written down here. Measured side by side on the same
-laptop, the code of 2026-10-20 is about 1.7 times slower than the code of
-2026-09-22 (16.4 ms against 9.4 ms for 1,000 turns). The growth is in the
-code, and it is tracked as its own task rather than hidden by writing the
-older numbers back.
+against the 6.6 ms written down here. The first frame is still about 1.5
+times slower than it was in September, because the width of a row is counted
+by graphemes and cells instead of by characters -- that is what keeps wide
+characters, emoji and wrapped code from breaking the layout (commit
+`b992f215`, 2026-09-24). The frame that matters while the model writes is
+several times faster than before: 1.78 ms against 10.19 ms at 10,000 turns.
 
 Numbers taken while the machine is also building something are not numbers:
 the first measurement of 2026-10-20 came out three times too high because a
