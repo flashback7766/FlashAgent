@@ -18,6 +18,7 @@ use flashagent_core::{
 };
 use flashagent_llm::{ChatMessage, LlmBackend};
 use flashagent_tools::{BuiltinTools, BuiltinToolsConfig};
+use flashagent_tui::i18n::tr;
 use flashagent_tui::goal::{commit_goal_milestone, format_plan, GoalBudgets, GoalLedger, MILESTONE_COMMIT_INTERVAL};
 use flashagent_tui::MascotMood;
 use flashagent_tui::{
@@ -1326,7 +1327,7 @@ fn resolve_session_start(session_start: SessionStart, cwd_display: &str) -> (Opt
         SessionStart::Continue => {
             let newest = sessions_dir().and_then(|dir| sessions_in(&dir, cwd_display).into_iter().next());
             if newest.is_none() {
-                session_note = Some("No saved session in this folder yet; starting a new one.".to_string());
+                session_note = Some(tr("No saved session in this folder yet; starting a new one.").to_string());
             }
             newest.map(|s| s.id)
         }
@@ -2840,7 +2841,7 @@ mod tests {
         let parsed = parse_recap_and_suggestion_json(raw);
         assert_eq!(
             parsed,
-            Some(("Explained Swift concepts".to_string(), Some("Show mascot code".to_string())))
+            Some(("Explained Swift concepts".to_string(), Some(tr("Show mascot code").to_string())))
         );
 
         let generic = "{\"recap\": \"Response generated\", \"suggestion\": \"What's next?\"}";
@@ -2851,19 +2852,19 @@ mod tests {
     fn test_sanitize_user_suggestion_conversions() {
         assert_eq!(
             sanitize_user_suggestion("«Tell me about Swift features»"),
-            Some("Tell me about Swift features".to_string())
+            Some(tr("Tell me about Swift features").to_string())
         );
         assert_eq!(
             sanitize_user_suggestion("show code examples of Swift"),
-            Some("Show code examples of Swift".to_string())
+            Some(tr("Show code examples of Swift").to_string())
         );
         assert_eq!(
             sanitize_user_suggestion("tell me about Swift features."),
-            Some("Tell me about Swift features".to_string())
+            Some(tr("Tell me about Swift features").to_string())
         );
         assert_eq!(
             sanitize_user_suggestion("Would you like to know more about memory safety?"),
-            Some("Explain more about memory safety".to_string())
+            Some(tr("Explain more about memory safety").to_string())
         );
         assert_eq!(sanitize_user_suggestion("What's next?"), None);
         assert_eq!(sanitize_user_suggestion("Next"), None);

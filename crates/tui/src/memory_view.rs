@@ -343,8 +343,8 @@ impl MemoryModal {
                 let selected = i == self.selected;
                 let marker = if selected { format!("{accent}▸{reset}") } else { " ".to_string() };
                 let scope_tag = match row.scope {
-                    Scope::Project => "project",
-                    Scope::Global => "global ",
+                    Scope::Project => crate::i18n::tr("project"),
+                    Scope::Global => crate::i18n::tr("global "),
                 };
                 let name = if selected {
                     format!("{bright}{}{reset}", row.entry.name)
@@ -419,7 +419,7 @@ impl MemoryModal {
         match &self.summary {
             SummaryState::None | SummaryState::Writing => {
                 let words = crate::anim::shimmer(
-                    "Reading what FlashAgent remembers and writing it up…",
+                    crate::i18n::tr("Reading what FlashAgent remembers and writing it up…"),
                     t,
                     2000,
                     crate::anim::Rgb(135, 130, 125),

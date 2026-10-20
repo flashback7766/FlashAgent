@@ -1,4 +1,5 @@
 use super::*;
+use flashagent_tui::i18n::{tr, tr_fill};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct SavedToolCall {
@@ -404,7 +405,7 @@ impl App {
                 let restored = restore_session(saved, &mut self.chat, &mut self.history);
                 strip_legacy_memory(&mut self.history, memory_block);
                 update_context_usage(&self.current_model, &mut self.context_usage, &self.history, memory_block, &self.chat, perm);
-                self.notice(format!("Resumed session {id} · {}", flashagent_tui::plural(restored, "message", "messages")));
+                self.notice(tr_fill("Resumed session {id} · {messages}", &[("id", id), ("messages", &flashagent_tui::plural(restored, "message", "messages"))]));
                 true
             }
             Err(why) => {
@@ -455,7 +456,7 @@ impl App {
         self.cost = flashagent_core::CostLedger::default();
         self.token_tracker = TokenTracker::new(self.current_model.clone());
         update_context_usage(&self.current_model, &mut self.context_usage, &self.history, memory_block, &self.chat, perm);
-        self.notice(format!("Resumed session {id} · {}", flashagent_tui::plural(restored, "message", "messages")));
+        self.notice(tr_fill("Resumed session {id} · {messages}", &[("id", id), ("messages", &flashagent_tui::plural(restored, "message", "messages"))]));
         true
     }
 
@@ -475,7 +476,7 @@ impl App {
             })
             .collect();
         if items.is_empty() {
-            self.custom_placeholder = Some("No other saved session in this folder".to_string());
+            self.custom_placeholder = Some(tr("No other saved session in this folder").to_string());
             self.suggested_prompt = None;
         } else {
             self.open_overlay(Overlay::Sessions(SelectMenu::new(flashagent_tui::i18n::tr("Resume a session"), items).with_noun(flashagent_tui::select::Noun::SESSIONS)));

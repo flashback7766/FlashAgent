@@ -4,6 +4,7 @@
 //! history is the same whatever protocol carries it.
 
 use super::*;
+use flashagent_tui::i18n::tr_fill;
 use flashagent_core::config::normalize_url;
 use flashagent_tui::providers::{self, ProviderArg, ProvidersAction};
 use flashagent_tui::ProvidersView;
@@ -89,7 +90,7 @@ impl App {
         if self.background.as_ref().is_some_and(|b| b.text.starts_with(offline_notice())) {
             self.background = None;
         }
-        self.notice(format!("Connecting to {} \u{b7} {}\u{2026}", profile.name, endpoint.url));
+        self.notice(tr_fill("Connecting to {name} \u{b7} {url}\u{2026}", &[("name", &profile.name), ("url", &endpoint.url)]));
         // Here, not in the task, so quick switches reach the client in order. A
         // look at the old server still under way is dropped by the client.
         cx.source.0.set_endpoint(endpoint.clone());
@@ -157,7 +158,7 @@ impl App {
                     None => self.overlay = Some(Overlay::Provider(menu)),
                     Some(providers::ADD) => self.run_setup_in_app(cx, true).await,
                     Some(providers::MANAGE) => self.open_providers_view(),
-                    Some(providers::THIS_RUN) => self.notice(format!("Already on {} for this run", self.config.active_profile().name)),
+                    Some(providers::THIS_RUN) => self.notice(tr_fill("Already on {name} for this run", &[("name", &self.config.active_profile().name)])),
                     Some(name) => self.switch_provider(cx, name),
                 }
             }

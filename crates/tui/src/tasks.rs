@@ -4,6 +4,7 @@
 //! how many it will stop.
 
 use super::*;
+use flashagent_tui::i18n::tr_fill;
 
 use flashagent_tools::{TaskInfo, TaskNotice, TaskState};
 use flashagent_tui::{TasksAction, TasksModal};
@@ -111,7 +112,7 @@ impl App {
             self.task_lines.push(line);
             if !notice.killed() {
                 self.say(BackgroundNotice::fading(
-                    format!("Background task {} {} \u{b7} the agent will be told", notice.id, notice.state.describe()),
+                    tr_fill("Background task {id} {state} \u{b7} the agent will be told", &[("id", &notice.id.to_string()), ("state", &notice.state.describe())]),
                     6,
                 ));
             }
@@ -259,7 +260,7 @@ impl App {
         );
         self.task_inbox.push(notice);
         self.background =
-            Some(BackgroundNotice::fading(format!("{} \u{b7} message to {to}", message.from), 6));
+            Some(BackgroundNotice::fading(tr_fill("{from} \u{b7} message to {to}", &[("from", &message.from), ("to", &to)]), 6));
         self.deliver_task_notices(cx);
         self.renderer.request_reprint();
     }

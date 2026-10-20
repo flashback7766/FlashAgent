@@ -22,7 +22,7 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
     if let Some(why) = raw.split_once("forbidden: ").map(|(_, why)| why.trim()).filter(|why| !why.is_empty()) {
         return Explained {
             headline: why.to_string(),
-            hint: Some("Rephrase the request, or switch to another provider with /provider.".to_string()),
+            hint: Some(crate::i18n::tr("Rephrase the request, or switch to another provider with /provider.").to_string()),
             raw: raw.to_string(),
         };
     }
@@ -35,11 +35,11 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         || lower.contains("failed to lookup")
     {
         let hint = if local {
-            "Start your server (LM Studio, llama.cpp, Ollama), or switch to another provider with /provider."
+            crate::i18n::tr("Start your server (LM Studio, llama.cpp, Ollama), or switch to another provider with /provider.")
         } else {
-            "Check the network connection and the address, or switch to another provider with /provider."
+            crate::i18n::tr("Check the network connection and the address, or switch to another provider with /provider.")
         };
-        return Explained { headline: format!("No model server answered at {base}"), hint: Some(hint.to_string()), raw: raw.to_string() };
+        return Explained { headline: crate::i18n::tr_fill("No model server answered at {base}", &[("base", base)]), hint: Some(hint.to_string()), raw: raw.to_string() };
     }
 
     if lower.contains("model_not_found")
@@ -48,8 +48,8 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         || lower.contains("model unloaded")
     {
         return Explained {
-            headline: format!("The server at {base} does not have {model} loaded"),
-            hint: Some("Press F3 to pick a model it does have, or load it in your server.".to_string()),
+            headline: crate::i18n::tr_fill("The server at {base} does not have {model} loaded", &[("base", base), ("model", model)]),
+            hint: Some(crate::i18n::tr("Press F3 to pick a model it does have, or load it in your server.").to_string()),
             raw: raw.to_string(),
         };
     }
@@ -61,8 +61,8 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         || lower.contains("kv cache")
     {
         return Explained {
-            headline: "The conversation no longer fits in the model's context".to_string(),
-            hint: Some("/compact summarizes the older turns and frees the space.".to_string()),
+            headline: crate::i18n::tr("The conversation no longer fits in the model's context").to_string(),
+            hint: Some(crate::i18n::tr("/compact summarizes the older turns and frees the space.").to_string()),
             raw: raw.to_string(),
         };
     }
@@ -75,10 +75,10 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
             .and_then(|(_, json)| serde_json::from_str::<serde_json::Value>(&format!("{{{json}")).ok())
             .and_then(|v| v["error"]["message"].as_str().map(|m| m.split(". To increase").next().unwrap_or(m).trim().to_string()));
         return Explained {
-            headline: format!("{base} says the account has too little credit"),
+            headline: crate::i18n::tr_fill("{base} says the account has too little credit", &[("base", base)]),
             hint: Some(said.map_or_else(
-                || "Add credit at the provider, or switch to another provider or a free model with /provider and F3.".to_string(),
-                |m| format!("{m}. Add credit, or pick a free model with F3."),
+                || crate::i18n::tr("Add credit at the provider, or switch to another provider or a free model with /provider and F3.").to_string(),
+                |m| crate::i18n::tr_fill("{m}. Add credit, or pick a free model with F3.", &[("m", &m)]),
             )),
             // The JSON carries the account id and adds nothing to the two lines.
             raw: String::new(),
@@ -92,8 +92,8 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         || lower.contains("invalid x-api-key") || lower.contains("authentication_error")
     {
         return Explained {
-            headline: format!("{base} rejected the API key"),
-            hint: Some("Set its key in /provider → Edit providers, or in the provider's environment variable.".to_string()),
+            headline: crate::i18n::tr_fill("{base} rejected the API key", &[("base", base)]),
+            hint: Some(crate::i18n::tr("Set its key in /provider → Edit providers, or in the provider's environment variable.").to_string()),
             raw: raw.to_string(),
         };
     }
@@ -101,26 +101,25 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
     // Anthropic's 529 and in-stream `overloaded_error`: busy, not broken.
     if lower.contains("overloaded") || lower.contains("returned 529") {
         return Explained {
-            headline: format!("{base} is overloaded right now"),
-            hint: Some("Wait a moment and press Ctrl+R, or switch provider with /provider.".to_string()),
+            headline: crate::i18n::tr_fill("{base} is overloaded right now", &[("base", base)]),
+            hint: Some(crate::i18n::tr("Wait a moment and press Ctrl+R, or switch provider with /provider.").to_string()),
             raw: raw.to_string(),
         };
     }
 
     if lower.contains("429") || lower.contains("rate limit") || lower.contains("quota") {
         return Explained {
-            headline: format!("{base} is rate-limiting this key"),
-            hint: Some("Wait and press Ctrl+R, or switch to a local provider with /provider.".to_string()),
+            headline: crate::i18n::tr_fill("{base} is rate-limiting this key", &[("base", base)]),
+            hint: Some(crate::i18n::tr("Wait and press Ctrl+R, or switch to a local provider with /provider.").to_string()),
             raw: raw.to_string(),
         };
     }
 
     if lower.contains("timed out") || lower.contains("timeout") || lower.contains("operation timed out") {
         return Explained {
-            headline: format!("{base} accepted the request and then sent nothing"),
+            headline: crate::i18n::tr_fill("{base} accepted the request and then sent nothing", &[("base", base)]),
             hint: Some(
-                "A large model can take a while to start; if it keeps happening, check the \
-                 server's own log."
+                crate::i18n::tr("A large model can take a while to start; if it keeps happening, check the server's own log.")
                     .to_string(),
             ),
             raw: raw.to_string(),
@@ -132,9 +131,9 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         || lower.contains("incomplete message") || lower.contains("body stream")
     {
         let hint = if local {
-            "The server dropped the connection \u{2014} often it ran out of memory. Its log will say. Ctrl+R retries."
+            crate::i18n::tr("The server dropped the connection \u{2014} often it ran out of memory. Its log will say. Ctrl+R retries.")
         } else {
-            "The provider ended the answer with the error below. Ctrl+R retries."
+            crate::i18n::tr("The provider ended the answer with the error below. Ctrl+R retries.")
         };
         return Explained { headline: "The answer stopped mid-stream".to_string(), hint: Some(hint.to_string()), raw: raw.to_string() };
     }

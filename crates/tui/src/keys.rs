@@ -17,7 +17,7 @@ impl App {
     pub(crate) fn save_config(&mut self) {
         flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(&self.config));
         if let Err(e) = self.config.save() {
-            self.notice(format!("Settings not saved: {e}"));
+            self.notice(flashagent_tui::i18n::tr_fill("Settings not saved: {e}", &[("e", &e.to_string())]));
         }
     }
 
@@ -49,7 +49,7 @@ impl App {
                 self.input.set(edited);
                 self.autocomplete_idx = 0;
             }
-            Err(err) => self.notice(format!("Failed to launch external editor: {err}")),
+            Err(err) => self.notice(flashagent_tui::i18n::tr_fill("Failed to launch external editor: {err}", &[("err", &err.to_string())])),
         }
         self.renderer.request_reprint();
     }
@@ -63,11 +63,11 @@ impl App {
         );
         self.renderer.request_reprint();
         let checking = |channel: flashagent_core::config::UpdateChannel| {
-            BackgroundNotice::fading(format!("{UPDATE_LINE_PREFIX}\u{b7} checking the {} channel\u{2026}", channel.label()), 30)
+            BackgroundNotice::fading(format!("{UPDATE_LINE_PREFIX}\u{b7} {}", flashagent_tui::i18n::tr_fill("checking the {channel} channel\u{2026}", &[("channel", channel.label())])), 30)
         };
         match action {
             UpdateKeyAction::DevMode => {
-                self.say(BackgroundNotice::fading("Auto-updater is disabled in dev mode", 6));
+                self.say(BackgroundNotice::fading(tr("Auto-updater is disabled in dev mode"), 6));
                 return;
             }
             UpdateKeyAction::ShowProgress => {
@@ -230,7 +230,7 @@ impl App {
                     self.renderer.request_reprint();
                 } else if !self.attachments.is_empty() {
                     self.attachments.clear();
-                    self.say(BackgroundNotice::fading("Attachments cleared".to_string(), 4));
+                    self.say(BackgroundNotice::fading(tr("Attachments cleared").to_string(), 4));
                     self.renderer.request_reprint();
                 } else {
                     // Esc closes and cancels, and never quits: it is pressed twice to close a
@@ -248,7 +248,7 @@ impl App {
             {
                 // It did nothing and said nothing while an answer was written.
                 if self.running {
-                    self.say(BackgroundNotice::fading("Ctrl+R regenerates once the answer is done · Esc stops it now".to_string(), 4));
+                    self.say(BackgroundNotice::fading(tr("Ctrl+R regenerates once the answer is done · Esc stops it now").to_string(), 4));
                     self.renderer.request_reprint();
                 } else if cx.gate.pending().is_none()
                     && cx.question_gate.pending().is_none()
@@ -369,15 +369,15 @@ impl App {
                     self.suggested_prompt = None;
                     if !model_sees_images(cx.source, &self.current_model) {
                         self.say(
-                            BackgroundNotice::sticky(format!(
-                                "{label} attached · {} cannot see images — press F3 for one that can",
-                                self.current_model
+                            BackgroundNotice::sticky(flashagent_tui::i18n::tr_fill(
+                                "{label} attached · {model} cannot see images — press F3 for one that can",
+                                &[("label", &label), ("model", &self.current_model)]
                             ))
                             .warning(),
                         );
                     } else {
                         self.say(BackgroundNotice::fading(
-                            format!("{label} attached · Ctrl+Z removes it"),
+                            flashagent_tui::i18n::tr_fill("{label} attached · Ctrl+Z removes it", &[("label", &label)]),
                             8,
                         ));
                     }
@@ -398,7 +398,7 @@ impl App {
             {
                 if let Some(removed) = self.attachments.pop() {
                     self.say(BackgroundNotice::fading(
-                        format!("{} removed", removed.label()),
+                        flashagent_tui::i18n::tr_fill("{what} removed", &[("what", &removed.label())]),
                         5,
                     ));
                 }
@@ -563,7 +563,7 @@ impl App {
                 } else if let Some(switch) = self.provider_switch.as_ref().filter(|_| !self.input.starts_with('/') && !self.running) {
                     // It would go to whichever server the client has at that moment.
                     let name = switch.name.clone();
-                    self.say(BackgroundNotice::fading(format!("Still connecting to {name} \u{b7} send it once it answers"), 5).warning());
+                    self.say(BackgroundNotice::fading(flashagent_tui::i18n::tr_fill("Still connecting to {name} \u{b7} send it once it answers", &[("name", &name)]), 5).warning());
                 } else if self.running && matches!(self.input.trim(), "/tasks" | "/bg") {
                     // Not steering: a task may need stopping while the turn runs.
                     self.input.clear();
@@ -631,7 +631,7 @@ impl App {
             // Shell editing keys, on either layout.
             KeyCode::Char(c) if cx.gate.pending().is_none() && mods.contains(KeyModifiers::CONTROL) => match latin(c) {
                 'k' if self.running => {
-                    self.say(BackgroundNotice::fading("Commands open once the turn is done · Esc interrupts it", 4));
+                    self.say(BackgroundNotice::fading(tr("Commands open once the turn is done · Esc interrupts it"), 4));
                     self.renderer.request_reprint();
                 }
                 'k' => self.open_palette(),
@@ -653,7 +653,7 @@ impl App {
                     self.edited();
                 }
                 'f' if self.input_history.is_empty() => {
-                    self.say(BackgroundNotice::fading("No earlier prompts to search yet", 4));
+                    self.say(BackgroundNotice::fading(tr("No earlier prompts to search yet"), 4));
                     self.renderer.request_reprint();
                 }
                 'f' => {

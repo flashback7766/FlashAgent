@@ -1,5 +1,5 @@
 use super::*;
-use flashagent_tui::i18n::tr;
+use flashagent_tui::i18n::{tr, tr_fill};
 
 /// Latin or Cyrillic.
 fn is_yes(code: KeyCode) -> bool {
@@ -147,7 +147,7 @@ impl App {
             if rules.is_empty() {
                 self.notice(tr("Allowed once · this command is too broad to allow always"));
             } else {
-                self.notice(format!("Always allowed this session: {}", rules.join(", ")));
+                self.notice(tr_fill("Always allowed this session: {rules}", &[("rules", &rules.join(", "))]));
             }
         }
         cx.gate.respond(Decision::Allow);
@@ -173,7 +173,7 @@ impl App {
             if let Some(view) = self.settings_view_mut() {
                 view.config.update_channel = sw.from;
             }
-            self.say(BackgroundNotice::fading(format!("Still on the {} channel", sw.from.label()), 5));
+            self.say(BackgroundNotice::fading(tr_fill("Still on the {channel} channel", &[("channel", sw.from.label())]), 5));
         }
     }
 
@@ -400,9 +400,9 @@ impl App {
             changes.push(format!("thinking ({chosen_effort})"));
         }
         if changes.len() == 1 && chosen_mode != shown_mode {
-            self.custom_placeholder = Some(format!("{} {}", tr("Permission mode set to:"), tr(chosen_mode.label())));
+            self.custom_placeholder = Some(tr_fill("{label} {mode}", &[("label", tr("Permission mode set to:")), ("mode", tr(chosen_mode.label()))]));
         } else if !changes.is_empty() {
-            self.custom_placeholder = Some(format!("Settings updated: {}", changes.join(", ")));
+            self.custom_placeholder = Some(tr_fill("Settings updated: {changes}", &[("changes", &changes.join(", "))]));
         }
         self.suggested_prompt = None;
 
@@ -413,10 +413,10 @@ impl App {
         let personality_changed = applied.personality != self.config.personality;
         if personality_changed {
             changes.push(format!("style ({})", applied.personality.summary()));
-            self.custom_placeholder = Some(format!("Settings updated: {}", changes.join(", ")));
+            self.custom_placeholder = Some(tr_fill("Settings updated: {changes}", &[("changes", &changes.join(", "))]));
         }
         if changes.is_empty() && applied != self.config {
-            self.custom_placeholder = Some("Settings saved".to_string());
+            self.custom_placeholder = Some(tr("Settings saved").to_string());
         }
         if wanted_channel != self.config.update_channel {
             applied.update_channel = self.config.update_channel;
@@ -594,7 +594,7 @@ impl App {
                 let mgr = cx.tools_arc.mcp_manager();
                 let _ = mgr.reload().await;
                 modal.servers = mgr.server_status_list().await;
-                modal.status_message = Some("Reloaded MCP configurations".to_string());
+                modal.status_message = Some(tr("Reloaded MCP configurations").to_string());
             }
             McpModalAction::TestServer(name) => {
                 let mgr = cx.tools_arc.mcp_manager();

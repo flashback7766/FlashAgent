@@ -313,7 +313,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
             }
             self.input.set(if draft.trim().is_empty() { restored } else { format!("{restored}\n{draft}") });
             self.say(BackgroundNotice::fading(
-                "The turn ended before your message reached it · Enter sends it now",
+                flashagent_tui::i18n::tr("The turn ended before your message reached it · Enter sends it now"),
                 8,
             ));
         }
@@ -386,7 +386,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                 if reason == DoneReason::Cancelled {
                     flashagent_core::mark_cut_short(&mut self.history, flashagent_core::CutShort::ByUser);
                     self.suggested_prompt = None;
-                    let interrupt_msg = "Request interrupted by user";
+                    let interrupt_msg = flashagent_tui::i18n::tr(flashagent_tui::i18n::tr("Request interrupted by user"));
                     self.custom_placeholder = Some(interrupt_msg.to_string());
                     self.renderer.request_reprint();
                 } else {
