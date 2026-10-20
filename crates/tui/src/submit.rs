@@ -39,6 +39,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/editor, Ctrl+X Ctrl+E", "write the prompt in an external editor"),
     ("/tools", "what the model may call, and what it may not"),
     ("/notices", "what the app said, kept so it can be read again"),
+    ("/safe", "the safe mode: reading and editing inside the project, nothing else"),
     ("/mcp [list|market|test|add|reload]", "Model Context Protocol servers"),
     ("/tasks", "background commands: their output, and stopping one"),
     ("/sampling", "sampling parameters (advanced)"),
@@ -128,7 +129,7 @@ fn while_running(name: &str) -> WhileRunning {
     match name {
         "help" | "?" | "whatsnew" | "changelog" | "memory" | "memories" | "context" | "verbose" | "expand" | "think"
         | "o" | "diff" | "commit" | "settings" | "config" | "sampling" | "params" | "effort" | "thinking" | "t"
-        | "model" | "models" | "m" | "mode" | "skills" | "tools" | "notices" | "log" => WhileRunning::Now,
+        | "model" | "models" | "m" | "mode" | "skills" | "tools" | "notices" | "log" | "safe" => WhileRunning::Now,
         "compact" | "clear" | "export" | "rewind" => WhileRunning::AfterTurn,
         "goal" | "resume" | "regenerate" | "retry" | "update" | "channel" | "mcp" | "editor" | "exit" | "quit" | "q"
         | "uninstall" => WhileRunning::Refuse,
@@ -401,6 +402,7 @@ impl App {
             "export" => self.export_conversation(cx, arg),
             "tools" => self.tools_command(cx),
             "notices" | "log" => self.notices_command(),
+            "safe" => self.safe_command(cx),
             _ => {
                 if let Some(skill) = name.strip_prefix("skill:") {
                     self.run_skill(cx, skill);
@@ -1042,6 +1044,21 @@ impl App {
 
     /// `/export <format> [path]`: the format is the first word, the path is
     /// what is left of it. A path with spaces is written in quotes.
+    /// `/safe`: the safe mode. Reading and editing inside the project, and
+    /// nothing else: no shell, no network, no subagents. It is a mode on top
+    /// of the permission mode, not instead of it.
+    fn safe_command(&mut self, cx: &LoopCtx<'_>) {
+        self.config.safe_mode = !self.config.safe_mode;
+        self.apply_disabled_tools(cx);
+        self.save_config();
+        let said = if self.config.safe_mode {
+            "Safe mode on · the shell, the web and the subagents are off; reading and editing inside the project are not"
+        } else {
+            "Safe mode off · every tool is back"
+        };
+        self.notice(said);
+    }
+
     /// `/notices`: what the app said, newest first. A notice fades and is
     /// gone; this is where it is read again.
     fn notices_command(&mut self) {

@@ -64,6 +64,8 @@ pub(crate) struct FrameState<'a> {
     /// Ctrl+F: the query and the prompt it found.
     pub(crate) history_search: Option<(&'a str, Option<&'a str>)>,
     pub(crate) mode: PermissionMode,
+    /// The safe mode is on: the shell, the web and the subagents are off.
+    pub(crate) safe_mode: bool,
     pub(crate) is_goal_active: bool,
     pub(crate) goal_progress: Option<&'a str>,
     /// Laid out by `TipAnimator::render_lines`; `None` with tips off.
@@ -719,7 +721,14 @@ fn context_gauges(context_usage: &ContextUsage, reported: bool, warn_threshold: 
 }
 
 fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>, awaiting_user: bool) -> String {
-    let mode_room = 2 + visible_width(st.mode.label()) + 2 + 1;
+    // The safe mode is said where the permission mode is: both say what the
+    // session may do, and one of them can change what the other allows.
+    let mode_label = if st.safe_mode {
+        format!("{} \u{b7} Safe", st.mode.label())
+    } else {
+        st.mode.label().to_string()
+    };
+    let mode_room = 2 + visible_width(&mode_label) + 2 + 1;
     let gauges = context_gauges(context_usage, st.context_reported, st.context_warn_threshold);
     let gauge_str = gauges.into_iter().find(|g| mode_room + visible_width(g) + 3 <= width).unwrap_or_default();
     // What the session costs sits next to the context gauge, and goes before it
@@ -743,7 +752,7 @@ fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>
         st.is_goal_active,
         awaiting_user,
         st.goal_progress,
-        st.mode.label(),
+        &mode_label,
         &format!("{}{expand_status}", tasks_status(st.background_tasks)),
     );
     fit_status_row(width, &left_telemetry, &format_provider(st.provider.0, st.provider.1), &gauge_str)
@@ -1600,6 +1609,7 @@ impl App {
                     .as_ref()
                     .map(|h| (h.query.as_str(), h.found(&self.input_history))),
                 mode: cx.perm.state().mode(),
+                safe_mode: self.config.safe_mode,
                 is_goal_active: self.goal_state.is_some(),
                 goal_progress: goal_progress.as_deref(),
                 tip_lines: config.show_tips.then_some(cx.tip_lines.as_slice()),

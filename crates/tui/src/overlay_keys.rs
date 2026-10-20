@@ -429,6 +429,9 @@ impl App {
         if personality_changed {
             self.apply_personality();
         }
+        // The safe mode and the tools the owner switched off: both are in the
+        // config now, and both have to reach the running conversation.
+        self.apply_disabled_tools(cx);
         // The warm-up was just turned on: the prefix is cached now, not at the
         // next server poll. Turned off, the running warm-up is dropped.
         self.warm_prompt_cache(cx.source, cx.perm);
@@ -560,6 +563,27 @@ impl App {
         cx.perm.set_disabled_tools(off.clone());
         self.config.disabled_tools = off;
         self.save_config();
+    }
+
+    /// The tools that are off right now: the ones the owner switched off, and
+    /// the ones the safe mode takes away.
+    pub(crate) fn effective_disabled_tools(&self) -> Vec<String> {
+        let mut off = self.config.disabled_tools.clone();
+        if self.config.safe_mode {
+            for name in flashagent_tui::tools_view::SAFE_MODE_TOOLS {
+                if !off.iter().any(|n| n == name) {
+                    off.push(name.to_string());
+                }
+            }
+        }
+        off
+    }
+
+    /// Puts the tools that are off into the two places that keep them.
+    pub(crate) fn apply_disabled_tools(&mut self, cx: &LoopCtx<'_>) {
+        let off = self.effective_disabled_tools();
+        cx.tools_arc.set_disabled_tools(off.clone());
+        cx.perm.set_disabled_tools(off);
     }
 
     async fn mcp_key(&mut self, cx: &LoopCtx<'_>, mut modal: McpModal, code: KeyCode, mods: KeyModifiers) {

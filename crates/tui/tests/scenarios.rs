@@ -1252,6 +1252,33 @@ fn an_export_can_be_written_where_the_person_says() {
 }
 
 #[test]
+fn the_safe_mode_leaves_the_project_and_nothing_else() {
+    let server = MockServer::start(vec![Reply::Text("Hello.".into()), Reply::Text("After.".into())]);
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+    ask(&term, "hello", "Hello.");
+
+    term.type_text("/safe");
+    term.send(ENTER);
+    term.wait_for("Safe mode on", WAIT);
+
+    ask(&term, "after", "After.");
+    let tools = &server.turns()[1].body["tools"];
+    let names: Vec<&str> = tools
+        .as_array()
+        .expect("the request has tools")
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap_or_default())
+        .collect();
+    assert!(!names.contains(&"run_shell"), "the shell is still on: {names:?}");
+    assert!(!names.contains(&"web_search"), "the web is still on: {names:?}");
+    assert!(!names.contains(&"spawn_agent"), "the subagents are still on: {names:?}");
+    assert!(names.contains(&"read_file"), "reading is still on: {names:?}");
+    assert!(names.contains(&"write_file"), "writing is still on: {names:?}");
+    quit(&mut term);
+}
+
+#[test]
 fn what_the_app_said_can_be_read_again() {
     let server = MockServer::start(vec![Reply::Text("Hello.".into())]);
     let home = Home::new();
