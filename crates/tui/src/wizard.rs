@@ -898,7 +898,7 @@ impl SetupWizard {
                 lines.push(pad_row(""));
                 // What the chosen row is, and how it will be spoken to.
                 let about = match self.preset() {
-                    Some(p) => format!("{} \u{b7} {}", p.description, p.protocol.label()),
+                    Some(p) => format!("{} \u{b7} {}", crate::i18n::tr(p.description), p.protocol.label()),
                     None if self.custom_url.is_empty() => crate::i18n::tr("Any server's address, e.g. http://localhost:8080/v1").to_string(),
                     None => crate::i18n::tr("Spoken to as {protocol} \u{b7} Tab changes it").replace("{protocol}", self.profile.protocol.label()),
                 };

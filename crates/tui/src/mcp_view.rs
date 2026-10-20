@@ -239,10 +239,10 @@ impl McpModal {
                 let stats = format!(
                     "{TEXT_BRIGHT}{}{RESET} {}  ·  {TEXT_GREEN}{}{RESET} {}  ·  {TEXT_CYAN}{}{RESET} {}",
                     crate::i18n::tr("Configured:"),
-                    crate::i18n::tr("Connected:"),
-                    crate::i18n::tr("Tools found:"),
                     self.servers.len(),
+                    crate::i18n::tr("Connected:"),
                     active_count,
+                    crate::i18n::tr("Tools found:"),
                     total_tools
                 );
                 lines.push((LineKind::System, pad_row(&stats)));
