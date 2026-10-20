@@ -9,12 +9,29 @@ use serde::Deserialize;
 use crate::ToolError;
 
 #[derive(Debug, Deserialize)]
+#[derive(Default)]
 pub struct EditChunk {
+    /// The text to replace, exactly as in the file. Not needed when the edit
+    /// names lines.
+    #[serde(default)]
     pub old_string: String,
+    /// The text that replaces it. With a line range it replaces those lines
+    /// whole, with the indentation it should have.
+    #[serde(default)]
     pub new_string: String,
     /// Every occurrence instead of exactly one.
     #[serde(default)]
     pub replace_all: bool,
+    /// `old_string` is a regular expression, and `new_string` may use `$1` and
+    /// `${name}` to put the matched parts back.
+    #[serde(default)]
+    pub regex: bool,
+    /// The first line to replace, counted from 1.
+    #[serde(default)]
+    pub start_line: Option<usize>,
+    /// The last line to replace, counted from 1 and included.
+    #[serde(default)]
+    pub end_line: Option<usize>,
 }
 
 /// The file a batch entry names, for telling `a.txt` and `./a.txt` apart
@@ -372,30 +389,148 @@ fn first_difference(want: &str, have: &str) -> Option<String> {
 /// guess. Shared by the edit tools, the diff preview and the check made before
 /// anyone is asked to approve an edit.
 pub(crate) fn apply_edits(path: &str, mut text: String, edits: &[EditChunk]) -> Result<(String, usize), ToolError> {
+    // Several cursors in one call: every edit is found in the text as it was,
+    // and the edits are then applied from the last to the first. A line number
+    // or a match found earlier keeps its place while the ones after it change,
+    // and one edit that shifts the file cannot move the next.
+    if let Some(planned) = plan_all_edits(path, &text, edits) {
+        let mut applied = 0usize;
+        for planned in planned.into_iter().rev() {
+            for (from, to, new_text) in planned.places.into_iter().rev() {
+                text.replace_range(from..to, &new_text);
+                applied += 1;
+            }
+        }
+        return Ok((text, applied));
+    }
+    // An edit that cannot be found in the text as it was depends on the one
+    // before it -- the second edit renames what the first wrote. Those are
+    // applied one after another, as they always were.
     let mut applied = 0usize;
     for edit in edits {
-        if edit.old_string.is_empty() {
-            return Err(ToolError::Other("edit: old_string must not be empty".into()));
+        let planned = plan_one_edit(path, &text, edit)?;
+        for (from, to, new_text) in planned.places.into_iter().rev() {
+            text.replace_range(from..to, &new_text);
+            applied += 1;
         }
-        let Some((target, indents)) = find_actual_string(&text, &edit.old_string) else {
-            return Err(not_found(path, &text, &edit.old_string));
-        };
-        let count = text.matches(target.as_str()).count();
-        if count > 1 && !edit.replace_all {
-            return Err(ToolError::Other(format!(
-                "edit: old_string matches {count} times in {path}; add more context or set replace_all"
-            )));
-        }
-        applied += if edit.replace_all { count } else { 1 };
-        let reindented = with_file_indent(&edit.new_string, &indents);
-        let new_string = in_line_endings_of(&text, &reindented);
-        text = if edit.replace_all {
-            text.replace(target.as_str(), &new_string)
-        } else {
-            text.replacen(target.as_str(), &new_string, 1)
-        };
     }
     Ok((text, applied))
+}
+
+/// Every edit resolved against the text as it was, or `None` when one of them
+/// cannot be found that way.
+fn plan_all_edits(path: &str, text: &str, edits: &[EditChunk]) -> Option<Vec<PlannedEdit>> {
+    let mut planned = Vec::with_capacity(edits.len());
+    for edit in edits {
+        planned.push(plan_one_edit(path, text, edit).ok()?);
+    }
+    Some(planned)
+}
+
+/// One edit, resolved against the text as it was before any edit.
+struct PlannedEdit {
+    /// Where the text goes and what goes there: the bytes it replaces and the
+    /// text that takes their place.
+    places: Vec<(usize, usize, String)>,
+}
+
+/// What one edit does to the file.
+fn plan_one_edit(path: &str, text: &str, edit: &EditChunk) -> Result<PlannedEdit, ToolError> {
+    // By line numbers: the lines themselves, counted from 1, the last one
+    // included.
+    if edit.start_line.is_some() || edit.end_line.is_some() {
+        let start = edit.start_line.unwrap_or(1);
+        let end = edit.end_line.unwrap_or(start);
+        if start == 0 {
+            return Err(ToolError::Other("edit: lines are counted from 1".into()));
+        }
+        if end < start {
+            return Err(ToolError::Other(format!("edit: line {end} is before line {start}")));
+        }
+        let Some((from, to)) = line_span(text, start, end) else {
+            return Err(ToolError::Other(format!("edit: lines {start}-{end} are not in {path}")));
+        };
+        // The text the model wrote carries the indentation it wants: the lines
+        // it replaces are known by number, not by a match.
+        let mut new_text = in_line_endings_of(text, &edit.new_string).into_owned();
+        // The lines that went had a line ending after them; the text that
+        // takes their place needs one too, or the next line joins it.
+        let replaced = &text[from..to];
+        if replaced.ends_with('\n') && !new_text.ends_with('\n') {
+            let ending = if replaced.ends_with("\r\n") { "\r\n" } else { "\n" };
+            new_text.push_str(ending);
+        }
+        return Ok(PlannedEdit { places: vec![(from, to, new_text)] });
+    }
+    if edit.old_string.is_empty() {
+        return Err(ToolError::Other("edit: old_string must not be empty".into()));
+    }
+    if edit.regex {
+        return plan_regex_edit(path, text, edit);
+    }
+    let Some((target, indents)) = find_actual_string(text, &edit.old_string) else {
+        return Err(not_found(path, text, &edit.old_string));
+    };
+    let count = text.matches(target.as_str()).count();
+    if count > 1 && !edit.replace_all {
+        return Err(ToolError::Other(format!(
+            "edit: old_string matches {count} times in {path}; add more context or set replace_all"
+        )));
+    }
+    let reindented = with_file_indent(&edit.new_string, &indents);
+    let new_text = in_line_endings_of(text, &reindented).into_owned();
+    let places = if edit.replace_all {
+        text.match_indices(target.as_str())
+            .map(|(at, _)| (at, at + target.len(), new_text.clone()))
+            .collect()
+    } else {
+        let at = text.find(target.as_str()).expect("the match was found a moment ago");
+        vec![(at, at + target.len(), new_text)]
+    };
+    Ok(PlannedEdit { places })
+}
+
+/// A regular expression: every match, or the first one, with the groups put
+/// back where the replacement says.
+fn plan_regex_edit(path: &str, text: &str, edit: &EditChunk) -> Result<PlannedEdit, ToolError> {
+    let re = regex::Regex::new(&edit.old_string)
+        .map_err(|e| ToolError::Other(format!("edit: the pattern is not a regular expression: {e}")))?;
+    let mut places: Vec<(usize, usize, String)> = Vec::new();
+    for m in re.find_iter(text) {
+        let Some(caps) = re.captures_at(text, m.start()) else { continue };
+        let mut buf = String::new();
+        caps.expand(&edit.new_string, &mut buf);
+        let expanded = in_line_endings_of(text, &buf).into_owned();
+        places.push((m.start(), m.end(), expanded));
+    }
+    if places.is_empty() {
+        return Err(not_found(path, text, &edit.old_string));
+    }
+    if places.len() > 1 && !edit.replace_all {
+        return Err(ToolError::Other(format!(
+            "edit: the pattern matches {} times in {path}; set replace_all",
+            places.len()
+        )));
+    }
+    Ok(PlannedEdit { places })
+}
+
+/// The bytes of the lines `start..=end`, counted from 1. The last line's own
+/// line ending goes with it, so a replacement does not eat it.
+fn line_span(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
+    let mut offset = 0;
+    let mut begin = None;
+    for (n, line) in text.split_inclusive('\n').enumerate() {
+        let n = n + 1;
+        if n == start {
+            begin = Some(offset);
+        }
+        if n == end {
+            return Some((begin?, offset + line.len()));
+        }
+        offset += line.len();
+    }
+    None
 }
 
 pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<String, ToolError> {
@@ -665,7 +800,101 @@ mod tests {
     use crate::testing::tempdir;
 
     fn chunk(old: &str, new: &str, replace_all: bool) -> EditChunk {
-        EditChunk { old_string: old.into(), new_string: new.into(), replace_all }
+        EditChunk { old_string: old.into(), new_string: new.into(), replace_all, ..Default::default() }
+    }
+
+    /// Lines are counted from 1 and the last one is included: the model reads
+    /// the file with those numbers and names them back.
+    #[test]
+    fn an_edit_can_name_its_lines() {
+        let text = "one\ntwo\nthree\nfour\n";
+        let edit = EditChunk {
+            start_line: Some(2),
+            end_line: Some(3),
+            new_string: "TWO\nTHREE".into(),
+            ..Default::default()
+        };
+        let (out, applied) = apply_edits("f", text.into(), &[edit]).unwrap();
+        assert_eq!(out, "one\nTWO\nTHREE\nfour\n");
+        assert_eq!(applied, 1);
+    }
+
+    /// One line is one edit: the range that names it.
+    #[test]
+    fn a_single_line_can_be_replaced() {
+        let text = "one\ntwo\nthree\n";
+        let edit = EditChunk { start_line: Some(3), end_line: Some(3), new_string: "THREE".into(), ..Default::default() };
+        let (out, _) = apply_edits("f", text.into(), &[edit]).unwrap();
+        assert_eq!(out, "one\ntwo\nTHREE\n");
+    }
+
+    /// A line that is not in the file is refused, not silently guessed at.
+    #[test]
+    fn lines_that_are_not_in_the_file_are_refused() {
+        let text = "one\ntwo\n";
+        let edit = EditChunk { start_line: Some(5), end_line: Some(6), new_string: "x".into(), ..Default::default() };
+        let err = apply_edits("f", text.into(), &[edit]).unwrap_err().to_string();
+        assert!(err.contains("not in"), "{err}");
+        let zero = EditChunk { start_line: Some(0), new_string: "x".into(), ..Default::default() };
+        assert!(apply_edits("f", text.into(), &[zero]).is_err(), "lines are counted from 1");
+    }
+
+    /// A regular expression, with the matched part put back.
+    #[test]
+    fn a_regular_expression_can_replace_and_keep_the_groups() {
+        let text = "let a = 1;\nlet b = 2;\n";
+        let edit = EditChunk {
+            old_string: r"let (\w) = (\d);".into(),
+            new_string: "let $1 = $2 + 1;".into(),
+            regex: true,
+            replace_all: true,
+            ..Default::default()
+        };
+        let (out, applied) = apply_edits("f", text.into(), &[edit]).unwrap();
+        assert_eq!(out, "let a = 1 + 1;\nlet b = 2 + 1;\n");
+        assert_eq!(applied, 2);
+    }
+
+    /// One match is replaced; the groups go back where the replacement says.
+    #[test]
+    fn a_regular_expression_replaces_one_match() {
+        let text = "value = 1;\n";
+        let edit = EditChunk {
+            old_string: r"value = (\d);".into(),
+            new_string: "value = $1 + 1;".into(),
+            regex: true,
+            ..Default::default()
+        };
+        let (out, applied) = apply_edits("f", text.into(), &[edit]).unwrap();
+        assert_eq!(out, "value = 1 + 1;\n");
+        assert_eq!(applied, 1);
+    }
+
+    /// A pattern that matches many times is refused unless it says so.
+    #[test]
+    fn a_pattern_that_matches_many_times_needs_replace_all() {
+        let text = "x\nx\n";
+        let edit = EditChunk { old_string: "x".into(), new_string: "y".into(), regex: true, ..Default::default() };
+        let err = apply_edits("f", text.into(), &[edit]).unwrap_err().to_string();
+        assert!(err.contains("replace_all"), "{err}");
+        let all = EditChunk { old_string: "x".into(), new_string: "y".into(), regex: true, replace_all: true, ..Default::default() };
+        let (out, applied) = apply_edits("f", text.into(), &[all]).unwrap();
+        assert_eq!(out, "y\ny\n");
+        assert_eq!(applied, 2);
+    }
+
+    /// Several cursors: the line numbers count the file as it was, so an edit
+    /// that changes the lines before another does not move it.
+    #[test]
+    fn several_cursors_do_not_move_each_other() {
+        let text = "one\ntwo\nthree\nfour\n";
+        let edits = [
+            EditChunk { start_line: Some(1), end_line: Some(1), new_string: "ONE\nONE-AND-A-HALF".into(), ..Default::default() },
+            EditChunk { start_line: Some(4), end_line: Some(4), new_string: "FOUR".into(), ..Default::default() },
+        ];
+        let (out, applied) = apply_edits("f", text.into(), &edits).unwrap();
+        assert_eq!(out, "ONE\nONE-AND-A-HALF\ntwo\nthree\nFOUR\n");
+        assert_eq!(applied, 2);
     }
 
     #[test]
@@ -767,7 +996,7 @@ mod tests {
         edit_file(
             &dir,
             "a.txt",
-            &[EditChunk { old_string: "two".into(), new_string: "dos".into(), replace_all: false }],
+            &[EditChunk { old_string: "two".into(), new_string: "dos".into(), replace_all: false, ..Default::default() }],
         )
         .unwrap();
         assert!(std::fs::read_to_string(dir.join("a.txt")).unwrap().contains("dos"));
@@ -775,7 +1004,7 @@ mod tests {
         let err = edit_file(
             &dir,
             "a.txt",
-            &[EditChunk { old_string: "zzz".into(), new_string: "y".into(), replace_all: false }],
+            &[EditChunk { old_string: "zzz".into(), new_string: "y".into(), replace_all: false, ..Default::default() }],
         )
         .unwrap_err();
         assert!(err.to_string().contains("not found"));
@@ -784,7 +1013,7 @@ mod tests {
         let err = edit_file(
             &dir,
             "a.txt",
-            &[EditChunk { old_string: "x".into(), new_string: "y".into(), replace_all: false }],
+            &[EditChunk { old_string: "x".into(), new_string: "y".into(), replace_all: false, ..Default::default() }],
         )
         .unwrap_err();
         assert!(err.to_string().contains("3 times"));
@@ -799,8 +1028,8 @@ mod tests {
             &dir,
             "a.txt",
             &[
-                EditChunk { old_string: "one".into(), new_string: "two".into(), replace_all: false },
-                EditChunk { old_string: "two".into(), new_string: "three".into(), replace_all: false },
+                EditChunk { old_string: "one".into(), new_string: "two".into(), replace_all: false, ..Default::default() },
+                EditChunk { old_string: "two".into(), new_string: "three".into(), replace_all: false, ..Default::default() },
             ],
         )
         .unwrap();
@@ -875,11 +1104,11 @@ mod tests {
             &[
                 (
                     "actual.txt".into(),
-                    vec![EditChunk { old_string: "one".into(), new_string: "two".into(), replace_all: false }],
+                    vec![EditChunk { old_string: "one".into(), new_string: "two".into(), replace_all: false, ..Default::default() }],
                 ),
                 (
                     "alias.txt".into(),
-                    vec![EditChunk { old_string: "two".into(), new_string: "three".into(), replace_all: false }],
+                    vec![EditChunk { old_string: "two".into(), new_string: "three".into(), replace_all: false, ..Default::default() }],
                 ),
             ],
         )
@@ -957,7 +1186,7 @@ mod tests {
     fn a_missing_old_string_points_at_the_closest_line() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("lib.rs"), "use std::io;\n\npub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n").unwrap();
-        let edits = [EditChunk { old_string: "pub fn add(a: u32, b: u32) -> u32 {".into(), new_string: "x".into(), replace_all: false }];
+        let edits = [EditChunk { old_string: "pub fn add(a: u32, b: u32) -> u32 {".into(), new_string: "x".into(), replace_all: false, ..Default::default() }];
         let err = edit_file(dir.path(), "lib.rs", &edits).unwrap_err().to_string();
         assert!(err.contains("closest line is 3: `pub fn add(a: i32, b: i32) -> i32 {`"), "{err}");
     }
@@ -1123,6 +1352,7 @@ mod tests {
             old_string: "fn hello() {\n    println!(\"world\");\n}".into(),
             new_string: "fn hello() {\n    println!(\"FlashAgent\");\n}".into(),
             replace_all: false,
+            ..Default::default()
         };
         let (res, _) = apply_edits("f", text.to_string(), &[edit]).unwrap();
         assert!(res.contains("FlashAgent"));
