@@ -157,7 +157,7 @@ pub(crate) fn save_session_file_marked(
     history: &[ChatMessage],
     turn_in_flight: bool,
 ) -> Result<std::path::PathBuf, String> {
-    let base_dir = sessions_dir().ok_or("no home directory to save sessions in")?;
+    let base_dir = sessions_dir().ok_or(flashagent_tui::i18n::tr("no home directory to save sessions in"))?;
     save_session_in(&base_dir, session_id, model, cwd, history, turn_in_flight)
 }
 
@@ -179,7 +179,7 @@ pub(crate) fn append_compaction_archive(path: &std::path::Path, messages: &[Chat
             .map_err(|e| format!("cannot encode compaction archive: {e}"))?;
         chunk.push(b'\n');
     }
-    let parent = path.parent().ok_or("compaction archive has no parent directory")?;
+    let parent = path.parent().ok_or(flashagent_tui::i18n::tr("compaction archive has no parent directory"))?;
     std::fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     #[cfg(unix)]
     {
@@ -398,7 +398,7 @@ impl App {
     /// transcript, when the session could not be read.
     pub(crate) fn resume_at_start(&mut self, id: &str, memory_block: &str, perm: &PermissionedTools) -> bool {
         match sessions_dir()
-            .ok_or_else(|| "No home directory to read sessions from; starting fresh.".to_string())
+            .ok_or_else(|| flashagent_tui::i18n::tr("No home directory to read sessions from; starting fresh.").to_string())
             .and_then(|dir| read_session(&dir, id))
         {
             Ok(saved) => {
@@ -426,7 +426,7 @@ impl App {
             }
         }
         let saved = match sessions_dir()
-            .ok_or_else(|| "No home directory to read sessions from".to_string())
+            .ok_or_else(|| flashagent_tui::i18n::tr("No home directory to read sessions from").to_string())
             .and_then(|dir| read_session(&dir, id))
         {
             Ok(saved) => saved,
@@ -470,7 +470,7 @@ impl App {
             // A fresh start has nothing to hide an older session behind.
             .filter(|s| s.id != current_session || !worth_saving(&self.history))
             .map(|s| {
-                let title = if s.title.is_empty() { "(no prompt)".to_string() } else { s.title };
+                let title = if s.title.is_empty() { flashagent_tui::i18n::tr("(no prompt)").to_string() } else { s.title };
                 SelectItem::with_description(title, format!("{} · {} messages", ago(s.timestamp, now), s.messages), s.id)
                     .with_search_text(s.text)
             })
@@ -665,7 +665,7 @@ pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history:
 /// the loop write these words when one fails or does not run.
 fn result_was_an_error(content: &str) -> bool {
     content.starts_with("error:")
-        || content.starts_with("not executed:")
+        || content.starts_with(flashagent_tui::i18n::tr("not executed:"))
         || content.starts_with(flashagent_core::permissions::DENIED)
         || content == flashagent_core::permissions::DECLINED
         || flashagent_core::stopped_by_user(content)

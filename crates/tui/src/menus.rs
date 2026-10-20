@@ -17,7 +17,7 @@ pub(crate) fn build_model_menu(source: &BackendSource, provider: &str) -> Select
     let mut items = Vec::new();
     for m in models {
         let summary = m.capabilities_summary();
-        let load_tag = if m.is_loaded { "● loaded" } else { "○ available" };
+        let load_tag = if m.is_loaded { "● loaded" } else { flashagent_tui::i18n::tr("○ available") };
         let desc = format!("{load_tag} · {summary}");
         items.push(SelectItem::with_description(m.id.clone(), desc, m.id.clone()));
     }

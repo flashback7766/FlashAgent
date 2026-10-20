@@ -588,19 +588,17 @@ pub fn render_session_saved_card(session_id: &str, width: usize) -> Vec<String> 
         ];
     }
 
-    let title_styled = " \x1b[1;38;2;225;175;95mSession saved\x1b[0m ";
-    let title_vis = visible_width(title_styled);
+    let title_styled = format!(" \x1b[1;38;2;225;175;95m{}\x1b[0m ", crate::i18n::tr("Session saved"));
+    let title_vis = visible_width(&title_styled);
     let dashes = box_w.saturating_sub(title_vis + 1);
     let top = format!("  {border_color}╭─{title_styled}{}╮{reset}", "─".repeat(dashes));
 
     let msg = if inner_text_w >= 86 {
-        format!(
-            "To resume: \x1b[1;38;2;240;235;225mflashagent --continue\x1b[0m here, or \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m"
-        )
+        crate::i18n::tr_fill("To resume: \x1b[1;38;2;240;235;225mflashagent --continue\x1b[0m here, or \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m", &[("resume_cmd", &resume_cmd)]).to_string()
     } else if inner_text_w >= resume_cmd.chars().count() + 21 {
-        format!("To resume next time: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m")
+        crate::i18n::tr_fill("To resume next time: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m", &[("resume_cmd", &resume_cmd)]).to_string()
     } else {
-        format!("Resume: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m")
+        crate::i18n::tr_fill("Resume: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m", &[("resume_cmd", &resume_cmd)]).to_string()
     };
     let msg_clipped = if visible_width(&msg) > inner_text_w {
         clip_ansi(&msg, inner_text_w)

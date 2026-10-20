@@ -58,8 +58,8 @@ pub(crate) fn tasks_left_running(history: &[ChatMessage]) -> Vec<(u32, String)> 
             Role::Tool => {
                 let text = m.content.as_str();
                 let started = text
-                    .strip_prefix("started background task ")
-                    .or_else(|| text.split_once("it keeps running as background task ").map(|(_, rest)| rest))
+                    .strip_prefix(flashagent_tui::i18n::tr("started background task "))
+                    .or_else(|| text.split_once(flashagent_tui::i18n::tr("it keeps running as background task ")).map(|(_, rest)| rest))
                     .and_then(number);
                 if let Some(id) = started {
                     open.retain(|(i, _)| *i != id);
@@ -69,7 +69,7 @@ pub(crate) fn tasks_left_running(history: &[ChatMessage]) -> Vec<(u32, String)> 
                 } else if let Some(id) = text.strip_prefix("task ").and_then(number) {
                     let rest = &text["task ".len() + id.to_string().len()..];
                     // Killed, already ended, or a status that is not "running".
-                    if rest.starts_with(" killed") || rest.starts_with(" had already ended") || (rest.starts_with(": ") && !rest.starts_with(": running")) {
+                    if rest.starts_with(" killed") || rest.starts_with(flashagent_tui::i18n::tr(" had already ended")) || (rest.starts_with(": ") && !rest.starts_with(": running")) {
                         open.retain(|(i, _)| *i != id);
                     }
                 }
@@ -299,9 +299,9 @@ impl App {
     /// Ctrl+B.
     pub(crate) fn detach_shell(&mut self, cx: &LoopCtx<'_>) {
         self.say(if cx.tools_arc.shells().detach_foreground() {
-            BackgroundNotice::fading("Moved to the background \u{b7} /tasks shows it; the agent is told when it ends", 6)
+            BackgroundNotice::fading(flashagent_tui::i18n::tr("Moved to the background \u{b7} /tasks shows it; the agent is told when it ends"), 6)
         } else {
-            BackgroundNotice::fading("Ctrl+B moves a running shell command to the background; none is running", 4)
+            BackgroundNotice::fading(flashagent_tui::i18n::tr("Ctrl+B moves a running shell command to the background; none is running"), 4)
         });
         self.renderer.request_reprint();
     }
@@ -317,7 +317,7 @@ impl App {
             TasksAction::Open(id) => modal.detail = Some((id, shells.output(id).unwrap_or_default())),
             TasksAction::Kill(id) => {
                 if shells.stop_for_user(id) {
-                    self.say(BackgroundNotice::fading(format!("Stopping background task {id}"), 4));
+                    self.say(BackgroundNotice::fading(flashagent_tui::i18n::tr_fill("Stopping background task {id}", &[("id", &id.to_string())]), 4));
                 }
             }
             TasksAction::None => {}
@@ -360,7 +360,7 @@ impl App {
             BackgroundNotice::fading(
                 format!(
                     "{} running \u{b7} quitting stops {}; do it again to quit",
-                    flashagent_tui::plural(running, "background task", "background tasks"),
+                    flashagent_tui::i18n::plural(running, "background task", "background tasks", "фоновая задача", "фоновые задачи", "фоновых задач"),
                     if running == 1 { "it" } else { "them" }
                 ),
                 4,

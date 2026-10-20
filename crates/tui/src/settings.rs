@@ -288,9 +288,15 @@ impl SettingsView {
             for t in PersonalityTrait::ALL {
                 let level = p.level(t);
                 let blurb = t.blurb(level);
+                // The trait, its level and what the level means: all three are
+                // the interface's words.
                 rows.push((
-                    t.label(),
-                    if blurb.is_empty() { level.label().to_string() } else { format!("{} — {blurb}", level.label()) },
+                    crate::i18n::tr(t.label()),
+                    if blurb.is_empty() {
+                        crate::i18n::tr(level.label()).to_string()
+                    } else {
+                        format!("{} — {}", crate::i18n::tr(level.label()), crate::i18n::tr(blurb))
+                    },
                 ));
             }
             rows

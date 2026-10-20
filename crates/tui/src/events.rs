@@ -260,7 +260,7 @@ impl App {
         self.turn_started = None;
         self.cancel_requested = None;
         self.aborted_turn = Some(self.turn_counter);
-        self.chat.abandon_compaction_card("the turn was abandoned before the summary landed");
+        self.chat.abandon_compaction_card(flashagent_tui::i18n::tr("the turn was abandoned before the summary landed"));
         self.mid_turn_report = None;
         // The turn's own history, dropped with the turn. Left set, the next
         // turn's autosave_during_turn wrote this one back over the session file
@@ -290,7 +290,7 @@ impl App {
         }
         self.chat.on_event(&LoopEvent::Done(DoneReason::Cancelled));
         self.flash_turn_end(Some(DoneReason::Cancelled));
-        self.custom_placeholder = Some("Turn aborted; its partial output was not kept in the model context".to_string());
+        self.custom_placeholder = Some(flashagent_tui::i18n::tr("Turn aborted; its partial output was not kept in the model context").to_string());
         self.renderer.request_reprint();
     }
 
@@ -579,7 +579,7 @@ impl App {
             // promise `CompactionStarted` made, because the window is still full
             // and the next steps go on filling it.
             LoopEvent::Compacted { saved } if *saved == 0 => {
-                self.chat.fail_compaction_card("the conversation is unchanged and the window is still full");
+                self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the conversation is unchanged and the window is still full"));
                 self.renderer.request_reprint();
             }
             // The window was nearly full; the work goes on. The compactor handed
@@ -592,7 +592,7 @@ impl App {
                     .and_then(|slot| slot.lock().ok().and_then(|mut slot| slot.take()));
                 match report {
                     Some(result) => self.chat.finish_compaction_card(&result),
-                    None => self.chat.fail_compaction_card("the summary was not kept"),
+                    None => self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the summary was not kept")),
                 }
                 self.renderer.request_reprint();
             }

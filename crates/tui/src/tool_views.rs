@@ -4,7 +4,7 @@
 
 use unicode_width::UnicodeWidthChar;
 
-use crate::{plural, visible_width, LineKind, RenderLine};
+use crate::{visible_width, LineKind, RenderLine};
 
 const RESET: &str = "\x1b[0m";
 const BORDER_DIM: &str = "\x1b[38;2;75;99;130m";
@@ -404,7 +404,7 @@ pub fn render_edit_card(change: &EditChange<'_>, state: CallState, reason: Optio
         (CallState::Running, true) => crate::i18n::tr("Writing"),
         (CallState::Running, false) => crate::i18n::tr("Editing"),
         (CallState::Failed, true) => crate::i18n::tr("Not written:"),
-        (CallState::Failed, false) => "Not edited:",
+        (CallState::Failed, false) => crate::i18n::tr("Not edited:"),
     };
     let verb_color = if state == CallState::Failed { TEXT_RED } else { TEXT_MUTED };
     // A change that only adds is not "+3 -0": the zero is noise, and a reader
@@ -527,7 +527,7 @@ pub fn render_grep_card(
             let remaining = raw_lines.len() - display_count;
             lines.push((
                 LineKind::Tool,
-                format!("    {TEXT_MUTED}+{}{RESET}", plural(remaining, "more match", "more matches")),
+                format!("    {TEXT_MUTED}+{}{RESET}", crate::i18n::plural(remaining, "more match", "more matches", "ещё совпадение", "ещё совпадения", "ещё совпадений")),
             ));
         }
     }
@@ -654,7 +654,7 @@ pub fn render_generic_card(
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     let verb = match state {
-        CallState::Waiting => "Waiting on",
+        CallState::Waiting => crate::i18n::tr("Waiting on"),
         CallState::Running => "Running",
         CallState::Done => "Ran",
         CallState::Failed => "Failed",

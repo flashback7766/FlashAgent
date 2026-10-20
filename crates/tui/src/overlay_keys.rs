@@ -330,9 +330,9 @@ impl App {
             }
             SettingsAction::CheckUpdatesNow => {
                 if flashagent_svc::updater::is_dev_mode() {
-                    settings.update_check_status = Some("Dev mode: updates disabled (source build)".into());
+                    settings.update_check_status = Some(flashagent_tui::i18n::tr("Dev mode: updates disabled (source build)").into());
                 } else {
-                    settings.update_check_status = Some("Checking GitHub releases…".into());
+                    settings.update_check_status = Some(flashagent_tui::i18n::tr("Checking GitHub releases…").into());
                     let ch = settings.config.update_channel;
                     let update_tx = cx.update_tx.clone();
                     tokio::spawn(async move {

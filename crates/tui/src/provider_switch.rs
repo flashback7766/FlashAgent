@@ -32,7 +32,7 @@ impl App {
     /// On the line under the prompt, which shows while a turn runs and while
     /// something is typed.
     pub(crate) fn refuse_switch_while_busy(&mut self) {
-        self.say(BackgroundNotice::fading(providers::BUSY.to_string(), 6).warning());
+        self.say(BackgroundNotice::fading(providers::busy().to_string(), 6).warning());
         self.renderer.request_reprint();
     }
 
@@ -197,7 +197,7 @@ impl App {
         let reconnect = in_use
             && before.is_some_and(|b| b.url != profile.url || b.protocol != profile.protocol || b.api_key != profile.api_key || b.model != profile.model);
         if reconnect && self.running {
-            view.refused(providers::BUSY);
+            view.refused(providers::busy());
             return;
         }
         let name = profile.name.trim().to_string();
