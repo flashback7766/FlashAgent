@@ -197,6 +197,9 @@ impl SettingsView {
                 if model.is_empty() { "(auto-detected)".to_string() } else { model.clone() }
             }),
             ("Permission mode", self.config.permission_mode.label().to_string()),
+            ("Safe mode", if self.config.safe_mode {
+                "On (reading and editing inside the project; no shell, no web, no subagents)".into()
+            } else { "Off".into() }),
             ("Auto-save sessions", if self.config.auto_save_sessions { "Enabled (auto-resume)".into() } else { "Disabled".into() }),
             ("External editor", self.config.external_editor.clone()),
             ("Setup wizard", "Run the setup again; a new server is added".into()),
@@ -376,16 +379,21 @@ impl SettingsView {
                     SettingsAction::None
                 }
                 3 => {
-                    self.config.auto_save_sessions = !self.config.auto_save_sessions;
+                    self.config.safe_mode = !self.config.safe_mode;
                     self.is_dirty = true;
                     SettingsAction::None
                 }
                 4 => {
+                    self.config.auto_save_sessions = !self.config.auto_save_sessions;
+                    self.is_dirty = true;
+                    SettingsAction::None
+                }
+                5 => {
                     self.cycle_editor();
                     self.is_dirty = true;
                     SettingsAction::None
                 }
-                5 => SettingsAction::OpenWizard,
+                6 => SettingsAction::OpenWizard,
                 _ => SettingsAction::None,
             },
             SettingsTab::Updates => match self.selected_index {
@@ -503,8 +511,9 @@ impl SettingsView {
                 0 => self.cycle_provider(delta),
                 1 => self.cycle_model(),
                 2 => self.config.permission_mode = self.config.permission_mode.next(),
-                3 => self.config.auto_save_sessions = !self.config.auto_save_sessions,
-                4 => self.cycle_editor(),
+                3 => self.config.safe_mode = !self.config.safe_mode,
+                4 => self.config.auto_save_sessions = !self.config.auto_save_sessions,
+                5 => self.cycle_editor(),
                 _ => {}
             },
             SettingsTab::Updates => match self.selected_index {

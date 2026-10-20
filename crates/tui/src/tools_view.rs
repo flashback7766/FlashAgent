@@ -15,6 +15,11 @@ const TEXT_MUTED: &str = "\x1b[38;2;145;150;160m";
 const TEXT_GREEN: &str = "\x1b[38;2;135;220;145m";
 const TEXT_OFF: &str = "\x1b[38;2;130;135;145m";
 
+/// The tools a safe session does not have: the shell, the web and the
+/// subagents. Reading and editing inside the project stay, so the agent can
+/// still do the work; it just cannot leave the project or run anything.
+pub const SAFE_MODE_TOOLS: [&str; 6] = ["run_shell", "web_search", "web_fetch", "spawn_agent", "send_message", "review_agent"];
+
 /// One tool in the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolRow {

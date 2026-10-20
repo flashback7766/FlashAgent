@@ -538,6 +538,16 @@ async fn main() -> Result<()> {
     // Only the MCP config (`read_only`, `read_only_tools`) marks external tools as reads.
     let hint_mgr = mcp_manager.clone();
     state.set_read_only_hint(Arc::new(move |tool: &str| hint_mgr.is_tool_read_only(tool)));
+    // The tools that are off: the ones the owner switched off, and the ones
+    // the safe mode takes away.
+    let mut disabled_tools = config.disabled_tools.clone();
+    if config.safe_mode {
+        for name in flashagent_tui::tools_view::SAFE_MODE_TOOLS {
+            if !disabled_tools.iter().any(|n| n == name) {
+                disabled_tools.push(name.to_string());
+            }
+        }
+    }
     let tools_arc: Arc<BuiltinTools> = Arc::new(BuiltinTools::new(BuiltinToolsConfig {
         cwd: cwd.clone(),
         // DuckDuckGo unless the environment names a Brave key.
@@ -548,8 +558,9 @@ async fn main() -> Result<()> {
         web_enabled: Some(config.web_tools),
         context_window: Some(context_capacity),
         mcp_manager: Some(mcp_manager.clone()),
-        // The tools the owner has switched off: not offered, and refused.
-        disabled_tools: Some(config.disabled_tools.clone()),
+        // The tools the owner has switched off, and the ones the safe mode
+        // takes away: not offered, and refused.
+        disabled_tools: Some(disabled_tools.clone()),
     })?);
     // A closed terminal window (SIGHUP) or a kill (SIGTERM) skips the normal
     // exit; the background tasks run in their own process groups and would
@@ -583,7 +594,7 @@ async fn main() -> Result<()> {
         Box::leak(Box::new(PermissionedTools::new(Arc::new(composite), Some(tools_arc.clone()), state.clone())));
     // The three tools only the top has are not the built-in ones, so the
     // permission layer is where their switch is kept.
-    perm.set_disabled_tools(config.disabled_tools.clone());
+    perm.set_disabled_tools(disabled_tools.clone());
 
     // Project and global memory docs, injected into the system prompt.
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_default();

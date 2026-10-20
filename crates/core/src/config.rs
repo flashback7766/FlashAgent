@@ -422,6 +422,10 @@ pub struct AppConfig {
     /// does not keep a name alive.
     #[serde(default)]
     pub disabled_tools: Vec<String>,
+    /// The safe mode: reading and editing inside the project, and nothing
+    /// else. No shell, no network, no subagents.
+    #[serde(default)]
+    pub safe_mode: bool,
     /// Trust confirmation is skipped for these.
     #[serde(default)]
     pub trusted_directories: Vec<PathBuf>,
@@ -637,6 +641,7 @@ impl Default for AppConfig {
             setup_completed: false,
             toolset_profile: ToolsetProfile::Auto,
             disabled_tools: Vec::new(),
+            safe_mode: false,
             trusted_directories: Vec::new(),
             update_channel: default_update_channel(),
             auto_check_updates: true,
