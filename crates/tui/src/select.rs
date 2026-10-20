@@ -308,7 +308,18 @@ impl<T> SelectMenu<T> {
         if matches.is_empty() {
             let said = match (self.custom_entry, self.filter.trim()) {
                 (true, "") => format!("(No {item_noun} listed \u{b7} type an id and press Enter)"),
-                (true, typed) => format!("(Not listed \u{b7} Enter uses \"{typed}\")"),
+                (true, typed) => {
+                    // The name is not in the list: the closest one that is, so
+                    // a typo costs a keystroke instead of a search.
+                    let closest = crate::autocomplete::closest_match(
+                        typed,
+                        self.items.iter().map(|i| i.label.as_str()).filter(|l| !l.is_empty()),
+                    );
+                    match closest {
+                        Some(near) => format!("(Not listed \u{b7} did you mean \"{near}\"? \u{b7} Enter uses \"{typed}\")"),
+                        None => format!("(Not listed \u{b7} Enter uses \"{typed}\")"),
+                    }
+                }
                 (false, _) => format!("(No matching {item_noun} found)"),
             };
             lines.push((LineKind::System, pad_row(&format!("  \x1b[38;2;135;130;125m{said}\x1b[0m"))));

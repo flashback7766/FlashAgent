@@ -1234,6 +1234,25 @@ fn esc_clears_a_steering_draft_before_it_stops_the_turn() {
 }
 
 #[test]
+fn a_misspelled_model_is_offered_the_closest_one() {
+    let server = MockServer::start(vec![Reply::Text("Hello.".into())]);
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+    ask(&term, "hello", "Hello.");
+
+    // A name the server did not list, one letter away from one it did.
+    term.type_text("/model mock-modle");
+    term.send(ENTER);
+    let screen = term.wait_for("Not listed", WAIT);
+    assert!(screen.contains("did you mean"), "no suggestion for the closest model:\n{screen}");
+    assert!(screen.contains(MODEL), "the closest model is not named:\n{screen}");
+    // The menu is still open: Esc closes it, then Ctrl+D quits.
+    term.send(ESC);
+    std::thread::sleep(Duration::from_millis(200));
+    quit(&mut term);
+}
+
+#[test]
 fn a_single_exchange_can_be_compacted_too() {
     let server = MockServer::start(vec![
         Reply::Text("Only answer.".into()),

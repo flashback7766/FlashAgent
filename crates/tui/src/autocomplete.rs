@@ -47,6 +47,48 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// The closest of `candidates` to what was typed, when it is close enough to
+/// be what was meant: "gpt4o" finds "gpt-4o", "compcat" finds "/compact".
+/// A name that is only a prefix of another is that other one: "mode" is not a
+/// typo of "models", it is the start of it.
+pub fn closest_match<'a>(typed: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let typed = typed.trim().trim_start_matches('/');
+    if typed.is_empty() {
+        return None;
+    }
+    let lower = typed.to_lowercase();
+    let mut best: Option<(&str, usize)> = None;
+    for candidate in candidates {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        let name = candidate.trim_start_matches('/').to_lowercase();
+        if name == lower {
+            return Some(candidate);
+        }
+        if name.starts_with(&lower) {
+            // A prefix is a start, not a typo: the menu already filters by it.
+            continue;
+        }
+        let distance = edit_distance(&lower, &name);
+        if distance <= allowed_distance(typed) && best.is_none_or(|(_, d)| distance < d) {
+            best = Some((candidate, distance));
+        }
+    }
+    best.map(|(c, _)| c)
+}
+
+/// How far a typed name may be from the one that was meant: two letters for a
+/// short name, three for a long one.
+fn allowed_distance(typed: &str) -> usize {
+    if typed.chars().count() > 8 {
+        3
+    } else {
+        2
+    }
+}
+
 pub fn builtin_commands() -> Vec<AutocompleteItem> {
     vec![
         AutocompleteItem::new("/help", "Show command reference and keybindings", AutocompleteCategory::Command),
@@ -564,8 +606,19 @@ mod tests {
     }
 
     #[test]
-    fn a_skill_is_listed_once() {
-        let dir = tempfile::tempdir().unwrap();
+    fn the_closest_name_is_the_one_that_was_meant() {
+        assert_eq!(closest_match("gpt4o", ["gpt-4o", "llama-3"]), Some("gpt-4o"));
+        assert_eq!(closest_match("compcat", ["/compact", "/help"]), Some("/compact"));
+        assert_eq!(closest_match("/compcat", ["/compact"]), Some("/compact"));
+        // Too far to be a typo: nothing is said that is not true.
+        assert_eq!(closest_match("zebra", ["/compact", "/help"]), None);
+        assert_eq!(closest_match("", ["/compact"]), None);
+        // A prefix is the start of a name, not a misspelling of it.
+        assert_eq!(closest_match("mode", ["/models", "/help"]), None);
+    }
+
+    #[test]
+    fn a_skill_is_listed_once() {        let dir = tempfile::tempdir().unwrap();
         let skills = dir.path().join(".agents/skills");
         std::fs::create_dir_all(&skills).unwrap();
         std::fs::write(skills.join("greet.md"), "description: Say hello\n").unwrap();
