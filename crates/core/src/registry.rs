@@ -221,10 +221,13 @@ const FILES: Param = list(
 const EDITS_ITEM: &[Param] = &[
     s(
         "old_string",
-        "Text to replace, copied exactly from the file with its indentation and line breaks; it must match once unless replace_all",
+        "Text to replace, copied exactly from the file with its indentation and line breaks; it must match once unless replace_all. Not needed when the edit names lines",
     ),
-    s("new_string", "The text that replaces old_string whole"),
+    s("new_string", "The text that replaces old_string whole, or the lines the edit names, with the indentation they should have"),
     opt_bool("replace_all", "Replace every match, not just one"),
+    opt_bool("regex", "Treat old_string as a regular expression; new_string may use $1 and ${name} to put the matched parts back"),
+    opt_int("start_line", "Replace the lines from here, counted from 1"),
+    opt_int("end_line", "The last line to replace, counted from 1 and included"),
 ];
 
 const EDITS: Param = list("edits", "Replacements, applied in order", EDITS_ITEM);
@@ -281,7 +284,7 @@ pub static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "edit_file",
-        description: "Replace exact old_string matches in a file; new_string replaces old_string whole, so to insert a line keep its neighbour in new_string too. For several files pass files instead of path and edits (up to 20); all apply or none do",
+        description: "Replace exact old_string matches in a file; new_string replaces old_string whole, so to insert a line keep its neighbour in new_string too. An edit may instead name lines (start_line and end_line, counted from 1, the last line included) or give a regular expression (regex: true). Several edits in one call are applied as several cursors: each is found in the file as it was. For several files pass files instead of path and edits (up to 20); all apply or none do",
         params: &[
             PATH,
             EDITS,
