@@ -479,7 +479,10 @@ fn restore_enhanced_keys() {
     let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
 }
 
-fn install_crash_hook() {
+/// The crash hook, and whether it may write a report: a report holds a
+/// backtrace and the paths of the machine, so it is written only when the
+/// owner has asked for it (Settings → General → Crash reports).
+fn install_crash_hook(reports_enabled: bool) {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
@@ -492,23 +495,29 @@ fn install_crash_hook() {
             LeaveAlternateScreen,
         );
         let _ = crossterm::terminal::disable_raw_mode();
-        let log_content = format!(
-            "FlashAgent Crash Report\nVersion: {}\nTime: {:?}\nPanic: {}\nBacktrace:\n{:?}\n\nPlease report this issue at: https://github.com/flashback7766/FlashAgent/issues\n",
-            flashagent_svc::updater::current_version(),
-            std::time::SystemTime::now(),
-            info,
-            std::backtrace::Backtrace::capture()
-        );
-        // Never into the user's project directory.
-        let log_path = flashagent_home_dir()
-            .map(|d| {
-                let _ = std::fs::create_dir_all(&d);
-                d.join("crash.log")
-            })
-            .unwrap_or_else(|| std::env::temp_dir().join("flashagent-crash.log"));
-        let _ = std::fs::write(&log_path, log_content);
         eprintln!("\x1b[1;38;2;245;120;120mFlashAgent encountered an unexpected crash.\x1b[0m");
-        eprintln!("Crash report written to {}. Please submit an issue at: https://github.com/flashback7766/FlashAgent/issues", log_path.display());
+        if reports_enabled {
+            let log_content = format!(
+                "FlashAgent Crash Report\nVersion: {}\nTime: {:?}\nPanic: {}\nBacktrace:\n{:?}\n\nPlease report this issue at: https://github.com/flashback7766/FlashAgent/issues\n",
+                flashagent_svc::updater::current_version(),
+                std::time::SystemTime::now(),
+                info,
+                std::backtrace::Backtrace::capture()
+            );
+            // Never into the user's project directory.
+            let log_path = flashagent_home_dir()
+                .map(|d| {
+                    let _ = std::fs::create_dir_all(&d);
+                    d.join("crash.log")
+                })
+                .unwrap_or_else(|| std::env::temp_dir().join("flashagent-crash.log"));
+            let _ = std::fs::write(&log_path, log_content);
+            eprintln!("Crash report written to {}. Please submit an issue at: https://github.com/flashback7766/FlashAgent/issues", log_path.display());
+        } else {
+            // Nothing is written without being asked for: a backtrace holds
+            // the paths of the machine it was taken on.
+            eprintln!("No crash report was written. Turn on \"Crash reports\" in Settings if you want one.");
+        }
         default_hook(info);
     }));
 
@@ -602,7 +611,7 @@ async fn main() -> Result<()> {
     let memory_block = flashagent_core::injection_block(&docs, config.token_budget);
     let memory_docs = docs.len();
 
-    install_crash_hook();
+    install_crash_hook(config.crash_reports);
 
     run_terminal(AppContext {
         config,
