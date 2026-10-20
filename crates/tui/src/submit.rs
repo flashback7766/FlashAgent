@@ -1,5 +1,25 @@
 use super::*;
 
+/// Messages typed while a compaction owns the history. The history is with the
+/// task (`std::mem::take` in `compact_command`), so a turn started now would
+/// begin from nothing: the words wait here and go out together once the summary
+/// is back. A static rather than an `App` field because `App` lives in main.rs,
+/// which must not change for this.
+static COMPACT_QUEUE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Typed while the context was being compacted: it waits for the summary.
+fn queue_compacted_message(text: String) {
+    let mut queue = COMPACT_QUEUE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    queue.push(text);
+}
+
+/// Everything typed during the compaction, oldest first. Empty when nothing
+/// waited.
+pub(crate) fn take_compacted_messages() -> Vec<String> {
+    let mut queue = COMPACT_QUEUE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::take(&mut *queue)
+}
+
 const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/goal <task>", "an autonomous run; its limits are in Settings \u{2192} Goal"),
     ("/resume", "pick a saved session from this folder and continue it"),
@@ -117,6 +137,16 @@ fn while_running(name: &str) -> WhileRunning {
     }
 }
 
+/// A command that begins a model turn. During a compaction these wait with a
+/// message: the history is with the task, and a turn now would start from
+/// nothing.
+fn starts_a_turn(name: &str, arg: &str) -> bool {
+    (name == "goal" && !arg.is_empty())
+        || matches!(name, "regenerate" | "retry")
+        || name.starts_with("skill:")
+        || find_skill_file(name).is_some()
+}
+
 fn untracked_list(files: &[&str]) -> String {
     let mut rows: Vec<String> = files.iter().take(8).map(|f| format!("  {f}")).collect();
     if files.len() > 8 {
@@ -134,12 +164,61 @@ impl App {
                 Some((name, arg)) => (name, arg.trim()),
                 None => (rest, ""),
             };
+            // The history is with the compaction task: a command that starts a
+            // turn would begin from nothing, so it waits with a message.
+            if self.compacting && starts_a_turn(name, arg) {
+                return self.queue_while_compacting(&line);
+            }
             if let Some(flow) = self.run_command(cx, name, arg).await {
                 return flow;
             }
         }
+        if self.compacting {
+            return self.queue_while_compacting(&line);
+        }
         self.send_prompt(cx);
         Flow::Next
+    }
+
+    /// Enter while the context is being compacted: the history is with the
+    /// task, so a new turn would start from nothing. The words wait and go out
+    /// together once the summary is back.
+    fn queue_while_compacting(&mut self, line: &str) -> Flow {
+        let text = line.trim().to_string();
+        if !text.is_empty() {
+            queue_compacted_message(text);
+        }
+        self.input.take();
+        self.notice("Compaction is still running \u{b7} your message is queued and will be sent when it finishes");
+        Flow::Next
+    }
+
+    /// The compaction came back: whatever was typed while it ran goes out now,
+    /// ahead of a draft typed since. Called from the `Compacted` handler
+    /// (`on_compacted`) once the history is restored, whether the summary was
+    /// saved or not. With no turn under way it is one new turn; with one
+    /// running, the words ride it as steering.
+    pub(crate) fn send_queued_after_compaction(&mut self, cx: &LoopCtx<'_>) {
+        let queued = take_compacted_messages();
+        if queued.is_empty() {
+            return;
+        }
+        let joined = queued.join("\n\n");
+        if self.running {
+            if let Some(tx) = self.active_steer_tx.clone() {
+                let _ = tx.send(flashagent_core::Steer::text(joined.clone()));
+                self.pending_steers.push((joined, Vec::new()));
+            } else {
+                // No channel: the words go back to the prompt rather than away.
+                let draft = self.input.take();
+                self.input.set(if draft.trim().is_empty() { joined } else { format!("{joined}\n\n{draft}") });
+            }
+            self.renderer.request_reprint();
+            return;
+        }
+        let draft = self.input.take();
+        self.input.set(if draft.trim().is_empty() { joined } else { format!("{joined}\n\n{draft}") });
+        self.send_prompt(cx);
     }
 
     /// Enter on a `/command` while a turn runs. False when the line is not one
@@ -748,8 +827,10 @@ impl App {
             self.chat.push_system("Compaction failed or saved no space · conversation unchanged");
             return;
         };
-        let earlier_turns = self.history.iter().filter(|m| flashagent_core::is_prompt(m)).count() > 1;
-        if !earlier_turns {
+        // One exchange is enough: the person asked for a compaction, and the
+        // summary of a short conversation is still a summary.
+        let has_turn = self.history.iter().any(flashagent_core::is_prompt);
+        if !has_turn {
             self.chat.push_system("Nothing to compact yet");
             return;
         }
@@ -757,16 +838,8 @@ impl App {
         self.custom_placeholder = None;
         self.suggested_prompt = None;
         self.compacting = true;
-        // No deadline: the write can take minutes, and a line that ran out
-        // half-way through would be hiding the very thing it reports.
-        self.set_compact_status(
-            format!(
-                "Compacting context… {} of {} in the window · the model is writing the summary",
-                ContextUsage::format_tokens(self.context_usage.total_used()),
-                ContextUsage::format_tokens(self.context_usage.total_capacity)
-            ),
-            0,
-        );
+        self.chat.start_compaction_card();
+        self.renderer.request_reprint();
 
         // The task owns the history until it is done; there is nothing to send
         // a turn with in the meantime, and a turn would have nothing to keep.
@@ -776,8 +849,11 @@ impl App {
         let focus = (!focus.is_empty()).then(|| focus.to_string());
         let tx = cx.tx.clone();
         tokio::spawn(async move {
-            let saved = compact_context(source.as_ref(), &mut history, focus.as_deref(), &archive, Some(used)).await;
-            let _ = tx.send(UiEvent::Compacted { history, saved });
+            let sink = SummarySink::ui(tx.clone());
+            let result =
+                compact_context_with_sink(source.as_ref(), &mut history, focus.as_deref(), &archive, Some(used), Some(&sink), true).await;
+            let saved = result.as_ref().map(|r| r.saved);
+            let _ = tx.send(UiEvent::Compacted { history, saved, card: result });
         });
     }
 
@@ -1047,5 +1123,25 @@ mod tests {
         assert_eq!(split_command("/compact keep the schema"), ("compact", "keep the schema"));
         assert_eq!(split_command("/help"), ("help", ""));
         assert_eq!(split_command("/tmp/shot.png"), ("tmp/shot.png", ""));
+    }
+
+    #[test]
+    fn only_a_turn_command_waits_for_compaction() {
+        assert!(starts_a_turn("goal", "ship it"));
+        assert!(!starts_a_turn("goal", ""));
+        assert!(starts_a_turn("regenerate", ""));
+        assert!(starts_a_turn("retry", ""));
+        assert!(starts_a_turn("skill:review", ""));
+        assert!(!starts_a_turn("compact", ""));
+        assert!(!starts_a_turn("help", ""));
+    }
+
+    #[test]
+    fn messages_queued_during_compaction_keep_their_order() {
+        assert!(take_compacted_messages().is_empty());
+        queue_compacted_message("first".into());
+        queue_compacted_message("second".into());
+        assert_eq!(take_compacted_messages(), ["first", "second"]);
+        assert!(take_compacted_messages().is_empty());
     }
 }

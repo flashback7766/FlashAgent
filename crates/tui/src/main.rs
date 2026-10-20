@@ -22,7 +22,7 @@ use flashagent_tui::goal::{commit_goal_milestone, format_plan, GoalBudgets, Goal
 use flashagent_tui::MascotMood;
 use flashagent_tui::{
     clip_ansi, pad_box_row, render_session_saved_card, restore_line_color,
-    visible_width, welcome_card, AutocompletePopup, ChatView, ConfirmChoice, ConfirmSelect,
+    visible_width, welcome_card, AutocompletePopup, ChatView, CompactionResult, ConfirmChoice, ConfirmSelect,
     ContextModal, LineKind, McpModal, McpModalAction, McpViewTab, PrefillTracker, ReasoningExpansion,
     RenderLine, SamplingAction, SamplingView, SelectItem, SelectMenu, SettingsAction, SettingsView,
     TuiGate, TuiQuestionGate, UiEvent,
@@ -751,13 +751,6 @@ impl PendingSwitch {
 struct App {
     question_ui_state: QuestionUiState,
     history: Vec<ChatMessage>,
-    /// Set while `/compact` runs in the background: the line under the prompt
-    /// says so instead of the interface looking frozen.
-    compact_status: Option<String>,
-    /// Idle ticks that line keeps the tip's row for once the compaction is done.
-    /// Zero while it still runs: that takes as long as it takes, and a line that
-    /// expired mid-write would be hiding the very thing it reports.
-    compact_status_hold: usize,
     /// The history is with the compaction task until it comes back.
     compacting: bool,
     input: flashagent_tui::Composer,
@@ -785,6 +778,9 @@ struct App {
     /// writes what it has done so far rather than the conversation as it stood
     /// when the turn started. `None` when no turn is running.
     turn_history: Option<flashagent_core::loop_::SharedHistory>,
+    /// The mid-turn compactor's last result, shared with the turn. The core
+    /// event says how much was saved; the card needs the summary too.
+    mid_turn_report: Option<Arc<std::sync::Mutex<Option<flashagent_tui::CompactionResult>>>>,
     active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<flashagent_core::Steer>>,
     pending_steers: Vec<(String, Vec<Attachment>)>,
     /// Commands typed while a turn ran that change the conversation: they run when it ends.
@@ -852,7 +848,7 @@ struct App {
     autocomplete_idx: usize,
     tick_n: usize,
     renderer: Renderer,
-    /// Unprompted things (an update, compaction) go on the line under the input.
+    /// Unprompted things (an update, a notice) go on the line under the input.
     background: Option<BackgroundNotice>,
     channel_switch: Option<ChannelSwitch>,
     uninstall_confirm: bool,
@@ -1371,8 +1367,6 @@ fn initial_app(init: InitialApp) -> App {
     App {
         question_ui_state: QuestionUiState::default(),
         history: vec![ChatMessage::system(system_prompt_text)],
-        compact_status: None,
-        compact_status_hold: 0,
         compacting: false,
         input: flashagent_tui::Composer::new(),
         custom_placeholder: None,
@@ -1391,6 +1385,7 @@ fn initial_app(init: InitialApp) -> App {
         running: false,
         active_turn_handle: None,
         turn_history: None,
+        mid_turn_report: None,
         active_steer_tx: None,
         pending_steers: Vec::new(),
         queued_commands: Vec::new(),
@@ -1992,6 +1987,8 @@ mod tests {
         BackendSource(flashagent_llm::Client::new(flashagent_llm::Endpoint::detect("http://127.0.0.1:9/v1", None), "m"))
     }
 
+    const SHAPED_SUMMARY: &str = "## Objective\nfirst question\n\n## Requirements\n- none\n\n## Decisions\n- none\n\n## Work State\n### Completed\n- read a file\n### Active\n- none\n### Blocked\n- none\n\n## Next Move\n1. continue the work\n\n## Relevant Files\n- none\n\n## Important Context\n- none";
+
     struct ScriptedCompaction(flashagent_llm::FinishReason);
 
     #[async_trait::async_trait]
@@ -2002,11 +1999,66 @@ mod tests {
             _tools: &[flashagent_llm::ToolSpec],
         ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
             let events = vec![
-                Ok(flashagent_llm::LlmEvent::TextDelta("Summary:\n1. Primary Request and Intent: first question\n7. Pending Tasks: continue the work\n8. Current Work: read a file".into())),
+                Ok(flashagent_llm::LlmEvent::TextDelta(SHAPED_SUMMARY.into())),
                 Ok(flashagent_llm::LlmEvent::Done(self.0)),
             ];
             Ok(Box::pin(futures::stream::iter(events)))
         }
+    }
+
+    /// A model that skipped a section is not refused: what it wrote is kept,
+    /// with a note about what is missing. Free models do this, and a window
+    /// that stays full helps nobody.
+    struct LooseCompaction;
+
+    #[async_trait::async_trait]
+    impl LlmSource for LooseCompaction {
+        async fn turn(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[flashagent_llm::ToolSpec],
+        ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+            let events = vec![
+                Ok(flashagent_llm::LlmEvent::TextDelta("## Objective\nfix the parser\n\n## Next Move\n1. read the file".into())),
+                Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_summary_that_skipped_a_section_is_kept_with_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("conversation.jsonl");
+        let mut history = long_history();
+        let result = compact_context(&LooseCompaction, &mut history, None, &archive, None)
+            .await
+            .expect("the text the model wrote is kept even without the shape");
+        assert!(result.summary.contains("## Objective"), "{}", result.summary);
+        assert!(result.summary.contains("did not take the usual shape"), "the shape is said out loud: {}", result.summary);
+        assert!(result.summary.contains("Requirements"), "the missing section is named: {}", result.summary);
+        assert!(result.summary.contains("## Next Move"), "what the model wrote is kept: {}", result.summary);
+    }
+
+    #[tokio::test]
+    async fn a_single_exchange_can_be_compacted_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("conversation.jsonl");
+        let mut history = vec![
+            ChatMessage::system("SYSTEM PROMPT"),
+            ChatMessage::user("fix the parser"),
+            ChatMessage::assistant("here it is"),
+        ];
+        // A compaction the person asked for: it happens even when the summary
+        // is longer than the exchange it replaces.
+        let result = compact_context_with_sink(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None, None, true)
+            .await
+            .expect("one exchange is enough to compact");
+        assert!(history[0].content.contains("Compacted Conversation History"), "{}", history[0].content);
+        assert!(history[0].content.contains("longer than the conversation"), "the growth is said out loud: {}", history[0].content);
+        assert_eq!(history[1].content, "fix the parser", "the task stays: the model still has it");
+        assert_eq!(history.len(), 2, "the exchange is replaced by the summary: {}", history.len());
+        assert_eq!(result.saved, 0, "nothing was freed, and the card says so");
     }
 
     #[tokio::test]
@@ -2029,9 +2081,10 @@ mod tests {
         assert!(freed.is_some());
         assert_eq!(history.iter().filter(|m| m.role == flashagent_llm::Role::System).count(), 1);
         assert!(history[0].content.starts_with("SYSTEM PROMPT"));
-        assert!(history[0].content.contains("The summary below covers the earlier conversation.\nSummary:"));
+        assert!(history[0].content.contains("The summary below covers the earlier conversation.\n## Objective"));
         assert!(history[0].content.contains("Continue the current task from this summary"));
         assert!(history[0].content.contains(&archive.display().to_string()));
+        assert!(history[0].content.contains(crate::compact::COMPACTION_STATS_MARK.trim()), "the card's bill is stored for a resume");
         assert!(history[0].content.contains("first question"));
         // The kept region is the whole current turn, from its prompt.
         assert_eq!(history[1].role, flashagent_llm::Role::User);
@@ -2054,6 +2107,49 @@ mod tests {
         let records: Vec<SavedMessage> = archived.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
         assert_eq!(records.iter().filter(|m| m.content == "first question").count(), 1);
         assert!(!records.iter().any(|m| m.content == "next"), "the active turn stays live");
+    }
+
+    /// The same shaped summary in two pieces, so a test can see the card get
+    /// the first one before the call that writes the second has finished.
+    struct SplitCompaction;
+
+    #[async_trait::async_trait]
+    impl LlmSource for SplitCompaction {
+        async fn turn(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[flashagent_llm::ToolSpec],
+        ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+            let (first, second) = SHAPED_SUMMARY.split_at(SHAPED_SUMMARY.find("## Requirements").unwrap());
+            let events = vec![
+                Ok(flashagent_llm::LlmEvent::TextDelta(first.into())),
+                Ok(flashagent_llm::LlmEvent::TextDelta(second.into())),
+                Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_compaction_summary_reaches_the_card_piece_by_piece() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let mut history = long_history();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = SummarySink::ui(tx);
+        let result = compact_context_with_sink(&SplitCompaction, &mut history, None, &archive, None, Some(&sink), true)
+            .await
+            .expect("the summary is accepted");
+        assert!(result.summary.contains("## Objective"));
+
+        let mut pieces = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let UiEvent::CompactionDelta(text) = event {
+                pieces.push(text);
+            }
+        }
+        assert_eq!(pieces.len(), 2, "both streamed pieces reached the card: {pieces:?}");
+        assert_eq!(pieces.concat(), SHAPED_SUMMARY);
     }
 
     /// Answers with `first` on the first call and `second` after that, and
@@ -2094,34 +2190,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_summary_without_the_expected_shape_is_asked_for_once_more() {
+    async fn a_summary_without_the_expected_shape_is_asked_for_once_more_and_kept_afterwards() {
         // Seen live: a model that reads and answers well wrote a plain summary,
         // sections 7 and 8 missing, and the window stayed full behind a message
         // that said only that it had failed.
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("c.jsonl");
         let shapeless = "Summary:\nThe user asked a question and I answered it.";
-        let shaped = "Summary:\n1. Primary Request and Intent: the first question\n7. Pending Tasks: none\n8. Current Work: done";
+        let shaped = SHAPED_SUMMARY;
 
         let mut history = long_history();
         let src = TwoShapeSummaries { first: shapeless, second: shaped, calls: std::sync::Mutex::new(0) };
         assert!(compact_context(&src, &mut history, None, &archive, None).await.is_some(), "the second ask is taken");
         assert_eq!(*src.calls.lock().unwrap(), 2, "and it is the last one");
-        assert!(history[0].content.contains("7. Pending Tasks: none"));
+        assert!(history[0].content.contains("continue the work"));
 
-        // Asked twice and refused twice is still a refusal: the rule is not
-        // relaxed, only the first answer is forgiven for its shape.
+        // Asked twice and the shape is still not there: what the model wrote is
+        // kept, with a note about what is missing. The rule is not relaxed
+        // into refusing everything, and the window is freed either way.
         let mut history = long_history();
         let src = TwoShapeSummaries { first: shapeless, second: shapeless, calls: std::sync::Mutex::new(0) };
-        assert!(compact_context(&src, &mut history, None, &archive, None).await.is_none());
+        let kept = compact_context(&src, &mut history, None, &archive, None)
+            .await
+            .expect("the text the model wrote is kept");
         assert_eq!(*src.calls.lock().unwrap(), 2, "no third ask");
-        assert_eq!(history[0].content, "SYSTEM PROMPT", "the conversation is untouched");
+        assert!(kept.summary.contains("The user asked a question"), "what it wrote is kept: {}", kept.summary);
+        assert!(kept.summary.contains("did not take the usual shape"), "the shape is said out loud: {}", kept.summary);
+        assert!(kept.summary.contains("Requirements"), "the missing section is named: {}", kept.summary);
 
         // A first answer that already has the shape is not asked for again.
         let mut history = long_history();
         let src = TwoShapeSummaries { first: shaped, second: shapeless, calls: std::sync::Mutex::new(0) };
         assert!(compact_context(&src, &mut history, None, &archive, None).await.is_some());
         assert_eq!(*src.calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn plain_headings_are_rewritten_into_the_card_shape() {
+        // A model that answers with "Objective:" rather than "## Objective" is
+        // not refused over punctuation: the stored summary gets the headings the
+        // card expects, and the model still receives every required section.
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let plain = "Here is the summary:\n\nObjective:\ncontinue the work\n\nRequirements:\n- none\n\nDecisions:\n- none\n\nWork State:\nCompleted:\n- first question answered\nActive:\n- none\nBlocked:\n- none\n\nNext Move:\n1. ship\n\nRelevant Files:\n- none\n\nImportant Context:\n- none";
+        let mut history = long_history();
+        let src = TwoShapeSummaries { first: plain, second: "nope", calls: std::sync::Mutex::new(0) };
+        let result = compact_context(&src, &mut history, None, &archive, None).await.expect("plain headings are accepted after normalization");
+        assert!(result.summary.starts_with("## Objective"), "{}", result.summary);
+        assert!(result.summary.contains("### Completed"), "{}", result.summary);
+        assert_eq!(*src.calls.lock().unwrap(), 1, "it was not asked a second time");
+        assert!(history[0].content.contains("## Objective"));
+    }
+
+    #[test]
+    fn a_session_summary_is_found_in_the_system_message_for_the_card() {
+        let content = format!(
+            "SYSTEM PROMPT{}{}## Objective\nship it{}/tmp/a.jsonl\nContinue{}17 in · 5 out",
+            crate::compact::COMPACTED_MARK,
+            crate::compact::COMPACTED_INTRO,
+            crate::compact::ARCHIVE_MARK,
+            crate::compact::COMPACTION_STATS_MARK
+        );
+        assert_eq!(crate::compact::summary_from_system(&content), Some("## Objective\nship it"));
+        assert_eq!(crate::compact::stats_from_system(&content), Some((17, 5)));
+        assert_eq!(crate::compact::summary_from_system("SYSTEM PROMPT"), None);
+        assert_eq!(crate::compact::stats_from_system("SYSTEM PROMPT"), None);
+    }
+
+    #[tokio::test]
+    async fn compaction_usage_after_the_finish_reason_is_still_counted() {
+        struct LateUsage;
+        #[async_trait::async_trait]
+        impl LlmSource for LateUsage {
+            async fn turn(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[flashagent_llm::ToolSpec],
+            ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+                let events = vec![
+                    Ok(flashagent_llm::LlmEvent::TextDelta(SHAPED_SUMMARY.into())),
+                    Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)),
+                    Ok(flashagent_llm::LlmEvent::Usage(flashagent_llm::Usage {
+                        prompt: Some(90_000),
+                        completion: Some(5_100),
+                        ..Default::default()
+                    })),
+                ];
+                Ok(Box::pin(futures::stream::iter(events)))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let mut history = long_history();
+        let result = compact_context(&LateUsage, &mut history, None, &archive, None).await.expect("a shaped summary");
+        assert_eq!((result.input_tokens, result.output_tokens), (90_000, 5_100));
     }
 
     /// A prompt and `steps` tool-using steps: assistant call, then its result.
@@ -2154,20 +2316,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compacting_a_running_turn_keeps_its_prompt_and_last_steps_and_the_project_memory() {
+    async fn compacting_a_running_turn_keeps_its_prompt_last_steps_and_system_memory() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("conversation.jsonl");
         let memory = "PROJECT RULES: use tabs";
         let mut history = running_turn(8);
+        history[0].content = format!("SYSTEM PROMPT\n\n{memory}");
         let before = history.clone();
         let (_, cut) = mid_turn_cut(&history).unwrap();
-        let saved = compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, memory, &archive, None).await;
-        assert!(saved.is_some_and(|n| n > 0));
+        let saved = compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, &archive, None).await;
+        assert!(saved.is_some_and(|r| r.saved > 0));
         assert_eq!(history[0].role, flashagent_llm::Role::System);
         assert!(history[0].content.contains("Compacted Conversation History"));
-        // The task it was given, with the memory the summarized message may have carried.
+        // Memory stays where it belongs, in the system prompt; the task itself
+        // is not padded with a second copy.
+        assert!(history[0].content.contains(memory), "the system prompt lost its memory:\n{}", history[0].content);
         assert_eq!(history[1].role, flashagent_llm::Role::User);
-        assert!(history[1].content.starts_with(memory) && history[1].content.ends_with("fix the parser"), "{}", history[1].content);
+        assert_eq!(history[1].content, "fix the parser");
         // The last steps, whole and in order.
         assert_eq!(history.len(), 2 + before.len() - cut);
         assert_eq!(history[2].content, before[cut].content);
@@ -2178,8 +2343,43 @@ mod tests {
 
         // Nothing to cut: untouched.
         let mut short = running_turn(2);
-        assert_eq!(compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut short, memory, &archive, None).await, None);
+        assert_eq!(compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut short, &archive, None).await, None);
         assert_eq!(short.len(), 6);
+    }
+
+    /// The mid-turn compactor hands its result to the app through the shared
+    /// slot: the core event says only how much was saved, and the card needs
+    /// the summary and the call's token counts too.
+    #[tokio::test]
+    async fn the_mid_turn_compactor_hands_its_result_to_the_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("conversation.jsonl");
+        let report = Arc::new(std::sync::Mutex::new(None));
+        let compactor = TurnCompactor {
+            source: Arc::new(ScriptedCompaction(flashagent_llm::FinishReason::Stop)),
+            archive: Some(archive),
+            capacity: 40_000,
+            fixed: 0,
+            threshold_pct: 50,
+            report: report.clone(),
+            sink: None,
+        };
+        let mut history = running_turn(8);
+        let prompt_tokens = Some(30_000);
+        assert!(compactor.will_compact(&history, prompt_tokens), "the window is past the threshold");
+        let done = compactor.compact(&mut history, prompt_tokens).await;
+        assert!(matches!(done, flashagent_core::Compaction::Saved(_)));
+        let slot = report.lock().unwrap().take().expect("the app gets the result");
+        assert!(slot.saved > 0);
+        assert!(slot.summary.contains("## Objective"), "{}", slot.summary);
+        assert!(slot.input_tokens > 0 && slot.output_tokens > 0);
+
+        // A compaction that does not happen clears the slot first: the app must
+        // never draw a stale card for a compaction that was not taken.
+        assert!(!compactor.will_compact(&history, Some(1_000)), "the window has room again");
+        let done = compactor.compact(&mut history, Some(1_000)).await;
+        assert!(matches!(done, flashagent_core::Compaction::NotNeeded));
+        assert!(report.lock().unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2195,19 +2395,32 @@ mod tests {
     #[tokio::test]
     async fn failed_or_truncated_compaction_keeps_the_original_history() {
         let dir = tempfile::tempdir().unwrap();
-        let archive = dir.path().join("conversation.jsonl");
         let original = vec![
             ChatMessage::system("system"),
             ChatMessage::user("important instruction"),
             ChatMessage::assistant("work already done".repeat(1000)),
             ChatMessage::user("current task"),
         ];
-        for reason in [flashagent_llm::FinishReason::Length, flashagent_llm::FinishReason::ToolUse] {
-            let mut history = original.clone();
-            assert_eq!(compact_context(&ScriptedCompaction(reason), &mut history, None, &archive, None).await, None);
-            assert_eq!(history.len(), original.len());
-            assert_eq!(history[2].content, original[2].content);
-        }
+        // A summary that was cut off is kept, with a note about what is
+        // missing: on a free model the reasoning often eats the output, and a
+        // window that stays full helps nobody.
+        let archive = dir.path().join("cut.jsonl");
+        let mut history = original.clone();
+        let cut = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Length), &mut history, None, &archive, None)
+            .await
+            .expect("what the model wrote before the cut is kept");
+        assert!(cut.summary.contains("cut off at the output limit"), "and it says what it is: {}", cut.summary);
+        assert!(cut.summary.contains("## Objective"), "with what it managed to write: {}", cut.summary);
+
+        // An answer that is not a summary at all is refused, and the history
+        // stays as it was.
+        let archive = dir.path().join("tool.jsonl");
+        let mut history = original.clone();
+        assert_eq!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::ToolUse), &mut history, None, &archive, None).await, None);
+        assert_eq!(history.len(), original.len());
+        assert_eq!(history[2].content, original[2].content);
+
+        let archive = dir.path().join("offline.jsonl");
         let mut history = original.clone();
         assert_eq!(compact_context(&offline_source(), &mut history, None, &archive, None).await, None);
         assert_eq!(history[1].content, "important instruction");
@@ -2233,7 +2446,6 @@ mod tests {
         let saved = compact_running_turn(
             &ScriptedCompaction(flashagent_llm::FinishReason::Length),
             &mut history,
-            "",
             &archive,
             None,
         )
@@ -2241,7 +2453,7 @@ mod tests {
         assert!(saved.is_some(), "a cut summary still frees the window");
         let summary = &history[0].content;
         assert!(summary.contains("cut off at the output limit"), "and says what it is: {summary}");
-        assert!(summary.contains("1. Primary Request"), "keeping what it reached: {summary}");
+        assert!(summary.contains("## Objective"), "keeping what it reached: {summary}");
         assert!(history.len() < before.len(), "the window must actually be smaller: {} vs {}", history.len(), before.len());
     }
 
@@ -2303,28 +2515,34 @@ mod tests {
     }
 
     #[test]
-    fn compaction_summary_needs_goal_pending_work_and_current_state() {
-        assert!(!summary_has_handoff_state("Summary:\n1. Primary Request and Intent: do the work"));
-        assert!(!summary_has_handoff_state("Summary:\n1. Goal\n7. Pending Tasks"));
-        assert!(summary_has_handoff_state("Summary:\n1. Primary Request and Intent: do the work\n7. Pending Tasks: None\n8. Current Work: waiting for a new task"));
+    fn compaction_summary_needs_every_card_section() {
+        assert!(!summary_has_handoff_state("## Objective\ndo the work"));
+        assert!(!summary_has_handoff_state("## Objective\ndo the work\n## Requirements\n- none\n## Work State\n### Completed\n- none"));
+        // Plain headings are accepted: normalization rewrites them before this
+        // check, but has_heading itself must not care about punctuation.
+        assert!(summary_has_handoff_state(
+            "Objective:\ndo the work\n\nRequirements:\n- none\n\nDecisions:\n- none\n\nWork State:\nCompleted:\n- nothing\nActive:\n- nothing\nBlocked:\n- nothing\n\nNext Move:\n1. wait\n\nRelevant Files:\n- none\n\nImportant Context:\n- none"
+        ));
+        assert!(!summary_has_handoff_state("Summary:\n1. Primary Request and Intent: do the work\n7. Pending Tasks: None\n8. Current Work: waiting"));
     }
 
     /// A window that filled up mid-task has to hand the model everything it
     /// needs to finish, because the summary is its only memory of the work
     /// already done.
     #[test]
-    fn a_window_forced_summary_asks_for_everything_and_leads_with_the_state() {
+    fn a_window_forced_summary_asks_for_everything_and_the_card_shape() {
         let request = compaction_request(&[ChatMessage::user("do it")], None, None, Detail::Exhaustive, false);
         let instruction = &request.last().unwrap().content;
-        assert!(instruction.contains("Keep everything"), "{instruction}");
+        assert!(instruction.to_lowercase().contains("keep everything"), "{instruction}");
         assert!(instruction.contains("Length is not the problem"), "it must not be told to be brief: {instruction}");
         assert!(instruction.contains("line numbers"), "detail is spelled out, not just requested: {instruction}");
         assert!(instruction.contains("verbatim"), "errors are kept as they were: {instruction}");
-        // The state comes first, so a summary cut off at the output limit still
-        // says what was done and what is next.
-        let state_at = instruction.find(CURRENT_STATE).expect("no CURRENT STATE block");
-        let first_section = instruction.find("1. Primary Request").expect("no numbered sections");
-        assert!(state_at < first_section, "the state must come before the detail");
+        // The card's shape is stated in the order it is drawn, so a summary cut
+        // off at the output limit still says what was done and what is next.
+        let objective_at = instruction.find("## Objective").expect("no Objective block");
+        let work_at = instruction.find("## Work State").expect("no Work State block");
+        let next_at = instruction.find("## Next Move").expect("no Next Move block");
+        assert!(objective_at < work_at && work_at < next_at);
         assert!(!instruction.contains("Drop repeated output and dead ends"), "brevity must not be asked for here");
     }
 
@@ -2334,8 +2552,8 @@ mod tests {
     fn an_asked_for_summary_stays_short_and_points_at_the_archive() {
         let request = compaction_request(&[ChatMessage::user("compact")], None, None, Detail::Brief, false);
         let instruction = &request.last().unwrap().content;
-        assert!(instruction.contains("Drop repeated output and dead ends"), "{instruction}");
-        assert!(!instruction.contains("Keep everything"), "brevity is not forbidden for a summary a person asked for");
+        assert!(instruction.contains("exact transcript stays in the archive"), "{instruction}");
+        assert!(!instruction.contains("Length is not the problem"), "brevity is not forbidden for a summary a person asked for");
     }
 
     /// The detail a caller asks for is the detail that is requested, whichever
@@ -2345,15 +2563,27 @@ mod tests {
         for (detail, keeps_everything) in [(Detail::Exhaustive, true), (Detail::Brief, false)] {
             let request = compaction_request(&[ChatMessage::user("x")], None, None, detail, false);
             let instruction = &request.last().unwrap().content;
-            assert_eq!(instruction.contains("Keep everything"), keeps_everything, "{detail:?}");
+            assert_eq!(instruction.contains("Length is not the problem"), keeps_everything, "{detail:?}");
         }
     }
 
-    /// The state a cut-off summary still has to carry.
+    /// The shape the card and the model both expect.
     #[test]
-    fn a_summary_that_starts_with_the_state_is_accepted_however_short() {
-        assert!(summary_has_handoff_state("Summary:\nCURRENT STATE:\n- Done: the guard moved\n- Next: run the tests"));
-        assert!(!summary_has_handoff_state("Summary:\nI read some files and then the model stopped"));
+    fn every_summary_the_card_accepts_has_the_same_headings() {
+        assert!(summary_has_handoff_state(SHAPED_SUMMARY));
+        assert!(!summary_has_handoff_state("Objective:\nonly the goal, no work state"));
+    }
+
+    /// The retry is the last thing between a full window and a lost summary, so
+    /// it spells the shape out one heading per line: the previous version ran
+    /// them together, and a model that copied it wrote `Work State (with ...)`
+    /// as a heading, which is not the heading the validator accepts.
+    #[test]
+    fn the_retry_lists_every_heading_on_its_own_line() {
+        let request = compaction_request(&[ChatMessage::user("do it")], None, None, Detail::Exhaustive, true);
+        let instruction = &request.last().unwrap().content;
+        assert!(instruction.contains("## Work State\n### Completed\n### Active\n### Blocked\n## Next Move"), "{instruction}");
+        assert!(!instruction.contains("Work State (with"), "{instruction}");
     }
 
     #[test]

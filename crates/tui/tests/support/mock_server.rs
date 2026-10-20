@@ -70,6 +70,9 @@ struct SideRequests {
     answers: Mutex<Vec<(String, String)>>,
     /// Lets a scenario act while the model is still thinking.
     turn_delay: Mutex<Option<Duration>>,
+    /// Holds back side answers before the first token, so the card that says a
+    /// summary is being written can be seen while it is open.
+    answer_delay: Mutex<Option<Duration>>,
     listing_delay: Mutex<Option<Duration>>,
     cloud: std::sync::atomic::AtomicBool,
     released: std::sync::atomic::AtomicBool,
@@ -133,6 +136,12 @@ impl MockServer {
     /// can act while one is still being written.
     pub fn slow_side_requests(&self, per_word: Duration) {
         *self.side.per_word.lock().unwrap() = Some(per_word);
+    }
+
+    /// Holds every side answer back before its first token. The card that says
+    /// a summary is being written is visible while the wait lasts.
+    pub fn delay_side_answers(&self, delay: Duration) {
+        *self.side.answer_delay.lock().unwrap() = Some(delay);
     }
 
     /// Only the OpenAI model list, as a cloud API answers: no loaded model.
@@ -266,6 +275,8 @@ fn serve(
         if let Some(delay) = *side.turn_delay.lock().unwrap() {
             std::thread::sleep(delay);
         }
+    } else if let Some(delay) = *side.answer_delay.lock().unwrap() {
+        std::thread::sleep(delay);
     }
 
     let reply = if request.is_turn() {

@@ -299,9 +299,79 @@ fn a_provider_switch_waits_for_the_running_answer() {
     assert!(second.requests().iter().all(|r| !r.is_turn()), "nothing may reach the other server mid-turn");
     assert!(!last_user_message(first.turns().last().unwrap()).contains("/provider"), "the command was sent to the model as steering");
 
-    // Still typed, it switches once the answer is done.
+    // Still typed, it switches once the answer is done. The footer names the
+    // new model at once; the rule waits for the next message.
     term.send(ENTER);
-    term.wait_for("Switched to Lab", WAIT);
+    term.wait_for("Lab \u{b7} lab-model", WAIT);
+    let screen = term.screen();
+    assert!(!screen.contains("Provider: Lab \u{b7}"), "the switch was written before a message used it:\n{screen}");
+
+    ask(&term, "now", "Answer from the lab server.");
+    term.wait_for("Provider: Lab \u{b7} lab-model", WAIT);
+}
+
+#[test]
+fn a_model_and_thinking_change_are_rules_in_the_chat() {
+    let server = MockServer::start(vec![
+        Reply::Text("Hello.".into()),
+        Reply::Text("After effort.".into()),
+        Reply::Text("After model.".into()),
+    ]);
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+
+    ask(&term, "hello", "Hello.");
+
+    // The rule belongs to the message that uses the new level, not to the
+    // command that chose it.
+    term.type_text("/effort high");
+    term.send(ENTER);
+    std::thread::sleep(Duration::from_millis(200));
+    let screen = term.screen();
+    assert!(!screen.contains("Thinking effort: high"), "the effort rule appeared before a message used it:\n{screen}");
+
+    ask(&term, "after effort", "After effort.");
+    let screen = term.wait_for("Thinking effort: high", WAIT);
+    assert!(screen.find("Thinking effort: high") < screen.find("after effort"), "the rule is not above its message:\n{screen}");
+
+    // A typed id the server did not list is still a choice in the menu: the
+    // command opens it filtered, and Enter takes the typed value.
+    term.type_text("/model other-model");
+    term.send(ENTER);
+    term.wait_for("Not listed", WAIT);
+    term.send(ENTER);
+    std::thread::sleep(Duration::from_millis(200));
+    let screen = term.screen();
+    assert!(!screen.contains("Model: other-model"), "the model rule appeared before a message used it:\n{screen}");
+
+    ask(&term, "after model", "After model.");
+    let screen = term.wait_for("Model: other-model", WAIT);
+    assert!(screen.find("Model: other-model") < screen.find("after model"), "the rule is not above its message:\n{screen}");
+    quit(&mut term);
+}
+
+#[test]
+fn the_card_at_the_top_says_the_model_that_runs_now() {
+    let server = MockServer::start(vec![Reply::Text("Hello.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+    ask(&term, "hello", "Hello.");
+
+    // A model the server did not list is still a choice: the command opens
+    // the menu filtered, and Enter takes the typed value.
+    term.type_text("/model other-model");
+    term.send(ENTER);
+    term.wait_for("Not listed", WAIT);
+    term.send(ENTER);
+    std::thread::sleep(Duration::from_millis(300));
+
+    // The card at the top of the chat says what runs now, not what ran when
+    // the session started. Its row is the one without the rule's level.
+    let screen = term.screen();
+    let card_row = screen
+        .lines()
+        .find(|l| l.contains("Model:") && l.contains("other-model") && !l.contains("thinking effort"));
+    assert!(card_row.is_some(), "the card still shows the old model:\n{screen}");
 }
 
 /// Ctrl+D on an empty prompt.
@@ -1164,13 +1234,41 @@ fn esc_clears_a_steering_draft_before_it_stops_the_turn() {
 }
 
 #[test]
+fn a_single_exchange_can_be_compacted_too() {
+    let server = MockServer::start(vec![
+        Reply::Text("Only answer.".into()),
+        Reply::Text("After the summary.".into()),
+    ]);
+    server.answer_side_requests("Summarize the conversation above", "## Objective\nanswer the one question.\n\n## Requirements\n- none\n\n## Decisions\n- none\n\n## Work State\n### Completed\n- answered the question\n### Active\n- none\n### Blocked\n- none\n\n## Next Move\n1. continue with the next question\n\n## Relevant Files\n- none\n\n## Important Context\n- none");
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    // One exchange is enough: the person asked for a compaction.
+    ask(&term, "the only question", "Only answer.");
+    term.type_text("/compact");
+    term.send(ENTER);
+    let screen = term.wait_for("Session compacted", WAIT);
+    assert!(screen.contains("Session compact"), "the card is not in the chat: {screen}");
+
+    ask(&term, "the next question", "After the summary.");
+    let turns = server.turns();
+    let after = &turns[1].body["messages"];
+    assert!(
+        after[0]["content"].as_str().unwrap_or_default().contains("[Compacted Conversation History]"),
+        "the summary is not in the system prompt: {}",
+        after[0]
+    );
+    assert!(sent(&turns[1]).contains("the only question"), "the task was lost: {}", sent(&turns[1]));
+}
+
+#[test]
 fn compact_replaces_the_conversation_so_far_with_a_summary() {
     let server = MockServer::start(vec![
         Reply::Text("First answer.".into()),
         Reply::Text("Second answer.".into()),
         Reply::Text("Third answer, after the summary.".into()),
     ]);
-    server.answer_side_requests("Summarize the conversation above", "Summary:\n1. Primary Request and Intent: answer the user's questions.\n7. Pending Tasks: None.\n8. Current Work: continue with the next question.");
+    server.answer_side_requests("Summarize the conversation above", "## Objective\nanswer the user's questions.\n\n## Requirements\n- none\n\n## Decisions\n- none\n\n## Work State\n### Completed\n- answered the earlier questions\n### Active\n- none\n### Blocked\n- none\n\n## Next Move\n1. continue with the next question\n\n## Relevant Files\n- none\n\n## Important Context\n- none");
     let home = Home::new();
     let term = ready(&home, &server);
 
@@ -1180,18 +1278,21 @@ fn compact_replaces_the_conversation_so_far_with_a_summary() {
     term.wait_for("First answer.", WAIT);
     term.wait_gone(RUNNING_HINT, WAIT);
     ask(&term, "the second question", "Second answer.");
+    // The card opens before the summary's first word; hold that word back so
+    // the live state can be seen rather than only its finished replacement.
+    server.delay_side_answers(Duration::from_millis(700));
     term.type_text("/compact");
     term.send(ENTER);
-    term.wait_for("Compacted", WAIT);
+    term.wait_for("Writing a summary", WAIT);
+    term.wait_for("Session compacted", WAIT);
     let screen = term.screen();
-    // The result belongs to the row under the prompt, not to the conversation.
-    assert!(!screen.contains("Context compacted"), "a status was pushed into the chat: {screen}");
-    let screen = term.screen();
+    // The card is in the transcript; no status row takes the prompt's place.
+    assert!(screen.contains("Session compact"), "the card is not in the chat: {screen}");
+    assert!(!screen.contains("Compacting context"), "a status row came back under the prompt: {screen}");
     assert!(!screen.contains("· 0 saved"), "the transcript was still counted after compaction:
 {screen}");
-    // The status took the tip's row, so no tip is showing while it is up.
-    let screen = term.screen();
-    assert!(!screen.contains("Tip:"), "a tip and the compaction status share the row: {screen}");
+    // The tips never lost their row to a compaction line.
+    assert!(screen.contains("Tip:"), "the tips lost their row: {screen}");
     ask(&term, "the third question", "Third answer, after the summary.");
 
     assert!(
@@ -1206,14 +1307,13 @@ fn compact_replaces_the_conversation_so_far_with_a_summary() {
         "the summary is not in the system prompt: {}",
         after[0]
     );
-    assert!(!sent(&turns[2]).contains("the first question"), "the summarised turns were still sent in full");
+    let sent_third = sent(&turns[2]);
+    assert!(!sent_third.contains("details details details"), "the summarised turns were still sent in full: {sent_third}");
     let archives = home.path().join(".flashagent").join("sessions").join("compactions");
     let archive = std::fs::read_dir(archives).unwrap().next().unwrap().unwrap().path();
     let saved = std::fs::read_to_string(archive).unwrap();
     assert!(saved.contains("the first question"));
     assert!(saved.contains("First answer."));
-    // The finished line borrows the tip's row; left up it is the only thing that
-    // row ever shows again.
     term.wait_for("Tip:", WAIT);
 }
 

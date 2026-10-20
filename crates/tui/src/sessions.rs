@@ -595,8 +595,26 @@ pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history:
                 // Older sessions stored the summary as its own system message.
                 let title = COMPACTED_MARK.trim_start();
                 if let (Some(pos), Some(system)) = (msg.content.find(title), history.first_mut()) {
-                    system.content.push_str(COMPACTED_MARK);
-                    system.content.push_str(msg.content[pos + title.len()..].trim_start());
+                    // The summary goes before the live context line, not after
+                    // it: the first turn rewrites that line and truncates from
+                    // its marker, and a summary parked behind it was dropped
+                    // before the model ever saw it. Reported live on a resumed
+                    // session, which answered as if the summary never existed.
+                    let block = format!("{COMPACTED_MARK}{}", msg.content[pos + title.len()..].trim_start());
+                    match system.content.find(crate::App::CONTEXT_LINE_MARK) {
+                        Some(at) => system.content.insert_str(at, &block),
+                        None => system.content.push_str(&block),
+                    }
+                }
+                // The transcript starts where the summary does: the turns it
+                // replaced are gone, and a reader who resumes should see why.
+                if let Some(summary) = crate::compact::summary_from_system(&msg.content) {
+                    let stats = crate::compact::stats_from_system(&msg.content);
+                    chat.push_restored_compaction_card(
+                        summary,
+                        stats.map(|(input, _)| input),
+                        stats.map(|(_, output)| output),
+                    );
                 }
             }
             flashagent_llm::Role::Tool => {
@@ -916,6 +934,38 @@ mod session_tests {
         assert!(!history[0].content.contains("old prompt"), "{}", history[0].content);
         assert!(history[0].content.contains("what happened before"), "{}", history[0].content);
         assert_eq!(chat.user_turn_count(), 1);
+    }
+
+    #[test]
+    fn a_restored_summary_lands_before_the_context_line_so_the_next_turn_keeps_it() {
+        // Reported live: after `-c`, the model answered as if the summary had
+        // never been written. The startup context line comes before the system
+        // message is restored, and the first turn rewrites that line from its
+        // marker, which truncated everything after it -- the summary included.
+        let saved = SavedSession {
+            id: "s".into(),
+            timestamp: 1,
+            model: "m".into(),
+            cwd: "~/proj".into(),
+            messages: vec![
+                SavedMessage::from(&ChatMessage::system(format!("old prompt{COMPACTED_MARK}what happened before"))),
+                SavedMessage::from(&ChatMessage::user("and now?")),
+                SavedMessage::from(&ChatMessage::assistant("carrying on")),
+            ],
+            turn_in_flight: false,
+        };
+        let mut chat = ChatView::default();
+        let mut history = vec![ChatMessage::system("new prompt\n\n[Context] 100 of 1,000 tokens used, 900 left.")];
+        restore_session(saved, &mut chat, &mut history);
+        let content = &history[0].content;
+        let summary_at = content.find("what happened before").expect("the summary is kept");
+        let context_at = content.find("[Context]").expect("the context line is kept");
+        assert!(summary_at < context_at, "the next turn would cut the summary off: {content}");
+        // What the first turn does to that line: cut from its marker and write
+        // a fresh one. The summary must survive it.
+        let cut = content.find(crate::App::CONTEXT_LINE_MARK).expect("the marker is where the line starts");
+        let rewritten = format!("{}{}", &content[..cut], "\n\n[Context] 200 of 1,000 tokens used, 800 left.");
+        assert!(rewritten.contains("what happened before"), "{rewritten}");
     }
 
     #[test]
