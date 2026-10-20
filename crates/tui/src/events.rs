@@ -102,7 +102,12 @@ impl App {
                 // nothing was learned: reported live against OpenRouter, which
                 // lists models fine but answers nothing to a name it is not given.
                 self.say(BackgroundNotice::fading(
-                    format!("{OFFLINE_NOTICE} · could not read the model list from {url} · /provider picks another"),
+                    format!(
+                        "{} · {} {url} · {}",
+                        offline_notice(),
+                        flashagent_tui::i18n::tr("could not read the model list from"),
+                        flashagent_tui::i18n::tr("/provider picks another")
+                    ),
                     8,
                 ));
             }
@@ -115,7 +120,7 @@ impl App {
                         format!("Model server is answering \u{b7} {}", self.current_model),
                         5,
                     ));
-                } else if self.background.as_ref().is_some_and(|b| b.text.starts_with(OFFLINE_NOTICE)) {
+                } else if self.background.as_ref().is_some_and(|b| b.text.starts_with(offline_notice())) {
                     self.background = None;
                     self.renderer.request_reprint();
                 }

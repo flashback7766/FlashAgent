@@ -1,4 +1,5 @@
 use super::*;
+use flashagent_tui::i18n::tr;
 
 /// Messages typed while a compaction owns the history. The history is with the
 /// task (`std::mem::take` in `compact_command`), so a turn started now would
@@ -76,14 +77,20 @@ fn help_text(width: usize) -> String {
     let what_w = width.saturating_sub(key_w + 4).max(16);
     let mut out = Vec::new();
     for (title, rows) in [
-        ("Commands and skills \u{b7} Tab completes them, Ctrl+K searches everything", HELP_COMMANDS),
-        ("Keys", HELP_KEYS),
+        (
+            tr("Commands and skills \u{b7} Tab completes them, Ctrl+K searches everything"),
+            HELP_COMMANDS,
+        ),
+        (tr("Keys"), HELP_KEYS),
     ] {
         if !out.is_empty() {
             out.push(String::new());
         }
         out.push(format!("{HEAD}{title}{OFF}"));
         for (key, what) in rows {
+            // The meaning follows the language of the interface; the command
+            // and the key stay as the terminal spells them.
+            let what = tr(what);
             let wrapped = wrap_plain(what, what_w);
             let key_cells = visible_width(key);
             // A key too long for its column gets a line of its own.
@@ -241,7 +248,7 @@ impl App {
             queue_compacted_message(text);
         }
         self.input.take();
-        self.notice("Compaction is still running \u{b7} your message is queued and will be sent when it finishes");
+        self.notice(tr("Compaction is still running \u{b7} your message is queued and will be sent when it finishes"));
         Flow::Next
     }
 
@@ -354,7 +361,7 @@ impl App {
             "clear" => self.clear_chat(),
             "regenerate" | "retry" => {
                 if !self.regenerate(cx) {
-                    self.notice("No previous turn to regenerate");
+                    self.notice(tr("No previous turn to regenerate"));
                 }
             }
             "effort" | "thinking" | "t" if arg.is_empty() => self.open_effort_menu(cx.source),
@@ -629,7 +636,7 @@ impl App {
         let skills = flashagent_tui::autocomplete::load_skills(std::path::Path::new("."));
         let listed: Vec<String> = skills.iter().map(|s| format!("  • {} — {}", s.trigger, s.description)).collect();
         if listed.is_empty() {
-            self.notice("No skills yet · add .agents/skills/<name>.md here, or ~/.flashagent/skills/<name>.md for every project");
+            self.notice(tr("No skills yet · add .agents/skills/<name>.md here, or ~/.flashagent/skills/<name>.md for every project"));
         } else {
             self.chat.push_system(&format!("Skills:\n{}", listed.join("\n")));
         }
@@ -665,7 +672,7 @@ impl App {
             news = flashagent_tui::whatsnew::latest(3);
         }
         if news.is_empty() {
-            self.notice("No changelog is bundled with this build");
+            self.notice(tr("No changelog is bundled with this build"));
         } else {
             let mut deferred = Vec::new();
             flashagent_tui::whatsnew::run_channel(news, now, cx.rx, &mut deferred).await.ok();
@@ -744,18 +751,18 @@ impl App {
             "acceptedits" | "accept_edits" | "edits" | "auto" | "default" => PermissionMode::AcceptEdits,
             "bypass" | "accept_all" | "all" => PermissionMode::Bypass,
             "autonomic" => {
-                self.notice("Autonomous mode runs only inside /goal <task>");
+                self.notice(tr("Autonomous mode runs only inside /goal <task>"));
                 return;
             }
             _ => {
-                self.notice("Usage: /mode planning | /mode manual | /mode edits | /mode all");
+                self.notice(tr("Usage: /mode planning | /mode manual | /mode edits | /mode all"));
                 return;
             }
         };
         cx.perm.state().set_mode(mode);
         self.remember_mode(mode);
         self.refresh_welcome(cx.source, cx.mascot_mood);
-        self.notice(format!("Permission mode set to: {}", mode.label()));
+        self.notice(format!("{} {}", tr("Permission mode set to:"), tr(mode.label())));
     }
 
     fn channel_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {
@@ -771,7 +778,7 @@ impl App {
             "stable" | "v" => UpdateChannel::Stable,
             "beta" | "b" => UpdateChannel::Beta,
             _ => {
-                self.notice("Unknown channel · /channel stable or /channel beta");
+                self.notice(tr("Unknown channel · /channel stable or /channel beta"));
                 return;
             }
         };
@@ -852,7 +859,7 @@ impl App {
                     Err(e) => self.notice(format!("MCP reload failed: {e}")),
                 }
             }
-            _ => self.notice("Usage: /mcp list | market | test <server> | add <id> | reload"),
+            _ => self.notice(tr("Usage: /mcp list | market | test <server> | add <id> | reload")),
         }
     }
 
@@ -862,13 +869,13 @@ impl App {
     /// the prompt says what is happening instead of the app looking frozen.
     fn compact_command(&mut self, cx: &LoopCtx<'_>, focus: &str) {
         if self.compacting {
-            self.notice("A compaction is already running");
+            self.notice(tr("A compaction is already running"));
             return;
         }
         if self.running {
             // The history belongs to the turn in flight: cutting it now would
             // orphan its tool calls and the turn could never finish.
-            self.notice("/compact waits for the turn to finish · Esc ends the turn first");
+            self.notice(tr("/compact waits for the turn to finish · Esc ends the turn first"));
             return;
         }
         let Some(archive) = compaction_archive_path(cx.session_id) else {
@@ -917,7 +924,7 @@ impl App {
             "last" => (true, false),
             "off" | "none" | "collapse" => (false, false),
             _ => {
-                self.notice("Usage: /verbose all | /verbose last | /verbose off");
+                self.notice(tr("Usage: /verbose all | /verbose last | /verbose off"));
                 return;
             }
         };
@@ -978,7 +985,7 @@ impl App {
 
     fn rewind_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {
         let Some(store) = cx.perm.state().snapshots() else {
-            self.notice("Rewind is not available in this session");
+            self.notice(tr("Rewind is not available in this session"));
             return;
         };
         let prompts: Vec<String> =
@@ -986,7 +993,7 @@ impl App {
         let prompt_refs: Vec<&str> = prompts.iter().map(String::as_str).collect();
         let turns = store.rewindable(&prompt_refs);
         if turns.is_empty() {
-            self.notice("Nothing to rewind to yet");
+            self.notice(tr("Nothing to rewind to yet"));
             return;
         }
         let Some(n) = arg.parse::<usize>().ok().filter(|n| (1..=turns.len()).contains(n)) else {
@@ -1010,7 +1017,7 @@ impl App {
             return;
         };
         if self.running {
-            self.notice("Wait for the turn to finish before rewinding");
+            self.notice(tr("Wait for the turn to finish before rewinding"));
             return;
         }
         let target = turns[n - 1].clone();
@@ -1172,7 +1179,7 @@ impl App {
             for (path, why) in &report.failed {
                 self.chat.push_line(LineKind::ToolError, format!("Not put back: {} — {why}", store.display_path(path)));
             }
-            self.notice("Rewind incomplete · history kept; fix the errors above and run /rewind again".to_string());
+            self.notice(tr("Rewind incomplete · history kept; fix the errors above and run /rewind again").to_string());
             self.renderer.request_reprint();
             return;
         }
@@ -1204,6 +1211,18 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every line of /help has a Russian version: the help is the one screen
+    /// a user reads when they do not know the app.
+    #[test]
+    fn every_help_line_is_translated() {
+        for (key, what) in HELP_COMMANDS.iter().chain(HELP_KEYS.iter()) {
+            assert!(
+                flashagent_tui::i18n::translate(flashagent_tui::i18n::Lang::Russian, what) != *what,
+                "the help line of {key} is not translated: {what}"
+            );
+        }
+    }
 
     #[test]
     fn a_command_typed_during_a_turn_runs_waits_or_is_refused_by_what_it_touches() {

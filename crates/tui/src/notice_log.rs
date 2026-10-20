@@ -137,7 +137,7 @@ impl NoticeLog {
             lines.push((LineKind::System, pad_row(&format!("{pointer} {when_styled}  {text_styled}"))));
         }
         if self.entries.is_empty() {
-            lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}Nothing has been said yet{RESET}"))));
+            lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}{}{RESET}", crate::i18n::tr("Nothing has been said yet")))));
         }
 
         lines.push((LineKind::System, format!("  {BORDER_GOLD}├{}┤{RESET}", "─".repeat(box_w))));

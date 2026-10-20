@@ -1,4 +1,5 @@
 use super::*;
+use flashagent_tui::i18n::tr;
 
 /// Latin or Cyrillic.
 fn is_yes(code: KeyCode) -> bool {
@@ -144,7 +145,7 @@ impl App {
         if let Some(req) = cx.gate.pending() {
             let rules = cx.perm.state().allow_always(&req);
             if rules.is_empty() {
-                self.notice("Allowed once · this command is too broad to allow always");
+                self.notice(tr("Allowed once · this command is too broad to allow always"));
             } else {
                 self.notice(format!("Always allowed this session: {}", rules.join(", ")));
             }
@@ -399,7 +400,7 @@ impl App {
             changes.push(format!("thinking ({chosen_effort})"));
         }
         if changes.len() == 1 && chosen_mode != shown_mode {
-            self.custom_placeholder = Some(format!("Permission mode set to: {}", chosen_mode.label()));
+            self.custom_placeholder = Some(format!("{} {}", tr("Permission mode set to:"), tr(chosen_mode.label())));
         } else if !changes.is_empty() {
             self.custom_placeholder = Some(format!("Settings updated: {}", changes.join(", ")));
         }
@@ -489,7 +490,7 @@ impl App {
             SamplingAction::SaveAndClose => {
                 view.apply_to_config(&mut self.config);
                 self.save_config();
-                self.notice("Sampling parameters updated");
+                self.notice(tr("Sampling parameters updated"));
             }
             SamplingAction::None => self.overlay = Some(Overlay::Sampling(view)),
         }

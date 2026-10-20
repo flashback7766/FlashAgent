@@ -1,6 +1,7 @@
 //! Popup for slash commands and skills, shown when input starts with `/`.
 
 use std::path::Path;
+use crate::i18n::tr;
 use crate::{visible_width, LineKind, RenderLine};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,38 +92,38 @@ fn allowed_distance(typed: &str) -> usize {
 
 pub fn builtin_commands() -> Vec<AutocompleteItem> {
     vec![
-        AutocompleteItem::new("/help", "Show command reference and keybindings", AutocompleteCategory::Command),
-        AutocompleteItem::new("/settings", "Open interactive settings tab (or press Tab on empty prompt)", AutocompleteCategory::Command),
-        AutocompleteItem::new("/sampling", "Sampling parameters, for those who tune them", AutocompleteCategory::Command),
-        AutocompleteItem::new("/memory", "See what FlashAgent remembers; forget or correct a fact", AutocompleteCategory::Command),
-        AutocompleteItem::new("/whatsnew", "Show what changed in the latest releases", AutocompleteCategory::Command),
-        AutocompleteItem::new("/context", "Show detailed context window token breakdown", AutocompleteCategory::Command),
-        AutocompleteItem::new("/cost", "What this session has cost, and where it went", AutocompleteCategory::Command),
-        AutocompleteItem::new("/clear", "Clear terminal screen and conversation scrollback", AutocompleteCategory::Command),
-        AutocompleteItem::new("/effort", "Select thinking effort preset (whatever the model offers)", AutocompleteCategory::Command),
-        AutocompleteItem::new("/model", "Open model selection menu or switch model", AutocompleteCategory::Command),
-        AutocompleteItem::new("/provider", "Switch to another saved provider, local or cloud; add or edit them", AutocompleteCategory::Command),
-        AutocompleteItem::new("/verbose", "Toggle verbose mode for thoughts and tool calls (all, last, off)", AutocompleteCategory::Command),
-        AutocompleteItem::new("/mode", "Cycle permission mode (Planning, Manual, Accept Edits, Accept All)", AutocompleteCategory::Command),
-        AutocompleteItem::new("/goal", "Autonomous run: /goal <task> (limits in Settings → Goal)", AutocompleteCategory::Command),
-        AutocompleteItem::new("/resume", "Pick a saved session from this folder and continue it", AutocompleteCategory::Command),
-        AutocompleteItem::new("/mcp", "List and manage Model Context Protocol servers", AutocompleteCategory::Command),
-        AutocompleteItem::new("/tools", "What the model may call, and what it may not", AutocompleteCategory::Command),
-        AutocompleteItem::new("/notices", "What the app said, kept so it can be read again", AutocompleteCategory::Command),
-        AutocompleteItem::new("/safe", "The safe mode: reading and editing inside the project, nothing else", AutocompleteCategory::Command),
-        AutocompleteItem::new("/tasks", "Background commands: see their output, stop one", AutocompleteCategory::Command),
-        AutocompleteItem::new("/compact", "Compact conversation context (optional: /compact <focus instructions>)", AutocompleteCategory::Command),
-        AutocompleteItem::new("/regenerate", "Regenerate the last assistant response from scratch (or press Ctrl+R)", AutocompleteCategory::Command),
-        AutocompleteItem::new("/update", "Check and apply FlashAgent updates in-place", AutocompleteCategory::Command),
-        AutocompleteItem::new("/channel", "Switch release channel: /channel <stable|beta>", AutocompleteCategory::Command),
-        AutocompleteItem::new("/diff", "Preview unstaged git changes and diff stat", AutocompleteCategory::Command),
-        AutocompleteItem::new("/commit", "Review changes and commit with /commit <message>", AutocompleteCategory::Command),
-        AutocompleteItem::new("/rewind", "Take turns back: files and conversation return to before a turn", AutocompleteCategory::Command),
-        AutocompleteItem::new("/editor", "Open external editor (nano/vim/code) to craft prompt", AutocompleteCategory::Command),
-        AutocompleteItem::new("/export", "Export chat session to markdown, HTML, or JSONL", AutocompleteCategory::Command),
-        AutocompleteItem::new("/exit", "Save the session and quit", AutocompleteCategory::Command),
-        AutocompleteItem::new("/uninstall", "Close FlashAgent and remove it; asks what data to delete", AutocompleteCategory::Command),
-        AutocompleteItem::new("/skills", "List skills from .agents/skills and ~/.flashagent/skills", AutocompleteCategory::Command),
+        AutocompleteItem::new("/help", tr("Show command reference and keybindings"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/settings", tr("Open interactive settings tab (or press Tab on empty prompt)"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/sampling", tr("Sampling parameters, for those who tune them"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/memory", tr("See what FlashAgent remembers; forget or correct a fact"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/whatsnew", tr("Show what changed in the latest releases"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/context", tr("Show detailed context window token breakdown"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/cost", tr("What this session has cost, and where it went"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/clear", tr("Clear terminal screen and conversation scrollback"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/effort", tr("Select thinking effort preset (whatever the model offers)"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/model", tr("Open model selection menu or switch model"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/provider", tr("Switch to another saved provider, local or cloud; add or edit them"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/verbose", tr("Toggle verbose mode for thoughts and tool calls (all, last, off)"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/mode", tr("Cycle permission mode (Planning, Manual, Accept Edits, Accept All)"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/goal", tr("Autonomous run: /goal <task> (limits in Settings → Goal)"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/resume", tr("Pick a saved session from this folder and continue it"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/mcp", tr("List and manage Model Context Protocol servers"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/tools", tr("What the model may call, and what it may not"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/notices", tr("What the app said, kept so it can be read again"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/safe", tr("The safe mode: reading and editing inside the project, nothing else"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/tasks", tr("Background commands: see their output, stop one"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/compact", tr("Compact conversation context (optional: /compact <focus instructions>)"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/regenerate", tr("Regenerate the last assistant response from scratch (or press Ctrl+R)"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/update", tr("Check and apply FlashAgent updates in-place"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/channel", tr("Switch release channel: /channel <stable|beta>"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/diff", tr("Preview unstaged git changes and diff stat"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/commit", tr("Review changes and commit with /commit <message>"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/rewind", tr("Take turns back: files and conversation return to before a turn"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/editor", tr("Open external editor (nano/vim/code) to craft prompt"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/export", tr("Export chat session to markdown, HTML, or JSONL"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/exit", tr("Save the session and quit"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/uninstall", tr("Close FlashAgent and remove it; asks what data to delete"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/skills", tr("List skills from .agents/skills and ~/.flashagent/skills"), AutocompleteCategory::Command),
     ]
 }
 
@@ -147,48 +148,48 @@ pub fn sub_commands(input: &str) -> Option<Vec<AutocompleteItem>> {
     }
     if lower.starts_with("/expand ") || lower == "/expand" || lower.starts_with("/verbose ") || lower == "/verbose" {
         Some(vec![
-            AutocompleteItem::new("/verbose all", "Expand both thoughts and tool calls permanently", AutocompleteCategory::Command),
-            AutocompleteItem::new("/verbose last", "Expand thoughts and tool calls for latest turn", AutocompleteCategory::Command),
-            AutocompleteItem::new("/verbose off", "Collapse thoughts and tool calls to concise summary", AutocompleteCategory::Command),
+            AutocompleteItem::new("/verbose all", tr("Expand both thoughts and tool calls permanently"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/verbose last", tr("Expand thoughts and tool calls for latest turn"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/verbose off", tr("Collapse thoughts and tool calls to concise summary"), AutocompleteCategory::Command),
         ])
     } else if lower.starts_with("/memory ") || lower == "/memory" {
         Some(vec![
-            AutocompleteItem::new("/memory", "List what FlashAgent remembers; forget or correct a fact", AutocompleteCategory::Command),
-            AutocompleteItem::new("/memory summary", "An overview of everything remembered, by topic", AutocompleteCategory::Command),
+            AutocompleteItem::new("/memory", tr("List what FlashAgent remembers; forget or correct a fact"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/memory summary", tr("An overview of everything remembered, by topic"), AutocompleteCategory::Command),
         ])
     } else if lower.starts_with("/effort ") || lower == "/effort" {
         Some(vec![
-            AutocompleteItem::new("/effort default", "Use API server default preset", AutocompleteCategory::Command),
-            AutocompleteItem::new("/effort off", "Disable model internal reasoning", AutocompleteCategory::Command),
-            AutocompleteItem::new("/effort low", "Fast response, low reasoning budget", AutocompleteCategory::Command),
-            AutocompleteItem::new("/effort medium", "Balanced reasoning depth and speed", AutocompleteCategory::Command),
-            AutocompleteItem::new("/effort high", "Full reasoning exploration", AutocompleteCategory::Command),
+            AutocompleteItem::new("/effort default", tr("Use API server default preset"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/effort off", tr("Disable model internal reasoning"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/effort low", tr("Fast response, low reasoning budget"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/effort medium", tr("Balanced reasoning depth and speed"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/effort high", tr("Full reasoning exploration"), AutocompleteCategory::Command),
         ])
     } else if lower.starts_with("/mode ") || lower == "/mode" {
         Some(vec![
-            AutocompleteItem::new("/mode manual", "Require confirmation for file writes and shell", AutocompleteCategory::Command),
-            AutocompleteItem::new("/mode edits", "Auto-approve file edits, ask on shell commands", AutocompleteCategory::Command),
-            AutocompleteItem::new("/mode planning", "Read-only planning mode (modifications blocked)", AutocompleteCategory::Command),
-            AutocompleteItem::new("/mode bypass", "Bypass all approval gates (full autonomy)", AutocompleteCategory::Command),
+            AutocompleteItem::new("/mode manual", tr("Require confirmation for file writes and shell"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/mode edits", tr("Auto-approve file edits, ask on shell commands"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/mode planning", tr("Read-only planning mode (modifications blocked)"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/mode bypass", tr("Bypass all approval gates (full autonomy)"), AutocompleteCategory::Command),
         ])
     } else if lower.starts_with("/mcp ") || lower == "/mcp" {
         Some(vec![
-            AutocompleteItem::new("/mcp list", "List configured and connected MCP servers", AutocompleteCategory::Command),
-            AutocompleteItem::new("/mcp market", "Browse vetted MCP marketplace extensions", AutocompleteCategory::Command),
-            AutocompleteItem::new("/mcp test", "Test connection and discover tools for an MCP server", AutocompleteCategory::Command),
-            AutocompleteItem::new("/mcp add", "Add and scaffold a curated MCP extension from marketplace", AutocompleteCategory::Command),
-            AutocompleteItem::new("/mcp reload", "Reload MCP configurations and restart active servers", AutocompleteCategory::Command),
+            AutocompleteItem::new("/mcp list", tr("List configured and connected MCP servers"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/mcp market", tr("Browse vetted MCP marketplace extensions"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/mcp test", tr("Test connection and discover tools for an MCP server"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/mcp add", tr("Add and scaffold a curated MCP extension from marketplace"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/mcp reload", tr("Reload MCP configurations and restart active servers"), AutocompleteCategory::Command),
         ])
     } else if lower.starts_with("/channel ") || lower == "/channel" {
         Some(vec![
-            AutocompleteItem::new("/channel beta", "Switch to Beta channel (latest features & pre-releases)", AutocompleteCategory::Command),
-            AutocompleteItem::new("/channel stable", "Switch to Stable channel (official releases)", AutocompleteCategory::Command),
+            AutocompleteItem::new("/channel beta", tr("Switch to Beta channel (latest features & pre-releases)"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/channel stable", tr("Switch to Stable channel (official releases)"), AutocompleteCategory::Command),
         ])
     } else if lower.starts_with("/compact ") || lower == "/compact" {
         Some(vec![
-            AutocompleteItem::new("/compact", "Auto-compact prior context while keeping current state", AutocompleteCategory::Command),
-            AutocompleteItem::new("/compact keep code details", "Compact context prioritizing code and architecture details", AutocompleteCategory::Command),
-            AutocompleteItem::new("/compact keep task goals", "Compact context prioritizing remaining tasks and roadmap", AutocompleteCategory::Command),
+            AutocompleteItem::new("/compact", tr("Auto-compact prior context while keeping current state"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/compact keep code details", tr("Compact context prioritizing code and architecture details"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/compact keep task goals", tr("Compact context prioritizing remaining tasks and roadmap"), AutocompleteCategory::Command),
         ])
     } else {
         None
@@ -502,6 +503,24 @@ mod skill_tests {
 mod tests {
     use super::*;
 
+    /// Every command in the list has a Russian description: the list is what
+    /// the user reads when they do not remember the command.
+    #[test]
+    fn every_command_description_is_translated() {
+        let mut items = builtin_commands();
+        for input in ["/verbose ", "/memory ", "/effort ", "/mode ", "/mcp ", "/channel ", "/compact "] {
+            items.extend(sub_commands(input).unwrap_or_default());
+        }
+        for item in items {
+            assert!(
+                crate::i18n::translate(crate::i18n::Lang::Russian, &item.description) != item.description,
+                "the description of {} is not translated: {}",
+                item.trigger,
+                item.description
+            );
+        }
+    }
+
     #[test]
     fn the_saved_providers_complete_after_the_command() {
         set_provider_names(vec![("LM Studio".into(), "OpenAI-compatible".into()), ("Anthropic".into(), "Anthropic".into())]);
@@ -567,9 +586,9 @@ mod tests {
     fn only_a_skill_is_labeled_and_every_row_is_as_wide_as_the_frame() {
         let popup = AutocompletePopup {
             items: vec![
-                AutocompleteItem::new("/help", "Show command reference and keybindings", AutocompleteCategory::Command),
-                AutocompleteItem::new("/greet", "Say hello politely to whoever is there", AutocompleteCategory::Skill),
-                AutocompleteItem::new("/compact keep code details", "Compact context prioritizing code", AutocompleteCategory::Command),
+                AutocompleteItem::new("/help", tr("Show command reference and keybindings"), AutocompleteCategory::Command),
+                AutocompleteItem::new("/greet", tr("Say hello politely to whoever is there"), AutocompleteCategory::Skill),
+                AutocompleteItem::new("/compact keep code details", tr("Compact context prioritizing code"), AutocompleteCategory::Command),
             ],
             selected: 0,
         };

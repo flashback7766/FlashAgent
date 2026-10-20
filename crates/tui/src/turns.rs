@@ -1,4 +1,5 @@
 use super::*;
+use flashagent_tui::i18n::tr;
 
 /// How long the run took, and no clock left behind. One operation, so the time
 /// cannot be read after the thing that holds it has been cleared.
@@ -84,7 +85,7 @@ impl App {
             // Messages not yet delivered stay pinned; the turn's end puts them back
             // in the prompt instead of dropping them.
             self.active_steer_tx = None;
-            self.notice("Interrupting…");
+            self.notice(tr("Interrupting…"));
         }
         self.renderer.request_reprint();
     }
@@ -521,7 +522,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                         format!("  \x1b[38;2;120;115;110m{}\x1b[0m", explained.raw.trim()),
                     );
                 }
-                self.notice("Ctrl+R retries the last prompt");
+                self.notice(tr("Ctrl+R retries the last prompt"));
             }
         }
         self.run_queued_commands(cx).await;

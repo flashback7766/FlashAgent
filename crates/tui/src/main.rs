@@ -616,6 +616,10 @@ async fn main() -> Result<()> {
     let memory_block = flashagent_core::injection_block(&docs, config.token_budget);
     let memory_docs = docs.len();
 
+    // The interface language before anything renders; the system prompt is
+    // not part of it.
+    flashagent_tui::i18n::set(flashagent_tui::i18n::Lang::from_code(&config.interface_language));
+
     install_crash_hook(config.crash_reports);
 
     run_terminal(AppContext {
@@ -936,7 +940,9 @@ last_autosave: Option<std::time::Instant>,
 
 /// How the line under the prompt says the server is not there, so a switch
 /// of provider can take it away.
-pub(crate) const OFFLINE_NOTICE: &str = "No answer from";
+pub(crate) fn offline_notice() -> &'static str {
+    flashagent_tui::i18n::tr("No answer from")
+}
 
 struct AppContext {
     config: AppConfig,

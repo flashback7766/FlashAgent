@@ -3780,3 +3780,65 @@ fn a_notice_waits_while_the_user_is_typing() {
     term.wait_for("It is done.", WAIT);
     assert_eq!(server.turns().len(), 3);
 }
+
+/// The interface speaks the language the config names: the hint line, the
+/// tips and /help are in Russian when it says so. The model still hears
+/// English -- the system prompt is not part of this.
+#[test]
+fn the_interface_speaks_the_language_the_config_names() {
+    let server = MockServer::start(vec![Reply::Text("Hello.".into())]);
+    let home = Home::new();
+    home.set_up_with(&server.url, serde_json::json!({ "interface_language": "ru" }));
+    let mut term = Term::start(&home, &["-y"], COLS, ROWS);
+
+    // The placeholder and the hint line under the composer.
+    let screen = term.wait_for("Спросите FlashAgent", WAIT);
+    assert!(screen.contains("команды"), "the hint line is not in Russian:\n{screen}");
+    assert!(screen.contains("Ctrl+D"), "the keys are gone:\n{screen}");
+
+    // The tips under the composer.
+    assert!(screen.contains("Tip:"), "the tips lost their row:\n{screen}");
+
+    // /help is in Russian too. The list is longer than the window, so the
+    // check is on what is on screen: the keys section and a command row.
+    term.type_text("/help");
+    term.send(ENTER);
+    let help = term.wait_for("Клавиши", WAIT);
+    assert!(help.contains("сохранить сессию и выйти"), "the help is not in Russian:\n{help}");
+
+    // The model is still asked in English.
+    ask(&term, "hello", "Hello.");
+    let system = server.turns()[0].body["messages"][0]["content"].as_str().unwrap_or_default().to_string();
+    assert!(system.contains("You are"), "the system prompt was translated:\n{system}");
+    quit(&mut term);
+}
+
+/// The language is turned in Settings and applies at once: the hint line
+/// speaks Russian before the next start, and the config keeps it.
+#[test]
+fn the_interface_language_can_be_turned_in_settings() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.send(TAB);
+    term.wait_for("╭─ Settings", WAIT);
+    // The language row is the eighth of the General tab.
+    for _ in 0..7 {
+        term.send(DOWN);
+    }
+    term.wait_for("Interface language", WAIT);
+    term.send(ENTER);
+    term.wait_for("Русский", WAIT);
+    term.send(ESC);
+    term.wait_gone("╭─ Settings", WAIT);
+
+    // The interface speaks it right away.
+    let screen = term.wait_for("команды", WAIT);
+    assert!(screen.contains("Ctrl+K"), "the hint line is gone:\n{screen}");
+
+    // And the next start keeps it.
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
+    assert_eq!(config["interface_language"], "ru", "{config}");
+}
