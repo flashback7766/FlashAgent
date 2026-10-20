@@ -113,6 +113,12 @@ pub enum LineKind {
     ToolError,
     Diff,
     System,
+    /// A compaction card: a rule, the summary, and a rule with what it cost.
+    Compaction,
+    /// A centred rule naming the model or thinking level the session runs on
+    /// now. Written with the first message that uses the switch, not when the
+    /// menu opened.
+    Model,
     /// A running subagent: its role, what it is doing now, and what it spent.
     Subagent,
 }
@@ -671,6 +677,26 @@ impl ChatView {
         self.lines.push(ChatLine::new(LineKind::System, text.to_string()));
     }
 
+    /// A centred rule that says what the session runs on now. The app writes
+    /// it with the first message that uses the new state, so a menu pick alone
+    /// never leaves a rule above an empty chat. The same rule twice in a row
+    /// says nothing new. Returns whether a row was added.
+    pub fn push_model_notice(&mut self, label: &str) -> bool {
+        let label = label.trim();
+        if label.is_empty() {
+            return false;
+        }
+        if self.lines.last().is_some_and(|l| l.kind == LineKind::Model && l.text == label) {
+            return false;
+        }
+        self.streaming = None;
+        self.streaming_reasoning = None;
+        self.lines.push(ChatLine::new(LineKind::Model, label));
+        *self.settled_cache.lock() = SettledRenderCache::default();
+        self.needs_reprint = true;
+        true
+    }
+
     /// One agent wrote to another, shown as a folded line the way a tool call is
     /// shown: who it is from, who it is for, and the message itself only when the
     /// line is opened. Dumped as text it read as the user having said it, and a
@@ -1125,6 +1151,8 @@ fn block_of(kind: LineKind) -> Block {
         LineKind::Reasoning | LineKind::Tool | LineKind::ToolError => Block::Work,
         LineKind::Assistant => Block::Answer,
         LineKind::Diff | LineKind::System => Block::Other,
+        // The card and the switch rule bring their own spacing.
+        LineKind::Compaction | LineKind::Model => Block::Other,
         // A subagent is work under way, next to the parent's own tool calls.
         LineKind::Subagent => Block::Work,
     }
@@ -1858,6 +1886,105 @@ mod tests {
         let (settled, live) = v.render_split(80, true);
         assert!(live.is_empty(), "nothing is live once the turn is over: {live:?}");
         assert!(!settled.is_empty());
+    }
+
+    #[test]
+    fn an_open_compaction_card_stays_live_until_the_summary_lands() {
+        let mut v = ChatView::default();
+        v.push_user("go");
+        let before_card = v.lines.len();
+        v.start_compaction_card();
+        assert_eq!(v.settled_boundary(), before_card, "a spinning card must not be printed and frozen");
+        let (settled, live) = v.render_split(80, false);
+        assert!(
+            live.iter().any(|(k, t)| *k == LineKind::Compaction && t.contains("Writing a summary")),
+            "the card is not in the live tail: {live:?}"
+        );
+        assert!(
+            !settled.iter().any(|(_, t)| t.contains("Writing a summary")),
+            "the card was also printed: {settled:?}"
+        );
+        v.finish_compaction_card(&CompactionResult {
+            saved: 10,
+            summary: "## Objective\nship it".into(),
+            input_tokens: 20,
+            output_tokens: 5,
+        });
+        assert_eq!(v.settled_boundary(), v.lines.len(), "a finished card may be printed once");
+    }
+
+    #[test]
+    fn a_compaction_card_shows_the_summary_while_it_streams() {
+        let mut v = ChatView::default();
+        v.start_compaction_card();
+        v.append_compaction_delta("## Objective\nship");
+        let (settled, live) = v.render_split(80, false);
+        assert!(
+            live.iter().any(|(k, t)| *k == LineKind::Compaction && t.contains("Objective")),
+            "the streamed heading is not in the card: {live:?}"
+        );
+        assert!(
+            live.iter().any(|(_, t)| t.contains("ship")),
+            "the streamed text is not in the card: {live:?}"
+        );
+        assert!(
+            live.iter().any(|(_, t)| t.contains("Writing a summary")),
+            "the spinner left the open card: {live:?}"
+        );
+        assert!(settled.is_empty(), "an open card must not be printed and frozen: {settled:?}");
+
+        v.append_compaction_delta(" it");
+        let (_, live) = v.render_split(80, false);
+        assert!(
+            live.iter().any(|(_, t)| t.contains("ship it")),
+            "the next delta was not appended: {live:?}"
+        );
+
+        // A refused attempt is cleared before the second one starts, not left
+        // above the answer that replaces it.
+        v.restart_compaction_card();
+        let (_, live) = v.render_split(80, false);
+        assert!(
+            !live.iter().any(|(_, t)| t.contains("ship")),
+            "the refused summary was not cleared: {live:?}"
+        );
+        assert!(
+            live.iter().any(|(_, t)| t.contains("Writing a summary")),
+            "the card lost its spinner after the reset: {live:?}"
+        );
+
+        v.finish_compaction_card(&CompactionResult {
+            saved: 10,
+            summary: "## Objective\nfinal".into(),
+            input_tokens: 20,
+            output_tokens: 5,
+        });
+        v.append_compaction_delta(" after it landed");
+        let (settled, live) = v.render_split(80, false);
+        assert!(live.is_empty(), "a finished card belongs to the printed transcript: {live:?}");
+        assert!(
+            settled.iter().any(|(_, t)| t.contains("final")),
+            "the accepted summary is not in the printed card: {settled:?}"
+        );
+        assert!(
+            !settled.iter().any(|(_, t)| t.contains("after it landed")),
+            "a late delta changed a finished card: {settled:?}"
+        );
+    }
+
+    #[test]
+    fn a_model_switch_is_a_centred_rule_and_is_not_repeated() {
+        let mut v = ChatView::default();
+        assert!(v.push_model_notice("Model: next"), "the first message after a switch opens with the rule");
+        let rows = v.render(80);
+        let rule = rows
+            .iter()
+            .find(|(k, _)| *k == LineKind::Model)
+            .map(|(_, t)| strip_ansi(t))
+            .expect("the rule is in the transcript");
+        assert!(rule.contains("Model: next"), "{rule:?}");
+        assert!(rule.trim_start().starts_with('─') && rule.trim_end().ends_with('─'), "not a centred rule: {rule:?}");
+        assert!(!v.push_model_notice("Model: next"), "the same rule twice in a row says nothing new");
     }
 
     #[test]

@@ -32,6 +32,13 @@ impl App {
         self.save_config();
     }
 
+    /// Remembers which thinking level the session runs on now. The rule is
+    /// written with the next message that uses it; the menu closing is not a
+    /// message.
+    pub(crate) fn remember_effort_switch(&mut self) {
+        self.remember_switch(None, false, true);
+    }
+
     /// `/update: watch an update already under way in the background,
     /// or check, download and install in one go.
     /// /editor and Ctrl+X Ctrl+E.

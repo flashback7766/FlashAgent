@@ -220,7 +220,10 @@ fn two_providers(home: &Home, first: &MockServer, second: &MockServer) -> Term {
 
 #[test]
 fn switching_provider_mid_session_sends_the_next_turn_to_the_other_server() {
-    let first = MockServer::start(vec![Reply::Text("Answer from the desk server.".into())]);
+    let first = MockServer::start(vec![
+        Reply::Text("Answer from the desk server.".into()),
+        Reply::Text("Back at the desk.".into()),
+    ]);
     let second = MockServer::start_with_model("lab-model", vec![Reply::Text("Answer from the lab server.".into())]);
     let home = Home::new();
     let mut term = two_providers(&home, &first, &second);
@@ -237,11 +240,19 @@ fn switching_provider_mid_session_sends_the_next_turn_to_the_other_server() {
     assert!(menu.contains(&second.url), "the menu shows where each provider is:\n{menu}");
     term.type_text("lab");
     term.send(ENTER);
-    // The server's own model, since none was saved for it.
-    term.wait_for("Switched to Lab \u{b7} lab-model", WAIT);
-    term.wait_for("Provider: Lab \u{b7} lab-model", WAIT);
+    // The server's own model, since none was saved for it. The footer names it
+    // once discovery is back; the transcript must still say nothing.
+    term.wait_for("Lab \u{b7} lab-model", WAIT);
+    let screen = term.screen();
+    assert!(!screen.contains("Provider: Lab \u{b7}"), "the switch was written before a message used it:\n{screen}");
 
     ask(&term, "and now?", "Answer from the lab server.");
+    let screen = term.wait_for("Provider: Lab \u{b7} lab-model \u{b7} thinking effort:", WAIT);
+    assert_eq!(
+        screen.lines().filter(|line| line.contains("Provider: Lab \u{b7}")).count(),
+        1,
+        "the switch was announced twice:\n{screen}"
+    );
     assert_eq!(first.turns().len(), 1, "the desk server got a turn after the switch");
     let turns = second.turns();
     assert_eq!(turns.len(), 1);
@@ -257,10 +268,14 @@ fn switching_provider_mid_session_sends_the_next_turn_to_the_other_server() {
     assert_eq!(config["providers"][1]["model"], "lab-model", "{config}");
     assert_eq!(config["providers"][0]["model"], MODEL, "{config}");
 
-    // And back, by name.
+    // And back, by name: the rule waits for the next message here too.
     term.type_text("/provider desk");
     term.send(ENTER);
-    term.wait_for("Switched to Desk", WAIT);
+    term.wait_for(&format!("Desk \u{b7} {MODEL}"), WAIT);
+    let screen = term.screen();
+    assert!(!screen.contains("Provider: Desk \u{b7}"), "the switch back was written before a message used it:\n{screen}");
+    ask(&term, "back?", "Back at the desk.");
+    term.wait_for("Provider: Desk \u{b7}", WAIT);
     quit(&mut term);
 }
 

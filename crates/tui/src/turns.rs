@@ -258,6 +258,9 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
             store.continue_turn(prompt_for_snapshot);
         }
         self.chat.truncate_to_last_user();
+        // The retry is the first request to use a switch made since the last
+        // answer; the rule goes below the prompt it answers again.
+        self.flush_switch_notice();
         self.renderer.scroll_to_bottom();
         self.last_expanded = false;
         self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
