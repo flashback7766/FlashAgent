@@ -167,7 +167,9 @@ impl ToolsView {
         let end = (self.scroll + height).min(self.rows.len());
         for (idx, row) in self.rows[self.scroll.min(self.rows.len())..end].iter().enumerate() {
             let is_sel = self.scroll + idx == self.selected;
-            let mark = if row.on { "✔" } else { "·" };
+            // The same mark the plan steps use: a glyph both Windows console
+            // fonts have, or it shows as a box on half the terminals.
+            let mark = if row.on { "√" } else { "·" };
             let (mark_styled, name_styled) = if row.on {
                 (format!("{TEXT_GREEN}{mark}{RESET}"), format!("{TEXT_BRIGHT}{}{RESET}", row.name))
             } else {
