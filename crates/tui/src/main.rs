@@ -404,6 +404,11 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
     Ok(Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, initial_effort, available_models, first_run_verdict, pending_discovery }))
 }
 
+/// How many characters the plan of the project may take in the prompt. A
+/// thousand tokens is a lot of prefill for a map: enough to name the folders
+/// and the files that matter, and no more.
+const PLAN_CHARS: usize = 4_000;
+
 /// Set when tmux was asked for xterm's `modifyOtherKeys`, so the matching
 /// reset goes out on the way back to the shell and not before.
 static TMUX_MODIFIED_KEYS: AtomicBool = AtomicBool::new(false);
@@ -1616,7 +1621,10 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         .with_subagents(true)
         // Memory is an instruction, not a user turn: it stays in the system
         // prompt and is rebuilt with it when the voice or model changes.
-        .with_memory(&w.memory_block);
+        .with_memory(&w.memory_block)
+        // The plan of the project: what is where, so the model does not spend
+        // turns looking for the file it wants.
+        .with_plan(flashagent_core::plan::project_outline(&w.cwd, PLAN_CHARS));
     let system_prompt_text =
         build_system_prompt(&system_prompt_config.clone().with_personality(&ctx.config.personality));
     let (resume_session_id, open_session_picker, session_note) = resolve_session_start(ctx.session_start, &w.cwd_display);
