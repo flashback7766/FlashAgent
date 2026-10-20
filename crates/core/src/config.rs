@@ -426,6 +426,10 @@ pub struct AppConfig {
     /// else. No shell, no network, no subagents.
     #[serde(default)]
     pub safe_mode: bool,
+    /// Write a crash report when the app falls over. Off by default: the
+    /// report holds a backtrace and the paths of the machine.
+    #[serde(default)]
+    pub crash_reports: bool,
     /// Trust confirmation is skipped for these.
     #[serde(default)]
     pub trusted_directories: Vec<PathBuf>,
@@ -642,6 +646,7 @@ impl Default for AppConfig {
             toolset_profile: ToolsetProfile::Auto,
             disabled_tools: Vec::new(),
             safe_mode: false,
+            crash_reports: false,
             trusted_directories: Vec::new(),
             update_channel: default_update_channel(),
             auto_check_updates: true,
@@ -1512,6 +1517,18 @@ mod tests {
 
     /// The warm-up costs a request of its own, so it is off unless the owner
     /// asks for it. A config that never heard of the setting stays off.
+    #[test]
+    fn a_crash_report_is_only_written_when_it_is_asked_for() {
+        // A backtrace holds the paths of the machine it was taken on, so
+        // nothing is written until the owner says so.
+        assert!(!AppConfig::default().crash_reports, "a crash report is off by default");
+        let (cfg, rejected) = AppConfig::from_json_str(r#"{}"#);
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert!(!cfg.crash_reports, "a config without the key writes nothing");
+        let (on, _) = AppConfig::from_json_str(r#"{"crash_reports":true}"#);
+        assert!(on.crash_reports, "and it can be turned on");
+    }
+
     #[test]
     fn the_prompt_cache_warm_up_is_off_until_it_is_asked_for() {
         assert!(!AppConfig::default().auto_warm_prompt_cache);
