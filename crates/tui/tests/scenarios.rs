@@ -1252,6 +1252,24 @@ fn an_export_can_be_written_where_the_person_says() {
 }
 
 #[test]
+fn the_prompt_carries_a_plan_of_the_project() {
+    let server = MockServer::start(vec![Reply::Text("Hello.".into())]);
+    let home = Home::new();
+    // A project to plan: a folder with a file in it.
+    std::fs::create_dir_all(home.work().join("src")).unwrap();
+    std::fs::write(home.work().join("src/main.rs"), "fn main() {}").unwrap();
+    let term = ready(&home, &server);
+    ask(&term, "hello", "Hello.");
+    let system = server.turns()[0].body["messages"][0]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(system.contains("PROJECT PLAN"), "the prompt has no plan of the project:\n{system}");
+    assert!(system.contains("src/"), "the plan does not name the folder of the code:\n{system}");
+    assert!(system.contains("main.rs"), "the plan does not name the file:\n{system}");
+}
+
+#[test]
 fn the_safe_mode_leaves_the_project_and_nothing_else() {
     let server = MockServer::start(vec![Reply::Text("Hello.".into()), Reply::Text("After.".into())]);
     let home = Home::new();

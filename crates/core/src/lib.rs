@@ -9,6 +9,7 @@ pub mod diff;
 pub mod effort_memory;
 pub mod loop_;
 pub mod memory;
+pub mod plan;
 pub mod memory_store;
 pub mod paths;
 pub mod permissions;

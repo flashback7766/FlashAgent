@@ -9,6 +9,9 @@ pub struct SystemPromptConfig {
     /// Project and user memory, loaded before the first request. It belongs in
     /// the system prompt: it is an instruction, not something the user said.
     pub memory: Option<String>,
+    /// A short plan of the project: what is where, so the model does not spend
+    /// turns looking for the file it wants.
+    pub plan: Option<String>,
     /// That voice uses emoji, so the default rule against them is left out.
     pub uses_emoji: bool,
     /// `spawn_agent` is on offer, so the rules about a subagent's report belong
@@ -48,6 +51,12 @@ impl SystemPromptConfig {
     pub fn with_personality(mut self, personality: &crate::personality::Personality) -> Self {
         self.personality = personality.prompt_section();
         self.uses_emoji = personality.uses_emoji();
+        self
+    }
+
+    pub fn with_plan(mut self, plan: impl Into<String>) -> Self {
+        let plan = plan.into();
+        self.plan = (!plan.trim().is_empty()).then_some(plan);
         self
     }
 
@@ -176,6 +185,14 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
     }
     if !env_lines.is_empty() {
         sections.push(env_lines.join("\n"));
+    }
+
+    // The plan of the project, right after the place it is in: the model reads
+    // it before the rules, so the first call it makes is already the right one.
+    if let Some(ref plan) = config.plan {
+        sections.push(format!(
+            "PROJECT PLAN (what is where; read a file before you rely on it):\n{plan}"
+        ));
     }
 
     // Before every rule below, because they are repairs on it: each was added
