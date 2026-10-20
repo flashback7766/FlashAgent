@@ -69,8 +69,8 @@ prompt is back in the input to edit.
 
 - Type a sentence, then move into its middle with **←** and fix a word.
   Show **Ctrl+W** deleting a word.
-- **Alt+Enter** for a second line. Paste a block of code; it keeps its
-  lines.
+- **Alt+Enter** or **Shift+Enter** for a second line. Paste a block of
+  code; it keeps its lines.
 - **Ctrl+F** and a few letters find a prompt sent earlier, even in an
   earlier session.
 

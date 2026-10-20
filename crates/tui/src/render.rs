@@ -677,7 +677,7 @@ fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u6
     } else if let Some(text) = st.background {
         format!("  {}", st.background_style.paint(text))
     } else if !st.input.is_empty() {
-        let hints = [("Enter", "send"), ("Alt+Enter", "new line"), ("Ctrl+W", "delete word"), ("Ctrl+F", "history"), ("Esc", "clear")];
+        let hints = [("Enter", "send"), ("Alt/Shift+Enter", "new line"), ("Ctrl+W", "delete word"), ("Ctrl+F", "history"), ("Esc", "clear")];
         format!("  {}", key_hints(&hints, width.saturating_sub(2)))
     } else {
         // The one key that finds every other. The welcome card lists more, but
