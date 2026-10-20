@@ -3801,6 +3801,15 @@ fn the_interface_speaks_the_language_the_config_names() {
     // The tips under the composer.
     assert!(screen.contains("Совет:"), "the tips lost their row:\n{screen}");
 
+    // The Settings screen speaks it too. It is opened before the help: the
+    // help is longer than the window, and the panel then has no room.
+    term.send(TAB);
+    let settings = term.wait_for("Настройки", WAIT);
+    assert!(settings.contains("Провайдер"), "the settings rows are not in Russian:\n{settings}");
+    assert!(settings.contains("Общие"), "the tabs are not in Russian:\n{settings}");
+    term.send(ESC);
+    term.wait_gone("Настройки", WAIT);
+
     // /help is in Russian too. The list is longer than the window, so the
     // check is on what is on screen: the keys section and a command row.
     term.type_text("/help");
@@ -3812,13 +3821,6 @@ fn the_interface_speaks_the_language_the_config_names() {
     ask(&term, "hello", "Hello.");
     let system = server.turns()[0].body["messages"][0]["content"].as_str().unwrap_or_default().to_string();
     assert!(system.contains("You are"), "the system prompt was translated:\n{system}");
-
-    // The Settings screen speaks it too.
-    term.send(TAB);
-    let settings = term.wait_for("Настройки", WAIT);
-    assert!(settings.contains("Провайдер"), "the settings rows are not in Russian:\n{settings}");
-    assert!(settings.contains("Общие"), "the tabs are not in Russian:\n{settings}");
-    term.send(ESC);
     quit(&mut term);
 }
 
