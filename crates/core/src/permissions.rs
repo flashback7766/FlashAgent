@@ -252,6 +252,11 @@ fn smuggles_side_effects(cmd: &str, dialects: &[ShellDialect]) -> bool {
     if cmd.contains("$(") || cmd.contains('`') || cmd.contains('\\') || cmd.contains("$'") {
         return true;
     }
+    // `echo <base64> | base64 -d | sh` hides the command from every word-level
+    // check: a base64 blob decoded into an interpreter is a side effect.
+    if base64_into_interpreter(cmd) {
+        return true;
+    }
     dialects.iter().any(|&dialect| smuggles_in(cmd, dialect))
 }
 
@@ -278,6 +283,51 @@ fn smuggles_in(cmd: &str, dialect: ShellDialect) -> bool {
         word_start = quote.is_none() && (ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')'));
     }
     false
+}
+
+/// A word long enough to be an encoded blob and using only the base64 alphabet
+/// (`=` only at the end): `echo AAAA... | base64 -d | sh` hides the command
+/// from every word-level check. Short names, flags and file names never match.
+fn looks_base64(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    if !(16..=256).contains(&bytes.len()) {
+        return false;
+    }
+    let mut body = 0usize;
+    let mut saw_eq = false;
+    for &b in bytes {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' => {
+                if saw_eq {
+                    return false;
+                }
+                body += 1;
+            }
+            b'=' => saw_eq = true,
+            _ => return false,
+        }
+    }
+    body >= 14
+}
+
+/// `echo <base64> | base64 -d | sh` runs an encoded string through a shell: no
+/// blacklisted word is visible, so a pipeline that decodes text and hands it
+/// to an interpreter is treated as carrying side effects. The interpreter must
+/// be the last pipe segment; decoding into a file (`... > out.txt`) is not.
+fn base64_into_interpreter(cmd: &str) -> bool {
+    let last = cmd.split('|').next_back();
+    let is_interpreter = last.is_some_and(|seg| {
+        seg.split_whitespace()
+            .next()
+            .is_some_and(|w| matches!(shell_word(w).as_str(), "sh" | "bash" | "dash" | "zsh" | "eval" | "source" | "."))
+    });
+    if !is_interpreter || !cmd.split('|').any(|seg| seg.split_whitespace().any(|w| shell_word(w) == "base64")) {
+        return false;
+    }
+    cmd.split('|')
+        .rev()
+        .skip(1)
+        .any(|seg| seg.split_whitespace().any(|w| looks_base64(shell_word(w).as_str())))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -646,11 +696,27 @@ fn blacklisted_segment(segment: &str) -> Option<&'static str> {
     let words: Vec<String> = segment.split_whitespace().map(shell_word).collect();
     let mut rest: &[String] = &words;
     // Through what only runs the command after it: `VAR=x rm`, `command rm`,
-    // `env A=b rm`, `nice -n 5 rm`, `xargs rm`.
+    // `env A=b rm`, `nice -n 5 rm`, `xargs rm`. An interpreter told to run a
+    // string (`sh -c '...'`, `eval '...'`) runs whatever is in it, so it is
+    // dangerous on its own. A bare `sh script.sh` / `source script.sh` is not.
     loop {
         match rest.first().map(String::as_str) {
             Some(w) if w.contains('=') && !w.starts_with('-') => rest = &rest[1..],
             Some("command" | "builtin" | "exec" | "env" | "nice" | "nohup" | "time" | "timeout" | "xargs" | "stdbuf") => {
+                rest = &rest[1..];
+                while rest.first().is_some_and(|w| w.starts_with('-') || w.parse::<f64>().is_ok()) {
+                    rest = &rest[1..];
+                }
+            }
+            // `sh -c` / `bash -c` / ... run an arbitrary string, not a file.
+            Some("sh" | "bash" | "dash" | "zsh")
+                if rest.len() >= 2 && matches!(rest[1].as_str(), "-c" | "-e" | "--command") =>
+            {
+                return Some("an interpreter with -c runs an arbitrary string");
+            }
+            // `eval` runs its argument as code.
+            Some("eval") if rest.len() >= 2 => return Some("eval runs an arbitrary string"),
+            Some("sh" | "bash" | "dash" | "zsh" | "source" | ".") => {
                 rest = &rest[1..];
                 while rest.first().is_some_and(|w| w.starts_with('-') || w.parse::<f64>().is_ok()) {
                     rest = &rest[1..];
@@ -1518,6 +1584,10 @@ mod tests {
             state.decide(&call("run_shell", r#"{"command":"rm -rf build"}"#), || None),
             Verdict::NeedApproval { .. }
         ), "a hand-picked Accept All must still ask for this, even with a standing rule");
+        assert!(matches!(
+            state.decide(&call("run_shell", r#"{"command":"sh -c 'rm -rf build'"}"#), || None),
+            Verdict::NeedApproval { .. }
+        ), "an interpreter told to run a string must still ask");
         assert_eq!(state.decide(&call("run_shell", r#"{"command":"cargo test"}"#), || None), Verdict::Allow);
     }
 
@@ -2038,6 +2108,40 @@ mod tests {
 
         let state_bypass = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
         assert_eq!(state_bypass.decide(&call("mcp__docker__restart_container", "{}"), || None), Verdict::Allow);
+    }
+
+    #[test]
+    fn interpreter_with_c_is_blacklisted_but_a_script_file_is_not() {
+        for cmd in [
+            "sh -c 'rm -rf /'",
+            "bash -c 'rm -rf /'",
+            "dash -e 'rm -rf /'",
+            "zsh --command 'rm -rf /'",
+            "FOO=1 sh -c 'rm -rf /'",
+            "command bash -c 'rm -rf /'",
+            "eval 'rm -rf /'",
+        ] {
+            assert!(blacklisted_shell_reason(cmd).is_some(), "should be caught: {cmd}");
+        }
+        for cmd in ["sh script.sh", "bash ./build.sh", "dash script", "zsh myscript.zsh", "source script.sh", ". script.sh", "eval"] {
+            assert!(blacklisted_shell_reason(cmd).is_none(), "should not be caught: {cmd}");
+        }
+    }
+
+    #[test]
+    fn base64_piped_into_an_interpreter_smuggles_side_effects() {
+        let blob = "SSBhbSBhIGJhc2U2NC1lbmNvZGVkIGNvbW1hbmQK";
+        assert!(smuggles_side_effects(&format!("echo {blob} | base64 -d | sh"), &[ShellDialect::Posix]));
+        assert!(smuggles_side_effects(&format!("echo {blob} | base64 -d | bash"), &[ShellDialect::Posix]));
+        assert!(smuggles_side_effects(&format!("base64 -d {blob} | zsh"), &[ShellDialect::Posix]));
+        // Not encoded for the shell, or no base64 step: no smuggling.
+        assert!(!smuggles_side_effects("cat file | sh", &[ShellDialect::Posix]));
+        assert!(!smuggles_side_effects("echo hello | sh", &[ShellDialect::Posix]));
+        assert!(!smuggles_side_effects("echo short | base64 -d | sh", &[ShellDialect::Posix]));
+        assert!(!smuggles_side_effects(&format!("echo {blob} | sh"), &[ShellDialect::Posix]));
+        // `>` writes to a file: that's a side effect on its own, even without
+        // an interpreter at the end of the pipe.
+        assert!(smuggles_side_effects(&format!("echo {blob} | base64 -d > out.txt"), &[ShellDialect::Posix]));
     }
 
 }
