@@ -3,18 +3,18 @@
 What the terminal app costs, measured. Each figure comes with the command
 that produces it, so it can be checked instead of believed.
 
-Measured 2026-09-22 on b328 code, and the test and tool counts refreshed
-2026-10-01 on b500: AMD Ryzen 7 7735U, 32 GB RAM, Linux 7.2,
-rustc 1.98.1, release build. Your own figures will differ with the machine.
-What matters is how they grow.
+Measured 2026-10-20 on 3f9dba3: AMD Ryzen 7 7735U, 29 GB RAM, Linux 7.2.9,
+rustc 1.99.0, release build. The figures of 2026-09-22 (b328) are kept
+below where they still stand, and the tables say which is which. Your own
+figures will differ with the machine. What matters is how they grow.
 
 ## Size and start
 
-| What | Figure |
-|---|---|
-| Binary, stripped (what releases ship) | 16.1 MB |
-| From launch to a usable prompt | 41 ms (median of 5) |
-| Memory when idle, welcome card on screen | 10 MB |
+| What | Figure | 2026-09-22 |
+|---|---:|---:|
+| Binary, stripped (what releases ship) | 18.4 MB (19,298,736 bytes) | 16.1 MB |
+| From launch to a usable prompt | 162 ms (median of 5) | 41 ms |
+| Memory when idle, welcome card on screen | 35.2 MB | 10 MB |
 
 ```bash
 cargo test --release -p flashagent-tui --test scenarios -- measure_startup_and_memory --ignored --nocapture
@@ -29,7 +29,10 @@ and asking the server which models it has.
 A local server keeps what it last read and reuses the part a new request
 begins with. The first message of a session has nothing to reuse unless the
 app sends that part ahead (see `warm.rs`). Measured 2026-09-22 against LM
-Studio with Gemma 4 E2B (Q4_K_M, 64k context) on the laptop above:
+Studio with Gemma 4 E2B (Q4_K_M, 64k context) on the laptop above. This
+table is the one that could not be measured again on 2026-10-20: there is
+no local model on the machine that day, and a cloud model would be measured
+on someone else's tokens:
 
 | What | Time to first token |
 |---|---:|
@@ -44,19 +47,19 @@ third is the figure the app's token line showed.
 
 ## Long sessions
 
-| What | Figure |
-|---|---|
-| `--resume` of a 2,000-turn session, to its last answer on screen | 81 ms |
-| Memory with those 2,000 turns loaded | 21 MB |
+| What | Figure | 2026-09-22 |
+|---|---:|---:|
+| `--resume` of a 2,000-turn session, to its last answer on screen | 242 ms | 81 ms |
+| Memory with those 2,000 turns loaded | 43.8 MB | 21 MB |
 
 Drawing the transcript (one turn = a question, a thought, a tool call and a
 few lines of Markdown):
 
-| Turns | First frame | Each frame while the model streams |
-|---:|---:|---:|
-| 100 | 0.6 ms | 0.03 ms |
-| 1,000 | 6.6 ms | 0.37 ms |
-| 10,000 | 64 ms | 3.4 ms |
+| Turns | First frame | Each frame while the model streams | 2026-09-22 (first / stream) |
+|---:|---:|---:|---:|
+| 100 | 1.7 ms | 0.08 ms | 0.6 ms / 0.03 ms |
+| 1,000 | 16.4 ms | 0.86 ms | 6.6 ms / 0.37 ms |
+| 10,000 | 179.8 ms | 10.19 ms | 64 ms / 3.4 ms |
 
 ```bash
 cargo test --release -p flashagent-tui --test numbers -- --ignored --nocapture
@@ -64,22 +67,34 @@ cargo test --release -p flashagent-tui --test numbers -- --ignored --nocapture
 
 The first frame renders everything once. After that, rows that can no longer
 change are kept and shared between frames. Only the turn in progress is
-rendered again. Before b328 each frame copied every kept row, and a streaming
+rendered again.
+
+The 2026-09-22 column was measured on a quieter machine: the same commit
+measured on this laptop in 2026-10-20 gives 9.4 ms for a 1,000-turn frame
+against the 6.6 ms written down here. Measured side by side on the same
+laptop, the code of 2026-10-20 is about 1.7 times slower than the code of
+2026-09-22 (16.4 ms against 9.4 ms for 1,000 turns). The growth is in the
+code, and it is tracked as its own task rather than hidden by writing the
+older numbers back.
+
+Numbers taken while the machine is also building something are not numbers:
+the first measurement of 2026-10-20 came out three times too high because a
+release build was running next to it. Before b328 each frame copied every kept row, and a streaming
 frame at 10,000 turns cost 17.6 ms. The remaining cost still grows with
 length, because of a few linear scans for the last question. At 10,000 turns
 that is a fifth of a 60 Hz frame.
 
 ## Tests
 
-Counted 2026-10-01 on b500 (`b500-subagents`), release build.
+Counted 2026-10-20 on 3f9dba3, release build.
 
-| What | Count |
-|---|---:|
-| Tests in the workspace (`cargo test --workspace`) | 1,267 |
-| Of those, the real binary in a pseudo-terminal (`crates/tui/tests/scenarios.rs`) | 105 |
-| Every built-in tool called for real (`crates/tools/tests/every_tool.rs`) | 15 |
-| Built-in tools the model can call | 24 |
-| Ignored: diagnostics that print screens, measurements, tests that need the internet | 11 |
+| What | Count | 2026-10-01 |
+|---|---:|---:|
+| Tests in the workspace (`cargo test --workspace`) | 1,485 | 1,267 |
+| Of those, the real binary in a pseudo-terminal (`crates/tui/tests/scenarios.rs`) | 132 | 105 |
+| Every built-in tool called for real (`crates/tools/tests/every_tool.rs`) | 24 | 15 |
+| Built-in tools the model can call | 24 | 24 |
+| Ignored: diagnostics that print screens, measurements, tests that need the internet | 12 | 11 |
 
 ```bash
 cargo test --workspace
