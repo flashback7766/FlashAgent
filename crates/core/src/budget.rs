@@ -11,8 +11,7 @@
 //! anymore; every window gets the same 20k.
 
 /// The window assumed when the server said nothing about its own. It no longer
-/// changes the static total, which is flat for every window; `ToolsetProfile`
-/// still overrides the toolset explicitly.
+/// changes the static total, which is flat for every window.
 pub const ASSUMED_WINDOW: usize = 128_000;
 
 /// What the prompt may cost at any window, from the owner, 2026-10-05.

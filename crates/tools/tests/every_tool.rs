@@ -40,7 +40,6 @@ impl Project {
         let tools = Arc::new(
             BuiltinTools::new(BuiltinToolsConfig {
                 cwd: dir.clone(),
-                toolset_profile: Some(flashagent_core::ToolsetProfile::Full),
                 web_enabled: Some(true),
                 context_window: Some(200_000),
                 ..Default::default()
@@ -544,7 +543,6 @@ async fn a_tool_turned_off_in_settings_says_so_rather_than_running() {
     let project = Project::new();
     let tools = BuiltinTools::new(BuiltinToolsConfig {
         cwd: project.dir.clone(),
-        toolset_profile: Some(flashagent_core::ToolsetProfile::Full),
         web_enabled: Some(false),
         context_window: Some(200_000),
         ..Default::default()

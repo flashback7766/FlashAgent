@@ -569,7 +569,6 @@ async fn main() -> Result<()> {
         brave_api_key: std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.trim().is_empty()),
         question_gate: Some(question_gate.clone()),
         is_goal_mode: None,
-        toolset_profile: Some(config.toolset_profile),
         web_enabled: Some(config.web_tools),
         context_window: Some(context_capacity),
         mcp_manager: Some(mcp_manager.clone()),
