@@ -477,20 +477,10 @@ impl ToolExec for BuiltinTools {
     fn specs(&self) -> Vec<ToolSpec> {
         use flashagent_core::registry::{self, Handler};
 
-        // The profile the window earns: a small one cannot carry every schema.
         let profile = self.toolset_profile.read().map(|p| *p).unwrap_or(ToolsetProfile::Auto);
         let ctx = self.context_window.read().ok().and_then(|c| *c);
-        let effective_profile = match profile {
-            ToolsetProfile::Compact => ToolsetProfile::Compact,
-            ToolsetProfile::Full => ToolsetProfile::Full,
-            ToolsetProfile::Auto => {
-                if let Some(c) = ctx {
-                    if c < 40_000 { ToolsetProfile::Compact } else { ToolsetProfile::Auto }
-                } else {
-                    ToolsetProfile::Auto
-                }
-            }
-        };
+        // No window-based downgrade: every profile keeps its full toolset.
+        let effective_profile = profile;
         let core = effective_profile != ToolsetProfile::Compact;
         let web = self.web_enabled.load(Ordering::Relaxed);
         let vision = self.vision_supported();
@@ -1038,13 +1028,13 @@ mod tests {
             cwd: testing::tempdir(),
             toolset_profile: Some(ToolsetProfile::Auto),
             web_enabled: Some(false),
-            context_window: Some(32_000), // ~32k ultra-minimum -> compact
+            context_window: Some(32_000), // a small window no longer trims the toolset
             ..Default::default()
         })
         .unwrap();
         let specs = tools.specs();
-        assert_eq!(specs.len(), 10); // Compact toolset
-        assert!(!specs.iter().any(|s| s.name == "patch_file"));
+        assert_eq!(specs.len(), 18); // Auto keeps the full toolset even at 32k (no window-based downgrade)
+        assert!(specs.iter().any(|s| s.name == "patch_file"));
 
         tools.set_context_window(Some(65_536));
         // What the app has measured: the schemas are given what a tier has left
