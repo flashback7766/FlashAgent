@@ -32,6 +32,24 @@ impl SummarySink {
     }
 }
 
+/// What one compaction is asked to do, so the call does not grow an argument
+/// for every new kind of detail.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Compaction<'a> {
+    /// What the person wants kept, if they said.
+    pub focus_prompt: Option<&'a str>,
+    /// Where the replaced conversation is kept.
+    pub archive_path: &'a std::path::Path,
+    /// What the window held before, when the server said.
+    pub real_used: Option<usize>,
+    /// The tokens one request may carry: the window minus the prompt and the
+    /// schemas. A conversation that does not fit is summarized in parts.
+    pub room: Option<usize>,
+    /// A compaction the person asked for happens even when the summary is not
+    /// smaller than the conversation it replaces.
+    pub allow_growth: bool,
+}
+
 /// Compaction without a live card, for tests that only need the result.
 #[cfg(test)]
 pub(crate) async fn compact_context(
@@ -41,7 +59,13 @@ pub(crate) async fn compact_context(
     archive_path: &std::path::Path,
     real_used: Option<usize>,
 ) -> Option<flashagent_tui::CompactionResult> {
-    compact_context_with_sink(source, history, focus_prompt, archive_path, real_used, None, false, None).await
+    compact_context_with_sink(
+        source,
+        history,
+        Compaction { focus_prompt, archive_path, real_used, room: None, allow_growth: false },
+        None,
+    )
+    .await
 }
 
 /// `allow_growth` is for a compaction the person asked for: it happens even
@@ -49,13 +73,10 @@ pub(crate) async fn compact_context(
 pub(crate) async fn compact_context_with_sink(
     source: &dyn LlmSource,
     history: &mut Vec<ChatMessage>,
-    focus_prompt: Option<&str>,
-    archive_path: &std::path::Path,
-    real_used: Option<usize>,
+    ask: Compaction<'_>,
     sink: Option<&SummarySink>,
-    allow_growth: bool,
-    room: Option<usize>,
 ) -> Option<flashagent_tui::CompactionResult> {
+    let Compaction { focus_prompt, archive_path, real_used, allow_growth, room } = ask;
     // Keep the current turn intact from its user message: a cut elsewhere can
     // orphan tool results or leave an assistant message first, which strict
     // servers reject.
@@ -290,21 +311,36 @@ struct Cut<'a> {
 }
 
 /// `keep_prompt`, when given, goes right after it: the turn's own prompt.
+/// What the summary replaces: the conversation it summarizes, the summary that
+/// was already in the system message, and the archive it goes to.
+struct Replaced<'a> {
+    /// Everything before this index goes.
+    split_idx: usize,
+    /// The turn's own prompt, which goes straight after the summary.
+    keep_prompt: Option<ChatMessage>,
+    /// The summary that was already there, folded into the new one.
+    prior_summary: Option<String>,
+    /// The system message without the old summary.
+    base_system: String,
+    /// Where the replaced conversation is kept.
+    archive_path: &'a std::path::Path,
+    /// What the conversation held before, in estimated tokens.
+    before_tokens: usize,
+    /// What the server said the window held.
+    real_used: Option<usize>,
+    /// A compaction the person asked for happens even when nothing was freed.
+    allow_growth: bool,
+}
+
 /// Puts the summary in place of the conversation it replaces, and says how
 /// much was saved.
 fn finish_summary(
     summary: String,
     usage: Option<flashagent_llm::Usage>,
     history: &mut Vec<ChatMessage>,
-    split_idx: usize,
-    keep_prompt: Option<ChatMessage>,
-    prior_summary: Option<String>,
-    base_system: String,
-    archive_path: &std::path::Path,
-    before_tokens: usize,
-    real_used: Option<usize>,
-    allow_growth: bool,
+    replaced: Replaced<'_>,
 ) -> Option<flashagent_tui::CompactionResult> {
+    let Replaced { split_idx, keep_prompt, prior_summary, base_system, archive_path, before_tokens, real_used, allow_growth } = replaced;
     // What the summary replaces: the conversation it summarizes, and the
     // summary that was already in the system message, which is folded into it.
     // A summary that is not smaller than that frees nothing. An automatic
@@ -445,14 +481,16 @@ async fn summarize_before(
             summary,
             usage,
             history,
-            split_idx,
-            keep_prompt,
-            prior_summary,
-            base_system,
-            archive_path,
-            before_tokens,
-            real_used,
-            allow_growth,
+            Replaced {
+                split_idx,
+                keep_prompt,
+                prior_summary,
+                base_system,
+                archive_path,
+                before_tokens,
+                real_used,
+                allow_growth,
+            },
         );
     }
 
@@ -494,14 +532,16 @@ async fn summarize_before(
         summary,
         usage,
         history,
-        split_idx,
-        keep_prompt,
-        prior_summary,
-        base_system,
-        archive_path,
-        before_tokens,
-        real_used,
-        allow_growth,
+        Replaced {
+            split_idx,
+            keep_prompt,
+            prior_summary,
+            base_system,
+            archive_path,
+            before_tokens,
+            real_used,
+            allow_growth,
+        },
     )
 }
 

@@ -439,12 +439,14 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                                 let fut = compact_context_with_sink(
                                     source_compact.as_ref(),
                                     &mut history,
-                                    None,
-                                    &archive,
-                                    Some(before),
+                                    crate::compact::Compaction {
+                                        focus_prompt: None,
+                                        archive_path: &archive,
+                                        real_used: Some(before),
+                                        room: Some(room),
+                                        allow_growth: false,
+                                    },
                                     Some(&sink),
-                                    false,
-                                    Some(room),
                                 );
                                 tokio::pin!(fut);
                                 let mut tick = tokio::time::interval_at(
