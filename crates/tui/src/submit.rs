@@ -887,7 +887,7 @@ impl App {
             self.notice(tr("/compact waits for the turn to finish · Esc ends the turn first"));
             return;
         }
-        let Some(archive) = compaction_archive_path(cx.session_id) else {
+        let Some(archive) = session_path(cx.session_id) else {
             self.chat.push_system("Compaction failed or saved no space · conversation unchanged");
             return;
         };

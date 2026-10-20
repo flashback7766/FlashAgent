@@ -1445,11 +1445,16 @@ fn compact_replaces_the_conversation_so_far_with_a_summary() {
     );
     let sent_third = sent(&turns[2]);
     assert!(!sent_third.contains("details details details"), "the summarised turns were still sent in full: {sent_third}");
-    let archives = home.path().join(".flashagent").join("sessions").join("compactions");
-    let archive = std::fs::read_dir(archives).unwrap().next().unwrap().unwrap().path();
-    let saved = std::fs::read_to_string(archive).unwrap();
-    assert!(saved.contains("the first question"));
-    assert!(saved.contains("First answer."));
+    // The archive of what the summary replaced is in the session's own file.
+    let sessions = home.path().join(".flashagent").join("sessions");
+    let session = std::fs::read_dir(&sessions)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().map(|e| e == "json").unwrap_or(false))
+        .expect("the session was saved");
+    let saved = std::fs::read_to_string(&session).unwrap();
+    assert!(saved.contains("the first question"), "the archive is not in the session: {saved}");
+    assert!(saved.contains("First answer."), "the archive is not in the session: {saved}");
     term.wait_for("Tip:", WAIT);
 }
 

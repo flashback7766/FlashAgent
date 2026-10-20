@@ -785,6 +785,9 @@ impl PendingSwitch {
 struct App {
     question_ui_state: QuestionUiState,
     history: Vec<ChatMessage>,
+    /// What earlier compactions took out of the model's context. Kept with the
+    /// session, in the session's own file.
+    archive: Vec<ChatMessage>,
     /// The history is with the compaction task until it comes back.
     compacting: bool,
     input: flashagent_tui::Composer,
@@ -1405,6 +1408,7 @@ fn initial_app(init: InitialApp) -> App {
     App {
         question_ui_state: QuestionUiState::default(),
         history: vec![ChatMessage::system(system_prompt_text)],
+        archive: Vec::new(),
         compacting: false,
         input: flashagent_tui::Composer::new(),
         custom_placeholder: None,
@@ -2142,7 +2146,12 @@ mod tests {
             ChatMessage::assistant("here it is"),
         ];
         let freed = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None).await;
-        assert!(freed.is_some());
+        let freed = freed.expect("the summary is accepted");
+        // The archive travels with the result: the session's own file keeps it.
+        let archived: Vec<String> = freed.archive.iter().map(|m| m.content.clone()).collect();
+        assert!(archived.iter().any(|c| c.contains("first answer")));
+        assert_eq!(archived.iter().filter(|c| c.as_str() == "first question").count(), 1);
+        assert!(!archived.iter().any(|c| c == "read a file"), "the current turn stays live");
         assert_eq!(history.iter().filter(|m| m.role == flashagent_llm::Role::System).count(), 1);
         assert!(history[0].content.starts_with("SYSTEM PROMPT"));
         assert!(history[0].content.contains("The summary below covers the earlier conversation.\n## Objective"));
@@ -2160,17 +2169,15 @@ mod tests {
         history.push(ChatMessage::user("next"));
         history.push(ChatMessage::assistant("ok"));
         history.push(ChatMessage::assistant("more work".repeat(1000)));
-        assert!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None).await.is_some());
+        let result = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None).await.expect("the summary is accepted");
+        // The second archive holds what the second summary replaced: the turn
+        // before the new question. The first archive is already in the
+        // session's file.
+        assert!(result.archive.iter().any(|m| m.content == "read a file"), "the second summary replaced the turn before it");
+        assert!(!result.archive.iter().any(|m| m.content == "ok"), "the current turn stays live");
         assert!(history[0].content.contains("first question"));
         assert_eq!(history[0].content.matches(COMPACTED_MARK.trim()).count(), 1);
         assert_eq!(history[0].content.matches("The summary below covers the earlier conversation.").count(), 1);
-        let archived = std::fs::read_to_string(&archive).unwrap();
-        assert!(archived.contains("first answer"));
-        assert!(archived.contains("read a file"));
-        assert!(archived.contains("file body"));
-        let records: Vec<SavedMessage> = archived.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert_eq!(records.iter().filter(|m| m.content == "first question").count(), 1);
-        assert!(!records.iter().any(|m| m.content == "next"), "the active turn stays live");
     }
 
     /// The same shaped summary in two pieces, so a test can see the card get
@@ -2310,10 +2317,10 @@ mod tests {
         // The last call is the reduction: the parts, not the conversation.
         assert_eq!(calls.last().copied(), Some(2), "the reduction asks with the instruction alone: {calls:?}");
         // The archive keeps what was replaced; the last turn stays live.
-        let archived = std::fs::read_to_string(&archive).unwrap();
-        assert!(archived.contains("first question"));
-        assert!(archived.contains("a long middle"));
-        assert!(!archived.contains("second answer"), "the current turn stays live");
+        let archived: Vec<String> = result.archive.iter().map(|m| m.content.clone()).collect();
+        assert!(archived.iter().any(|c| c.contains("first question")));
+        assert!(archived.iter().any(|c| c.contains("a long middle")));
+        assert!(!archived.iter().any(|c| c.contains("second answer")), "the current turn stays live");
     }
 
     fn long_history() -> Vec<ChatMessage> {
@@ -2462,7 +2469,8 @@ mod tests {
         let before = history.clone();
         let (_, cut) = mid_turn_cut(&history).unwrap();
         let saved = compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, &archive, None).await;
-        assert!(saved.is_some_and(|r| r.saved > 0));
+        let saved = saved.expect("the turn is compacted");
+        assert!(saved.saved > 0);
         assert_eq!(history[0].role, flashagent_llm::Role::System);
         assert!(history[0].content.contains("Compacted Conversation History"));
         // Memory stays where it belongs, in the system prompt; the task itself
@@ -2475,12 +2483,13 @@ mod tests {
         assert_eq!(history[2].content, before[cut].content);
         assert_eq!(history.last().unwrap().tool_call_id, before.last().unwrap().tool_call_id);
         // What went is kept whole for the model to read.
-        let archived = std::fs::read_to_string(&archive).unwrap();
-        assert!(archived.contains("body 0") && !archived.contains(&format!("body {}", before.len() / 2 + 3)));
+        let archived: Vec<String> = saved.archive.iter().map(|m| m.content.clone()).collect();
+        assert!(archived.iter().any(|c| c.contains("body 0")));
+        assert!(!archived.iter().any(|c| c.contains(&format!("body {}", before.len() / 2 + 3))));
 
         // Nothing to cut: untouched.
         let mut short = running_turn(2);
-        assert_eq!(compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut short, &archive, None).await, None);
+        assert!(compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut short, &archive, None).await.is_none());
         assert_eq!(short.len(), 6);
     }
 
@@ -2522,7 +2531,7 @@ mod tests {
     #[tokio::test]
     async fn single_turn_history_is_already_compact() {
         let mut history = vec![ChatMessage::system("s"), ChatMessage::user("u"), ChatMessage::assistant("a")];
-        assert_eq!(compact_context(&offline_source(), &mut history, None, std::path::Path::new("unused.jsonl"), None).await, None);
+        assert!(compact_context(&offline_source(), &mut history, None, std::path::Path::new("unused.jsonl"), None).await.is_none());
         assert_eq!(history.len(), 3);
     }
 
@@ -2553,21 +2562,18 @@ mod tests {
         // stays as it was.
         let archive = dir.path().join("tool.jsonl");
         let mut history = original.clone();
-        assert_eq!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::ToolUse), &mut history, None, &archive, None).await, None);
+        assert!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::ToolUse), &mut history, None, &archive, None).await.is_none());
         assert_eq!(history.len(), original.len());
         assert_eq!(history[2].content, original[2].content);
 
         let archive = dir.path().join("offline.jsonl");
         let mut history = original.clone();
-        assert_eq!(compact_context(&offline_source(), &mut history, None, &archive, None).await, None);
+        assert!(compact_context(&offline_source(), &mut history, None, &archive, None).await.is_none());
         assert_eq!(history[1].content, "important instruction");
         assert!(!archive.exists());
 
-        let blocker = dir.path().join("not_a_directory");
-        std::fs::write(&blocker, "file").unwrap();
-        let mut history = original.clone();
-        assert_eq!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &blocker.join("archive.jsonl"), None).await, None);
-        assert_eq!(history[2].content, original[2].content, "archive failure must not discard history");
+        // The archive is kept in the session's own file now, so there is no
+        // side file left to fail: the session save is what reports a problem.
     }
 
     /// A window that filled up mid-task is the other way round: refusing the

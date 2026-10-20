@@ -4,7 +4,7 @@ use super::*;
 pub(crate) const COMPACTED_MARK: &str = "\n\n[Compacted Conversation History]:\n";
 pub(crate) const COMPACTED_INTRO: &str = "This session is being continued after context compaction. The summary below covers the earlier conversation.\n";
 pub(crate) const ARCHIVE_MARK: &str = "\n\n[Full Earlier Transcript Archive]:\n";
-const COMPACTED_OUTRO: &str = "\nContinue the current task from this summary and the retained messages that follow. If an exact prior message or tool result is needed, read the archive above subject to normal file permissions. Verify changeable facts before acting.";
+const COMPACTED_OUTRO: &str = "\nContinue the current task from this summary and the retained messages that follow. If an exact prior message or tool result is needed, read the archive in the session file named below, under its \"archive\" field, subject to normal file permissions. Verify changeable facts before acting.";
 /// The card's token counts, kept after the summary so a resumed session can
 /// draw the same footer. The model ignores it; the summary reader stops at the
 /// archive marker.
@@ -365,11 +365,10 @@ fn finish_summary(
     new_history.extend_from_slice(&history[split_idx..]);
 
     let after_tokens: usize = new_history.iter().map(|m| m.content.len() / 4 + 4).sum();
-    // A summary is a navigation aid, not a replacement for the exact record.
-    // If the archive cannot be saved, keep the original in-memory history.
-    if append_compaction_archive(archive_path, &history[1..split_idx]).is_err() {
-        return None;
-    }
+    // The exact words of the turns the summary replaces go with the session,
+    // so a session is one file: the model can still read what was summarized
+    // away, and nothing has to be kept in two places at once.
+    let archive: Vec<ChatMessage> = history[1..split_idx].to_vec();
     *history = new_history;
 
     // The shrinking decision compares like with like, in estimated units. What is
@@ -410,7 +409,7 @@ fn finish_summary(
     if let Some(system) = history.first_mut() {
         system.content.push_str(&format!("{COMPACTION_STATS_MARK}{input_tokens} in · {output_tokens} out"));
     }
-    Some(flashagent_tui::CompactionResult { saved, summary, input_tokens, output_tokens })
+    Some(flashagent_tui::CompactionResult { saved, summary, input_tokens, output_tokens, archive })
 }
 
 async fn summarize_before(

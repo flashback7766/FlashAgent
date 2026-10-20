@@ -67,7 +67,7 @@ use flashagent_llm::{ChatMessage, ServerDiscovery};
 
 /// What one compaction produced. The summary is also written into the system
 /// message; the card reads it from here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CompactionResult {
     /// Tokens the window got back, in the unit the status line uses.
     pub saved: usize,
@@ -77,6 +77,9 @@ pub struct CompactionResult {
     /// estimated from the conversation otherwise.
     pub input_tokens: usize,
     pub output_tokens: usize,
+    /// The conversation the summary replaced, kept with the session so the
+    /// exact words of the earlier turns are not lost.
+    pub archive: Vec<ChatMessage>,
 }
 
 #[derive(Debug)]
@@ -2242,6 +2245,7 @@ mod tests {
             "the card was also printed: {settled:?}"
         );
         v.finish_compaction_card(&CompactionResult {
+            archive: Vec::new(),
             saved: 10,
             summary: "## Objective\nship it".into(),
             input_tokens: 20,
@@ -2291,6 +2295,7 @@ mod tests {
         );
 
         v.finish_compaction_card(&CompactionResult {
+            archive: Vec::new(),
             saved: 10,
             summary: "## Objective\nfinal".into(),
             input_tokens: 20,
