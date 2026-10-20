@@ -2304,8 +2304,8 @@ fn a_command_that_changes_the_conversation_waits_for_the_turn_to_end() {
     assert!(screen.contains("/compact"), "{screen}");
     server.release();
 
-    // Run once the answer is whole; one turn has nothing earlier to summarize.
-    term.wait_for("Nothing to compact yet", WAIT);
+    // Run once the answer is whole; one exchange is enough to summarize.
+    term.wait_for("Session compacted", WAIT);
     assert!(term.screen().contains("word4"), "the turn was cut off:\n{}", term.screen());
     assert_eq!(server.turns().len(), 1, "the command was sent to the model as steering");
     assert!(!last_user_message(&server.turns()[0]).contains("/compact"));
@@ -2322,7 +2322,9 @@ fn a_command_that_only_reads_runs_at_once_while_the_model_works() {
     term.wait_for("word2", WAIT);
     term.type_text("/help");
     term.send(ENTER);
-    term.wait_for("/rewind [n]", WAIT);
+    // The help is longer than the window and the view keeps its end, so the
+    // check is on a row that is on screen.
+    term.wait_for("save the session and quit", WAIT);
     server.release();
     term.wait_for("word3", WAIT);
     assert_eq!(server.turns().len(), 1, "/help reached the model");
