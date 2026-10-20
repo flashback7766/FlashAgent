@@ -394,6 +394,19 @@ pub(crate) fn apply_edits(path: &str, mut text: String, edits: &[EditChunk]) -> 
     // or a match found earlier keeps its place while the ones after it change,
     // and one edit that shifts the file cannot move the next.
     if let Some(planned) = plan_all_edits(path, &text, edits) {
+        // Two edits that cover the same bytes would each overwrite the other,
+        // and the second one to be applied would win while the first was lost
+        // without a word. That is a silent loss, so it is refused instead.
+        if let Some((a, b, at)) = overlapping_places(&planned) {
+            return Err(ToolError::Other(format!(
+                "edit: two edits in this call cover the same part of {path} \
+                 (edit {} and edit {}, at line {}); apply them one at a time, \
+                 or make them cover different text",
+                a + 1,
+                b + 1,
+                line_of(&text, at),
+            )));
+        }
         let mut applied = 0usize;
         for planned in planned.into_iter().rev() {
             for (from, to, new_text) in planned.places.into_iter().rev() {
@@ -425,6 +438,41 @@ fn plan_all_edits(path: &str, text: &str, edits: &[EditChunk]) -> Option<Vec<Pla
         planned.push(plan_one_edit(path, text, edit).ok()?);
     }
     Some(planned)
+}
+
+/// Two edits that would write over the same bytes, and where they meet.
+///
+/// The edits of one call are all planned against the text as it was, and then
+/// applied from the last to the first. That is what makes several cursors
+/// possible, and it is also what makes two edits over the same text lose one
+/// of them: the one applied later wins and the other is gone without a word.
+/// The file is left in a state nobody asked for, and the model is told the
+/// edits were applied. So they are found here instead, and refused.
+fn overlapping_places(planned: &[PlannedEdit]) -> Option<(usize, usize, usize)> {
+    // Each place with the edit it belongs to, so a match inside one edit (the
+    // several places `replace_all` makes) is not mistaken for a conflict.
+    let mut all: Vec<(usize, usize, usize)> = Vec::new();
+    for (n, edit) in planned.iter().enumerate() {
+        for (from, to, _) in &edit.places {
+            all.push((*from, *to, n));
+        }
+    }
+    all.sort_unstable();
+    for pair in all.windows(2) {
+        let (_from_a, to_a, edit_a) = pair[0];
+        let (from_b, _to_b, edit_b) = pair[1];
+        // Sorted by start, so the second starts no earlier than the first.
+        // The bytes they share are the overlap.
+        if edit_a != edit_b && to_a > from_b {
+            return Some((edit_a, edit_b, from_b));
+        }
+    }
+    None
+}
+
+/// The line a byte offset falls on, counted from 1.
+fn line_of(text: &str, at: usize) -> usize {
+    text[..at.min(text.len())].matches('\n').count() + 1
 }
 
 /// One edit, resolved against the text as it was before any edit.
@@ -894,6 +942,79 @@ mod tests {
         ];
         let (out, applied) = apply_edits("f", text.into(), &edits).unwrap();
         assert_eq!(out, "ONE\nONE-AND-A-HALF\ntwo\nthree\nFOUR\n");
+        assert_eq!(applied, 2);
+    }
+
+    /// Two edits over the same text would each overwrite the other, and the
+    /// one applied later would win while the other was lost without a word.
+    /// The file was left in a state nobody asked for, and the model was told
+    /// both edits were applied. They are refused instead.
+    #[test]
+    fn two_edits_over_the_same_text_are_refused() {
+        let text = "x = foo()\n";
+        let edits = [
+            EditChunk { old_string: "foo".into(), new_string: "bar".into(), ..Default::default() },
+            EditChunk { old_string: "foo()".into(), new_string: "qux()".into(), ..Default::default() },
+        ];
+        let err = apply_edits("f", text.into(), &edits).unwrap_err().to_string();
+        assert!(err.contains("cover the same part"), "{err}");
+        assert!(err.contains("edit 1 and edit 2"), "the model must know which two: {err}");
+        assert!(err.contains("line 1"), "the model must know where: {err}");
+    }
+
+    /// The same text twice is the same conflict, and it used to cut the file
+    /// in half: "one" replaced by "A" and then "one" by "B" left "Awo".
+    #[test]
+    fn two_edits_over_the_same_words_are_refused() {
+        let text = "one\ntwo\n";
+        let edits = [
+            EditChunk { old_string: "one".into(), new_string: "A".into(), ..Default::default() },
+            EditChunk { old_string: "one".into(), new_string: "B".into(), ..Default::default() },
+        ];
+        let err = apply_edits("f", text.into(), &edits).unwrap_err().to_string();
+        assert!(err.contains("cover the same part"), "{err}");
+    }
+
+    /// The same text inside one edit is not a conflict: `replace_all` means
+    /// every occurrence, and that has to keep working.
+    #[test]
+    fn one_edit_over_many_places_is_not_a_conflict() {
+        let text = "x\nx\n";
+        let edit = EditChunk {
+            old_string: "x".into(),
+            new_string: "y".into(),
+            replace_all: true,
+            ..Default::default()
+        };
+        let (out, applied) = apply_edits("f", text.into(), &[edit]).unwrap();
+        assert_eq!(out, "y\ny\n");
+        assert_eq!(applied, 2);
+    }
+
+    /// A line and a word inside it are a conflict too, and the same one: the
+    /// word's place is inside the line's.
+    #[test]
+    fn a_line_and_a_word_inside_it_are_refused() {
+        let text = "one\ntwo\nthree\n";
+        let edits = [
+            EditChunk { start_line: Some(1), end_line: Some(2), new_string: "ONE TWO".into(), ..Default::default() },
+            EditChunk { old_string: "two".into(), new_string: "TWO".into(), ..Default::default() },
+        ];
+        let err = apply_edits("f", text.into(), &edits).unwrap_err().to_string();
+        assert!(err.contains("cover the same part"), "{err}");
+    }
+
+    /// Edits that do not touch each other still go through as several
+    /// cursors: this is the case the check must not break.
+    #[test]
+    fn edits_that_do_not_touch_each_other_are_still_applied() {
+        let text = "one\ntwo\nthree\n";
+        let edits = [
+            EditChunk { old_string: "one".into(), new_string: "ONE".into(), ..Default::default() },
+            EditChunk { old_string: "three".into(), new_string: "THREE".into(), ..Default::default() },
+        ];
+        let (out, applied) = apply_edits("f", text.into(), &edits).unwrap();
+        assert_eq!(out, "ONE\ntwo\nTHREE\n");
         assert_eq!(applied, 2);
     }
 
