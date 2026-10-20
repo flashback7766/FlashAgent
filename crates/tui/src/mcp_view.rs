@@ -361,7 +361,7 @@ pub fn render_mcp_test_report(report: &McpTestReport, width: usize) -> Vec<Strin
     let inner_w = report_width(width).saturating_sub(4);
     let mut lines = Vec::new();
 
-    let title = format!("MCP test report: {}", report.name);
+    let title = crate::i18n::tr_fill("MCP test report: {name}", &[("name", &report.name)]);
     lines.push(box_top(&title, inner_w, BORDER_GOLD));
 
     let mut status = format!("{TEXT_GREEN}● Handshake successful{RESET}");
@@ -416,7 +416,7 @@ pub fn render_mcp_add_success(item: &MarketplaceItem, target_path: &Path, width:
     let inner_w = report_width(width).saturating_sub(4);
     let mut lines = Vec::new();
 
-    let title = format!("Added MCP extension: {}", item.name);
+    let title = crate::i18n::tr_fill("Added MCP extension: {name}", &[("name", item.name)]);
     lines.push(box_top(&title, inner_w, BORDER_GOLD));
 
     lines.push(box_line(

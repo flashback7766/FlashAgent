@@ -367,7 +367,7 @@ fn restyle_compaction_heading(row: &str) -> String {
 /// summary rendered as markdown, and a rule saying what the call cost.
 fn render_compaction_card(card: &CompactionCard, width: usize) -> Vec<RenderLine> {
     let mut out = Vec::new();
-    out.push((LineKind::Compaction, compaction_rule("Session compaction started", width)));
+    out.push((LineKind::Compaction, compaction_rule(crate::i18n::tr("Session compaction started"), width)));
     out.push((LineKind::Compaction, String::new()));
     match card.state {
         CompactionState::Started => {
@@ -409,12 +409,12 @@ fn render_compaction_card(card: &CompactionCard, width: usize) -> Vec<RenderLine
     if card.state != CompactionState::Started {
         out.push((LineKind::Compaction, String::new()));
         let footer = match card.state {
-            CompactionState::Failed => "Session compaction failed".to_string(),
+            CompactionState::Failed => crate::i18n::tr("Session compaction failed").to_string(),
             _ => match (card.input_tokens, card.output_tokens) {
                 (Some(input), Some(output)) => {
                     format!("Session compacted · {} in · {} out", ContextUsage::format_tokens(input), ContextUsage::format_tokens(output))
                 }
-                _ => "Session compacted".to_string(),
+                _ => crate::i18n::tr("Session compacted").to_string(),
             },
         };
         out.push((LineKind::Compaction, compaction_rule(&footer, width)));
@@ -888,7 +888,7 @@ impl ChatView {
         let answer = finished.answer.as_str();
         self.streaming = None;
         self.streaming_reasoning = None;
-        let said = if finished.done == DoneReason::Completed { "answered" } else { "stopped early" };
+        let said = if finished.done == DoneReason::Completed { "answered" } else { crate::i18n::tr("stopped early") };
         let head = format!(
             "{role} {} {said} \u{b7} {} \u{b7} {} tokens \u{b7} {secs}s",
             finished.id,
@@ -1134,9 +1134,9 @@ impl ChatView {
                 self.open_tool = None;
                 // The enum's own name ("— StepLimit —") used to reach the chat.
                 let said = match reason {
-                    flashagent_core::DoneReason::StepLimit => Some("stopped: the step limit was reached"),
-                    flashagent_core::DoneReason::TokenBudget => Some("stopped: the token budget was spent"),
-                    flashagent_core::DoneReason::TimeLimit => Some("stopped: the time limit was reached"),
+                    flashagent_core::DoneReason::StepLimit => Some(crate::i18n::tr("stopped: the step limit was reached")),
+                    flashagent_core::DoneReason::TokenBudget => Some(crate::i18n::tr("stopped: the token budget was spent")),
+                    flashagent_core::DoneReason::TimeLimit => Some(crate::i18n::tr("stopped: the time limit was reached")),
                     // The explanation of what failed follows; a line announcing it said it twice.
                     flashagent_core::DoneReason::Failed
                     | flashagent_core::DoneReason::Cancelled
@@ -1486,14 +1486,14 @@ impl ChatView {
                     format!(
                         "  \x1b[38;2;138;180;248m{}\x1b[0m \x1b[1m{}\x1b[0m {chevron}",
                         anim::spinner(t),
-                        anim::shimmer(&format!("Thinking: {stage}"), t, 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255)),
+                        anim::shimmer(&crate::i18n::tr("Thinking: {stage}").replace("{stage}", stage), t, 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255)),
                     )
                 } else if let Some(s) = secs {
-                    format!("  \x1b[38;2;120;125;140m•\x1b[0m \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m \x1b[38;2;140;145;160m({s}s)\x1b[0m {chevron}")
+                    format!("  \x1b[38;2;120;125;140m•\x1b[0m \x1b[1;38;2;194;231;255m{}:\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m \x1b[38;2;140;145;160m({s}s)\x1b[0m {chevron}", crate::i18n::tr("Thought"), crate::i18n::tr(stage))
                 } else {
                     // Thinking lifted out of the answer text has no measured duration, but it
                     // is plainly over.
-                    format!("  \x1b[38;2;120;125;140m•\x1b[0m \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m {chevron}")
+                    format!("  \x1b[38;2;120;125;140m•\x1b[0m \x1b[1;38;2;194;231;255m{}:\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m {chevron}", crate::i18n::tr("Thought"), crate::i18n::tr(stage))
                 };
                 let budget = width.saturating_sub(4);
                 let clipped_styled = clip_ansi(&text_styled, budget);
@@ -1506,15 +1506,17 @@ impl ChatView {
                     (false, Some(s)) => format!(" ({s}s)"),
                     _ => String::new(),
                 };
-                let title_vis = format!("{verb}: {stage}{elapsed}");
+                let title_vis = format!("{}: {}{}", crate::i18n::tr(verb), crate::i18n::tr(stage), elapsed);
                 let title_styled = if is_streaming {
                     format!(
                         "\x1b[1m{}\x1b[0m",
-                        anim::shimmer(&format!("{verb}: {stage}"), anim::now_ms(), 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255))
+                        anim::shimmer(&format!("{}: {}", crate::i18n::tr(verb), crate::i18n::tr(stage)), anim::now_ms(), 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255))
                     )
                 } else {
                     format!(
-                        "\x1b[1;38;2;194;231;255m{verb}:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m\x1b[38;2;140;145;160m{elapsed}\x1b[0m"
+                        "\x1b[1;38;2;194;231;255m{}:\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m\x1b[38;2;140;145;160m{elapsed}\x1b[0m",
+                        crate::i18n::tr(verb),
+                        crate::i18n::tr(stage)
                     )
                 };
                 let box_w = width.saturating_sub(4).clamp(30, 84);
@@ -3616,7 +3618,7 @@ hm".into()));
         };
         let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
         let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
-        assert!(text.contains("Session compaction started"), "{text}");
+        assert!(text.contains(crate::i18n::tr("Session compaction started")), "{text}");
         let footer = format!(
             "Session compacted · {} in · {} out",
             ContextUsage::format_tokens(90_000),
@@ -3638,9 +3640,9 @@ hm".into()));
         };
         let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
         let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
-        assert!(text.contains("Session compaction started"), "{text}");
+        assert!(text.contains(crate::i18n::tr("Session compaction started")), "{text}");
         assert!(text.contains("Writing a summary"), "{text}");
-        assert!(!text.contains("Session compacted"), "{text}");
+        assert!(!text.contains(crate::i18n::tr("Session compacted")), "{text}");
     }
 
     #[test]
@@ -3653,7 +3655,7 @@ hm".into()));
         };
         let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
         let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
-        assert!(text.contains("Session compacted"), "{text}");
+        assert!(text.contains(crate::i18n::tr("Session compacted")), "{text}");
         assert!(!text.contains(" in · ") && !text.contains(" out"), "no bill was kept: {text}");
     }
 
@@ -3667,9 +3669,9 @@ hm".into()));
         };
         let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
         let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
-        assert!(text.contains("Session compaction failed"), "{text}");
+        assert!(text.contains(crate::i18n::tr("Session compaction failed")), "{text}");
         assert!(text.contains("unchanged"), "{text}");
-        assert!(!text.contains("Session compacted"), "{text}");
+        assert!(!text.contains(crate::i18n::tr("Session compacted")), "{text}");
     }
 
     /// A turn can end while its mid-turn compaction is still writing (Esc, a
@@ -3682,13 +3684,13 @@ hm".into()));
         chat.push_user("go");
         assert!(!chat.abandon_compaction_card("no card was open"), "nothing to settle");
         let settled = chat.render(80);
-        assert!(!settled.iter().any(|(_, t)| t.contains("Session compaction failed")), "{settled:?}");
+        assert!(!settled.iter().any(|(_, t)| t.contains(crate::i18n::tr("Session compaction failed"))), "{settled:?}");
 
         chat.start_compaction_card();
         assert!(chat.abandon_compaction_card("the turn ended before the summary landed"));
         let settled = chat.render(80);
         assert!(
-            settled.iter().any(|(k, t)| *k == LineKind::Compaction && t.contains("Session compaction failed")),
+            settled.iter().any(|(k, t)| *k == LineKind::Compaction && t.contains(crate::i18n::tr("Session compaction failed"))),
             "{settled:?}"
         );
         assert!(

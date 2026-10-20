@@ -38,7 +38,7 @@ pub fn completion_entries(config: &AppConfig) -> Vec<(String, String)> {
 
 /// How a provider is spoken to, where, and the model it starts with.
 pub fn describe(profile: &ProviderProfile) -> String {
-    let model = if profile.model.is_empty() { "the loaded model" } else { profile.model.as_str() };
+    let model = if profile.model.is_empty() { crate::i18n::tr("the loaded model") } else { profile.model.as_str() };
     format!("{} \u{b7} {} \u{b7} {model}", profile.protocol.label(), profile.url)
 }
 
@@ -58,8 +58,8 @@ pub fn provider_menu(config: &AppConfig) -> SelectMenu<String> {
         };
         items.push(SelectItem::with_description(label, describe(p), p.name.clone()));
     }
-    items.push(SelectItem::with_description("+ Add a provider", "a local server or a cloud API, set up step by step", ADD.to_string()));
-    items.push(SelectItem::with_description("+ Edit providers", "address, protocol, key and model of each; delete one", MANAGE.to_string()));
+    items.push(SelectItem::with_description(crate::i18n::tr("+ Add a provider"), crate::i18n::tr("a local server or a cloud API, set up step by step"), ADD.to_string()));
+    items.push(SelectItem::with_description(crate::i18n::tr("+ Edit providers"), crate::i18n::tr("address, protocol, key and model of each; delete one"), MANAGE.to_string()));
     let mut menu = SelectMenu::new(crate::i18n::tr("Switch provider"), items).with_noun(crate::select::Noun::PROVIDERS);
     menu.uncounted = 2;
     menu.select_by_value(&if config.run_provider.is_some() { THIS_RUN.to_string() } else { in_use.name.clone() });
@@ -779,6 +779,6 @@ mod tests {
         }
         view.selected = view.profiles.len();
         let shown = text(&view.render(100));
-        assert!(shown.contains("more above") && shown.contains("+ Add a provider"), "{shown}");
+        assert!(shown.contains("more above") && shown.contains(crate::i18n::tr("+ Add a provider")), "{shown}");
     }
 }

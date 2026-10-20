@@ -1,5 +1,5 @@
 use super::*;
-use flashagent_tui::i18n::tr;
+use flashagent_tui::i18n::{tr, tr_fill};
 
 /// Messages typed while a compaction owns the history. The history is with the
 /// task (`std::mem::take` in `compact_command`), so a turn started now would
@@ -731,7 +731,7 @@ impl App {
             known.extend(p.presets.iter().filter(|p| !known.contains(p)).cloned().collect::<Vec<_>>());
         }
         if !known.contains(&wanted) {
-            self.notice(format!("Unknown effort '{wanted}' · try {}", known.join(", ")));
+            self.notice(tr_fill("Unknown effort '{wanted}' · try {known}", &[("wanted", &wanted), ("known", &known.join(", "))]));
             return;
         }
         let changed = self.current_effort != wanted;
@@ -783,7 +783,7 @@ impl App {
             }
         };
         if wanted == self.config.update_channel {
-            self.notice(format!("Already on the {} channel", wanted.label()));
+            self.notice(tr_fill("Already on the {channel} channel", &[("channel", wanted.label())]));
             return;
         }
         // Switching can install an older binary, so it always asks.
@@ -998,7 +998,7 @@ impl App {
         }
         let Some(n) = arg.parse::<usize>().ok().filter(|n| (1..=turns.len()).contains(n)) else {
             if !arg.is_empty() {
-                self.notice(format!("No turn {arg} to rewind to: pick 1 to {}", turns.len()));
+                self.notice(tr_fill("No turn {arg} to rewind to: pick 1 to {count}", &[("arg", arg), ("count", &turns.len().to_string())]));
             }
             let mut text = String::from(
                 "Turns you can go back to. The files FlashAgent changed and the conversation return to how they were before the turn:\n",
@@ -1097,7 +1097,7 @@ impl App {
     fn export_conversation(&mut self, cx: &LoopCtx<'_>, arg: &str) {
         // A file with only a header, in the project folder, helps nobody.
         if !self.history.iter().any(flashagent_core::is_prompt) {
-            self.say(BackgroundNotice::fading("Nothing to export yet".to_string(), 5));
+            self.say(BackgroundNotice::fading(tr("Nothing to export yet").to_string(), 5));
             self.renderer.request_reprint();
             return;
         }
@@ -1252,10 +1252,10 @@ mod tests {
     #[test]
     fn an_export_takes_a_format_and_a_path() {
         assert_eq!(split_export_arg("md"), ("md".to_string(), None));
-        assert_eq!(split_export_arg("md ~/notes/chat.md"), ("md".to_string(), Some("~/notes/chat.md".to_string())));
-        assert_eq!(split_export_arg("  html  out.html "), ("html".to_string(), Some("out.html".to_string())));
+        assert_eq!(split_export_arg("md ~/notes/chat.md"), ("md".to_string(), Some(tr("~/notes/chat.md").to_string())));
+        assert_eq!(split_export_arg("  html  out.html "), ("html".to_string(), Some(tr("out.html").to_string())));
         // A path with spaces in it is written in quotes.
-        assert_eq!(split_export_arg("\"~/my notes/chat.md\""), ("md".to_string(), Some("~/my notes/chat.md".to_string())));
+        assert_eq!(split_export_arg("\"~/my notes/chat.md\""), ("md".to_string(), Some(tr("~/my notes/chat.md").to_string())));
     }
 
     #[test]

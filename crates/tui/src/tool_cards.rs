@@ -4,6 +4,7 @@
 //! verbs and the argument named, so they are a table ([`fixed_labels`]).
 
 use super::*;
+use crate::i18n::tr;
 
 const MUTED: &str = "\x1b[38;2;160;165;180m";
 const STRONG: &str = "\x1b[38;2;225;230;240m";
@@ -97,39 +98,39 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
         "memory_create" | "memory_update" | "memory_remove" => {
             let scope = format!("[{}]", text("scope").unwrap_or("project"));
             let verbs = match name {
-                "memory_create" => ("Creating memory", "Created memory", "Failed to create memory"),
-                "memory_update" => ("Updating memory", "Updated memory", "Failed to update memory"),
-                _ => ("Removing memory", "Removed memory", "Failed to remove memory"),
+                "memory_create" => (tr("Creating memory"), tr("Created memory"), tr("Failed to create memory")),
+                "memory_update" => (tr("Updating memory"), tr("Updated memory"), tr("Failed to update memory")),
+                _ => (tr("Removing memory"), tr("Removed memory"), tr("Failed to remove memory")),
             };
             Labels::new(verbs, Some(&scope))
         }
         "outline_file" => {
             let path = format_cmd(text("path").unwrap_or("file"));
-            Labels::new(("Outlining", "Outlined", "Failed to outline"), Some(&path))
+            Labels::new((tr("Outlining"), tr("Outlined"), tr("Failed to outline")), Some(&path))
         }
         "web_search" => {
             let query = format!("\"{}\"", format_cmd(text("query").unwrap_or("web")));
-            Labels::new(("Searching web:", "Searched web:", "Web search failed:"), Some(&query))
+            Labels::new((tr("Searching web:"), tr("Searched web:"), tr("Web search failed:")), Some(&query))
         }
         "web_fetch" => {
             let url = format_cmd(text("url").unwrap_or("url"));
-            Labels::new(("Fetching", "Fetched", "Failed to fetch"), Some(&url))
+            Labels::new((tr("Fetching"), tr("Fetched"), tr("Failed to fetch")), Some(&url))
         }
         "git_status" => Labels::new(
-            ("Checking git status", "Checked git status", "Failed to check git status"),
+            (tr("Checking git status"), tr("Checked git status"), tr("Failed to check git status")),
             None,
         ),
         "git_diff" => {
             let staged = parsed.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
             let what = if staged { "staged git diff" } else { "git diff" };
             Labels {
-                run: card_line(&format!("Checking {what}"), None),
-                done: card_line(&format!("Checked {what}"), None),
-                fail: failed_line(&format!("Failed to check {what}"), None),
+                run: card_line(&tr("Checking {what}").replace("{what}", what), None),
+                done: card_line(&tr("Checked {what}").replace("{what}", what), None),
+                fail: failed_line(&tr("Failed to check {what}").replace("{what}", what), None),
             }
         }
         "env_info" => Labels::new(
-            ("Inspecting environment", "Inspected environment", "Failed to inspect environment"),
+            (tr("Inspecting environment"), tr("Inspected environment"), tr("Failed to inspect environment")),
             None,
         ),
         "ask_user" => {
@@ -143,13 +144,13 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
                 format_cmd(first.or_else(|| text("question")).or_else(|| text("prompt")).unwrap_or("a question"));
             let more = questions.map_or(0, |q| q.len().saturating_sub(1));
             if more > 0 {
-                question.push_str(&format!(" (+{more} more)"));
+                question.push_str(&tr(" (+{more} more)").replace("{more}", &more.to_string()));
             }
             Labels {
-                run: card_line("Asking user:", Some(&question)),
-                done: card_line("Asked user:", Some(&question)),
+                run: card_line(tr("Asking user:"), Some(&question)),
+                done: card_line(tr("Asked user:"), Some(&question)),
                 // The question is gone from the screen; repeating it would read as answered.
-                fail: failed_line("Cancelled question", None),
+                fail: failed_line(tr("Cancelled question"), None),
             }
         }
         // Anything else, MCP tools included: the name, plus its main argument if one
@@ -163,10 +164,10 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
                 None => name.to_string(),
             };
             Labels {
-                run: card_line("Running", Some(&subject)),
+                run: card_line(tr("Running"), Some(&subject)),
                 // One statement, so one colour.
-                done: card_line(&format!("{subject} finished"), None),
-                fail: failed_line(&format!("{subject} failed"), None),
+                done: card_line(&tr("{subject} finished").replace("{subject}", &subject), None),
+                fail: failed_line(&tr("{subject} failed").replace("{subject}", &subject), None),
             }
         }
     }
@@ -310,7 +311,7 @@ impl ChatView {
                 *count += 1;
                 *last_cmd = cmd;
                 *is_running = true;
-                line.text = card_line(&format!("Running {count} commands"), None);
+                line.text = card_line(&tr("Running {count} commands").replace("{count}", &count.to_string()), None);
                 true
             })
         };
@@ -441,12 +442,12 @@ impl ChatView {
                 *count += 1;
                 *last_task = task;
                 *is_running = true;
-                line.text = card_line(&format!("Running {count} subagents"), None);
+                line.text = card_line(&tr("Running {count} subagents").replace("{count}", &count.to_string()), None);
                 true
             })
         };
         if !folded {
-            let text = card_line(&format!("Running subagent: {}", format_cmd(&task)), None);
+            let text = card_line(&tr("Running subagent: {task}").replace("{task}", &format_cmd(&task)), None);
             let mut line = ChatLine::with_details(LineKind::Tool, text, args_json.to_string());
             line.tool_name = Some("spawn_agent".to_string());
             line.tool_group =
@@ -469,12 +470,12 @@ impl ChatView {
                     scopes.push(scope);
                 }
                 *is_running = true;
-                line.text = card_line("Reading memory", Some(&format!("[{}]", scopes.join(", "))));
+                line.text = card_line(tr("Reading memory"), Some(&format!("[{}]", scopes.join(", "))));
                 true
             })
         };
         if !folded {
-            let text = card_line("Reading memory", Some(&format!("[{scope}]")));
+            let text = card_line(tr("Reading memory"), Some(&format!("[{scope}]")));
             let mut line = ChatLine::with_details(LineKind::Tool, text, args_json.to_string());
             line.tool_name = Some("memory_read".to_string());
             line.tool_group = Some(ToolGroupKind::Memory { scopes: vec![scope], is_running: true });
@@ -578,10 +579,10 @@ fn finished_text(group: &mut ToolGroupKind, is_error: bool, failed: usize, total
         ToolGroupKind::Command { count, last_cmd, is_running } => {
             *is_running = false;
             match (failed >= *count, *count) {
-                (true, 1) => failed_line("Failed", Some(&format_cmd(last_cmd))),
-                (true, n) => failed_line(&format!("Failed {n} commands"), None),
-                (false, 1) => card_line("Ran", Some(&format_cmd(last_cmd))),
-                (false, n) => format!("{}{}", card_line(&format!("Ran {n} commands"), None), failed_suffix(failed, n)),
+                (true, 1) => failed_line(tr("Failed"), Some(&format_cmd(last_cmd))),
+                (true, n) => failed_line(&tr("Failed {n} commands").replace("{n}", &n.to_string()), None),
+                (false, 1) => card_line(tr("Ran"), Some(&format_cmd(last_cmd))),
+                (false, n) => format!("{}{}", card_line(&tr("Ran {n} commands").replace("{n}", &n.to_string()), None), failed_suffix(failed, n)),
             }
         }
         ToolGroupKind::Explore { files, searches, last_target, is_running } => {
@@ -593,7 +594,7 @@ fn finished_text(group: &mut ToolGroupKind, is_error: bool, failed: usize, total
             let basename =
                 std::path::Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path);
             if failed >= total {
-                return failed_line("Failed to edit", Some(basename));
+                return failed_line(tr("Failed to edit"), Some(basename));
             }
             format!(
                 "  {FAINT}{TOOL_MARK}{OFF} {MUTED}Edited{OFF} \x1b[1;38;2;225;230;240m{basename}{OFF} \x1b[38;2;145;205;140m+{added}{OFF} {FAILED}-{deleted}{OFF} {}{}",
@@ -604,24 +605,24 @@ fn finished_text(group: &mut ToolGroupKind, is_error: bool, failed: usize, total
         ToolGroupKind::Subagent { count, last_task, is_running } => {
             *is_running = false;
             match (failed >= *count, *count) {
-                (true, 1) => failed_line("Subagent failed:", Some(&format_cmd(last_task))),
-                (false, 1) => card_line(&format!("{} finished", format_cmd(last_task)), None),
-                (true, n) => failed_line(&format!("{n} subagents failed"), None),
-                (false, n) => format!("{}{}", card_line(&format!("Ran {n} subagents"), None), failed_suffix(failed, n)),
+                (true, 1) => failed_line(tr("Subagent failed:"), Some(&format_cmd(last_task))),
+                (false, 1) => card_line(&tr("{name} finished").replace("{name}", &format_cmd(last_task)), None),
+                (true, n) => failed_line(&tr("{n} subagents failed").replace("{n}", &n.to_string()), None),
+                (false, n) => format!("{}{}", card_line(&tr("Ran {n} subagents").replace("{n}", &n.to_string()), None), failed_suffix(failed, n)),
             }
         }
         ToolGroupKind::Memory { scopes, is_running } => {
             *is_running = false;
             let scopes = format!("[{}]", scopes.join(", "));
             if is_error {
-                failed_line("Failed to read memory", Some(&scopes))
+                failed_line(tr("Failed to read memory"), Some(&scopes))
             } else {
-                card_line("Read memory", Some(&scopes))
+                card_line(tr("Read memory"), Some(&scopes))
             }
         }
         ToolGroupKind::Generic { name, summary, is_running } => {
             *is_running = false;
-            card_line(&format!("{name} [{summary}] finished"), None)
+            card_line(&tr("{name} [{summary}] finished").replace("{name}", name).replace("{summary}", summary), None)
         }
         ToolGroupKind::Custom { done_text, fail_text, is_running, .. } => {
             *is_running = false;

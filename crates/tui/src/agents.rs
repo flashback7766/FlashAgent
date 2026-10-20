@@ -17,9 +17,9 @@ use flashagent_core::{ChildUsage, DoneReason, SubagentEvent};
 fn outcome(done: DoneReason) -> &'static str {
     match done {
         DoneReason::Completed => "answered",
-        DoneReason::StepLimit => "stopped at its step limit",
-        DoneReason::TokenBudget => "stopped at its token limit",
-        DoneReason::TimeLimit => "stopped at its time limit",
+        DoneReason::StepLimit => crate::i18n::tr("stopped at its step limit"),
+        DoneReason::TokenBudget => crate::i18n::tr("stopped at its token limit"),
+        DoneReason::TimeLimit => crate::i18n::tr("stopped at its time limit"),
         DoneReason::Cancelled => "stopped",
         DoneReason::Failed => "failed",
     }
@@ -314,7 +314,7 @@ impl AgentTree {
                 },
             );
         }
-        self.children.get_mut(id).expect("just inserted")
+        self.children.get_mut(id).unwrap_or_else(|| panic!("{}", crate::i18n::tr("just inserted")))
     }
 }
 

@@ -117,7 +117,7 @@ impl App {
                 // otherwise just take the stale notice away.
                 if previous == MascotMood::Offline {
                     self.say(BackgroundNotice::fading(
-                        format!("Model server is answering \u{b7} {}", self.current_model),
+                        flashagent_tui::i18n::tr_fill("Model server is answering \u{b7} {model}", &[("model", &self.current_model)]),
                         5,
                     ));
                 } else if self.background.as_ref().is_some_and(|b| b.text.starts_with(offline_notice())) {
@@ -152,7 +152,7 @@ impl App {
                     "Update available: {version} · /update installs it"
                 )));
                 if let Some(s) = self.settings_view_mut() {
-                    s.update_check_status = Some(format!("Available: {version} (/update)"));
+                    s.update_check_status = Some(flashagent_tui::i18n::tr("Available: {version} (/update)").to_string());
                 }
             }
             UpdateNotice::Progress { version, stage } => {
@@ -166,20 +166,21 @@ impl App {
                 self.pending_update = None;
                 self.update_progress = None;
                 self.update_watched = false;
-                self.say(BackgroundNotice::sticky(format!(
-                    "Updated to {version} \u{b7} restart FlashAgent to use it"
+                self.say(BackgroundNotice::sticky(flashagent_tui::i18n::tr_fill(
+                    "Updated to {version} \u{b7} restart FlashAgent to use it",
+                    &[("version", &version)]
                 )));
                 if let Some(s) = self.settings_view_mut() {
-                    s.update_check_status = Some(format!("Ready: {version} (restart to apply)"));
+                    s.update_check_status = Some(flashagent_tui::i18n::tr("Ready: {version} (restart to apply)").to_string());
                 }
             }
             UpdateNotice::UpToDate { version } => {
                 if let Some(s) = self.settings_view_mut() {
-                    s.update_check_status = Some(format!("Up to date ({version})"));
+                    s.update_check_status = Some(flashagent_tui::i18n::tr_fill("Up to date ({version})", &[("version", &version)]));
                 }
                 if std::mem::take(&mut self.update_watched) {
                     self.say(BackgroundNotice::fading(
-                        format!("FlashAgent {version} is up to date"),
+                        flashagent_tui::i18n::tr_fill("FlashAgent {version} is up to date", &[("version", &version)]),
                         6,
                     ));
                 }
@@ -328,7 +329,7 @@ impl App {
         self.compacting = false;
         match card {
             Some(result) => self.chat.finish_compaction_card(&result),
-            None => self.chat.fail_compaction_card("the conversation is unchanged"),
+            None => self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the conversation is unchanged")),
         }
         self.chat.forget_counted_context();
         // On disk now, not at the next turn or at the exit: a machine that
@@ -661,7 +662,7 @@ impl App {
                     let picked = self.renderer.text_in(top, m.row, left, m.column);
                     if picked.chars().count() > 1 && flashagent_tui::clipboard::set_clipboard_text(&picked) {
                         self.background =
-                            Some(BackgroundNotice::fading(format!("Copied {} characters", picked.chars().count()), 4));
+                            Some(BackgroundNotice::fading(flashagent_tui::i18n::tr_fill("Copied {n} characters", &[("n", &picked.chars().count().to_string())]), 4));
                         self.renderer.request_reprint();
                     }
                 }

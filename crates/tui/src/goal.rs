@@ -44,13 +44,13 @@ impl GoalBudgets {
         }
         let mut parts = Vec::new();
         if let Some(n) = self.steps {
-            parts.push(crate::plural(n as usize, "step", "steps"));
+            parts.push(crate::i18n::plural(n as usize, "step", "steps", "шаг", "шага", "шагов"));
         }
         if let Some(t) = self.time {
-            parts.push(format!("{} max", human_duration(t)));
+            parts.push(crate::i18n::tr_fill("{limit} max", &[("limit", &human_duration(t))]));
         }
         if let Some(t) = self.output_tokens {
-            parts.push(format!("{} generated tokens", human_count(t)));
+            parts.push(crate::i18n::tr_fill("{count} generated tokens", &[("count", &human_count(t))]));
         }
         parts.join(" · ")
     }
@@ -66,7 +66,7 @@ pub fn parse_goal_task(rest: &str) -> Result<String, String> {
         return Err(format!("{flag} is gone: /goal limits are set in Settings → Goal now. Usage: /goal <task>"));
     }
     if task.is_empty() {
-        return Err("Nothing to do. Usage: /goal <task>".to_string());
+        return Err(crate::i18n::tr("Nothing to do. Usage: /goal <task>").to_string());
     }
     Ok(task.to_string())
 }
@@ -269,25 +269,24 @@ impl GoalLedger {
         // saying nothing.
         if let Some(total) = self.cost.total() {
             out.push(if total == 0.0 {
-                "Cost: free \u{b7} the backend prices every turn at nothing".to_string()
+                crate::i18n::tr("Cost: free \u{b7} the backend prices every turn at nothing").to_string()
             } else {
-                format!(
-                    "Cost: ${} over {}",
-                    flashagent_core::CostLedger::format_amount(total),
-                    flashagent_core::CostLedger::turns_phrase(self.cost.priced_turns())
-                )
+                crate::i18n::tr_fill("Cost: ${amount} over {turns}", &[
+                    ("amount", &flashagent_core::CostLedger::format_amount(total)),
+                    ("turns", &flashagent_core::CostLedger::turns_phrase(self.cost.priced_turns())),
+                ])
             });
         }
 
         let touched = self.written.len() + self.edited.len();
         if touched == 0 {
-            out.push("Files changed: none".to_string());
+            out.push(crate::i18n::tr("Files changed: none").to_string());
         } else {
-            out.push(format!(
-                "Files changed: {touched} ({} created, {} edited)",
-                self.written.len(),
-                self.edited.len()
-            ));
+            out.push(crate::i18n::tr_fill("Files changed: {touched} ({created} created, {edited} edited)", &[
+                ("touched", &touched.to_string()),
+                ("created", &self.written.len().to_string()),
+                ("edited", &self.edited.len().to_string()),
+            ]));
             for f in self.written.iter().map(|f| format!("  + {f}")).chain(
                 self.edited.iter().map(|f| format!("  ~ {f}")),
             ) {
@@ -295,11 +294,10 @@ impl GoalLedger {
             }
         }
 
-        out.push(format!(
-            "Shell commands: {} ok, {} failed",
-            self.shell_ok,
-            self.shell_failed.len()
-        ));
+        out.push(crate::i18n::tr_fill("Shell commands: {ok} ok, {failed} failed", &[
+            ("ok", &self.shell_ok.to_string()),
+            ("failed", &self.shell_failed.len().to_string()),
+        ]));
         for f in &self.shell_failed {
             out.push(format!("  ! {f}"));
         }
@@ -315,10 +313,10 @@ impl GoalLedger {
                     .to_string()
             }
             DoneReason::Cancelled => {
-                "You stopped the run; anything above already happened on disk.".to_string()
+                crate::i18n::tr("You stopped the run; anything above already happened on disk.").to_string()
             }
             DoneReason::Failed => {
-                "The backend failed mid-run; work listed above already happened on disk."
+                crate::i18n::tr("The backend failed mid-run; work listed above already happened on disk.")
                     .to_string()
             }
             _ => "The goal was cut short by a limit — it is not finished. Raise the limit in \

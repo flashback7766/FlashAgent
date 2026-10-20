@@ -265,9 +265,9 @@ pub(crate) fn update_progress_line(version: &str, stage: flashagent_svc::updater
         }
         // Some mirrors send no content-length; show the bytes, not a fake bar.
         UpdateProgress::Downloading { received, .. } => {
-            format!("{:.1} MB downloaded", received as f64 / MB)
+            flashagent_tui::i18n::tr_fill("{size} MB downloaded", &[("size", &format!("{:.1}", received as f64 / MB))])
         }
-        UpdateProgress::Verifying => "verifying the checksum\u{2026}".to_string(),
+        UpdateProgress::Verifying => flashagent_tui::i18n::tr("verifying the checksum\u{2026}").to_string(),
         UpdateProgress::Installing => "installing\u{2026}".to_string(),
     };
     format!("{UPDATE_LINE_PREFIX}{version} \u{b7} {detail}")

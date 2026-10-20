@@ -81,7 +81,7 @@ pub(crate) fn box_row(styled: &str, style: &str, inner_w: usize) -> RenderLine {
 }
 
 fn more_lines(n: usize) -> String {
-    format!("+{}", plural(n, "more line", "more lines"))
+    format!("+{}", crate::i18n::plural(n, "more line", "more lines", "ещё строка", "ещё строки", "ещё строк"))
 }
 
 /// `──────── +N more lines ────────`
@@ -141,13 +141,13 @@ pub fn render_command_card(
 
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
     let status_header = if state == CallState::Waiting {
-        format!("  {TEXT_MUTED}Waiting to run{RESET} {TEXT_BRIGHT}{cmd}{RESET} {chevron}")
+        format!("  {TEXT_MUTED}{}{RESET} {TEXT_BRIGHT}{cmd}{RESET} {chevron}", crate::i18n::tr("Waiting to run"))
     } else if is_running {
-        format!("  {TEXT_MUTED}Running{RESET} {TEXT_BRIGHT}{cmd}{RESET} {}", crate::anim::spinner(crate::anim::now_ms()))
+        format!("  {TEXT_MUTED}{}{RESET} {TEXT_BRIGHT}{cmd}{RESET} {}", crate::i18n::tr("Running"), crate::anim::spinner(crate::anim::now_ms()))
     } else if is_error {
-        format!("  {TEXT_RED}Failed{RESET} {TEXT_BRIGHT}{cmd}{RESET} {chevron}")
+        format!("  {TEXT_RED}{}{RESET} {TEXT_BRIGHT}{cmd}{RESET} {chevron}", crate::i18n::tr("Failed"))
     } else {
-        format!("  {TEXT_MUTED}Ran{RESET} {TEXT_BRIGHT}{cmd}{RESET} {chevron}")
+        format!("  {TEXT_MUTED}{}{RESET} {TEXT_BRIGHT}{cmd}{RESET} {chevron}", crate::i18n::tr("Ran"))
     };
     lines.push((LineKind::Tool, status_header));
 
@@ -183,9 +183,9 @@ pub fn render_command_card(
             }
         }
     } else if state == CallState::Waiting {
-        lines.push(box_row("Runs once you allow it", TEXT_MUTED, inner_w));
+        lines.push(box_row(crate::i18n::tr("Runs once you allow it"), TEXT_MUTED, inner_w));
     } else if is_running {
-        lines.push(box_row("Executing command…", TEXT_MUTED, inner_w));
+        lines.push(box_row(crate::i18n::tr("Executing command…"), TEXT_MUTED, inner_w));
     }
 
     lines.push((LineKind::Tool, render_card_bottom(width)));
@@ -203,9 +203,9 @@ pub fn render_directory_card(
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     let header = if is_running {
-        format!("  {TEXT_MUTED}Analyzing{RESET} {TEXT_BRIGHT}{path}{RESET} {}", crate::anim::spinner(crate::anim::now_ms()))
+        format!("  {TEXT_MUTED}{}{RESET} {TEXT_BRIGHT}{path}{RESET} {}", crate::i18n::tr("Analyzing"), crate::anim::spinner(crate::anim::now_ms()))
     } else {
-        format!("  {TEXT_MUTED}Analyzed{RESET} {TEXT_BRIGHT}{path}{RESET} {chevron}")
+        format!("  {TEXT_MUTED}{}{RESET} {TEXT_BRIGHT}{path}{RESET} {chevron}", crate::i18n::tr("Analyzed"))
     };
     lines.push((LineKind::Tool, header));
 
@@ -222,7 +222,7 @@ pub fn render_directory_card(
             let remaining = raw_entries.len() - display_count;
             lines.push((
                 LineKind::Tool,
-                format!("    {TEXT_MUTED}+{}{RESET}", plural(remaining, "more entry", "more entries")),
+                format!("    {TEXT_MUTED}+{}{RESET}", crate::i18n::plural(remaining, "more entry", "more entries", "ещё запись", "ещё записи", "ещё записей")),
             ));
         }
     }
@@ -252,8 +252,9 @@ pub fn render_read_card(
     let count = file_lines.iter().filter(|l| !is_file_separator(l)).count();
 
     let header = format!(
-        "  {TEXT_MUTED}Read{RESET} {TEXT_BRIGHT}{path}{RESET} {TEXT_MUTED}({}){RESET} {chevron}",
-        plural(count, "line", "lines")
+        "  {TEXT_MUTED}{}{RESET} {TEXT_BRIGHT}{path}{RESET} {TEXT_MUTED}({}){RESET} {chevron}",
+        crate::i18n::tr("Read"),
+        crate::i18n::plural(count, "line", "lines", "строка", "строки", "строк")
     );
     lines.push((LineKind::Tool, header));
 
@@ -396,13 +397,13 @@ pub fn render_edit_card(change: &EditChange<'_>, state: CallState, reason: Optio
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     let action_verb = match (state, is_write) {
-        (CallState::Done, true) => "Wrote",
-        (CallState::Done, false) => "Edited",
-        (CallState::Waiting, true) => "Waiting to write",
-        (CallState::Waiting, false) => "Waiting to edit",
-        (CallState::Running, true) => "Writing",
-        (CallState::Running, false) => "Editing",
-        (CallState::Failed, true) => "Not written:",
+        (CallState::Done, true) => crate::i18n::tr("Wrote"),
+        (CallState::Done, false) => crate::i18n::tr("Edited"),
+        (CallState::Waiting, true) => crate::i18n::tr("Waiting to write"),
+        (CallState::Waiting, false) => crate::i18n::tr("Waiting to edit"),
+        (CallState::Running, true) => crate::i18n::tr("Writing"),
+        (CallState::Running, false) => crate::i18n::tr("Editing"),
+        (CallState::Failed, true) => crate::i18n::tr("Not written:"),
         (CallState::Failed, false) => "Not edited:",
     };
     let verb_color = if state == CallState::Failed { TEXT_RED } else { TEXT_MUTED };
