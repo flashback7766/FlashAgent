@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flashagent_core::{ApprovalGate, ApprovalRequest, Decision, DoneReason, LoopEvent};
+use flashagent_core::{ApprovalGate, ApprovalRequest, ContextUsage, Decision, DoneReason, LoopEvent};
 use parking_lot::Mutex;
 use unicode_width::UnicodeWidthChar;
 
@@ -62,6 +62,20 @@ pub use ReasoningExpansion as VerboseMode;
 use crossterm::event::{KeyCode, KeyModifiers, MouseEvent};
 use flashagent_llm::{ChatMessage, ServerDiscovery};
 
+/// What one compaction produced. The summary is also written into the system
+/// message; the card reads it from here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionResult {
+    /// Tokens the window got back, in the unit the status line uses.
+    pub saved: usize,
+    /// The summary as it was stored, with the card's headings.
+    pub summary: String,
+    /// The summarising call's prompt and answer, when the server reported them;
+    /// estimated from the conversation otherwise.
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+}
+
 #[derive(Debug)]
 pub enum UiEvent {
     /// Tagged with the turn that produced it.
@@ -98,9 +112,14 @@ pub enum UiEvent {
     SubagentEvent(flashagent_core::SubagentEvent),
     /// What a child has finished, said, or what the parent made of a report.
     SubagentOutbound(flashagent_core::SubagentOutbound),
+    /// A piece of a compaction summary, as the model writes it.
+    CompactionDelta(String),
+    /// The previous summary attempt was refused: the open card starts again.
+    CompactionReset,
     /// `/compact` finished. `saved` is `None` when nothing was compacted: the
-    /// history comes back either way, unchanged in that case.
-    Compacted { history: Vec<ChatMessage>, saved: Option<usize> },
+    /// history comes back either way, unchanged in that case. `card` carries
+    /// the summary for the transcript; it is `None` when there is none.
+    Compacted { history: Vec<ChatMessage>, saved: Option<usize>, card: Option<CompactionResult> },
 }
 
 /// Drives terminal colours.
@@ -159,6 +178,25 @@ pub struct ToolCallRecord {
     pub diff: Option<String>,
 }
 
+/// One compaction as the transcript shows it: a header while the summary is
+/// being written, then the summary and what the call cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionCard {
+    pub state: CompactionState,
+    pub summary: String,
+    /// `None` for a card restored from a session file, which stores the
+    /// summary but not the summarising call's bill.
+    pub input_tokens: Option<usize>,
+    pub output_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionState {
+    Started,
+    Done,
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatLine {
     pub kind: LineKind,
@@ -179,6 +217,8 @@ pub struct ChatLine {
     /// Which running subagent this line reports, so its row can be updated in
     /// place as the child works instead of a new line per event.
     pub agent_id: Option<String>,
+    /// Set on a [`LineKind::Compaction`] line.
+    pub compaction: Option<CompactionCard>,
 }
 
 impl ChatLine {
@@ -195,6 +235,7 @@ impl ChatLine {
             is_expanded: None,
             tool_calls: Vec::new(),
             agent_id: None,
+            compaction: None,
         }
     }
 
@@ -211,6 +252,7 @@ impl ChatLine {
             is_expanded: None,
             tool_calls: Vec::new(),
             agent_id: None,
+            compaction: None,
         }
     }
 }
@@ -283,6 +325,99 @@ pub fn format_explore(is_running: bool, files: usize, searches: usize, last_targ
     }
 }
 
+
+/// A thin rule with a centred label, the way a compaction card opens and
+/// closes. The label is dimmer than the body so the summary stays the thing
+/// the eye lands on.
+fn compaction_rule(label: &str, width: usize) -> String {
+    const RULE: &str = "\x1b[38;2;82;80;76m";
+    const LABEL: &str = "\x1b[38;2;160;155;148m";
+    let width = width.max(20);
+    let text = format!(" {label} ");
+    let label_width = visible_width(&text);
+    if label_width >= width {
+        return format!("{LABEL}{}\x1b[0m", clip_ansi(&text, width));
+    }
+    let left = (width - label_width) / 2;
+    let right = width - label_width - left;
+    format!("{RULE}{}{LABEL}{text}{RULE}{}\x1b[0m", "─".repeat(left), "─".repeat(right))
+}
+
+/// Markdown headings keep their emphasis but lose the list-style mark the
+/// transcript uses elsewhere: a compaction summary is a document, not a block
+/// of the chat. Heading levels stay distinguishable by weight.
+fn restyle_compaction_heading(row: &str) -> String {
+    for (mark, colour) in [
+        ("\x1b[1;38;2;255;255;255m♦ ", "\x1b[1;38;2;240;235;225m"),
+        ("\x1b[1;38;2;194;231;255m◊ ", "\x1b[1;38;2;235;230;220m"),
+        ("\x1b[1;38;2;225;230;240m▸ ", "\x1b[1;38;2;205;200;190m"),
+        ("\x1b[38;2;180;185;200m▪ ", "\x1b[38;2;190;185;175m"),
+    ] {
+        if let Some(rest) = row.strip_prefix(mark) {
+            return format!("{colour}{rest}");
+        }
+    }
+    row.to_string()
+}
+
+/// The card that takes the place of the turns a summary replaced: a rule, the
+/// summary rendered as markdown, and a rule saying what the call cost.
+fn render_compaction_card(card: &CompactionCard, width: usize) -> Vec<RenderLine> {
+    let mut out = Vec::new();
+    out.push((LineKind::Compaction, compaction_rule("Session compaction started", width)));
+    out.push((LineKind::Compaction, String::new()));
+    match card.state {
+        CompactionState::Started => {
+            // The summary follows the header word by word, and the spinner sits
+            // under what has arrived, so a quiet prefill still looks alive.
+            if !card.summary.is_empty() {
+                let inner = width.saturating_sub(4).max(20);
+                for row in render_markdown_text(&card.summary, inner) {
+                    out.push((LineKind::Compaction, format!("  {}", restyle_compaction_heading(&row))));
+                }
+                out.push((LineKind::Compaction, String::new()));
+            }
+            // Drawn from the clock, not from event count: the open card is live
+            // while the model writes, so the spinner shows the wait is moving.
+            let t = anim::now_ms();
+            out.push((
+                LineKind::Compaction,
+                format!(
+                    "  \x1b[38;2;145;140;134m{}\x1b[0m \x1b[38;2;190;185;178mWriting a summary of the conversation…\x1b[0m",
+                    anim::spinner(t)
+                ),
+            ));
+        }
+        CompactionState::Failed => {
+            let body = format!("  \x1b[38;2;230;145;135m{}\x1b[0m", card.summary);
+            for row in wrap(&body, width.saturating_sub(2)) {
+                out.push((LineKind::Compaction, row));
+            }
+        }
+        CompactionState::Done => {
+            let inner = width.saturating_sub(4).max(20);
+            for row in render_markdown_text(&card.summary, inner) {
+                out.push((LineKind::Compaction, format!("  {}", restyle_compaction_heading(&row))));
+            }
+        }
+    }
+    // The card opens when the summary starts and closes when it lands: a rule
+    // at the bottom while it is still being written would be claiming a result.
+    if card.state != CompactionState::Started {
+        out.push((LineKind::Compaction, String::new()));
+        let footer = match card.state {
+            CompactionState::Failed => "Session compaction failed".to_string(),
+            _ => match (card.input_tokens, card.output_tokens) {
+                (Some(input), Some(output)) => {
+                    format!("Session compacted · {} in · {} out", ContextUsage::format_tokens(input), ContextUsage::format_tokens(output))
+                }
+                _ => "Session compacted".to_string(),
+            },
+        };
+        out.push((LineKind::Compaction, compaction_rule(&footer, width)));
+    }
+    out
+}
 
 /// Its `path`, then each of its `files`.
 fn call_paths(parsed: &serde_json::Value) -> Vec<String> {
@@ -426,11 +561,18 @@ impl ChatView {
     /// First still-changing line, or `lines.len()`. Everything before it is
     /// printed to the scrollback once and never touched again.
     pub fn settled_boundary(&self) -> usize {
+        // An open compaction card carries a spinner. Its rows are drawn from
+        // the clock, so they stay in the live tail until the summary lands.
+        let open_card = self.lines.iter().rposition(|l| {
+            l.kind == LineKind::Compaction
+                && l.compaction.as_ref().is_some_and(|c| c.state == CompactionState::Started)
+        });
         // min(): taking the first Some() would freeze a line that still receives appends.
         self.streaming
             .into_iter()
             .chain(self.streaming_reasoning)
             .chain(self.open_tool)
+            .chain(open_card)
             .min()
             .unwrap_or(self.lines.len())
     }
@@ -746,7 +888,8 @@ impl ChatView {
         self.lines.push(line);
     }
 
-    /// "Compacting context…" becomes "Context compacted · 12k saved" in place.
+    /// Replaces the newest system row in place, so a line that is corrected
+    /// does not move down the transcript.
     pub fn replace_last_system(&mut self, text: &str) {
         match self.lines.iter().rposition(|l| l.kind == LineKind::System) {
             Some(i) => {
@@ -756,6 +899,119 @@ impl ChatView {
             }
             None => self.push_system(text),
         }
+    }
+
+    /// The rule and header that stand in the transcript while a summary is
+    /// being written. Finished in place, so the header stays where it started.
+    pub fn start_compaction_card(&mut self) {
+        // Mid-turn the card lands between two steps: text that arrives after it
+        // must start a new block below the card, not continue one above it.
+        self.streaming = None;
+        self.streaming_reasoning = None;
+        let mut line = ChatLine::new(LineKind::Compaction, "");
+        line.compaction = Some(CompactionCard {
+            state: CompactionState::Started,
+            summary: String::new(),
+            input_tokens: None,
+            output_tokens: None,
+        });
+        self.lines.push(line);
+        *self.settled_cache.lock() = SettledRenderCache::default();
+        self.needs_reprint = true;
+    }
+
+    /// Adds the model's next words to the open card, so the summary is read as
+    /// it is written rather than only when the call ends.
+    pub fn append_compaction_delta(&mut self, delta: &str) {
+        if let Some(card) = self.open_compaction_card() {
+            card.summary.push_str(delta);
+        }
+    }
+
+    /// Drops the open card's text before a refused summary is asked for again.
+    pub fn restart_compaction_card(&mut self) {
+        if let Some(card) = self.open_compaction_card() {
+            card.summary.clear();
+        }
+    }
+
+    fn open_compaction_card(&mut self) -> Option<&mut CompactionCard> {
+        self.lines.iter_mut().rev().find_map(|line| match line.compaction.as_mut() {
+            Some(card) if card.state == CompactionState::Started => Some(card),
+            _ => None,
+        })
+    }
+
+    /// Fills the card started for this compaction with the summary and what the
+    /// call cost. A card that was not started (a compaction from an older
+    /// build) still gets one, so the summary is never invisible.
+    pub fn finish_compaction_card(&mut self, result: &CompactionResult) {
+        let card = CompactionCard {
+            state: CompactionState::Done,
+            summary: result.summary.clone(),
+            input_tokens: Some(result.input_tokens),
+            output_tokens: Some(result.output_tokens),
+        };
+        self.settle_compaction_card(card, &result.summary);
+    }
+
+    /// The card a resumed session gets: the summary is in the session file,
+    /// along with the summarising call's token counts when this build stored
+    /// them. Cards from older files show no bill rather than inventing one.
+    pub fn push_restored_compaction_card(&mut self, summary: &str, input_tokens: Option<usize>, output_tokens: Option<usize>) {
+        let card = CompactionCard {
+            state: CompactionState::Done,
+            summary: summary.to_string(),
+            input_tokens,
+            output_tokens,
+        };
+        self.settle_compaction_card(card, summary);
+    }
+
+    fn settle_compaction_card(&mut self, card: CompactionCard, text: &str) {
+        let found = self
+            .lines
+            .iter()
+            .rposition(|l| l.kind == LineKind::Compaction && l.compaction.as_ref().is_some_and(|c| c.state == CompactionState::Started));
+        match found {
+            Some(i) => {
+                self.lines[i].text = text.to_string();
+                self.lines[i].compaction = Some(card);
+            }
+            None => {
+                let mut line = ChatLine::new(LineKind::Compaction, text);
+                line.compaction = Some(card);
+                self.lines.push(line);
+            }
+        }
+        *self.settled_cache.lock() = SettledRenderCache::default();
+        self.needs_reprint = true;
+    }
+
+    /// The compaction did not happen: the card says so where the reader is
+    /// already looking for the summary.
+    pub fn fail_compaction_card(&mut self, reason: &str) {
+        let card = CompactionCard {
+            state: CompactionState::Failed,
+            summary: reason.to_string(),
+            input_tokens: None,
+            output_tokens: None,
+        };
+        let text = format!("Session compaction failed · {reason}");
+        self.settle_compaction_card(card, &text);
+    }
+
+    /// Ends a card left open by a turn that stopped before its compaction
+    /// reported. Only an open card is touched: every other turn ends with no
+    /// card, and pushing a failure there would invent one.
+    pub fn abandon_compaction_card(&mut self, reason: &str) -> bool {
+        let open = self.lines.iter().any(|line| {
+            line.kind == LineKind::Compaction && line.compaction.as_ref().is_some_and(|card| card.state == CompactionState::Started)
+        });
+        if open {
+            self.fail_compaction_card(reason);
+        }
+        open
     }
 
     /// A running subagent's row, written over in place. One child is one line
@@ -1372,6 +1628,18 @@ impl ChatView {
                 let answer_begun = self.streaming.is_some_and(|a| a > i && !self.lines[a].text.trim().is_empty());
                 let is_streaming = self.streaming_reasoning == Some(i) && !answer_begun;
                 push_reasoning(target, &line.text, line.reasoning_secs, is_streaming, is_expanded, &stage);
+                continue;
+            }
+
+            if line.kind == LineKind::Model {
+                target.push((line.kind, compaction_rule(&line.text, width)));
+                continue;
+            }
+
+            if line.kind == LineKind::Compaction {
+                if let Some(card) = &line.compaction {
+                    target.extend(render_compaction_card(card, width));
+                }
                 continue;
             }
 
@@ -3252,6 +3520,128 @@ hm".into()));
         assert_eq!(counts_from_diff("--- n.txt\n+++ n.txt\n+only\n"), (1, 0));
         assert_eq!(counts_from_diff("--- n.txt\n+++ n.txt\n"), (0, 0));
         assert_eq!(counts_from_diff("--- n.txt\n+++ n.txt\n-gone\n"), (0, 1));
+    }
+
+    fn summary_with_card_shape() -> &'static str {
+        "## Objective\nShip the release.\n\n## Requirements\n- none\n\n## Decisions\n- none\n\n## Work State\n### Completed\n- work\n### Active\n- none\n### Blocked\n- none\n\n## Next Move\n1. ship\n\n## Relevant Files\n- `a.rs`\n\n## Important Context\n- none"
+    }
+
+    #[test]
+    fn a_compaction_card_draws_rules_around_the_summary() {
+        let card = CompactionCard {
+            state: CompactionState::Done,
+            summary: summary_with_card_shape().into(),
+            input_tokens: Some(90_000),
+            output_tokens: Some(5_100),
+        };
+        let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
+        let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Session compaction started"), "{text}");
+        let footer = format!(
+            "Session compacted · {} in · {} out",
+            ContextUsage::format_tokens(90_000),
+            ContextUsage::format_tokens(5_100)
+        );
+        assert!(text.contains(&footer), "{text}");
+        assert!(text.contains("Objective") && text.contains("Next Move"), "{text}");
+        assert!(!text.contains('◊') && !text.contains('▸'), "the card's headings are not list marks: {text}");
+        assert_eq!(rows.iter().filter(|row| strip_ansi(row).starts_with('─')).count(), 2, "{rows:?}");
+    }
+
+    #[test]
+    fn a_started_compaction_card_opens_with_the_header_only() {
+        let card = CompactionCard {
+            state: CompactionState::Started,
+            summary: String::new(),
+            input_tokens: None,
+            output_tokens: None,
+        };
+        let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
+        let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Session compaction started"), "{text}");
+        assert!(text.contains("Writing a summary"), "{text}");
+        assert!(!text.contains("Session compacted"), "{text}");
+    }
+
+    #[test]
+    fn a_restored_compaction_card_says_compacted_without_a_bill() {
+        let card = CompactionCard {
+            state: CompactionState::Done,
+            summary: summary_with_card_shape().into(),
+            input_tokens: None,
+            output_tokens: None,
+        };
+        let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
+        let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Session compacted"), "{text}");
+        assert!(!text.contains(" in · ") && !text.contains(" out"), "no bill was kept: {text}");
+    }
+
+    #[test]
+    fn a_failed_compaction_card_says_the_conversation_is_unchanged() {
+        let card = CompactionCard {
+            state: CompactionState::Failed,
+            summary: "the conversation is unchanged".into(),
+            input_tokens: None,
+            output_tokens: None,
+        };
+        let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
+        let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Session compaction failed"), "{text}");
+        assert!(text.contains("unchanged"), "{text}");
+        assert!(!text.contains("Session compacted"), "{text}");
+    }
+
+    /// A turn can end while its mid-turn compaction is still writing (Esc, a
+    /// failed request). The card promised a summary, so it is withdrawn rather
+    /// than left spinning — but only when one is open: every other turn ends
+    /// with no card, and pushing a failure there would invent one.
+    #[test]
+    fn abandoning_a_mid_turn_compaction_settles_only_an_open_card() {
+        let mut chat = ChatView::default();
+        chat.push_user("go");
+        assert!(!chat.abandon_compaction_card("no card was open"), "nothing to settle");
+        let settled = chat.render(80);
+        assert!(!settled.iter().any(|(_, t)| t.contains("Session compaction failed")), "{settled:?}");
+
+        chat.start_compaction_card();
+        assert!(chat.abandon_compaction_card("the turn ended before the summary landed"));
+        let settled = chat.render(80);
+        assert!(
+            settled.iter().any(|(k, t)| *k == LineKind::Compaction && t.contains("Session compaction failed")),
+            "{settled:?}"
+        );
+        assert!(
+            settled.iter().any(|(_, t)| t.contains("the turn ended before the summary landed")),
+            "{settled:?}"
+        );
+        // A second abandon is a no-op: the card is already settled.
+        assert!(!chat.abandon_compaction_card("again"));
+    }
+
+    /// Mid-turn the card lands between two steps: text that arrives after it
+    /// must start a new block below the card, not continue the answer above it.
+    #[test]
+    fn a_mid_turn_card_resets_the_stream_so_the_answer_continues_below_it() {
+        let mut chat = ChatView::default();
+        chat.push_user("go");
+        chat.on_event(&LoopEvent::TurnDelta("before".into()));
+        chat.start_compaction_card();
+        chat.on_event(&LoopEvent::TurnDelta("after".into()));
+        let lines = chat.render(80);
+        let card_pos = lines
+            .iter()
+            .position(|(k, _)| *k == LineKind::Compaction)
+            .expect("the card is on screen");
+        let after_pos = lines
+            .iter()
+            .position(|(_, t)| t.contains("after"))
+            .expect("the continued answer is on screen");
+        assert!(after_pos > card_pos, "the answer continues below the card: {lines:?}");
+        assert!(
+            lines[..card_pos].iter().any(|(_, t)| t.contains("before")),
+            "the text before the card stays above it: {lines:?}"
+        );
     }
 }
 

@@ -107,9 +107,6 @@ pub(crate) struct FrameState<'a> {
     /// capacity in use is then a guess, and a percentage off it is a guess
     /// wearing the clothes of a number.
     pub(crate) context_reported: bool,
-    /// What `/compact` is doing, in the row under the prompt: a status belongs
-    /// with the other running things, not in the conversation as a line.
-    pub(crate) compact_status: Option<&'a str>,
     pub(crate) pending_steers: &'a [(String, Vec<Attachment>)],
     /// Every subagent row, pinned above the composer: id and the line itself.
     pub(crate) agent_rows: &'a [(String, String)],
@@ -688,12 +685,6 @@ fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u6
 }
 
 fn append_tip_rows(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize) {
-    // A running compaction is the status of the moment: it takes the tip's row
-    // rather than pushing the chat down, and it is clipped, never wrapped.
-    if let Some(status) = st.compact_status {
-        tail.push((LineKind::System, format!("  {}", clip_ansi(status, width.saturating_sub(2)))));
-        return;
-    }
     for line in st.tip_lines.unwrap_or_default() {
         tail.push((LineKind::System, clip_ansi(line, width.saturating_sub(2))));
     }
@@ -1635,7 +1626,6 @@ impl App {
                 background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                 context_warn_threshold: config.context_warn_threshold,
                 context_reported: self.current_context.is_some(),
-                compact_status: self.compact_status.as_deref(),
                 pending_steers: &self.pending_steers,
                 queued_commands: &self.queued_commands,
                 agent_rows: &agent_rows,

@@ -120,7 +120,7 @@ impl App {
 
     /// Marks where the live context line starts, so the next turn replaces it
 /// rather than stacking another one underneath.
-const CONTEXT_LINE_MARK: &str = "\n\n[Context]";
+pub(crate) const CONTEXT_LINE_MARK: &str = "\n\n[Context]";
 
 /// Rewrites the last line of the system prompt with what the context costs
 /// now, so the model can see the room it has left instead of finding out by
@@ -198,19 +198,22 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         self.cancel_recap();
         // A long task fills the window between its own steps; the same threshold
         // that summarizes between prompts summarizes here.
+        let report = Arc::new(std::sync::Mutex::new(None));
         let compactor = (self.config.auto_compact_context && self.context_usage.total_capacity > 0).then(|| {
             Arc::new(TurnCompactor {
                 source: cx.source.clone(),
                 archive: compaction_archive_path(cx.session_id),
-                memory: cx.memory_block.to_string(),
                 capacity: self.context_usage.total_capacity,
                 fixed: self.context_usage.system_tokens + self.context_usage.memory_tokens + self.context_usage.tools_tokens,
                 threshold_pct: flashagent_core::resolved_compact_threshold(
                     self.config.context_compact_threshold,
                     self.context_usage.total_capacity,
                 ),
+                report: report.clone(),
+                sink: Some(SummarySink::ui(cx.tx.clone())),
             })
         });
+        self.mid_turn_report = compactor.is_some().then_some(report);
         // The turn works on a handle the app also holds, so a save taken while it
         // runs writes what the turn has actually done so far. It used to hand
         // over a clone and keep its own, which is why a crash mid-turn lost the
@@ -289,6 +292,11 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         self.stop_turn_clock();
         self.active_turn_handle = None;
         self.active_steer_tx = None;
+        // A turn can end while its mid-turn compaction is still writing (Esc,
+        // a failed request). The card promised a summary, so it is withdrawn
+        // rather than left spinning in a transcript that will never change.
+        self.chat.abandon_compaction_card("the turn ended before the summary landed");
+        self.mid_turn_report = None;
         self.task_inbox.turn_ended(matches!(res, Ok((_, DoneReason::Cancelled))));
         self.flush_task_lines();
         // A steer typed as the turn ended never reached the model; it goes back into
@@ -403,30 +411,61 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                     let earlier_turns = self.history.iter().filter(|m| flashagent_core::is_prompt(m)).count() > 1;
                     if verdict.should() && earlier_turns {
                         // In the transcript: it changes what the model remembers.
-                        self.chat.push_system("Compacting context…");
+                        self.chat.start_compaction_card();
                         self.renderer.request_reprint();
                         // Drawn before the wait: the command is already gone from the composer.
                         self.draw(cx, None);
                         let source_compact = cx.source.clone();
                         let before = self.context_usage.total_used();
                         let compacted = if let Some(archive) = compaction_archive_path(cx.session_id) {
-                            compact_context(source_compact.as_ref(), &mut self.history, None, &archive, Some(before)).await
+                            // This handler is the event loop, so awaiting the compaction
+                            // straight through would freeze the card until the summary
+                            // landed. Keep the history aside and pump the words into the
+                            // card while redrawing the spinner on a clock.
+                            let mut history = std::mem::take(&mut self.history);
+                            let (update_tx, mut update_rx) =
+                                tokio::sync::mpsc::unbounded_channel::<UiEvent>();
+                            let sink = SummarySink::ui(update_tx);
+                            let result = {
+                                let fut = compact_context_with_sink(
+                                    source_compact.as_ref(),
+                                    &mut history,
+                                    None,
+                                    &archive,
+                                    Some(before),
+                                    Some(&sink),
+                                    false,
+                                );
+                                tokio::pin!(fut);
+                                let mut tick = tokio::time::interval_at(
+                                    tokio::time::Instant::now() + std::time::Duration::from_millis(80),
+                                    std::time::Duration::from_millis(80),
+                                );
+                                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                                loop {
+                                    tokio::select! {
+                                        result = &mut fut => break result,
+                                        Some(update) = update_rx.recv() => match update {
+                                            UiEvent::CompactionDelta(delta) => self.chat.append_compaction_delta(&delta),
+                                            UiEvent::CompactionReset => self.chat.restart_compaction_card(),
+                                            _ => {}
+                                        },
+                                        _ = tick.tick() => self.draw(cx, None),
+                                    }
+                                }
+                            };
+                            self.history = history;
+                            result
                         } else {
                             None
                         };
                         match compacted {
-                            Some(_) => {
+                            Some(result) => {
+                                self.chat.finish_compaction_card(&result);
                                 self.chat.forget_counted_context();
                                 update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-                                let saved = before.saturating_sub(self.context_usage.total_used());
-                                self.chat.replace_last_system(&format!(
-                                    "Context compacted · {} saved · the conversation so far is now a summary",
-                                    ContextUsage::format_tokens(saved)
-                                ));
                             }
-                            None => self.chat.replace_last_system(
-                                "Compacting context failed — the conversation is unchanged",
-                            ),
+                            None => self.chat.fail_compaction_card("the conversation is unchanged"),
                         }
                         self.renderer.request_reprint();
                     }

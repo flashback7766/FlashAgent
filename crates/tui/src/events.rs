@@ -15,37 +15,7 @@ pub(crate) fn server_mood(switching: bool, answered: bool, silent: bool, since_s
     }
 }
 
-/// How long a finished compaction keeps the tip's row: ten seconds at the 80 ms
-/// idle tick, the span a tip itself gets. It borrows a tip's place, so it has to
-/// hand that place back.
-pub(crate) const COMPACT_STATUS_HOLD_TICKS: usize = 125;
-
-/// Whether a compaction line has been shown long enough that the row is due back
-/// to the tips. A hold of zero is a line with no deadline — the one written while
-/// `/compact` is still running — and it does not run out on its own.
-fn compact_status_expired(hold: &mut usize) -> bool {
-    match *hold {
-        0 => false,
-        1 => {
-            *hold = 0;
-            true
-        }
-        n => {
-            *hold = n - 1;
-            false
-        }
-    }
-}
-
 impl App {
-    /// Puts the compaction line under the prompt, where the status of the moment
-    /// belongs rather than in the chat. `hold` is how many idle ticks it keeps
-    /// the tip's row for; zero leaves it up for as long as it lasts.
-    pub(crate) fn set_compact_status(&mut self, text: String, hold: usize) {
-        self.compact_status = Some(text);
-        self.compact_status_hold = hold;
-        self.renderer.request_reprint();
-    }
     /// One event from the terminal, the agent loop or a background task.
     pub(crate) async fn on_ui_event(&mut self, cx: &mut LoopCtx<'_>, ev: UiEvent) -> Flow {
         match ev {
@@ -73,7 +43,9 @@ impl App {
                 self.on_server_discovered(cx, disc)
             }
             UiEvent::ServerSilent(url) => self.server_silent = self.provider_switch.is_none() && url == cx.source.0.base_url(),
-            UiEvent::Compacted { history, saved } => self.on_compacted(cx, history, saved),
+            UiEvent::CompactionDelta(delta) => self.chat.append_compaction_delta(&delta),
+            UiEvent::CompactionReset => self.chat.restart_compaction_card(),
+            UiEvent::Compacted { history, saved, card } => self.on_compacted(cx, history, saved, card),
             UiEvent::Loop { turn_id, event } => self.on_loop_event(cx, turn_id, &event),
             UiEvent::Finished { turn_id, result } => return self.finish_turn(cx, turn_id, result).await,
             UiEvent::Resize(cols, rows) => {
@@ -134,11 +106,19 @@ impl App {
                     8,
                 ));
             }
-            MascotMood::Happy if previous == MascotMood::Offline => {
-                self.background = Some(BackgroundNotice::fading(
-                    format!("Model server is answering \u{b7} {}", self.current_model),
-                    5,
-                ));
+            MascotMood::Happy => {
+                // The server answered: the "no answer" notice is no longer true,
+                // however it got there. Coming from Offline say so briefly;
+                // otherwise just take the stale notice away.
+                if previous == MascotMood::Offline {
+                    self.background = Some(BackgroundNotice::fading(
+                        format!("Model server is answering \u{b7} {}", self.current_model),
+                        5,
+                    ));
+                } else if self.background.as_ref().is_some_and(|b| b.text.starts_with(OFFLINE_NOTICE)) {
+                    self.background = None;
+                    self.renderer.request_reprint();
+                }
             }
             _ => {}
         }
@@ -238,13 +218,6 @@ impl App {
             self.background = None;
             self.renderer.request_reprint();
         }
-        // A compaction that has finished reports itself once and then lets the
-        // tips have their row again: the line takes a tip's place, so holding it
-        // forever means no tip ever comes round.
-        if compact_status_expired(&mut self.compact_status_hold) {
-            self.compact_status = None;
-            self.renderer.request_reprint();
-        }
         if self.running && self.cancel_requested.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(3)) {
             self.abort_stuck_turn(cx);
         }
@@ -281,6 +254,8 @@ impl App {
         self.turn_started = None;
         self.cancel_requested = None;
         self.aborted_turn = Some(self.turn_counter);
+        self.chat.abandon_compaction_card("the turn was abandoned before the summary landed");
+        self.mid_turn_report = None;
         // The turn's own history, dropped with the turn. Left set, the next
         // turn's autosave_during_turn wrote this one back over the session file
         // for as long as it kept running: the abandoned turn's half steps
@@ -334,22 +309,27 @@ impl App {
     }
 
     /// The compaction task came back with the history it was given, shortened
-    /// or untouched. The line under the prompt keeps the result, so the chat is
-    /// not where a status belongs.
-    pub(crate) fn on_compacted(&mut self, cx: &LoopCtx<'_>, history: Vec<ChatMessage>, saved: Option<usize>) {
+    /// or untouched. The card in the transcript carries the result, so there is
+    /// no second status line under the prompt to keep.
+    pub(crate) fn on_compacted(
+        &mut self,
+        cx: &LoopCtx<'_>,
+        history: Vec<ChatMessage>,
+        _saved: Option<usize>,
+        card: Option<CompactionResult>,
+    ) {
         self.history = history;
         self.compacting = false;
+        match card {
+            Some(result) => self.chat.finish_compaction_card(&result),
+            None => self.chat.fail_compaction_card("the conversation is unchanged"),
+        }
         self.chat.forget_counted_context();
         update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-        self.set_compact_status(
-            match saved {
-                Some(saved) => {
-                    format!("Compacted · {} saved · {} left in the window", ContextUsage::format_tokens(saved), ContextUsage::format_tokens(self.context_usage.total_used()))
-                }
-                None => "Compaction saved no space · conversation unchanged".to_string(),
-            },
-            COMPACT_STATUS_HOLD_TICKS,
-        );
+        // Whatever was typed while compaction ran goes out now — whether the
+        // summary was saved or not — as steering if a turn is under way, or a
+        // fresh turn otherwise.
+        self.send_queued_after_compaction(cx);
     }
 
     /// The model a discovery answers for. A cloud listing names no active model
@@ -577,35 +557,33 @@ impl App {
                     ledger.record_cost(&self.config.active_profile().name, u.cost);
                 }
             }
-            // A running turn is about to summarize itself. This one is said in
-            // the transcript, not the status line: nothing streams for the half
-            // minute it takes, and a line that simply stops moving reads as a
-            // hang rather than as work.
+            // A running turn is about to summarize itself. The card says why
+            // the turn is quiet for a while, and stays in the transcript as
+            // the record of what the model now remembers.
             LoopEvent::CompactionStarted => {
-                self.chat.push_line(
-                    flashagent_tui::LineKind::System,
-                    "Window nearly full: writing a full summary of this task so it can carry on \u{b7} the turn continues in a moment",
-                );
+                self.chat.start_compaction_card();
                 self.renderer.request_reprint();
             }
-            // Nothing was saved: the summarizing failed. The promise
-            // CompactionStarted made is withdrawn here, in the transcript
-            // where it was made, because the window is still full and the next
-            // steps go on filling it.
-            LoopEvent::Compacted { saved: 0 } => {
-                self.chat.push_line(
-                    flashagent_tui::LineKind::System,
-                    "Could not summarize this task \u{b7} the conversation is unchanged and the window is still full",
-                );
+            // Nothing was saved: the summarizing failed. The card withdraws the
+            // promise `CompactionStarted` made, because the window is still full
+            // and the next steps go on filling it.
+            LoopEvent::Compacted { saved } if *saved == 0 => {
+                self.chat.fail_compaction_card("the conversation is unchanged and the window is still full");
                 self.renderer.request_reprint();
             }
-            // The window was nearly full; the work goes on. Said on the status line,
-            // not in the transcript: nothing in the conversation changed for the reader.
-            LoopEvent::Compacted { saved } => {
-                self.background = Some(BackgroundNotice::fading(
-                    format!("Context nearly full: older steps summarized mid-turn \u{b7} {} saved", ContextUsage::format_tokens(*saved)),
-                    8,
-                ));
+            // The window was nearly full; the work goes on. The compactor handed
+            // the summary and the call's token counts over before the event was
+            // queued, so the card can be filled in where it was started.
+            LoopEvent::Compacted { .. } => {
+                let report = self
+                    .mid_turn_report
+                    .as_ref()
+                    .and_then(|slot| slot.lock().ok().and_then(|mut slot| slot.take()));
+                match report {
+                    Some(result) => self.chat.finish_compaction_card(&result),
+                    None => self.chat.fail_compaction_card("the summary was not kept"),
+                }
+                self.renderer.request_reprint();
             }
             LoopEvent::SteeringInjected(directive) if self.task_inbox.injected(directive) => {
                 self.flush_task_lines();
@@ -775,34 +753,6 @@ fn decayed(momentum: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_finished_compaction_hands_the_tip_row_back() {
-        let mut hold = COMPACT_STATUS_HOLD_TICKS;
-        for _ in 1..COMPACT_STATUS_HOLD_TICKS {
-            assert!(!compact_status_expired(&mut hold), "the row went back before the time was up");
-        }
-        assert_eq!(hold, 1);
-        assert!(compact_status_expired(&mut hold), "the row was never handed back: the line stays forever");
-        assert_eq!(hold, 0);
-    }
-
-    #[test]
-    fn a_running_compaction_line_does_not_expire_on_its_own() {
-        let mut hold = 0;
-        for _ in 0..COMPACT_STATUS_HOLD_TICKS * 10 {
-            assert!(!compact_status_expired(&mut hold), "a line about a running compaction vanished mid-write");
-        }
-        assert_eq!(hold, 0);
-    }
-
-    #[test]
-    fn a_cleared_status_does_not_keep_expiring() {
-        let mut hold = 1;
-        assert!(compact_status_expired(&mut hold));
-        for _ in 0..5 {
-            assert!(!compact_status_expired(&mut hold), "clearing again after the row went back");
-        }
-    }
     use super::*;
 
     #[test]
