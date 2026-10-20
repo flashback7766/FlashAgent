@@ -1079,7 +1079,7 @@ impl App {
     pub(crate) fn tools_command(&mut self, cx: &LoopCtx<'_>) {
         use flashagent_tui::tools_view::{ToolRow, ToolsView};
         let off = cx.perm.disabled_tools();
-        let core = self.config.toolset_profile != flashagent_core::ToolsetProfile::Compact;
+        let core = true;
         let web = self.config.web_tools;
         let vision = cx.tools_arc.vision_supported();
         let rows: Vec<ToolRow> = flashagent_core::registry::TOOLS

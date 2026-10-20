@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use flashagent_core::{ToolExec, ToolOutput, ToolsetProfile, WritePreview};
+use flashagent_core::{ToolExec, ToolOutput, WritePreview};
 use flashagent_llm::{ToolCall, ToolSpec};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -75,7 +75,6 @@ pub struct BuiltinToolsConfig {
     pub question_gate: Option<Arc<dyn QuestionGate>>,
     /// Set while `/goal` runs.
     pub is_goal_mode: Option<Arc<AtomicBool>>,
-    pub toolset_profile: Option<ToolsetProfile>,
     pub web_enabled: Option<bool>,
     /// Small windows get fewer tools.
     pub context_window: Option<usize>,
@@ -93,7 +92,6 @@ pub struct BuiltinTools {
     brave_key: Option<String>,
     question_gate: Option<Arc<dyn QuestionGate>>,
     is_goal_mode: Arc<AtomicBool>,
-    toolset_profile: std::sync::RwLock<ToolsetProfile>,
     web_enabled: Arc<AtomicBool>,
     context_window: Arc<std::sync::RwLock<Option<usize>>>,
     /// What the system prompt actually costs, in tokens. The schemas are given
@@ -128,7 +126,6 @@ impl BuiltinTools {
             brave_key: config.brave_api_key,
             question_gate: config.question_gate,
             is_goal_mode: config.is_goal_mode.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
-            toolset_profile: std::sync::RwLock::new(config.toolset_profile.unwrap_or(ToolsetProfile::Auto)),
             web_enabled: Arc::new(AtomicBool::new(config.web_enabled.unwrap_or(true))),
             context_window: Arc::new(std::sync::RwLock::new(config.context_window)),
             prompt_tokens: Arc::new(std::sync::atomic::AtomicUsize::new(
@@ -152,12 +149,6 @@ impl BuiltinTools {
 
     pub fn set_goal_mode(&self, active: bool) {
         self.is_goal_mode.store(active, Ordering::Relaxed);
-    }
-
-    pub fn set_toolset_profile(&self, profile: ToolsetProfile) {
-        if let Ok(mut lock) = self.toolset_profile.write() {
-            *lock = profile;
-        }
     }
 
     /// The tools that are off. The app changes them while the session runs.
@@ -511,11 +502,10 @@ impl ToolExec for BuiltinTools {
     fn specs(&self) -> Vec<ToolSpec> {
         use flashagent_core::registry::{self, Handler};
 
-        let profile = self.toolset_profile.read().map(|p| *p).unwrap_or(ToolsetProfile::Auto);
         let ctx = self.context_window.read().ok().and_then(|c| *c);
-        // No window-based downgrade: every profile keeps its full toolset.
-        let effective_profile = profile;
-        let core = effective_profile != ToolsetProfile::Compact;
+        // One toolset for every model: the budget trims it if it must, the
+        // owner switches tools off by hand.
+        let core = true;
         let web = self.web_enabled.load(Ordering::Relaxed);
         let vision = self.vision_supported();
 
@@ -547,7 +537,7 @@ impl ToolExec for BuiltinTools {
         // cannot happen without are offered whatever it costs.
         // `Full` is the user asking for the whole toolset whatever the window says,
         // so the ladder does not apply to it.
-        if !matches!(profile, ToolsetProfile::Full) {
+        {
         let budget = flashagent_core::budget::Budget::for_window(ctx);
         let model_name = self.model_name.read().ok().map(|m| m.clone()).unwrap_or_default();
         let allowance = budget.tool_allowance(self.prompt_tokens.load(Ordering::Relaxed));
@@ -972,45 +962,33 @@ mod tests {
     }
 
     #[test]
-    fn specs_include_tools_by_profile() {
-        let tools_auto = BuiltinTools::new(BuiltinToolsConfig {
+    fn the_whole_toolset_is_offered() {
+        // One list for every model: the budget trims it if it must, the owner
+        // switches tools off by hand. There is no profile to choose any more.
+        let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
-            toolset_profile: Some(ToolsetProfile::Auto),
             ..Default::default()
         })
         .unwrap();
-        let specs_auto = tools_auto.specs();
-        assert_eq!(specs_auto.len(), 20); // 10 core (update_plan included) + 8 extended + 2 web, on by default
-        let names_auto: Vec<&str> = specs_auto.iter().map(|s| s.name.as_str()).collect();
-        assert!(names_auto.contains(&"ask_user"));
-        assert!(names_auto.contains(&"outline_file"));
-        assert!(names_auto.contains(&"git_status"));
-        assert!(names_auto.contains(&"git_diff"));
-        assert!(names_auto.contains(&"patch_file"));
-        assert!(names_auto.contains(&"env_info"));
-        assert!(names_auto.contains(&"memory_read"));
-        assert!(names_auto.contains(&"memory_create"));
-        assert!(names_auto.contains(&"web_search"));
-        assert!(names_auto.contains(&"web_fetch"));
-
-        let tools_compact = BuiltinTools::new(BuiltinToolsConfig {
-            cwd: testing::tempdir(),
-            toolset_profile: Some(ToolsetProfile::Compact),
-            ..Default::default()
-        })
-        .unwrap();
-        let specs_compact = tools_compact.specs();
-        assert_eq!(specs_compact.len(), 10);
-        let names_compact: Vec<&str> = specs_compact.iter().map(|s| s.name.as_str()).collect();
-        assert!(names_compact.contains(&"ask_user"));
-        assert!(!names_compact.contains(&"patch_file"));
+        let specs = tools.specs();
+        assert_eq!(specs.len(), 20); // 10 core (update_plan included) + 8 extended + 2 web, on by default
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"ask_user"));
+        assert!(names.contains(&"outline_file"));
+        assert!(names.contains(&"git_status"));
+        assert!(names.contains(&"git_diff"));
+        assert!(names.contains(&"patch_file"));
+        assert!(names.contains(&"env_info"));
+        assert!(names.contains(&"memory_read"));
+        assert!(names.contains(&"memory_create"));
+        assert!(names.contains(&"web_search"));
+        assert!(names.contains(&"web_fetch"));
     }
 
     #[tokio::test]
     async fn update_plan_is_offered_and_works_in_ordinary_chat_as_well_as_a_goal() {
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
-            toolset_profile: Some(ToolsetProfile::Auto),
             ..Default::default()
         })
         .unwrap();
@@ -1037,7 +1015,6 @@ mod tests {
     async fn web_tools_turned_off_in_settings_are_neither_offered_nor_run() {
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
-            toolset_profile: Some(ToolsetProfile::Auto),
             web_enabled: Some(false),
             ..Default::default()
         })
@@ -1062,7 +1039,6 @@ mod tests {
     fn adaptive_toolset_per_context_window() {
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
-            toolset_profile: Some(ToolsetProfile::Auto),
             web_enabled: Some(false),
             context_window: Some(32_000), // a small window no longer trims the toolset
             ..Default::default()
@@ -1088,7 +1064,6 @@ mod tests {
         // not an agent with no way to read or write anything.
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
-            toolset_profile: Some(ToolsetProfile::Auto),
             web_enabled: Some(false),
             context_window: Some(65_536),
             ..Default::default()

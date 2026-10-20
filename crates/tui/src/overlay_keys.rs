@@ -439,7 +439,6 @@ impl App {
         // Also during /goal, where it is the mode the run hands back.
         self.config.permission_mode = chosen_mode;
         self.save_config();
-        cx.tools_arc.set_toolset_profile(self.config.toolset_profile);
         cx.tools_arc.set_web_enabled(self.config.web_tools);
         cx.source.0.set_max_retries(self.config.network_retries);
         cx.source.0.set_user_sampling(self.config.sampling_preset == flashagent_core::config::SamplingPreset::Custom);

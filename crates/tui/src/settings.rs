@@ -296,7 +296,6 @@ impl SettingsView {
             rows
         }
         SettingsTab::Tools => vec![
-            (crate::i18n::tr("Toolset profile"), crate::i18n::tr(self.config.toolset_profile.label()).to_string()),
             (crate::i18n::tr("Tools on/off"), {
                 let off = self.config.disabled_tools.len();
                 if off == 0 {
@@ -513,14 +512,9 @@ impl SettingsView {
                 _ => SettingsAction::None,
             },
             SettingsTab::Tools => match self.selected_index {
-                0 => {
-                    self.config.toolset_profile = self.config.toolset_profile.next();
-                    self.is_dirty = true;
-                    SettingsAction::None
-                }
-                1 => SettingsAction::OpenTools,
-                2 => SettingsAction::OpenMcpMenu,
-                3 => SettingsAction::RunToolTest,
+                0 => SettingsAction::OpenTools,
+                1 => SettingsAction::OpenMcpMenu,
+                2 => SettingsAction::RunToolTest,
                 _ => SettingsAction::None,
             },
         }
@@ -583,11 +577,8 @@ impl SettingsView {
                 6 => self.cycle_sampling(),
                 _ => {}
             },
-            SettingsTab::Tools => {
-                if self.selected_index == 0 {
-                    self.config.toolset_profile = self.config.toolset_profile.next();
-                }
-            }
+            // Nothing on this tab is a value: the rows open other screens.
+            SettingsTab::Tools => {}
         }
         self.is_dirty = true;
     }
@@ -898,7 +889,6 @@ mod tests {
 
         view.handle_key(KeyCode::Char('6'), KeyModifiers::empty());
         assert_eq!(view.active_tab, SettingsTab::Tools);
-        view.handle_key(KeyCode::Down, KeyModifiers::empty());
         assert_eq!(view.handle_key(KeyCode::Enter, KeyModifiers::empty()), SettingsAction::OpenTools);
         view.handle_key(KeyCode::Down, KeyModifiers::empty());
         assert_eq!(view.handle_key(KeyCode::Enter, KeyModifiers::empty()), SettingsAction::OpenMcpMenu);

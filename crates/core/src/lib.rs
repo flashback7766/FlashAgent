@@ -23,7 +23,7 @@ pub mod task_notices;
 pub mod toolcheck;
 
 pub use budget::Budget;
-pub use config::{AppConfig, BackendPreset, ColorTheme, SamplingPreset, ToolsetProfile, UpdateChannel};
+pub use config::{AppConfig, BackendPreset, ColorTheme, SamplingPreset, UpdateChannel};
 pub use cost::{CostLedger, ProviderCost};
 pub use context_usage::{
     default_compact_threshold, resolved_compact_threshold, should_compact, CompactionInput,

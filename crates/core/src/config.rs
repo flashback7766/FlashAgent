@@ -415,8 +415,6 @@ pub struct AppConfig {
     #[serde(default)]
     pub goal_max_output_tokens: Option<i64>,
     pub setup_completed: bool,
-    #[serde(default)]
-    pub toolset_profile: ToolsetProfile,
     /// Tools the owner has switched off: the model is not offered them, and a
     /// call to one is refused. By name, so a tool that is not there any more
     /// does not keep a name alive.
@@ -606,32 +604,6 @@ impl UpdateChannel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
-pub enum ToolsetProfile {
-    #[default]
-    Auto,
-    Full,
-    Compact,
-}
-
-impl ToolsetProfile {
-    pub fn next(self) -> Self {
-        match self {
-            Self::Auto => Self::Full,
-            Self::Full => Self::Compact,
-            Self::Compact => Self::Auto,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Auto => "Auto",
-            Self::Full => "Full",
-            Self::Compact => "Compact",
-        }
-    }
-}
-
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -653,7 +625,6 @@ impl Default for AppConfig {
             goal_max_minutes: None,
             goal_max_output_tokens: None,
             setup_completed: false,
-            toolset_profile: ToolsetProfile::Auto,
             disabled_tools: Vec::new(),
             safe_mode: false,
             crash_reports: false,
@@ -921,9 +892,6 @@ impl AppConfig {
     }
 
     fn normalised(mut self) -> Self {
-        if self.toolset_profile == ToolsetProfile::Compact {
-            self.toolset_profile = ToolsetProfile::Auto;
-        }
         if self.thinking_effort == "default" || self.thinking_effort.is_empty() {
             self.thinking_effort = "auto".to_string();
         }
@@ -1418,13 +1386,12 @@ mod tests {
     #[test]
     fn stored_values_are_read_whatever_their_case() {
         let (cfg, rejected) = AppConfig::from_json_str(
-            r#"{"update_channel":"Beta","permission_mode":"Accept Edits","sampling_preset":"MTP_Coding","toolset_profile":"FULL"}"#,
+            r#"{"update_channel":"Beta","permission_mode":"Accept Edits","sampling_preset":"MTP_Coding","web_tools":true}"#,
         );
         assert!(rejected.is_empty(), "{rejected:?}");
         assert_eq!(cfg.update_channel, UpdateChannel::Beta);
         assert_eq!(cfg.permission_mode, crate::PermissionMode::AcceptEdits);
         assert_eq!(cfg.sampling_preset, SamplingPreset::MtpCoding);
-        assert_eq!(cfg.toolset_profile, ToolsetProfile::Full);
     }
 
     #[test]
@@ -1579,7 +1546,6 @@ mod tests {
         assert!(cfg.setup_completed, "setup_completed flag must be preserved!");
         assert_eq!(cfg.sampling_preset, SamplingPreset::Coding);
         assert!(cfg.web_tools);
-        assert_eq!(cfg.toolset_profile, ToolsetProfile::Auto);
         assert!(cfg.trusted_directories.is_empty());
     }
 
@@ -1651,9 +1617,4 @@ lenient_enum!(UpdateChannel, "update channel", {
     "release" => UpdateChannel::Stable,
 });
 
-lenient_enum!(ToolsetProfile, "toolset profile", {
-    "auto" => ToolsetProfile::Auto,
-    "full" => ToolsetProfile::Full,
-    "compact" => ToolsetProfile::Compact,
-});
 
