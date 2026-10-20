@@ -1234,6 +1234,24 @@ fn esc_clears_a_steering_draft_before_it_stops_the_turn() {
 }
 
 #[test]
+fn an_export_can_be_written_where_the_person_says() {
+    let server = MockServer::start(vec![Reply::Text("Hello.".into())]);
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+    ask(&term, "hello", "Hello.");
+
+    // A path the person names, in a folder that is not there yet.
+    let target = home.work().join("notes").join("chat.md");
+    term.type_text(&format!("/export md {}", target.display()));
+    term.send(ENTER);
+    term.wait_for("Exported to", WAIT);
+    assert!(target.exists(), "the file is not where it was asked for: {}", target.display());
+    let text = std::fs::read_to_string(&target).unwrap();
+    assert!(text.contains("Hello."), "the conversation is not in the file: {text}");
+    quit(&mut term);
+}
+
+#[test]
 fn a_misspelled_model_is_offered_the_closest_one() {
     let server = MockServer::start(vec![Reply::Text("Hello.".into())]);
     let home = Home::new();
