@@ -35,7 +35,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/regenerate, Ctrl+R", "answer the last prompt again from scratch"),
     ("/rewind [n]", "files and conversation go back to before turn n"),
     ("/diff, /commit <msg>", "the changed lines and untracked files; commit the staged changes"),
-    ("/export [md|html|jsonl]", "write the conversation to a file"),
+    ("/export [md|html|jsonl] [path]", "write the conversation to a file, where you say"),
     ("/editor, Ctrl+X Ctrl+E", "write the prompt in an external editor"),
     ("/mcp [list|market|test|add|reload]", "Model Context Protocol servers"),
     ("/tasks", "background commands: their output, and stopping one"),
@@ -137,7 +137,46 @@ fn while_running(name: &str) -> WhileRunning {
     }
 }
 
-/// A command that begins a model turn. During a compaction these wait with a
+/// The format and the path of an export: `/export md ~/notes/chat.md` writes
+/// markdown there, `/export "~/my notes/chat.md"` writes markdown to a path
+/// with spaces in it.
+fn split_export_arg(arg: &str) -> (String, Option<String>) {
+    let arg = arg.trim();
+    if let Some(rest) = arg.strip_prefix('"') {
+        let path = rest.strip_suffix('"').unwrap_or(rest);
+        return ("md".to_string(), Some(path.trim().to_string()));
+    }
+    match arg.split_once(char::is_whitespace) {
+        Some((format, rest)) => {
+            let path = rest.trim();
+            (format.to_string(), (!path.is_empty()).then(|| path.to_string()))
+        }
+        None => (arg.to_string(), None),
+    }
+}
+
+/// Where an export goes: the path the person named, with the format's ending
+/// added when they left it out, and the default name when they named a
+/// folder.
+fn export_target(path: &str, default_name: &str) -> String {
+    let expanded = flashagent_core::paths::expand_home(path.trim());
+    let raw = expanded.as_ref();
+    let looks_like_a_folder = raw.ends_with('/') || raw.ends_with('\\') || std::path::Path::new(raw).is_dir();
+    if looks_like_a_folder {
+        return std::path::Path::new(raw).join(default_name).display().to_string();
+    }
+    let candidate = std::path::Path::new(raw);
+    if candidate.extension().is_none() {
+        // No ending: the format's one is used, so "notes/chat" is a markdown file.
+        let default_ext = std::path::Path::new(default_name).extension().map(|e| e.to_string_lossy().to_string());
+        if let Some(ext) = default_ext {
+            return format!("{raw}.{ext}");
+        }
+    }
+    raw.to_string()
+}
+
+/// Commands that begin a model turn. During a compaction these wait with a
 /// message: the history is with the task, and a turn now would start from
 /// nothing.
 fn starts_a_turn(name: &str, arg: &str) -> bool {
@@ -987,13 +1026,16 @@ impl App {
         }
     }
 
-    fn export_conversation(&mut self, cx: &LoopCtx<'_>, format_arg: &str) {
+    /// `/export <format> [path]`: the format is the first word, the path is
+    /// what is left of it. A path with spaces is written in quotes.
+    fn export_conversation(&mut self, cx: &LoopCtx<'_>, arg: &str) {
         // A file with only a header, in the project folder, helps nobody.
         if !self.history.iter().any(flashagent_core::is_prompt) {
             self.background = Some(BackgroundNotice::fading("Nothing to export yet".to_string(), 5));
             self.renderer.request_reprint();
             return;
         }
+        let (format_arg, path_arg) = split_export_arg(arg);
         let format_arg = format_arg.to_lowercase();
         // The id already starts with "session_" (was session_session_1789.md).
         let stem = cx.session_id.strip_prefix("session_").unwrap_or(cx.session_id);
@@ -1029,9 +1071,20 @@ impl App {
                 export::conversation_markdown(&self.history, cx.session_id, &self.current_model, cx.cwd_display),
             ),
         };
-        match std::fs::write(&filename, content) {
+        // Where it goes: the path the person named, or the project folder.
+        let target = match path_arg {
+            Some(p) => export_target(&p, &filename),
+            None => filename.clone(),
+        };
+        // The folders the person named are part of what they asked for.
+        if let Some(parent) = std::path::Path::new(&target).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        match std::fs::write(&target, content) {
             Ok(_) => {
-                let shown = std::fs::canonicalize(&filename).map_or(filename, |p| p.display().to_string());
+                let shown = std::fs::canonicalize(&target).map_or(target.clone(), |p| p.display().to_string());
                 // It fades: as the prompt's placeholder it came back every time the prompt was emptied.
                 self.background = Some(BackgroundNotice::fading(format!("Exported to {shown}"), 8));
                 self.renderer.request_reprint();
@@ -1116,6 +1169,24 @@ mod tests {
         assert_eq!(split_command("/compact keep the schema"), ("compact", "keep the schema"));
         assert_eq!(split_command("/help"), ("help", ""));
         assert_eq!(split_command("/tmp/shot.png"), ("tmp/shot.png", ""));
+    }
+
+    #[test]
+    fn an_export_takes_a_format_and_a_path() {
+        assert_eq!(split_export_arg("md"), ("md".to_string(), None));
+        assert_eq!(split_export_arg("md ~/notes/chat.md"), ("md".to_string(), Some("~/notes/chat.md".to_string())));
+        assert_eq!(split_export_arg("  html  out.html "), ("html".to_string(), Some("out.html".to_string())));
+        // A path with spaces in it is written in quotes.
+        assert_eq!(split_export_arg("\"~/my notes/chat.md\""), ("md".to_string(), Some("~/my notes/chat.md".to_string())));
+    }
+
+    #[test]
+    fn the_path_of_an_export_keeps_the_format_when_the_person_left_it_out() {
+        assert_eq!(export_target("notes/chat", "session_1.md"), "notes/chat.md");
+        assert_eq!(export_target("notes/chat.md", "session_1.md"), "notes/chat.md");
+        assert_eq!(export_target("notes/chat.jsonl", "session_1.md"), "notes/chat.jsonl");
+        // A folder gets the default name inside it.
+        assert_eq!(export_target("notes/", "session_1.md"), "notes/session_1.md");
     }
 
     #[test]

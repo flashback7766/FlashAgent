@@ -103,7 +103,11 @@ narrows to it and shows where the word was.
 ```
 
 Open the file: the conversation as a document, with tool results folded
-away.
+away. Name a path and it goes there instead:
+
+```
+/export md ~/notes/chat.md
+```
 
 ## 8. What holds it together (2 min)
 
