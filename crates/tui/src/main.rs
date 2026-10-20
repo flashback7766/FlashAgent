@@ -855,6 +855,8 @@ struct App {
     renderer: Renderer,
     /// Unprompted things (an update, a notice) go on the line under the input.
     background: Option<BackgroundNotice>,
+    /// What the app told the user, newest last, so it can be read again.
+    notices: Vec<flashagent_tui::notice_log::NoticeEntry>,
     channel_switch: Option<ChannelSwitch>,
     uninstall_confirm: bool,
     /// So a new turn can stop it.
@@ -1430,6 +1432,7 @@ fn initial_app(init: InitialApp) -> App {
         tick_n: 0,
         renderer: Renderer::new(),
         background: None,
+        notices: Vec::new(),
         channel_switch: None,
         uninstall_confirm: false,
         recap_task: None,

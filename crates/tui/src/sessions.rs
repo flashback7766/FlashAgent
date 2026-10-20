@@ -599,15 +599,29 @@ pub(crate) fn restore_session(saved: SavedSession, chat: &mut ChatView, history:
             // The fresh system prompt wins; only a compaction summary carries over. A
             // second system message mid-history breaks strict templates (Gemma, Qwen).
             flashagent_llm::Role::System => {
-                // Older sessions stored the summary as its own system message.
-                let title = COMPACTED_MARK.trim_start();
-                if let (Some(pos), Some(system)) = (msg.content.find(title), history.first_mut()) {
+                // The summary, in whichever shape the session was saved in: the
+                // current one keeps it in the system message after the marker,
+                // the older one had it as the whole message.
+                let carried: Option<String> = match msg.content.find(COMPACTED_MARK) {
+                    Some(pos) => Some(msg.content[pos + COMPACTED_MARK.len()..].trim_start().to_string()),
+                    None => msg.content.strip_prefix(COMPACTED_INTRO).map(|s| s.trim_start().to_string()),
+                };
+                if let (Some(carried), Some(system)) = (carried, history.first_mut()) {
+                    // The context line of the saved one is left out: the live
+                    // one counts, and two of them would say two different
+                    // things about the same window.
+                    let carried = carried
+                        .split(crate::App::CONTEXT_LINE_MARK)
+                        .next()
+                        .unwrap_or(carried.as_str())
+                        .trim_end()
+                        .to_string();
+                    let block = format!("{COMPACTED_MARK}{carried}");
                     // The summary goes before the live context line, not after
                     // it: the first turn rewrites that line and truncates from
                     // its marker, and a summary parked behind it was dropped
                     // before the model ever saw it. Reported live on a resumed
                     // session, which answered as if the summary never existed.
-                    let block = format!("{COMPACTED_MARK}{}", msg.content[pos + title.len()..].trim_start());
                     match system.content.find(crate::App::CONTEXT_LINE_MARK) {
                         Some(at) => system.content.insert_str(at, &block),
                         None => system.content.push_str(&block),
@@ -1017,6 +1031,38 @@ mod session_tests {
     }
 
     #[test]
+    fn a_session_from_the_old_shape_still_carries_its_summary() {
+        // The summary used to be its own system message. Without this it was
+        // lost on a resume: the model answered as if it had never been written,
+        // and the chat showed no compaction at all.
+        let saved = SavedSession {
+            id: "s".into(),
+            timestamp: 1,
+            model: "m".into(),
+            cwd: "~/proj".into(),
+            messages: vec![
+                SavedMessage::from(&ChatMessage::system(format!("{COMPACTED_INTRO}what happened before"))),
+                SavedMessage::from(&ChatMessage::user("and now?")),
+                SavedMessage::from(&ChatMessage::assistant("carrying on")),
+            ],
+            turn_in_flight: false,
+        };
+        let mut chat = ChatView::default();
+        let mut history = vec![ChatMessage::system("new prompt")];
+        restore_session(saved, &mut chat, &mut history);
+        assert!(
+            history[0].content.contains("what happened before"),
+            "the summary is lost: {}",
+            history[0].content
+        );
+        let lines: Vec<String> = chat.render(80).into_iter().map(|(_, t)| t).collect();
+        assert!(
+            lines.iter().any(|l| l.contains("Session compaction started")),
+            "the chat shows no compaction: {lines:#?}"
+        );
+    }
+
+    #[test]
     fn a_resumed_session_shows_its_tool_calls_and_thoughts_again() {
         let mut asked = ChatMessage::assistant("Reading it.");
         asked.reasoning = Some("**Reading Files**\nstore.py holds the bug".into());
@@ -1084,3 +1130,4 @@ mod session_tests {
         assert!(rendered.iter().any(|(kind, text)| *kind == LineKind::User && text.contains("[image]")));
     }
 }
+

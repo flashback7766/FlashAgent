@@ -66,19 +66,19 @@ impl App {
         };
         match action {
             UpdateKeyAction::DevMode => {
-                self.background = Some(BackgroundNotice::fading("Auto-updater is disabled in dev mode", 6));
+                self.say(BackgroundNotice::fading("Auto-updater is disabled in dev mode", 6));
                 return;
             }
             UpdateKeyAction::ShowProgress => {
                 self.update_watched = true;
                 if let Some((version, stage)) = &self.update_progress {
-                    self.background = Some(BackgroundNotice::sticky(update_progress_line(version, *stage)));
+                    self.say(BackgroundNotice::sticky(update_progress_line(version, *stage)));
                 }
                 return;
             }
             UpdateKeyAction::WatchCheck => {
                 self.update_watched = true;
-                self.background = Some(checking(self.config.update_channel));
+                self.say(checking(self.config.update_channel));
                 return;
             }
             UpdateKeyAction::InstallPending | UpdateKeyAction::CheckAndInstall => {}
@@ -86,14 +86,14 @@ impl App {
         // Claimed, not just read: the background updater may have started in between.
         if cx.update_busy.swap(true, Ordering::SeqCst) {
             self.update_watched = true;
-            self.background = Some(checking(self.config.update_channel));
+            self.say(checking(self.config.update_channel));
             return;
         }
         self.update_watched = true;
         let update_tx = cx.update_tx.clone();
         let busy = cx.update_busy.clone();
         let pending = if action == UpdateKeyAction::InstallPending { self.pending_update.clone() } else { None };
-        self.background = Some(match &pending {
+        self.say(match &pending {
             Some((version, ..)) => BackgroundNotice::sticky(format!("{UPDATE_LINE_PREFIX}{version} \u{b7} starting the download\u{2026}")),
             None => checking(self.config.update_channel),
         });
@@ -229,7 +229,7 @@ impl App {
                     self.renderer.request_reprint();
                 } else if !self.attachments.is_empty() {
                     self.attachments.clear();
-                    self.background = Some(BackgroundNotice::fading("Attachments cleared".to_string(), 4));
+                    self.say(BackgroundNotice::fading("Attachments cleared".to_string(), 4));
                     self.renderer.request_reprint();
                 } else {
                     // Esc closes and cancels, and never quits: it is pressed twice to close a
@@ -247,7 +247,7 @@ impl App {
             {
                 // It did nothing and said nothing while an answer was written.
                 if self.running {
-                    self.background = Some(BackgroundNotice::fading("Ctrl+R regenerates once the answer is done · Esc stops it now".to_string(), 4));
+                    self.say(BackgroundNotice::fading("Ctrl+R regenerates once the answer is done · Esc stops it now".to_string(), 4));
                     self.renderer.request_reprint();
                 } else if cx.gate.pending().is_none()
                     && cx.question_gate.pending().is_none()
@@ -367,7 +367,7 @@ impl App {
                     self.attachments.push(att);
                     self.suggested_prompt = None;
                     if !model_sees_images(cx.source, &self.current_model) {
-                        self.background = Some(
+                        self.say(
                             BackgroundNotice::sticky(format!(
                                 "{label} attached · {} cannot see images — press F3 for one that can",
                                 self.current_model
@@ -375,7 +375,7 @@ impl App {
                             .warning(),
                         );
                     } else {
-                        self.background = Some(BackgroundNotice::fading(
+                        self.say(BackgroundNotice::fading(
                             format!("{label} attached · Ctrl+Z removes it"),
                             8,
                         ));
@@ -396,7 +396,7 @@ impl App {
                 if mods.contains(KeyModifiers::CONTROL) && !self.attachments.is_empty() =>
             {
                 if let Some(removed) = self.attachments.pop() {
-                    self.background = Some(BackgroundNotice::fading(
+                    self.say(BackgroundNotice::fading(
                         format!("{} removed", removed.label()),
                         5,
                     ));
@@ -562,7 +562,7 @@ impl App {
                 } else if let Some(switch) = self.provider_switch.as_ref().filter(|_| !self.input.starts_with('/') && !self.running) {
                     // It would go to whichever server the client has at that moment.
                     let name = switch.name.clone();
-                    self.background = Some(BackgroundNotice::fading(format!("Still connecting to {name} \u{b7} send it once it answers"), 5).warning());
+                    self.say(BackgroundNotice::fading(format!("Still connecting to {name} \u{b7} send it once it answers"), 5).warning());
                 } else if self.running && matches!(self.input.trim(), "/tasks" | "/bg") {
                     // Not steering: a task may need stopping while the turn runs.
                     self.input.clear();
@@ -630,7 +630,7 @@ impl App {
             // Shell editing keys, on either layout.
             KeyCode::Char(c) if cx.gate.pending().is_none() && mods.contains(KeyModifiers::CONTROL) => match latin(c) {
                 'k' if self.running => {
-                    self.background = Some(BackgroundNotice::fading("Commands open once the turn is done · Esc interrupts it", 4));
+                    self.say(BackgroundNotice::fading("Commands open once the turn is done · Esc interrupts it", 4));
                     self.renderer.request_reprint();
                 }
                 'k' => self.open_palette(),
@@ -652,7 +652,7 @@ impl App {
                     self.edited();
                 }
                 'f' if self.input_history.is_empty() => {
-                    self.background = Some(BackgroundNotice::fading("No earlier prompts to search yet", 4));
+                    self.say(BackgroundNotice::fading("No earlier prompts to search yet", 4));
                     self.renderer.request_reprint();
                 }
                 'f' => {

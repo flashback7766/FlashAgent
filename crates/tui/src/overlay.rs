@@ -26,6 +26,8 @@ pub(crate) enum Overlay {
     Palette(SelectMenu<String>),
     /// /tools: what the model may call, and what it may not.
     Tools(flashagent_tui::tools_view::ToolsView),
+    /// /notices: what the app said, kept so it can be read again.
+    Notices(flashagent_tui::notice_log::NoticeLog),
 }
 
 impl Overlay {
@@ -53,6 +55,7 @@ impl Overlay {
             Overlay::Mcp(modal) => modal.render(width),
             Overlay::Tasks(modal) => modal.render(width),
             Overlay::Tools(view) => view.render(width),
+            Overlay::Notices(view) => view.render(width),
         }
     }
 }

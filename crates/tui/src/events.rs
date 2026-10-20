@@ -101,7 +101,7 @@ impl App {
                 // that is already answering their questions is worse than saying
                 // nothing was learned: reported live against OpenRouter, which
                 // lists models fine but answers nothing to a name it is not given.
-                self.background = Some(BackgroundNotice::fading(
+                self.say(BackgroundNotice::fading(
                     format!("{OFFLINE_NOTICE} · could not read the model list from {url} · /provider picks another"),
                     8,
                 ));
@@ -111,7 +111,7 @@ impl App {
                 // however it got there. Coming from Offline say so briefly;
                 // otherwise just take the stale notice away.
                 if previous == MascotMood::Offline {
-                    self.background = Some(BackgroundNotice::fading(
+                    self.say(BackgroundNotice::fading(
                         format!("Model server is answering \u{b7} {}", self.current_model),
                         5,
                     ));
@@ -143,7 +143,7 @@ impl App {
         match notice {
             UpdateNotice::Available { version, asset_name, download_url, checksums_url } => {
                 self.pending_update = Some((version.clone(), asset_name, download_url, checksums_url));
-                self.background = Some(BackgroundNotice::sticky(format!(
+                self.say(BackgroundNotice::sticky(format!(
                     "Update available: {version} · /update installs it"
                 )));
                 if let Some(s) = self.settings_view_mut() {
@@ -161,7 +161,7 @@ impl App {
                 self.pending_update = None;
                 self.update_progress = None;
                 self.update_watched = false;
-                self.background = Some(BackgroundNotice::sticky(format!(
+                self.say(BackgroundNotice::sticky(format!(
                     "Updated to {version} \u{b7} restart FlashAgent to use it"
                 )));
                 if let Some(s) = self.settings_view_mut() {
@@ -173,7 +173,7 @@ impl App {
                     s.update_check_status = Some(format!("Up to date ({version})"));
                 }
                 if std::mem::take(&mut self.update_watched) {
-                    self.background = Some(BackgroundNotice::fading(
+                    self.say(BackgroundNotice::fading(
                         format!("FlashAgent {version} is up to date"),
                         6,
                     ));
@@ -185,7 +185,7 @@ impl App {
                     s.update_check_status = Some(format!("Error: {error}"));
                 }
                 if std::mem::take(&mut self.update_watched) {
-                    self.background = Some(
+                    self.say(
                         BackgroundNotice::fading(
                             format!("Update failed: {}", flashagent_tui::truncate_middle(&error, 90)),
                             10,
@@ -326,6 +326,10 @@ impl App {
             None => self.chat.fail_compaction_card("the conversation is unchanged"),
         }
         self.chat.forget_counted_context();
+        // On disk now, not at the next turn or at the exit: a machine that
+        // loses power here used to lose the compaction with it, and the
+        // conversation came back as it was before the summary.
+        self.autosave(cx.session_id, cx.cwd_display);
         update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
         // Whatever was typed while compaction ran goes out now — whether the
         // summary was saved or not — as steering if a turn is under way, or a
@@ -522,7 +526,7 @@ impl App {
                     .is_some_and(|n| matches!(n, "memory_create" | "memory_update" | "memory_remove"));
                 if wrote_memory && !*is_error {
                     if let Some(said) = result.as_deref().and_then(|r| r.lines().next()) {
-                        self.background = Some(BackgroundNotice::fading(
+                        self.say(BackgroundNotice::fading(
                             format!("{said}  ·  /memory to see or change it"),
                             10,
                         ));
@@ -732,7 +736,7 @@ impl App {
             let label = att.label();
             self.attachments.push(att);
             self.suggested_prompt = None;
-            self.background = Some(BackgroundNotice::fading(format!("{label} attached · Ctrl+Z removes it"), 8));
+            self.say(BackgroundNotice::fading(format!("{label} attached · Ctrl+Z removes it"), 8));
         } else if !pasted.is_empty() {
             // Pasted code or logs keep their line breaks.
             self.input.insert_str(pasted);

@@ -38,6 +38,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/export [md|html|jsonl] [path]", "write the conversation to a file, where you say"),
     ("/editor, Ctrl+X Ctrl+E", "write the prompt in an external editor"),
     ("/tools", "what the model may call, and what it may not"),
+    ("/notices", "what the app said, kept so it can be read again"),
     ("/mcp [list|market|test|add|reload]", "Model Context Protocol servers"),
     ("/tasks", "background commands: their output, and stopping one"),
     ("/sampling", "sampling parameters (advanced)"),
@@ -127,7 +128,7 @@ fn while_running(name: &str) -> WhileRunning {
     match name {
         "help" | "?" | "whatsnew" | "changelog" | "memory" | "memories" | "context" | "verbose" | "expand" | "think"
         | "o" | "diff" | "commit" | "settings" | "config" | "sampling" | "params" | "effort" | "thinking" | "t"
-        | "model" | "models" | "m" | "mode" | "skills" | "tools" => WhileRunning::Now,
+        | "model" | "models" | "m" | "mode" | "skills" | "tools" | "notices" | "log" => WhileRunning::Now,
         "compact" | "clear" | "export" | "rewind" => WhileRunning::AfterTurn,
         "goal" | "resume" | "regenerate" | "retry" | "update" | "channel" | "mcp" | "editor" | "exit" | "quit" | "q"
         | "uninstall" => WhileRunning::Refuse,
@@ -289,10 +290,10 @@ impl App {
                     self.queued_commands.push(line.clone());
                     // A queued command that says nothing looks like the app
                     // swallowed it, and that reads the same as a hang.
-                    self.background = Some(BackgroundNotice::fading(format!("/{name} will run when this turn finishes \u{b7} Esc ends the turn now instead"), 6).warning());
+                    self.say(BackgroundNotice::fading(format!("/{name} will run when this turn finishes \u{b7} Esc ends the turn now instead"), 6).warning());
                 }
             }
-            WhileRunning::Refuse => self.background = Some(BackgroundNotice::fading(format!("/{name} does not run while the model works \u{b7} Esc interrupts the turn first"), 6).warning()),
+            WhileRunning::Refuse => self.say(BackgroundNotice::fading(format!("/{name} does not run while the model works \u{b7} Esc interrupts the turn first"), 6).warning()),
             WhileRunning::Unknown => self.unknown_command(name),
         }
         self.renderer.request_reprint();
@@ -399,6 +400,7 @@ impl App {
             "commit" => self.git_commit(arg),
             "export" => self.export_conversation(cx, arg),
             "tools" => self.tools_command(cx),
+            "notices" | "log" => self.notices_command(),
             _ => {
                 if let Some(skill) = name.strip_prefix("skill:") {
                     self.run_skill(cx, skill);
@@ -428,7 +430,7 @@ impl App {
             Some(g) => format!("Unknown command {word} · did you mean {g}?"),
             None => format!("Unknown command {word} · /help lists them"),
         };
-        self.background = Some(BackgroundNotice::fading(said, 6));
+        self.say(BackgroundNotice::fading(said, 6));
     }
 
     /// Remembers a switch for the first message that uses it. Picking a model
@@ -1040,6 +1042,13 @@ impl App {
 
     /// `/export <format> [path]`: the format is the first word, the path is
     /// what is left of it. A path with spaces is written in quotes.
+    /// `/notices`: what the app said, newest first. A notice fades and is
+    /// gone; this is where it is read again.
+    fn notices_command(&mut self) {
+        let entries = self.notice_history();
+        self.open_overlay(Overlay::Notices(flashagent_tui::notice_log::NoticeLog::new(entries)));
+    }
+
     /// `/tools`: the list of tools, and which of them the model may call. A
     /// tool that is off is not in the schemas the model reads, and a call to
     /// one is refused.
@@ -1064,7 +1073,7 @@ impl App {
     fn export_conversation(&mut self, cx: &LoopCtx<'_>, arg: &str) {
         // A file with only a header, in the project folder, helps nobody.
         if !self.history.iter().any(flashagent_core::is_prompt) {
-            self.background = Some(BackgroundNotice::fading("Nothing to export yet".to_string(), 5));
+            self.say(BackgroundNotice::fading("Nothing to export yet".to_string(), 5));
             self.renderer.request_reprint();
             return;
         }
@@ -1119,7 +1128,7 @@ impl App {
             Ok(_) => {
                 let shown = std::fs::canonicalize(&target).map_or(target.clone(), |p| p.display().to_string());
                 // It fades: as the prompt's placeholder it came back every time the prompt was emptied.
-                self.background = Some(BackgroundNotice::fading(format!("Exported to {shown}"), 8));
+                self.say(BackgroundNotice::fading(format!("Exported to {shown}"), 8));
                 self.renderer.request_reprint();
             }
             Err(e) => self.notice(format!("Failed to export conversation: {e}")),

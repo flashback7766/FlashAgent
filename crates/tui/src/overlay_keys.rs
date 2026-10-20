@@ -75,6 +75,13 @@ impl App {
                 Overlay::Rewind(card) => self.rewind_key(cx, card, code),
                 Overlay::Effort(menu) => self.effort_menu_key(cx, menu, code),
                 Overlay::Tools(view) => self.tools_key(cx, view, code, mods),
+                Overlay::Notices(mut view) => {
+                    use flashagent_tui::notice_log::NoticeAction;
+                    if view.handle_key(code, mods) == NoticeAction::Close {
+                        return Flow::Continue;
+                    }
+                    self.overlay = Some(Overlay::Notices(view));
+                }
                 Overlay::Palette(menu) => {
                     let flow = self.palette_key(cx, menu, code, mods).await;
                     self.renderer.request_reprint();
@@ -156,7 +163,7 @@ impl App {
             if let Some(view) = self.settings_view_mut() {
                 view.config.update_channel = sw.to;
             }
-            self.background = Some(BackgroundNotice::sticky(format!(
+            self.say(BackgroundNotice::sticky(format!(
                 "Release channel is now {} \u{b7} /update moves to it",
                 sw.to.label()
             )));
@@ -165,7 +172,7 @@ impl App {
             if let Some(view) = self.settings_view_mut() {
                 view.config.update_channel = sw.from;
             }
-            self.background = Some(BackgroundNotice::fading(format!("Still on the {} channel", sw.from.label()), 5));
+            self.say(BackgroundNotice::fading(format!("Still on the {} channel", sw.from.label()), 5));
         }
     }
 
