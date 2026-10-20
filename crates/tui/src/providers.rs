@@ -17,7 +17,9 @@ pub const THIS_RUN: &str = "\u{0}run";
 
 /// Said instead of switching while a turn runs: the turn's requests would
 /// go to one server and its answer be read as another's.
-pub const BUSY: &str = "Wait for the answer to finish, then switch provider";
+pub fn busy() -> &'static str {
+    crate::i18n::tr("Wait for the answer to finish, then switch provider")
+}
 
 /// Where a provider's key comes from, never the key.
 pub fn key_status(profile: &ProviderProfile) -> String {

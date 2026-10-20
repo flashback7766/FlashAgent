@@ -194,7 +194,7 @@ pub(crate) fn work_box(
     // than the bottom of its own frame.
     let lead = usize::from(box_w >= 3);
     let room = box_w.saturating_sub(2 + lead);
-    let full = " subagents & background ";
+    let full = flashagent_tui::i18n::tr(" subagents & background ");
     let title: String = if full.chars().count() <= room {
         full.to_string()
     } else if " work ".chars().count() <= room {

@@ -555,7 +555,7 @@ pub fn call_facts(name: &str, parsed: &serde_json::Value, diff: Option<&str>) ->
             .or_else(|| parsed.get("query"))
             .and_then(|p| p.as_str())
             .map(|p| format!("\"{}\"", format_cmd(p))),
-        "list_dir" => Some(path_of("path").unwrap_or_else(|| "the project".to_string())),
+        "list_dir" => Some(path_of("path").unwrap_or_else(|| crate::i18n::tr("the project").to_string())),
         _ => None,
     }
 }

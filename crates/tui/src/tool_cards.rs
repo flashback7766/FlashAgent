@@ -348,9 +348,9 @@ impl ChatView {
                 .or_else(|| parsed.get("path"))
                 .and_then(|s| s.as_str())
                 // A listing of the working directory has no path or pattern.
-                .unwrap_or("the project")
+                .unwrap_or(crate::i18n::tr("the project"))
         };
-        let target = if matches!(target, "." | "./" | "") { "the project" } else { target };
+        let target = if matches!(target, "." | "./" | "") { crate::i18n::tr("the project") } else { target };
 
         let folded = self.fold_into_previous(args_json, |line| {
             let Some(ToolGroupKind::Explore { files, searches, last_target, is_running }) =
@@ -545,11 +545,11 @@ fn not_run_note(result: &str) -> Option<&'static str> {
     if result == flashagent_core::permissions::DECLINED {
         Some("declined")
     } else if result.starts_with(flashagent_core::permissions::DENIED) {
-        Some("not allowed")
+        Some(crate::i18n::tr("not allowed"))
     } else if flashagent_core::stopped_by_user(result) {
         Some("stopped")
     } else if result.contains(flashagent_core::permissions::QUESTION_CLOSED) {
-        Some("not answered")
+        Some(crate::i18n::tr("not answered"))
     } else {
         None
     }
@@ -559,7 +559,7 @@ fn not_run_note(result: &str) -> Option<&'static str> {
 /// to see why a call failed without unfolding it.
 fn failure_reason(result: &str) -> Option<String> {
     let mut line = result.lines().map(str::trim).find(|l| !l.is_empty())?;
-    while let Some(rest) = ["error:", "Error:", "edit:", "write:", "run_shell:"].iter().find_map(|p| line.strip_prefix(p)) {
+    while let Some(rest) = ["error:", "Error:", "edit:", "write:", crate::i18n::tr("run_shell:")].iter().find_map(|p| line.strip_prefix(p)) {
         line = rest.trim_start();
     }
     let shown: String = line.chars().take(72).collect();
@@ -685,7 +685,7 @@ mod tests {
         }
         for (result, note) in [
             (flashagent_core::permissions::DECLINED.to_string(), "declined"),
-            (format!("{}writes outside the project", flashagent_core::permissions::DENIED), "not allowed"),
+            (format!("{}writes outside the project", flashagent_core::permissions::DENIED), crate::i18n::tr("not allowed")),
             (flashagent_core::CANCELLED_RESULT.to_string(), "stopped"),
             (flashagent_core::STOPPED_RESULT.to_string(), "stopped"),
             // Saved by an older build.

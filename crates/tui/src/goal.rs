@@ -381,21 +381,21 @@ pub fn commit_goal_milestone(ledger: &GoalLedger, cwd: &Path, completed_steps: u
 
 fn stop_line(reason: DoneReason, budgets: &GoalBudgets, step: u32) -> String {
     match reason {
-        DoneReason::Completed => "Stopped: model finished its turn".to_string(),
-        DoneReason::StepLimit => format!(
-            "Stopped: step budget reached ({}) — INCOMPLETE",
-            crate::plural(budgets.steps.unwrap_or(step) as usize, "step", "steps")
-        ),
-        DoneReason::TokenBudget => format!(
-            "Stopped: token budget reached ({}) — INCOMPLETE",
-            budgets.output_tokens.map_or("budget".to_string(), human_count)
-        ),
-        DoneReason::TimeLimit => format!(
-            "Stopped: time budget reached ({}) — INCOMPLETE",
-            budgets.time.map_or("budget".to_string(), human_duration)
-        ),
-        DoneReason::Cancelled => "Stopped: interrupted by you — INCOMPLETE".to_string(),
-        DoneReason::Failed => "Stopped: backend error — INCOMPLETE".to_string(),
+        DoneReason::Completed => crate::i18n::tr("Stopped: model finished its turn").to_string(),
+        DoneReason::StepLimit => crate::i18n::tr_fill("Stopped: step budget reached ({steps}) — INCOMPLETE", &[(
+            "steps",
+            &crate::i18n::plural(budgets.steps.unwrap_or(step) as usize, "step", "steps", "шаг", "шага", "шагов"),
+        )]),
+        DoneReason::TokenBudget => crate::i18n::tr_fill("Stopped: token budget reached ({budget}) — INCOMPLETE", &[(
+            "budget",
+            &budgets.output_tokens.map_or_else(|| crate::i18n::tr("budget").to_string(), human_count),
+        )]),
+        DoneReason::TimeLimit => crate::i18n::tr_fill("Stopped: time budget reached ({budget}) — INCOMPLETE", &[(
+            "budget",
+            &budgets.time.map_or_else(|| crate::i18n::tr("budget").to_string(), human_duration),
+        )]),
+        DoneReason::Cancelled => crate::i18n::tr("Stopped: interrupted by you — INCOMPLETE").to_string(),
+        DoneReason::Failed => crate::i18n::tr("Stopped: backend error — INCOMPLETE").to_string(),
     }
 }
 
@@ -430,7 +430,7 @@ fn subject_of(name: &str, args_json: &str) -> String {
         args.as_ref()?.get(key)?.as_str().map(|s| s.to_string())
     };
     let raw = match name {
-        "run_shell" => pick("command").unwrap_or_else(|| "(poll/kill)".to_string()),
+        "run_shell" => pick("command").unwrap_or_else(|| crate::i18n::tr("(poll/kill)").to_string()),
         _ => pick("path")
             .or_else(|| {
                 let files = files_of(name, args_json);

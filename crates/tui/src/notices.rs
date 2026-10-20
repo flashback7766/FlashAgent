@@ -56,7 +56,7 @@ pub(crate) fn channel_switch_warning(
         (Some(_), Some(_)) => format!(
             "Update: {current} → {destination}. You get everything added since {current}.{} Continue?",
             if Version::parse(&destination).is_some_and(|v| v.is_beta()) {
-                " Beta builds land often and can regress; that is the point of them."
+                flashagent_tui::i18n::tr(" Beta builds land often and can regress; that is the point of them.")
             } else {
                 ""
             }
@@ -268,7 +268,7 @@ pub(crate) fn update_progress_line(version: &str, stage: flashagent_svc::updater
             flashagent_tui::i18n::tr_fill("{size} MB downloaded", &[("size", &format!("{:.1}", received as f64 / MB))])
         }
         UpdateProgress::Verifying => flashagent_tui::i18n::tr("verifying the checksum\u{2026}").to_string(),
-        UpdateProgress::Installing => "installing\u{2026}".to_string(),
+        UpdateProgress::Installing => flashagent_tui::i18n::tr("installing\u{2026}").to_string(),
     };
     format!("{UPDATE_LINE_PREFIX}{version} \u{b7} {detail}")
 }
