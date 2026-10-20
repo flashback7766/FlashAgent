@@ -311,7 +311,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                 self.attachments.extend(pictures);
             }
             self.input.set(if draft.trim().is_empty() { restored } else { format!("{restored}\n{draft}") });
-            self.background = Some(BackgroundNotice::fading(
+            self.say(BackgroundNotice::fading(
                 "The turn ended before your message reached it · Enter sends it now",
                 8,
             ));

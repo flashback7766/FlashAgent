@@ -1252,6 +1252,31 @@ fn an_export_can_be_written_where_the_person_says() {
 }
 
 #[test]
+fn what_the_app_said_can_be_read_again() {
+    let server = MockServer::start(vec![Reply::Text("Hello.".into())]);
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+    ask(&term, "hello", "Hello.");
+
+    // Something the app says and then forgets. The typo stays in the prompt,
+    // so it is cleared before the next command.
+    term.type_text("/nosuchcommand");
+    term.send(ENTER);
+    term.wait_for("Unknown command", WAIT);
+    term.send(ESC);
+    std::thread::sleep(Duration::from_millis(200));
+
+    // And the list of it.
+    term.type_text("/notices");
+    term.send(ENTER);
+    let screen = term.wait_for("Notices", WAIT);
+    assert!(screen.contains("Unknown command"), "the notice is not in the history:\n{screen}");
+    term.send(ESC);
+    std::thread::sleep(Duration::from_millis(200));
+    quit(&mut term);
+}
+
+#[test]
 fn a_tool_that_is_turned_off_is_not_offered_to_the_model() {
     let server = MockServer::start(vec![Reply::Text("Hello.".into()), Reply::Text("After.".into())]);
     let home = Home::new();
@@ -2043,6 +2068,42 @@ fn slash_resume_switches_sessions_and_saves_the_one_that_was_open() {
     assert!(history.contains("old question"), "the model did not get the resumed conversation: {history}");
     assert!(!history.contains("new question"), "the conversation switched away from leaked into the resumed one: {history}");
     quit(&mut term);
+}
+
+#[test]
+fn a_compaction_is_still_in_the_chat_after_a_restart() {
+    let server = MockServer::start(vec![
+        Reply::Text("First answer.".into()),
+        Reply::Text("Second answer.".into()),
+    ]);
+    server.answer_side_requests("Summarize the conversation above", "## Objective\nanswer the questions.\n\n## Requirements\n- none\n\n## Decisions\n- none\n\n## Work State\n### Completed\n- answered\n### Active\n- none\n### Blocked\n- none\n\n## Next Move\n1. continue\n\n## Relevant Files\n- none\n\n## Important Context\n- none");
+    let home = Home::new();
+    {
+        let mut term = ready(&home, &server);
+        ask(&term, "the first question", "First answer.");
+        ask(&term, "the second question", "Second answer.");
+        term.type_text("/compact");
+        term.send(ENTER);
+        term.wait_for("Session compacted", WAIT);
+        quit(&mut term);
+    }
+    // The session file, not the folder the compaction archive lives in.
+    let session = home
+        .sessions()
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "json"))
+        .expect("the conversation was saved");
+    let id = session.file_stem().unwrap().to_string_lossy().to_string();
+
+    // The same session, opened again: the summary is what the conversation is
+    // now, and it has to be on the screen and in the prompt.
+    let term = Term::start(&home, &["-y", "--resume", &id], COLS, ROWS);
+    term.wait_for(&format!("Resumed session {id}"), WAIT);
+    let screen = term.screen();
+    assert!(
+        screen.contains("Objective") || screen.contains("Session compacted"),
+        "the compaction is not in the chat after a restart:\n{screen}"
+    );
 }
 
 #[test]

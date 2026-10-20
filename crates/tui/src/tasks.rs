@@ -110,7 +110,7 @@ impl App {
             // loop takes the notice, or when the turn ends.
             self.task_lines.push(line);
             if !notice.killed() {
-                self.background = Some(BackgroundNotice::fading(
+                self.say(BackgroundNotice::fading(
                     format!("Background task {} {} \u{b7} the agent will be told", notice.id, notice.state.describe()),
                     6,
                 ));
@@ -227,7 +227,7 @@ impl App {
             self.chat.push_system(&line);
         }
         self.task_inbox.push(notice);
-        self.background = Some(BackgroundNotice::fading(format!("Subagent {said} \u{b7} the agent will be told"), 6));
+        self.say(BackgroundNotice::fading(format!("Subagent {said} \u{b7} the agent will be told"), 6));
         self.deliver_task_notices(cx);
         self.renderer.request_reprint();
     }
@@ -297,7 +297,7 @@ impl App {
 
     /// Ctrl+B.
     pub(crate) fn detach_shell(&mut self, cx: &LoopCtx<'_>) {
-        self.background = Some(if cx.tools_arc.shells().detach_foreground() {
+        self.say(if cx.tools_arc.shells().detach_foreground() {
             BackgroundNotice::fading("Moved to the background \u{b7} /tasks shows it; the agent is told when it ends", 6)
         } else {
             BackgroundNotice::fading("Ctrl+B moves a running shell command to the background; none is running", 4)
@@ -316,7 +316,7 @@ impl App {
             TasksAction::Open(id) => modal.detail = Some((id, shells.output(id).unwrap_or_default())),
             TasksAction::Kill(id) => {
                 if shells.stop_for_user(id) {
-                    self.background = Some(BackgroundNotice::fading(format!("Stopping background task {id}"), 4));
+                    self.say(BackgroundNotice::fading(format!("Stopping background task {id}"), 4));
                 }
             }
             TasksAction::None => {}
@@ -355,7 +355,7 @@ impl App {
             return true;
         }
         self.quit_armed = Some(std::time::Instant::now());
-        self.background = Some(
+        self.say(
             BackgroundNotice::fading(
                 format!(
                     "{} running \u{b7} quitting stops {}; do it again to quit",

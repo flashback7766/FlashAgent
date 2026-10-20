@@ -1,0 +1,187 @@
+//! The list of what the app told the user, so it can be read again.
+//!
+//! A notice is a line under the composer that fades, and a message in the
+//! placeholder that stays until the prompt is touched. Both are gone the
+//! moment they are gone; this keeps them, so "what did it just say?" has an
+//! answer.
+
+use crossterm::event::{KeyCode, KeyModifiers};
+use crate::tool_views::clip_ellipsis;
+use crate::{visible_width, LineKind, RenderLine};
+
+const RESET: &str = "\x1b[0m";
+const BORDER_GOLD: &str = "\x1b[38;2;225;175;95m";
+const TEXT_BRIGHT: &str = "\x1b[1;38;2;245;240;235m";
+const TEXT_MUTED: &str = "\x1b[38;2;145;150;160m";
+const TEXT_GREEN: &str = "\x1b[38;2;135;220;145m";
+const TEXT_AMBER: &str = "\x1b[38;2;235;175;90m";
+
+/// One thing the app said, and when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoticeEntry {
+    /// How long ago, in words: "just now", "3 min ago".
+    pub when: String,
+    pub text: String,
+    /// Something is wrong: amber, not green.
+    pub warning: bool,
+}
+
+/// What the view asks the app to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoticeAction {
+    None,
+    Close,
+}
+
+/// The notices, newest first.
+pub struct NoticeLog {
+    pub entries: Vec<NoticeEntry>,
+    pub selected: usize,
+    /// The first entry on screen.
+    pub scroll: usize,
+    /// How many entries fit between the borders.
+    pub height: usize,
+}
+
+impl NoticeLog {
+    pub fn new(entries: Vec<NoticeEntry>) -> Self {
+        Self { entries, selected: 0, scroll: 0, height: 12 }
+    }
+
+    /// Moves the cursor, and the window with it.
+    pub fn move_by(&mut self, delta: isize) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let last = self.entries.len() as isize - 1;
+        self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
+        self.keep_visible();
+    }
+
+    /// The keys the view answers to.
+    pub fn handle_key(&mut self, code: KeyCode, _mods: KeyModifiers) -> NoticeAction {
+        match code {
+            KeyCode::Esc => NoticeAction::Close,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_by(-1);
+                NoticeAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.move_by(1);
+                NoticeAction::None
+            }
+            KeyCode::PageUp => {
+                self.move_by(-(self.height as isize));
+                NoticeAction::None
+            }
+            KeyCode::PageDown => {
+                self.move_by(self.height as isize);
+                NoticeAction::None
+            }
+            KeyCode::Home => {
+                self.selected = 0;
+                self.keep_visible();
+                NoticeAction::None
+            }
+            KeyCode::End => {
+                self.selected = self.entries.len().saturating_sub(1);
+                self.keep_visible();
+                NoticeAction::None
+            }
+            _ => NoticeAction::None,
+        }
+    }
+
+    /// The window follows the cursor.
+    fn keep_visible(&mut self) {
+        let height = self.height.max(1);
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + height {
+            self.scroll = self.selected + 1 - height;
+        }
+        let max_scroll = self.entries.len().saturating_sub(height);
+        self.scroll = self.scroll.min(max_scroll);
+    }
+
+    /// The list, as it is drawn.
+    pub fn render(&self, width: usize) -> Vec<RenderLine> {
+        let mut lines = Vec::new();
+        let box_w = width.saturating_sub(6).min(100);
+        let inner_w = box_w.saturating_sub(2);
+
+        let pad_row = |content: &str| -> String {
+            let clipped = clip_ellipsis(content, inner_w);
+            let pad = " ".repeat(inner_w.saturating_sub(visible_width(&clipped)));
+            format!("  {BORDER_GOLD}│{RESET} {clipped}{pad} {BORDER_GOLD}│{RESET}")
+        };
+
+        let title = format!(
+            " \x1b[1;38;2;225;175;95mNotices{RESET} \x1b[38;2;160;155;145m{} kept{RESET} ",
+            self.entries.len()
+        );
+        let dashes = box_w.saturating_sub(visible_width(&title) + 1);
+        lines.push((LineKind::System, format!("  {BORDER_GOLD}╭─{title}{}╮{RESET}", "─".repeat(dashes))));
+        lines.push((LineKind::System, format!("  {BORDER_GOLD}├{}┤{RESET}", "─".repeat(box_w))));
+
+        let height = self.height.max(1);
+        let end = (self.scroll + height).min(self.entries.len());
+        for (idx, entry) in self.entries[self.scroll.min(self.entries.len())..end].iter().enumerate() {
+            let is_sel = self.scroll + idx == self.selected;
+            let pointer = if is_sel { format!("{TEXT_BRIGHT}▸{RESET}") } else { " ".to_string() };
+            let (when_styled, text_styled) = if entry.warning {
+                (format!("{TEXT_AMBER}{}{RESET}", entry.when), format!("{TEXT_BRIGHT}{}{RESET}", entry.text))
+            } else {
+                (format!("{TEXT_GREEN}{}{RESET}", entry.when), format!("{TEXT_MUTED}{}{RESET}", entry.text))
+            };
+            lines.push((LineKind::System, pad_row(&format!("{pointer} {when_styled}  {text_styled}"))));
+        }
+        if self.entries.is_empty() {
+            lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}Nothing has been said yet{RESET}"))));
+        }
+
+        lines.push((LineKind::System, format!("  {BORDER_GOLD}├{}┤{RESET}", "─".repeat(box_w))));
+        let hints: &[(&str, &str)] = &[("↑/↓", "move"), ("Esc", "close")];
+        lines.push((LineKind::System, pad_row(&crate::key_hints(hints, inner_w.saturating_sub(1)))));
+        lines.push((LineKind::System, format!("  {BORDER_GOLD}╰{}╯{RESET}", "─".repeat(box_w))));
+        lines
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entries() -> Vec<NoticeEntry> {
+        vec![
+            NoticeEntry { when: "just now".into(), text: "Exported to /tmp/chat.md".into(), warning: false },
+            NoticeEntry { when: "2 min ago".into(), text: "The server did not answer".into(), warning: true },
+        ]
+    }
+
+    #[test]
+    fn the_cursor_stays_inside_the_list() {
+        let mut v = NoticeLog::new(entries());
+        v.move_by(-5);
+        assert_eq!(v.selected, 0);
+        v.move_by(50);
+        assert_eq!(v.selected, 1);
+        assert_eq!(v.handle_key(KeyCode::Esc, KeyModifiers::NONE), NoticeAction::Close);
+    }
+
+    #[test]
+    fn the_list_is_drawn_with_what_was_said() {
+        let v = NoticeLog::new(entries());
+        let screen: Vec<String> = v.render(80).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
+        assert!(screen.iter().any(|l| l.contains("Exported to")), "{screen:#?}");
+        assert!(screen.iter().any(|l| l.contains("did not answer")), "{screen:#?}");
+        assert!(screen.iter().any(|l| l.contains("2 kept")), "{screen:#?}");
+    }
+
+    #[test]
+    fn an_empty_history_says_so() {
+        let v = NoticeLog::new(Vec::new());
+        let screen: Vec<String> = v.render(80).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
+        assert!(screen.iter().any(|l| l.contains("Nothing has been said yet")), "{screen:#?}");
+    }
+}

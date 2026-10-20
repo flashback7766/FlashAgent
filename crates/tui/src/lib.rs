@@ -18,6 +18,7 @@ pub mod composer;
 pub mod context_modal;
 pub mod goal;
 pub mod mcp_view;
+pub mod notice_log;
 pub mod prefill;
 pub mod providers;
 pub mod sampling;

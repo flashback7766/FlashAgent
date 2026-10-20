@@ -31,7 +31,7 @@ impl App {
     /// On the line under the prompt, which shows while a turn runs and while
     /// something is typed.
     pub(crate) fn refuse_switch_while_busy(&mut self) {
-        self.background = Some(BackgroundNotice::fading(providers::BUSY.to_string(), 6).warning());
+        self.say(BackgroundNotice::fading(providers::BUSY.to_string(), 6).warning());
         self.renderer.request_reprint();
     }
 

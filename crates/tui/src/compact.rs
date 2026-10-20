@@ -406,11 +406,15 @@ pub(crate) enum Detail {
 }
 
 /// The summary embedded in a system message, for the card a resumed session
-/// shows. Older sessions stored the summary without the archive markers; the
-/// whole body is still better than hiding what the model remembers.
+/// shows, in either shape: the current one (after the marker) and the older
+/// one, where the summary was the whole system message. Older sessions
+/// stored the summary as its own system message; without this it was lost on
+/// a resume, and the model answered as if it had never been written.
 pub(crate) fn summary_from_system(content: &str) -> Option<&str> {
-    let body = content.split_once(COMPACTED_MARK)?.1;
-    let body = body.strip_prefix(COMPACTED_INTRO).unwrap_or(body);
+    let body = match content.split_once(COMPACTED_MARK) {
+        Some((_, body)) => body.strip_prefix(COMPACTED_INTRO).unwrap_or(body),
+        None => content.strip_prefix(COMPACTED_INTRO)?,
+    };
     let summary = body.split_once(ARCHIVE_MARK).map_or(body, |(summary, _)| summary);
     let summary = summary.trim();
     (!summary.is_empty()).then_some(summary)

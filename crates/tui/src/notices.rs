@@ -193,9 +193,56 @@ impl App {
     /// Under the cursor, not in the transcript: it is for the person at the
     /// keyboard, not the conversation. A suggestion in the same spot is cleared.
     pub(crate) fn notice(&mut self, text: impl Into<String>) {
-        self.custom_placeholder = Some(text.into());
+        let text = text.into();
+        self.remember_notice(&text, false);
+        self.custom_placeholder = Some(text);
         self.suggested_prompt = None;
         self.renderer.request_reprint();
+    }
+
+    /// The line under the composer, and a copy of it in the history: a notice
+    /// that fades is gone the moment it is gone.
+    pub(crate) fn say(&mut self, notice: BackgroundNotice) {
+        self.remember_notice(&notice.text, notice.warning);
+        self.background = Some(notice);
+    }
+
+    /// Keeps what the app said, so it can be read again.
+    pub(crate) fn remember_notice(&mut self, text: &str, warning: bool) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        self.notices.push(flashagent_tui::notice_log::NoticeEntry {
+            when: how_long_ago(std::time::Instant::now()),
+            text: text.to_string(),
+            warning,
+        });
+        // The history is a help, not an archive: the last hundred are enough
+        // to cover a session and do not grow without bound.
+        if self.notices.len() > 100 {
+            let drop = self.notices.len() - 100;
+            self.notices.drain(..drop);
+        }
+    }
+
+    /// The notices, newest first.
+    pub(crate) fn notice_history(&self) -> Vec<flashagent_tui::notice_log::NoticeEntry> {
+        self.notices.iter().rev().cloned().collect()
+    }
+}
+
+/// How long ago something happened, in words.
+fn how_long_ago(at: std::time::Instant) -> String {
+    let secs = at.elapsed().as_secs();
+    if secs < 5 {
+        "just now".to_string()
+    } else if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{} min ago", secs / 60)
+    } else {
+        format!("{} h ago", secs / 3600)
     }
 }
 
