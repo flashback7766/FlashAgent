@@ -450,11 +450,16 @@ impl SettingsView {
                     SettingsAction::None
                 }
                 4 => {
+                    self.config.web_tools = !self.config.web_tools;
+                    self.is_dirty = true;
+                    SettingsAction::None
+                }
+                5 => {
                     self.cycle_network_retries();
                     self.is_dirty = true;
                     SettingsAction::None
                 }
-                5 => SettingsAction::OpenSamplingMenu,
+                6 => SettingsAction::OpenSamplingMenu,
                 _ => SettingsAction::None,
             },
             SettingsTab::Tools => match self.selected_index {
