@@ -2975,13 +2975,15 @@ fn a_chosen_voice_reaches_the_model_as_an_example_and_nowhere_else() {
 }
 
 #[test]
-fn the_opening_of_the_first_request_is_sent_ahead_so_the_server_has_it_cached() {
+fn the_system_prompt_with_memory_is_sent_ahead_so_the_server_has_it_cached() {
     let server = MockServer::start(vec![Reply::Text("Hi there!".into())]);
     let home = Home::new();
     let global = home.path().join(".flashagent");
     std::fs::create_dir_all(&global).unwrap();
     std::fs::write(global.join("MEMORY.md"), "Writes Rust.\n").unwrap();
-    let term = ready(&home, &server);
+    // The warm-up is off by default because it costs a request; this test is
+    // about what it sends when it is on.
+    let term = ready_with(&home, &server, serde_json::json!({ "auto_warm_prompt_cache": true }));
 
     let deadline = std::time::Instant::now() + WAIT;
     while !server.requests().iter().any(|r| r.is_warm_up()) {
@@ -2998,10 +3000,11 @@ fn the_opening_of_the_first_request_is_sent_ahead_so_the_server_has_it_cached() 
     let real = turn.body["messages"].as_array().unwrap();
     assert_eq!(warm.len(), real.len(), "warm-up {warm:?}\nturn {real:?}");
     assert_eq!(warm[..warm.len() - 1], real[..real.len() - 1], "the warm-up began differently from the turn");
-    let opening = warm.last().unwrap()["content"].as_str().unwrap();
+    let system = real[0]["content"].as_str().unwrap();
+    assert!(system.contains("Writes Rust"), "the memory block is not in the system prompt: {system}");
     let prompt = real.last().unwrap()["content"].as_str().unwrap();
-    assert!(opening.contains("Writes Rust"), "the memory block was not warmed: {opening}");
-    assert!(prompt.starts_with(opening), "the first prompt does not begin with what was warmed:\n{opening}\n---\n{prompt}");
+    assert!(!prompt.contains("Writes Rust"), "the memory block was sent again as a user turn: {prompt}");
+    assert_eq!(warm.last().unwrap()["content"].as_str(), Some("hi"), "the warm-up ends with its one-token opening");
     assert_eq!(warm_ups[0].body["tools"], turn.body["tools"], "the warm-up offered other tools");
     assert_eq!(warm_ups.len(), 1, "the same prefix was warmed twice");
 }

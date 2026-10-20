@@ -144,20 +144,7 @@ impl App {
             self.config.active_profile_mut().model = model.clone();
             self.save_config();
         }
-        self.refresh_welcome(cx.source, cx.mascot_mood);
-
-        let profile = self.config.active_profile();
-        let how = format!("{} \u{b7} {}", profile.protocol.label(), profile.url);
-        let line = match (&discovery, model.is_empty()) {
-            (Some(_), false) => format!("Provider: {} \u{b7} {model} ({how})", switch.name),
-            (Some(_), true) => format!("Provider: {} ({how}) lists no models yet", switch.name),
-            (None, _) => format!("Provider: {} ({how}) did not answer; its models are listed once it does", switch.name),
-        };
-        self.chat.push_system(&line);
-        match discovery {
-            Some(_) if !model.is_empty() => self.notice(format!("Switched to {} \u{b7} {model}", switch.name)),
-            _ => self.notice(format!("Switched to {} \u{b7} /provider goes back", switch.name)),
-        }
+        self.refresh_welcome_state(cx.source, cx.mascot_mood);
         self.renderer.request_reprint();
     }
 

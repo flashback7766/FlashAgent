@@ -448,32 +448,15 @@ impl App {
                 format!("{text}  [{}]", labels.join(", "))
             }
         };
+        self.flush_switch_notice();
         self.chat.push_user(&shown);
-        let content = self.with_memory_if_first(cx, text);
-        let mut user_msg = ChatMessage::user(content);
+        let mut user_msg = ChatMessage::user(text);
         if !self.attachments.is_empty() {
             user_msg.images = self.attachments.drain(..).map(|a| a.data_url).collect();
         }
         self.history.push(user_msg);
         self.begin_snapshot_turn(cx);
         self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
-    }
-
-    /// The memory block goes in front of the first user message, and again
-    /// after compaction took that message away: project instructions must not
-    /// silently leave the context.
-    fn with_memory_if_first(&self, cx: &LoopCtx<'_>, text: String) -> String {
-        let first = !self
-            .history
-            .iter()
-            .any(|m| m.role == flashagent_llm::Role::User && m.content.starts_with(cx.memory_block));
-        if !first || cx.memory_block.is_empty() {
-            text
-        } else if text.trim().is_empty() {
-            cx.memory_block.to_string()
-        } else {
-            format!("{}\n\n---\n\n{text}", cx.memory_block)
-        }
     }
 
     /// Before the message just pushed onto the history.
@@ -522,6 +505,9 @@ impl App {
         cx.tools_arc.set_goal_mode(true);
         self.goal_active = true;
         self.apply_personality();
+        self.refresh_welcome_state(cx.source, cx.mascot_mood);
+        // A switch made before the goal belongs above the goal card, not inside it.
+        self.flush_switch_notice();
 
         let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
         let card_w = (w as usize).saturating_sub(4).clamp(20, 110);
@@ -583,8 +569,7 @@ impl App {
             task_desc,
             flashagent_tui::goal::human_duration(flashagent_tools::GOAL_QUESTION_TIMEOUT),
         );
-        let content = self.with_memory_if_first(cx, autonomous_directive);
-        self.history.push(ChatMessage::user(content));
+        self.history.push(ChatMessage::user(autonomous_directive));
         self.begin_snapshot_turn(cx);
         self.start_turn(cx, goal_budgets);
     }
@@ -682,10 +667,13 @@ impl App {
             self.notice(format!("Unknown effort '{wanted}' · try {}", known.join(", ")));
             return;
         }
+        let changed = self.current_effort != wanted;
         self.current_effort = wanted;
         self.save_live_effort();
-        self.refresh_welcome(cx.source, cx.mascot_mood);
-        self.notice(format!("Thinking effort set to: {}", self.current_effort));
+        self.refresh_welcome_state(cx.source, cx.mascot_mood);
+        if changed {
+            self.remember_effort_switch();
+        }
     }
 
     fn mode_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {

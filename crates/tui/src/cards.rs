@@ -7,6 +7,37 @@ impl App {
         self.animate_welcome(source, mood, None, None);
     }
 
+    /// The model, the provider or the level changed after the conversation
+    /// started: the card at the top says what runs now. Before the first
+    /// message it is the same card, drawn as usual.
+    pub(crate) fn refresh_welcome_state(&mut self, source: &BackendSource, mood: MascotMood) {
+        if !self.chat.has_user_message() {
+            self.animate_welcome(source, mood, None, None);
+            return;
+        }
+        let card = self.welcome_lines(source, mood, None);
+        self.chat.update_welcome_card_state(card);
+    }
+
+    /// The card as it stands now: model, provider, level and the rest.
+    fn welcome_lines(&self, source: &BackendSource, mood: MascotMood, width: Option<usize>) -> Vec<RenderLine> {
+        let (w, h) = crossterm::terminal::size().unwrap_or((100, 24));
+        let th_sum = thinking_summary_str(source, &self.current_effort);
+        welcome_card(&WelcomeCard {
+            model: &self.current_model,
+            provider: Some(&self.config.active_profile().name),
+            cwd: &self.cwd_display,
+            memory_docs: self.memory_docs,
+            thinking: Some(&th_sum),
+            context_window: self.current_context.as_deref(),
+            width: width.unwrap_or(w as usize),
+            height: h as usize,
+            tick: self.tick_n,
+            show_mascot: self.config.show_mascot,
+            mood,
+        })
+    }
+
     /// `width` overrides the terminal's; `reveal_rows` draws only that many rows
     /// for the start-up reveal.
     pub(crate) fn animate_welcome(
@@ -19,21 +50,7 @@ impl App {
         if self.chat.has_user_message() {
             return;
         }
-        let (w, h) = crossterm::terminal::size().unwrap_or((100, 24));
-        let th_sum = thinking_summary_str(source, &self.current_effort);
-        let card = welcome_card(&WelcomeCard {
-            model: &self.current_model,
-            provider: Some(&self.config.active_profile().name),
-            cwd: &self.cwd_display,
-            memory_docs: self.memory_docs,
-            thinking: Some(&th_sum),
-            context_window: self.current_context.as_deref(),
-            width: width.unwrap_or(w as usize),
-            height: h as usize,
-            tick: self.tick_n,
-            show_mascot: self.config.show_mascot,
-            mood,
-        });
+        let card = self.welcome_lines(source, mood, width);
         let card = match reveal_rows {
             Some(rows) => revealed(card, rows),
             None => card,

@@ -223,6 +223,11 @@ impl SettingsView {
                     pct => format!("Enabled (at {pct}%)"),
                 }
             } else { "Disabled".into() }),
+            // Off by default: the warm-up is a request of its own, and only a
+            // local server profits from it.
+            ("Context Auto Warm-up", if self.config.auto_warm_prompt_cache {
+                "Enabled (the prefix is cached before the first message)".into()
+            } else { "Disabled".into() }),
             ("Web tools", if self.config.web_tools { "Enabled (web_fetch, web_search)".into() } else { "Disabled".into() }),
             // Not "on connection failure" any more: the retries also wait out the statuses
 // a gateway returns while it is busy, and zero means zero. A label that named
@@ -445,7 +450,7 @@ impl SettingsView {
                     SettingsAction::None
                 }
                 3 => {
-                    self.config.web_tools = !self.config.web_tools;
+                    self.config.auto_warm_prompt_cache = !self.config.auto_warm_prompt_cache;
                     self.is_dirty = true;
                     SettingsAction::None
                 }
@@ -523,9 +528,10 @@ impl SettingsView {
                 0 => self.cycle_effort(),
                 1 => self.cycle_warn_threshold(),
                 2 => self.config.auto_compact_context = !self.config.auto_compact_context,
-                3 => self.config.web_tools = !self.config.web_tools,
-                4 => self.cycle_network_retries(),
-                5 => self.cycle_sampling(),
+                3 => self.config.auto_warm_prompt_cache = !self.config.auto_warm_prompt_cache,
+                4 => self.config.web_tools = !self.config.web_tools,
+                5 => self.cycle_network_retries(),
+                6 => self.cycle_sampling(),
                 _ => {}
             },
             SettingsTab::Tools => {
@@ -976,6 +982,28 @@ mod tests {
         view.effort_choices = ["auto", "off", "high"].iter().map(|s| s.to_string()).collect();
         view.cycle_effort();
         assert_eq!(view.config.thinking_effort, "auto", "an unsupported saved level must not linger");
+    }
+
+    /// The warm-up of the prompt cache is a request of its own, so it is off
+    /// until the owner turns it on, and it lives with the other context
+    /// settings in the LLM tab.
+    #[test]
+    fn the_cache_warm_up_is_off_until_it_is_turned_on_in_the_llm_tab() {
+        let mut view = SettingsView::new(AppConfig::default(), Vec::new());
+        view.handle_key(KeyCode::Char('4'), KeyModifiers::empty());
+        assert_eq!(view.active_tab, SettingsTab::Reasoning);
+        assert!(!view.config.auto_warm_prompt_cache, "off by default");
+        let rows: Vec<&str> = view.items().into_iter().map(|(name, _)| name).collect();
+        let row = rows.iter().position(|name| *name == "Context Auto Warm-up").expect("the row is there");
+        view.selected_index = row;
+        view.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert!(view.config.auto_warm_prompt_cache, "the row turns it on");
+        let shown = view.items()[row].1.clone();
+        assert!(shown.starts_with("Enabled"), "{shown}");
+        // And back off again.
+        view.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert!(!view.config.auto_warm_prompt_cache);
+        assert!(view.items()[row].1.contains("Disabled"), "{}", view.items()[row].1);
     }
 
     #[test]

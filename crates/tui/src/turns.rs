@@ -354,6 +354,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
             cx.perm.state().set_mode(saved.mode);
             self.current_effort = saved.effort.clone();
             self.max_steps = saved.max_steps;
+            self.refresh_welcome_state(cx.source, cx.mascot_mood);
             if let Some(ledger) = self.goal_ledger.take() {
                 let reason = match &res {
                     Ok((_, r)) => *r,
@@ -378,7 +379,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                 update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                 // The turn just read all of it. A later change (interrupted turn closed,
                 // compaction) makes a new prefix, which is warmed.
-                self.note_prompt_cached(cx.source, cx.perm, cx.memory_block);
+                self.note_prompt_cached(cx.source, cx.perm);
                 self.renderer.request_reprint();
 
                 if reason == DoneReason::Cancelled {

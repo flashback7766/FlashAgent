@@ -449,6 +449,12 @@ pub struct AppConfig {
     pub color_theme: ColorTheme,
     #[serde(default = "default_true")]
     pub auto_compact_context: bool,
+    /// Warms the prompt cache before the first message, so the first request
+    /// does not read the system prompt and the tool schemas from scratch. Off
+    /// by default: it costs a request of its own, and only a server on this
+    /// machine or network can profit from it.
+    #[serde(default)]
+    pub auto_warm_prompt_cache: bool,
     #[serde(default = "default_warn_threshold")]
     pub context_warn_threshold: usize,
     /// 0 chooses by window size.
@@ -638,6 +644,7 @@ impl Default for AppConfig {
             personality: Default::default(),
             color_theme: ColorTheme::default(),
             auto_compact_context: true,
+            auto_warm_prompt_cache: false,
             context_warn_threshold: 70,
             context_compact_threshold: 0,
             auto_save_sessions: true,
@@ -1490,6 +1497,18 @@ mod tests {
         assert_eq!(loaded.goal_max_steps, Some(12));
         assert!(loaded.setup_completed);
         let _ = std::fs::remove_file(&temp);
+    }
+
+    /// The warm-up costs a request of its own, so it is off unless the owner
+    /// asks for it. A config that never heard of the setting stays off.
+    #[test]
+    fn the_prompt_cache_warm_up_is_off_until_it_is_asked_for() {
+        assert!(!AppConfig::default().auto_warm_prompt_cache);
+        let (cfg, rejected) = AppConfig::from_json_str(r#"{}"#);
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert!(!cfg.auto_warm_prompt_cache, "a config without the key keeps the warm-up off");
+        let (on, _) = AppConfig::from_json_str(r#"{"auto_warm_prompt_cache":true}"#);
+        assert!(on.auto_warm_prompt_cache, "and it can be turned on");
     }
 
     #[test]

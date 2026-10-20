@@ -416,6 +416,9 @@ impl App {
         if personality_changed {
             self.apply_personality();
         }
+        // The warm-up was just turned on: the prefix is cached now, not at the
+        // next server poll. Turned off, the running warm-up is dropped.
+        self.warm_prompt_cache(cx.source, cx.perm);
         // Also during /goal, where it is the mode the run hands back.
         self.config.permission_mode = chosen_mode;
         self.save_config();
@@ -441,9 +444,12 @@ impl App {
                 cx.perm.state().set_mode(chosen_mode);
                 self.current_effort = chosen_effort;
                 self.save_live_effort();
+                if previous_effort != self.current_effort {
+                    self.remember_effort_switch();
+                }
             }
         }
-        self.refresh_welcome(cx.source, cx.mascot_mood);
+        self.refresh_welcome_state(cx.source, cx.mascot_mood);
     }
 
     /// Looks up what the channel would install while the card is up.
@@ -597,7 +603,16 @@ impl App {
             cx.tools_arc.set_prompt_tokens(self.prompt_tokens);
         }
         update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-        self.warm_prompt_cache(cx.source, cx.perm, cx.memory_block);
+        self.warm_prompt_cache(cx.source, cx.perm);
+        // The rule waits for the message that first uses the new model: a menu
+        // pick alone must not write above a chat with nothing in it yet.
+        if previous_model != self.current_model && !self.current_model.is_empty() {
+            self.remember_switch(None, true, false);
+        } else if previous_effort != self.current_effort {
+            self.remember_switch(None, false, true);
+        }
+        // The card at the top says what runs now, not what ran at the start.
+        self.refresh_welcome_state(cx.source, cx.mascot_mood);
     }
 
     fn model_menu_key(&mut self, cx: &LoopCtx<'_>, mut menu: SelectMenu<String>, code: KeyCode, mods: KeyModifiers) {
