@@ -97,7 +97,7 @@ impl App {
                 SelectItem::with_description(label, c.description, value)
             })
             .collect();
-        self.open_overlay(Overlay::Palette(SelectMenu::new("Command palette", items).with_noun("commands")));
+        self.open_overlay(Overlay::Palette(SelectMenu::new(flashagent_tui::i18n::tr("Command palette"), items).with_noun(flashagent_tui::select::Noun::COMMANDS)));
     }
 
     pub(crate) fn open_overlay(&mut self, overlay: Overlay) {

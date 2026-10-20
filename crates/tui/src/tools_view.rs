@@ -155,9 +155,11 @@ impl ToolsView {
 
         let on = self.on_count();
         let title = format!(
-            " \x1b[1;38;2;225;175;95mTools{RESET} \x1b[38;2;160;155;145m{} of {} on{RESET} ",
-            on,
-            self.rows.len()
+            " \x1b[1;38;2;225;175;95m{}\x1b[0m \x1b[38;2;160;155;145m{}\x1b[0m ",
+            crate::i18n::tr("Tools"),
+            crate::i18n::tr("{on} of {total} on")
+                .replace("{on}", &on.to_string())
+                .replace("{total}", &self.rows.len().to_string())
         );
         let dashes = box_w.saturating_sub(visible_width(&title) + 1);
         lines.push((LineKind::System, format!("  {BORDER_GOLD}╭─{title}{}╮{RESET}", "─".repeat(dashes))));
@@ -179,7 +181,7 @@ impl ToolsView {
             let what = if row.available {
                 row.description.clone()
             } else {
-                format!("{} (not offered here)", row.description)
+                format!("{} ({})", row.description, crate::i18n::tr("not offered here"))
             };
             let what_styled = if row.available {
                 format!("{TEXT_MUTED}{what}{RESET}")
@@ -189,7 +191,7 @@ impl ToolsView {
             lines.push((LineKind::System, pad_row(&format!("{pointer} {mark_styled} {name_styled}  {what_styled}"))));
         }
         if self.rows.is_empty() {
-            lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}No tools are registered{RESET}"))));
+            lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}{}{RESET}", crate::i18n::tr("No tools are registered")))));
         }
 
         lines.push((LineKind::System, format!("  {BORDER_GOLD}├{}┤{RESET}", "─".repeat(box_w))));

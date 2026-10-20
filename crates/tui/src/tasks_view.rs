@@ -28,10 +28,10 @@ const OUTPUT_ROWS: usize = 14;
 /// A state in a few letters, for the list.
 fn short_state(state: &TaskState) -> String {
     match state {
-        TaskState::Running => "running".into(),
-        TaskState::Exited(Some(code)) => format!("exit {code}"),
-        TaskState::Exited(None) => "signal".into(),
-        TaskState::Killed => "stopped".into(),
+        TaskState::Running => crate::i18n::tr("running").into(),
+        TaskState::Exited(Some(code)) => format!("{} {code}", crate::i18n::tr("exit")),
+        TaskState::Exited(None) => crate::i18n::tr("signal").into(),
+        TaskState::Killed => crate::i18n::tr("stopped").into(),
     }
 }
 
@@ -107,7 +107,7 @@ impl TasksModal {
             let pad = " ".repeat(inner_w.saturating_sub(visible_width(&clipped) + 2));
             (LineKind::System, format!("  {border}\u{2502}{reset} {clipped}{pad} {border}\u{2502}{reset}"))
         };
-        let title = " Background tasks ";
+        let title = format!(" {} ", crate::i18n::tr("Background tasks"));
         let mut lines = vec![(
             LineKind::System,
             format!(
@@ -133,7 +133,7 @@ impl TasksModal {
                 lines.push(row(""));
                 let out: Vec<&str> = output.lines().collect();
                 if out.iter().all(|l| l.trim().is_empty()) {
-                    lines.push(row(&format!("{dim}(no output yet){reset}")));
+                    lines.push(row(&format!("{dim}({}){reset}", crate::i18n::tr("no output yet"))));
                 }
                 for line in &out[out.len().saturating_sub(OUTPUT_ROWS)..] {
                     lines.push(row(&plain(line)));
@@ -141,8 +141,8 @@ impl TasksModal {
                 if task.state == TaskState::Running { vec![("k", "stop it"), ("Esc", "back")] } else { vec![("Esc", "back")] }
             }
             None if self.tasks.is_empty() => {
-                lines.push(row("No background tasks yet."));
-                lines.push(row(&format!("{dim}The agent starts them for servers and long builds; Ctrl+B moves a running command here.{reset}")));
+                lines.push(row(crate::i18n::tr("No background tasks yet.")));
+                lines.push(row(&format!("{dim}{}{reset}", crate::i18n::tr("The agent starts them for servers and long builds; Ctrl+B moves a running command here."))));
                 vec![("Esc", "close")]
             }
             None => {

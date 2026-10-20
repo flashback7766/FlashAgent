@@ -50,14 +50,15 @@ impl SettingsTab {
     }
 
     pub fn label(self) -> &'static str {
+        // The number stays first: it is how the tab is chosen.
         match self {
-            Self::General => "1 General",
-            Self::Updates => "2 Updates",
-            Self::Aesthetics => "3 UI",
-            Self::Reasoning => "4 LLM",
-            Self::Goal => "5 Goal",
-            Self::Tools => "6 Tools",
-            Self::Style => "7 Style",
+            Self::General => crate::i18n::tr("1 General"),
+            Self::Updates => crate::i18n::tr("2 Updates"),
+            Self::Aesthetics => crate::i18n::tr("3 UI"),
+            Self::Reasoning => crate::i18n::tr("4 LLM"),
+            Self::Goal => crate::i18n::tr("5 Goal"),
+            Self::Tools => crate::i18n::tr("6 Tools"),
+            Self::Style => crate::i18n::tr("7 Style"),
         }
     }
 
@@ -106,18 +107,18 @@ fn cycle_choice<T: PartialEq + Copy>(choices: &[Option<T>], current: Option<T>, 
 
 fn goal_minutes_label(minutes: Option<u32>) -> String {
     match minutes {
-        None | Some(0) => "Unlimited".to_string(),
-        Some(m) if m % 60 == 0 => format!("{} h", m / 60),
-        Some(m) => format!("{m} min"),
+        None | Some(0) => crate::i18n::tr("Unlimited").to_string(),
+        Some(m) if m % 60 == 0 => crate::i18n::tr("{} h").replace("{}", &(m / 60).to_string()),
+        Some(m) => crate::i18n::tr("{m} min").replace("{m}", &m.to_string()),
     }
 }
 
 fn goal_tokens_label(tokens: Option<i64>) -> String {
     match tokens {
-        None | Some(0) => "Unlimited".to_string(),
-        Some(t) if t >= 1_000_000 && t % 1_000_000 == 0 => format!("{}M generated tokens", t / 1_000_000),
-        Some(t) if t >= 1_000 => format!("{}k generated tokens", t / 1_000),
-        Some(t) => format!("{t} generated tokens"),
+        None | Some(0) => crate::i18n::tr("Unlimited").to_string(),
+        Some(t) if t >= 1_000_000 && t % 1_000_000 == 0 => crate::i18n::tr("{}M generated tokens").replace("{}", &(t / 1_000_000).to_string()),
+        Some(t) if t >= 1_000 => crate::i18n::tr("{}k generated tokens").replace("{}", &(t / 1_000).to_string()),
+        Some(t) => crate::i18n::tr("{t} generated tokens").replace("{t}", &t.to_string()),
     }
 }
 
@@ -188,96 +189,102 @@ impl SettingsView {
     fn items(&self) -> Vec<(&'static str, String)> {
     match self.active_tab {
         SettingsTab::General => vec![
-            ("Provider", {
+            (crate::i18n::tr("Provider"), {
                 let p = self.config.active_profile();
                 format!("{} \u{b7} {}", p.name, p.url)
             }),
-            ("Active model", {
+            (crate::i18n::tr("Active model"), {
                 let model = &self.config.active_profile().model;
-                if model.is_empty() { "(auto-detected)".to_string() } else { model.clone() }
+                if model.is_empty() { crate::i18n::tr("(auto-detected)").to_string() } else { model.clone() }
             }),
-            ("Permission mode", crate::i18n::tr(self.config.permission_mode.label()).to_string()),
-            ("Safe mode", if self.config.safe_mode {
-                "On (reading and editing inside the project; no shell, no web, no subagents)".into()
-            } else { "Off".into() }),
-            ("Crash reports", if self.config.crash_reports {
-                "On (a backtrace is written to ~/.flashagent/crash.log)".into()
-            } else { "Off (nothing is written when the app falls over)".into() }),
-            ("Auto-save sessions", if self.config.auto_save_sessions { "Enabled (auto-resume)".into() } else { "Disabled".into() }),
-            ("External editor", self.config.external_editor.clone()),
+            (crate::i18n::tr("Permission mode"), crate::i18n::tr(self.config.permission_mode.label()).to_string()),
+            (crate::i18n::tr("Safe mode"), if self.config.safe_mode {
+                crate::i18n::tr("On (reading and editing inside the project; no shell, no web, no subagents)").into()
+            } else { crate::i18n::tr("Off").into() }),
+            (crate::i18n::tr("Crash reports"), if self.config.crash_reports {
+                crate::i18n::tr("On (a backtrace is written to ~/.flashagent/crash.log)").into()
+            } else { crate::i18n::tr("Off (nothing is written when the app falls over)").into() }),
+            (crate::i18n::tr("Auto-save sessions"), if self.config.auto_save_sessions { crate::i18n::tr("Enabled (auto-resume)").into() } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("External editor"), self.config.external_editor.clone()),
             // The language of what the user reads. It applies at once: the
             // hints, /help and the tips speak it from the next frame. The
             // Settings screen stays English for now: half of it in two
             // languages is worse than all of it in one.
             (
-                "Interface language",
+                crate::i18n::tr("Interface language"),
                 crate::i18n::Lang::from_code(&self.config.interface_language).label().to_string(),
             ),
-            ("Setup wizard", "Run the setup again; a new server is added".into()),
+            (crate::i18n::tr("Setup wizard"), crate::i18n::tr("Run the setup again; a new server is added").into()),
         ],
         SettingsTab::Updates => vec![
-            ("Auto-update *", if self.config.auto_check_updates { "On (installs in the background)".into() } else { "Off (/update only)".into() }),
-            ("Release channel", self.config.update_channel.label().to_string()),
-            ("Check for updates", self.update_check_status.clone().unwrap_or_else(|| "Ask GitHub for the newest release".into())),
+            (crate::i18n::tr("Auto-update *"), if self.config.auto_check_updates { crate::i18n::tr("On (installs in the background)").into() } else { crate::i18n::tr("Off (/update only)").into() }),
+            (crate::i18n::tr("Release channel"), self.config.update_channel.label().to_string()),
+            (crate::i18n::tr("Check for updates"), self.update_check_status.clone().unwrap_or_else(|| crate::i18n::tr("Ask GitHub for the newest release").into())),
         ],
         SettingsTab::Aesthetics => vec![
-            ("Swift mascot", if self.config.show_mascot { "Enabled (animated)".into() } else { "Disabled".into() }),
-            ("Developer tips", if self.config.show_tips { "Enabled (rotating deck)".into() } else { "Disabled".into() }),
-            ("Prefill / cache", if self.config.show_ttft { "Enabled (TTFT and t/s on a local server, cache share on a hosted API)".into() } else { "Disabled".into() }),
-            ("Generation speed", if self.config.show_tokens { "Enabled (t/s while the model writes)".into() } else { "Disabled".into() }),
-            ("Clipboard toasts", if self.config.show_toasts { "Enabled".into() } else { "Disabled".into() }),
-            ("Animations", if self.config.animations { "Enabled (sweeps, pulses, unfolding panels)".into() } else { "Reduced (spinners only)".into() }),
-            ("Color theme", self.config.color_theme.label().to_string()),
+            (crate::i18n::tr("Swift mascot"), if self.config.show_mascot { crate::i18n::tr("Enabled (animated)").into() } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Developer tips"), if self.config.show_tips { crate::i18n::tr("Enabled (rotating deck)").into() } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Prefill / cache"), if self.config.show_ttft { crate::i18n::tr("Enabled (TTFT and t/s on a local server, cache share on a hosted API)").into() } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Generation speed"), if self.config.show_tokens { crate::i18n::tr("Enabled (t/s while the model writes)").into() } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Clipboard toasts"), if self.config.show_toasts { crate::i18n::tr("Enabled").into() } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Animations"), if self.config.animations { crate::i18n::tr("Enabled (sweeps, pulses, unfolding panels)").into() } else { crate::i18n::tr("Reduced (spinners only)").into() }),
+            (crate::i18n::tr("Color theme"), crate::i18n::tr(self.config.color_theme.label()).to_string()),
         ],
         SettingsTab::Reasoning => vec![
-            ("Thinking effort", self.config.thinking_effort.clone()),
-            ("Context alert", if self.config.context_warn_threshold > 0 { format!("Warn at {}%", self.config.context_warn_threshold) } else { "Disabled".into() }),
-            ("Auto-compact history", if self.config.auto_compact_context {
+            (crate::i18n::tr("Thinking effort"), self.config.thinking_effort.clone()),
+            (crate::i18n::tr("Context alert"), if self.config.context_warn_threshold > 0 { crate::i18n::tr("Warn at {}%").replace("{}", &self.config.context_warn_threshold.to_string()) } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Auto-compact history"), if self.config.auto_compact_context {
                 // Zero follows the window; "0%" would read as "always".
                 match self.config.context_compact_threshold {
-                    0 => format!("Enabled (auto: {}% for this window)", flashagent_core::default_compact_threshold(self.context_capacity)),
-                    pct => format!("Enabled (at {pct}%)"),
+                    0 => crate::i18n::tr("Enabled (auto: {}% for this window)").replace("{}", &flashagent_core::default_compact_threshold(self.context_capacity).to_string()),
+                    pct => crate::i18n::tr("Enabled (at {pct}%)").replace("{pct}", &pct.to_string()),
                 }
             } else { "Disabled".into() }),
             // Off by default: the warm-up is a request of its own, and only a
             // local server profits from it.
-            ("Context Auto Warm-up", if self.config.auto_warm_prompt_cache {
-                "Enabled (the prefix is cached before the first message)".into()
-            } else { "Disabled".into() }),
-            ("Web tools", if self.config.web_tools { "Enabled (web_fetch, web_search)".into() } else { "Disabled".into() }),
+            (crate::i18n::tr("Context Auto Warm-up"), if self.config.auto_warm_prompt_cache {
+                crate::i18n::tr("Enabled (the prefix is cached before the first message)").into()
+            } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Web tools"), if self.config.web_tools { crate::i18n::tr("Enabled (web_fetch, web_search)").into() } else { crate::i18n::tr("Disabled").into() }),
             // Not "on connection failure" any more: the retries also wait out the statuses
 // a gateway returns while it is busy, and zero means zero. A label that named
 // one of the two reasons was wrong about the other, and the setting it
 // describes now does exactly what it says.
-("Network retries", {
-                let n = crate::plural(self.config.network_retries, "retry", "retries");
+(crate::i18n::tr("Network retries"), {
+                let n = crate::i18n::count(
+                    self.config.network_retries as u64,
+                    ("retry", "retries"),
+                    ("повтор", "повтора", "повторов"),
+                );
                 match self.config.network_retries {
-                    0 => "None · a rate limit is reported instead of waited out".into(),
-                    _ => format!("{n} · before anything is generated, so never twice"),
+                    0 => crate::i18n::tr("None · a rate limit is reported instead of waited out").into(),
+                    _ => crate::i18n::tr("{n} · before anything is generated, so never twice").replace("{n}", &n),
                 }
             }),
             // Last, and for those who know what the numbers do.
-            ("Sampling (advanced)", {
+            (crate::i18n::tr("Sampling (advanced)"), {
                 // Mirrors `Client::set_user_sampling`: the presets are tuned for local models.
                 let maker_tuned = matches!(self.config.active_profile().protocol, flashagent_llm::ApiProtocol::Anthropic | flashagent_llm::ApiProtocol::Gemini);
                 if maker_tuned && self.config.sampling_preset != flashagent_core::SamplingPreset::Custom {
-                    format!("{} · {} chooses its own", self.config.sampling_preset.label(), self.config.active_profile().protocol.label())
+                    crate::i18n::tr("{preset} · {protocol} chooses its own")
+                        .replace("{preset}", crate::i18n::tr(self.config.sampling_preset.label()))
+                        .replace("{protocol}", self.config.active_profile().protocol.label())
                 } else {
-                    format!("{} · temperature {:.2}", self.config.sampling_preset.label(), self.config.temperature)
+                    crate::i18n::tr("{} · temperature {:.2}").replace("{}", crate::i18n::tr(self.config.sampling_preset.label())).replace("{:.2}", &format!("{:.2}", self.config.temperature))
                 }
             }),
         ],
         SettingsTab::Goal => vec![
-            ("Step limit", match self.config.goal_max_steps {
-                None | Some(0) => "Unlimited".to_string(),
-                Some(n) => crate::plural(n as usize, "step", "steps"),
+            (crate::i18n::tr("Step limit"), match self.config.goal_max_steps {
+                None | Some(0) => crate::i18n::tr("Unlimited").to_string(),
+                Some(n) => crate::i18n::count(n as u64, ("step", "steps"), ("шаг", "шага", "шагов")),
             }),
-            ("Time limit", goal_minutes_label(self.config.goal_max_minutes)),
-            ("Token limit", goal_tokens_label(self.config.goal_max_output_tokens)),
+            (crate::i18n::tr("Time limit"), goal_minutes_label(self.config.goal_max_minutes)),
+            (crate::i18n::tr("Token limit"), goal_tokens_label(self.config.goal_max_output_tokens)),
         ],
         SettingsTab::Style => {
             let p = &self.config.personality;
-            let mut rows = vec![("Base style and tone", format!("{} — {}", p.base.label(), p.base.blurb()))];
+            let mut rows = vec![(crate::i18n::tr("Base style and tone"), format!("{} — {}", crate::i18n::tr(p.base.label()), crate::i18n::tr(p.base.blurb())))];
             for t in PersonalityTrait::ALL {
                 let level = p.level(t);
                 let blurb = t.blurb(level);
@@ -289,13 +296,17 @@ impl SettingsView {
             rows
         }
         SettingsTab::Tools => vec![
-            ("Toolset profile", self.config.toolset_profile.label().to_string()),
-            ("Tools on/off", {
+            (crate::i18n::tr("Toolset profile"), crate::i18n::tr(self.config.toolset_profile.label()).to_string()),
+            (crate::i18n::tr("Tools on/off"), {
                 let off = self.config.disabled_tools.len();
-                if off == 0 { "Every tool is on".into() } else { format!("{} switched off", crate::plural(off, "tool", "tools")) }
+                if off == 0 {
+                    crate::i18n::tr("Every tool is on").into()
+                } else {
+                    crate::i18n::tr("{} switched off").replace("{}", &crate::i18n::count(off as u64, ("tool", "tools"), ("инструмент", "инструмента", "инструментов")))
+                }
             }),
-            ("MCP servers", "Configured servers and the marketplace".into()),
-            ("Run tool test", self.tool_test_status.clone().unwrap_or_else(|| "Probe function calling".into())),
+            (crate::i18n::tr("MCP servers"), crate::i18n::tr("Configured servers and the marketplace").into()),
+            (crate::i18n::tr("Run tool test"), self.tool_test_status.clone().unwrap_or_else(|| crate::i18n::tr("Probe function calling").into())),
         ],
     }
     }
@@ -702,8 +713,8 @@ impl SettingsView {
             format!("  {border_color}│{reset} {clipped}{pad} {border_color}│{reset}")
         };
 
-        let title_styled = " \x1b[1;38;2;225;175;95mSettings\x1b[0m ";
-        let title_vis = crate::visible_width(title_styled);
+        let title_styled = format!(" \x1b[1;38;2;225;175;95m{}\x1b[0m ", crate::i18n::tr("Settings"));
+        let title_vis = crate::visible_width(&title_styled);
         let dashes = box_w.saturating_sub(title_vis + 1);
         lines.push((
             LineKind::System,
@@ -762,14 +773,20 @@ impl SettingsView {
         }
 
         let note = match self.active_tab {
-            SettingsTab::Updates => "\x1b[38;2;225;175;95m* Takes effect after a restart\x1b[0m",
-            SettingsTab::General => "\x1b[38;2;135;130;125m\u{2190}/\u{2192} on Provider switches between the saved ones; Enter edits them.\x1b[0m",
+            SettingsTab::Updates => format!("\x1b[38;2;225;175;95m{}\x1b[0m", crate::i18n::tr("* Takes effect after a restart")),
+            SettingsTab::General => format!(
+                "\x1b[38;2;135;130;125m{}\x1b[0m",
+                crate::i18n::tr("←/→ on Provider switches between the saved ones; Enter edits them.")
+            ),
             SettingsTab::Style => {
-                "\x1b[38;2;135;130;125mTone only — tools and code are unaffected. Applies from your next message.\x1b[0m"
+                format!(
+                    "\x1b[38;2;135;130;125m{}\x1b[0m",
+                    crate::i18n::tr("Tone only — tools and code are unaffected. Applies from your next message.")
+                )
             }
-            _ => "",
+            _ => String::new(),
         };
-        for row in crate::wrap_styled(note, inner_text_w.max(1)) {
+        for row in crate::wrap_styled(&note, inner_text_w.max(1)) {
             lines.push((LineKind::System, pad_row(&row)));
         }
         if note.is_empty() {

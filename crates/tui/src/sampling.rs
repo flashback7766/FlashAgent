@@ -245,7 +245,7 @@ impl SamplingView {
         let reset = "\x1b[0m";
         let inner_w = width.saturating_sub(6).clamp(20, 110);
 
-        let title = " Sampling parameters ";
+        let title = format!(" {} ", crate::i18n::tr("Sampling parameters"));
         let dash_count = inner_w.saturating_sub(title.chars().count() + 1);
         lines.push((
             LineKind::System,
@@ -265,7 +265,7 @@ impl SamplingView {
 
         let is_preset_sel = self.selected_index == 0;
         let ptr0 = if is_preset_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
-        let preset_val = format!("[ {} ]", self.preset.label());
+        let preset_val = format!("[ {} ]", crate::i18n::tr(self.preset.label()));
         let (label0, val0) = if is_preset_sel {
             (
                 format!("\x1b[1;38;2;240;235;225m{:<18}\x1b[0m", "Preset"),
@@ -280,12 +280,12 @@ impl SamplingView {
         lines.push((LineKind::System, pad_row(&format!("{ptr0} {label0} {val0}"))));
 
         let fields = [
-            (1, "Temperature", &self.temp_buf, "0.00..2.00 (coding: 0.60, mtp: 0.30, chat: 0.80, precise: 0.10)"),
-            (2, "Top P", &self.top_p_buf, "0.00..1.00 (coding: 0.95, mtp: 0.90, precise: 0.75)"),
-            (3, "Top K", &self.top_k_buf, "0..500     (coding: 20, mtp: 40, chat: 50, precise: 10)"),
-            (4, "Repeat penalty", &self.repeat_penalty_buf, "0.00..2.00 (coding: 1.00, mtp: 1.02, gemma: 1.08, chat: 1.10)"),
-            (5, "Presence penalty", &self.presence_penalty_buf, "-2.00..2.00 (chat: 0.10, mtp-chat: 0.05, default: 0.00)"),
-            (6, "Min P", &self.min_p_buf, "0.00..1.00 (mtp-code: 0.05, mtp: 0.03, default: 0.00)"),
+            (1, crate::i18n::tr("Temperature"), &self.temp_buf, "0.00..2.00 (coding: 0.60, mtp: 0.30, chat: 0.80, precise: 0.10)"),
+            (2, crate::i18n::tr("Top P"), &self.top_p_buf, "0.00..1.00 (coding: 0.95, mtp: 0.90, precise: 0.75)"),
+            (3, crate::i18n::tr("Top K"), &self.top_k_buf, "0..500     (coding: 20, mtp: 40, chat: 50, precise: 10)"),
+            (4, crate::i18n::tr("Repeat penalty"), &self.repeat_penalty_buf, "0.00..2.00 (coding: 1.00, mtp: 1.02, gemma: 1.08, chat: 1.10)"),
+            (5, crate::i18n::tr("Presence penalty"), &self.presence_penalty_buf, "-2.00..2.00 (chat: 0.10, mtp-chat: 0.05, default: 0.00)"),
+            (6, crate::i18n::tr("Min P"), &self.min_p_buf, "0.00..1.00 (mtp-code: 0.05, mtp: 0.03, default: 0.00)"),
         ];
 
         for (idx, label, buf, range_hint) in fields {

@@ -29,9 +29,9 @@ impl McpViewTab {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Overview => "1 Overview",
-            Self::Servers => "2 Servers",
-            Self::Marketplace => "3 Marketplace",
+            Self::Overview => crate::i18n::tr("1 Overview"),
+            Self::Servers => crate::i18n::tr("2 Servers"),
+            Self::Marketplace => crate::i18n::tr("3 Marketplace"),
         }
     }
 
@@ -186,12 +186,17 @@ impl McpModal {
         };
 
         // The heading shrinks first; a sheared box is worse than a shorter name.
-        let title = [" Model Context Protocol (MCP) ", " MCP "]
-            .into_iter()
+        let titles = [
+            format!(" {} ", crate::i18n::tr("Model Context Protocol (MCP)")),
+            format!(" {} ", crate::i18n::tr("MCP")),
+        ];
+        let title = titles
+            .iter()
             .find(|t| visible_width(t) < box_w.saturating_sub(1))
-            .unwrap_or(" MCP ");
+            .cloned()
+            .unwrap_or_else(|| format!(" {} ", crate::i18n::tr("MCP")));
         let title_styled = format!("\x1b[1;38;2;225;175;95m{title}\x1b[0m");
-        let dashes = box_w.saturating_sub(visible_width(title) + 1);
+        let dashes = box_w.saturating_sub(visible_width(&title) + 1);
         lines.push((
             LineKind::System,
             format!("  {border_color}╭─{title_styled}{border_color}{}╮{reset}", "─".repeat(dashes)),
@@ -226,13 +231,16 @@ impl McpModal {
 
         match self.active_tab {
             McpViewTab::Overview => {
-                lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}Connect local tool providers and external servers via JSON-RPC 2.0{RESET}"))));
+                lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}{}{RESET}", crate::i18n::tr("Connect local tool providers and external servers via JSON-RPC 2.0")))));
                 lines.push((LineKind::System, pad_row("")));
 
                 let active_count = self.servers.iter().filter(|s| s.state == ServerConnectionState::Active).count();
                 let total_tools: usize = self.servers.iter().map(|s| s.tool_count).sum();
                 let stats = format!(
-                    "{TEXT_BRIGHT}Configured:{RESET} {}  ·  {TEXT_GREEN}Connected:{RESET} {}  ·  {TEXT_CYAN}Tools found:{RESET} {}",
+                    "{TEXT_BRIGHT}{}{RESET} {}  ·  {TEXT_GREEN}{}{RESET} {}  ·  {TEXT_CYAN}{}{RESET} {}",
+                    crate::i18n::tr("Configured:"),
+                    crate::i18n::tr("Connected:"),
+                    crate::i18n::tr("Tools found:"),
                     self.servers.len(),
                     active_count,
                     total_tools
@@ -240,17 +248,17 @@ impl McpModal {
                 lines.push((LineKind::System, pad_row(&stats)));
 
                 let paths_display = if self.loaded_paths.is_empty() {
-                    "none (looked for .mcp.json and ~/.flashagent/mcp.json)".to_string()
+                    crate::i18n::tr("none (looked for .mcp.json and ~/.flashagent/mcp.json)").to_string()
                 } else {
                     self.loaded_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
                 };
-                lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}Config files: {paths_display}{RESET}"))));
+                lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}{} {paths_display}{RESET}", crate::i18n::tr("Config files:")))));
                 lines.push((LineKind::System, pad_row("")));
 
                 let actions = [
-                    ("Browse configured servers", "Tools, status and ping time"),
-                    ("Curated extensions marketplace", "SQLite, GitHub, Postgres and more"),
-                    ("Reload MCP configurations", "Restart child processes and rediscover tools"),
+                    (crate::i18n::tr("Browse configured servers"), crate::i18n::tr("Tools, status and ping time")),
+                    (crate::i18n::tr("Curated extensions marketplace"), crate::i18n::tr("SQLite, GitHub, Postgres and more")),
+                    (crate::i18n::tr("Reload MCP configurations"), crate::i18n::tr("Restart child processes and rediscover tools")),
                 ];
                 for (idx, (action, desc)) in actions.iter().enumerate() {
                     let is_sel = idx == self.selected_index;
@@ -265,9 +273,9 @@ impl McpModal {
             }
             McpViewTab::Servers => {
                 if self.servers.is_empty() {
-                    lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}No MCP servers configured yet in .mcp.json or ~/.flashagent/mcp.json{RESET}"))));
+                    lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}{}{RESET}", crate::i18n::tr("No MCP servers configured yet in .mcp.json or ~/.flashagent/mcp.json")))));
                     lines.push((LineKind::System, pad_row("")));
-                    lines.push((LineKind::System, pad_row(&format!("{TEXT_CYAN}Press Tab or 3 to browse the marketplace{RESET}"))));
+                    lines.push((LineKind::System, pad_row(&format!("{TEXT_CYAN}{}{RESET}", crate::i18n::tr("Press Tab or 3 to browse the marketplace")))));
                 } else {
                     for (idx, s) in self.servers.iter().enumerate() {
                         let is_sel = idx == self.selected_index;
