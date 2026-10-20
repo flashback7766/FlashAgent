@@ -564,6 +564,7 @@ static RU: &[(&str, &str)] = &[
     ("more matches", "ещё совпадений"),
     ("Not edited:", "Не изменено:"),
     ("Waiting on", "Ждём"),
+    ("Context compacted: {replaced} messages became a summary, about {saved} tokens freed. The full transcript is in the session file.", "Контекст сжат: {replaced} сообщений заменились сводкой, освобождено примерно {saved} токенов. Полный архив — в файле сессии."),
     // --- What the app says ---
     ("Settings not saved: {e}", "Настройки не сохранены: {e}"),
     ("Failed to launch external editor: {err}", "Не удалось открыть внешний редактор: {err}"),
