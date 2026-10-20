@@ -60,7 +60,7 @@ pub fn provider_menu(config: &AppConfig) -> SelectMenu<String> {
     }
     items.push(SelectItem::with_description("+ Add a provider", "a local server or a cloud API, set up step by step", ADD.to_string()));
     items.push(SelectItem::with_description("+ Edit providers", "address, protocol, key and model of each; delete one", MANAGE.to_string()));
-    let mut menu = SelectMenu::new("Switch provider", items).with_noun("providers");
+    let mut menu = SelectMenu::new(crate::i18n::tr("Switch provider"), items).with_noun(crate::select::Noun::PROVIDERS);
     menu.uncounted = 2;
     menu.select_by_value(&if config.run_provider.is_some() { THIS_RUN.to_string() } else { in_use.name.clone() });
     menu

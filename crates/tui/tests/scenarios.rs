@@ -3812,6 +3812,13 @@ fn the_interface_speaks_the_language_the_config_names() {
     ask(&term, "hello", "Hello.");
     let system = server.turns()[0].body["messages"][0]["content"].as_str().unwrap_or_default().to_string();
     assert!(system.contains("You are"), "the system prompt was translated:\n{system}");
+
+    // The Settings screen speaks it too.
+    term.send(TAB);
+    let settings = term.wait_for("Настройки", WAIT);
+    assert!(settings.contains("Провайдер"), "the settings rows are not in Russian:\n{settings}");
+    assert!(settings.contains("Общие"), "the tabs are not in Russian:\n{settings}");
+    term.send(ESC);
     quit(&mut term);
 }
 

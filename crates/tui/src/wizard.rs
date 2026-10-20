@@ -263,10 +263,10 @@ impl SetupWizard {
         self.available_models = filtered_models.iter().map(|m| m.id.clone()).collect();
         let loaded_count = self.discovered_models.iter().filter(|m| m.is_loaded).count();
         let status = if is_lm && loaded_count > 0 {
-            format!("Connected ({loaded_count} loaded {} in LM Studio)", if loaded_count == 1 { "model" } else { "models" })
+            crate::i18n::tr("Connected ({loaded_count} loaded {models} in LM Studio)").replace("{loaded_count}", &loaded_count.to_string()).replace("{models}", crate::i18n::tr(if loaded_count == 1 { "model" } else { "models" }))
         } else {
             let n = self.available_models.len();
-            format!("Connected ({n} {} found)", if n == 1 { "model" } else { "models" })
+            crate::i18n::tr("Connected ({n} {models} found)").replace("{n}", &n.to_string()).replace("{models}", crate::i18n::tr(if n == 1 { "model" } else { "models" }))
         };
         self.connection_status = Some(status);
         let saved = self.available_models.iter().position(|m| *m == self.profile.model);
@@ -453,7 +453,7 @@ impl SetupWizard {
             if takes_text {
                 match crate::clipboard::get_clipboard_text() {
                     Some(text) => self.handle_paste(&text),
-                    None => self.connection_status = Some("The clipboard has no text to paste".to_string()),
+                    None => self.connection_status = Some(crate::i18n::tr("The clipboard has no text to paste").to_string()),
                 }
             }
             return None;
@@ -516,7 +516,7 @@ impl SetupWizard {
                 KeyCode::Enter => {
                     let mut trimmed = self.custom_url.trim().to_string();
                     if trimmed.is_empty() {
-                        self.connection_status = Some("Please enter an endpoint URL before continuing".to_string());
+                        self.connection_status = Some(crate::i18n::tr("Please enter an endpoint URL before continuing").to_string());
                         return None;
                     }
                     if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
@@ -581,7 +581,7 @@ impl SetupWizard {
             match code {
                 KeyCode::Enter => {
                     if self.key_missing() {
-                        self.connection_status = Some("API key is required for cloud providers. Please paste your key.".to_string());
+                        self.connection_status = Some(crate::i18n::tr("API key is required for cloud providers. Please paste your key.").to_string());
                         return None;
                     }
                     self.sync_api_key();
@@ -806,8 +806,8 @@ impl SetupWizard {
         let reset = "\x1b[0m";
         let inner_w = width.saturating_sub(6).clamp(20, 110);
 
-        let what = if self.provider_only { "Add a provider" } else { "FlashAgent setup" };
-        let title = format!(" {what} \u{b7} step {} of {} ", self.step_number(self.step), self.total_steps());
+        let what = if self.provider_only { crate::i18n::tr("Add a provider") } else { crate::i18n::tr("FlashAgent setup") };
+        let title = format!(" {what} \u{b7} {}", crate::i18n::tr("step {} of {}").replace("{}", &self.step_number(self.step).to_string()).replace("{}", &self.total_steps().to_string()));
         let dash_count = inner_w.saturating_sub(title.chars().count() + 1);
         lines.push(format!("  {border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)));
 
@@ -833,8 +833,8 @@ impl SetupWizard {
 
         match self.step {
             0 => {
-                lines.push(pad_row(&heading(0, "Choose your model server")));
-                prose(&mut lines, "", "\x1b[38;2;160;155;145m", "Where does your model run? A local server needs no key.");
+                lines.push(pad_row(&heading(0, crate::i18n::tr("Choose your model server"))));
+                prose(&mut lines, "", "\x1b[38;2;160;155;145m", crate::i18n::tr("Where does your model run? A local server needs no key."));
                 lines.push(pad_row(""));
 
                 let presets = BackendPreset::all();
@@ -873,7 +873,7 @@ impl SetupWizard {
                 let is_custom_sel = self.is_custom();
                 let ptr = if is_custom_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
                 let placeholder_color = "\x1b[38;2;68;65;62m";
-                let placeholder_text = "type its URL";
+                let placeholder_text = crate::i18n::tr("type its URL");
                 let custom_row = if self.custom_url.is_empty() {
                     if is_custom_sel {
                         format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<name_w$}\x1b[0m \x1b[7m \x1b[27m{placeholder_color}{placeholder_text}\x1b[0m", "Custom")
@@ -899,8 +899,8 @@ impl SetupWizard {
                 // What the chosen row is, and how it will be spoken to.
                 let about = match self.preset() {
                     Some(p) => format!("{} \u{b7} {}", p.description, p.protocol.label()),
-                    None if self.custom_url.is_empty() => "Any server's address, e.g. http://localhost:8080/v1".to_string(),
-                    None => format!("Spoken to as {} \u{b7} Tab changes it", self.profile.protocol.label()),
+                    None if self.custom_url.is_empty() => crate::i18n::tr("Any server's address, e.g. http://localhost:8080/v1").to_string(),
+                    None => crate::i18n::tr("Spoken to as {protocol} \u{b7} Tab changes it").replace("{protocol}", self.profile.protocol.label()),
                 };
                 for row in crate::wrap_styled(&format!("\x1b[38;2;135;130;125m{about}\x1b[0m"), inner_w.saturating_sub(6).max(1)) {
                     lines.push(pad_row(&format!("  {row}")));
@@ -908,61 +908,61 @@ impl SetupWizard {
 
                 if let Some(ref st) = self.connection_status {
                     lines.push(pad_row(""));
-                    lines.push(pad_row(&format!("Status: {st}")));
+                    lines.push(pad_row(&format!("{} {st}", crate::i18n::tr("Status:"))));
                 }
             }
             1 => {
-                lines.push(pad_row(&heading(1, "API key")));
+                lines.push(pad_row(&heading(1, crate::i18n::tr("API key"))));
                 let env_key = self.env_key();
                 if let Some(var) = env_key {
                     lines.push(pad_row(&format!("\x1b[38;2;145;205;140mFound {var} in your environment.\x1b[0m")));
                     lines.push(pad_row(""));
-                    prose(&mut lines, "  ", "\x1b[38;2;160;155;145m", "Press Enter to use it, or paste a key to save one for this provider.");
+                    prose(&mut lines, "  ", "\x1b[38;2;160;155;145m", crate::i18n::tr("Press Enter to use it, or paste a key to save one for this provider."));
                 } else if self.key_required() {
-                    lines.push(pad_row("\x1b[38;2;225;175;95mThis provider needs an API key.\x1b[0m"));
+                    lines.push(pad_row(&format!("\x1b[38;2;225;175;95m{}\x1b[0m", crate::i18n::tr("This provider needs an API key."))));
                     lines.push(pad_row(""));
-                    lines.push(pad_row("  \x1b[38;2;160;155;145mHow to get your API key:\x1b[0m"));
+                    lines.push(pad_row(&format!("  \x1b[38;2;160;155;145m{}\x1b[0m", crate::i18n::tr("How to get your API key:"))));
                     if self.profile.url.contains("openrouter.ai") {
-                        lines.push(pad_row("    1. Open \x1b[1;38;2;145;205;140mhttps://openrouter.ai/keys\x1b[0m in your browser"));
-                        lines.push(pad_row("    2. Create a key and copy it (format: \x1b[38;2;175;170;225msk-or-v1-...\x1b[0m)"));
-                        lines.push(pad_row("    3. Paste or type your key below:"));
+                        lines.push(pad_row(&format!("    {} \x1b[1;38;2;145;205;140mhttps://openrouter.ai/keys\x1b[0m {}", crate::i18n::tr("1. Open"), crate::i18n::tr("in your browser"))));
+                        lines.push(pad_row(&format!("    {} ({}: \x1b[38;2;175;170;225msk-or-v1-...\x1b[0m)", crate::i18n::tr("2. Create a key and copy it"), crate::i18n::tr("format"))));
+                        lines.push(pad_row(crate::i18n::tr("3. Paste or type your key below:")));
                     } else {
-                        lines.push(pad_row("    1. Open your provider account / API dashboard"));
-                        lines.push(pad_row("    2. Copy your Secret / Bearer API token"));
+                        lines.push(pad_row(crate::i18n::tr("1. Open your provider account / API dashboard")));
+                        lines.push(pad_row(crate::i18n::tr("2. Copy your Secret / Bearer API token")));
                         lines.push(pad_row("    3. Paste or type your key below:"));
                     }
                     if let Some(var) = self.profile.key_env().first() {
-                        lines.push(pad_row(&format!("  \x1b[38;2;135;130;125mOr set {var}: FlashAgent reads it when no key is saved.\x1b[0m")));
+                        lines.push(pad_row(&format!("  \x1b[38;2;135;130;125m{}\x1b[0m", crate::i18n::tr("Or set {var}: FlashAgent reads it when no key is saved.").replace("{var}", var))));
                     }
                 } else if self.is_cloud_backend() {
-                    lines.push(pad_row("\x1b[38;2;225;175;95mA server on the internet usually wants a key.\x1b[0m"));
+                    lines.push(pad_row(&format!("\x1b[38;2;225;175;95m{}\x1b[0m", crate::i18n::tr("A server on the internet usually wants a key."))));
                     lines.push(pad_row(""));
-                    prose(&mut lines, "  ", "\x1b[38;2;160;155;145m", "Paste it below, or press Enter if this one takes none.");
+                    prose(&mut lines, "  ", "\x1b[38;2;160;155;145m", crate::i18n::tr("Paste it below, or press Enter if this one takes none."));
                 } else {
-                    lines.push(pad_row("\x1b[38;2;145;205;140mA server on your network usually needs no key.\x1b[0m"));
+                    lines.push(pad_row(&format!("\x1b[38;2;145;205;140m{}\x1b[0m", crate::i18n::tr("A server on your network usually needs no key."))));
                     lines.push(pad_row(""));
-                    prose(&mut lines, "  ", "\x1b[38;2;160;155;145m", "If your server uses Bearer auth, enter it below.");
-                    prose(&mut lines, "  ", "\x1b[38;2;135;130;125m", "Otherwise, leave empty and press Enter to continue.");
+                    prose(&mut lines, "  ", "\x1b[38;2;160;155;145m", crate::i18n::tr("If your server uses Bearer auth, enter it below."));
+                    prose(&mut lines, "  ", "\x1b[38;2;135;130;125m", crate::i18n::tr("Otherwise, leave empty and press Enter to continue."));
                 }
                 lines.push(pad_row(""));
 
                 let placeholder_color = "\x1b[38;2;68;65;62m";
                 let key_display = if self.api_key_input.is_empty() {
                     let placeholder = if env_key.is_some() {
-                        "Enter uses the environment's key"
+                        crate::i18n::tr("Enter uses the environment's key")
                     } else if self.key_required() {
-                        "Paste API key here"
+                        crate::i18n::tr("Paste API key here")
                     } else {
-                        "Enter API key here (Enter to skip)"
+                        crate::i18n::tr("Enter API key here (Enter to skip)")
                     };
                     format!("\x1b[7m \x1b[27m{placeholder_color}{placeholder}\x1b[0m")
                 } else {
                     // The length shows that a paste landed, and whether it landed twice.
                     let masked = mask_api_key(&self.api_key_input);
-                    let count = crate::plural(self.api_key_input.chars().count(), "character", "characters");
+                    let count = crate::i18n::count(self.api_key_input.chars().count() as u64, ("character", "characters"), ("символ", "символа", "символов"));
                     format!("\x1b[1;38;2;225;175;95m{masked}\x1b[7m \x1b[27m\x1b[0m \x1b[38;2;135;130;125m({count})\x1b[0m")
                 };
-                lines.push(pad_row(&format!("  \x1b[1;38;2;240;235;225mAPI Key:\x1b[0m {key_display}")));
+                lines.push(pad_row(&format!("  \x1b[1;38;2;240;235;225m{}\x1b[0m {key_display}", crate::i18n::tr("API Key:"))));
 
                 if let Some(ref st) = self.connection_status {
                     lines.push(pad_row(""));
@@ -974,11 +974,11 @@ impl SetupWizard {
                 let total_models = self.available_models.len();
                 let total_matches = filtered.len();
 
-                lines.push(pad_row(&heading(2, "Choose the model")));
+                lines.push(pad_row(&heading(2, crate::i18n::tr("Choose the model"))));
                 let count_info = if self.is_lm_studio() && self.discovered_models.iter().any(|m| m.is_loaded) {
-                    format!("({total_models} loaded in LM Studio)")
+                    format!("({})", crate::i18n::tr("({total_models} loaded in LM Studio)").replace("{total_models}", &total_models.to_string()))
                 } else if self.model_search.is_empty() {
-                    format!("({total_models} on the server)")
+                    format!("({})", crate::i18n::tr("({total_models} on the server)").replace("{total_models}", &total_models.to_string()))
                 } else {
                     format!("({total_matches}/{total_models} · filter: \"{}\")", self.model_search)
                 };
@@ -991,16 +991,16 @@ impl SetupWizard {
                     let (said, next) = match self.connection_status.as_deref() {
                         Some(status) if status.starts_with("Connecting") => (status.to_string(), String::new()),
                         Some(status) if !status.starts_with("Connected") && self.is_cloud_backend() => (
-                            format!("Could not get the model list from {url}."),
-                            "Esc tries again. Or type a model id and press Enter, or Enter alone to pick one later with F3.".to_string(),
+                            crate::i18n::tr("Could not get the model list from {url}.").replace("{url}", url),
+                            crate::i18n::tr("Esc tries again. Or type a model id and press Enter, or Enter alone to pick one later with F3.").to_string(),
                         ),
                         Some(status) if !status.starts_with("Connected") => (
-                            format!("No server answered at {url}."),
-                            "Start it and press Esc to try again, or Enter to go on and pick a model later with F3.".to_string(),
+                            crate::i18n::tr("No server answered at {url}.").replace("{url}", url),
+                            crate::i18n::tr("Start it and press Esc to try again, or Enter to go on and pick a model later with F3.").to_string(),
                         ),
                         _ => (
-                            format!("{url} lists no models."),
-                            "Load one in your server and press Esc to look again, or Enter to go on.".to_string(),
+                            crate::i18n::tr("{url} lists no models.").replace("{url}", url),
+                            crate::i18n::tr("Load one in your server and press Esc to look again, or Enter to go on.").to_string(),
                         ),
                     };
                     lines.push(pad_row(&format!("  \x1b[38;2;225;175;95m{said}\x1b[0m")));
@@ -1009,10 +1009,10 @@ impl SetupWizard {
                     }
                     if !self.model_search.trim().is_empty() {
                         lines.push(pad_row(""));
-                        lines.push(pad_row(&format!("  \x1b[38;2;160;155;145mModel id:\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m", self.model_search.trim())));
+                        lines.push(pad_row(&format!("  \x1b[38;2;160;155;145m{}\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m", crate::i18n::tr("Model id:"), self.model_search.trim())));
                     }
                 } else if filtered.is_empty() {
-                    lines.push(pad_row("  \x1b[38;2;135;130;125m(No models matching search filter)\x1b[0m"));
+                    lines.push(pad_row(&format!("  \x1b[38;2;135;130;125m{}\x1b[0m", crate::i18n::tr("(No models matching search filter)"))));
                 } else {
                     let cur_pos = filtered.iter().position(|&idx| idx == self.model_idx).unwrap_or(0);
                     let has_metadata = !self.discovered_models.is_empty();
@@ -1056,13 +1056,13 @@ impl SetupWizard {
             }
             3 => {
                 lines.push(pad_row(&heading(3, "Permissions")));
-                prose(&mut lines, "", "\x1b[38;2;160;155;145m", "What may the agent do without asking? Shift+Tab changes it any time.");
+                prose(&mut lines, "", "\x1b[38;2;160;155;145m", crate::i18n::tr("What may the agent do without asking? Shift+Tab changes it any time."));
                 lines.push(pad_row(""));
                 let modes = [
-                    (PermissionMode::Planning, "1. Planning", "only reads and plans; changes nothing"),
-                    (PermissionMode::Manual, "2. Manual", "asks before every edit and command"),
-                    (PermissionMode::AcceptEdits, "3. Accept Edits", "edits files, asks before commands (default)"),
-                    (PermissionMode::Bypass, "4. Accept All", "edits and runs commands without asking"),
+                    (PermissionMode::Planning, "1. Planning", crate::i18n::tr("only reads and plans; changes nothing")),
+                    (PermissionMode::Manual, "2. Manual", crate::i18n::tr("asks before every edit and command")),
+                    (PermissionMode::AcceptEdits, "3. Accept Edits", crate::i18n::tr("edits files, asks before commands (default)")),
+                    (PermissionMode::Bypass, "4. Accept All", crate::i18n::tr("edits and runs commands without asking")),
                 ];
                 for (m, label, desc) in modes {
                     let is_sel = self.config.permission_mode == m;
@@ -1076,8 +1076,8 @@ impl SetupWizard {
                 }
             }
             4 => {
-                lines.push(pad_row(&heading(4, "Sampling and launch")));
-                prose(&mut lines, "", "\x1b[38;2;160;155;145m", "How the model samples. The preset suits most models; its numbers are in /sampling.");
+                lines.push(pad_row(&heading(4, crate::i18n::tr("Sampling and launch"))));
+                prose(&mut lines, "", "\x1b[38;2;160;155;145m", crate::i18n::tr("How the model samples. The preset suits most models; its numbers are in /sampling."));
                 lines.push(pad_row(""));
 
                 let preset_val = format!("[ {} ]", self.sampling.preset.label());
@@ -1087,7 +1087,7 @@ impl SetupWizard {
                 )));
 
                 lines.push(pad_row(""));
-                lines.push(pad_row(" \x1b[1;38;2;25;30;22;48;2;145;205;140m Save and launch \x1b[0m"));
+                lines.push(pad_row(&format!(" \x1b[1;38;2;25;30;22;48;2;145;205;140m {} \x1b[0m", crate::i18n::tr("Save and launch"))));
             }
             _ => {}
         }
@@ -1123,7 +1123,7 @@ async fn probe_server(wizard: &mut SetupWizard) {
     } else {
         wizard.available_models.clear();
         wizard.discovered_models.clear();
-        wizard.connection_status = Some("No server answered".to_string());
+        wizard.connection_status = Some(crate::i18n::tr("No server answered").to_string());
     }
 }
 
@@ -1132,7 +1132,7 @@ async fn probe_server(wizard: &mut SetupWizard) {
 async fn after_key(wizard: &mut SetupWizard, prev_step: usize, painter: &mut crate::screen::Screen) {
     if prev_step < 2 && wizard.step == 2 {
         wizard.available_models.clear();
-        wizard.connection_status = Some(format!("Connecting to {}\u{2026}", wizard.profile.url.trim_end_matches('/')));
+        wizard.connection_status = Some(crate::i18n::tr("Connecting to {url}\u{2026}").replace("{url}", wizard.profile.url.trim_end_matches('/')));
         let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
         crate::screen::paint_page(painter, &wizard.render_in(term_w as usize, term_h as usize), true);
         probe_server(wizard).await;

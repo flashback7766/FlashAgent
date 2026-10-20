@@ -478,7 +478,7 @@ impl App {
             self.custom_placeholder = Some("No other saved session in this folder".to_string());
             self.suggested_prompt = None;
         } else {
-            self.open_overlay(Overlay::Sessions(SelectMenu::new("Resume a session", items).with_noun("sessions")));
+            self.open_overlay(Overlay::Sessions(SelectMenu::new(flashagent_tui::i18n::tr("Resume a session"), items).with_noun(flashagent_tui::select::Noun::SESSIONS)));
         }
         self.renderer.request_reprint();
     }

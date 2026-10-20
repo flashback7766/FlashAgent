@@ -115,11 +115,45 @@ impl<T> SelectItem<T> {
     }
 }
 
+/// The word the count and the empty states use. English has two forms and
+/// Russian three, so the word comes with all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Noun {
+    pub en_one: &'static str,
+    pub en_many: &'static str,
+    pub ru_one: &'static str,
+    pub ru_few: &'static str,
+    pub ru_many: &'static str,
+}
+
+impl Noun {
+    pub const COMMANDS: Self = Self { en_one: "command", en_many: "commands", ru_one: "команда", ru_few: "команды", ru_many: "команд" };
+    pub const PROVIDERS: Self = Self { en_one: "provider", en_many: "providers", ru_one: "провайдер", ru_few: "провайдера", ru_many: "провайдеров" };
+    pub const MODELS: Self = Self { en_one: "model", en_many: "models", ru_one: "модель", ru_few: "модели", ru_many: "моделей" };
+    pub const OPTIONS: Self = Self { en_one: "option", en_many: "options", ru_one: "вариант", ru_few: "варианта", ru_many: "вариантов" };
+    pub const SESSIONS: Self = Self { en_one: "session", en_many: "sessions", ru_one: "сессия", ru_few: "сессии", ru_many: "сессий" };
+    pub const SERVERS: Self = Self { en_one: "server", en_many: "servers", ru_one: "сервер", ru_few: "сервера", ru_many: "серверов" };
+    pub const ITEMS: Self = Self { en_one: "item", en_many: "items", ru_one: "пункт", ru_few: "пункта", ru_many: "пунктов" };
+
+    /// The word as the current language says it, in the singular.
+    pub fn one(&self) -> &'static str {
+        match crate::i18n::current() {
+            crate::i18n::Lang::English => self.en_one,
+            crate::i18n::Lang::Russian => self.ru_one,
+        }
+    }
+
+    /// The word with the number in front of it, in the form the number wants.
+    pub fn counted(&self, n: u64) -> String {
+        crate::i18n::count(n, (self.en_one, self.en_many), (self.ru_one, self.ru_few, self.ru_many))
+    }
+}
+
 /// Up / Down / Enter / Esc, a 10-item scrolling window, paging and live search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectMenu<T> {
     pub title: String,
-    pub noun: Option<String>,
+    pub noun: Option<Noun>,
     pub items: Vec<SelectItem<T>>,
     pub selected: usize,
     pub filter: String,
@@ -158,9 +192,9 @@ impl<T> SelectMenu<T> {
         (self.custom_entry && !typed.is_empty() && self.filtered_indices().is_empty()).then_some(typed)
     }
 
-    /// E.g. "options", "models".
-    pub fn with_noun(mut self, noun: impl Into<String>) -> Self {
-        self.noun = Some(noun.into());
+    /// E.g. the options or the models.
+    pub fn with_noun(mut self, noun: Noun) -> Self {
+        self.noun = Some(noun);
         self
     }
 
@@ -277,20 +311,19 @@ impl<T> SelectMenu<T> {
         let matches = self.filtered_indices();
         let total_matches = matches.len();
 
-        let item_noun = self.noun.as_deref().unwrap_or_else(|| {
+        let item_noun = self.noun.unwrap_or_else(|| {
             if self.title.to_lowercase().contains("model") {
-                "models"
+                Noun::MODELS
             } else if self.title.to_lowercase().contains("effort") {
-                "options"
+                Noun::OPTIONS
             } else {
-                "items"
+                Noun::ITEMS
             }
         });
 
         let counted = self.items.len().saturating_sub(self.uncounted);
         let count_str = if self.filter.is_empty() {
-            let noun = if counted == 1 { item_noun.strip_suffix('s').unwrap_or(item_noun) } else { item_noun };
-            format!("({counted} {noun})")
+            format!("({})", item_noun.counted(counted as u64))
         } else {
             format!("({}/{counted} · \"{}\")", matches.iter().filter(|&&i| i < counted).count(), self.filter)
         };
@@ -307,7 +340,7 @@ impl<T> SelectMenu<T> {
 
         if matches.is_empty() {
             let said = match (self.custom_entry, self.filter.trim()) {
-                (true, "") => format!("(No {item_noun} listed \u{b7} type an id and press Enter)"),
+                (true, "") => crate::i18n::tr_with("(No {noun} listed \u{b7} type an id and press Enter)", item_noun.one()),
                 (true, typed) => {
                     // The name is not in the list: the closest one that is, so
                     // a typo costs a keystroke instead of a search.
@@ -316,11 +349,13 @@ impl<T> SelectMenu<T> {
                         self.items.iter().map(|i| i.label.as_str()).filter(|l| !l.is_empty()),
                     );
                     match closest {
-                        Some(near) => format!("(Not listed \u{b7} did you mean \"{near}\"? \u{b7} Enter uses \"{typed}\")"),
-                        None => format!("(Not listed \u{b7} Enter uses \"{typed}\")"),
+                        Some(near) => crate::i18n::tr_with("(Not listed \u{b7} did you mean \"{near}\"? \u{b7} Enter uses \"{typed}\")", item_noun.one())
+                            .replace("{near}", near)
+                            .replace("{typed}", typed),
+                        None => crate::i18n::tr_with("(Not listed \u{b7} Enter uses \"{typed}\")", item_noun.one()).replace("{typed}", typed),
                     }
                 }
-                (false, _) => format!("(No matching {item_noun} found)"),
+                (false, _) => crate::i18n::tr_with("(No matching {noun} found)", item_noun.one()),
             };
             lines.push((LineKind::System, pad_row(&format!("  \x1b[38;2;135;130;125m{said}\x1b[0m"))));
         } else {
@@ -377,7 +412,11 @@ impl<T> SelectMenu<T> {
             LineKind::System,
             format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
         ));
-        let mut hints = vec![("↑/↓", "move"), ("Enter", "select"), ("type", if self.custom_entry { "to filter or enter an id" } else { "to filter" })];
+        let mut hints = vec![
+            ("↑/↓", "move"),
+            ("Enter", "select"),
+            ("type", if self.custom_entry { "to filter or enter an id" } else { "to filter" }),
+        ];
         if total_matches > self.page() {
             hints.push(("PgUp/PgDn", "page"));
         }
@@ -560,7 +599,7 @@ mod tests {
         let custom_menu = SelectMenu::new(
             "Select Server",
             vec![SelectItem::new("local", "local")],
-        ).with_noun("servers");
+        ).with_noun(Noun::SERVERS);
         let custom_lines = custom_menu.render(80);
         assert!(custom_lines.iter().any(|(_, t)| t.contains("(1 server)")));
     }

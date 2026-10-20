@@ -109,12 +109,19 @@ pub fn parse_summary(raw: &str) -> Option<ParsedSummary> {
 pub fn ago(then: u64, now: u64) -> String {
     let secs = now.saturating_sub(then);
     let (n, unit) = match secs {
-        0..=59 => return "just now".to_string(),
+        0..=59 => return crate::i18n::tr("just now").to_string(),
         60..=3599 => (secs / 60, "minute"),
         3600..=86_399 => (secs / 3600, "hour"),
         _ => (secs / 86_400, "day"),
     };
-    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+    // The word follows the number, and Russian has three forms of it.
+    let (en_one, en_many, ru_one, ru_few, ru_many) = match unit {
+        "minute" => ("minute", "minutes", "минуту", "минуты", "минут"),
+        "hour" => ("hour", "hours", "час", "часа", "часов"),
+        _ => ("day", "days", "день", "дня", "дней"),
+    };
+    let word = crate::i18n::count(n, (en_one, en_many), (ru_one, ru_few, ru_many));
+    format!("{} {}", word, crate::i18n::tr("ago"))
 }
 
 #[derive(Debug, Clone)]
@@ -304,11 +311,17 @@ impl MemoryModal {
 
         let mut lines: Vec<RenderLine> = Vec::new();
         // The heading shrinks first; a sheared box is worse than a shorter name.
-        let title = [" What FlashAgent remembers ", " What is remembered ", " Memory "]
-            .into_iter()
+        let titles = [
+            format!(" {} ", crate::i18n::tr("What FlashAgent remembers")),
+            format!(" {} ", crate::i18n::tr("What is remembered")),
+            format!(" {} ", crate::i18n::tr("Memory")),
+        ];
+        let title = titles
+            .iter()
             .find(|t| crate::visible_width(t) < inner_w)
-            .unwrap_or(" Memory ");
-        let dashes = inner_w.saturating_sub(crate::visible_width(title) + 1);
+            .cloned()
+            .unwrap_or_else(|| format!(" {} ", crate::i18n::tr("Memory")));
+        let dashes = inner_w.saturating_sub(crate::visible_width(&title) + 1);
         lines.push((
             LineKind::System,
             format!("  {border}╭─{accent}{title}{border}{}╮{reset}", "─".repeat(dashes)),
@@ -323,7 +336,7 @@ impl MemoryModal {
 
         if self.rows.is_empty() {
             lines.push((LineKind::System, pad("")));
-            lines.push((LineKind::System, pad(&format!("{dim}Nothing remembered yet. Facts worth keeping are written as they come up.{reset}"))));
+            lines.push((LineKind::System, pad(&format!("{dim}{}{reset}", crate::i18n::tr("Nothing remembered yet. Facts worth keeping are written as they come up.")))));
         } else {
             lines.push((LineKind::System, pad("")));
             for (i, row) in self.rows.iter().enumerate() {

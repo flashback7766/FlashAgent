@@ -106,23 +106,23 @@ impl TrustScreen {
                 KeyCode::Enter => {
                     let trimmed = input.trim();
                     if trimmed.is_empty() {
-                        *error = Some("Path cannot be empty".to_string());
+                        *error = Some(crate::i18n::tr("Path cannot be empty").to_string());
                         return None;
                     }
                     let resolved = resolve_path(trimmed);
                     if resolved.is_dir() {
                         let canon = std::fs::canonicalize(&resolved).unwrap_or(resolved);
                         if let Err(e) = std::env::set_current_dir(&canon) {
-                            *error = Some(format!("Failed to enter directory: {e}"));
+                            *error = Some(crate::i18n::tr("Failed to enter directory: {e}").replace("{e}", &e.to_string()));
                         } else {
                             self.cwd = canon;
                             self.selected = 0;
                             self.mode = TrustScreenMode::Select;
                         }
                     } else if resolved.exists() {
-                        *error = Some(format!("'{}' is not a directory", trimmed));
+                        *error = Some(format!("'{}' {}", trimmed, crate::i18n::tr("is not a directory")));
                     } else {
-                        *error = Some(format!("Directory '{}' does not exist", trimmed));
+                        *error = Some(format!("{} '{}'", crate::i18n::tr("Directory"), trimmed));
                     }
                     None
                 }
@@ -148,7 +148,7 @@ impl TrustScreen {
 
         match &self.mode {
             TrustScreenMode::Select => {
-                lines.push(format!("{prompt_style}FlashAgent{reset} {text_dim}\u{b7} trust this folder?{reset}"));
+                lines.push(format!("{prompt_style}FlashAgent{reset} {text_dim}\u{b7} {}{reset}", crate::i18n::tr("trust this folder?")));
                 lines.push(String::new());
                 // The folder's own name is at the end of the path: in a narrow window
                 // the start goes, never the name of what is being trusted.
@@ -164,7 +164,7 @@ impl TrustScreen {
                 }
                 lines.push(String::new());
 
-                let options = ["1. Yes, continue", "2. Change folder", "3. No, quit"];
+                let options = [crate::i18n::tr("1. Yes, continue"), crate::i18n::tr("2. Change folder"), crate::i18n::tr("3. No, quit")];
                 for (idx, opt) in options.iter().enumerate() {
                     if idx == self.selected {
                         lines.push(format!("{prompt_style}\u{25b8} {text_bright}{opt}{reset}"));
@@ -178,16 +178,17 @@ impl TrustScreen {
                 lines.push(format!("  {}", crate::key_hints(&hints, width.saturating_sub(2))));
             }
             TrustScreenMode::ChangeDir { input, error } => {
-                lines.push(format!("{prompt_style}FlashAgent{reset} {text_dim}\u{b7} change folder{reset}"));
+                lines.push(format!("{prompt_style}FlashAgent{reset} {text_dim}\u{b7} {}{reset}", crate::i18n::tr("change folder")));
                 lines.push(String::new());
                 lines.push(format!(
-                    "  {text_dim}Folder to work in (relative, absolute, or starting with ~):{reset}"
+                    "  {text_dim}{}{reset}",
+                    crate::i18n::tr("Folder to work in (relative, absolute, or starting with ~):")
                 ));
                 lines.push(format!(
                     "  {prompt_style}› {text_bright}{input}\x1b[7m {reset}"
                 ));
                 if let Some(err) = error {
-                    lines.push(format!("  {text_error}Error: {err}{reset}"));
+                    lines.push(format!("  {text_error}{} {err}{reset}", crate::i18n::tr("Error:")));
                 } else {
                     lines.push(String::new());
                 }
