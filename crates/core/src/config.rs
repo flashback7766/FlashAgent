@@ -417,6 +417,11 @@ pub struct AppConfig {
     pub setup_completed: bool,
     #[serde(default)]
     pub toolset_profile: ToolsetProfile,
+    /// Tools the owner has switched off: the model is not offered them, and a
+    /// call to one is refused. By name, so a tool that is not there any more
+    /// does not keep a name alive.
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
     /// Trust confirmation is skipped for these.
     #[serde(default)]
     pub trusted_directories: Vec<PathBuf>,
@@ -631,6 +636,7 @@ impl Default for AppConfig {
             goal_max_output_tokens: None,
             setup_completed: false,
             toolset_profile: ToolsetProfile::Auto,
+            disabled_tools: Vec::new(),
             trusted_directories: Vec::new(),
             update_channel: default_update_channel(),
             auto_check_updates: true,

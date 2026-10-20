@@ -1078,6 +1078,9 @@ pub struct PermissionedTools {
     inner: Arc<dyn ToolExec>,
     preview: Option<Arc<dyn crate::loop_::WritePreview>>,
     state: Arc<PermissionState>,
+    /// The tools the owner has switched off. The model is not offered them and
+    /// a call to one is refused, whatever the permissions say.
+    disabled: std::sync::RwLock<Vec<String>>,
 }
 
 impl PermissionedTools {
@@ -1087,7 +1090,25 @@ impl PermissionedTools {
         preview: Option<Arc<dyn crate::loop_::WritePreview>>,
         state: Arc<PermissionState>,
     ) -> Self {
-        Self { inner, preview, state }
+        Self { inner, preview, state, disabled: std::sync::RwLock::new(Vec::new()) }
+    }
+
+    /// The tools that are off. Shared with the app, so the switch takes effect
+    /// in the conversation that is running.
+    pub fn set_disabled_tools(&self, names: Vec<String>) {
+        if let Ok(mut off) = self.disabled.write() {
+            *off = names;
+        }
+    }
+
+    /// The tools that are off right now.
+    pub fn disabled_tools(&self) -> Vec<String> {
+        self.disabled.read().map(|d| d.clone()).unwrap_or_default()
+    }
+
+    /// Whether this tool is one of the ones that are off.
+    pub fn tool_disabled(&self, name: &str) -> bool {
+        self.disabled.read().map(|d| d.iter().any(|n| n == name)).unwrap_or(false)
     }
 
     pub fn state(&self) -> &Arc<PermissionState> {
@@ -1115,10 +1136,26 @@ pub const DECLINED: &str = "The user declined this call. Do not retry it and do 
 #[async_trait]
 impl ToolExec for PermissionedTools {
     fn specs(&self) -> Vec<ToolSpec> {
-        self.inner.specs()
+        // A tool that is off is not offered at all: the model should not plan
+        // around something it cannot call.
+        self.inner
+            .specs()
+            .into_iter()
+            .filter(|s| !self.tool_disabled(&s.name))
+            .collect()
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolOutput {
+        if self.tool_disabled(&call.name) {
+            return ToolOutput {
+                content: format!(
+                    "the tool '{}' is switched off in this session · the user turned it off, so do not call it",
+                    call.name
+                ),
+                is_error: true,
+                images: Vec::new(),
+            };
+        }
         match self.state.decide(call, || self.preview.as_deref().and_then(|p| p.write_preview(call))) {
             Verdict::Allow => self.run_allowed(call).await,
             Verdict::Deny(reason) => ToolOutput {
