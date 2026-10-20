@@ -331,8 +331,19 @@ impl App {
             Some(result) => {
                 // The turns the summary replaced go with the session: one file
                 // holds the conversation and the archive of what it left out.
+                let replaced = result.archive.len();
                 self.archive.extend(result.archive.iter().cloned());
                 self.chat.finish_compaction_card(&result);
+                // A standing line about the compaction itself: what went, what
+                // it freed and where the exact words are kept. The card holds
+                // the summary; this holds the facts about it.
+                self.chat.push_system(&flashagent_tui::i18n::tr_fill(
+                    "Context compacted: {replaced} messages became a summary, about {saved} tokens freed. The full transcript is in the session file.",
+                    &[
+                        ("replaced", &replaced.to_string()),
+                        ("saved", &result.saved.to_string()),
+                    ],
+                ));
             }
             None => self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the conversation is unchanged")),
         }
