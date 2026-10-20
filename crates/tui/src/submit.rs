@@ -900,13 +900,30 @@ impl App {
         // a turn with in the meantime, and a turn would have nothing to keep.
         let mut history = std::mem::take(&mut self.history);
         let used = self.context_usage.total_used();
+        // The room one request may carry: the window minus the prompt, the
+        // schemas and what the conversation holds now.
+        let room = self
+            .context_usage
+            .total_capacity
+            .saturating_sub(self.context_usage.system_tokens + self.context_usage.tools_tokens)
+            .saturating_sub(used);
         let source = cx.source.clone();
         let focus = (!focus.is_empty()).then(|| focus.to_string());
         let tx = cx.tx.clone();
         tokio::spawn(async move {
             let sink = SummarySink::ui(tx.clone());
             let result =
-                compact_context_with_sink(source.as_ref(), &mut history, focus.as_deref(), &archive, Some(used), Some(&sink), true).await;
+                compact_context_with_sink(
+                source.as_ref(),
+                &mut history,
+                focus.as_deref(),
+                &archive,
+                Some(used),
+                Some(&sink),
+                true,
+                Some(room),
+            )
+            .await;
             let saved = result.as_ref().map(|r| r.saved);
             let _ = tx.send(UiEvent::Compacted { history, saved, card: result });
         });
