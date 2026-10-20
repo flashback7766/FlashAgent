@@ -178,10 +178,13 @@ impl ToolsView {
                 (format!("{TEXT_OFF}{mark}{RESET}"), format!("{TEXT_OFF}{}{RESET}", row.name))
             };
             let pointer = if is_sel { format!("{TEXT_BRIGHT}▸{RESET}") } else { " ".to_string() };
+            // The description the model gets stays English; the person reads
+            // it in their own language.
+            let description = crate::i18n::tr(&row.description);
             let what = if row.available {
-                row.description.clone()
+                description.to_string()
             } else {
-                format!("{} ({})", row.description, crate::i18n::tr("not offered here"))
+                format!("{} ({})", description, crate::i18n::tr("not offered here"))
             };
             let what_styled = if row.available {
                 format!("{TEXT_MUTED}{what}{RESET}")

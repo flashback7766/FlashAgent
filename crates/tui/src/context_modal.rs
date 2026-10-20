@@ -82,16 +82,17 @@ impl ContextModal {
             let bar_len = ((item_pct / 100.0) * bar_w as f32).round() as usize;
             let bar = "█".repeat(bar_len.min(bar_w));
             lines.push((LineKind::System, pad_row(&format!(
-                "  \x1b[38;2;160;155;145m{:<18}\x1b[0m {:>6} tokens  \x1b[38;2;135;130;125m({:>4.1}%)\x1b[0m  \x1b[38;2;175;170;225m{bar}\x1b[0m",
+                "  \x1b[38;2;160;155;145m{:<22}\x1b[0m {:>6} {}  \x1b[38;2;135;130;125m({:>4.1}%)\x1b[0m  \x1b[38;2;175;170;225m{bar}\x1b[0m",
                 label,
                 count,
+                tokens,
                 item_pct
             ))));
         }
 
         lines.push((LineKind::System, pad_row("")));
         let gauge = self.usage.format_compact_gauge(20);
-        lines.push((LineKind::System, pad_row(&format!("Gauge: {gauge}"))));
+        lines.push((LineKind::System, pad_row(&format!("{} {gauge}", crate::i18n::tr("Gauge:")))));
         lines.push((LineKind::System, pad_row(&crate::key_hints(&[("Esc", "close")], inner_w.saturating_sub(2)))));
 
         lines.push((
