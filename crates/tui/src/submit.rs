@@ -706,6 +706,15 @@ impl App {
             CostLedger::format_amount(total),
             CostLedger::turns_phrase(self.cost.priced_turns())
         ));
+        // What the providers behind the gateways charged: the difference is
+        // what the gateway added for itself.
+        if let Some(upstream) = self.cost.upstream_total() {
+            self.chat.push_system(&format!(
+                "  the providers themselves: ${} over {}",
+                CostLedger::format_amount(upstream),
+                CostLedger::turns_phrase(self.cost.upstream_turns())
+            ));
+        }
         for row in self.cost.by_provider() {
             // A model the backend prices at nothing has no bill to break down:
             // saying "$0.00 over 12 turns" reads as an empty account rather than

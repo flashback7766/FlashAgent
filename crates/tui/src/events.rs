@@ -563,7 +563,11 @@ impl App {
                 self.token_tracker.on_usage(u);
                 // Only what the server priced. A local backend reports nothing,
                 // and the ledger stays silent rather than inventing a bill.
-                self.cost.record(&self.config.active_profile().name, u.cost);
+                self.cost.record_with_details(
+                    &self.config.active_profile().name,
+                    u.cost,
+                    u.cost_details.and_then(|d| d.upstream_cost),
+                );
                 if let Some(ledger) = self.goal_ledger.as_mut() {
                     ledger.record_cost(&self.config.active_profile().name, u.cost);
                 }

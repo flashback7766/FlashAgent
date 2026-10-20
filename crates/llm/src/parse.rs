@@ -343,12 +343,29 @@ impl ChunkParser {
                 .get("cost")
                 .or_else(|| usage.get("cost_usd"))
                 .and_then(|c| c.as_f64().filter(|v| v.is_finite() && *v >= 0.0));
+            // The thinking tokens: part of the completion count, not on top
+            // of it, and worth saying apart.
+            let reasoning = usage
+                .get("completion_tokens_details")
+                .and_then(|d| d.get("reasoning_tokens"))
+                .and_then(Value::as_i64);
+            // What the provider behind the gateway charged, when it says.
+            let cost_details = usage.get("cost_details").and_then(|d| {
+                let upstream_cost = d.get("upstream_inference_cost").and_then(Value::as_f64);
+                let upstream_prompt_tokens = d.get("upstream_inference_prompt_tokens").and_then(Value::as_i64);
+                let upstream_completion_tokens = d.get("upstream_inference_completion_tokens").and_then(Value::as_i64);
+                (upstream_cost.is_some() || upstream_prompt_tokens.is_some() || upstream_completion_tokens.is_some()).then_some(
+                    crate::types::CostDetails { upstream_cost, upstream_prompt_tokens, upstream_completion_tokens },
+                )
+            });
             events.push(LlmEvent::Usage(crate::types::Usage {
                 prompt,
                 completion,
                 cached,
                 mtp,
                 cost,
+                reasoning,
+                cost_details,
             }));
         } else if let Some((prompt, cached)) = timings {
             events.push(LlmEvent::Usage(crate::types::Usage {
@@ -356,7 +373,7 @@ impl ChunkParser {
                 completion: None,
                 cached: Some(cached),
                 mtp,
-                cost: None,
+                cost: None, reasoning: None, cost_details: None,
             }));
         } else if let Some(m) = mtp {
             events.push(LlmEvent::Usage(crate::types::Usage {
@@ -364,7 +381,7 @@ impl ChunkParser {
                 completion: None,
                 cached: None,
                 mtp: Some(m),
-                cost: None,
+                cost: None, reasoning: None, cost_details: None,
             }));
         }
 

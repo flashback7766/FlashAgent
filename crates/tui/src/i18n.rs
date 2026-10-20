@@ -507,6 +507,8 @@ static RU: &[(&str, &str)] = &[
     ("A large model can take a while to start; if it keeps happening, check the server's own log.", "Большая модель может долго просыпаться; если так и дальше, посмотрите лог сервера."),
     ("The server dropped the connection \u{2014} often it ran out of memory. Its log will say. Ctrl+R retries.", "Сервер оборвал соединение — часто ему не хватило памяти. Об этом скажет его лог. Ctrl+R повторяет."),
     ("The provider ended the answer with the error below. Ctrl+R retries.", "Провайдер закончил ответ ошибкой ниже. Ctrl+R повторяет."),
+    ("This session: ${} over {}", "Эта сессия: ${} за {}"),
+    ("  the providers themselves: ${} over {}", "  сами провайдеры: ${} за {}"),
     // --- The last corners ---
     ("more character", "ещё знак"),
     ("more characters", "ещё знаков"),
@@ -769,6 +771,7 @@ static RU: &[(&str, &str)] = &[
     ("Disable internal reasoning", "Отключить внутренние размышления"),
     ("Fast response, low thinking budget", "Быстрый ответ, малый бюджет размышления"),
     ("Maximum thinking budget for difficult tasks", "Максимум размышления для трудных задач"),
+    ("The most thinking the model will do", "Самое глубокое размышление, на которое модель пойдёт"),
     ("Enable internal reasoning", "Включить внутренние размышления"),
     ("API model preset", "Пресет модели в API"),
     ("Disable reasoning (the server lists no other settings)", "Отключить размышление (сервер не перечисляет других настроек)"),
