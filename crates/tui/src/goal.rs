@@ -533,7 +533,7 @@ mod tests {
             completion: Some(120),
             cached: None,
             mtp: None,
-            cost: None,
+            cost: None, reasoning: None, cost_details: None,
         }));
 
         let report = l.report(DoneReason::Completed).join("\n");

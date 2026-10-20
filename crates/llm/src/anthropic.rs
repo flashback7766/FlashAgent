@@ -998,7 +998,7 @@ impl Decoder {
                 mtp: None,
                 // Anthropic prices per token, not per turn, and this is a stream:
                 // there is no account total to read here.
-                cost: None,
+                cost: None, reasoning: None, cost_details: None,
             })));
         }
         // Without a stop reason and without a `message_stop`, the body stopped
@@ -1609,7 +1609,7 @@ mod tests {
             json!({ "type": "message_stop" }),
         ]);
         let usage: Vec<Usage> = events(&transcript, 64).into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
-        assert_eq!(usage, [Usage { prompt: Some(4320), completion: Some(42), cached: Some(4000), mtp: None, cost: None }], "once, at the end: the loop adds every report up");
+        assert_eq!(usage, [Usage { prompt: Some(4320), completion: Some(42), cached: Some(4000), mtp: None, cost: None, reasoning: None, cost_details: None }], "once, at the end: the loop adds every report up");
     }
 
     #[test]

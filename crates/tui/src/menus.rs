@@ -103,6 +103,7 @@ pub(crate) fn build_effort_menu(
                     "medium" | "standard" => flashagent_tui::i18n::tr("Balanced reasoning depth and speed"),
                     "high" | "deep" => flashagent_tui::i18n::tr("Full reasoning exploration"),
                     "xhigh" | "extra-high" => flashagent_tui::i18n::tr("Maximum thinking budget for difficult tasks"),
+                    "max" => flashagent_tui::i18n::tr("The most thinking the model will do"),
                     "on" | "enabled" | "true" | "1" => flashagent_tui::i18n::tr("Enable internal reasoning"),
                     _ => flashagent_tui::i18n::tr("API model preset"),
                 };
@@ -120,6 +121,9 @@ pub(crate) fn build_effort_menu(
         items.push(SelectItem::with_description("low", flashagent_tui::i18n::tr("Minimal reasoning budget"), "low".to_string()));
         items.push(SelectItem::with_description("medium", flashagent_tui::i18n::tr("Balanced reasoning depth"), "medium".to_string()));
         items.push(SelectItem::with_description("high", flashagent_tui::i18n::tr("Deep reasoning exploration"), "high".to_string()));
+        // The two levels above high: the models with an effort ladder have them.
+        items.push(SelectItem::with_description("xhigh", flashagent_tui::i18n::tr("Maximum thinking budget for difficult tasks"), "xhigh".to_string()));
+        items.push(SelectItem::with_description("max", flashagent_tui::i18n::tr("The most thinking the model will do"), "max".to_string()));
     }
     SelectMenu::new(flashagent_tui::i18n::tr("Thinking effort"), items).with_noun(flashagent_tui::select::Noun::OPTIONS)
 }

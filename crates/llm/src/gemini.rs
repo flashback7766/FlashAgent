@@ -606,7 +606,7 @@ fn read_usage(meta: &Value) -> Option<Usage> {
         (answer, thoughts) => Some(answer.unwrap_or(0) + thoughts.unwrap_or(0)),
     };
     (prompt.is_some() || completion.is_some())
-        .then_some(Usage { prompt, completion, cached: count("cachedContentTokenCount"), mtp: None, cost: None })
+        .then_some(Usage { prompt, completion, cached: count("cachedContentTokenCount"), mtp: None, cost: None, reasoning: None, cost_details: None })
 }
 
 fn error_message(error: &Value) -> String {
@@ -1115,7 +1115,7 @@ mod tests {
             }),
         ]);
         let usages: Vec<Usage> = ok_events(decode(&[&stream])).into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
-        assert_eq!(usages, vec![Usage { prompt: Some(100), completion: Some(50), cached: Some(64), mtp: None, cost: None }]);
+        assert_eq!(usages, vec![Usage { prompt: Some(100), completion: Some(50), cached: Some(64), mtp: None, cost: None, reasoning: None, cost_details: None }]);
     }
 
     /// Several Gemini-compatible gateways send the counts in a usage-only frame
@@ -1134,7 +1134,7 @@ mod tests {
         let usages: Vec<Usage> = events.into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
         assert_eq!(
             usages,
-            vec![Usage { prompt: Some(100), completion: Some(20), cached: None, mtp: None, cost: None }],
+            vec![Usage { prompt: Some(100), completion: Some(20), cached: None, mtp: None, cost: None, reasoning: None, cost_details: None }],
             "the later counts are the ones the turn is billed on, and nothing is counted twice"
         );
     }
@@ -1290,7 +1290,7 @@ mod tests {
                 events,
                 vec![
                     LlmEvent::TextDelta("Hello".into()),
-                    LlmEvent::Usage(Usage { prompt: Some(5), completion: Some(1), cached: None, mtp: None, cost: None }),
+                    LlmEvent::Usage(Usage { prompt: Some(5), completion: Some(1), cached: None, mtp: None, cost: None, reasoning: None, cost_details: None }),
                     LlmEvent::Done(FinishReason::Stop),
                 ]
             );

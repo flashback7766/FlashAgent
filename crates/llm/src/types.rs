@@ -130,6 +130,24 @@ pub struct Usage {
     /// prices it (OpenRouter sends `usage.cost`). A local server prices nothing,
     /// so this stays `None` there rather than being guessed from token counts.
     pub cost: Option<f64>,
+    /// The tokens the model spent thinking (OpenAI's
+    /// `completion_tokens_details.reasoning_tokens`). They are part of the
+    /// completion count, not on top of it.
+    pub reasoning: Option<i64>,
+    /// What the provider behind the gateway charged, when it says.
+    pub cost_details: Option<CostDetails>,
+}
+
+/// What a gateway says the provider behind it charged: the turn's own price,
+/// apart from what the gateway added for itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CostDetails {
+    /// The upstream provider's own price for the turn.
+    pub upstream_cost: Option<f64>,
+    /// The tokens the upstream provider billed for the prompt.
+    pub upstream_prompt_tokens: Option<i64>,
+    /// The tokens the upstream provider billed for the answer.
+    pub upstream_completion_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

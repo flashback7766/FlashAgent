@@ -191,6 +191,11 @@ impl Default for ThinkingProfile {
                 "low".to_string(),
                 "medium".to_string(),
                 "high".to_string(),
+                // The two levels above high that the models with an effort
+                // ladder have: not every model has them, and a level the
+                // server never sent is still sent as the person asked for it.
+                "xhigh".to_string(),
+                "max".to_string(),
             ],
             protocol: ThinkingProtocol::ReasoningEffort,
             supported: true,
