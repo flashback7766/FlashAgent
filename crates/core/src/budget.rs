@@ -2,41 +2,30 @@
 //! the tool schemas. It is paid on every step of every turn, so it is budgeted
 //! against the window the server reported.
 //!
-//! The prompt gets the same ceiling at every tier. It is the one part that
+//! The prompt gets the same ceiling at every window. It is the one part that
 //! cannot be scaled down without making the model worse, and a shorter version
-//! of it is not a cheaper version of it: it is a different agent. What the
-//! window buys is the room for tool schemas, which are the interchangeable part.
+//! of it is not a cheaper version of it: it is a different agent.
 //!
-//! The ladder is the owner's, 2026-10-05: 160k of static context on a 1M
-//! window, halving down to 10k at 64k. A prompt of 4k plus the schemas the
-//! product ships costs about 7.6k, so the bottom tier has to be at least that
-//! for the agent on a small window to still be the same agent. What is left in
-//! a tier is split two ways and keeps a tenth spare, because a tier is a
-//! ceiling and a set measured against it lands under.
+//! The static budget is flat for every model: the prompt (up to 10k) plus the
+//! full toolset (~5k) = 20k, regardless of the window size. There is no ladder
+//! anymore; every window gets the same 20k.
 
-/// The window assumed when the server said nothing about its own. Mid, so a
-/// provider that omits `context_length` keeps the extended toolset while a
-/// genuinely small one is still trimmed; `ToolsetProfile` overrides it either
-/// way.
+/// The window assumed when the server said nothing about its own. It no longer
+/// changes the static total, which is flat for every window; `ToolsetProfile`
+/// still overrides the toolset explicitly.
 pub const ASSUMED_WINDOW: usize = 128_000;
 
 /// What the prompt may cost at any window, from the owner, 2026-10-05.
 ///
 /// A full contract runs to about this, and it is the same at every window: a
-/// shorter one is not a cheaper agent, it is a different one. What the window
-/// decides is what is left over for schemas.
+/// shorter one is not a cheaper agent, it is a different one. The rest of the
+/// budget is for schemas.
 pub const PROMPT_CEILING: usize = 10_000;
 
-/// Total tokens of static context per tier, largest window first. What is left
+/// Total tokens of static context, the same for every window. What is left
 /// after the prompt is split two ways and keeps a tenth spare, in the ratio the
 /// owner's first figures gave: 20 parts built-in to 12 to MCP.
-const TOTALS: &[(usize, usize)] = &[
-    (1_000_000, 160_000),
-    (512_000, 80_000),
-    (256_000, 40_000),
-    (128_000, 20_000),
-    (64_000, 10_000),
-];
+const TOTALS: &[(usize, usize)] = &[(0, 20_000)];
 
 const BUILTIN_SHARE: usize = 20;
 const MCP_SHARE: usize = 12;
@@ -48,11 +37,11 @@ pub struct Budget {
     pub window_floor: usize,
     /// Everything static, together.
     pub total: usize,
-    /// [`PROMPT_CEILING`] at every tier.
+    /// [`PROMPT_CEILING`] at every window.
     pub prompt: usize,
     pub builtin_tools: usize,
     pub mcp_tools: usize,
-    /// Left unspent on purpose: a tier is a ceiling.
+    /// Left unspent on purpose: the total is a ceiling.
     pub reserve: usize,
 }
 
@@ -63,7 +52,7 @@ impl Budget {
             .iter()
             .find(|(floor, _)| window >= *floor)
             .copied()
-            .unwrap_or_else(|| TOTALS.last().copied().expect("the ladder has a floor"));
+            .unwrap_or_else(|| TOTALS.last().copied().expect("the flat budget has a floor"));
         let share = total.saturating_sub(PROMPT_CEILING);
         let builtin_tools = share * BUILTIN_SHARE / SHARE_TOTAL;
         let mcp_tools = share * MCP_SHARE / SHARE_TOTAL;
@@ -122,25 +111,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_bigger_window_never_spends_more() {
-        for pair in TOTALS.windows(2) {
-            let (higher, lower) = (pair[0], pair[1]);
-            assert!(
-                lower.1 <= higher.1,
-                "a {}-token window is offered more than a {}-token one",
-                lower.0,
-                higher.0
-            );
-        }
-    }
-
-    #[test]
-    fn the_top_tier_is_the_ladder_the_owner_gave() {
+    fn the_flat_budget_splits_what_the_prompt_leaves() {
         let b = Budget::for_window(Some(1_000_000));
-        assert_eq!(b.total, 160_000);
-        assert_eq!(b.prompt, PROMPT_CEILING, "the prompt is the same at every tier");
-        assert_eq!(b.builtin_tools, (160_000 - PROMPT_CEILING) * 20 / 36);
-        assert_eq!(b.mcp_tools, (160_000 - PROMPT_CEILING) * 12 / 36);
+        assert_eq!(b.total, 20_000);
+        assert_eq!(b.prompt, PROMPT_CEILING, "the prompt is the same at every window");
+        assert_eq!(b.builtin_tools, (20_000 - PROMPT_CEILING) * 20 / 36);
+        assert_eq!(b.mcp_tools, (20_000 - PROMPT_CEILING) * 12 / 36);
     }
 
     #[test]
@@ -151,21 +127,10 @@ mod tests {
     }
 
     #[test]
-    fn the_ladder_answers_at_its_own_floors() {
-        for (floor, total) in TOTALS {
-            assert_eq!(Budget::for_window(Some(*floor)).total, *total, "at {floor}");
+    fn the_flat_budget_applies_to_every_window() {
+        for window in [1_000_000, 512_000, 256_000, 128_000, 64_000, 8_000, 0] {
+            assert_eq!(Budget::for_window(Some(window)).total, 20_000, "at {window}");
         }
-        // A window just under a floor belongs to the tier below it, so a model
-        // that reports 999_999 is not given the 1M budget.
-        assert_eq!(Budget::for_window(Some(999_999)).total, 80_000);
-        assert_eq!(Budget::for_window(Some(511_999)).total, 40_000);
-        assert_eq!(Budget::for_window(Some(127_999)).total, 10_000);
-    }
-
-    #[test]
-    fn a_small_window_lands_on_the_floor_rather_than_nothing() {
-        assert_eq!(Budget::for_window(Some(8_000)).total, 10_000);
-        assert_eq!(Budget::for_window(Some(0)).total, 10_000);
     }
 
     #[test]
@@ -221,10 +186,10 @@ mod tests {
         assert!(dropped.is_empty());
     }
 
-    /// The whole contract as the model sees it, so the ladder is checked against
-    /// the real schemas rather than against an estimate of them.
+    /// The whole contract as the model sees it, so the flat budget is checked
+    /// against the real schemas rather than against an estimate of them.
     #[test]
-    fn the_registry_measures_against_the_ladder() {
+    fn the_registry_measures_against_the_flat_budget() {
         let mut total = 0;
         for def in crate::registry::TOOLS {
             let cost = tool_cost("gpt-4o", def.name, def.description, &def.schema_json());
