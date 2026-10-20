@@ -1443,13 +1443,36 @@ impl ChatView {
         let mut previous_block: Option<Block> = None;
         let last_user_idx = self.lines.iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0);
 
-        let cached_settled_match = {
+        // The rows for the lines before the boundary do not change when the
+        // boundary moves forward: the same lines, drawn the same way. So the
+        // cache is kept when it covers fewer lines than the new boundary, and
+        // only the lines after it are drawn again.
+        //
+        // It is only true when the expansion does not depend on which turn is
+        // the last one: "verbose: last" expands the newest turn, and a new
+        // question would collapse the turn the cached rows were drawn for.
+        let turn_independent = expansion.all || !expansion.last;
+        let cached_prefix = {
             let cache = self.settled_cache.lock();
-            if cache.boundary == boundary && cache.width == width && cache.expansion == expansion && !cache.lines.is_empty() {
-                Some((cache.lines.clone(), cache.owners.clone()))
+            if turn_independent
+                // A boundary of zero is how the cache is thrown away: the lines
+                // it holds are then older than the ones on screen.
+                && cache.boundary > 0
+                && cache.boundary <= boundary
+                && cache.width == width
+                && cache.expansion == expansion
+                && !cache.lines.is_empty()
+            {
+                Some((cache.boundary, cache.lines.clone(), cache.owners.clone()))
             } else {
                 None
             }
+        };
+        // The lines the cached rows already cover.
+        let cached_boundary = cached_prefix.as_ref().map(|(b, _, _)| *b).unwrap_or(0);
+        let cached_settled_match = match &cached_prefix {
+            Some((b, lines, owners)) if *b == boundary => Some((lines.clone(), owners.clone())),
+            _ => None,
         };
         // Where each line's rows start, in settled or live, for `RowOwners`.
         let mut starts: Vec<(bool, usize, usize)> = Vec::new();
@@ -1542,17 +1565,17 @@ impl ChatView {
         let mut last_tool_group: Option<ToolGroupKind> = None;
         let mut current_turn_user_idx = 0usize;
 
-        let has_cached = cached_settled_match.is_some();
+        let has_cached = cached_prefix.is_some();
         // With settled rows cached, only the turn the boundary falls in is re-read;
         // earlier turns ended at their next question, where state resets.
         let scan_from = if has_cached {
-            self.lines[..boundary.min(self.lines.len())].iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0)
+            self.lines[..cached_boundary.min(self.lines.len())].iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0)
         } else {
             0
         };
 
         for (i, line) in self.lines.iter().enumerate().skip(scan_from) {
-            if i < boundary && has_cached {
+            if i < cached_boundary && has_cached {
                 if line.kind == LineKind::User {
                     current_turn_user_idx = i;
                     turn_reasoning_stages.clear();
@@ -1596,10 +1619,18 @@ impl ChatView {
             // cache: the question settles while its thinking is still live.
             let blank = |row: &RenderLine| row.1.trim().is_empty();
             let row_above_blank = if i < boundary {
-                settled.last().map(blank)
+                // The row above is the last one drawn; with the cached rows in
+                // front, that is their last row.
+                settled
+                    .last()
+                    .or_else(|| cached_prefix.as_ref().and_then(|(_, rows, _)| rows.last()))
+                    .map(blank)
             } else {
                 live.last()
                     .or_else(|| settled.last())
+                    // The rows the cache holds are the ones above, when the
+                    // boundary moved and the new rows start after them.
+                    .or_else(|| cached_prefix.as_ref().and_then(|(_, rows, _)| rows.last()))
                     .or_else(|| cached_settled_match.as_ref().and_then(|(rows, _)| rows.last()))
                     .map(blank)
             };
@@ -1810,8 +1841,29 @@ impl ChatView {
             owners
         };
         let live_owners = owners_of(&live, false);
-        let (settled, settled_owners) = match cached_settled_match {
-            Some(cached) => cached,
+        let (settled, settled_owners) = match cached_prefix {
+            // The whole settled part is cached: nothing to draw.
+            Some((cached_boundary, lines, owners)) if cached_boundary == boundary => (lines, owners),
+            // The boundary moved forward: the rows for the lines before it are
+            // the same, so they are kept and the new ones are added after.
+            Some((_, lines, owners)) => {
+                let new_owners = owners_of(&settled, true);
+                let mut rows = lines.as_ref().clone();
+                rows.extend(settled.iter().cloned());
+                let rows = std::sync::Arc::new(rows);
+                let mut all_owners = owners.as_ref().clone();
+                all_owners.extend(new_owners);
+                let all_owners = std::sync::Arc::new(all_owners);
+                if boundary > 0 {
+                    let mut cache = self.settled_cache.lock();
+                    cache.lines = rows.clone();
+                    cache.owners = all_owners.clone();
+                    cache.boundary = boundary;
+                    cache.width = width;
+                    cache.expansion = expansion;
+                }
+                (rows, all_owners)
+            }
             None => {
                 let owners = std::sync::Arc::new(owners_of(&settled, true));
                 let settled = std::sync::Arc::new(settled);
@@ -3674,3 +3726,36 @@ hm".into()));
 }
 
 
+
+#[cfg(test)]
+mod bench_tmp {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn where_does_the_time_go() {
+        let call = ToolCallRecord {
+            name: "read_file".into(),
+            args_json: r#"{"header":"Reading the file","path":"src/main.rs"}"#.into(),
+            result: Some("fn main() {}".into()),
+            is_error: false,
+            is_running: false,
+            added: 0,
+            deleted: 0,
+            diff: None,
+        };
+        let n = 10_000;
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = render_single_tool_card(&call, 120, false, None);
+        }
+        println!("tool card: {:.1} ms for {n} cards", t.elapsed().as_secs_f64() * 1000.0);
+
+        let text = "It parses the arguments, **opens the config** and starts the loop.\n\n- one\n- two\n\n```rust\nfn main() {}\n```\n";
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = render_markdown_text(text, 120);
+        }
+        println!("render_markdown_text: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+    }
+}
