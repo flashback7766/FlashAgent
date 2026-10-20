@@ -437,6 +437,7 @@ impl App {
                 g.effort = chosen_effort;
             }
             None => {
+                let previous_effort = self.current_effort.clone();
                 cx.perm.state().set_mode(chosen_mode);
                 self.current_effort = chosen_effort;
                 self.save_live_effort();
@@ -565,6 +566,8 @@ impl App {
     /// 128K budget on an 8K model overflows the server. The new prefix is
     /// warmed while the user types.
     pub(crate) fn switch_model(&mut self, cx: &LoopCtx<'_>, model: &str) {
+        let previous_model = self.current_model.clone();
+        let previous_effort = self.current_effort.clone();
         self.current_model = model.to_string();
         cx.source.set_model(&self.current_model);
         cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
@@ -615,7 +618,6 @@ impl App {
                 }
                 self.switch_model(cx, &val);
                 self.refresh_welcome(cx.source, cx.mascot_mood);
-                self.notice(format!("Model: {}", self.current_model));
             }
             KeyCode::Esc => {}
             _ => {
@@ -643,12 +645,15 @@ impl App {
             KeyCode::Down => menu.down(),
             KeyCode::Enter => {
                 if let Some(val) = menu.selected_value().cloned() {
+                    let changed = self.current_effort != val;
                     self.current_effort = val;
                     // Saved, not just held: a level chosen in F4 that died with
                     // the session was the one thing that made this feel broken.
                     self.save_live_effort();
                     self.refresh_welcome(cx.source, cx.mascot_mood);
-                    self.notice(format!("Thinking effort set to: {}", self.current_effort));
+                    if changed {
+                        self.remember_effort_switch();
+                    }
                 }
                 return;
             }

@@ -305,6 +305,27 @@ impl App {
         self.background = Some(BackgroundNotice::fading(said, 6));
     }
 
+    /// Remembers a switch for the first message that uses it. Picking a model
+    /// in a menu changes the next request, but writing the rule now would put
+    /// it above a chat nothing has been sent in yet.
+    pub(crate) fn remember_switch(&mut self, provider: Option<&str>, model: bool, effort: bool) {
+        if let Some(name) = provider {
+            self.pending_switch.provider = Some(name.to_string());
+        }
+        self.pending_switch.model |= model;
+        self.pending_switch.effort |= effort;
+    }
+
+    /// Writes the remembered switch above the message that is about to go out.
+    /// One rule even when the provider and its model changed together.
+    pub(crate) fn flush_switch_notice(&mut self) {
+        let pending = std::mem::take(&mut self.pending_switch);
+        let Some(label) = pending.label(&self.current_model, &self.current_effort) else { return };
+        if self.chat.push_model_notice(&label) {
+            self.renderer.request_reprint();
+        }
+    }
+
     fn send_prompt(&mut self, cx: &LoopCtx<'_>) {
         let text = self.input.take();
         self.remember_prompt(&text);
@@ -505,6 +526,7 @@ impl App {
             self.notice(format!("Unknown skill '{name}' · /skills lists them"));
             return;
         };
+        self.flush_switch_notice();
         self.chat.push_user(&format!("/skill:{name}"));
         self.history.push(ChatMessage::user(format!("Execute skill: {name}\n\nSkill Instructions:\n{skill_content}")));
         self.begin_snapshot_turn(cx);

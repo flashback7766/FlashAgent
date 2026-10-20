@@ -11,6 +11,12 @@ pub(crate) fn color(kind: LineKind) -> crossterm::style::Color {
         LineKind::ToolError => crossterm::style::Color::Rgb { r: 230, g: 110, b: 95 },
         LineKind::Diff => crossterm::style::Color::Rgb { r: 145, g: 205, b: 140 },
         LineKind::System => crossterm::style::Color::Rgb { r: 225, g: 175, b: 95 },
+        // The card paints its own rules and headings; the body reads as an
+        // answer, not as a warning.
+        LineKind::Compaction => crossterm::style::Color::Rgb { r: 232, g: 227, b: 218 },
+        // The rule paints its own muted label and will use this when a row has
+        // no ANSI of its own.
+        LineKind::Model => crossterm::style::Color::Rgb { r: 160, g: 155, b: 148 },
         // Between the tool colour and the reasoning grey: a child is work in
         // progress, closer to a tool call than to something said.
         LineKind::Subagent => crossterm::style::Color::Rgb { r: 150, g: 170, b: 195 },

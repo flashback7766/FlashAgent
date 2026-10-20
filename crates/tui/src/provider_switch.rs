@@ -122,6 +122,23 @@ impl App {
         self.context_usage.total_capacity = UNKNOWN_CONTEXT;
         cx.tools_arc.set_context_window(Some(UNKNOWN_CONTEXT));
         cx.tools_arc.set_model_name(&model);
+
+        // A working switch is one rule with the provider, its model and the
+        // effort, written when the next message uses them. A failure or an
+        // empty listing is said at once: there is no model to wait for.
+        if discovery.is_some() && !model.is_empty() {
+            self.remember_switch(Some(&switch.name), false, false);
+        } else {
+            let profile = self.config.active_profile();
+            let how = format!("{} \u{b7} {}", profile.protocol.label(), profile.url);
+            let line = if discovery.is_some() {
+                format!("Provider: {} ({how}) lists no models yet", switch.name)
+            } else {
+                format!("Provider: {} ({how}) did not answer; its models are listed once it does", switch.name)
+            };
+            self.chat.push_system(&line);
+        }
+
         self.switch_model(cx, &model);
         if !model.is_empty() && model != saved {
             self.config.active_profile_mut().model = model.clone();

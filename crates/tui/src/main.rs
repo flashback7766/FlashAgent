@@ -640,6 +640,33 @@ struct LoopCtx<'a> {
     tip_lines: &'a Vec<String>,
 }
 
+/// A switch made in the app that the transcript has not announced yet. The
+/// rule belongs to the first message that uses the new state: a menu pick
+/// alone must not put a rule above an empty chat.
+#[derive(Default)]
+struct PendingSwitch {
+    /// The provider name, when the change came from `/provider`.
+    provider: Option<String>,
+    model: bool,
+    effort: bool,
+}
+
+impl PendingSwitch {
+    /// One rule for the changes waiting together: a provider switch already
+    /// carries the model and effort it runs, so it must not be split in two.
+    fn label(&self, model: &str, effort: &str) -> Option<String> {
+        if let Some(provider) = &self.provider {
+            Some(format!("Provider: {provider} \u{b7} {model} \u{b7} thinking effort: {effort}"))
+        } else if self.model {
+            Some(format!("Model: {model} \u{b7} thinking effort: {effort}"))
+        } else if self.effort {
+            Some(format!("Thinking effort: {effort}"))
+        } else {
+            None
+        }
+    }
+}
+
 struct App {
     question_ui_state: QuestionUiState,
     history: Vec<ChatMessage>,
@@ -669,6 +696,8 @@ struct App {
     /// Ctrl+X, waiting for Ctrl+E.
     ctrl_x_at: Option<std::time::Instant>,
     chat: ChatView,
+    /// A model/provider/effort change not yet written to the transcript.
+    pending_switch: PendingSwitch,
     running: bool,
     active_turn_handle: Option<tokio::task::JoinHandle<()>>,
     /// The running turn's own history, held here so a save taken while it runs
@@ -1229,6 +1258,7 @@ fn initial_app(init: InitialApp) -> App {
         whole_change_shown: None,
         ctrl_x_at: None,
         chat: ChatView::default(),
+        pending_switch: PendingSwitch::default(),
         running: false,
         active_turn_handle: None,
         turn_history: None,
@@ -1724,6 +1754,56 @@ fn find_skill_file(name: &str) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flashagent_core::Compactor;
+
+    #[test]
+    fn tmux_extended_keys_are_used_only_in_the_csi_u_format() {
+        assert!(tmux_forwards_extended_keys("on csi-u\n"));
+        assert!(tmux_forwards_extended_keys("always csi-u"));
+        assert!(!tmux_forwards_extended_keys("on xterm\n"), "the xterm form is not parsed by the reader");
+        assert!(!tmux_forwards_extended_keys("off csi-u\n"), "tmux would not forward it anyway");
+        assert!(!tmux_forwards_extended_keys(""), "no answer means no request");
+    }
+
+    #[test]
+    fn a_shift_reported_apart_from_the_key_is_the_shifted_character() {
+        let shift = KeyModifiers::SHIFT;
+        assert_eq!(shifted_char('`', shift), '~');
+        assert_eq!(shifted_char('1', shift), '!');
+        assert_eq!(shifted_char('a', shift), 'A');
+        assert_eq!(shifted_char('~', shift), '~', "an already shifted character stays as it is");
+        assert_eq!(shifted_char('a', KeyModifiers::NONE), 'a');
+    }
+
+    #[test]
+    fn a_terminal_that_reports_the_key_and_the_shift_apart_types_the_shifted_character() {
+        // A kitty-style terminal that reports the key code and the shift
+        // separately: `~` arrived as a backtick and Caps Lock as a lower case
+        // letter.
+        let tilde = crossterm::event::KeyEvent::new(KeyCode::Char('`'), KeyModifiers::SHIFT);
+        assert_eq!(typed_char(&tilde), Some('~'));
+        let caps = crossterm::event::KeyEvent::new_with_kind_and_state(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+            crossterm::event::KeyEventState::CAPS_LOCK,
+        );
+        assert_eq!(typed_char(&caps), Some('A'), "Caps Lock must still make a capital");
+        let plain = crossterm::event::KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(typed_char(&plain), Some('a'));
+    }
+
+    #[test]
+    fn a_pending_switch_becomes_one_rule() {
+        let mut p = PendingSwitch::default();
+        assert_eq!(p.label("m", "auto"), None);
+        p.model = true;
+        assert_eq!(p.label("m", "high").as_deref(), Some("Model: m · thinking effort: high"));
+        p.provider = Some("Lab".into());
+        assert_eq!(p.label("m", "high").as_deref(), Some("Provider: Lab · m · thinking effort: high"));
+        let p = PendingSwitch { effort: true, ..Default::default() };
+        assert_eq!(p.label("m", "high").as_deref(), Some("Thinking effort: high"));
+    }
 
     #[test]
     fn keys_that_arrive_together_with_a_newline_inside_are_one_paste() {
