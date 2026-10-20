@@ -57,8 +57,18 @@ fn shuffle_deck(deck: &mut [usize], seed: &mut u64) {
 const HOLD_TICKS: usize = 125;
 /// How long a new tip takes to fade in, with motion on.
 const FADE_TICKS: usize = 5;
-/// "  Tip: " before the text, and the columns the footer leaves free on the right.
-const LABEL_COLS: usize = 7;
+/// "  Tip: " before the text, and the columns the footer leaves free on the
+/// right. The label is the interface's word, so its width is counted where it
+/// is written down: a Russian label is wider, and the room for the text moves
+/// with it.
+fn label() -> &'static str {
+    crate::i18n::tr("Tip:")
+}
+
+/// The columns the label takes: two spaces, the word, one space.
+fn label_cols() -> usize {
+    2 + label().chars().count() + 1
+}
 const RIGHT_MARGIN: usize = 2;
 const TEXT_RGB: (u8, u8, u8) = (175, 170, 160);
 /// Where the fade starts: close to the background, not black.
@@ -166,19 +176,19 @@ impl TipAnimator {
         // The deck holds the English tips; the row speaks the language of the
         // interface.
         let tip = crate::i18n::tr(self.tip_text);
-        let label = "  \x1b[1;38;2;225;175;95mTip:\x1b[0m ";
+        let label = format!("  \x1b[1;38;2;225;175;95m{}\x1b[0m ", label());
         if !two_rows(width, max_lines) {
             return vec![format!("{label}{color}{}\x1b[0m", shorten(tip, room))];
         }
         let (line1, line2) = split_tip_at_word_boundary(tip, room);
-        let second = if line2.is_empty() { String::new() } else { format!("{}{color}{}\x1b[0m", " ".repeat(LABEL_COLS), shorten(line2, room)) };
+        let second = if line2.is_empty() { String::new() } else { format!("{}{color}{}\x1b[0m", " ".repeat(label_cols()), shorten(line2, room)) };
         vec![format!("{label}{color}{line1}\x1b[0m"), second]
     }
 }
 
 /// Characters of tip text a row holds.
 fn text_room(width: usize) -> usize {
-    width.saturating_sub(LABEL_COLS + RIGHT_MARGIN)
+    width.saturating_sub(label_cols() + RIGHT_MARGIN)
 }
 
 /// Two rows at this width if any tip needs them and the window has them.

@@ -206,7 +206,7 @@ static RU: &[(&str, &str)] = &[
     ("open or fold one thought or tool call", "развернуть или свернуть одну мысль или вызов"),
     ("close, dismiss or interrupt; it never quits", "закрыть, убрать или прервать; сам агент не выходит"),
     // --- Tips under the composer ---
-    ("Tip:", "Tip:"),
+    ("Tip:", "Совет:"),
     ("Shift+Tab cycles the permission mode: Planning, Manual, Accept Edits, Accept All.", "Shift+Tab листает режим разрешений: Planning, Manual, Accept Edits, Accept All."),
     ("Click a thought or a tool call to open or fold just that one; F2 does them all.", "Клик по мысли или вызову разворачивает или сворачивает только его; F2 — все сразу."),
     ("Press Enter while the agent is working to steer it without stopping the turn; a slash command works too, and /compact runs once the turn ends.", "Enter во время работы подводит агента, не останавливая ход; сработает и /команда, а /compact дождётся конца хода."),
