@@ -430,6 +430,10 @@ pub struct AppConfig {
     /// report holds a backtrace and the paths of the machine.
     #[serde(default)]
     pub crash_reports: bool,
+    /// The language of what the user reads: hints, /help, tips, notices. The
+    /// model keeps English: the system prompt is not translated here.
+    #[serde(default = "default_interface_language")]
+    pub interface_language: String,
     /// Trust confirmation is skipped for these.
     #[serde(default)]
     pub trusted_directories: Vec<PathBuf>,
@@ -500,6 +504,12 @@ fn default_compact_threshold() -> usize {
 
 fn default_editor() -> String {
     "$EDITOR".to_string()
+}
+
+/// English until the interface says otherwise: `Lang::from_code` scopes what
+/// the code accepts, a typo here reads as English, not as a failure.
+fn default_interface_language() -> String {
+    "en".to_string()
 }
 
 fn default_retries() -> usize {
@@ -647,6 +657,7 @@ impl Default for AppConfig {
             disabled_tools: Vec::new(),
             safe_mode: false,
             crash_reports: false,
+            interface_language: default_interface_language(),
             trusted_directories: Vec::new(),
             update_channel: default_update_channel(),
             auto_check_updates: true,
@@ -1513,6 +1524,16 @@ mod tests {
         assert_eq!(loaded.goal_max_steps, Some(12));
         assert!(loaded.setup_completed);
         let _ = std::fs::remove_file(&temp);
+    }
+
+    /// The interface language is a written code in the config; a fresh one is
+    /// English, a named one comes back whatever was written.
+    #[test]
+    fn the_interface_language_round_trips_and_defaults_to_english() {
+        assert_eq!(AppConfig::default().interface_language, "en");
+        let (cfg, rejected) = AppConfig::from_json_str(r#"{"interface_language":"ru"}"#);
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert_eq!(cfg.interface_language, "ru");
     }
 
     /// The warm-up costs a request of its own, so it is off unless the owner

@@ -196,7 +196,7 @@ impl SettingsView {
                 let model = &self.config.active_profile().model;
                 if model.is_empty() { "(auto-detected)".to_string() } else { model.clone() }
             }),
-            ("Permission mode", self.config.permission_mode.label().to_string()),
+            ("Permission mode", crate::i18n::tr(self.config.permission_mode.label()).to_string()),
             ("Safe mode", if self.config.safe_mode {
                 "On (reading and editing inside the project; no shell, no web, no subagents)".into()
             } else { "Off".into() }),
@@ -205,6 +205,14 @@ impl SettingsView {
             } else { "Off (nothing is written when the app falls over)".into() }),
             ("Auto-save sessions", if self.config.auto_save_sessions { "Enabled (auto-resume)".into() } else { "Disabled".into() }),
             ("External editor", self.config.external_editor.clone()),
+            // The language of what the user reads. It applies at once: the
+            // hints, /help and the tips speak it from the next frame. The
+            // Settings screen stays English for now: half of it in two
+            // languages is worse than all of it in one.
+            (
+                "Interface language",
+                crate::i18n::Lang::from_code(&self.config.interface_language).label().to_string(),
+            ),
             ("Setup wizard", "Run the setup again; a new server is added".into()),
         ],
         SettingsTab::Updates => vec![
@@ -401,7 +409,11 @@ impl SettingsView {
                     self.is_dirty = true;
                     SettingsAction::None
                 }
-                7 => SettingsAction::OpenWizard,
+                7 => {
+                    self.cycle_language();
+                    SettingsAction::None
+                }
+                8 => SettingsAction::OpenWizard,
                 _ => SettingsAction::None,
             },
             SettingsTab::Updates => match self.selected_index {
@@ -523,6 +535,7 @@ impl SettingsView {
                 4 => self.config.crash_reports = !self.config.crash_reports,
                 5 => self.config.auto_save_sessions = !self.config.auto_save_sessions,
                 6 => self.cycle_editor(),
+                7 => self.cycle_language(),
                 _ => {}
             },
             SettingsTab::Updates => match self.selected_index {
@@ -610,6 +623,19 @@ impl SettingsView {
             .map(|i| (i + 1) % editors.len())
             .unwrap_or(0);
         self.config.external_editor = editors[next_idx].to_string();
+        self.is_dirty = true;
+    }
+
+    /// The interface language, English and Russian. It applies at once: the
+    /// footer hints, /help and the tips speak it from the next frame, and the
+    /// config keeps it for the next start.
+    fn cycle_language(&mut self) {
+        let next = match crate::i18n::Lang::from_code(&self.config.interface_language) {
+            crate::i18n::Lang::Russian => crate::i18n::Lang::English,
+            crate::i18n::Lang::English => crate::i18n::Lang::Russian,
+        };
+        self.config.interface_language = next.code().to_string();
+        crate::i18n::set(next);
         self.is_dirty = true;
     }
 

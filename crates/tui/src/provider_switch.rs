@@ -86,7 +86,7 @@ impl App {
         self.cache_warm_key = None;
         // The old server's absence is not the new one's; the new one's is said anew.
         self.announced_mood = MascotMood::Checking;
-        if self.background.as_ref().is_some_and(|b| b.text.starts_with(OFFLINE_NOTICE)) {
+        if self.background.as_ref().is_some_and(|b| b.text.starts_with(offline_notice())) {
             self.background = None;
         }
         self.notice(format!("Connecting to {} \u{b7} {}\u{2026}", profile.name, endpoint.url));

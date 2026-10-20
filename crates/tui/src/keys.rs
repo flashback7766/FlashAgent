@@ -1,4 +1,5 @@
 use super::*;
+use flashagent_tui::i18n::tr;
 
 impl App {
     /// The next launch starts in the current mode. A `/goal` run's Accept All is
@@ -330,14 +331,14 @@ impl App {
 
                     if !self.input.is_empty() {
                         flashagent_tui::clipboard::set_clipboard_text(&self.input);
-                        self.copy_toast = Some(("Copied input to clipboard".to_string(), now));
+                        self.copy_toast = Some((tr("Copied input to clipboard").to_string(), now));
                         self.renderer.request_reprint();
                     } else if let Some(text) = self.chat.last_assistant_text() {
                         if is_double_tap {
                             return Some(Flow::Quit);
                         }
                         flashagent_tui::clipboard::set_clipboard_text(&text);
-                        self.copy_toast = Some(("Copied assistant response (press Ctrl+C again to exit)".to_string(), now));
+                        self.copy_toast = Some((tr("Copied assistant response (press Ctrl+C again to exit)").to_string(), now));
                         self.renderer.request_reprint();
                     } else if is_double_tap {
                         return Some(Flow::Quit);
@@ -422,7 +423,7 @@ impl App {
                 cx.perm.state().set_mode(next_mode);
                 self.remember_mode(next_mode);
                 self.refresh_welcome(cx.source, cx.mascot_mood);
-                self.custom_placeholder = Some(format!("Permission mode set to: {}", next_mode.label()));
+                self.custom_placeholder = Some(format!("{} {}", tr("Permission mode set to:"), tr(next_mode.label())));
                 self.suggested_prompt = None;
                 self.renderer.request_reprint();
             }

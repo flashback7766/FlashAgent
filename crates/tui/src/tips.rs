@@ -163,11 +163,14 @@ impl TipAnimator {
     pub fn render_lines(&self, width: usize, max_lines: usize) -> Vec<String> {
         let room = text_room(width);
         let color = self.text_color();
+        // The deck holds the English tips; the row speaks the language of the
+        // interface.
+        let tip = crate::i18n::tr(self.tip_text);
         let label = "  \x1b[1;38;2;225;175;95mTip:\x1b[0m ";
         if !two_rows(width, max_lines) {
-            return vec![format!("{label}{color}{}\x1b[0m", shorten(self.tip_text, room))];
+            return vec![format!("{label}{color}{}\x1b[0m", shorten(tip, room))];
         }
-        let (line1, line2) = split_tip_at_word_boundary(self.tip_text, room);
+        let (line1, line2) = split_tip_at_word_boundary(tip, room);
         let second = if line2.is_empty() { String::new() } else { format!("{}{color}{}\x1b[0m", " ".repeat(LABEL_COLS), shorten(line2, room)) };
         vec![format!("{label}{color}{line1}\x1b[0m"), second]
     }
@@ -180,11 +183,12 @@ fn text_room(width: usize) -> usize {
 
 /// Two rows at this width if any tip needs them and the window has them.
 fn two_rows(width: usize, max_lines: usize) -> bool {
-    let longest = TIPS_POOL.iter().map(|t| t.chars().count()).max().unwrap_or(0);
+    let longest = TIPS_POOL.iter().map(|t| crate::i18n::tr(t).chars().count()).max().unwrap_or(0);
     max_lines >= 2 && width >= 30 && longest > text_room(width)
 }
 
 fn fits(tip: &str, width: usize, rows: usize) -> bool {
+    let tip = crate::i18n::tr(tip);
     let room = text_room(width);
     if !two_rows(width, rows) {
         return tip.chars().count() <= room;
@@ -235,6 +239,18 @@ pub fn split_tip_at_word_boundary(text: &str, budget1: usize) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every tip has a Russian version: a tip in English inside a Russian
+    /// interface is a gap the owner sees at once.
+    #[test]
+    fn every_tip_is_translated() {
+        for tip in TIPS_POOL {
+            assert!(
+                crate::i18n::translate(crate::i18n::Lang::Russian, tip) != *tip,
+                "the tip is not translated: {tip}"
+            );
+        }
+    }
 
     #[test]
     fn every_tip_is_about_something_that_exists() {

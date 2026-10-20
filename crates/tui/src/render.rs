@@ -563,17 +563,17 @@ pub(crate) fn format_status_left(
     expand_status: &str,
 ) -> String {
     let mode_str = if is_goal_active {
-        "\x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m".to_string()
+        format!("\x1b[1;38;2;225;175;95m{}\x1b[0m", flashagent_tui::i18n::tr("[Goal: Autonomous]"))
     } else {
         format!("\x1b[38;2;145;205;140m[{mode_label}]\x1b[0m")
     };
     let activity = match (running, awaiting_user, goal_progress) {
         // Stopped at an approval card: waiting for the user, not generating.
-        (true, true, _) => "\x1b[38;2;225;175;95mWaiting for your answer\x1b[0m".to_string(),
+        (true, true, _) => format!("\x1b[38;2;225;175;95m{}\x1b[0m", flashagent_tui::i18n::tr("Waiting for your answer")),
         // During a goal the budget burn-down.
         (true, false, Some(p)) => format!("\x1b[38;2;168;199;250m{p}\x1b[0m"),
         (true, false, None) => return format!("  {mode_str}{expand_status}"),
-        (false, ..) => "\x1b[38;2;140;135;130mReady\x1b[0m".to_string(),
+        (false, ..) => format!("\x1b[38;2;140;135;130m{}\x1b[0m", flashagent_tui::i18n::tr("Ready")),
     };
     format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m {activity}{expand_status}")
 }
@@ -699,8 +699,9 @@ fn context_gauges(context_usage: &ContextUsage, reported: bool, warn_threshold: 
     let percent = context_usage.percentage().clamp(0.0, 100.0);
     if !reported {
         let used = format!(
-            "\x1b[38;2;135;215;165m{}\x1b[0m used",
-            ContextUsage::format_tokens(context_usage.total_used())
+            "\x1b[38;2;135;215;165m{}\x1b[0m {}",
+            ContextUsage::format_tokens(context_usage.total_used()),
+            flashagent_tui::i18n::tr("used")
         );
         return [used.clone(), used.clone(), used];
     }
@@ -723,10 +724,15 @@ fn context_gauges(context_usage: &ContextUsage, reported: bool, warn_threshold: 
 fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>, awaiting_user: bool) -> String {
     // The safe mode is said where the permission mode is: both say what the
     // session may do, and one of them can change what the other allows.
+    // The mode and the safe marker are the interface's own words.
     let mode_label = if st.safe_mode {
-        format!("{} \u{b7} Safe", st.mode.label())
+        format!(
+            "{} \u{b7} {}",
+            flashagent_tui::i18n::tr(st.mode.label()),
+            flashagent_tui::i18n::tr("Safe")
+        )
     } else {
-        st.mode.label().to_string()
+        flashagent_tui::i18n::tr(st.mode.label()).to_string()
     };
     let mode_room = 2 + visible_width(&mode_label) + 2 + 1;
     let gauges = context_gauges(context_usage, st.context_reported, st.context_warn_threshold);
@@ -741,11 +747,14 @@ fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>
         _ => gauge_str,
     };
     let expand_status = if st.reasoning_expand.all {
-        " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: all]\x1b[0m"
+        // The words are the interface's; the brackets are a label's.
+        " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m{v}\x1b[0m"
+            .replace("{v}", flashagent_tui::i18n::tr("[verbose: all]"))
     } else if st.reasoning_expand.last {
-        " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: last]\x1b[0m"
+        " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m{v}\x1b[0m"
+            .replace("{v}", flashagent_tui::i18n::tr("[verbose: last]"))
     } else {
-        ""
+        String::new()
     };
     let left_telemetry = format_status_left(
         st.running,
@@ -1127,28 +1136,30 @@ fn append_composer(
         vec![if let Some(prefill) = st.prefill_status {
             format!(" {prompt_styled}  {prefill}")
         } else if st.running {
-            let what = st.turn_phase.map_or_else(|| "Working on task".to_string(), TurnPhase::label);
+            // What the agent is at, in the language of the interface; the
+            // label itself stays English for the tests that pin it.
+            let what = st.turn_phase.map_or_else(|| flashagent_tui::i18n::tr("Working on task").to_string(), |p| flashagent_tui::i18n::tr(p.label().as_str()).to_string());
             let glow = if matches!(st.turn_phase, Some(TurnPhase::Stopping)) { Rgb(235, 150, 120) } else { Rgb(235, 225, 205) };
             format!(" {prompt_styled} {}", anim::shimmer(&format!("{what}…"), t, 2000, Rgb(135, 130, 125), glow))
         } else if let Some(sug) = st.suggested_prompt {
             format!(" {prompt_styled}  \x1b[38;2;155;160;175m{sug}\x1b[0m  {}", key_hints(&[("→", "use")], width))
         } else if !st.attachments.is_empty() {
             let prompt_text = if width >= 60 {
-                "Press Enter to send the image, or type a message\u{2026}"
+                flashagent_tui::i18n::tr("Press Enter to send the image, or type a message\u{2026}")
             } else if width >= 40 {
-                "Enter sends the image\u{2026}"
+                flashagent_tui::i18n::tr("Enter sends the image\u{2026}")
             } else {
-                "Enter to send\u{2026}"
+                flashagent_tui::i18n::tr("Enter to send\u{2026}")
             };
             format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
         } else {
             // The long form when it fits.
             let prompt_text = if width >= 60 {
-                "Ask FlashAgent to do anything\u{2026}"
+                flashagent_tui::i18n::tr("Ask FlashAgent to do anything\u{2026}")
             } else if width >= 40 {
-                "Ask FlashAgent\u{2026}"
+                flashagent_tui::i18n::tr("Ask FlashAgent\u{2026}")
             } else {
-                "Ask\u{2026}"
+                flashagent_tui::i18n::tr("Ask\u{2026}")
             };
             format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
         }]

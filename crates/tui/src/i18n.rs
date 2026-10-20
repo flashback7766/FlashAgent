@@ -1,0 +1,417 @@
+//! The language of what the user reads: footer hints, /help, the tips under
+//! the composer, the command list, the standing notices. The conversation and
+//! the system prompt stay untouched: the model reads English, the person
+//! reads the language they picked in Settings.
+//!
+//! A lookup table of `(English, Russian)` pairs stands in for an i18n crate:
+//! the interface is a known, finite set of phrases, not prose anyone writes.
+//! A phrase the table does not hold shows in English -- a gap, not a bug, and
+//! the table can be filled line by line.
+
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// The language the interface speaks. English is what a fresh config gets and
+/// what an unknown code falls back to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Lang {
+    #[default]
+    English,
+    Russian,
+}
+
+impl Lang {
+    /// How the config spells it (`interface_language: "ru"`).
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::English => "en",
+            Self::Russian => "ru",
+        }
+    }
+
+    /// What the Settings row shows. Every language speaks its own name; these
+    /// two never translate.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::English => "English",
+            Self::Russian => "Русский",
+        }
+    }
+
+    /// The config holds a written value; a typo in one field must not fail a
+    /// session over a cosmetic setting, so anything unrecognised is English.
+    pub fn from_code(code: &str) -> Self {
+        match code.trim().to_ascii_lowercase().as_str() {
+            "ru" | "rus" => Self::Russian,
+            _ => Self::English,
+        }
+    }
+}
+
+/// The language every future lookup reads. English is zero, Russian one;
+/// `set` is called once from the config at startup and then from the Settings
+/// row when the user turns it.
+static LANG: AtomicU8 = AtomicU8::new(Lang::English as u8);
+
+pub fn set(lang: Lang) {
+    LANG.store(lang as u8, Ordering::Relaxed);
+}
+
+pub fn current() -> Lang {
+    match LANG.load(Ordering::Relaxed) {
+        1 => Lang::Russian,
+        _ => Lang::English,
+    }
+}
+
+/// The phrase in the language of the interface. A phrase the table does not
+/// hold passes through unchanged: an English line is better than a missing
+/// one, and the gap can be filled a row at a time.
+///
+/// The result borrows either the table (long-lived) or the input, which is
+/// why the quoted form of the lifetime elision is `&(whatever the input's
+/// lifetime is)`; passing a `&'static str` in, as tips and help tables do,
+/// gives a `&'static str` back.
+pub fn tr(input: &str) -> &str {
+    translate(current(), input)
+}
+
+/// `tr` with the language in hand, so tests read the table without moving the
+/// global.
+pub fn translate(lang: Lang, input: &str) -> &str {
+    let table = match lang {
+        Lang::English => return input,
+        Lang::Russian => RU,
+    };
+    table.iter().find(|(en, _)| *en == input).map_or(input, |(_, ru)| *ru)
+}
+
+// (English, Russian). The English side is what call sites spell, so it must
+// match them exactly -- a mistyped key reads as English and hopes for a later
+// fix. English and Russian turn to unicode escapes where the call sites do,
+// both sides must be the same string once compiled; the middle dot, the
+// ellipsis, the arrow and the quotes below are the same characters the source
+// spells.
+
+static RU: &[(&str, &str)] = &[
+    // --- Hint lines (key_hints values: what the key does, not the key) ---
+    ("send", "отправить"),
+    ("new line", "новая строка"),
+    ("delete word", "стереть слово"),
+    ("history", "история"),
+    ("clear", "очистить"),
+    ("cancel", "отмена"),
+    ("close", "закрыть"),
+    ("older", "старее"),
+    ("use", "взять"),
+    ("confirm", "подтвердить"),
+    ("choose", "выбрать"),
+    ("always", "всегда"),
+    ("deny", "отклонить"),
+    ("complete", "дополнить"),
+    ("select", "выбрать"),
+    ("run", "выполнить"),
+    ("steer", "подправить"),
+    ("steer or /command", "подправить или /команда"),
+    ("commands", "команды"),
+    ("interrupt", "прервать"),
+    ("try again", "повторить"),
+    ("forget", "забыть"),
+    ("correct it", "исправить"),
+    ("summary", "суть"),
+    ("list", "список"),
+    ("to ask", "свой ответ"),
+    ("pick a question", "выбрать вопрос"),
+    ("rewrite", "переписать"),
+    ("switch tab", "сменить вкладку"),
+    ("move", "двигать"),
+    ("tick", "отметить"),
+    ("pick", "отметить"),
+    ("back to the choices", "вернуться к вариантам"),
+    ("add", "добавить"),
+    ("edit", "править"),
+    ("delete", "удалить"),
+    ("keep it", "оставить"),
+    ("back", "назад"),
+    ("background", "в фон"),
+    ("quit", "выйти"),
+    ("close and uninstall", "закрыть и удалить FlashAgent"),
+    ("keep FlashAgent", "оставить FlashAgent"),
+    ("switch", "переключить"),
+    ("keep the current channel", "оставить текущий канал"),
+    ("paste image", "вставить картинку"),
+    ("show all", "показать всё"),
+    ("save and close", "сохранить и закрыть"),
+    ("skip", "пропустить"),
+    ("change", "сменить"),
+    ("next", "дальше"),
+    ("output", "вывод"),
+    ("start working", "начать работу"),
+    ("stop it", "остановить"),
+    ("turn one on or off", "включить или выключить"),
+    // --- Footer status ---
+    ("used", "занято"),
+    ("Ready", "Готов"),
+    ("Waiting for your answer", "Жду вашего ответа"),
+    ("[Goal: Autonomous]", "[Цель: автономный]"),
+    ("[verbose: all]", "[подробно: всё]"),
+    ("[verbose: last]", "[подробно: в последнем ходе]"),
+    // --- Composer phase (TurnPhase labels, what the agent is doing now) ---
+    ("Waiting for the model", "Жду модель"),
+    ("Thinking", "Думает"),
+    ("Writing the answer", "Пишет ответ"),
+    ("Running a tool", "Запускает инструмент"),
+    ("Reading the result", "Читает результат"),
+    ("Stopping", "Останавливается"),
+    ("Working on task", "Работает над задачей"),
+    // --- /help ---
+    ("Commands and skills \u{b7} Tab completes them, Ctrl+K searches everything", "Команды и навыки \u{b7} Tab дополняет, Ctrl+K ищет по всему"),
+    ("Keys", "Клавиши"),
+    // --- /help commands ---
+    ("an autonomous run; its limits are in Settings \u{2192} Goal", "автономный прогон; лимиты в Settings \u{2192} Goal"),
+    ("pick a saved session from this folder and continue it", "выбрать сохранённую сессию этой папки и продолжить её"),
+    ("settings", "настройки"),
+    ("choose and switch the model", "выбрать и сменить модель"),
+    ("switch to another saved provider, local or cloud; add or edit them", "перейти на другого сохранённого провайдера, локального или облачного; добавить или изменить"),
+    ("thinking effort (also Ctrl+T)", "степень размышления (также Ctrl+T)"),
+    ("permission mode (also Shift+Tab)", "режим разрешений (также Shift+Tab)"),
+    ("what fills the context window", "чем занято окно контекста"),
+    ("summarize older turns to free context", "сжать старые ходы, освободив контекст"),
+    ("what FlashAgent remembers; the summary groups it by topic", "что FlashAgent помнит; сводка группирует это по темам"),
+    ("show thoughts and tool calls (also F2, Alt+O, Ctrl+O)", "показывать мысли и вызовы инструментов (также F2, Alt+O, Ctrl+O)"),
+    ("answer the last prompt again from scratch", "ответить на последний промпт заново, с нуля"),
+    ("files and conversation go back to before turn n", "файлы и диалог откатятся к состоянию до хода n"),
+    ("the changed lines and untracked files; commit the staged changes", "изменённые строки и файлы вне git; /commit закоммитит подготовленное"),
+    ("write the conversation to a file, where you say", "записать разговор в файл по указанному пути"),
+    ("write the prompt in an external editor", "написать промпт во внешнем редакторе"),
+    ("what the model may call, and what it may not", "что модель может вызывать, а что нет"),
+    ("what the app said, kept so it can be read again", "что говорил агент, чтобы перечитать"),
+    ("the safe mode: reading and editing inside the project, nothing else", "безопасный режим: чтение и правки внутри проекта, больше ничего"),
+    ("Model Context Protocol servers", "серверы Model Context Protocol"),
+    ("background commands: their output, and stopping one", "фоновые команды: их вывод и остановка"),
+    ("sampling parameters (advanced)", "параметры сэмплинга (для знающих)"),
+    ("run a skill from .agents/skills/", "запустить навык из .agents/skills/"),
+    ("check for, download and install an update", "проверить, скачать и поставить обновление"),
+    ("switch the release channel", "сменить канал обновлений"),
+    ("clear the screen and scrollback", "очистить экран и прокрутку"),
+    ("close FlashAgent and remove it; asks what data to delete", "закрыть FlashAgent и удалить его; спросит, что стереть"),
+    ("save the session and quit", "сохранить сессию и выйти"),
+    // --- /help keys ---
+    ("send; while a turn runs, steer it, or run a /command (/compact, /clear, /export and /rewind wait for the turn to end)", "отправить; пока ход идёт, подправить или /команда (/compact, /clear, /export и /rewind ждут конца хода)"),
+    ("a new line in the prompt", "новая строка в промпте"),
+    ("move and delete in the prompt, as in a shell", "движение и стирание в промпте, как в шелле"),
+    ("search the prompts sent before", "поиск по отправленным промптам"),
+    ("paste a screenshot (Ctrl+Z takes it back); dropping an image works too", "вставить скриншот (Ctrl+Z отменяет); можно и перетащить картинку"),
+    ("every command and menu, searchable", "все команды и меню, с поиском"),
+    ("move the running shell command to the background", "увести идущую команду шелла в фон"),
+    ("open or fold one thought or tool call", "развернуть или свернуть одну мысль или вызов"),
+    ("close, dismiss or interrupt; it never quits", "закрыть, убрать или прервать; сам агент не выходит"),
+    // --- Tips under the composer ---
+    ("Tip:", "Tip:"),
+    ("Shift+Tab cycles the permission mode: Planning, Manual, Accept Edits, Accept All.", "Shift+Tab листает режим разрешений: Planning, Manual, Accept Edits, Accept All."),
+    ("Click a thought or a tool call to open or fold just that one; F2 does them all.", "Клик по мысли или вызову разворачивает или сворачивает только его; F2 — все сразу."),
+    ("Press Enter while the agent is working to steer it without stopping the turn; a slash command works too, and /compact runs once the turn ends.", "Enter во время работы подводит агента, не останавливая ход; сработает и /команда, а /compact дождётся конца хода."),
+    ("Esc interrupts a running turn and keeps everything it already did.", "Esc прерывает идущий ход и сохраняет всё, что он уже сделал."),
+    ("Ctrl+Z takes back an attached image before it is sent.", "Ctrl+Z отменяет приложенную картинку, пока она не отправлена."),
+    ("Drop an image file on the window to attach it to the next message.", "Бросьте файл картинки на окно, чтобы приложить его к следующему сообщению."),
+    ("Ctrl+X Ctrl+E writes the prompt in your external editor, as in bash.", "Ctrl+X Ctrl+E пишет промпт во внешнем редакторе, как в bash."),
+    ("/update checks for an update, downloads it and shows the progress.", "/update проверяет обновление, скачивает его и показывает ход."),
+    ("/goal <task> runs on its own; its step, time and token limits are in Settings \u{2192} Goal.", "/goal <task> работает сам; лимиты ходов, времени и токенов в Settings \u{2192} Goal."),
+    ("A /goal ends with a report of what changed, and says plainly when it is unfinished.", "/goal завершается отчётом о переменениях и прямо говорит, если не управился."),
+    ("/compact summarizes older turns to free context; /compact <focus> says what to keep.", "/compact сжимает старые ходы ради свободного контекста; /compact <focus> уточняет, что сохранить."),
+    ("Auto-compaction fills a bigger window further: 85% of 128k, 97% of a million.", "Автокомпакция у большего окна ждёт дольше: 85% от 128k, 97% от миллиона."),
+    ("/memory lists what FlashAgent remembers; d forgets a fact, e asks the model to fix one.", "/memory перечисляет память агента; d забывает факт, e просит модель исправить."),
+    ("Say \"remember that ...\" and the fact follows you into every project and model.", "Скажите «remember that ...» — и факт пойдёт за вами в каждый проект и модель."),
+    ("Facts about this codebase stay in its own MEMORY.md; facts about you are global.", "Факты о самом проекте лежат в его MEMORY.md; факты о вас — глобальные."),
+    ("/whatsnew shows what changed in the latest releases.", "/whatsnew показывает, что изменилось в свежих выпусках."),
+    ("/effort explains what auto effort has learned about the current model.", "/effort рассказывает, что авто-усилие выучило о текущей модели."),
+    ("Auto effort nudges itself by one step when a model keeps overthinking or fumbling tools.", "Авто-усилие шагает на ступень, когда модель всё время передумывает или бестолку тычется в инструменты."),
+    ("/diff shows changed tracked files; /commit <message> commits what is staged.", "/diff показывает изменённые файлы; /commit <message> коммитит подготовленное."),
+    ("/export md, /export html or /export jsonl writes the conversation to a file.", "/export md, /export html или /export jsonl пишет разговор в файл."),
+    ("/mcp manages Model Context Protocol servers and their tools.", "/mcp управляет серверами Model Context Protocol и их инструментами."),
+    ("Put a skill in .agents/skills/<name>.md and run it with /skill:<name>.", "Положите навык в .agents/skills/<name>.md и запускайте как /skill:<name>."),
+    ("/mode planning keeps the agent read-only until you approve a plan.", "/mode planning держит агента читающим, пока вы не одобрите план."),
+    ("In Manual mode every edit and command waits for your approval card.", "В Manual каждая правка и команда ждёт вашей карточки подтверждения."),
+    ("On an approval card, a allows this kind of call for the rest of the session.", "На карточке подтверждения A разрешает такие вызовы до конца сессии."),
+    ("/clear empties the scrollback; the conversation itself is kept.", "/clear чистит экран; сам разговор остаётся."),
+    ("/channel stable or /channel beta picks the release channel, with a warning first.", "/channel stable или /channel beta выбирает канал, сначала предупредив."),
+    ("Sessions are saved on exit and come back with flashagent --resume <id>.", "Сессии сохраняются на выходе; вернуть можно так: flashagent --resume <id>."),
+    ("flashagent --tool-test scores how reliably the current model drives tools.", "flashagent --tool-test меряет, как надёжно модель водит инструментами."),
+    ("flashagent --tool-test --all-models compares every chat model the server lists.", "flashagent --tool-test --all-models сравнивает все чат-модели, что перечислены на сервере."),
+    ("flashagent --setup reruns the setup; a new server is saved beside the others.", "flashagent --setup повторяет настройку; новый сервер сохраняется рядом с прежними."),
+    ("/provider switches to another saved provider, local or cloud, and the conversation goes on.", "/provider переходит на другого сохранённого провайдера, локального или облачного; разговор продолжается."),
+    ("flashagent -y skips the directory trust question for trusted projects.", "flashagent -y пропускает вопрос о доверии папке для знакомых проектов."),
+    ("flashagent --url <endpoint> talks to another server for one run and saves nothing about it.", "flashagent --url <endpoint> говорит с другим сервером один прогон и ничего о нём не запоминает."),
+    ("The line under the input shows what the agent is doing right now.", "Строка под вводом показывает, чем агент занят прямо сейчас."),
+    ("Every tool call carries a one-line header from the model saying what it is for.", "У всякого вызова инструмента есть строка от модели — зачем он."),
+    ("A declined tool call is not retried; the model is told to ask you instead.", "Отклонённый вызов не повторяется; модель просят спросить вас вместо этого."),
+    ("Pictures cost tokens: the attachment label shows the measured cost for this model.", "Картинки стоят токенов: подпись вложения показывает меру для этой модели."),
+    // --- Command list (autocomplete descriptions) ---
+    ("Show command reference and keybindings", "Справка по командам и клавишам"),
+    ("Open interactive settings tab (or press Tab on empty prompt)", "Открыть настройки (или Tab на пустом вводе)"),
+    ("Sampling parameters, for those who tune them", "Параметры сэмплинга, для тех, кто их крутит"),
+    ("See what FlashAgent remembers; forget or correct a fact", "Показать память агента; забыть или поправить факт"),
+    ("List what FlashAgent remembers; forget or correct a fact", "Показать память агента; забыть или поправить факт"),
+    ("Show what changed in the latest releases", "Что изменилось в свежих выпусках"),
+    ("Show detailed context window token breakdown", "Разбор окна контекста по частям"),
+    ("What this session has cost, and where it went", "Расход этой сессии и куда он ушёл"),
+    ("Clear terminal screen and conversation scrollback", "Очистить экран и прокрутку разговора"),
+    ("Select thinking effort preset (whatever the model offers)", "Задать степень размышления (из предложенного моделью)"),
+    ("Open model selection menu or switch model", "Меню выбора модели или её смена"),
+    ("Switch to another saved provider, local or cloud; add or edit them", "Перейти на другого сохранённого провайдера, локального или облачного; добавить или изменить"),
+    ("Toggle verbose mode for thoughts and tool calls (all, last, off)", "Показывать мысли и вызовы инструментов (all, last, off)"),
+    ("Cycle permission mode (Planning, Manual, Accept Edits, Accept All)", "Режим разрешений (Planning, Manual, Accept Edits, Accept All)"),
+    ("Autonomous run: /goal <task> (limits in Settings \u{2192} Goal)", "Автономный прогон: /goal <task> (лимиты в Settings \u{2192} Goal)"),
+    ("Pick a saved session from this folder and continue it", "Выбрать сохранённую сессию этой папки и продолжить её"),
+    ("List and manage Model Context Protocol servers", "Серверы Model Context Protocol: список и управление"),
+    ("What the model may call, and what it may not", "Что модель может вызывать, а что нет"),
+    ("What the app said, kept so it can be read again", "Что говорил агент, чтобы перечитать"),
+    ("The safe mode: reading and editing inside the project, nothing else", "Безопасный режим: чтение и правки внутри проекта, больше ничего"),
+    ("Background commands: see their output, stop one", "Фоновые команды: их вывод и остановка"),
+    ("Compact conversation context (optional: /compact <focus instructions>)", "Сжать контекст разговора (опционально: /compact <что сохранить>)"),
+    ("Regenerate the last assistant response from scratch (or press Ctrl+R)", "Ответить агенту заново, с нуля (или Ctrl+R)"),
+    ("Check and apply FlashAgent updates in-place", "Проверить и применить обновление FlashAgent на месте"),
+    ("Switch release channel: /channel <stable|beta>", "Канал обновлений: /channel <stable|beta>"),
+    ("Preview unstaged git changes and diff stat", "Показать незакоммиченные изменения и статистику"),
+    ("Review changes and commit with /commit <message>", "Разобрать изменения и закоммитить: /commit <message>"),
+    ("Take turns back: files and conversation return to before a turn", "Откат ходов: файлы и разговор вернутся к состоянию до хода"),
+    ("Open external editor (nano/vim/code) to craft prompt", "Открыть внешний редактор (nano/vim/code) для промпта"),
+    ("Export chat session to markdown, HTML, or JSONL", "Экспортировать разговор в markdown, HTML или JSONL"),
+    ("Save the session and quit", "Сохранить сессию и выйти"),
+    ("Close FlashAgent and remove it; asks what data to delete", "Закрыть FlashAgent и удалить его; спросит, что стереть"),
+    ("List skills from .agents/skills and ~/.flashagent/skills", "Навыки из .agents/skills и ~/.flashagent/skills"),
+    // --- Sub-command descriptions ---
+    ("Expand both thoughts and tool calls permanently", "Разворачивать мысли и вызовы всегда"),
+    ("Expand thoughts and tool calls for latest turn", "Разворачивать в последнем ходу"),
+    ("Collapse thoughts and tool calls to concise summary", "Свернуть мысли и вызовы в краткие сводки"),
+    ("An overview of everything remembered, by topic", "Обзор всей памяти, по темам"),
+    ("Use API server default preset", "Сколько решит сам сервер"),
+    ("Disable model internal reasoning", "Отключить размышления модели"),
+    ("Fast response, low reasoning budget", "Быстрый ответ, мало размышлений"),
+    ("Balanced reasoning depth and speed", "Разум и скорость пополам"),
+    ("Full reasoning exploration", "Полный разбор размышлениями"),
+    ("Require confirmation for file writes and shell", "Подтверждать правки файлов и команды"),
+    ("Auto-approve file edits, ask on shell commands", "Правки одобрять, команды спрашивать"),
+    ("Read-only planning mode (modifications blocked)", "Только чтение, пока план не одобрен"),
+    ("Bypass all approval gates (full autonomy)", "Мимо всех предохранителей (полная автономия)"),
+    ("List configured and connected MCP servers", "Список настроенных и подключённых серверов MCP"),
+    ("Browse vetted MCP marketplace extensions", "Проверенные расширения из каталога MCP"),
+    ("Test connection and discover tools for an MCP server", "Проверить соединение и найти инструменты сервера MCP"),
+    ("Add and scaffold a curated MCP extension from marketplace", "Добавить проверенное расширение из каталога"),
+    ("Reload MCP configurations and restart active servers", "Перечитать конфиги MCP и перезапустить активные серверы"),
+    ("Switch to Beta channel (latest features & pre-releases)", "Бета-канал: свежие возможности и предвыпуски"),
+    ("Switch to Stable channel (official releases)", "Стабильный канал: официальные выпуски"),
+    ("Auto-compact prior context while keeping current state", "Сжать старый контекст, сохранив текущее"),
+    ("Compact context prioritizing code and architecture details", "Сжать контекст, сохранив про код и архитектуру"),
+    ("Compact context prioritizing remaining tasks and roadmap", "Сжать контекст, сохранив задачи и план"),
+    // --- Standing notices ---
+    ("Interrupting\u{2026}", "Прерываю\u{2026}"),
+    ("Ctrl+R retries the last prompt", "Ctrl+R повторит последний промпт"),
+    ("Compaction is still running \u{b7} your message is queued and will be sent when it finishes", "Компакция ещё идёт \u{b7} ваше сообщение в очереди и уйдёт, когда она кончится"),
+    ("No previous turn to regenerate", "До этого не было хода — повторять нечего"),
+    ("No skills yet \u{b7} add .agents/skills/<name>.md here, or ~/.flashagent/skills/<name>.md for every project", "Навыков нет \u{b7} положите .agents/skills/<name>.md в проект или ~/.flashagent/skills/<name>.md сразу на всё"),
+    ("No changelog is bundled with this build", "В этой сборке нет changelog"),
+    ("Autonomous mode runs only inside /goal <task>", "Автономный режим живёт только внутри /goal <task>"),
+    ("Usage: /mode planning | /mode manual | /mode edits | /mode all", "Так: /mode planning | /mode manual | /mode edits | /mode all"),
+    ("Unknown channel \u{b7} /channel stable or /channel beta", "Нет такого канала \u{b7} /channel stable или /channel beta"),
+    ("Usage: /mcp list | market | test <server> | add <id> | reload", "Так: /mcp list | market | test <server> | add <id> | reload"),
+    ("A compaction is already running", "Компакция уже идёт"),
+    ("/compact waits for the turn to finish \u{b7} Esc ends the turn first", "/compact дождётся конца хода \u{b7} Esc завершит ход заранее"),
+    ("Usage: /verbose all | /verbose last | /verbose off", "Так: /verbose all | /verbose last | /verbose off"),
+    ("Rewind is not available in this session", "В этой сессии откат недоступен"),
+    ("Nothing to rewind to yet", "Откатываться пока некуда"),
+    ("Wait for the turn to finish before rewinding", "Сначала дождитесь конца хода, потом откатывайте"),
+    ("Rewind incomplete \u{b7} history kept; fix the errors above and run /rewind again", "Откат кончился не весь \u{b7} история сохранена; исправьте ошибки выше и повторите /rewind"),
+    ("Allowed once \u{b7} this command is too broad to allow always", "Разрешено один раз \u{b7} команда слишком широкая, чтобы разрешать всегда"),
+    ("Sampling parameters updated", "Параметры сэмплинга обновлены"),
+    ("Copied input to clipboard", "Ввод скопирован в буфер"),
+    ("Copied assistant response (press Ctrl+C again to exit)", "Ответ агента скопирован (ещё Ctrl+C — выход)"),
+    ("Nothing has been said yet", "Пока ничего не говорилось"),
+    // --- The permission mode and the safe marker ---
+    ("Planning", "Планирование"),
+    ("Manual", "Вручную"),
+    ("Accept Edits", "Правки без спроса"),
+    ("Accept All", "Всё без спроса"),
+    ("Safe", "Безопасный"),
+    ("Permission mode set to:", "Режим разрешений:"),
+    // --- The offline notice ---
+    ("No answer from", "Нет ответа от"),
+    ("could not read the model list from", "не удалось прочитать список моделей у"),
+    ("/provider picks another", "/provider выберет другой"),
+    // --- The welcome card and the placeholder under it ---
+    ("Welcome back", "С возвращением"),
+    ("Welcome", "Добро пожаловать"),
+    ("the coding agent for local models", "кодовый агент для локальных моделей"),
+    ("none yet (F3)", "пока нет (F3)"),
+    ("System & Context", "Система и контекст"),
+    ("Quick Commands", "Быстрые команды"),
+    ("Model:", "Модель:"),
+    ("Provider:", "Провайдер:"),
+    ("Context:", "Контекст:"),
+    ("Effort:", "Усилие:"),
+    ("Memory:", "Память:"),
+    ("not chosen yet", "ещё не выбран"),
+    ("not known yet", "пока неизвестно"),
+    ("no rule files yet", "файлов правил пока нет"),
+    ("rule file", "файл правил"),
+    ("rule files", "файлов правил"),
+    ("for autonomy", "для автономии"),
+    ("context", "контекст"),
+    ("verbose", "подробно"),
+    ("model", "модель"),
+    ("effort", "усилие"),
+    ("regen", "заново"),
+    ("for more", "подробнее"),
+    ("Tab settings", "Tab настройки"),
+    ("Ctrl+K commands", "Ctrl+K команды"),
+    ("Ctrl+D quit", "Ctrl+D выйти"),
+    ("Ask FlashAgent to do anything\u{2026}", "Спросите FlashAgent о чём угодно\u{2026}"),
+    ("Ask FlashAgent\u{2026}", "Спросите FlashAgent\u{2026}"),
+    ("Ask\u{2026}", "Спросите\u{2026}"),
+    ("Enter to send\u{2026}", "Enter \u{2014} отправить\u{2026}"),
+    ("Press Enter to send the image, or type a message\u{2026}", "Enter \u{2014} отправить картинку, или напишите сообщение\u{2026}"),
+    ("Enter sends the image\u{2026}", "Enter \u{2014} отправить картинку\u{2026}"),
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every entry is a real pair: no side empty, no English phrase repeated
+    /// (a repeated key means a drift between two call sites that spell the
+    /// phrase differently by accident).
+    #[test]
+    fn every_entry_is_a_pair() {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (en, ru) in RU {
+            assert!(!en.is_empty() && !ru.is_empty(), "empty side: ({en:?}, {ru:?})");
+            assert!(seen.insert(en), "english phrase twice: {en:?}");
+        }
+    }
+
+    /// English never translates: the table is only read under Russian, and an
+    /// English build of the interface shows exactly what the code spells.
+    #[test]
+    fn english_passes_through() {
+        assert!(matches!(translate(Lang::English, "anything at all"), "anything at all"));
+    }
+
+    /// Known phrases come back in Russian, phrases the table does not hold
+    /// come back as they were: an untranslated line beats a blank one.
+    #[test]
+    fn russian_translates_and_unknowns_pass_through() {
+        assert!(matches!(translate(Lang::Russian, "send"), "отправить"));
+        assert!(matches!(translate(Lang::Russian, "Ready"), "Готов"));
+        let untranslated = "not a phrase in the table";
+        assert!(matches!(translate(Lang::Russian, untranslated), "not a phrase in the table"));
+    }
+
+    /// What the config spells: the two codes it means, and the typo that
+    /// silently reads as English.
+    #[test]
+    fn codes() {
+        assert_eq!(Lang::from_code("ru").code(), "ru");
+        assert_eq!(Lang::from_code(" RU ").code(), "ru");
+        assert_eq!(Lang::from_code("en").code(), "en");
+        assert_eq!(Lang::from_code("klingon").code(), "en");
+    }
+}

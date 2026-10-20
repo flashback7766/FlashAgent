@@ -32,6 +32,7 @@ pub mod theme;
 mod tool_cards;
 pub mod tips;
 pub mod image_cost;
+pub mod i18n;
 pub mod memory_view;
 pub mod whatsnew;
 pub mod wizard;
