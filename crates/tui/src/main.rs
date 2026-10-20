@@ -2104,7 +2104,18 @@ mod tests {
         ];
         // A compaction the person asked for: it happens even when the summary
         // is longer than the exchange it replaces.
-        let result = compact_context_with_sink(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None, None, true, None)
+        let result = compact_context_with_sink(
+            &ScriptedCompaction(flashagent_llm::FinishReason::Stop),
+            &mut history,
+            crate::compact::Compaction {
+                focus_prompt: None,
+                archive_path: &archive,
+                real_used: None,
+                room: None,
+                allow_growth: true,
+            },
+            None,
+        )
             .await
             .expect("one exchange is enough to compact");
         assert!(history[0].content.contains("Compacted Conversation History"), "{}", history[0].content);
@@ -2190,7 +2201,18 @@ mod tests {
         let mut history = long_history();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let sink = SummarySink::ui(tx);
-        let result = compact_context_with_sink(&SplitCompaction, &mut history, None, &archive, None, Some(&sink), true, None)
+        let result = compact_context_with_sink(
+            &SplitCompaction,
+            &mut history,
+            crate::compact::Compaction {
+                focus_prompt: None,
+                archive_path: &archive,
+                real_used: None,
+                room: None,
+                allow_growth: true,
+            },
+            Some(&sink),
+        )
             .await
             .expect("the summary is accepted");
         assert!(result.summary.contains("## Objective"));
@@ -2267,7 +2289,18 @@ mod tests {
 
         let source = CountingCompaction { calls: std::sync::Mutex::new(Vec::new()) };
         // A room of 4k tokens: the conversation is far bigger.
-        let result = compact_context_with_sink(&source, &mut history, None, &archive, None, None, true, Some(4_000))
+        let result = compact_context_with_sink(
+            &source,
+            &mut history,
+            crate::compact::Compaction {
+                focus_prompt: None,
+                archive_path: &archive,
+                real_used: None,
+                room: Some(4_000),
+                allow_growth: true,
+            },
+            None,
+        )
             .await
             .expect("the summary is accepted");
         assert!(result.summary.contains("## Objective"));

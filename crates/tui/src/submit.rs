@@ -916,12 +916,14 @@ impl App {
                 compact_context_with_sink(
                 source.as_ref(),
                 &mut history,
-                focus.as_deref(),
-                &archive,
-                Some(used),
+                crate::compact::Compaction {
+                    focus_prompt: focus.as_deref(),
+                    archive_path: &archive,
+                    real_used: Some(used),
+                    room: Some(room),
+                    allow_growth: true,
+                },
                 Some(&sink),
-                true,
-                Some(room),
             )
             .await;
             let saved = result.as_ref().map(|r| r.saved);
