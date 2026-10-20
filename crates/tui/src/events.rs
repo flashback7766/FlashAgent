@@ -328,7 +328,12 @@ impl App {
         self.history = history;
         self.compacting = false;
         match card {
-            Some(result) => self.chat.finish_compaction_card(&result),
+            Some(result) => {
+                // The turns the summary replaced go with the session: one file
+                // holds the conversation and the archive of what it left out.
+                self.archive.extend(result.archive.iter().cloned());
+                self.chat.finish_compaction_card(&result);
+            }
             None => self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the conversation is unchanged")),
         }
         self.chat.forget_counted_context();

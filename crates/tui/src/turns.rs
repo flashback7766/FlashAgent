@@ -203,7 +203,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         let compactor = (self.config.auto_compact_context && self.context_usage.total_capacity > 0).then(|| {
             Arc::new(TurnCompactor {
                 source: cx.source.clone(),
-                archive: compaction_archive_path(cx.session_id),
+                archive: session_path(cx.session_id),
                 capacity: self.context_usage.total_capacity,
                 fixed: self.context_usage.system_tokens + self.context_usage.memory_tokens + self.context_usage.tools_tokens,
                 threshold_pct: flashagent_core::resolved_compact_threshold(
@@ -426,7 +426,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                             .total_capacity
                             .saturating_sub(self.context_usage.system_tokens + self.context_usage.tools_tokens)
                             .saturating_sub(before);
-                        let compacted = if let Some(archive) = compaction_archive_path(cx.session_id) {
+                        let compacted = if let Some(archive) = session_path(cx.session_id) {
                             // This handler is the event loop, so awaiting the compaction
                             // straight through would freeze the card until the summary
                             // landed. Keep the history aside and pump the words into the
