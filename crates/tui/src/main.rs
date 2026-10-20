@@ -580,7 +580,7 @@ async fn main() -> Result<()> {
     let perm: &'static PermissionedTools =
         Box::leak(Box::new(PermissionedTools::new(Arc::new(composite), Some(tools_arc.clone()), state.clone())));
 
-    // Project and global memory docs, injected into the first user message.
+    // Project and global memory docs, injected into the system prompt.
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_default();
     let docs = flashagent_core::collect(&cwd, &home.join(".flashagent"));
     let memory_block = flashagent_core::injection_block(&docs, config.token_budget);
@@ -1585,7 +1585,10 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         .with_effort(&ctx.initial_effort)
         // `spawn_agent` is always in the composite, so the rules about a
         // subagent's report belong in the prompt.
-        .with_subagents(true);
+        .with_subagents(true)
+        // Memory is an instruction, not a user turn: it stays in the system
+        // prompt and is rebuilt with it when the voice or model changes.
+        .with_memory(&w.memory_block);
     let system_prompt_text =
         build_system_prompt(&system_prompt_config.clone().with_personality(&ctx.config.personality));
     let (resume_session_id, open_session_picker, session_note) = resolve_session_start(ctx.session_start, &w.cwd_display);
@@ -1639,7 +1642,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     if open_session_picker {
         app.open_session_picker(&w.cwd_display, &session_id);
     }
-    app.warm_prompt_cache(&w.source, w.perm, &w.memory_block);
+    app.warm_prompt_cache(&w.source, w.perm);
 
     event_loop(&mut app, &w, Inbox { events, updates, channel_probes }, &mut session_id).await;
 
@@ -1665,7 +1668,7 @@ async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mu
                 app.tell_of_lost_tasks(&w.tools_arc.shells().tasks());
                 *session_id = id;
                 open_snapshots(w.perm, session_id, &w.cwd);
-                app.warm_prompt_cache(&w.source, w.perm, &w.memory_block);
+                app.warm_prompt_cache(&w.source, w.perm);
             }
         }
         let mascot_mood = app.server_mood(&w.source, w.started_at);
@@ -1745,12 +1748,19 @@ fn update_context_usage(
     // tokenizer and the budget with a third rule, so the bar, the budget and
     // the speed readout could each be a different number for the same text.
     let count = |text: &str| flashagent_llm::count_tokens(model, text);
+    let memory_tokens = count(memory_block);
+    let system_has_memory = !memory_block.is_empty()
+        && history
+            .iter()
+            .find(|m| m.role == flashagent_llm::Role::System)
+            .is_some_and(|m| m.content.contains(memory_block));
     usage.system_tokens = history
         .iter()
         .filter(|m| m.role == flashagent_llm::Role::System)
         .map(|m| count(&m.content))
-        .sum();
-    usage.memory_tokens = count(memory_block);
+        .sum::<usize>()
+        .saturating_sub(if system_has_memory { memory_tokens } else { 0 });
+    usage.memory_tokens = memory_tokens;
     // Every advertised schema, MCP included.
     usage.tools_tokens = tools
         .specs()
@@ -1772,7 +1782,8 @@ fn update_context_usage(
             flashagent_llm::Role::System => {}
         }
     }
-    // Already counted once as memory.
+    // New sessions carry memory in the system prompt; older ones kept it in
+    // front of the first user message. Either way it is counted once.
     if !memory_block.is_empty()
         && history.iter().find(|m| m.role == flashagent_llm::Role::User).is_some_and(|m| m.content.starts_with(memory_block))
     {
@@ -2748,7 +2759,15 @@ mod tests {
         let directive = "[AUTONOMOUS GOAL DIRECTIVE]\nYou are operating in fully autonomous /goal mode.\nTarget goal: Создай файл hello.txt\n\nAutonomous Rules:\n1. Do NOT ask...";
         assert_eq!(extract_user_prompt(directive), "Создай файл hello.txt");
         assert_eq!(extract_user_prompt("plain question"), "plain question");
-        assert_eq!(extract_user_prompt("memory block\n\n---\n\nthe question"), "the question");
+        assert_eq!(
+            extract_user_prompt("# Memory (automatically loaded)\n\nmemory block\n\n---\n\nthe question"),
+            "the question"
+        );
+        assert_eq!(
+            extract_user_prompt("before\n\n---\n\nafter"),
+            "before\n\n---\n\nafter",
+            "a separator in the user's own text is not a memory wrapper"
+        );
     }
 
     #[test]

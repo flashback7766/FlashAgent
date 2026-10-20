@@ -277,6 +277,7 @@ impl App {
             cx.perm.state().set_mode(saved.mode);
             self.current_effort = saved.effort.clone();
             self.max_steps = saved.max_steps;
+            self.refresh_welcome_state(cx.source, cx.mascot_mood);
             if let Some(ledger) = self.goal_ledger.take() {
                 push_goal_report(&mut self.chat, &ledger, DoneReason::Cancelled);
             }
@@ -290,7 +291,7 @@ impl App {
     /// Asks the server again what it runs, unless a turn or another look is
     /// already talking to it.
     pub(crate) fn poll_server(&mut self, cx: &LoopCtx<'_>) {
-        self.warm_prompt_cache(cx.source, cx.perm, cx.memory_block);
+        self.warm_prompt_cache(cx.source, cx.perm);
         if !should_poll_server(self.running, cx.source.0.requests_in_flight(), cx.is_discovering.load(Ordering::Relaxed)) {
             return;
         }
@@ -355,7 +356,7 @@ impl App {
                 self.config.active_profile_mut().model = self.current_model.clone();
                 self.save_config();
             }
-            self.refresh_welcome(cx.source, cx.mascot_mood);
+            self.refresh_welcome_state(cx.source, cx.mascot_mood);
             self.renderer.request_reprint();
         }
         // Kept rather than swapped for a model that would be billed instead,
@@ -403,7 +404,7 @@ impl App {
                     }
                 }
 
-                self.refresh_welcome(cx.source, cx.mascot_mood);
+                self.refresh_welcome_state(cx.source, cx.mascot_mood);
                 let ctx_tag = self.current_context.clone().unwrap_or_default();
 
                 if model_changed {
@@ -424,7 +425,7 @@ impl App {
                 self.renderer.request_reprint();
             }
         }
-        self.warm_prompt_cache(cx.source, cx.perm, cx.memory_block);
+        self.warm_prompt_cache(cx.source, cx.perm);
     }
 
     fn on_recap(&mut self, turn_id: u64, recap: &str, suggestion: Option<String>) {

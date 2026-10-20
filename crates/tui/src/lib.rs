@@ -772,6 +772,18 @@ impl ChatView {
         if self.has_user_message() {
             return;
         }
+        self.replace_welcome_card(new_card);
+    }
+
+    /// The card at the top of a conversation that has already started: the
+    /// model, the provider or the level changed, and the card says what runs
+    /// now instead of what ran when the session started.
+    pub fn update_welcome_card_state(&mut self, new_card: Vec<RenderLine>) {
+        self.replace_welcome_card(new_card);
+    }
+
+    /// The card's lines become the new ones; everything after it stays.
+    fn replace_welcome_card(&mut self, new_card: Vec<RenderLine>) {
         *self.settled_cache.lock() = SettledRenderCache::default();
         let end_idx = if self.card_len > 0 {
             self.card_len.min(self.lines.len())
@@ -2835,6 +2847,19 @@ hm".into()));
         let new_card_c = vec![(LineKind::System, "banner-v3".to_string())];
         v.update_welcome_card(new_card_c);
         assert!(!v.lines.iter().any(|l| l.text.contains("banner-v3")));
+    }
+
+    #[test]
+    fn the_welcome_card_says_what_runs_now_after_the_conversation_started() {
+        let mut v = ChatView::default();
+        v.update_welcome_card(vec![(LineKind::System, "model-a".to_string())]);
+        v.push_user("hello");
+        // The model changed: the card at the top says so, and the
+        // conversation stays where it was.
+        v.update_welcome_card_state(vec![(LineKind::System, "model-b".to_string())]);
+        assert!(v.lines.iter().any(|l| l.text.contains("model-b")), "the card must show what runs now");
+        assert!(!v.lines.iter().any(|l| l.text.contains("model-a")), "the old model is gone from the card");
+        assert!(v.lines.iter().any(|l| l.text.contains("hello")), "the conversation is still there");
     }
 
     #[test]

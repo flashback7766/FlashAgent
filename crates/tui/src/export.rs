@@ -87,7 +87,7 @@ mod tests {
         let result = ChatMessage::tool_result("c1", "src/\n```\nREADME.md");
         vec![
             ChatMessage::system("You are FlashAgent. Huge system prompt."),
-            ChatMessage::user("memory: likes Rust\n\n---\n\nwhat is in this folder?"),
+            ChatMessage::user("# Memory (automatically loaded)\n\nlikes Rust\n\n---\n\nwhat is in this folder?"),
             call,
             result,
             ChatMessage::assistant("A `src` folder and a README."),

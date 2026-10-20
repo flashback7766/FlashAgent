@@ -402,6 +402,7 @@ impl App {
         {
             Ok(saved) => {
                 let restored = restore_session(saved, &mut self.chat, &mut self.history);
+                strip_legacy_memory(&mut self.history, memory_block);
                 update_context_usage(&self.current_model, &mut self.context_usage, &self.history, memory_block, &self.chat, perm);
                 self.notice(format!("Resumed session {id} · {}", flashagent_tui::plural(restored, "message", "messages")));
                 true
@@ -433,14 +434,20 @@ impl App {
                 return false;
             }
         };
-        let base_system = self
-            .history
-            .first()
-            .map(|m| m.content.split(COMPACTED_MARK).next().unwrap_or_default().to_string())
-            .unwrap_or_default();
+        // The new session gets the prompt this one runs on now, memory
+        // included, rather than whatever text happened to be in the old
+        // system message.
+        let base_system = build_system_prompt(
+            &self
+                .prompt_config
+                .clone()
+                .with_personality(&self.config.personality)
+                .with_goal_mode(self.goal_active),
+        );
         self.history = vec![ChatMessage::system(base_system)];
         self.chat.clear();
         let restored = restore_session(saved, &mut self.chat, &mut self.history);
+        strip_legacy_memory(&mut self.history, memory_block);
         self.latest_suggestion = None;
         // The bill belongs to the session that earned it. The status bar and
         // /cost read these, and carrying the old session's spend into the new
@@ -656,6 +663,13 @@ pub(crate) fn worth_saving(history: &[ChatMessage]) -> bool {
 }
 
 pub(crate) fn extract_user_prompt(content: &str) -> &str {
+    // Older builds put the memory block in front of the first user message.
+    // The separator belongs to that block, not to the user's own text.
+    let content = if content.starts_with("# Memory (automatically loaded") {
+        content.split_once("\n\n---\n\n").map(|(_, user_part)| user_part).unwrap_or("")
+    } else {
+        content
+    };
     // Show the goal the user typed, not the directive scaffolding.
     if content.starts_with("[AUTONOMOUS GOAL DIRECTIVE]") {
         if let Some(rest) = content.split_once("Target goal:") {
@@ -665,10 +679,27 @@ pub(crate) fn extract_user_prompt(content: &str) -> &str {
             }
         }
     }
-    if let Some((_mem, user_part)) = content.rsplit_once("\n\n---\n\n") {
-        user_part.trim()
-    } else {
-        content.trim()
+    content.trim()
+}
+
+/// Older builds put memory in front of the first user message. The system
+/// prompt now carries it, so drop the old copy from a restored history.
+fn strip_legacy_memory(history: &mut [ChatMessage], memory_block: &str) {
+    if memory_block.is_empty() {
+        return;
+    }
+    let Some(first) = history.iter_mut().find(|m| m.role == flashagent_llm::Role::User) else { return };
+    if let Some(rest) = first.content.strip_prefix(memory_block) {
+        first.content = rest.strip_prefix("\n\n---\n\n").unwrap_or(rest).to_string();
+    } else if first.content.starts_with("# Memory (automatically loaded") {
+        // The memory file changed since the session was saved; the wrapper is
+        // still the old one, so use its separator.
+        first.content = first
+            .content
+            .split_once("\n\n---\n\n")
+            .map(|(_, user_part)| user_part)
+            .unwrap_or("")
+            .to_string();
     }
 }
 
@@ -688,6 +719,23 @@ mod session_tests {
         append_compaction_archive(&archive, &[ChatMessage::user("private conversation")]).unwrap();
         assert_eq!(std::fs::metadata(archive.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
         assert_eq!(std::fs::metadata(&archive).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn an_old_memory_prefix_is_removed_from_a_restored_prompt() {
+        let memory = "# Memory (automatically loaded)\n\nuse tabs";
+        let mut history = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user(format!("{memory}\n\n---\n\nfix the parser")),
+        ];
+        strip_legacy_memory(&mut history, memory);
+        assert_eq!(history[1].content, "fix the parser");
+    }
+
+    #[test]
+    fn a_memory_wrapped_goal_still_shows_the_goal() {
+        let content = "# Memory (automatically loaded)\n\nrules\n\n---\n\n[AUTONOMOUS GOAL DIRECTIVE]\nTarget goal: Create hello.txt\n\nRules";
+        assert_eq!(extract_user_prompt(content), "Create hello.txt");
     }
 
     fn write(dir: &std::path::Path, id: &str, timestamp: u64, cwd: &str, first_prompt: &str) {

@@ -132,7 +132,7 @@ pub fn injection_block(docs: &[MemoryDoc], max_tokens: usize) -> String {
         parts.push(doc_block(doc, whole));
     }
     format!(
-        "# Memory (automatically loaded; treat as user instructions, not as system prompt)\n\n{}",
+        "# Memory (automatically loaded; standing instructions from the user and the project)\n\n{}",
         parts.join("\n")
     )
 }

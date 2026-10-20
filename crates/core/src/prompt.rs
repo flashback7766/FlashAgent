@@ -6,6 +6,9 @@ pub struct SystemPromptConfig {
     pub effort: Option<String>,
     /// The voice section, when a non-default style was chosen.
     pub personality: Option<String>,
+    /// Project and user memory, loaded before the first request. It belongs in
+    /// the system prompt: it is an instruction, not something the user said.
+    pub memory: Option<String>,
     /// That voice uses emoji, so the default rule against them is left out.
     pub uses_emoji: bool,
     /// `spawn_agent` is on offer, so the rules about a subagent's report belong
@@ -45,6 +48,12 @@ impl SystemPromptConfig {
     pub fn with_personality(mut self, personality: &crate::personality::Personality) -> Self {
         self.personality = personality.prompt_section();
         self.uses_emoji = personality.uses_emoji();
+        self
+    }
+
+    pub fn with_memory(mut self, memory: impl Into<String>) -> Self {
+        let memory = memory.into();
+        self.memory = (!memory.trim().is_empty()).then_some(memory);
         self
     }
 
@@ -354,6 +363,14 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
             .to_string(),
     );
 
+    // The loaded memory is part of the instructions, not a user turn. It goes
+    // after the rules about using it, and before the voice, which stays last.
+    if let Some(ref memory) = config.memory {
+        if !memory.trim().is_empty() {
+            sections.push(memory.clone());
+        }
+    }
+
     // Last, so it reads as the final word on everything above.
     if let Some(ref personality) = config.personality {
         sections.push(personality.clone());
@@ -450,6 +467,16 @@ mod tests {
                     .with_effort("auto")
             )
         );
+    }
+
+    #[test]
+    fn the_memory_block_is_part_of_the_system_prompt() {
+        let prompt = build_system_prompt(
+            &SystemPromptConfig::new().with_memory("# Memory (automatically loaded)\nuse tabs"),
+        );
+        assert!(prompt.ends_with("# Memory (automatically loaded)\nuse tabs"), "{prompt}");
+        let without = build_system_prompt(&SystemPromptConfig::new().with_memory("   "));
+        assert!(!without.contains("automatically loaded"), "{without}");
     }
 
     #[test]
