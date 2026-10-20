@@ -370,12 +370,8 @@ impl App {
     fn unknown_command(&mut self, name: &str) {
         let word = format!("/{name}");
         let known = flashagent_tui::autocomplete::builtin_commands();
-        let guess = known
-            .iter()
-            .map(|c| c.trigger.as_str())
-            .filter(|t| !t.contains(' '))
-            .min_by_key(|t| flashagent_tui::autocomplete::edit_distance(t, &word))
-            .filter(|t| flashagent_tui::autocomplete::edit_distance(t, &word) <= 2);
+        let triggers: Vec<String> = known.iter().map(|c| c.trigger.clone()).collect();
+        let guess = flashagent_tui::autocomplete::closest_match(&word, triggers.iter().map(|t| t.as_str()));
         // The typo stays in the prompt; the placeholder only shows on an empty one.
         let said = match guess {
             Some(g) => format!("Unknown command {word} · did you mean {g}?"),
@@ -587,7 +583,16 @@ impl App {
     fn run_skill(&mut self, cx: &LoopCtx<'_>, name: &str) {
         let name = name.trim();
         let Some(skill_content) = find_skill_file(name).and_then(|p| std::fs::read_to_string(p).ok()) else {
-            self.notice(format!("Unknown skill '{name}' · /skills lists them"));
+            // A name that is close to one of the skills is that one, said out
+            // loud: a typo should not need a search.
+            let skills = flashagent_tui::autocomplete::load_skills(std::path::Path::new("."));
+            let names: Vec<String> = skills.iter().map(|s| s.trigger.trim_start_matches("/skill:").to_string()).collect();
+            let guess = flashagent_tui::autocomplete::closest_match(name, names.iter().map(|n| n.as_str()));
+            let said = match guess {
+                Some(near) => format!("Unknown skill '{name}' · did you mean '{near}'?"),
+                None => format!("Unknown skill '{name}' · /skills lists them"),
+            };
+            self.notice(said);
             return;
         };
         self.flush_switch_notice();
