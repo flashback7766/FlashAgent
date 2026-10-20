@@ -30,7 +30,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
 
 const HELP_KEYS: &[(&str, &str)] = &[
     ("Enter", "send; while a turn runs, steer it, or run a /command (/compact, /clear, /export and /rewind wait for the turn to end)"),
-    ("Alt+Enter, Ctrl+J, \\ Enter", "a new line in the prompt"),
+    ("Alt+Enter, Shift+Enter, Ctrl+J, \\ Enter", "a new line in the prompt"),
     ("\u{2190}/\u{2192}, Home/End, Ctrl+A/E, Ctrl+W, Ctrl+U, Alt+K", "move and delete in the prompt, as in a shell"),
     ("Ctrl+F", "search the prompts sent before"),
     ("Ctrl+V", "paste a screenshot (Ctrl+Z takes it back); dropping an image works too"),

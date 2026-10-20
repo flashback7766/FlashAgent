@@ -8,7 +8,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+    KeyboardEnhancementFlags, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use flashagent_core::{
@@ -403,10 +404,86 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
     Ok(Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, initial_effort, available_models, first_run_verdict, pending_discovery }))
 }
 
+/// Set when tmux was asked for xterm's `modifyOtherKeys`, so the matching
+/// reset goes out on the way back to the shell and not before.
+static TMUX_MODIFIED_KEYS: AtomicBool = AtomicBool::new(false);
+
+/// True when tmux says modified keys are reported at all and that the report
+/// arrives in the `csi-u` form. tmux's `xterm` form is `CSI 27;mod;key~`,
+/// which crossterm does not parse, so it must not be asked for.
+fn tmux_forwards_extended_keys(report: &str) -> bool {
+    let mut fields = report.split_whitespace();
+    let keys = fields.next().unwrap_or_default();
+    let format = fields.next().unwrap_or_default();
+    matches!(keys, "on" | "always") && format == "csi-u"
+}
+
+/// tmux up to 3.8 does not know the kitty protocol: it reports a modified key
+/// only after an application asks for xterm's `modifyOtherKeys` mode, and only
+/// when its own options say to. Asked for only when the report will be in the
+/// `csi-u` form, which reaches the reader as the same `CSI … u` sequence a
+/// kitty-aware terminal sends.
+fn ask_tmux_for_modified_keys() -> bool {
+    if std::env::var_os("TMUX").is_none() {
+        return false;
+    }
+    let Ok(out) = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "#{extended-keys} #{extended-keys-format}"])
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    if !tmux_forwards_extended_keys(&String::from_utf8_lossy(&out.stdout)) {
+        return false;
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().write_all(b"\x1b[>4;2m");
+    let _ = std::io::stdout().flush();
+    true
+}
+
+fn release_tmux_modified_keys() {
+    if !TMUX_MODIFIED_KEYS.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().write_all(b"\x1b[>4;0m");
+    let _ = std::io::stdout().flush();
+}
+
+/// Shift+Enter reaches an application as plain Enter unless the terminal
+/// speaks the kitty keyboard protocol. `DISAMBIGUATE_ESCAPE_CODES` is enough
+/// for that: the terminal then reports Enter, Tab and Backspace as
+/// `CSI … u` with the shift in the modifier field, and leaves printable keys
+/// as the text they are.
+///
+/// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` is deliberately not used. It makes the
+/// terminal send every key as `CSI key-code;modifiers u` with the *unshifted*
+/// key code, and the shifted character only in a second field that crossterm
+/// 0.28 does not read. The result was that `~` arrived as a backtick with a
+/// shift modifier, and Caps Lock, which the terminal reports the same way,
+/// stopped working: the typed character came out unshifted.
+fn enable_enhanced_keys() {
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
+    TMUX_MODIFIED_KEYS.store(ask_tmux_for_modified_keys(), Ordering::Relaxed);
+}
+
+/// Pops one level of the flags pushed above, so a terminal that shares its
+/// screen with the shell does not keep the enhanced encoding after exit.
+fn restore_enhanced_keys() {
+    release_tmux_modified_keys();
+    let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+}
+
 fn install_crash_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
+        restore_enhanced_keys();
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::cursor::Show,
@@ -487,6 +564,7 @@ async fn main() -> Result<()> {
             };
             tools.shells().stop_all();
             // After SIGTERM the terminal is still there, in raw mode on the alternate screen.
+            restore_enhanced_keys();
             let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show, DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen);
             let _ = crossterm::terminal::disable_raw_mode();
             std::process::exit(code);
@@ -542,9 +620,12 @@ async fn run_terminal(ctx: AppContext) -> Result<()> {
         EnableBracketedPaste,
         EnableMouseCapture,
     );
+    enable_enhanced_keys();
     let result = run_app(ctx).await;
 
     flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
+    // Before the screen goes: the shell below must get plain Enter and Tab back.
+    restore_enhanced_keys();
     // The frame may have hidden the cursor (a menu was open); the shell needs it back.
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -884,6 +965,8 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     INPUT_PAUSED.store(true, Ordering::SeqCst);
     // Let a poll already under way in the reader thread run out.
     std::thread::sleep(std::time::Duration::from_millis(60));
+    // The editor is a normal program: hand its Enter and Tab back before it starts.
+    restore_enhanced_keys();
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -905,6 +988,7 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableMouseCapture
     );
+    enable_enhanced_keys();
 
     INPUT_PAUSED.store(false, Ordering::SeqCst);
 
@@ -962,6 +1046,40 @@ fn alt_code_char(k: &crossterm::event::KeyEvent) -> Option<char> {
     (!was_held).then_some(c)
 }
 
+/// The character a key press means when the terminal reports the key and the
+/// shift apart: `~` is a backtick with shift, `!` is a one with shift. A
+/// terminal that sends the character itself is not touched, and a character
+/// that is already shifted stays as it is.
+fn shifted_char(c: char, mods: KeyModifiers) -> char {
+    if !mods.contains(KeyModifiers::SHIFT) {
+        return c;
+    }
+    match c {
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        '`' => '~',
+        _ => c.to_uppercase().next().unwrap_or(c),
+    }
+}
+
 /// A character, or a newline for Enter.
 fn typed_char(k: &crossterm::event::KeyEvent) -> Option<char> {
     if let KeyCode::Char(c) = k.code {
@@ -979,11 +1097,22 @@ fn typed_char(k: &crossterm::event::KeyEvent) -> Option<char> {
     // Russian one) delivers a pasted brace that way, and it is text, not a shortcut.
     let alt_gr = k.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT);
     match k.code {
-        KeyCode::Char(c) if plain => Some(c),
+        KeyCode::Char(c) if plain => Some(typed_case(c, k)),
         KeyCode::Char(c) if alt_gr && !c.is_ascii_alphanumeric() && !c.is_control() => Some(c),
         KeyCode::Enter if k.modifiers.is_empty() => Some('\n'),
         _ => None,
     }
+}
+
+/// The character as it is meant: the shift a terminal reports apart from the
+/// key is applied here, and Caps Lock, which a terminal reports the same way,
+/// turns a letter into its capital.
+fn typed_case(c: char, k: &crossterm::event::KeyEvent) -> char {
+    let shifted = shifted_char(c, k.modifiers);
+    if k.state.contains(crossterm::event::KeyEventState::CAPS_LOCK) {
+        return shifted.to_uppercase().next().unwrap_or(shifted);
+    }
+    shifted
 }
 
 /// With a newline and more than a line of text among them, they are a paste.

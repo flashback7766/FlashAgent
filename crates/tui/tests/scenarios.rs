@@ -2492,6 +2492,12 @@ fn show_small_terminal() {
 const LEFT: &str = "\x1b[D";
 const HOME: &str = "\x1b[H";
 const ALT_ENTER: &str = "\x1b\r";
+/// What a terminal sends for Shift+Enter once the kitty keyboard protocol is
+/// on; the PTY does not speak it, so the bytes stand in for the terminal.
+const SHIFT_ENTER: &str = "\x1b[13;2u";
+/// What a terminal sends for Shift+` when it reports the key and the shift
+/// apart: the backtick with a shift modifier, and the character on the key.
+const SHIFT_BACKTICK: &str = "\x1b[96;2u";
 const CTRL_F: &str = "\x06";
 const CTRL_W: &str = "\x17";
 
@@ -2533,29 +2539,53 @@ fn a_typo_is_fixed_where_it_is_not_at_the_end() {
 }
 
 #[test]
+fn a_shifted_key_the_terminal_reports_apart_is_typed_as_it_is() {
+    // A terminal that reports the key code and the shift separately sends the
+    // backtick with a shift modifier. Typed as it came, the user got a
+    // backtick where they wanted a tilde.
+    let server = MockServer::start(vec![Reply::Text("Tilde.".into())]);
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+
+    term.type_text("a");
+    term.send(SHIFT_BACKTICK);
+    term.type_text("b");
+    term.wait_for("a~b", WAIT);
+    term.send(ENTER);
+    term.wait_for("Tilde.", WAIT);
+    let prompt = prompt_of(server.turns().last().unwrap());
+    assert!(prompt.contains("a~b"), "{prompt}");
+    quit(&mut term);
+}
+
+#[test]
 fn a_prompt_can_have_several_lines() {
     let server = MockServer::start(vec![Reply::Text("Got both lines.".into()), Reply::Text("Got the paste.".into())]);
     let home = Home::new();
     let term = ready(&home, &server);
 
-    // Alt+Enter and a backslash before Enter both start a new line.
+    // Alt+Enter, a backslash before Enter and Shift+Enter all start a new line.
     term.type_text("first line");
     term.send(ALT_ENTER);
     term.type_text("second line\\");
     term.send(ENTER);
     term.type_text("third line");
-    term.wait_for("third line", WAIT);
+    term.send(SHIFT_ENTER);
+    term.type_text("fourth line");
+    term.wait_for("fourth line", WAIT);
     let screen = term.screen();
     let rows = |needle: &str| screen.lines().position(|l| l.contains(needle));
     assert!(
-        rows("first line") < rows("second line") && rows("second line") < rows("third line"),
+        rows("first line") < rows("second line")
+            && rows("second line") < rows("third line")
+            && rows("third line") < rows("fourth line"),
         "the lines are not one under another:\n{screen}"
     );
     term.send(ENTER);
     term.wait_for("Got both lines.", WAIT);
     term.wait_gone(RUNNING_HINT, WAIT);
     let prompt = prompt_of(server.turns().last().unwrap());
-    assert!(prompt.contains("first line\\nsecond line\\nthird line"), "{prompt}");
+    assert!(prompt.contains("first line\\nsecond line\\nthird line\\nfourth line"), "{prompt}");
 
     // A paste keeps its lines.
     paste(&term, "fn main() {\n    println!(\"hi\");\n}");
