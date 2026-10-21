@@ -419,6 +419,11 @@ pub struct AppConfig {
     /// picks one.
     #[serde(default)]
     pub seed: Option<u64>,
+    /// The standing permissions the owner gave with "Always". They are kept
+    /// between the runs: a rule that is not written down has to be given
+    /// again, and `/rules` shows what there is.
+    #[serde(default)]
+    pub always_rules: crate::permissions::RuleSet,
     /// `None` means unlimited.
     #[serde(default)]
     pub max_steps: Option<u32>,
@@ -653,6 +658,7 @@ impl Default for AppConfig {
             // the owner sets them.
             max_tokens: None,
             seed: None,
+            always_rules: Default::default(),
             max_steps: None, // no step limit per turn
             token_budget: 2000,
             web_tools: true,
@@ -1573,6 +1579,24 @@ mod tests {
         let (cfg, rejected) = AppConfig::from_json_str(r#"{"interface_language":"ru"}"#);
         assert!(rejected.is_empty(), "{rejected:?}");
         assert_eq!(cfg.interface_language, "ru");
+    }
+
+    /// The standing permissions are kept between the runs. They used to live
+    /// in memory until the app closed, so a rule the owner gave on purpose
+    /// had to be given again every morning.
+    #[test]
+    fn the_standing_permissions_survive_the_restart() {
+        let (cfg, rejected) = AppConfig::from_json_str(
+            r#"{"always_rules":{"always_allow_tools":["read_file"],"shell_prefixes":["npm test"],"shell_exact":["ls -la"]}}"#,
+        );
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert_eq!(cfg.always_rules.always_allow_tools, vec!["read_file".to_string()]);
+        assert_eq!(cfg.always_rules.shell_prefixes, vec!["npm test".to_string()]);
+        assert_eq!(cfg.always_rules.shell_exact, vec!["ls -la".to_string()]);
+        // And a config that never heard of the rules has none.
+        let (old, rejected) = AppConfig::from_json_str(r#"{}"#);
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert!(old.always_rules.all().is_empty());
     }
 
     /// The warm-up costs a request of its own, so it is off unless the owner

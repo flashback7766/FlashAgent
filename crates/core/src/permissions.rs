@@ -149,14 +149,67 @@ impl ApprovalGate for AllowAllGate {
     }
 }
 
-/// The "Always" button and narrow shell prefixes, for this session.
-#[derive(Debug, Default, Clone)]
+/// The "Always" button and narrow shell prefixes.
+///
+/// They were kept in memory for the session, and the owner had no way to see
+/// them: a rule that was given once and then forgotten still asked every time
+/// in the next run, and there was no list to look at. So they are kept in the
+/// config, they survive the restart, and `/rules` shows them.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RuleSet {
     pub always_allow_tools: Vec<String>,
     /// Narrow: `npm test` covers `npm test --watch`, never `npm publish`.
     pub shell_prefixes: Vec<String>,
     /// Allowed only verbatim, with no extra arguments.
     pub shell_exact: Vec<String>,
+}
+
+/// One rule, as the person sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleKind {
+    /// A tool that is always allowed.
+    Tool,
+    /// A shell prefix that is always allowed.
+    ShellPrefix,
+    /// A command that is always allowed, verbatim.
+    ShellExact,
+}
+
+impl RuleSet {
+    /// Every rule, in the order the owner gave them: the tools first, then
+    /// the shell ones.
+    pub fn all(&self) -> Vec<(RuleKind, String)> {
+        let mut out: Vec<(RuleKind, String)> = Vec::new();
+        for t in &self.always_allow_tools {
+            out.push((RuleKind::Tool, t.clone()));
+        }
+        for p in &self.shell_prefixes {
+            out.push((RuleKind::ShellPrefix, p.clone()));
+        }
+        for c in &self.shell_exact {
+            out.push((RuleKind::ShellExact, c.clone()));
+        }
+        out
+    }
+
+    /// Takes one rule back.
+    pub fn remove(&mut self, kind: RuleKind, text: &str) -> bool {
+        let list = match kind {
+            RuleKind::Tool => &mut self.always_allow_tools,
+            RuleKind::ShellPrefix => &mut self.shell_prefixes,
+            RuleKind::ShellExact => &mut self.shell_exact,
+        };
+        let before = list.len();
+        list.retain(|t| t != text);
+        list.len() != before
+    }
+
+    /// Takes them all back.
+    pub fn clear(&mut self) {
+        self.always_allow_tools.clear();
+        self.shell_prefixes.clear();
+        self.shell_exact.clear();
+    }
 }
 
 /// How run_shell's shell reads a command line. Git Bash and cmd.exe quote
@@ -851,6 +904,26 @@ impl PermissionState {
         *self.project_root.lock().expect("root lock") = Some(root);
     }
 
+    /// The rules as they stand now.
+    pub fn rules(&self) -> RuleSet {
+        self.rules.lock().expect("rules lock").clone()
+    }
+
+    /// Puts the rules in place: the ones the owner gave in an earlier run.
+    pub fn set_rules(&self, rules: RuleSet) {
+        *self.rules.lock().expect("rules lock") = rules;
+    }
+
+    /// Takes one rule back, and says whether it was there.
+    pub fn remove_rule(&self, kind: RuleKind, text: &str) -> bool {
+        self.rules.lock().expect("rules lock").remove(kind, text)
+    }
+
+    /// Takes them all back.
+    pub fn clear_rules(&self) {
+        self.rules.lock().expect("rules lock").clear();
+    }
+
     /// A web page can talk the model into fetching local addresses, so this is
     /// treated like a file outside the project. Addresses hidden behind DNS or
     /// redirects are refused by the tool itself.
@@ -1104,6 +1177,26 @@ impl PermissionedTools {
     /// The tools that are off right now.
     pub fn disabled_tools(&self) -> Vec<String> {
         self.disabled.read().map(|d| d.clone()).unwrap_or_default()
+    }
+
+    /// The standing permissions as they stand now.
+    pub fn rules(&self) -> RuleSet {
+        self.state.rules()
+    }
+
+    /// Puts the rules in place: the ones the owner gave in an earlier run.
+    pub fn set_rules(&self, rules: RuleSet) {
+        self.state.set_rules(rules);
+    }
+
+    /// Takes one rule back, and says whether it was there.
+    pub fn remove_rule(&self, kind: RuleKind, text: &str) -> bool {
+        self.state.remove_rule(kind, text)
+    }
+
+    /// Takes them all back.
+    pub fn clear_rules(&self) {
+        self.state.clear_rules();
     }
 
     /// Whether this tool is one of the ones that are off.

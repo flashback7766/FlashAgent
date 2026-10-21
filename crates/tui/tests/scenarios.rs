@@ -3160,6 +3160,53 @@ fn the_mcp_panel_says_its_keys_once() {
     assert!(!footer.contains("switch tab"), "the keys are listed again under the panel:\n{screen}");
 }
 
+/// The standing permissions are the ones the owner gave with "Always", and
+/// they used to live in memory until the app closed: a rule given on purpose
+/// had to be given again every morning, and there was nowhere to look to see
+/// what stood.
+#[test]
+fn the_standing_permissions_are_listed_and_can_be_taken_back() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let term = ready_with(
+        &home,
+        &server,
+        serde_json::json!({
+            "always_rules": {
+                "always_allow_tools": ["read_file"],
+                "shell_prefixes": ["npm test"],
+                "shell_exact": ["ls -la"]
+            }
+        }),
+    );
+
+    term.type_text("/rules");
+    term.send(ENTER);
+    // The card unfolds from its title down, so the last rule is waited for:
+    // the screen is caught with the whole list on it.
+    let screen = term.wait_for("ls -la", WAIT);
+    assert!(screen.contains("Standing permissions"), "the panel has no title:\n{screen}");
+    assert!(screen.contains("npm test"), "the prefix rule is not listed:\n{screen}");
+    assert!(screen.contains("ls -la"), "the exact rule is not listed:\n{screen}");
+
+    // The rule under the cursor is taken back, and it is gone from the list.
+    term.send("d");
+    std::thread::sleep(Duration::from_millis(300));
+    let screen = term.screen();
+    assert!(!screen.contains("read_file"), "the rule is still in the list:\n{screen}");
+    assert!(screen.contains("npm test"), "and the other rules went with it:\n{screen}");
+
+    // And it is gone from the config as well, so the next run does not have
+    // it either.
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.path().join(".flashagent/config.json")).unwrap()).unwrap();
+    let rules = &config["always_rules"];
+    assert!(
+        rules["always_allow_tools"].as_array().unwrap().is_empty(),
+        "the rule is still in the config: {rules}"
+    );
+}
+
 #[test]
 fn a_saved_session_is_found_by_something_said_inside_it() {
     let server = MockServer::start(vec![
@@ -3983,9 +4030,11 @@ fn the_interface_speaks_the_language_the_config_names() {
     // The Settings screen speaks it too. It is opened before the help: the
     // help is longer than the window, and the panel then has no room.
     term.send(TAB);
-    let settings = term.wait_for("Настройки", WAIT);
+    // The screen unfolds from its title down, so the last tab is waited for
+    // and not the title: the screen is caught with the whole panel on it.
+    let settings = term.wait_for("Общие", WAIT);
+    assert!(settings.contains("Настройки"), "the panel has no title:\n{settings}");
     assert!(settings.contains("Провайдер"), "the settings rows are not in Russian:\n{settings}");
-    assert!(settings.contains("Общие"), "the tabs are not in Russian:\n{settings}");
     term.send(ESC);
     term.wait_gone("Настройки", WAIT);
 

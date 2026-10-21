@@ -110,6 +110,7 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/mcp", tr("List and manage Model Context Protocol servers"), AutocompleteCategory::Command),
         AutocompleteItem::new("/tools", tr("What the model may call, and what it may not"), AutocompleteCategory::Command),
         AutocompleteItem::new("/notices", tr("What the app said, kept so it can be read again"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/rules", tr("The standing permissions, and a way to take them back"), AutocompleteCategory::Command),
         AutocompleteItem::new("/safe", tr("The safe mode: reading and editing inside the project, nothing else"), AutocompleteCategory::Command),
         AutocompleteItem::new("/tasks", tr("Background commands: see their output, stop one"), AutocompleteCategory::Command),
         AutocompleteItem::new("/compact", tr("Compact conversation context (optional: /compact <focus instructions>)"), AutocompleteCategory::Command),
