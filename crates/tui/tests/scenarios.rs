@@ -1321,6 +1321,56 @@ fn what_the_app_said_can_be_read_again() {
     quit(&mut term);
 }
 
+/// The prompt must not tell the model to use a tool the owner has switched
+/// off: it would send the model looking for something that is not there, and
+/// a turn is spent on the refusal.
+#[test]
+fn a_tool_that_is_turned_off_goes_out_of_the_prompt_with_it() {
+    let server = MockServer::start(vec![Reply::Text("Hello.".into()), Reply::Text("After.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+    ask(&term, "hello", "Hello.");
+
+    // The prompt starts by promising a way to ask.
+    let first = &server.turns()[0].body["messages"][0]["content"].as_str().unwrap_or_default().to_string();
+    assert!(first.contains("MANDATORY ask_user"), "the asking rules are not in the prompt:\n{first}");
+
+    // `ask_user` is switched off. The list is in the order the tools come, so
+    // the cursor walks down until the name is on screen, and the space turns
+    // that one off.
+    term.type_text("/tools");
+    term.send(ENTER);
+    term.wait_for("Tools", WAIT);
+    for _ in 0..40 {
+        let screen = term.screen();
+        // The row under the cursor is the one marked with a triangle.
+        let line = screen
+            .lines()
+            .find(|l| l.contains('\u{25b8}') || l.contains("▸"))
+            .unwrap_or_default();
+        if line.contains("ask_user") {
+            term.send(" ");
+            break;
+        }
+        term.send("j");
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    term.send(ESC);
+    std::thread::sleep(Duration::from_millis(200));
+
+    ask(&term, "after", "After.");
+    let second = &server.turns()[1].body["messages"][0]["content"].as_str().unwrap_or_default().to_string();
+    assert!(
+        !second.contains("MANDATORY ask_user"),
+        "the prompt still promises ask_user, which is switched off:\n{second}"
+    );
+    // And it is not left with no way to ask at all.
+    assert!(
+        second.contains("There is no way to ask a question here"),
+        "the prompt says nothing about asking:\n{second}"
+    );
+}
+
 #[test]
 fn a_tool_that_is_turned_off_is_not_offered_to_the_model() {
     let server = MockServer::start(vec![Reply::Text("Hello.".into()), Reply::Text("After.".into())]);

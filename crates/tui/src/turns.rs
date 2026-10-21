@@ -1,6 +1,26 @@
 use super::*;
 use flashagent_tui::i18n::tr;
 
+/// The tools the prompt talks about, and whether they are on offer.
+///
+/// The prompt describes `spawn_agent` and `ask_user`, and the owner can
+/// switch either off. A prompt that describes a tool the model was not
+/// offered sends it looking for something that is not there, and a turn is
+/// spent on the refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OfferedTools {
+    pub subagents: bool,
+    pub ask_user: bool,
+}
+
+impl OfferedTools {
+    /// What the model can call right now.
+    pub(crate) fn from_specs(specs: &[flashagent_llm::ToolSpec]) -> Self {
+        let has = |name: &str| specs.iter().any(|s| s.name == name);
+        Self { subagents: has("spawn_agent"), ask_user: has("ask_user") }
+    }
+}
+
 /// How long the run took, and no clock left behind. One operation, so the time
 /// cannot be read after the thing that holds it has been cleared.
 pub(crate) fn elapsed(started: &mut Option<std::time::Instant>) -> Option<f32> {
@@ -110,11 +130,25 @@ impl App {
     /// `/provider` change them: "do not think" must not outlive a switch to
     /// high effort. Rebuilt only on a change, since the system prompt is the
     /// cached prefix.
-    pub(crate) fn sync_system_prompt(&mut self) {
+    ///
+    /// The prompt also names the tools that are on offer, and the owner can
+    /// switch them off in `/tools` while the app is running. So the set of
+    /// tools is part of what is compared: a prompt that still offers a
+    /// subagent the owner has just switched off sends the model looking for
+    /// something that is not there.
+    pub(crate) fn sync_system_prompt(&mut self, offered: OfferedTools) {
         if self.prompt_config.model.as_deref() != Some(self.current_model.as_str())
             || self.prompt_config.effort.as_deref() != Some(self.current_effort.as_str())
+            || self.prompt_config.subagents_available != offered.subagents
+            || self.prompt_config.ask_user_available != offered.ask_user
         {
-            self.prompt_config = self.prompt_config.clone().with_model(&self.current_model).with_effort(&self.current_effort);
+            self.prompt_config = self
+                .prompt_config
+                .clone()
+                .with_model(&self.current_model)
+                .with_effort(&self.current_effort)
+                .with_subagents(offered.subagents)
+                .with_ask_user(offered.ask_user);
             self.apply_personality();
         }
     }
@@ -161,7 +195,7 @@ pub(crate) fn refresh_context_line(&mut self) {
 }
 
 pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
-        self.sync_system_prompt();
+        self.sync_system_prompt(OfferedTools::from_specs(&cx.perm.specs()));
         // Here, not only for typed prompts: a /goal, a skill or Ctrl+R measured
         // their growth from a turn long gone and compacted too early.
         self.context_before_turn = self.context_usage.total_used();
