@@ -595,9 +595,11 @@ impl App {
         self.chat.push_user(&format!("/goal {task_desc}"));
 
         let budget_rule = if goal_budgets.is_unlimited() {
-            "This run has no budget: it ends when you finish or the user stops it. Say plainly \
-             what is left unfinished or unverified rather than claiming success."
-                .to_string()
+            flashagent_tui::i18n::tr(
+                "This run has no budget: it ends when you finish or the user stops it. Say plainly \
+                 what is left unfinished or unverified rather than claiming success.",
+            )
+            .to_string()
         } else {
             format!(
                 "Budget for this run: {}. When it runs out the run is stopped wherever it \
@@ -808,7 +810,9 @@ impl App {
             "" | "help" => self.open_mcp(cx, McpViewTab::Overview).await,
             "list" | "ls" => self.open_mcp(cx, McpViewTab::Servers).await,
             "market" | "marketplace" => self.open_mcp(cx, McpViewTab::Marketplace).await,
-            "test" if rest.is_empty() => self.chat.push_system("Usage: /mcp test <server_name>\nExample: /mcp test sqlite"),
+            "test" if rest.is_empty() => self.chat.push_system(flashagent_tui::i18n::tr(
+                "Usage: /mcp test <server_name>\nExample: /mcp test sqlite",
+            )),
             "test" => {
                 self.notice(format!("Testing MCP server '{rest}'…"));
                 // Drawn before the wait, which can take a while.
@@ -828,7 +832,9 @@ impl App {
                 }
             }
             "add" if rest.is_empty() => self.chat.push_system(
-                "Usage: /mcp add <marketplace_id>\nExample: /mcp add sqlite\nType /mcp market to browse extensions.",
+                flashagent_tui::i18n::tr(
+                    "Usage: /mcp add <marketplace_id>\nExample: /mcp add sqlite\nType /mcp market to browse extensions.",
+                ),
             ),
             "add" => {
                 let Some(item) = flashagent_tools::mcp::find_marketplace_item(rest) else {
@@ -1036,7 +1042,9 @@ impl App {
                 self.notice(tr_fill("No turn {arg} to rewind to: pick 1 to {count}", &[("arg", arg), ("count", &turns.len().to_string())]));
             }
             let mut text = String::from(
-                "Turns you can go back to. The files FlashAgent changed and the conversation return to how they were before the turn:\n",
+                flashagent_tui::i18n::tr(
+                    "Turns you can go back to. The files FlashAgent changed and the conversation return to how they were before the turn:\n",
+                ),
             );
             for (i, turn) in turns.iter().enumerate() {
                 let first_line = extract_user_prompt(&prompts[turn.user_index]).lines().next().unwrap_or("").to_string();
@@ -1047,7 +1055,7 @@ impl App {
                 };
                 text.push_str(&format!("  {}. {} · {files}\n", i + 1, flashagent_tui::truncate_middle(&first_line, 60)));
             }
-            text.push_str("Type /rewind <number>. Changes made by shell commands are not undone.");
+            text.push_str(flashagent_tui::i18n::tr("Type /rewind <number>. Changes made by shell commands are not undone."));
             self.chat.push_system(&text);
             return;
         };

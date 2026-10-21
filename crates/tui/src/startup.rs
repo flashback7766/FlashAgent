@@ -157,8 +157,10 @@ impl TrustScreen {
                 lines.push(format!("  {text_bright}{shown}{reset}"));
                 lines.push(String::new());
 
-                let desc = "FlashAgent will read, edit and run commands here. Continue only if you trust \
-                            its files: they can carry instructions aimed at the model.";
+                let desc = crate::i18n::tr(
+                    "FlashAgent will read, edit and run commands here. Continue only if you trust \
+                     its files: they can carry instructions aimed at the model.",
+                );
                 for l in wrap_words(desc, width.saturating_sub(4).max(20)) {
                     lines.push(format!("  {text_dim}{l}{reset}"));
                 }
