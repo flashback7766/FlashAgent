@@ -3221,6 +3221,8 @@ mod never_half_drawn {
 
     struct Watched {
         seen: Arc<Mutex<Seen>>,
+        /// What is on the screen now, so a test can wait for something.
+        screen: Arc<Mutex<String>>,
         writer: Arc<Mutex<Box<dyn Write + Send>>>,
         child: Box<dyn portable_pty::Child + Send + Sync>,
         _master: Box<dyn portable_pty::MasterPty + Send>,
@@ -3242,8 +3244,9 @@ mod never_half_drawn {
             let writer = Arc::new(Mutex::new(pty.master.take_writer().unwrap()));
             let mut reader = pty.master.try_clone_reader().unwrap();
             let seen = Arc::new(Mutex::new(Seen::default()));
+            let screen = Arc::new(Mutex::new(String::new()));
             let settled_at = Arc::new(Mutex::new(None::<Instant>));
-            let (seen2, writer2, settled2) = (seen.clone(), writer.clone(), settled_at.clone());
+            let (seen2, writer2, settled2, screen2) = (seen.clone(), writer.clone(), settled_at.clone(), screen.clone());
             std::thread::spawn(move || {
                 let mut parser = vt100::Parser::new(ROWS, COLS, 0);
                 let mut buf = [0u8; 65536];
@@ -3252,6 +3255,22 @@ mod never_half_drawn {
                         Ok(0) | Err(_) => break,
                         Ok(n) => n,
                     };
+                    // The app leaving the alternate screen is the end of the
+                    // session, not a frame: the terminal goes back to the screen
+                    // it was on before, which is empty here. The test kills the
+                    // app when it is done, and the app tidies up on its way out
+                    // (it restores the cursor and leaves the alternate screen),
+                    // so those last bytes say nothing about how the screen was
+                    // drawn. Counting them made this test fail on a busy
+                    // machine, where the last read lands on the way out.
+                    //
+                    // Checked before the bytes are parsed: once the parser has
+                    // seen the exit, the screen it reports is the empty one
+                    // behind the alternate screen, and the frame that was
+                    // there a moment ago is already gone.
+                    if buf[..n].windows(5).any(|w| w == b"1049l") {
+                        break;
+                    }
                     parser.process(&buf[..n]);
                     if buf[..n].windows(4).any(|w| w == b"\x1b[6n") {
                         let (row, col) = parser.screen().cursor_position();
@@ -3259,6 +3278,7 @@ mod never_half_drawn {
                     }
                     let contents = parser.screen().contents();
                     let filled = contents.chars().filter(|c| !c.is_whitespace()).count();
+                    *screen2.lock().unwrap() = contents.clone();
                     let mut settled = settled2.lock().unwrap();
                     if settled.is_none() && contents.contains("Ask FlashAgent") {
                         *settled = Some(Instant::now());
@@ -3278,7 +3298,7 @@ mod never_half_drawn {
                 assert!(started.elapsed() < Duration::from_secs(30), "the prompt never came up");
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Watched { seen, writer, child, _master: pty.master }
+            Watched { seen, screen, writer, child, _master: pty.master }
         }
 
         fn send(&self, keys: &[u8]) {
@@ -3288,6 +3308,23 @@ mod never_half_drawn {
 
         fn seen(&self) -> Seen {
             *self.seen.lock().unwrap()
+        }
+
+        /// Waits until the screen carries `needle`, or gives up.
+        ///
+        /// How long a frame takes is the machine's business: a busy one draws
+        /// fewer of them in the same wall-clock time, and a test that counts
+        /// frames fails on a busy machine for no reason of its own. What the
+        /// test cares about is the screen, so it waits for the screen.
+        fn wait_for(&self, needle: &str, timeout: Duration) -> bool {
+            let start = Instant::now();
+            while start.elapsed() < timeout {
+                if self.screen.lock().unwrap().contains(needle) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            false
         }
     }
 
@@ -3339,9 +3376,18 @@ mod never_half_drawn {
 
         term.send(b"tell me a story");
         term.send(b"\r");
-        std::thread::sleep(Duration::from_secs(6));
+        // Wait for the last word of the story to be on the screen. How long the
+        // answer takes is the machine's business: a busy one draws fewer frames
+        // in the same time, and a test that counts frames fails on a busy
+        // machine for no reason of its own. What the test judges is the screen,
+        // so it waits for the screen.
+        assert!(
+            term.wait_for("word299", Duration::from_secs(120)),
+            "the story never arrived: {:?}",
+            term.seen()
+        );
         let seen = term.seen();
-        assert!(seen.reads > 50, "too little was drawn to judge: {seen:?}");
+        assert!(seen.reads > 20, "too little was drawn to judge: {seen:?}");
         assert_eq!(seen.half_drawn, 0, "the screen was seen half drawn: {seen:?}");
     }
 }
