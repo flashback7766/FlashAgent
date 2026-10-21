@@ -29,6 +29,8 @@ pub mod startup;
 pub mod tasks_view;
 pub mod tools_view;
 pub mod theme;
+#[cfg(test)]
+mod untranslated;
 mod tool_cards;
 pub mod tips;
 pub mod image_cost;

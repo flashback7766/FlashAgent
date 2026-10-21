@@ -135,13 +135,17 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         } else {
             crate::i18n::tr("The provider ended the answer with the error below. Ctrl+R retries.")
         };
-        return Explained { headline: "The answer stopped mid-stream".to_string(), hint: Some(hint.to_string()), raw: raw.to_string() };
+        return Explained {
+            headline: crate::i18n::tr("The answer stopped mid-stream").to_string(),
+            hint: Some(hint.to_string()),
+            raw: raw.to_string(),
+        };
     }
 
     if lower.contains("500") || lower.contains("502") || lower.contains("503") {
         return Explained {
             headline: format!("{base} returned a server error"),
-            hint: Some("Its own log will say why; Ctrl+R retries.".to_string()),
+            hint: Some(crate::i18n::tr("Its own log will say why; Ctrl+R retries.").to_string()),
             raw: raw.to_string(),
         };
     }

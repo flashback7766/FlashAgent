@@ -350,7 +350,8 @@ impl App {
                         return Some(Flow::Quit);
                     } else {
                         // Twice, as /help says: once quit a new session at a stray press.
-                        self.copy_toast = Some(("Press Ctrl+C again to exit".to_string(), now));
+                        self.copy_toast =
+                            Some((flashagent_tui::i18n::tr("Press Ctrl+C again to exit").to_string(), now));
                         self.renderer.request_reprint();
                     }
                 }
