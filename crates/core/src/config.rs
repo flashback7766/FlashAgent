@@ -101,6 +101,20 @@ pub enum KeySource {
     None,
 }
 
+/// An MCP server the owner allowed to run from a project's `.mcp.json`.
+///
+/// The command it runs is remembered with it: a config that changes what it
+/// runs is a different program, and it is asked about again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedMcpServer {
+    /// The folder the server was allowed in.
+    pub directory: PathBuf,
+    /// The name it has in the config.
+    pub name: String,
+    /// What it runs, as it was when it was allowed.
+    pub command: String,
+}
+
 /// A saved provider: a server, how to talk to it, its key and the model to
 /// start with there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -435,6 +449,14 @@ pub struct AppConfig {
     /// Trust confirmation is skipped for these.
     #[serde(default)]
     pub trusted_directories: Vec<PathBuf>,
+    /// MCP servers the owner allowed to run from a project's `.mcp.json`.
+    ///
+    /// A project config can start a program, so a cloned repository could run
+    /// code before the person asked anything. The command that was allowed is
+    /// remembered with the server, so a config that changes what it runs is
+    /// asked about again.
+    #[serde(default)]
+    pub trusted_mcp_servers: Vec<TrustedMcpServer>,
     #[serde(default = "default_update_channel")]
     pub update_channel: UpdateChannel,
     /// Check, download and install in the background.
@@ -630,6 +652,7 @@ impl Default for AppConfig {
             crash_reports: false,
             interface_language: default_interface_language(),
             trusted_directories: Vec::new(),
+            trusted_mcp_servers: Vec::new(),
             update_channel: default_update_channel(),
             auto_check_updates: true,
             show_mascot: true,
@@ -921,6 +944,42 @@ impl AppConfig {
             let d_canon = std::fs::canonicalize(d).unwrap_or_else(|_| d.clone());
             d_canon == canon
         })
+    }
+
+    /// Whether the owner already allowed this server, in this folder, to run
+    /// this command.
+    ///
+    /// The command is part of the answer: a config that changed what it runs
+    /// is a different program, and it is asked about again.
+    pub fn is_mcp_server_trusted(&self, dir: &Path, name: &str, command: &str) -> bool {
+        let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        self.trusted_mcp_servers.iter().any(|t| {
+            let d_canon = std::fs::canonicalize(&t.directory).unwrap_or_else(|_| t.directory.clone());
+            d_canon == canon && t.name == name && t.command == command
+        })
+    }
+
+    /// Remembers that the owner allowed this server to run.
+    pub fn trust_mcp_server(&mut self, dir: &Path, name: &str, command: &str) {
+        let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        if self.is_mcp_server_trusted(&canon, name, command) {
+            return;
+        }
+        self.trusted_mcp_servers.push(TrustedMcpServer {
+            directory: canon,
+            name: name.to_string(),
+            command: command.to_string(),
+        });
+    }
+
+    /// Forgets an allowed server: the folder it was allowed in is given, and
+    /// the server may be left running for this session.
+    pub fn forget_mcp_server(&mut self, dir: &Path, name: &str) {
+        let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        self.trusted_mcp_servers.retain(|t| {
+            let d_canon = std::fs::canonicalize(&t.directory).unwrap_or_else(|_| t.directory.clone());
+            !(d_canon == canon && t.name == name)
+        });
     }
 
     pub fn trust_directory(&mut self, dir: &Path) {
@@ -1561,6 +1620,42 @@ mod tests {
         let prev_len = cfg.trusted_directories.len();
         cfg.trust_directory(&temp_dir);
         assert_eq!(cfg.trusted_directories.len(), prev_len);
+    }
+
+    /// An allowed MCP server is remembered with the command it was allowed
+    /// to run: a config that changes what it runs is a different program, and
+    /// it is asked about again.
+    #[test]
+    fn an_allowed_mcp_server_is_remembered_with_its_command() {
+        let mut cfg = AppConfig::default();
+        let dir = std::env::temp_dir();
+
+        assert!(!cfg.is_mcp_server_trusted(&dir, "sqlite", "uvx mcp-server-sqlite"));
+        cfg.trust_mcp_server(&dir, "sqlite", "uvx mcp-server-sqlite");
+        assert!(cfg.is_mcp_server_trusted(&dir, "sqlite", "uvx mcp-server-sqlite"));
+
+        // The same name, a different program: asked about again.
+        assert!(!cfg.is_mcp_server_trusted(&dir, "sqlite", "sh -c something else"));
+        // A different server in the same folder: asked about again.
+        assert!(!cfg.is_mcp_server_trusted(&dir, "other", "uvx mcp-server-sqlite"));
+
+        // Remembered once, not twice.
+        let len = cfg.trusted_mcp_servers.len();
+        cfg.trust_mcp_server(&dir, "sqlite", "uvx mcp-server-sqlite");
+        assert_eq!(cfg.trusted_mcp_servers.len(), len);
+
+        // Forgotten, when the owner takes it back.
+        cfg.forget_mcp_server(&dir, "sqlite");
+        assert!(!cfg.is_mcp_server_trusted(&dir, "sqlite", "uvx mcp-server-sqlite"));
+    }
+
+    /// An older config has no allowed servers, and says so rather than
+    /// refusing to load.
+    #[test]
+    fn an_older_config_knows_of_no_allowed_mcp_servers() {
+        let (cfg, rejected) = AppConfig::from_json_str(r#"{"model":"qwen"}"#);
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert!(cfg.trusted_mcp_servers.is_empty());
     }
 
     #[test]

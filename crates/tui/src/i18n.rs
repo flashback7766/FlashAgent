@@ -800,6 +800,15 @@ static RU: &[(&str, &str)] = &[
     ("change folder", "сменить папку"),
     ("Folder to work in (relative, absolute, or starting with ~):", "Папка для работы (относительный путь, абсолютный или с ~):"),
     ("Error:", "Ошибка:"),
+    // --- The MCP server a project wants to start ---
+    ("run this MCP server?", "запустить этот MCP-сервер?"),
+    ("This project wants to start an MCP server:", "Проект хочет запустить MCP-сервер:"),
+    ("It runs a program from this project. Continue only if you trust what it does.", "Он запускает программу из этого проекта. Продолжайте, только если доверяете тому, что она делает."),
+    ("1. Yes, and remember", "1. Да, и запомнить"),
+    ("2. Yes, just this time", "2. Да, только в этот раз"),
+    ("3. No, do not start it", "3. Нет, не запускать"),
+    ("{current} of {total} servers", "сервер {current} из {total}"),
+    ("skip the rest", "пропустить остальные"),
     // --- The setup wizard ---
     ("The clipboard has no text to paste", "В буфере обмена нет текста"),
     ("Please enter an endpoint URL before continuing", "Введите адрес сервера, прежде чем идти дальше"),
