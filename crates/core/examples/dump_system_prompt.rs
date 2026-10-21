@@ -25,6 +25,6 @@ fn main() {
     eprintln!(
         "\n[flashagent-slot-warmup] {} bytes, ~{} tokens (fixed prefix, no env block)",
         prompt.len(),
-        prompt.len() / 4
+        flashagent_llm::count_tokens("warmup", &prompt)
     );
 }

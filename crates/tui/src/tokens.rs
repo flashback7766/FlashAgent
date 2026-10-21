@@ -27,6 +27,16 @@ pub(crate) struct TokenTracker {
     /// whole assistant message is billed, tool name and arguments included, so
     /// counting those again locally charged a large write_file twice.
     reported_usage: bool,
+    /// What the model wrote in this request, so the server's own count of it
+    /// can be used to measure the model. Every server says how many tokens
+    /// it wrote, and the app has the text: together they are an exact
+    /// measurement of the model, and it costs nothing extra.
+    request_text: String,
+    /// Whether this request carried a tool call. The server counts the call
+    /// as part of what the model wrote, and the app has the name and the
+    /// arguments but not the framing around them, so such a request is not
+    /// a measurement of anything.
+    request_had_tool: bool,
     pub(crate) turn_start_time: Option<std::time::Instant>,
     pub(crate) first_token_time: Option<std::time::Instant>,
     pub(crate) prompt_tokens: Option<usize>,
@@ -50,6 +60,8 @@ impl TokenTracker {
             window: std::collections::VecDeque::new(),
             last_f_keep: None,
             reported_usage: false,
+            request_text: String::new(),
+            request_had_tool: false,
             turn_start_time: None,
             first_token_time: None,
             prompt_tokens: None,
@@ -91,6 +103,8 @@ impl TokenTracker {
         if text.is_empty() {
             return;
         }
+        // Kept for the measurement: the server counts this text too.
+        self.request_text.push_str(text);
         let now = std::time::Instant::now();
         if self.first_token_time.is_none() {
             self.first_token_time = Some(now);
@@ -121,6 +135,15 @@ impl TokenTracker {
     pub(crate) fn on_usage(&mut self, usage: &flashagent_llm::Usage) {
         if usage.completion.is_some() || usage.prompt.is_some() {
             self.reported_usage = true;
+        }
+        // The server counted what the model wrote, and the app has what it
+        // wrote. That is a measurement of the model itself, and the counter
+        // uses it: the model that is being talked to is the one that decides
+        // how many tokens a token is.
+        if let Some(c) = usage.completion.filter(|c| *c > 0) {
+            if !self.request_had_tool {
+                flashagent_llm::note_measured(&self.model, &self.request_text, c as usize);
+            }
         }
         if let Some(mtp) = usage.mtp.filter(|m| m.total_draft_tokens > 0) {
             self.draft_acceptance = Some(mtp.acceptance_rate());
@@ -174,6 +197,8 @@ impl TokenTracker {
     /// work it did.
     pub(crate) fn on_request_start(&mut self) {
         self.request_tokens = 0;
+        self.request_text.clear();
+        self.request_had_tool = false;
     }
 
     /// A tool call's name and arguments. Where the server prices the request it
@@ -182,7 +207,13 @@ impl TokenTracker {
     /// local model that reports no usage has nobody to correct it, so there the
     /// estimate is the only figure and its tools must not come out free.
     pub(crate) fn on_tool_call(&mut self, name: &str, args_json: &str) {
+        self.request_had_tool = true;
         if self.reported_usage {
+            // The server counted the call as part of what the model wrote, so
+            // the measurement needs the text of it even where the tokens of
+            // it are not counted here.
+            self.request_text.push_str(name);
+            self.request_text.push_str(args_json);
             return;
         }
         self.on_delta(name);

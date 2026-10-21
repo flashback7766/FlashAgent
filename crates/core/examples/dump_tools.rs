@@ -29,6 +29,6 @@ fn main() {
         "[flashagent-slot-warmup] {} tools, {} bytes of JSON, ~{} tokens",
         tools.len(),
         body.len(),
-        body.len() / 4
+        flashagent_llm::count_tokens("warmup", &body)
     );
 }

@@ -533,6 +533,13 @@ fn install_crash_hook(reports_enabled: bool) {
 async fn main() -> Result<()> {
     flashagent_svc::updater::remove_stale_backups_beside_exe();
     let mut config = AppConfig::load();
+    // What the models were measured to be, from the runs before this one. A
+    // model that was measured is not measured again: the server's own count
+    // of its own words is what the counter learns from, and it is the same
+    // model every time.
+    if let Some(path) = flashagent_llm::measurements_path() {
+        flashagent_llm::load_measurements(&path);
+    }
     let Some((force_setup, skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
 
     let Some(ran_setup) = startup_screens(&mut config, force_setup).await else { return Ok(()) };
@@ -623,7 +630,9 @@ async fn main() -> Result<()> {
     // Project and global memory docs, injected into the system prompt.
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_default();
     let docs = flashagent_core::collect(&cwd, &home.join(".flashagent"));
-    let memory_block = flashagent_core::injection_block(&docs, config.token_budget);
+    // The budget is in the tokens of the model that will read it, so the
+    // memory is measured the same way.
+    let memory_block = flashagent_core::injection_block(&model, &docs, config.token_budget);
     let memory_docs = docs.len();
 
     // The interface language before anything renders; the system prompt is
@@ -1874,6 +1883,9 @@ fn update_context_usage(
     // of the character count while the status line counted with a real
     // tokenizer and the budget with a third rule, so the bar, the budget and
     // the speed readout could each be a different number for the same text.
+    // The character rule was the worst of the three: it counted bytes, and a
+    // Russian letter is two of them, so the bar said the window was half
+    // full when the model had read a third of it.
     let count = |text: &str| flashagent_llm::count_tokens(model, text);
     let memory_tokens = count(memory_block);
     let system_has_memory = !memory_block.is_empty()
@@ -1895,17 +1907,22 @@ fn update_context_usage(
         .map(|t| count(&t.name) + count(&t.description) + count(&t.parameters_json))
         .sum();
 
-    let (chat_user, chat_assistant, chat_reasoning, chat_tools) = chat.raw_content_chars();
+    let (chat_user, chat_assistant, chat_reasoning, chat_tools) = chat.raw_content_tokens(&count);
 
     let (mut user, mut assistant, mut reasoning, mut tool_out) = (0usize, 0usize, 0usize, 0usize);
     for m in history {
         match m.role {
-            flashagent_llm::Role::User => user += m.content.len(),
+            flashagent_llm::Role::User => user += count(&m.content),
             flashagent_llm::Role::Assistant => {
-                assistant += m.content.len() + m.tool_calls.iter().map(|c| c.args_json.len()).sum::<usize>();
-                reasoning += m.reasoning.as_ref().map_or(0, |r| r.len());
+                assistant += count(&m.content);
+                for call in &m.tool_calls {
+                    assistant += count(&call.name) + count(&call.args_json);
+                }
+                if let Some(ref r) = m.reasoning {
+                    reasoning += count(r);
+                }
             }
-            flashagent_llm::Role::Tool => tool_out += m.content.len(),
+            flashagent_llm::Role::Tool => tool_out += count(&m.content),
             flashagent_llm::Role::System => {}
         }
     }
@@ -1914,17 +1931,20 @@ fn update_context_usage(
     if !memory_block.is_empty()
         && history.iter().find(|m| m.role == flashagent_llm::Role::User).is_some_and(|m| m.content.starts_with(memory_block))
     {
-        user = user.saturating_sub(memory_block.len());
+        user = user.saturating_sub(memory_tokens);
     }
 
-    // The conversation itself is left on the character estimate on purpose: it
-    // is recounted on every keystroke and every token of it, and a server that
-    // reports usage corrects the total anyway. What the budget is decided on is
-    // the three above, and those are counted with the model's own tokenizer.
-    usage.user_tokens = user.max(chat_user) / 4;
-    usage.assistant_tokens = assistant.max(chat_assistant) / 4;
-    usage.reasoning_tokens = reasoning.max(chat_reasoning) / 4;
-    usage.tool_output_tokens = tool_out.max(chat_tools) / 4;
+    // The conversation is counted with the same counter as everything else.
+    // It used to be a fourth of the character count, on purpose: it is
+    // recounted on every token of the answer, and a server that reports
+    // usage corrects the total anyway. But a character count of bytes is not
+    // a token count of anything: a Russian letter is two bytes, so the bar
+    // said the window was half full when the model had read a third of it,
+    // and the compaction came too early.
+    usage.user_tokens = user.max(chat_user);
+    usage.assistant_tokens = assistant.max(chat_assistant);
+    usage.reasoning_tokens = reasoning.max(chat_reasoning);
+    usage.tool_output_tokens = tool_out.max(chat_tools);
 }
 
 fn build_turn_options(
@@ -2169,7 +2189,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("conversation.jsonl");
         let mut history = long_history();
-        let result = compact_context(&LooseCompaction, &mut history, None, &archive, None)
+        let result = compact_context(&LooseCompaction, &mut history, None, &archive, None, "test-model")
             .await
             .expect("the text the model wrote is kept even without the shape");
         assert!(result.summary.contains("## Objective"), "{}", result.summary);
@@ -2198,6 +2218,7 @@ mod tests {
                 real_used: None,
                 room: None,
                 allow_growth: true,
+                    model: "test-model",
             },
             None,
         )
@@ -2226,7 +2247,7 @@ mod tests {
             ChatMessage::tool_result("c1", "file body"),
             ChatMessage::assistant("here it is"),
         ];
-        let freed = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None).await;
+        let freed = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None, "test-model").await;
         let freed = freed.expect("the summary is accepted");
         // The archive travels with the result: the session's own file keeps it.
         let archived: Vec<String> = freed.archive.iter().map(|m| m.content.clone()).collect();
@@ -2250,7 +2271,7 @@ mod tests {
         history.push(ChatMessage::user("next"));
         history.push(ChatMessage::assistant("ok"));
         history.push(ChatMessage::assistant("more work".repeat(1000)));
-        let result = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None).await.expect("the summary is accepted");
+        let result = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None, "test-model").await.expect("the summary is accepted");
         // The second archive holds what the second summary replaced: the turn
         // before the new question. The first archive is already in the
         // session's file.
@@ -2298,6 +2319,7 @@ mod tests {
                 real_used: None,
                 room: None,
                 allow_growth: true,
+                    model: "test-model",
             },
             Some(&sink),
         )
@@ -2386,6 +2408,7 @@ mod tests {
                 real_used: None,
                 room: Some(4_000),
                 allow_growth: true,
+                    model: "test-model",
             },
             None,
         )
@@ -2432,6 +2455,7 @@ mod tests {
                 real_used: None,
                 room: Some(room),
                 allow_growth: true,
+                    model: "test-model",
             },
             None,
         )
@@ -2467,6 +2491,7 @@ mod tests {
                 real_used: None,
                 room: Some(room),
                 allow_growth: true,
+                    model: "test-model",
             },
             None,
         )
@@ -2501,7 +2526,7 @@ mod tests {
 
         let mut history = long_history();
         let src = TwoShapeSummaries { first: shapeless, second: shaped, calls: std::sync::Mutex::new(0) };
-        assert!(compact_context(&src, &mut history, None, &archive, None).await.is_some(), "the second ask is taken");
+        assert!(compact_context(&src, &mut history, None, &archive, None, "test-model").await.is_some(), "the second ask is taken");
         assert_eq!(*src.calls.lock().unwrap(), 2, "and it is the last one");
         assert!(history[0].content.contains("continue the work"));
 
@@ -2510,7 +2535,7 @@ mod tests {
         // into refusing everything, and the window is freed either way.
         let mut history = long_history();
         let src = TwoShapeSummaries { first: shapeless, second: shapeless, calls: std::sync::Mutex::new(0) };
-        let kept = compact_context(&src, &mut history, None, &archive, None)
+        let kept = compact_context(&src, &mut history, None, &archive, None, "test-model")
             .await
             .expect("the text the model wrote is kept");
         assert_eq!(*src.calls.lock().unwrap(), 2, "no third ask");
@@ -2521,7 +2546,7 @@ mod tests {
         // A first answer that already has the shape is not asked for again.
         let mut history = long_history();
         let src = TwoShapeSummaries { first: shaped, second: shapeless, calls: std::sync::Mutex::new(0) };
-        assert!(compact_context(&src, &mut history, None, &archive, None).await.is_some());
+        assert!(compact_context(&src, &mut history, None, &archive, None, "test-model").await.is_some());
         assert_eq!(*src.calls.lock().unwrap(), 1);
     }
 
@@ -2535,7 +2560,7 @@ mod tests {
         let plain = "Here is the summary:\n\nObjective:\ncontinue the work\n\nRequirements:\n- none\n\nDecisions:\n- none\n\nWork State:\nCompleted:\n- first question answered\nActive:\n- none\nBlocked:\n- none\n\nNext Move:\n1. ship\n\nRelevant Files:\n- none\n\nImportant Context:\n- none";
         let mut history = long_history();
         let src = TwoShapeSummaries { first: plain, second: "nope", calls: std::sync::Mutex::new(0) };
-        let result = compact_context(&src, &mut history, None, &archive, None).await.expect("plain headings are accepted after normalization");
+        let result = compact_context(&src, &mut history, None, &archive, None, "test-model").await.expect("plain headings are accepted after normalization");
         assert!(result.summary.starts_with("## Objective"), "{}", result.summary);
         assert!(result.summary.contains("### Completed"), "{}", result.summary);
         assert_eq!(*src.calls.lock().unwrap(), 1, "it was not asked a second time");
@@ -2582,7 +2607,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("c.jsonl");
         let mut history = long_history();
-        let result = compact_context(&LateUsage, &mut history, None, &archive, None).await.expect("a shaped summary");
+        let result = compact_context(&LateUsage, &mut history, None, &archive, None, "test-model").await.expect("a shaped summary");
         assert_eq!((result.input_tokens, result.output_tokens), (90_000, 5_100));
     }
 
@@ -2624,7 +2649,7 @@ mod tests {
         history[0].content = format!("SYSTEM PROMPT\n\n{memory}");
         let before = history.clone();
         let (_, cut) = mid_turn_cut(&history).unwrap();
-        let saved = compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, &archive, None).await;
+        let saved = compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, &archive, None, "test-model").await;
         let saved = saved.expect("the turn is compacted");
         assert!(saved.saved > 0);
         assert_eq!(history[0].role, flashagent_llm::Role::System);
@@ -2645,7 +2670,7 @@ mod tests {
 
         // Nothing to cut: untouched.
         let mut short = running_turn(2);
-        assert!(compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut short, &archive, None).await.is_none());
+        assert!(compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut short, &archive, None, "test-model").await.is_none());
         assert_eq!(short.len(), 6);
     }
 
@@ -2658,6 +2683,7 @@ mod tests {
         let archive = dir.path().join("conversation.jsonl");
         let report = Arc::new(std::sync::Mutex::new(None));
         let compactor = TurnCompactor {
+            model: "test-model".to_string(),
             source: Arc::new(ScriptedCompaction(flashagent_llm::FinishReason::Stop)),
             archive: Some(archive),
             capacity: 40_000,
@@ -2687,7 +2713,7 @@ mod tests {
     #[tokio::test]
     async fn single_turn_history_is_already_compact() {
         let mut history = vec![ChatMessage::system("s"), ChatMessage::user("u"), ChatMessage::assistant("a")];
-        assert!(compact_context(&offline_source(), &mut history, None, std::path::Path::new("unused.jsonl"), None).await.is_none());
+        assert!(compact_context(&offline_source(), &mut history, None, std::path::Path::new("unused.jsonl"), None, "test-model").await.is_none());
         assert_eq!(history.len(), 3);
     }
 
@@ -2708,7 +2734,7 @@ mod tests {
         // window that stays full helps nobody.
         let archive = dir.path().join("cut.jsonl");
         let mut history = original.clone();
-        let cut = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Length), &mut history, None, &archive, None)
+        let cut = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Length), &mut history, None, &archive, None, "test-model")
             .await
             .expect("what the model wrote before the cut is kept");
         assert!(cut.summary.contains("cut off at the output limit"), "and it says what it is: {}", cut.summary);
@@ -2718,13 +2744,13 @@ mod tests {
         // stays as it was.
         let archive = dir.path().join("tool.jsonl");
         let mut history = original.clone();
-        assert!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::ToolUse), &mut history, None, &archive, None).await.is_none());
+        assert!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::ToolUse), &mut history, None, &archive, None, "test-model").await.is_none());
         assert_eq!(history.len(), original.len());
         assert_eq!(history[2].content, original[2].content);
 
         let archive = dir.path().join("offline.jsonl");
         let mut history = original.clone();
-        assert!(compact_context(&offline_source(), &mut history, None, &archive, None).await.is_none());
+        assert!(compact_context(&offline_source(), &mut history, None, &archive, None, "test-model").await.is_none());
         assert_eq!(history[1].content, "important instruction");
         assert!(!archive.exists());
 
@@ -2747,6 +2773,7 @@ mod tests {
             &mut history,
             &archive,
             None,
+            "test-model",
         )
         .await;
         assert!(saved.is_some(), "a cut summary still frees the window");

@@ -19,6 +19,12 @@ impl App {
         if let Err(e) = self.config.save() {
             self.notice(flashagent_tui::i18n::tr_fill("Settings not saved: {e}", &[("e", &e.to_string())]));
         }
+        // What the models were measured to be goes with it: a model that was
+        // measured today is not measured again tomorrow, and the first
+        // request of the next session is counted with what was learned here.
+        if let Some(path) = flashagent_llm::measurements_path() {
+            flashagent_llm::save_measurements(&path);
+        }
     }
 
     /// Keeps the chosen effort across a restart. Without this the level lived
