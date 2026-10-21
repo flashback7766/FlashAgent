@@ -2323,6 +2323,81 @@ mod tests {
         assert!(!archived.iter().any(|c| c.contains("second answer")), "the current turn stays live");
     }
 
+    /// A conversation that fits in the window goes in one request. The room
+    /// used to be the window minus the fixed part *and* minus what the
+    /// conversation already held, so the same tokens were counted twice: a
+    /// conversation that fitted was cut into parts, and on a small window the
+    /// room came out as nothing, which sent the whole conversation in one
+    /// request that the server refuses.
+    #[tokio::test]
+    async fn a_conversation_that_fits_in_the_window_goes_in_one_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let mut history = long_history();
+        history.push(ChatMessage::assistant("a long middle ".repeat(2000)));
+        history.push(ChatMessage::user("second question"));
+        history.push(ChatMessage::assistant("second answer"));
+
+        let source = CountingCompaction { calls: std::sync::Mutex::new(Vec::new()) };
+        // A window of 128k with a fixed part of 16k: the conversation fits
+        // many times over.
+        let room = crate::compact::room_for(128_000, 16_000);
+        let result = compact_context_with_sink(
+            &source,
+            &mut history,
+            crate::compact::Compaction {
+                focus_prompt: None,
+                archive_path: &archive,
+                real_used: None,
+                room: Some(room),
+                allow_growth: true,
+            },
+            None,
+        )
+        .await
+        .expect("the summary is accepted");
+        assert!(result.summary.contains("## Objective"));
+
+        let calls = source.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "it fits, so it is one request and not a set of parts: {calls:?}");
+    }
+
+    /// The same conversation on a window it does not fit: it is cut, and
+    /// every piece goes in its own request.
+    #[tokio::test]
+    async fn a_conversation_that_does_not_fit_is_cut_and_each_piece_goes_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let mut history = long_history();
+        history.push(ChatMessage::assistant("a long middle ".repeat(4000)));
+        history.push(ChatMessage::user("second question"));
+        history.push(ChatMessage::assistant("second answer"));
+
+        let source = CountingCompaction { calls: std::sync::Mutex::new(Vec::new()) };
+        // The same window, but the fixed part eats most of it: what is left
+        // is smaller than the conversation.
+        let room = crate::compact::room_for(32_000, 16_000);
+        let result = compact_context_with_sink(
+            &source,
+            &mut history,
+            crate::compact::Compaction {
+                focus_prompt: None,
+                archive_path: &archive,
+                real_used: None,
+                room: Some(room),
+                allow_growth: true,
+            },
+            None,
+        )
+        .await
+        .expect("the summary is accepted");
+        assert!(result.summary.contains("## Objective"));
+
+        let calls = source.calls.lock().unwrap().clone();
+        assert!(calls.len() >= 3, "the parts are summarized one by one and then together: {calls:?}");
+        assert_eq!(calls.last().copied(), Some(2), "the reduction asks with the instruction alone: {calls:?}");
+    }
+
     fn long_history() -> Vec<ChatMessage> {
         vec![
             ChatMessage::system("SYSTEM PROMPT"),

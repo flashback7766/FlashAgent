@@ -908,14 +908,16 @@ impl App {
         // The task owns the history until it is done; there is nothing to send
         // a turn with in the meantime, and a turn would have nothing to keep.
         let mut history = std::mem::take(&mut self.history);
+        // What the window holds now: the number the summary is measured
+        // against, and what the card says it freed.
         let used = self.context_usage.total_used();
         // The room one request may carry: the window minus the prompt, the
-        // schemas and what the conversation holds now.
-        let room = self
-            .context_usage
-            .total_capacity
-            .saturating_sub(self.context_usage.system_tokens + self.context_usage.tools_tokens)
-            .saturating_sub(used);
+        // memory and the schemas — once. What the conversation holds now is
+        // what gets summarized, so it is not subtracted here.
+        let room = crate::compact::room_for(
+            self.context_usage.total_capacity,
+            self.context_usage.system_tokens + self.context_usage.memory_tokens + self.context_usage.tools_tokens,
+        );
         let source = cx.source.clone();
         let focus = (!focus.is_empty()).then(|| focus.to_string());
         let tx = cx.tx.clone();

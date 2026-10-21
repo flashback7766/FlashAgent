@@ -113,6 +113,19 @@ pub(crate) async fn compact_context_with_sink(
 /// chunk that fills the room exactly is a request that fails.
 const CHUNK_SHARE: usize = 80;
 
+/// The room one request may carry: the window minus what every request
+/// carries whatever the conversation is.
+///
+/// The window minus the prompt, the memory and the schemas — once. What the
+/// turn already holds is the conversation itself, and it is what gets
+/// summarized, so subtracting it here would count it twice: the room would
+/// come out far smaller than the window, and a conversation that fits would
+/// be cut into parts, or, on a small window, sent whole in one request that
+/// the server refuses.
+pub(crate) fn room_for(capacity: usize, fixed: usize) -> usize {
+    capacity.saturating_sub(fixed)
+}
+
 /// Estimated tokens of a piece of text: the same rough measure the rest of the
 /// compaction uses, four characters to a token.
 fn est_tokens(text: &str) -> usize {
@@ -198,8 +211,9 @@ impl flashagent_core::Compactor for TurnCompactor {
         // The window filled up in the middle of a task, so the summary is
         // exhaustive: this is the model's only memory of what it already did.
         // The room one request may carry: the window minus the prompt, the
-        // schemas and what the turn has used so far.
-        let room = self.capacity.saturating_sub(self.fixed).saturating_sub(prompt_tokens.unwrap_or(0));
+        // memory and the schemas — once. What the turn has used so far is the
+        // conversation itself, and it is what gets summarized.
+        let room = room_for(self.capacity, self.fixed);
         match compact_running_turn_with_sink(
             self.source.as_ref(),
             history,
@@ -971,4 +985,69 @@ fn normalize_compaction_summary(text: &str) -> String {
         out.pop();
     }
     out.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The room is the window minus the fixed part — once. What the turn
+    /// already holds is the conversation itself, and it is what gets
+    /// summarized: subtracting it counted the same tokens twice and left a
+    /// room far smaller than the window, or none at all.
+    #[test]
+    fn the_room_is_the_window_minus_the_fixed_part() {
+        let capacity = 128_000;
+        let fixed = 16_100;
+        assert_eq!(room_for(capacity, fixed), 111_900);
+        // The room does not shrink with the conversation: the conversation is
+        // what gets summarized, and it is measured against the room.
+        let used = 40_000;
+        assert_eq!(room_for(capacity, fixed), 111_900, "the used {used} is not part of the room");
+        let small = room_for(64_000, 16_100);
+        assert!(small > 0, "a 64k window has room for a 40k conversation: {small}");
+    }
+
+    /// A window smaller than the fixed part leaves no room, and the caller
+    /// must hear it rather than divide by it.
+    #[test]
+    fn a_window_smaller_than_the_fixed_part_leaves_no_room() {
+        assert_eq!(room_for(10_000, 16_000), 0);
+    }
+
+    /// A conversation that fits in the room goes in one request: one request
+    /// is cheaper, and the cache likes a prefix.
+    #[test]
+    fn a_conversation_that_fits_is_not_cut_into_parts() {
+        let conversation = vec![ChatMessage::user("a".repeat(4_000)), ChatMessage::assistant("b".repeat(4_000))];
+        assert!(split_into_chunks(&conversation, 100_000).is_none(), "it fits, so it is not cut");
+    }
+
+    /// A conversation bigger than the room is cut, and every piece fits.
+    #[test]
+    fn a_conversation_bigger_than_the_room_is_cut_into_pieces_that_fit() {
+        let conversation = vec![
+            ChatMessage::user("a".repeat(40_000)),
+            ChatMessage::assistant("b".repeat(40_000)),
+            ChatMessage::user("c".repeat(40_000)),
+        ];
+        let chunks = split_into_chunks(&conversation, 20_000).expect("it does not fit, so it is cut");
+        assert!(chunks.len() >= 2, "cut into pieces: {}", chunks.len());
+        for chunk in &chunks {
+            let size: usize = chunk.iter().map(|m| est_tokens(&m.content)).sum();
+            assert!(size <= 20_000 * CHUNK_SHARE / 100, "a piece of {size} does not fit");
+        }
+        // Nothing is lost: the pieces are the whole conversation.
+        let total: usize = chunks.iter().flat_map(|c| c.iter()).map(|m| est_tokens(&m.content)).sum();
+        let whole: usize = conversation.iter().map(|m| est_tokens(&m.content)).sum();
+        assert_eq!(total, whole, "every message is in some piece");
+    }
+
+    /// A room of nothing means the window cannot carry a request at all, and
+    /// the conversation is not cut into pieces of nothing.
+    #[test]
+    fn no_room_means_no_pieces() {
+        let conversation = vec![ChatMessage::user("a".repeat(4_000))];
+        assert!(split_into_chunks(&conversation, 0).is_none());
+    }
 }
