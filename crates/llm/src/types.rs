@@ -216,6 +216,9 @@ pub struct TurnOptions {
     pub presence_penalty: Option<f32>,
     pub min_p: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// The seed of the sampling: the same seed and the same request give the
+    /// same answer. `None`: the server picks one.
+    pub seed: Option<u64>,
 }
 
 /// Used when the backend sends no usage: ~4 chars per token for Latin text,

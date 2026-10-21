@@ -579,7 +579,7 @@ impl App {
             LineKind::System,
             format!("{border_color}╭─\x1b[1;38;2;245;240;232m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)),
         );
-        let meta = "Accept All \u{b7} thinking high \u{b7} Esc stops the run";
+        let meta = flashagent_tui::i18n::tr("Accept All \u{b7} thinking high \u{b7} Esc stops the run");
         let budget = format!("Budget: {}", goal_budgets.summary());
         let rows: Vec<String> =
             [meta, budget.as_str()].iter().flat_map(|text| wrap_plain(text, inner_w.saturating_sub(2))).collect();
