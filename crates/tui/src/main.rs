@@ -501,7 +501,10 @@ fn install_crash_hook(reports_enabled: bool) {
             LeaveAlternateScreen,
         );
         let _ = crossterm::terminal::disable_raw_mode();
-        eprintln!("\x1b[1;38;2;245;120;120mFlashAgent encountered an unexpected crash.\x1b[0m");
+        eprintln!(
+            "\x1b[1;38;2;245;120;120m{}\x1b[0m",
+            flashagent_tui::i18n::tr("FlashAgent encountered an unexpected crash.")
+        );
         if reports_enabled {
             let log_content = format!(
                 "FlashAgent Crash Report\nVersion: {}\nTime: {:?}\nPanic: {}\nBacktrace:\n{:?}\n\nPlease report this issue at: https://github.com/flashback7766/FlashAgent/issues\n",
@@ -1958,6 +1961,11 @@ fn build_turn_options(
         repeat_penalty: app_config.repeat_penalty,
         presence_penalty: app_config.presence_penalty,
         min_p: app_config.min_p,
+        // How much the model may write, and the seed of the sampling. Both
+        // are `None` until the owner sets them, and then the server's own
+        // limits and its own choice stand.
+        max_tokens: app_config.max_tokens,
+        seed: app_config.seed,
         ..Default::default()
     };
     if effort == "auto" || effort.is_empty() {

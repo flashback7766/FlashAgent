@@ -23,7 +23,7 @@ pub(crate) fn conversation_markdown(history: &[ChatMessage], session_id: &str, m
             // A tool's picture, a task's notice or a nudge from the loop.
             flashagent_llm::Role::User if !flashagent_core::is_prompt(m) => {}
             flashagent_llm::Role::User => {
-                md.push_str("---\n\n## You\n\n");
+                md.push_str(&format!("---\n\n{}\n\n", flashagent_tui::i18n::tr("## You")));
                 let prompt = extract_user_prompt(&m.content);
                 if !prompt.is_empty() {
                     md.push_str(prompt);

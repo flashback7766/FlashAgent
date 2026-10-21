@@ -428,6 +428,11 @@ fn body_at(
     if let Some(mt) = options.max_tokens {
         body["max_tokens"] = serde_json::json!(mt);
     }
+    // The seed of the sampling: the same seed and the same request give the
+    // same answer, which is what makes a run repeatable.
+    if let Some(seed) = options.seed {
+        body["seed"] = serde_json::json!(seed);
+    }
     if fields == Fields::Standard {
         return finish(body, tools, learned);
     }
@@ -819,6 +824,28 @@ mod tests {
     fn body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: &TurnOptions) -> serde_json::Value {
         let learned = client.learned.read().clone();
         body_at(client, messages, tools, options, Fields::All, &learned)
+    }
+
+    /// The limit of the answer and the seed of the sampling reach the server.
+    /// Without them the owner has no way to say how much the model may write
+    /// or to make a run repeatable.
+    #[test]
+    fn the_limit_of_the_answer_and_the_seed_reach_the_server() {
+        let c = client("https://api.openai.com/v1", "gpt-4o");
+        let opts = TurnOptions { max_tokens: Some(4096), seed: Some(42), ..Default::default() };
+        let body = body(&c, &[ChatMessage::user("hi")], &[], &opts);
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["seed"], 42);
+    }
+
+    /// Nothing is said about them until the owner says it: a server that
+    /// does not know the fields must not see them.
+    #[test]
+    fn no_limit_and_no_seed_are_not_mentioned() {
+        let c = client("https://api.openai.com/v1", "gpt-4o");
+        let body = body(&c, &[ChatMessage::user("hi")], &[], &TurnOptions::default());
+        assert!(body.get("max_tokens").is_none(), "{body}");
+        assert!(body.get("seed").is_none(), "{body}");
     }
 
     #[test]

@@ -199,6 +199,11 @@ fn request_body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], o
     if let Some(n) = options.max_tokens {
         config.insert("maxOutputTokens".into(), json!(n));
     }
+    // The seed of the sampling: the same seed and the same request give the
+    // same answer, which is what makes a run repeatable.
+    if let Some(seed) = options.seed {
+        config.insert("seed".into(), json!(seed));
+    }
     if let Some(thinking) = thinking_config(client, &messages, options) {
         config.insert("thinkingConfig".into(), thinking);
     }

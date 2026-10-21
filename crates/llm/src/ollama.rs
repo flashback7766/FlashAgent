@@ -106,6 +106,9 @@ fn body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: 
     set("presence_penalty", options.presence_penalty.map(Value::from));
     set("min_p", options.min_p.map(Value::from));
     set("num_predict", options.max_tokens.map(Value::from));
+    // The seed of the sampling: the same seed and the same request give the
+    // same answer, which is what makes a run repeatable.
+    set("seed", options.seed.map(Value::from));
 
     let in_text = !tools.is_empty() && !takes_tools(client, &model);
     let flattened;
