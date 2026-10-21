@@ -539,9 +539,19 @@ async fn main() -> Result<()> {
     let Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, initial_effort, available_models, first_run_verdict, pending_discovery }) =
         prepare_backend(&mut config, skip_trust, ran_setup).await? else { return Ok(()) };
 
+    // The interface language before anything renders; the system prompt is
+    // not part of it. Set before the questions about MCP servers, which the
+    // person reads.
+    flashagent_tui::i18n::set(flashagent_tui::i18n::Lang::from_code(&config.interface_language));
+
     let gate = TuiGate::new();
     let question_gate = TuiQuestionGate::new();
     let mcp_manager = flashagent_tools::mcp::McpManager::new(cwd.clone());
+    // A project's `.mcp.json` can start a program, so the owner is asked
+    // before it runs. The answer is remembered, unless the safe mode is on:
+    // there, nothing runs without a question every time.
+    let allowed = approve_project_mcp_servers(&mut config, &mcp_manager, &cwd).await;
+    mcp_manager.set_allowed(allowed.iter().cloned().collect());
     let mcp_bg = mcp_manager.clone();
     tokio::spawn(async move {
         mcp_bg.start_enabled_servers().await;
@@ -618,8 +628,6 @@ async fn main() -> Result<()> {
 
     // The interface language before anything renders; the system prompt is
     // not part of it.
-    flashagent_tui::i18n::set(flashagent_tui::i18n::Lang::from_code(&config.interface_language));
-
     install_crash_hook(config.crash_reports);
 
     run_terminal(AppContext {
@@ -1779,6 +1787,72 @@ async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mu
             return;
         }
     }
+}
+
+/// Asks about the MCP servers a project's config wants to start, and returns
+/// the ones the owner allowed.
+///
+/// A server the owner put in their own global config is theirs and starts
+/// without a word. One that came from a project's `.mcp.json` runs a program
+/// the owner may never have seen, so it is asked about first. The answer is
+/// remembered in the config, together with the command that was allowed: a
+/// config that changes what it runs is asked about again.
+///
+/// The safe mode asks every time: there, nothing runs without a question.
+async fn approve_project_mcp_servers(
+    config: &mut AppConfig,
+    mcp: &flashagent_tools::mcp::McpManager,
+    cwd: &std::path::Path,
+) -> Vec<String> {
+    let servers = mcp.project_servers();
+    if servers.is_empty() {
+        return Vec::new();
+    }
+
+    // The ones already allowed, and the ones to ask about.
+    let mut allowed: Vec<String> = Vec::new();
+    let mut to_ask = Vec::new();
+    for (name, cfg) in servers {
+        let command = mcp_command_line(&cfg);
+        // The safe mode asks every time: nothing runs there without a
+        // question, however often the owner said yes before.
+        if !config.safe_mode && config.is_mcp_server_trusted(cwd, &name, &command) {
+            allowed.push(name);
+            continue;
+        }
+        to_ask.push(flashagent_tui::startup::McpServerToAsk { name, command });
+    }
+    if to_ask.is_empty() {
+        return allowed;
+    }
+
+    if !std::io::stdout().is_terminal() {
+        // No one to ask: the servers stay off rather than run unseen.
+        return allowed;
+    }
+
+    let asked = flashagent_tui::startup::run_mcp_trust_screen(to_ask).await.unwrap_or_default();
+    // Remembered only in the ordinary mode: the safe mode asks every time.
+    if !config.safe_mode {
+        for (name, cfg) in mcp.project_servers() {
+            if asked.contains(&name) {
+                config.trust_mcp_server(cwd, &name, &mcp_command_line(&cfg));
+            }
+        }
+        let _ = config.save();
+    }
+    allowed.extend(asked);
+    allowed
+}
+
+/// What a server runs, as one line: the command and its arguments.
+fn mcp_command_line(cfg: &flashagent_tools::mcp::McpServerConfig) -> String {
+    let mut line = cfg.command.clone();
+    for arg in cfg.args.iter() {
+        line.push(' ');
+        line.push_str(arg);
+    }
+    line
 }
 
 fn update_context_usage(

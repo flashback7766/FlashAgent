@@ -1514,6 +1514,26 @@ fn with_mcp_stub(home: &Home) -> std::path::PathBuf {
     log
 }
 
+/// A server from a project's `.mcp.json` is asked about before it runs: it is
+/// a program from a repository, and the owner may never have seen it.
+fn approve_mcp_stub(term: &Term) {
+    term.wait_for("run this MCP server", WAIT);
+    term.send(ENTER);
+}
+
+/// The same, when the owner has already said yes to this server in this
+/// folder: the question is not asked again.
+///
+/// The answer is written into the config the app reads. `ready` writes the
+/// config from scratch, so this is done where the app is started, not before.
+fn allow_mcp_stub(home: &Home) {
+    let mut config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
+    let dir = std::fs::canonicalize(home.work()).unwrap_or_else(|_| home.work());
+    let command = format!("{} {}", python(), std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/mcp_stub.py").display());
+    config["trusted_mcp_servers"] = serde_json::json!([{ "directory": dir, "name": "stub", "command": command }]);
+    home.write_config(config);
+}
+
 fn stub_log(log: &std::path::Path) -> String {
     std::fs::read_to_string(log).unwrap_or_default()
 }
@@ -1527,6 +1547,50 @@ fn wait_for_mcp(log: &std::path::Path) {
     }
 }
 
+/// A server a project names is a program from that project, so it is asked
+/// about before it runs: a repository somebody else wrote could otherwise run
+/// code before the owner asked anything.
+#[test]
+fn a_server_from_a_project_is_asked_about_before_it_runs() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let log = with_mcp_stub(&home);
+    home.set_up(&server.url);
+    let term = Term::start(&home, &["-y"], COLS, ROWS);
+
+    // The question names the program it wants to run.
+    let screen = term.wait_for("run this MCP server", WAIT);
+    assert!(screen.contains("stub"), "the server is not named: {screen}");
+    assert!(screen.contains("mcp_stub.py"), "the command is not shown: {screen}");
+
+    // Said no: the server does not start.
+    term.send("3");
+    term.wait_for(PROMPT, WAIT);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!stub_log(&log).contains("listed"), "the server ran without a yes: {}", stub_log(&log));
+}
+
+/// Said yes: the server starts, and the answer is remembered, so the next
+/// launch does not ask again.
+#[test]
+fn a_server_from_a_project_starts_after_a_yes_and_is_not_asked_again() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let log = with_mcp_stub(&home);
+    home.set_up(&server.url);
+    let term = Term::start(&home, &["-y"], COLS, ROWS);
+    approve_mcp_stub(&term);
+    term.wait_for(PROMPT, WAIT);
+    wait_for_mcp(&log);
+
+    // Remembered: the next launch in the same folder asks nothing.
+    let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
+    assert!(
+        config["trusted_mcp_servers"].as_array().is_some_and(|a| !a.is_empty()),
+        "the answer was not remembered: {config}"
+    );
+}
+
 #[test]
 fn a_read_only_mcp_tool_runs_without_asking() {
     let server = MockServer::start(vec![
@@ -1535,7 +1599,12 @@ fn a_read_only_mcp_tool_runs_without_asking() {
     ]);
     let home = Home::new();
     let log = with_mcp_stub(&home);
-    let term = ready(&home, &server);
+    // The owner already said yes to this server in this folder: the question
+    // is not asked again.
+    home.set_up(&server.url);
+    allow_mcp_stub(&home);
+    let term = Term::start(&home, &["-y"], COLS, ROWS);
+    term.wait_for(PROMPT, WAIT);
     wait_for_mcp(&log);
 
     // No key is pressed: a confirmation card would hold the turn until timeout.
@@ -1558,7 +1627,11 @@ fn an_mcp_tool_that_changes_things_asks_first_and_a_refusal_never_reaches_the_se
     ]);
     let home = Home::new();
     let log = with_mcp_stub(&home);
-    let term = ready(&home, &server);
+    // The owner already said yes to this server in this folder.
+    home.set_up(&server.url);
+    allow_mcp_stub(&home);
+    let term = Term::start(&home, &["-y"], COLS, ROWS);
+    term.wait_for(PROMPT, WAIT);
     wait_for_mcp(&log);
 
     term.type_text("delete everything");

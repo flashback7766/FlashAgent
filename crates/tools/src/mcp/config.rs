@@ -1,6 +1,6 @@
 //! MCP config discovery for project and global servers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
@@ -117,8 +117,20 @@ fn parse_servers(content: &str) -> Option<HashMap<String, McpServerConfig>> {
 
 /// Project config overrides global.
 pub fn load_mcp_configs(cwd: &Path) -> (HashMap<String, McpServerConfig>, Vec<PathBuf>) {
+    let (servers, paths, _) = load_mcp_configs_with_origin(cwd);
+    (servers, paths)
+}
+
+/// The servers, the files they came from, and which of them a project's
+/// `.mcp.json` named.
+///
+/// The origin matters: a server the owner put in their own global config is
+/// theirs, and one a project names is the project's, which may have come
+/// from a repository somebody else wrote.
+pub fn load_mcp_configs_with_origin(cwd: &Path) -> (HashMap<String, McpServerConfig>, Vec<PathBuf>, HashSet<String>) {
     let mut servers = HashMap::new();
     let mut loaded_paths = Vec::new();
+    let mut from_project = HashSet::new();
 
     // ~/.flashagent/mcp.json
     if let Some(home) = dirs_next().or_else(|| std::env::var("HOME").ok().map(PathBuf::from)) {
@@ -136,6 +148,7 @@ pub fn load_mcp_configs(cwd: &Path) -> (HashMap<String, McpServerConfig>, Vec<Pa
     for p in &project_candidates {
         if p.is_file() {
             if let Some(parsed) = std::fs::read_to_string(p).ok().and_then(|c| parse_servers(&c)) {
+                from_project.extend(parsed.keys().cloned());
                 servers.extend(parsed);
                 loaded_paths.push(p.clone());
                 break;
@@ -143,7 +156,7 @@ pub fn load_mcp_configs(cwd: &Path) -> (HashMap<String, McpServerConfig>, Vec<Pa
         }
     }
 
-    (servers, loaded_paths)
+    (servers, loaded_paths, from_project)
 }
 
 fn dirs_next() -> Option<PathBuf> {
