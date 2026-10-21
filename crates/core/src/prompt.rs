@@ -18,6 +18,10 @@ pub struct SystemPromptConfig {
     /// in the prompt. Left out when it is not, rather than describing a tool
     /// the model cannot call.
     pub subagents_available: bool,
+    /// `ask_user` is on offer, so the rules about asking belong in the
+    /// prompt. Left out when it is not, rather than describing a tool the
+    /// model cannot call.
+    pub ask_user_available: bool,
     /// A `/goal` run is under way, so the rules that only hold inside one are
     /// stated. Outside a run they would describe a mode the model is not in.
     pub goal_mode: bool,
@@ -68,6 +72,11 @@ impl SystemPromptConfig {
 
     pub fn with_subagents(mut self, available: bool) -> Self {
         self.subagents_available = available;
+        self
+    }
+
+    pub fn with_ask_user(mut self, available: bool) -> Self {
+        self.ask_user_available = available;
         self
     }
 
@@ -233,13 +242,26 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
         );
     }
 
-    sections.push(
-        "ASKING THE USER (MANDATORY ask_user):\n\
-         - Every question to the user goes through the ask_user tool, with 2-6 concrete options for each question. Several questions go in one call's questions array.\n\
-         - Never write a question or a list of questions to the user as plain text.\n\
-         - Decide routine details yourself; ask only when the choice is genuinely the user's (scope, stack, design, anything destructive)."
-            .to_string(),
-    );
+    // The rules about asking are only true when the tool is on offer. When it
+    // is switched off, the model has no way to ask, and the rule "never write
+    // a question as plain text" would leave it with no way to say anything at
+    // all: it would have to guess, or stay silent.
+    if config.ask_user_available {
+        sections.push(
+            "ASKING THE USER (MANDATORY ask_user):\n\
+             - Every question to the user goes through the ask_user tool, with 2-6 concrete options for each question. Several questions go in one call's questions array.\n\
+             - Never write a question or a list of questions to the user as plain text.\n\
+             - Decide routine details yourself; ask only when the choice is genuinely the user's (scope, stack, design, anything destructive)."
+                .to_string(),
+        );
+    } else {
+        sections.push(
+            "ASKING THE USER:\n\
+             - There is no way to ask a question here, so do not try: no tool for it is on offer. Say in one line what you need, if you need anything, and carry on with what you can do without an answer.\n\
+             - Decide routine details yourself."
+                .to_string(),
+        );
+    }
 
     sections.push(
         "PERMISSIONS:\n\
@@ -471,6 +493,31 @@ mod tests {
         assert!(with.contains("Never write, guess or predict a result you have not received"), "{with}");
     }
 
+    /// The rules about asking are only true when the tool is on offer. A
+    /// prompt that says "every question goes through ask_user" while the tool
+    /// is switched off leaves the model with no way to ask anything at all.
+    #[test]
+    fn the_asking_rules_are_only_there_when_the_tool_is() {
+        let without = build_system_prompt(&SystemPromptConfig::new());
+        assert!(!without.contains("MANDATORY ask_user"), "{without}");
+        // And it is not left with nothing: it says what to do instead.
+        assert!(without.contains("There is no way to ask a question here"), "{without}");
+
+        let with = build_system_prompt(&SystemPromptConfig::new().with_ask_user(true));
+        assert!(with.contains("MANDATORY ask_user"), "{with}");
+        assert!(!with.contains("There is no way to ask a question here"), "{with}");
+    }
+
+    /// The prompt must not name a tool the model was not offered. The owner
+    /// can switch any of them off, and the prompt has to agree.
+    #[test]
+    fn the_prompt_never_names_a_tool_that_is_switched_off() {
+        for (available, marker) in [(false, "DELEGATING:"), (true, "DELEGATING:")] {
+            let prompt = build_system_prompt(&SystemPromptConfig::new().with_subagents(available));
+            assert_eq!(prompt.contains(marker), available, "{prompt}");
+        }
+    }
+
     #[test]
     fn a_rule_is_stated_once() {
         // A rule in two places is a rule to keep in sync, and one more thing to
@@ -550,7 +597,9 @@ mod tests {
             .with_cwd("/home/user/project")
             .with_platform("linux")
             .with_model("qwen-2.5-coder")
-            .with_effort("auto");
+            .with_effort("auto")
+            .with_ask_user(true)
+            .with_subagents(true);
 
         let prompt = build_system_prompt(&config);
 
