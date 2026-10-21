@@ -625,7 +625,8 @@ pub(crate) fn cut_off_notice(raw: &str, arrived: usize) -> Option<String> {
         return None;
     }
     Some(if arrived == 0 {
-        "The connection to the model server dropped before the answer began \u{b7} nothing of this turn was written".to_string()
+        flashagent_tui::i18n::tr("The connection to the model server dropped before the answer began \u{b7} nothing of this turn was written")
+            .to_string()
     } else {
         format!(
             "The connection to the model server dropped mid-answer \u{b7} about {} arrived and the answer above is cut off, not finished",

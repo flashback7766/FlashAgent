@@ -410,6 +410,15 @@ pub struct AppConfig {
     pub presence_penalty: Option<f32>,
     #[serde(default = "default_min_p")]
     pub min_p: Option<f32>,
+    /// The most the model may write in one answer. `None`: the server's own
+    /// limit, which is what it was before.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// The seed of the sampling. The same seed and the same request give the
+    /// same answer, which is what makes a run repeatable. `None`: the server
+    /// picks one.
+    #[serde(default)]
+    pub seed: Option<u64>,
     /// `None` means unlimited.
     #[serde(default)]
     pub max_steps: Option<u32>,
@@ -640,6 +649,10 @@ impl Default for AppConfig {
             repeat_penalty: Some(1.00),
             presence_penalty: Some(0.00),
             min_p: Some(0.00),
+            // The server's own limits and its own choice of seed stand until
+            // the owner sets them.
+            max_tokens: None,
+            seed: None,
             max_steps: None, // no step limit per turn
             token_budget: 2000,
             web_tools: true,

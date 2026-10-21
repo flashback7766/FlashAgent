@@ -9,13 +9,15 @@
 //! reach the screen without a translation. A phrase is untranslated when it
 //!
 //! - is a literal in the sources of the interface,
-//! - is not the argument of `tr`, `tr_fill` or `tr_with` (those are
-//!   translated at the call),
-//! - has no translation in the table (a phrase the table holds is
-//!   translated where it is used, even if the call is further away, as the
-//!   tips are),
+//! - has no translation in the table,
 //! - and looks like something a person reads: two words or more, in Latin
 //!   letters, written with a capital, without a hole in it.
+//!
+//! Whether the phrase stands next to a `tr` call does not matter: a call
+//! without a translation in the table shows the English all the same, and
+//! that was the first kind of gap this collector found — a phrase that went
+//! through `tr` and still came out in English, because the table did not
+//! hold it.
 //!
 //! What is left is either a gap or a phrase that is English on purpose. The
 //! second kind is listed below with the reason, so that a new one has to be
@@ -78,6 +80,27 @@ const ENGLISH_ON_PURPOSE: &[(&str, &str)] = &[
         "a prompt to the model",
     ),
     ("FAIL: no answer within 120s", "the report of the tool test, for the developer who ran it"),
+    (
+        "\nContinue the current task from this summary and the retained messages that follow. If an exact prior message or tool result is needed, read the archive in the session file named below, under its \"archive\" field, subject to normal file permissions. Verify changeable facts before acting.",
+        "the model reads it",
+    ),
+    ("\n[Compaction Stats]: ", "a marker in the system message, the model reads it"),
+    ("\n\n[Compacted Conversation History]:\n", "a marker in the system message, the model reads it"),
+    ("\n\n[Full Earlier Transcript Archive]:\n", "a marker in the system message, the model reads it"),
+    ("# Memory (automatically loaded", "a marker in the session file"),
+    ("[AUTONOMOUS GOAL DIRECTIVE]", "a marker in the session file"),
+    ("### Stage:", "the model writes it, the interface reads it back"),
+    (". To increase", "the mark the server's own message is cut at"),
+    (". This is", "the mark an automatic notice is cut at"),
+    ("## FlashAgent\n\n", "the name of the assistant in the exported document"),
+    (
+        "\u{2190}/\u{2192}, Home/End, Ctrl+A/E, Ctrl+W, Ctrl+U, Alt+K",
+        "the names of the keys",
+    ),
+    (
+        "\nA model that fails these will talk about doing the work instead of doing it.\nYou can re-run this any time with `flashagent --tool-test`, or compare models\nwith `flashagent --tool-test --all-models`.",
+        "the report of the tool test, for the developer who ran it",
+    ),
 ];
 
 /// The sources of the interface, and the table of translations.
@@ -235,6 +258,29 @@ fn unescape(raw: &str) -> String {
             Some('r') => out.push('\r'),
             Some('"') => out.push('"'),
             Some('\\') => out.push('\\'),
+            Some('u') => {
+                // A codepoint: \u{2190} is the arrow.
+                let mut rest = String::new();
+                let mut closed = false;
+                for next in chars.by_ref() {
+                    if next == '}' {
+                        closed = true;
+                        break;
+                    }
+                    rest.push(next);
+                }
+                match u32::from_str_radix(rest.trim_start_matches('{'), 16).ok().and_then(char::from_u32) {
+                    Some(c) if closed => out.push(c),
+                    _ => {
+                        out.push('\\');
+                        out.push('u');
+                        out.push_str(&rest);
+                        if closed {
+                            out.push('}');
+                        }
+                    }
+                }
+            }
             Some(other) => {
                 out.push('\\');
                 out.push(other);
@@ -245,39 +291,72 @@ fn unescape(raw: &str) -> String {
     out
 }
 
-/// Whether the phrase looks like something a person reads.
-fn looks_like_text(phrase: &str) -> bool {
-    if phrase.split_whitespace().count() < 2 {
-        return false;
-    }
-    if !phrase.is_ascii() {
-        return false;
-    }
-    if phrase.contains('{') || phrase.contains('}') {
-        return false;
-    }
-    let first = phrase.chars().next().unwrap_or(' ');
-    first.is_ascii_uppercase() || first == '('
-}
-
-/// Whether the literal stands as the argument of a translation call.
-///
-/// The call may be spread over several lines, so the walk looks back far
-/// enough to find the call and checks that nothing but the argument stands
-/// between it and the literal.
-fn goes_through_tr(text: &str, at: usize) -> bool {
-    let start = at.saturating_sub(400);
-    let before = &text[start..at];
-    let mut found = false;
-    for name in ["tr_fill(", "tr_with(", "tr("] {
-        if let Some(pos) = before.rfind(name) {
-            let between = &before[pos + name.len()..];
-            if !between.contains(';') && !between.contains('{') && !between.contains(')') {
-                found = true;
+/// The colour codes and other marks taken off, so that what is left is what
+/// the person reads.
+fn strip_codes(phrase: &str) -> String {
+    let mut out = String::with_capacity(phrase.len());
+    let mut chars = phrase.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // A colour code written out: it ends at the letter that names it.
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        // An escape in the source: \x1b, \u{1b}, \n.
+        let mut mark = String::new();
+        for next in chars.by_ref() {
+            mark.push(next);
+            if next.is_ascii_alphabetic() && mark.len() > 1 {
+                break;
             }
         }
+        if mark.starts_with('x') || mark.starts_with('u') {
+            // The colour code that follows the mark: [ ... m
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else if mark.starts_with('u') {
+                for next in chars.by_ref() {
+                    if next == '}' {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push_str(&mark);
     }
-    found
+    out
+}
+
+/// Whether the phrase looks like something a person reads.
+fn looks_like_text(phrase: &str) -> bool {
+    let plain = strip_codes(phrase);
+    if plain.split_whitespace().count() < 2 {
+        return false;
+    }
+    if !plain.is_ascii() {
+        return false;
+    }
+    if plain.contains('{') || plain.contains('}') {
+        return false;
+    }
+    // The first letter, not the first character: a phrase that starts with
+    // a colour code starts with a backslash.
+    let first = plain.chars().find(|c| c.is_alphabetic()).unwrap_or(' ');
+    first.is_ascii_uppercase()
 }
 
 #[test]
@@ -295,11 +374,8 @@ fn every_phrase_the_interface_shows_is_translated() {
             Some(at) => &text[..at],
             None => &text[..],
         };
-        for (at, phrase) in literals(body) {
+        for (_, phrase) in literals(body) {
             if !looks_like_text(&phrase) {
-                continue;
-            }
-            if goes_through_tr(body, at) {
                 continue;
             }
             if table.contains(&phrase) {

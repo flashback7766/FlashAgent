@@ -929,7 +929,7 @@ impl SetupWizard {
                     } else {
                         lines.push(pad_row(crate::i18n::tr("1. Open your provider account / API dashboard")));
                         lines.push(pad_row(crate::i18n::tr("2. Copy your Secret / Bearer API token")));
-                        lines.push(pad_row("    3. Paste or type your key below:"));
+                        lines.push(pad_row(&format!("    {}", crate::i18n::tr("3. Paste or type your key below:"))));
                     }
                     if let Some(var) = self.profile.key_env().first() {
                         lines.push(pad_row(&format!("  \x1b[38;2;135;130;125m{}\x1b[0m", crate::i18n::tr("Or set {var}: FlashAgent reads it when no key is saved.").replace("{var}", var))));
@@ -1059,10 +1059,10 @@ impl SetupWizard {
                 prose(&mut lines, "", "\x1b[38;2;160;155;145m", crate::i18n::tr("What may the agent do without asking? Shift+Tab changes it any time."));
                 lines.push(pad_row(""));
                 let modes = [
-                    (PermissionMode::Planning, "1. Planning", crate::i18n::tr("only reads and plans; changes nothing")),
-                    (PermissionMode::Manual, "2. Manual", crate::i18n::tr("asks before every edit and command")),
-                    (PermissionMode::AcceptEdits, "3. Accept Edits", crate::i18n::tr("edits files, asks before commands (default)")),
-                    (PermissionMode::Bypass, "4. Accept All", crate::i18n::tr("edits and runs commands without asking")),
+                    (PermissionMode::Planning, crate::i18n::tr("1. Planning"), crate::i18n::tr("only reads and plans; changes nothing")),
+                    (PermissionMode::Manual, crate::i18n::tr("2. Manual"), crate::i18n::tr("asks before every edit and command")),
+                    (PermissionMode::AcceptEdits, crate::i18n::tr("3. Accept Edits"), crate::i18n::tr("edits files, asks before commands (default)")),
+                    (PermissionMode::Bypass, crate::i18n::tr("4. Accept All"), crate::i18n::tr("edits and runs commands without asking")),
                 ];
                 for (m, label, desc) in modes {
                     let is_sel = self.config.permission_mode == m;
