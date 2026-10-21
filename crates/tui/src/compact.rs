@@ -48,6 +48,8 @@ pub(crate) struct Compaction<'a> {
     /// A compaction the person asked for happens even when the summary is not
     /// smaller than the conversation it replaces.
     pub allow_growth: bool,
+    /// The model in use: what it costs is counted with its own counter.
+    pub model: &'a str,
 }
 
 /// Compaction without a live card, for tests that only need the result.
@@ -58,11 +60,12 @@ pub(crate) async fn compact_context(
     focus_prompt: Option<&str>,
     archive_path: &std::path::Path,
     real_used: Option<usize>,
+    model: &str,
 ) -> Option<flashagent_tui::CompactionResult> {
     compact_context_with_sink(
         source,
         history,
-        Compaction { focus_prompt, archive_path, real_used, room: None, allow_growth: false },
+        Compaction { focus_prompt, archive_path, real_used, room: None, allow_growth: false, model },
         None,
     )
     .await
@@ -76,7 +79,7 @@ pub(crate) async fn compact_context_with_sink(
     ask: Compaction<'_>,
     sink: Option<&SummarySink>,
 ) -> Option<flashagent_tui::CompactionResult> {
-    let Compaction { focus_prompt, archive_path, real_used, allow_growth, room } = ask;
+    let Compaction { focus_prompt, archive_path, real_used, allow_growth, room, model } = ask;
     // Keep the current turn intact from its user message: a cut elsewhere can
     // orphan tool results or leave an assistant message first, which strict
     // servers reject.
@@ -101,7 +104,7 @@ pub(crate) async fn compact_context_with_sink(
     summarize_before(
         source,
         history,
-        Cut { split_idx, keep_prompt, focus_prompt, detail: Detail::Brief, real_used, allow_growth, room },
+        Cut { split_idx, keep_prompt, focus_prompt, detail: Detail::Brief, real_used, allow_growth, room, model },
         archive_path,
         sink,
     )
@@ -126,21 +129,22 @@ pub(crate) fn room_for(capacity: usize, fixed: usize) -> usize {
     capacity.saturating_sub(fixed)
 }
 
-/// Estimated tokens of a piece of text: the same rough measure the rest of the
-/// compaction uses, four characters to a token.
-fn est_tokens(text: &str) -> usize {
-    text.len() / 4 + 4
+/// Estimated tokens of a piece of text, counted with the counter of the model
+/// in use. The four extra tokens are what the server adds around a message:
+/// the role, the separators, the framing.
+fn est_tokens(model: &str, text: &str) -> usize {
+    flashagent_llm::count_tokens(model, text) + 4
 }
 
 /// The conversation split into pieces that each fit in one request, at message
 /// boundaries. `None` when it already fits: one request is cheaper than two,
 /// and the cache likes a prefix.
-fn split_into_chunks(conversation: &[ChatMessage], room: usize) -> Option<Vec<&[ChatMessage]>> {
+fn split_into_chunks<'a>(conversation: &'a [ChatMessage], room: usize, model: &str) -> Option<Vec<&'a [ChatMessage]>> {
     if room == 0 {
         return None;
     }
     let limit = room * CHUNK_SHARE / 100;
-    let total: usize = conversation.iter().map(|m| est_tokens(&m.content)).sum();
+    let total: usize = conversation.iter().map(|m| est_tokens(model, &m.content)).sum();
     if total <= limit {
         return None;
     }
@@ -148,7 +152,7 @@ fn split_into_chunks(conversation: &[ChatMessage], room: usize) -> Option<Vec<&[
     let mut start = 0;
     let mut used = 0;
     for (i, m) in conversation.iter().enumerate() {
-        let t = est_tokens(&m.content);
+        let t = est_tokens(model, &m.content);
         if used + t > limit && i > start {
             chunks.push(&conversation[start..i]);
             start = i;
@@ -181,6 +185,9 @@ pub(crate) struct TurnCompactor {
     pub(crate) report: Arc<std::sync::Mutex<Option<flashagent_tui::CompactionResult>>>,
     /// Where the summary goes while the core waits for it.
     pub(crate) sink: Option<SummarySink>,
+    /// The model in use: what the conversation costs is counted with its own
+    /// counter.
+    pub(crate) model: String,
 }
 
 #[async_trait::async_trait]
@@ -221,6 +228,7 @@ impl flashagent_core::Compactor for TurnCompactor {
             prompt_tokens,
             self.sink.as_ref(),
             Some(room),
+            &self.model,
         )
         .await
         {
@@ -236,9 +244,10 @@ impl flashagent_core::Compactor for TurnCompactor {
 }
 
 impl TurnCompactor {
-    /// A server that reports no usage is estimated at four characters a token.
+    /// A server that reports no usage is estimated with the counter of the
+    /// model in use.
     fn used(&self, history: &[ChatMessage], prompt_tokens: Option<usize>) -> usize {
-        prompt_tokens.unwrap_or_else(|| history.iter().map(|m| m.content.len() / 4 + 4).sum())
+        prompt_tokens.unwrap_or_else(|| history.iter().map(|m| est_tokens(&self.model, &m.content)).sum())
     }
 }
 
@@ -275,8 +284,9 @@ pub(crate) async fn compact_running_turn(
     history: &mut Vec<ChatMessage>,
     archive_path: &std::path::Path,
     real_used: Option<usize>,
+    model: &str,
 ) -> Option<flashagent_tui::CompactionResult> {
-    compact_running_turn_with_sink(source, history, archive_path, real_used, None, None).await
+    compact_running_turn_with_sink(source, history, archive_path, real_used, None, None, model).await
 }
 
 pub(crate) async fn compact_running_turn_with_sink(
@@ -286,13 +296,14 @@ pub(crate) async fn compact_running_turn_with_sink(
     real_used: Option<usize>,
     sink: Option<&SummarySink>,
     room: Option<usize>,
+    model: &str,
 ) -> Option<flashagent_tui::CompactionResult> {
     let (prompt_idx, cut) = mid_turn_cut(history)?;
     let prompt = history[prompt_idx].clone();
     summarize_before(
         source,
         history,
-        Cut { split_idx: cut, keep_prompt: Some(prompt), focus_prompt: None, detail: Detail::Exhaustive, real_used, allow_growth: false, room },
+        Cut { split_idx: cut, keep_prompt: Some(prompt), focus_prompt: None, detail: Detail::Exhaustive, real_used, allow_growth: false, room, model },
         archive_path,
         sink,
     )
@@ -322,6 +333,8 @@ struct Cut<'a> {
     /// smaller than the conversation it replaces. An automatic one does not:
     /// a window that does not get smaller is not a compaction.
     allow_growth: bool,
+    /// The model in use: what it costs is counted with its own counter.
+    model: &'a str,
 }
 
 /// `keep_prompt`, when given, goes right after it: the turn's own prompt.
@@ -340,6 +353,8 @@ struct Replaced<'a> {
     archive_path: &'a std::path::Path,
     /// What the conversation held before, in estimated tokens.
     before_tokens: usize,
+    /// The model in use: what it costs is counted with its own counter.
+    model: &'a str,
     /// What the server said the window held.
     real_used: Option<usize>,
     /// A compaction the person asked for happens even when nothing was freed.
@@ -354,16 +369,16 @@ fn finish_summary(
     history: &mut Vec<ChatMessage>,
     replaced: Replaced<'_>,
 ) -> Option<flashagent_tui::CompactionResult> {
-    let Replaced { split_idx, keep_prompt, prior_summary, base_system, archive_path, before_tokens, real_used, allow_growth } = replaced;
+    let Replaced { split_idx, keep_prompt, prior_summary, base_system, archive_path, before_tokens, model, real_used, allow_growth } = replaced;
     // What the summary replaces: the conversation it summarizes, and the
     // summary that was already in the system message, which is folded into it.
     // A summary that is not smaller than that frees nothing. An automatic
     // compaction does not happen then; one the person asked for does, and says
     // that the window did not get smaller.
-    let replaced_tokens: usize = history[1..split_idx].iter().map(|m| m.content.len() / 4 + 4).sum::<usize>()
-        + prior_summary.as_deref().map_or(0, |s| s.chars().count() / 4 + 4);
+    let replaced_tokens: usize = history[1..split_idx].iter().map(|m| est_tokens(model, &m.content)).sum::<usize>()
+        + prior_summary.as_deref().map_or(0, |s| est_tokens(model, s));
     let mut summary = summary;
-    if summary.chars().count() / 4 + 4 >= replaced_tokens {
+    if est_tokens(model, &summary) >= replaced_tokens {
         if !allow_growth {
             return None;
         }
@@ -378,7 +393,7 @@ fn finish_summary(
     new_history.extend(keep_prompt);
     new_history.extend_from_slice(&history[split_idx..]);
 
-    let after_tokens: usize = new_history.iter().map(|m| m.content.len() / 4 + 4).sum();
+    let after_tokens: usize = new_history.iter().map(|m| est_tokens(model, &m.content)).sum();
     // The exact words of the turns the summary replaces go with the session,
     // so a session is one file: the model can still read what was summarized
     // away, and nothing has to be kept in two places at once.
@@ -417,7 +432,7 @@ fn finish_summary(
         .and_then(|u| u.completion)
         .filter(|n| *n > 0)
         .map(|n| n as usize)
-        .unwrap_or_else(|| summary.chars().count() / 4 + 4);
+        .unwrap_or_else(|| est_tokens(model, &summary));
     // Stored after the archive note: the summary reader and the next compaction
     // stop before it, while a resumed card can still show what the call cost.
     if let Some(system) = history.first_mut() {
@@ -433,9 +448,9 @@ async fn summarize_before(
     archive_path: &std::path::Path,
     sink: Option<&SummarySink>,
 ) -> Option<flashagent_tui::CompactionResult> {
-    let Cut { split_idx, keep_prompt, focus_prompt, detail, real_used, allow_growth, room } = cut;
+    let Cut { split_idx, keep_prompt, focus_prompt, detail, real_used, allow_growth, room, model } = cut;
 
-    let before_tokens: usize = history.iter().map(|m| m.content.len() / 4 + 4).sum();
+    let before_tokens: usize = history.iter().map(|m| est_tokens(model, &m.content)).sum();
 
     // Fold a previous summary in, so repeated compaction never forgets older turns.
     let (base_system, prior_summary) = match history[0].content.find(COMPACTED_MARK) {
@@ -472,7 +487,7 @@ async fn summarize_before(
     // that stays full helps nobody.
     // A conversation that does not fit in one request is summarized in parts:
     // each part on its own, and the parts into one summary afterwards.
-    if let Some(chunks) = split_into_chunks(&history[..split_idx], room.unwrap_or(0)) {
+    if let Some(chunks) = split_into_chunks(&history[..split_idx], room.unwrap_or(0), model) {
         let (text, usage) = summarize_in_parts(
             source,
             &chunks,
@@ -501,6 +516,7 @@ async fn summarize_before(
                 base_system,
                 archive_path,
                 before_tokens,
+                model,
                 real_used,
                 allow_growth,
             },
@@ -552,6 +568,7 @@ async fn summarize_before(
             base_system,
             archive_path,
             before_tokens,
+            model,
             real_used,
             allow_growth,
         },
@@ -1020,7 +1037,7 @@ mod tests {
     #[test]
     fn a_conversation_that_fits_is_not_cut_into_parts() {
         let conversation = vec![ChatMessage::user("a".repeat(4_000)), ChatMessage::assistant("b".repeat(4_000))];
-        assert!(split_into_chunks(&conversation, 100_000).is_none(), "it fits, so it is not cut");
+        assert!(split_into_chunks(&conversation, 100_000, "test-model").is_none(), "it fits, so it is not cut");
     }
 
     /// A conversation bigger than the room is cut, and every piece fits.
@@ -1031,15 +1048,15 @@ mod tests {
             ChatMessage::assistant("b".repeat(40_000)),
             ChatMessage::user("c".repeat(40_000)),
         ];
-        let chunks = split_into_chunks(&conversation, 20_000).expect("it does not fit, so it is cut");
+        let chunks = split_into_chunks(&conversation, 20_000, "test-model").expect("it does not fit, so it is cut");
         assert!(chunks.len() >= 2, "cut into pieces: {}", chunks.len());
         for chunk in &chunks {
-            let size: usize = chunk.iter().map(|m| est_tokens(&m.content)).sum();
+            let size: usize = chunk.iter().map(|m| est_tokens("test-model", &m.content)).sum();
             assert!(size <= 20_000 * CHUNK_SHARE / 100, "a piece of {size} does not fit");
         }
         // Nothing is lost: the pieces are the whole conversation.
-        let total: usize = chunks.iter().flat_map(|c| c.iter()).map(|m| est_tokens(&m.content)).sum();
-        let whole: usize = conversation.iter().map(|m| est_tokens(&m.content)).sum();
+        let total: usize = chunks.iter().flat_map(|c| c.iter()).map(|m| est_tokens("test-model", &m.content)).sum();
+        let whole: usize = conversation.iter().map(|m| est_tokens("test-model", &m.content)).sum();
         assert_eq!(total, whole, "every message is in some piece");
     }
 
@@ -1048,6 +1065,6 @@ mod tests {
     #[test]
     fn no_room_means_no_pieces() {
         let conversation = vec![ChatMessage::user("a".repeat(4_000))];
-        assert!(split_into_chunks(&conversation, 0).is_none());
+        assert!(split_into_chunks(&conversation, 0, "test-model").is_none());
     }
 }

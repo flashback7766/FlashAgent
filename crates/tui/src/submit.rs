@@ -920,6 +920,10 @@ impl App {
         );
         let source = cx.source.clone();
         let focus = (!focus.is_empty()).then(|| focus.to_string());
+        // The model in use: what the conversation costs is counted with its
+        // own counter, and the compaction decides on the same numbers the bar
+        // shows.
+        let model = self.current_model.clone();
         let tx = cx.tx.clone();
         tokio::spawn(async move {
             let sink = SummarySink::ui(tx.clone());
@@ -933,6 +937,7 @@ impl App {
                     real_used: Some(used),
                     room: Some(room),
                     allow_growth: true,
+                    model: &model,
                 },
                 Some(&sink),
             )
