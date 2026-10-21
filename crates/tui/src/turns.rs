@@ -418,14 +418,19 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                         // Drawn before the wait: the command is already gone from the composer.
                         self.draw(cx, None);
                         let source_compact = cx.source.clone();
+                        // What the window holds now: the number the summary
+                        // is measured against, and what the card says it freed.
                         let before = self.context_usage.total_used();
                         // The room one request may carry: the window minus the
-                        // prompt, the schemas and what the turn holds now.
-                        let room = self
-                            .context_usage
-                            .total_capacity
-                            .saturating_sub(self.context_usage.system_tokens + self.context_usage.tools_tokens)
-                            .saturating_sub(before);
+                        // prompt, the memory and the schemas — once. What the
+                        // turn holds now is the conversation itself, and it is
+                        // what gets summarized, so it is not subtracted here.
+                        let room = crate::compact::room_for(
+                            self.context_usage.total_capacity,
+                            self.context_usage.system_tokens
+                                + self.context_usage.memory_tokens
+                                + self.context_usage.tools_tokens,
+                        );
                         let compacted = if let Some(archive) = session_path(cx.session_id) {
                             // This handler is the event loop, so awaiting the compaction
                             // straight through would freeze the card until the summary
