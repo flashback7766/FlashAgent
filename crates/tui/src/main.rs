@@ -629,6 +629,9 @@ async fn main() -> Result<()> {
     // The three tools only the top has are not the built-in ones, so the
     // permission layer is where their switch is kept.
     perm.set_disabled_tools(disabled_tools.clone());
+    // The standing permissions the owner gave in an earlier run. They are
+    // remembered, not asked for again every morning.
+    perm.set_rules(config.always_rules.clone());
 
     // Project and global memory docs, injected into the system prompt.
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_default();

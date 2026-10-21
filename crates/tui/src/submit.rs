@@ -40,6 +40,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/editor, Ctrl+X Ctrl+E", "write the prompt in an external editor"),
     ("/tools", "what the model may call, and what it may not"),
     ("/notices", "what the app said, kept so it can be read again"),
+    ("/rules", "the standing permissions, and a way to take them back"),
     ("/safe", "the safe mode: reading and editing inside the project, nothing else"),
     ("/mcp [list|market|test|add|reload]", "Model Context Protocol servers"),
     ("/tasks", "background commands: their output, and stopping one"),
@@ -136,7 +137,7 @@ fn while_running(name: &str) -> WhileRunning {
     match name {
         "help" | "?" | "whatsnew" | "changelog" | "memory" | "memories" | "context" | "verbose" | "expand" | "think"
         | "o" | "diff" | "commit" | "settings" | "config" | "sampling" | "params" | "effort" | "thinking" | "t"
-        | "model" | "models" | "m" | "mode" | "skills" | "tools" | "notices" | "log" | "safe" => WhileRunning::Now,
+        | "model" | "models" | "m" | "mode" | "skills" | "tools" | "notices" | "log" | "safe" | "rules" => WhileRunning::Now,
         "compact" | "clear" | "export" | "rewind" => WhileRunning::AfterTurn,
         "goal" | "resume" | "regenerate" | "retry" | "update" | "channel" | "mcp" | "editor" | "exit" | "quit" | "q"
         | "uninstall" => WhileRunning::Refuse,
@@ -409,6 +410,7 @@ impl App {
             "export" => self.export_conversation(cx, arg),
             "tools" => self.tools_command(cx),
             "notices" | "log" => self.notices_command(),
+            "rules" => self.rules_command(cx),
             "safe" => self.safe_command(cx),
             _ => {
                 if let Some(skill) = name.strip_prefix("skill:") {
@@ -1114,6 +1116,14 @@ impl App {
     fn notices_command(&mut self) {
         let entries = self.notice_history();
         self.open_overlay(Overlay::Notices(flashagent_tui::notice_log::NoticeLog::new(entries)));
+    }
+
+    /// `/rules`: the standing permissions the owner gave with "Always". They
+    /// are kept between the runs, and this is where they are seen and taken
+    /// back.
+    fn rules_command(&mut self, cx: &LoopCtx<'_>) {
+        let view = flashagent_tui::rules_view::RulesView::new(&cx.perm.rules());
+        self.open_overlay(Overlay::Rules(view));
     }
 
     /// `/tools`: the list of tools, and which of them the model may call. A

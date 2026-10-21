@@ -21,6 +21,7 @@ pub mod mcp_view;
 pub mod notice_log;
 pub mod prefill;
 pub mod providers;
+pub mod rules_view;
 pub mod sampling;
 pub mod screen;
 pub mod select;
