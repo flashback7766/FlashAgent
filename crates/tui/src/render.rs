@@ -1,4 +1,5 @@
 use super::*;
+use flashagent_tui::i18n::tr_fill;
 use flashagent_tui::anim::{self, Rgb};
 use flashagent_tui::theme;
 
@@ -847,12 +848,16 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
             .filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ") && !l.starts_with("@@"))
             .all(|l| l.starts_with('+'))
     });
+    // The card speaks the language of the person who reads it. These four
+    // questions and the three buttons under them went past the translation
+    // table, so a Russian interface showed an English card in the middle of
+    // a Russian conversation.
     let question = match req.tool.as_str() {
-        "run_shell" => "Run this command?".to_string(),
-        "write_file" if new_file => "Create this file?".to_string(),
-        "edit_file" | "patch_file" | "write_file" if several_files => "Change these files?".to_string(),
-        "edit_file" | "patch_file" | "write_file" => "Change this file?".to_string(),
-        tool => format!("Allow {tool}?"),
+        "run_shell" => tr("Run this command?").to_string(),
+        "write_file" if new_file => tr("Create this file?").to_string(),
+        "edit_file" | "patch_file" | "write_file" if several_files => tr("Change these files?").to_string(),
+        "edit_file" | "patch_file" | "write_file" => tr("Change this file?").to_string(),
+        tool => tr_fill("Allow {tool}?", &[("tool", tool)]),
     };
     let title = format!(" \x1b[1;38;2;225;175;95m{question}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m ", req.tool);
     let dash_w = inner_w.saturating_sub(visible_width(&title) + 1);
@@ -925,9 +930,9 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
         pad_box_row(
             &format!(
                 " {}  {}  {}",
-                button("Allow", ConfirmChoice::Allow),
-                button("Always allow", ConfirmChoice::Always),
-                button("Deny", ConfirmChoice::Deny)
+                button(tr("Allow"), ConfirmChoice::Allow),
+                button(tr("Always allow"), ConfirmChoice::Always),
+                button(tr("Deny"), ConfirmChoice::Deny)
             ),
             width,
         ),

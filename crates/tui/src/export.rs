@@ -12,7 +12,7 @@ pub(crate) fn conversation_markdown(history: &[ChatMessage], session_id: &str, m
         .find(|m| flashagent_core::is_prompt(m))
         .map(|m| extract_user_prompt(&m.content).lines().next().unwrap_or_default().trim().to_string())
         .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| "FlashAgent session".to_string());
+        .unwrap_or_else(|| flashagent_tui::i18n::tr("FlashAgent session").to_string());
     let mut md = format!("# {title}\n\n| | |\n|---|---|\n| Session | `{session_id}` |\n| Model | `{model}` |\n| Folder | `{cwd}` |\n\n");
 
     // Tool results carry only the call id; the name is on the call.

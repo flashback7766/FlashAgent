@@ -308,9 +308,11 @@ impl GoalLedger {
         out.push(String::new());
         out.push(match reason {
             DoneReason::Completed => {
-                "The model ended its turn on its own. Verify by hand: this report counts \
-                 actions, it does not judge whether the goal was met."
-                    .to_string()
+                crate::i18n::tr(
+                    "The model ended its turn on its own. Verify by hand: this report counts \
+                     actions, it does not judge whether the goal was met.",
+                )
+                .to_string()
             }
             DoneReason::Cancelled => {
                 crate::i18n::tr("You stopped the run; anything above already happened on disk.").to_string()
