@@ -177,12 +177,6 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
     if let Some(ref platform) = config.platform {
         env_lines.push(format!("Platform: {platform}"));
     }
-    if let Some(ref model) = config.model {
-        env_lines.push(format!("Model: {model}"));
-    }
-    if let Some(ref effort) = config.effort {
-        env_lines.push(format!("Thinking Mode: {effort}"));
-    }
     if !env_lines.is_empty() {
         sections.push(env_lines.join("\n"));
     }
@@ -391,6 +385,25 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
     // Last, so it reads as the final word on everything above.
     if let Some(ref personality) = config.personality {
         sections.push(personality.clone());
+    }
+
+    // The model and the thinking mode go last, and that is not a matter of
+    // taste. The provider keeps the part of a request that is the same as the
+    // last one, so everything above is kept and only what follows is read
+    // again. Changing the model (F3) or the thinking mode (F4) used to change
+    // the second block of the prompt, and with it everything after it: the
+    // whole prompt was prefilled again, which on a local model is seconds of
+    // waiting for a change the person made to save time. Here only the tail
+    // moves, and the part that is kept is the whole prompt.
+    let mut session_lines = Vec::new();
+    if let Some(ref model) = config.model {
+        session_lines.push(format!("Model: {model}"));
+    }
+    if let Some(ref effort) = config.effort {
+        session_lines.push(format!("Thinking Mode: {effort}"));
+    }
+    if !session_lines.is_empty() {
+        sections.push(session_lines.join("\n"));
     }
 
     sections.join("\n\n")

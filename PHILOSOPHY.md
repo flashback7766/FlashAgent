@@ -46,7 +46,7 @@ Models and data stay on the machine by default. What FlashAgent sends out:
 | License | MIT |
 | Documentation | README as the entry point; a generated site (mdBook on GitHub Pages) later |
 | Releases | Beta builds numbered `b<N>`, stable releases SemVer cut from a build (`vX.Y.Z+b<N>`); see [VERSIONING.md](VERSIONING.md) |
-| Language | The interface and the repository are English only; the model answers in the language the user wrote in |
+| Language | The interface is English and Russian, chosen in Settings; the repository and the system prompt stay English, and the model answers in the language the user wrote in |
 
 ## 5. Tool calling
 
