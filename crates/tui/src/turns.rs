@@ -328,6 +328,12 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         self.stop_turn_clock();
         self.active_turn_handle = None;
         self.active_steer_tx = None;
+        // What the models were measured to be goes onto the disk at the end of
+        // the turn: a model that was measured in this turn is not measured
+        // again in the next one.
+        if let Some(path) = flashagent_llm::measurements_path() {
+            flashagent_llm::save_measurements(&path);
+        }
         // A turn can end while its mid-turn compaction is still writing (Esc,
         // a failed request). The card promised a summary, so it is withdrawn
         // rather than left spinning in a transcript that will never change.
