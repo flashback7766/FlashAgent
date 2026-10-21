@@ -24,7 +24,10 @@ pub use protocol::{ApiProtocol, Endpoint};
 pub use parse::{is_complete_json, ChunkParser, SseDecoder, TextToolScanner, ScannerEvent};
 pub use repair::{effective_args, repair_json};
 pub use thinking::{DiscoveredModel, ServerDiscovery, TaskComplexity, ThinkingProfile, ThinkingProtocol};
-pub use tokenizer::count_tokens;
+pub use tokenizer::{
+    count_tokens, load_measurements, measurement_of, measurements, measurements_path, note_measured, save_measurements,
+    set_measurement, Measurement,
+};
 pub use types::{ChatMessage, FinishReason, LlmError, LlmEvent, MtpStats, Role, ThinkingEffort, ToolCall, ToolSpec, TurnOptions, Usage, estimate_tokens};
 
 use async_trait::async_trait;

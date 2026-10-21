@@ -591,6 +591,43 @@ impl ChatView {
         (user.saturating_sub(bu), assistant.saturating_sub(ba), reasoning.saturating_sub(br), tools.saturating_sub(bt))
     }
 
+    /// The same four numbers, counted as tokens with the counter of the model
+    /// in use.
+    ///
+    /// The transcript is what is on the screen, and while a turn runs it holds
+    /// more than the history does: the answer is being written. Counting
+    /// characters and dividing by four was a different number from the one
+    /// the budget used, and for Russian it was far off: a letter is two
+    /// bytes, and the bar said the window was half full when the model had
+    /// read a third of it.
+    pub fn raw_content_tokens(&self, count: &dyn Fn(&str) -> usize) -> (usize, usize, usize, usize) {
+        let (user, assistant, reasoning, tools) = self.all_content_tokens(count);
+        let (bu, ba, br, bt) = self.context_baseline;
+        (user.saturating_sub(bu), assistant.saturating_sub(ba), reasoning.saturating_sub(br), tools.saturating_sub(bt))
+    }
+
+    fn all_content_tokens(&self, count: &dyn Fn(&str) -> usize) -> (usize, usize, usize, usize) {
+        let mut user = 0;
+        let mut assistant = 0;
+        let mut reasoning = 0;
+        let mut tools = 0;
+        for l in &self.lines {
+            match l.kind {
+                LineKind::User => user += count(&l.text),
+                LineKind::Assistant => assistant += count(&l.text),
+                LineKind::Reasoning => reasoning += count(&l.text),
+                LineKind::Tool | LineKind::ToolError => {
+                    if let Some(ref d) = l.details {
+                        tools += count(d);
+                    }
+                    tools += count(&l.text);
+                }
+                _ => {}
+            }
+        }
+        (user, assistant, reasoning, tools)
+    }
+
     /// After compaction the transcript still shows what the model no longer
     /// gets; counting it kept the gauge over the threshold, so every later turn
     /// compacted again.

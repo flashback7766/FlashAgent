@@ -102,9 +102,10 @@ fn how_much_survives_a_change() {
 
     // What the win is worth: the fixed bulk is the prompt minus the env block.
     let one = build_system_prompt(&cfg("/a", MODEL_A, "high"));
-    println!("\nprompt is {} bytes / ~{} tokens", one.len(), one.len() / 4);
+    let tokens = flashagent_llm::count_tokens(MODEL_A, &one);
+    println!("\nprompt is {} bytes / ~{} tokens", one.len(), tokens);
     println!("at ~300 prefill tok/s, a full recompute of this prompt costs ~{:.1} s",
-        one.len() as f64 / 4.0 / 300.0);
+        tokens as f64 / 300.0);
     println!("at 96% reused, a workspace change costs ~{:.2} s\n",
-        one.len() as f64 / 4.0 * 0.04 / 300.0);
+        tokens as f64 * 0.04 / 300.0);
 }

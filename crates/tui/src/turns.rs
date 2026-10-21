@@ -246,6 +246,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                 ),
                 report: report.clone(),
                 sink: Some(SummarySink::ui(cx.tx.clone())),
+                model: self.current_model.clone(),
             })
         });
         self.mid_turn_report = compactor.is_some().then_some(report);
@@ -465,6 +466,10 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                                 + self.context_usage.memory_tokens
                                 + self.context_usage.tools_tokens,
                         );
+                        // The model in use: what the conversation costs is
+                        // counted with its own counter, and the compaction
+                        // decides on the same numbers the bar shows.
+                        let model = self.current_model.clone();
                         let compacted = if let Some(archive) = session_path(cx.session_id) {
                             // This handler is the event loop, so awaiting the compaction
                             // straight through would freeze the card until the summary
@@ -484,6 +489,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                                         real_used: Some(before),
                                         room: Some(room),
                                         allow_growth: false,
+                                        model: &model,
                                     },
                                     Some(&sink),
                                 );

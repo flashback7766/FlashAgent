@@ -568,7 +568,9 @@ mod tests {
                 .with_subagents(true)
                 .with_goal_mode(true),
         );
-        let tokens = flashagent_llm::estimate_tokens(&prompt) as usize;
+        // The ceiling is in the tokens of the model that will read the prompt,
+        // so the prompt is measured the same way and not by a rule of its own.
+        let tokens = flashagent_llm::count_tokens("some-model", &prompt);
         println!("{tokens} tokens, {} chars, ceiling {}", prompt.len(), crate::budget::PROMPT_CEILING);
         for window in [1_000_000, 512_000, 256_000, 128_000, 64_000] {
             let b = crate::budget::Budget::for_window(Some(window));
