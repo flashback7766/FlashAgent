@@ -8,7 +8,6 @@
 //! reads a prompt in a second anyway.
 
 use super::*;
-use flashagent_core::ToolExec as _;
 use std::hash::{Hash, Hasher};
 
 /// System prompt, voice example, history, and a one-token opening user message.

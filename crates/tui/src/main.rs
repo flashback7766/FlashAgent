@@ -14,7 +14,7 @@ use crossterm::event::{
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use flashagent_core::{
     build_system_prompt, AgentLoop, AppConfig, ContextUsage, Decision, DoneReason, LlmSource,
-    LoopConfig, LoopEvent, PermissionMode, PermissionState, PermissionedTools, SystemPromptConfig,
+    LoopConfig, LoopEvent, PermissionMode, PermissionState, PermissionedTools, SystemPromptConfig, ToolExec,
 };
 use flashagent_llm::{ChatMessage, LlmBackend};
 use flashagent_tools::{BuiltinTools, BuiltinToolsConfig};
@@ -1629,14 +1629,21 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         started_at: std::time::Instant::now(),
     };
 
+    // What the model can actually call. The prompt has to agree with it: a
+    // prompt that describes a tool the model was not offered sends it looking
+    // for something that is not there, and a turn is spent on the refusal.
+    let offered = w.perm.specs();
+    let has_tool = |name: &str| offered.iter().any(|s| s.name == name);
     let system_prompt_config = SystemPromptConfig::new()
         .with_cwd(&w.cwd_display)
         .with_platform(flashagent_tools::shell::platform())
         .with_model(&ctx.model)
         .with_effort(&ctx.initial_effort)
-        // `spawn_agent` is always in the composite, so the rules about a
-        // subagent's report belong in the prompt.
-        .with_subagents(true)
+        // `spawn_agent` and `ask_user` are on offer, so the rules about a
+        // subagent's report and about asking belong in the prompt. Both can be
+        // switched off, and then the rules go with them.
+        .with_subagents(has_tool("spawn_agent"))
+        .with_ask_user(has_tool("ask_user"))
         // Memory is an instruction, not a user turn: it stays in the system
         // prompt and is rebuilt with it when the voice or model changes.
         .with_memory(&w.memory_block)

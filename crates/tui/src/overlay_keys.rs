@@ -1,4 +1,5 @@
 use super::*;
+use crate::turns::OfferedTools;
 use flashagent_tui::i18n::{tr, tr_fill};
 
 /// Latin or Cyrillic.
@@ -558,11 +559,16 @@ impl App {
     /// The tools that are off, in the two places that keep them: the built-in
     /// ones (which a subagent gets too) and the permission layer (which holds
     /// the three only the top has). The config keeps them for the next run.
+    ///
+    /// The prompt goes with them: it describes the tools that are on offer, so
+    /// a tool the owner has just switched off must not be described as
+    /// something to call.
     pub(crate) fn save_disabled_tools(&mut self, cx: &LoopCtx<'_>, off: Vec<String>) {
         cx.tools_arc.set_disabled_tools(off.clone());
         cx.perm.set_disabled_tools(off.clone());
         self.config.disabled_tools = off;
         self.save_config();
+        self.sync_system_prompt(OfferedTools::from_specs(&cx.perm.specs()));
     }
 
     /// The tools that are off right now: the ones the owner switched off, and
@@ -584,6 +590,10 @@ impl App {
         let off = self.effective_disabled_tools();
         cx.tools_arc.set_disabled_tools(off.clone());
         cx.perm.set_disabled_tools(off);
+        // The prompt describes the tools that are on offer. A tool the owner
+        // has just switched off must go out of the prompt with it, or the
+        // model is told to call something it cannot call.
+        self.sync_system_prompt(OfferedTools::from_specs(&cx.perm.specs()));
     }
 
     async fn mcp_key(&mut self, cx: &LoopCtx<'_>, mut modal: McpModal, code: KeyCode, mods: KeyModifiers) {
@@ -673,7 +683,7 @@ impl App {
             }
         }
         if !self.running {
-            self.sync_system_prompt();
+            self.sync_system_prompt(OfferedTools::from_specs(&cx.perm.specs()));
             cx.tools_arc.set_model_name(&self.current_model);
             cx.tools_arc.set_prompt_tokens(self.prompt_tokens);
         }
