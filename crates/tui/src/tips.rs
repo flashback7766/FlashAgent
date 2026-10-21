@@ -25,7 +25,7 @@ pub static TIPS_POOL: &[&str] = &[
     "Put a skill in .agents/skills/<name>.md and run it with /skill:<name>.",
     "/mode planning keeps the agent read-only until you approve a plan.",
     "In Manual mode every edit and command waits for your approval card.",
-    "On an approval card, a allows this kind of call for the rest of the session.",
+    "On an approval card, a allows this kind of call and remembers it; /rules shows what stands.",
     "/clear empties the scrollback; the conversation itself is kept.",
     "/channel stable or /channel beta picks the release channel, with a warning first.",
     "Sessions are saved on exit and come back with flashagent --resume <id>.",

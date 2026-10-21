@@ -84,6 +84,16 @@ impl App {
                     }
                     self.overlay = Some(Overlay::Notices(view));
                 }
+                Overlay::Rules(mut view) => {
+                    use flashagent_tui::rules_view::RulesAction;
+                    match view.handle_key(code, mods) {
+                        RulesAction::Close => return Flow::Continue,
+                        RulesAction::Remove(idx) => self.remove_rule(cx, &mut view, idx),
+                        RulesAction::ClearAll => self.clear_rules(cx, &mut view),
+                        RulesAction::None => {}
+                    }
+                    self.overlay = Some(Overlay::Rules(view));
+                }
                 Overlay::Palette(menu) => {
                     let flow = self.palette_key(cx, menu, code, mods).await;
                     self.renderer.request_reprint();
@@ -148,7 +158,13 @@ impl App {
             if rules.is_empty() {
                 self.notice(tr("Allowed once · this command is too broad to allow always"));
             } else {
-                self.notice(tr_fill("Always allowed this session: {rules}", &[("rules", &rules.join(", "))]));
+                // The rule is kept between the runs, not only until the app
+                // closes: a permission the owner gave was given on purpose,
+                // and making it again every morning is the price of a rule
+                // that lives in memory. `/rules` shows what there is and
+                // takes it back.
+                self.remember_rules(cx);
+                self.notice(tr_fill("Always allowed: {rules}", &[("rules", &rules.join(", "))]));
             }
         }
         cx.gate.respond(Decision::Allow);
@@ -543,6 +559,38 @@ impl App {
             ToolsAction::None => {}
         }
         self.overlay = Some(Overlay::Tools(view));
+    }
+
+    /// One standing permission is taken back. The rule goes from the
+    /// permission layer, from the config and from the disk at once, and the
+    /// owner is told, because a rule that is gone should not be a surprise
+    /// the next time the call is asked about.
+    fn remove_rule(&mut self, cx: &LoopCtx<'_>, view: &mut flashagent_tui::rules_view::RulesView, idx: usize) {
+        let Some(row) = view.rows.get(idx).cloned() else { return };
+        if !cx.perm.remove_rule(row.kind, &row.text) {
+            return;
+        }
+        self.remember_rules(cx);
+        view.refresh(&cx.perm.rules());
+        self.notice(flashagent_tui::i18n::tr_fill("Rule taken back: {rule}", &[("rule", &row.text)]));
+    }
+
+    /// Every standing permission is taken back.
+    fn clear_rules(&mut self, cx: &LoopCtx<'_>, view: &mut flashagent_tui::rules_view::RulesView) {
+        if cx.perm.rules().all().is_empty() {
+            return;
+        }
+        cx.perm.clear_rules();
+        self.remember_rules(cx);
+        view.refresh(&cx.perm.rules());
+        self.notice(flashagent_tui::i18n::tr("Every standing permission is gone"));
+    }
+
+    /// The rules as they stand now go into the config and onto the disk, so
+    /// they are there in the next run.
+    pub(crate) fn remember_rules(&mut self, cx: &LoopCtx<'_>) {
+        self.config.always_rules = cx.perm.rules();
+        self.save_config();
     }
 
     /// One tool was turned on or off: the schemas the model reads and the
