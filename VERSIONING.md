@@ -76,7 +76,9 @@ git push origin HEAD b290
 ```
 
 Named types add up to at most +15 per release. A release they do not
-measure takes a number instead, which is used as given: `bump.sh 25`.
+measure takes a number instead, which is used as given: `bump.sh 25`. The
+named cap does not apply to a number, so a larger jump is one command too:
+from `b573` to `b600` is `./packaging/bump.sh 27`.
 
 `bump.sh` sets the version in `README.md` and the Arch `PKGBUILD`, commits
 them together with the changelog as "Release b290: short title", and tags
