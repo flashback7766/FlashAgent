@@ -1,5 +1,20 @@
 # Changelog
 
+## b603 — the documentation back, and the Windows runs that stopped riding the console
+
+- **The repository keeps its documentation again.** The architecture walk, the
+  roadmap, the versioning and security notes, the contributing guide, the
+  design manifesto, the code of conduct, the measured numbers, the demo
+  script, the tool-calling method with its raw results, and the issue and
+  pull-request templates are all back, and the links that named them work.
+- **Three scenarios no longer ride the console's own translation.** The kitty
+  key code with a shift, the Alt/Shift+Enter between lines, and a digit
+  answering a question card do not survive ConPTY as written; the decode
+  logic is held by the unit tests on every platform, and the scenarios run
+  where the bytes are what was written.
+- **The background move waits for the output it carries.** A command that was
+  still starting had printed nothing, so nothing was carried over with it.
+
 ## b602 — three scenarios that rode ConPTY instead of the app, and the gates that put them back
 
 - **The shell tests said what a faithful byte channel does.** Three scenarios
