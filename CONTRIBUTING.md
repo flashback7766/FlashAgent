@@ -3,7 +3,7 @@
 Read [PHILOSOPHY.md](PHILOSOPHY.md) first. A feature that goes against it will be declined, however well it is built. In short:
 
 1. **Local first.** No telemetry, no cloud lock-in; a session goes only to the provider you chose.
-2. **No Electron or Chromium.** One native Rust binary, about 10 MB of memory when idle ([measured](docs/numbers.md)).
+2. **No Electron or Chromium.** One native Rust binary, about 35 MB of memory when idle ([measured](docs/numbers.md)).
 3. **Tool calling that works every time.** A change that makes calls less reliable is not accepted.
 4. **A finished interface.** Details matter in the terminal as much as in a GUI.
 

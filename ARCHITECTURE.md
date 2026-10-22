@@ -110,27 +110,23 @@ page, which is what cmd.exe and most Windows tools write to a pipe.
 ## What the model is given before it answers
 
 The system prompt and the tool schemas are a fixed cost on every step of
-every turn, so they are budgeted against the window the server reported
-(`core::budget`): 160k of static context on a 1M window, halving down to
-10k at 64k.
-
-The prompt gets the same ceiling at every tier — 10k — because it is the one
-part that cannot be scaled down without making the model worse, and a
-shorter version of it is a different agent rather than a cheaper one. What
-the window buys is the room for schemas, which are the interchangeable part.
-What is left after the prompt is split between the built-in schemas and
-what MCP servers add, and a tenth of a tier is kept spare: a tier is a
-ceiling and a set measured against it lands under.
+every turn, and that cost is flat: 20k at every window (`core::budget`).
+The prompt is capped at 10k — the one part that cannot be scaled down
+without making the model worse — and the schemas get the rest, split
+between the built-in set and what MCP servers add, with a tenth kept spare
+because the total is a ceiling. A small window no longer trims the toolset:
+what the window buys is room for the conversation.
 
 `BuiltinTools::specs` drops schemas from the optional end until that
 allowance is spent. What did not fit is reported rather than left silently
 missing, and the tools a task cannot happen without are offered whatever it
-costs. `ToolsetProfile::Full` skips the ladder: it is the user asking for the
-whole toolset.
+costs.
 
-Counting is done with the tokenizer of the model in use, for the static
-parts. The conversation itself stays on a character estimate, which is
-re-counted on every keystroke and corrected by the server's own usage.
+Counting is one function, `flashagent_llm::count_tokens(model, text)`, for
+the budget, the context bar, the compaction, the memory block and the status
+line. The server's own usage corrects the estimate per model, and the
+difference is written to `~/.flashagent/tokens.json` and carried into the
+next run.
 
 The last line of the system prompt carries what the context has used and
 what is left, rounded down to a twentieth of the window. It moves in steps
@@ -153,13 +149,20 @@ that only read run, everything else is refused), Manual (ask before anything
 that is not a read), Accept Edits (file changes allowed, shell asks), Accept
 All. Shell approvals can be remembered per command prefix, and a prefix never
 covers a different subcommand: approving `npm test` does not approve
-`npm publish`. A file outside the project asks in Manual and Accept Edits
-and is refused in Planning and during `/goal`; Accept All lets it through,
+`npm publish`. A remembered rule is kept in the config, survives a restart,
+and `/rules` lists what stands and takes a rule back. A file outside the
+project asks in Manual and Accept Edits and is refused in Planning and during
+`/goal`; Accept All lets it through,
 since its shell already reaches any file. A short blacklist of dangerous commands (recursive force
 deletes, `sudo`, force pushes, hard resets, ...) still asks in Accept All and
 is refused outright during `/goal`, where nobody is there to answer. A
 declined call is returned to the model as an error it must not retry. The
 mode the user is in is saved as the one to start in next time.
+
+Safe mode is a layer on top of the permission mode, not a fifth mode: reading
+and editing inside the project, and nothing else — the shell, the web and the
+subagents are off. A project MCP server asks every time and nothing is
+remembered while it is on.
 
 ## Model backend
 
@@ -233,6 +236,9 @@ local address is warmed.
 
 - Rule files: `MEMORY.md`, `CLAUDE.md`, `AGENTS.md` and `.agents/rules/` in
   the project, and `~/.flashagent/` globally, injected into the prompt.
+  `MEMORY.md` is split at `<!-- flashagent:memory -->`: the owner's text is
+  an instruction, the index the model wrote is a record the model is told to
+  look up through `memory_read`, not an order.
 - Remembered facts: one file per fact under `memory/`, indexed by
   `MEMORY.md`. Facts about the user are global, facts about the code stay
   with the project. Writes are refused during `/goal`.
@@ -263,7 +269,8 @@ graph LR
 
 - `ChatView::render_split` keeps the settled rows in a cache shared through
   an `Arc`. A frame reads again only from the turn the settled boundary
-  falls in, so its cost barely grows with the length of the session (see
+  falls in, and a new question no longer throws the cache away: its cost
+  barely grows with the length of the session (see
   [docs/numbers.md](docs/numbers.md)).
 - Every row is measured in display cells and clipped or wrapped to the
   width. A row wider than the terminal would wrap and push every row under
@@ -291,6 +298,11 @@ graph LR
 - The composer is `composer::Composer`: text and a cursor that steps over
   grapheme clusters. It folds its text into rows for the box, and the box
   grows up to a third of the screen, then scrolls around the cursor.
+- The interface text goes through `i18n::tr`, with an English key and a
+  Russian entry in one table; the system prompt is not translated. A new
+  screen cannot ship in one language: `untranslated.rs` walks the UI sources
+  and fails on a phrase that reaches the screen without an entry or a written
+  reason.
 
 ## Sessions
 
@@ -299,8 +311,8 @@ A conversation is saved after each turn and on exit, to
 
 - The id is `session_<unix seconds>_<process id>`. Two instances running at
   once never share a process id, so they never share a session file.
-- A save writes a temporary file beside the target and renames it over
-  the target. A crash leaves the old session or the new one, never half.
+- A save writes a temporary file beside the target, syncs it, and renames it
+  over the target. A crash leaves the old session or the new one, never half.
 - A failed save is shown on screen and retried after the next turn. On
   exit there is no next turn, so the conversation goes to the temporary
   folder instead, and the message says where.
@@ -314,8 +326,9 @@ providers, keys included), `sessions/*.json`,
 `snapshots/<session>/` (file copies for `/rewind`), `prompt_history.jsonl`
 (what was sent, for ↑ and Ctrl+F; kept only while sessions are saved),
 `memory/` and `MEMORY.md`, `rules/`, `skills/`, `mcp.json`, `effort.json`,
-`image-costs.json`, `prefill_cache.json`. A project can add its own
-`.mcp.json`, `.agents/rules/` and `.agents/skills/`.
+`image-costs.json`, `prefill_cache.json`, `tokens.json` (how far the local
+tokenizer is from each model). A project can add its own `.mcp.json`,
+`.agents/rules/` and `.agents/skills/`.
 
 ## Updates
 

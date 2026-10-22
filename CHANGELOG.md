@@ -1,5 +1,251 @@
 # Changelog
 
+## b600 — the prompt becomes a contract, the tokens get one counter, and a hundred quiet failures start saying so
+
+This build carries everything since b570, including the three builds that
+shipped without notes of their own. b571–b573 are small: a project reached
+through a link in its path stopped looking like an escape from itself, and
+two tests were taught to wait for the question card and to skip a Windows
+privilege.
+
+### The prompt
+
+- **The prompt is a method before it is a list of rules.** It had grown by
+  repair into a hundred rules in the order they were added, each one after a
+  model was seen doing the wrong thing, with nothing to fall back on when a
+  situation no rule covered. The part before a turn now decides what done
+  means, takes the next step, checks it and says what happened; every section
+  below is a repair on that, and a test holds them in that order and holds one
+  rule to one place.
+- **A section that does not apply is not sent.** The rules for a `/goal` run
+  sat in every prompt; telling a model outside a run about a mode it is not in
+  reads as permission it does not have. They now come with the run, and the
+  delegation rules come with the tools that delegate.
+- **The prompt never names a tool that is switched off.** It described
+  subagents and `ask_user` whatever the schemas said, so safe mode spent a
+  turn reading about tools it did not have. The prompt is rebuilt when the
+  set changes, and a rule that needs a missing tool says what to do instead.
+- **The static budget is one ceiling at every window.** The ladder of budgets
+  by window is gone, along with the tool profile beside it: the prompt is
+  capped at 10k, the schemas get what is left, and a small window no longer
+  trims the toolset. The schemas are still cut from the optional end if they
+  ever outgrow the room, and what did not fit is reported rather than missing.
+- **The model is told where it is.** A short plan of the project — what is
+  where — rides in the prompt, marked as a plan and not as the truth of the
+  project: it says to read a file before relying on it.
+- **Memory the model wrote is a record, not an order.** `MEMORY.md` held both
+  the owner's text and the index the model writes; all of it was sent as
+  standing instructions, so "always answer briefly" sat beside "ignore previous
+  instructions" on the same footing. The file is split at its markers: the
+  owner's part is an instruction, the model's part is a record to look up
+  through `memory_read`.
+- **What is left in the window is visible to the model**, in the last line of
+  the system prompt, rounded to a twentieth of the window. It moves about
+  twenty times in a session instead of once a turn, so the cached prefix
+  survives between moves.
+- **The model and the thinking level sit at the end of the prompt.** They were
+  second, so changing either (F3, F4) invalidated everything after it. Prefix
+  reuse was 2.7% on a folder change and 3.2% on a thinking-level change; it is
+  now 100.0% and 99.8%, which is about twelve seconds of re-reading on a local
+  model saved per switch. The warm-up option prefills exactly the prefix the
+  first turn will send.
+- **Tool descriptions follow the mistakes, not the importance.** `run_shell`
+  says which of its two forms it is being asked for, that a foreground command
+  is capped at ten minutes because a turn waiting on a shell cannot be steered,
+  and that output comes back marked where it was cut. `spawn_agent` says when
+  it earns its place and when it does not. The 600-character cap that stood in
+  for that judgement is gone.
+
+### Tokens
+
+- **One counter for every number the app shows.** The context bar divided
+  bytes by four, the budget used a second rule, and the status line used a
+  tokenizer — three answers for one text. Everything now goes through
+  `flashagent_llm::count_tokens(model, text)`.
+- **The tokenizer is the closer one, and it learns.** For everything that is
+  not OpenAI the app used `cl100k_base`, a table that was not the model's:
+  against a real Qwen tokenizer it was off by 12% on average and 80% in the
+  worst case. `o200k_base` is off by 6.1% and 30.2%; a server that reports its
+  own count turns that into 2.4% on average, measured per model and kept in
+  `~/.flashagent/tokens.json`. The correction is counted separately for Latin
+  words, other scripts and the marks between them.
+- The panel caches the count of each message, because recounting a hundred
+  kilobytes on every token of a streaming answer cost 2.5 ms a frame.
+- The one counter has a price: the tokenizer table takes about 47 MB of
+  memory when it is first loaded. The app is still well under what
+  [PHILOSOPHY.md](PHILOSOPHY.md) asks of it, and the count it buys is the
+  one that decides when to compact.
+
+### Compaction
+
+- **A conversation that does not fit is cut into pieces that do.** It used to
+  go to the model whole and be refused for length, leaving the window full and
+  the next request failing too. Each piece is 80% of the room and the pieces
+  are joined into one summary; a conversation that fits still goes in one
+  request.
+- **The room is counted once.** The free space was "window minus prompt and
+  schemas" and then minus "what is already used", which already included the
+  prompt and the schemas — and the conversation, which is what is being
+  compacted, was subtracted a third time. At 64k with 40k used the room came
+  out zero, so nothing was cut and the request was refused. Three places that
+  counted their own way now call `room_for`.
+- **The archive lives in the session file**, not beside it, so the two cannot
+  drift apart; the session folder is 0700.
+- **A line in the conversation says what happened**: what was compacted, how
+  many tokens it freed, and where the exact archive is. The card carries the
+  summary and scrolls away with it.
+- **A summary that was cut off, or that did not take the shape, is kept** with
+  a note saying what is missing instead of being thrown away. One exchange is
+  enough to compact.
+
+### Files and tools
+
+- **`edit_file` takes lines, a regular expression, or several cursors.**
+  `start_line`/`end_line` address the file as it was read, `regex: true` makes
+  `old_string` a pattern with `$1`/`${name}` in the replacement, and every edit
+  in one call is found in the file as it was, then applied from the end so a
+  line number does not move under another edit.
+- **Edits that overlap are refused instead of quietly eating each other.**
+  Two edits over the same text applied "from the end" without a check: the
+  second overwrote the first while the model was told "applied 2 edit(s)".
+  The overlap is found before anything is written, and the refusal names both
+  edits, the line, and what to do instead.
+- **A call with its edits listed bottom-up no longer panics.** The plan was
+  built against the original text and applied in the order of the array, so a
+  reversed list either sliced out of range or corrupted the file; edits are now
+  applied by descending offset, which is also what the planner assumed.
+- **A write is atomic, and a failed batch is put back.** Files are written to
+  a temporary file in the same folder, synced and renamed; when one file in a
+  batch fails, the files already written — including the one that failed —
+  are restored from the bytes read before the first change. The message no
+  longer promises a rollback that did not happen.
+- **`view_image` checks the size before it reads**, not after loading a
+  hundred megabytes into memory.
+- **Git commands have a deadline.** A stale `index.lock` could hang a turn
+  for ever; a command that overruns is killed and reported.
+- **`glob` and `grep` keep a symlinked path inside the project.** A fixed
+  prefix that was itself a link out of the project turned the filter off.
+- **A shell timeout stops its output pumps**, and a timeout shorter than a
+  second says how long it actually waited instead of "after 0s".
+- **`ask_user` reports the time it really waited**, not a rounded constant.
+- **A "split a long file" call actually splits it.** The 2,000-line budget
+  was applied per file with a floor of 200, so the sum could exceed the budget
+  several times over.
+
+### The wire
+
+- **A garbage tool index no longer splits one call in two.** The ceiling for
+  an out-of-range `index` was computed from the growing table, so `u64::MAX`
+  became slot 64, then 129, and the arguments went to different calls while the
+  table grew without bound. Now an index below the cap is the slot of its own
+  call, and a broken one lands in a fixed range above it, chosen by its low
+  bits: the same broken index always gets the same slot, two different ones do
+  not land on top of each other, and the table stops at twice the cap.
+- **A repeated tool name without an index or an id is one call, not two.**
+  The "a fresh name means a new call" heuristic now waits until the previous
+  call's arguments are whole, and the check for that is the same one the
+  closing path uses.
+- **A truncated call is not executed.** The feeding path repaired a half
+  written argument object and ran it — a `write_file` landing with the tail
+  missing. Both paths now use one rule for "the body is whole": a body that is
+  not is handed over as text, whether or not the closing tag arrived.
+- **JSON repair understands `\d`, `\w`, `\s` and Windows paths.** A backslash
+  before a character JSON does not allow is escaped instead of making the
+  whole repair fail, and a backslash lost outside a string stays a backslash.
+- **Usage is read field by field.** A non-numeric `cached_tokens` no longer
+  cuts the chain short, and `cache_creation_input_tokens` — input the provider
+  wrote to its cache, and bills as input — is added to the prompt count.
+- **Text calls are not dropped when a native call is present.** One native
+  call used to discard every text call in the same answer without running it
+  or telling the model. Both now run, with the echoed duplicate of a native
+  call removed.
+- **The history shows what was written.** Unreadable arguments used to become
+  `{}` in the transcript while the tool received something else, and a model
+  that read its own history saw a call with no arguments at all.
+- **A learned `max_tokens` cap is not invented.** It now clamps a limit the
+  owner set and leaves an unset one unset.
+- **`effective_args` keeps a value it cannot unwrap** instead of returning
+  nothing, so the tool complains about the arguments rather than about an
+  empty object.
+
+### Trust
+
+- **A server from the project's `.mcp.json` asks before it runs.** Opening a
+  folder used to start whatever the file named, before the first question and
+  even with `-y`. The card names the server and the exact command, remembers
+  "yes" together with the folder and the command, and asks again when the
+  command changes. Safe mode asks every time and remembers nothing.
+- **"Always" survives a restart, and `/rules` shows what stands.** The rule
+  lived in memory until the process ended, and there was nowhere to look at it.
+  Rules are kept in the config, listed on their own screen, and `d`/`x` take
+  one or all of them back from the permission layer, the config and the disk
+  in one step.
+- **A base64 blob piped into an interpreter counts as a side effect.**
+  `echo <blob> | base64 -d | sh` hid the command from every word-level check.
+- **Safe mode**: reading and editing inside the project, and nothing else —
+  the shell, the web and the subagents are off. It is a mode on top of the
+  permission mode, not instead of it, and the footer says when it is on.
+- **The updater verifies the checksum or refuses the file.** A release without
+  a `sha256` in its manifest used to be accepted without a check, and on unix
+  the old binary was not kept, so there was nothing to go back to. The check is
+  mandatory, the current binary is saved before the swap on unix too, the
+  swap is synced, and the temporary file is removed when the update fails.
+- **A project reached through a link in its path is still the project**
+  (b571–b573): the escape check resolved the link and then compared it with
+  the unresolved project root.
+
+### The interface
+
+- **English and Russian, chosen in Settings** and switched live. The prompt
+  stays English and the model answers in the language the user wrote in. The
+  panels, the permission card and its buttons, the `/goal` report, tool cards,
+  the setup wizard, the menus and the notifications follow the choice; the
+  model's own text and the command line for developers stay English on purpose.
+- **A collector finds the phrases that reach the screen untranslated**, so a
+  new panel cannot quietly ship in one language. It reads the interface
+  sources, allows a phrase only when it is in the table or on a list with a
+  reason, and fails when the table is empty.
+- **The conversation is not redrawn for every question.** The cache of settled
+  rows used to be dropped when the live boundary moved forward; at 10,000 turns
+  a frame after a question went from 180 ms to 8.4 ms, and a streaming frame
+  from 10.19 ms to 1.22 ms.
+- **A long line is truncated by cells, not characters.** CJK and emoji no
+  longer push a card past the window or eat the marker that says it was cut;
+  the same for the selection rectangle, the tables, and the wrapped notes.
+  `strip_ansi` understands OSC sequences, and a tail window does not split a
+  grapheme.
+- **The `/goal` run puts the mode, the effort and the plan back** on the
+  ordinary path as well as on failure; the next message no longer goes to a
+  goal that already ended.
+- **`/cost` answers while the model is working**, `Enter` in the session list
+  takes the session that matches the filter (and does nothing when none does),
+  and `x` on `/rules` asks once before removing everything.
+- **`/sampling` grew a maximum answer length and a seed**, both carried to the
+  provider that understands them (Anthropic has no seed) and neither touched
+  by a preset.
+- **What the app said can be read again**: `/notices` keeps the last hundred
+  notices, newest first, with how long ago each was said.
+- **A crash report is written only when it is asked for**, because it holds a
+  backtrace and the paths of the machine.
+- **`/export md ~/notes/chat.md` writes where the person said**, makes the
+  folders, adds the format's ending when it is left out, and quotes a path with
+  spaces.
+- **A name one letter away from a real one is offered** — a model, a provider
+  or a skill — while a prefix is left alone, because it is not a typo.
+- **A model or provider change is one line in the conversation**, attached to
+  the message whose request it changes.
+- **The input field keeps its Shift and Caps Lock** on terminals that report
+  every key as an escape code.
+
+### Measured
+
+1,658 tests across the workspace, 140 of them the real binary in a
+pseudo-terminal, clippy clean across the workspace. A stripped binary is
+19.0 MB; the app holds 57.5 MB of memory when idle, and about 47 MB of that
+is the tokenizer table the one counter loads — the price of counting the way
+the model counts. The details and the commands are in
+[docs/numbers.md](docs/numbers.md).
+
 ## b570 — the bar keeps the work, the box keeps its frame, and a lost frame stops looking like a finished answer
 
 ### The frame
