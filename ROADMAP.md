@@ -15,7 +15,7 @@ A milestone is closed only when its user path has been run end to end, in a scen
 - [x] **V3. `/goal` limits and report.** Step, time and token limits (now in Settings → Goal), their use shown in the status line, and an end-of-run card built from loop events: files touched, failed commands, why it stopped.
 - [x] **V4. TUI structure.** `main.rs` went from 7,236 lines to about 1,500 plus 600 of tests, and its event loop from 3,349 lines to 86; every event has its own handler, and keys, submission, turn completion, rendering, sessions and menus are their own modules. Behaviour unchanged, checked with the full test suite and a live run.
 - [x] **V5. Scenario tests.** The real binary in a pseudo-terminal (`portable-pty` + `vt100`) against a scripted model server, in `crates/tui/tests/scenarios.rs`, on Linux, Windows and macOS in CI. Each scenario was checked by breaking what it guards.
-- [x] **V6. Tool-calling test.** `flashagent --tool-test [--all-models]` runs eight scenarios; results are in [docs/tool-calling.md](docs/tool-calling.md) and the README, and the first run checks the chosen model.
+- [x] **V6. Tool-calling test.** `flashagent --tool-test [--all-models]` runs twenty scenarios — fifteen single-turn and five for delegation — with `--repeat N` for a median; results are in [docs/tool-calling.md](docs/tool-calling.md) and the README, and the first run checks the chosen model.
 - [x] **V7. Fewer guesses.** What the server reports (reasoning presets, context, tool support) is used instead of guessing from names. Reasoning is not guessed from model names; a model the server says nothing about is "unreported" and left to its default. The kind of server comes from the API that answered, not from the port. Still guessed, on purpose: the local token counter picks its tokenizer by model name, since no server reports one before a request.
 
 ## Track A: core
@@ -59,7 +59,7 @@ Decided 2026-09-11: v1 ships the terminal app only, and B1–B10 resume after v1
 - [~] **C4. Public launch.** Done: GIFs of real sessions, a quick start in the README, Discussions. Open: a feature comparison table and labelled good-first-issues.
 - [~] **C5. From the old app.** Ideas carried over from the Electron flashgent. The ones not done move to v1.x.
   - Tolerant argument names (`filePath`/`path`, `oldString`/`TargetContent`, `cmd`/`command`). *Done (b268), in `effective_args`, so the approval card, the rules and the tool see the same call; MCP tools keep their own names.*
-  - A project outline (types and functions) in the system prompt.
+  - A project outline (types and functions) in the system prompt. *Done (b600): a short plan of the project rides in the prompt, marked as a plan and not as the truth of the project.*
   - Steering: a message typed during a turn goes into it. *Done: Enter while a turn runs.*
   - Rewind. *Done (b267): `/rewind`, with file copies in `~/.flashagent/snapshots/<session>/`; files and conversation go back to before a chosen turn; shell changes and files over 8 MB are reported, not undone.*
   - Continuing a cut-off answer. *Done (b269): a reply cut off at the output limit is continued up to three times in the same message, with a repeated tail trimmed; a cut-off tool call is not run.*
@@ -75,7 +75,7 @@ Planned, not promised for v1.0:
 - **Telemetry (C1):** opt-in counters and crash stack traces. Nothing is sent until it exists and you turn it on.
 - **Documentation site (C2):** mdBook on GitHub Pages, rustdoc, MCP guides.
 - **Installers and signing (C3):** MSIX or NSIS, a dmg, code signing, notarization.
-- **The rest of C5:** the project outline, stronger prompt-injection defences, session titles.
+- **The rest of C5:** stronger prompt-injection defences, session titles.
 
 ## How milestones are worked
 

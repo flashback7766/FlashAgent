@@ -15,8 +15,9 @@ so a published table can be checked instead of believed.
 
 ## What is measured
 
-Fifteen small scenarios, each one something the agent loop does on real work.
-A model that fails one fails a real task the same way, later.
+Twenty scenarios: fifteen single-turn, each one something the agent loop does
+on real work, and five for delegation. A model that fails one fails a real
+task the same way, later.
 
 | Scenario | The model is asked to | Why a failure hurts |
 | :--- | :--- | :--- |
@@ -52,7 +53,9 @@ are run separately so the check can measure what the model does when the rules
 about subagents are actually in front of it.
 
 Sampling is the same for every model: temperature 0, reasoning off, 1024
-output tokens, one attempt per scenario. The fixtures leave nothing open to
+output tokens, one attempt per scenario. `--repeat N` runs the set N times
+and reports the median beside the scores, and separates the scenarios that
+failed every time from the ones that flipped. The fixtures leave nothing open to
 interpretation: an earlier version gave the model a tool result that began
 with a line number, two models reported that number, and the fixture was
 fixed.

@@ -115,7 +115,7 @@ away. Name a path and it goes there instead:
 cargo test -p flashagent-tui --test scenarios
 ```
 
-About a minute: 109 tests start the real binary in a pseudo-terminal,
+About a minute: 140 tests start the real binary in a pseudo-terminal,
 type into it and read the screen, against a scripted model server. Then
 open [numbers.md](numbers.md) for the figures: start-up, memory, and
 frame time on a 10,000-turn session.
