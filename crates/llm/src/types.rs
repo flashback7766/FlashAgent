@@ -105,7 +105,6 @@ impl ChatMessage {
 pub struct MtpStats {
     pub total_draft_tokens: u64,
     pub accepted_draft_tokens: u64,
-    pub rejected_draft_tokens: u64,
 }
 
 impl MtpStats {
@@ -130,10 +129,6 @@ pub struct Usage {
     /// prices it (OpenRouter sends `usage.cost`). A local server prices nothing,
     /// so this stays `None` there rather than being guessed from token counts.
     pub cost: Option<f64>,
-    /// The tokens the model spent thinking (OpenAI's
-    /// `completion_tokens_details.reasoning_tokens`). They are part of the
-    /// completion count, not on top of it.
-    pub reasoning: Option<i64>,
     /// What the provider behind the gateway charged, when it says.
     pub cost_details: Option<CostDetails>,
 }
@@ -144,10 +139,6 @@ pub struct Usage {
 pub struct CostDetails {
     /// The upstream provider's own price for the turn.
     pub upstream_cost: Option<f64>,
-    /// The tokens the upstream provider billed for the prompt.
-    pub upstream_prompt_tokens: Option<i64>,
-    /// The tokens the upstream provider billed for the answer.
-    pub upstream_completion_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,9 +155,10 @@ pub enum LlmEvent {
     /// Concatenate `args_delta` per `index`.
     ToolCallDelta {
         index: usize,
-        /// Present on the first fragment only.
+        /// The id of the call, as far as it is known: a fragment that brings
+        /// one repeats it, and one that brings none keeps the earlier.
         id: Option<String>,
-        /// Present on the first fragment only.
+        /// The name of the call, as far as it is known.
         name: Option<String>,
         args_delta: String,
     },

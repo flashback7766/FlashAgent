@@ -69,8 +69,12 @@ impl Learned {
         }
         if let Some(cap) = self.token_cap {
             let key = if self.completion_tokens { "max_completion_tokens" } else { "max_tokens" };
-            let capped = map.get(key).and_then(|n| n.as_i64()).map_or(cap, |n| n.min(cap));
-            map.insert(key.into(), serde_json::json!(capped));
+            // Only a limit the owner set is capped. The learned number came
+            // from a refusal of a request that carried one; adding it to a
+            // request that asked for no limit would invent a limit.
+            if let Some(n) = map.get(key).and_then(|n| n.as_i64()) {
+                map.insert(key.into(), serde_json::json!(n.min(cap)));
+            }
         }
         if self.no_reasoning_replay {
             for message in map.get_mut("messages").and_then(|m| m.as_array_mut()).into_iter().flatten() {
@@ -849,6 +853,17 @@ mod tests {
     }
 
     #[test]
+    fn a_learned_cap_only_limits_a_reply_the_owner_bounded() {
+        let c = client("https://api.openai.com/v1", "gpt-4o");
+        *c.learned.write() = Learned { token_cap: Some(68094), ..Default::default() };
+        let unbounded = body(&c, &[ChatMessage::user("hi")], &[], &TurnOptions::default());
+        assert!(unbounded.get("max_tokens").is_none(), "a cap the owner did not ask for was added: {unbounded}");
+        let asked = TurnOptions { max_tokens: Some(131072), ..Default::default() };
+        let bounded = body(&c, &[ChatMessage::user("hi")], &[], &asked);
+        assert_eq!(bounded["max_tokens"], 68094, "the cap learned from a 402 did not limit the reply");
+    }
+
+    #[test]
     fn a_lost_finish_frame_over_the_openai_path_is_not_a_clean_stop() {
         // This reader parses payloads itself and never goes through
         // `ChunkParser::feed`, so the frame that says why the answer ended is
@@ -1337,13 +1352,14 @@ mod tests {
         })
         .await;
         let b = client(format!("{url}/v1"), "m");
-        let events = collect(b.stream(&[ChatMessage::user("hi")], &[]).await.expect("the second request goes through")).await;
+        let asked = TurnOptions { max_tokens: Some(131072), ..Default::default() };
+        let events = collect(b.stream_with_options(&[ChatMessage::user("hi")], &[], &asked).await.expect("the second request goes through")).await;
         assert_eq!(text_of(&events), "ok");
         let sent: Vec<_> = log.lock().unwrap().iter().map(|r| r.json()["max_tokens"].as_i64()).collect();
-        assert_eq!(sent, [None, Some(68094)], "no cap first, the affordable one after the 402");
+        assert_eq!(sent, [Some(131072), Some(68094)], "the asked limit first, the affordable one after the 402");
 
         // Kept: the next turn does not ask for more than the balance buys.
-        let events = collect(b.stream(&[ChatMessage::user("again")], &[]).await.unwrap()).await;
+        let events = collect(b.stream_with_options(&[ChatMessage::user("again")], &[], &asked).await.unwrap()).await;
         assert_eq!(text_of(&events), "ok");
         assert_eq!(log.lock().unwrap().len(), 3, "one request, not a refusal and a retry");
     }
