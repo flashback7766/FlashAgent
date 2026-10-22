@@ -42,6 +42,25 @@ pub fn resolve_path(root: &Path, raw: &str) -> PathBuf {
     if path.is_absolute() { path.to_path_buf() } else { root.join(path) }
 }
 
+/// Writes a file with its mode set at creation, never widened afterwards: the
+/// config and sessions hold API keys, and a file that is briefly world-readable
+/// has already leaked to every other account on the machine.
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    let mut options = {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true).mode(0o600);
+        o
+    };
+    #[cfg(not(unix))]
+    let mut options = std::fs::OpenOptions::new();
+    let mut f = options.write(true).create(true).truncate(true).open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +96,21 @@ mod tests {
         if let Some(home) = home() {
             assert_eq!(resolve_path(root, "~/notes.txt"), home.join("notes.txt"));
         }
+    }
+
+    #[test]
+    fn a_private_write_is_readable_only_by_its_owner() {
+        let dir = std::env::temp_dir().join(format!("fa-write-private-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        write_private(&path, b"{\"api_key\":\"secret\"}").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"api_key\":\"secret\"}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the file was readable by others");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

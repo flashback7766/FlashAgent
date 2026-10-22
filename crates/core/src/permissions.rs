@@ -250,6 +250,29 @@ pub fn parse_chain(cmd: &str) -> Vec<String> {
     split_chain(cmd, ShellDialect::Posix, true)
 }
 
+/// The segments a command has under every shell that could run it.
+///
+/// A rule is cut as the command is read and is checked under every dialect the
+/// machine may use. On Windows a line may be read by cmd.exe, where `;` is not
+/// a separator: a rule cut the Posix way did not match that reading, so the
+/// owner said "Always" and the card came back. Saving every reading is what
+/// makes "Always" mean always.
+fn segments_in_dialects(cmd: &str, dialects: &[ShellDialect]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for &dialect in dialects {
+        let segs = match dialect {
+            ShellDialect::Posix => parse_chain(cmd),
+            ShellDialect::Cmd => split_chain(cmd, dialect, true),
+        };
+        for seg in segs {
+            if !out.contains(&seg) {
+                out.push(seg);
+            }
+        }
+    }
+    out
+}
+
 fn split_chain(cmd: &str, dialect: ShellDialect, comments: bool) -> Vec<String> {
     let quotes: &[char] = match dialect {
         ShellDialect::Posix => &['\'', '"'],
@@ -405,6 +428,23 @@ fn always_rule(segment: &str) -> ShellRule {
     }
 }
 
+/// The rules an "Always" on this command saves.
+///
+/// The command is cut as every shell that could run it reads it, and a
+/// segment that is blacklisted is pinned to the command as written: a prefix
+/// would cover the dangerous variants, which the blacklist then asks about
+/// anyway — "Always" on `git push --force` must stick.
+fn always_rules_for(cmd: &str, dialects: &[ShellDialect]) -> Vec<ShellRule> {
+    let mut rules: Vec<ShellRule> = Vec::new();
+    for seg in segments_in_dialects(cmd, dialects) {
+        let rule = if blacklisted_segment(&seg).is_some() { ShellRule::Exact(seg.clone()) } else { always_rule(&seg) };
+        if !rules.contains(&rule) {
+            rules.push(rule);
+        }
+    }
+    rules
+}
+
 impl RuleSet {
     /// Every chain segment must match. Substitutions, redirections and escapes
     /// never match.
@@ -444,9 +484,15 @@ fn shell_command(args_json: &str) -> Option<String> {
     flashagent_llm::effective_args(args_json, "run_shell")?.get("command")?.as_str().map(str::to_string)
 }
 
-/// Always asked about, whatever the mode or "Always" rules: these reach beyond
-/// what `/rewind` can restore, or leave the project. In practice this matters
-/// for `/goal`, the only mode that would otherwise run them unasked.
+/// Asked about even when the mode would allow it: these reach beyond what
+/// `/rewind` can restore, or leave the project.
+///
+/// Not every mode, and not every rule: a command from the blacklist is asked
+/// about even in Accept All, where no rule silences it, and in Accept All
+/// during a run it is refused outright — there is nobody to answer a card.
+/// What lets it through in Manual and Accept Edits is an exact "Always" rule:
+/// one saved for that very command. In practice this matters for `/goal`, the
+/// only mode that would otherwise run them unasked.
 fn blacklisted_shell_reason(cmd: &str) -> Option<&'static str> {
     // Every reading any shell could take, comments included: missing one is worse
     // than asking once too often.
@@ -1028,10 +1074,10 @@ impl PermissionState {
             return Vec::new();
         }
         let mut shown = Vec::new();
-        for seg in parse_chain(&cmd) {
-            // A prefix would cover the dangerous variants, which the blacklist
-            // then asks about anyway: "Always" on `git push --force` must stick.
-            let rule = if blacklisted_segment(&seg).is_some() { ShellRule::Exact(seg.clone()) } else { always_rule(&seg) };
+        // Cut as every shell that could run the command reads it: a rule saved
+        // for one reading does not match the other, and "Always" would ask
+        // again on the machine it was given on.
+        for rule in always_rules_for(&cmd, shell_dialects()) {
             match rule {
                 ShellRule::Prefix(p) => {
                     shown.push(format!("{p} ..."));
@@ -1421,6 +1467,18 @@ mod tests {
         assert!(is_read_only_shell_in(&here(), "echo '& calc &'", &[ShellDialect::Posix]));
     }
 
+    /// The note on the blacklist claimed it outranks every mode and every
+    /// rule. It does not: an exact "Always" rule lets a blacklisted command
+    /// through in Manual and Accept Edits. A note that says otherwise sends
+    /// the reader looking for a rule that is not there.
+    #[test]
+    fn the_note_on_the_blacklist_says_what_actually_happens() {
+        let source = include_str!("permissions.rs");
+        let stale = ["Always asked about, whatever the mode or ", "\"Always\" rules"].concat();
+        assert!(!source.contains(&stale), "the note claims a rule that does not exist");
+        assert!(source.contains("an exact \"Always\" rule"), "the note says what the rule is");
+    }
+
     #[test]
     fn an_always_rule_never_covers_a_blacklisted_variant() {
         for mode in [PermissionMode::Manual, PermissionMode::AcceptEdits] {
@@ -1458,6 +1516,96 @@ mod tests {
         let write = ApprovalRequest { tool: "write_file".into(), args_json: "{}".into(), category: Category::Write, diff: None };
         assert_eq!(state.allow_always(&write), vec!["write_file".to_string()]);
         assert_eq!(state.decide(&call("write_file", "{}"), || None), Verdict::Allow);
+    }
+
+    /// The rule is cut as the shell that will run the command reads it, and it
+    /// is checked under every shell that could run it. On Windows a line may
+    /// be read by cmd.exe, where `;` is not a separator: the rule was cut the
+    /// Posix way, the check saw one segment, and "Always" asked again.
+    ///
+    /// The test is about the logic, not about the platform: it says which
+    /// shells may run the command, so it is the same on every machine.
+    #[test]
+    fn an_always_rule_covers_the_command_in_every_shell_that_could_run_it() {
+        let both = [ShellDialect::Posix, ShellDialect::Cmd];
+        let mut rules = RuleSet::default();
+        for rule in always_rules_for("git status; git diff", &both) {
+            match rule {
+                ShellRule::Prefix(p) => rules.shell_prefixes.push(p),
+                ShellRule::Exact(e) => rules.shell_exact.push(e),
+            }
+        }
+        assert!(
+            rules.shell_allows_in("git status; git diff", &both),
+            "the rule does not match the command it was saved for: {rules:?}"
+        );
+        // And it covers no more than it was given.
+        assert!(
+            !rules.shell_allows_in("git status; git diff; git log", &both),
+            "the rule grew past the command: {rules:?}"
+        );
+        assert!(
+            !rules.shell_allows_in("git status; git diff --stat", &both),
+            "the rule grew past the command: {rules:?}"
+        );
+    }
+
+    /// The case the audit named: `a; b` is two commands to a POSIX shell and
+    /// one to cmd.exe. A rule cut the POSIX way alone does not match the
+    /// reading of the shell that will run it, so the owner says "Always" and
+    /// the card comes back.
+    ///
+    /// The test is about the logic, not about the platform: it says which
+    /// shells may run the command, so it is the same on every machine.
+    #[test]
+    fn an_always_rule_for_two_commands_matches_the_cmd_reading() {
+        let both = [ShellDialect::Posix, ShellDialect::Cmd];
+        let mut rules = RuleSet::default();
+        for rule in always_rules_for("a; b", &both) {
+            match rule {
+                ShellRule::Prefix(p) => rules.shell_prefixes.push(p),
+                ShellRule::Exact(e) => rules.shell_exact.push(e),
+            }
+        }
+        // The reading of cmd.exe is saved as well: `;` is not a separator
+        // there, so the command is one segment, not two.
+        assert!(
+            rules.shell_exact.iter().any(|e| e == "a; b"),
+            "the cmd reading of the command was not saved: {rules:?}"
+        );
+        assert!(
+            rules.shell_allows_in("a; b", &both),
+            "the rule does not match the command it was saved for: {rules:?}"
+        );
+        // And it covers no more than it was given.
+        assert!(
+            !rules.shell_allows_in("a; b; c", &both),
+            "the rule grew past the command: {rules:?}"
+        );
+        assert!(
+            !rules.shell_allows_in("a; b c", &both),
+            "the rule grew past the command: {rules:?}"
+        );
+    }
+
+    /// The same rule through the public path: what "Always" saves on this
+    /// machine lets the command through on this machine.
+    #[test]
+    fn an_always_rule_lets_the_command_through_where_it_was_given() {
+        let state = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
+        let cmd = "git status; git diff";
+        let req = ApprovalRequest {
+            tool: "run_shell".into(),
+            args_json: serde_json::json!({ "command": cmd }).to_string(),
+            category: Category::Shell,
+            diff: None,
+        };
+        assert!(!state.allow_always(&req).is_empty());
+        assert_eq!(
+            state.decide(&call("run_shell", &serde_json::json!({ "command": cmd }).to_string()), || None),
+            Verdict::Allow,
+            "the owner said always and the card came back"
+        );
     }
 
     #[test]

@@ -192,9 +192,29 @@ impl ProviderProfile {
         Endpoint::new(self.protocol, &self.url, key).with_context_window(self.context_window)
     }
 
-    /// The same server under the same protocol, however the address is written.
+    /// The same server, however the address is written.
+    ///
+    /// By host, not by the whole address, the way a preset is found: an
+    /// address says what speaks there, so `http://localhost:11434` and
+    /// `http://localhost:11434/v1` are one Ollama — the first its own
+    /// dialect, the second the OpenAI-compatible side — and saving it twice
+    /// must not leave two providers behind.
+    ///
+    /// A profile whose protocol is not what its address speaks is a choice the
+    /// owner made, and that makes it a provider of its own.
     pub fn same_server(&self, other: &ProviderProfile) -> bool {
-        self.protocol == other.protocol && normalize_url(&self.url) == normalize_url(&other.url)
+        let same_host = match (host_of(&self.url), host_of(&other.url)) {
+            (Some(a), Some(b)) => a == b,
+            _ => normalize_url(&self.url) == normalize_url(&other.url),
+        };
+        same_host
+            && (self.protocol == other.protocol
+                || (self.speaks_its_own_dialect() && other.speaks_its_own_dialect()))
+    }
+
+    /// Whether the address says what this profile says speaks there.
+    fn speaks_its_own_dialect(&self) -> bool {
+        ApiProtocol::detect(&self.url) == self.protocol
     }
 }
 
@@ -631,13 +651,6 @@ impl UpdateChannel {
             Self::Stable => "Stable",
         }
     }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Beta => "beta",
-            Self::Stable => "stable",
-        }
-    }
 }
 
 impl Default for AppConfig {
@@ -993,12 +1006,34 @@ impl AppConfig {
 
     /// Forgets an allowed server: the folder it was allowed in is given, and
     /// the server may be left running for this session.
-    pub fn forget_mcp_server(&mut self, dir: &Path, name: &str) {
+    ///
+    /// Returns whether there was anything to take back, so that a panel can
+    /// say so instead of pretending it worked.
+    pub fn forget_mcp_server(&mut self, dir: &Path, name: &str) -> bool {
         let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let before = self.trusted_mcp_servers.len();
         self.trusted_mcp_servers.retain(|t| {
             let d_canon = std::fs::canonicalize(&t.directory).unwrap_or_else(|_| t.directory.clone());
             !(d_canon == canon && t.name == name)
         });
+        self.trusted_mcp_servers.len() != before
+    }
+
+    /// The servers the owner has allowed in this folder, with the command each
+    /// was allowed to run.
+    ///
+    /// A panel that shows what is trusted needs this: an owner who trusted a
+    /// server can only take the trust back if the trusted servers can be
+    /// listed.
+    pub fn mcp_servers_trusted_in(&self, dir: &Path) -> Vec<&TrustedMcpServer> {
+        let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        self.trusted_mcp_servers
+            .iter()
+            .filter(|t| {
+                let d_canon = std::fs::canonicalize(&t.directory).unwrap_or_else(|_| t.directory.clone());
+                d_canon == canon
+            })
+            .collect()
     }
 
     pub fn trust_directory(&mut self, dir: &Path) {
@@ -1040,7 +1075,7 @@ impl AppConfig {
         // The file holds API keys: another account on the machine must not read
         // it. Set on the temp file, so it is never briefly readable at the
         // final name.
-        let written = Self::write_private(&tmp, json.as_bytes());
+        let written = crate::paths::write_private(&tmp, json.as_bytes());
         let result = written.and_then(|_| std::fs::rename(&tmp, path));
         if result.is_err() {
             let _ = std::fs::remove_file(&tmp);
@@ -1055,25 +1090,6 @@ impl AppConfig {
             }
         }
         Ok(())
-    }
-
-    /// Written with the mode set at creation, never widened afterwards: the
-    /// config holds API keys, and a file that is briefly world-readable has
-    /// already leaked to every other account on the machine.
-    fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-        use std::io::Write;
-        #[cfg(unix)]
-        let mut options = {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut o = std::fs::OpenOptions::new();
-            o.write(true).create(true).truncate(true).mode(0o600);
-            o
-        };
-        #[cfg(not(unix))]
-        let mut options = std::fs::OpenOptions::new();
-        let mut f = options.write(true).create(true).truncate(true).open(path)?;
-        f.write_all(bytes)?;
-        f.sync_all()
     }
 
     /// What a build from before providers reads (`backend_url`, `api_key`,
@@ -1459,6 +1475,69 @@ mod tests {
         assert_eq!(ProviderProfile::from_url("http://localhost:11434/v1").protocol, ApiProtocol::OpenAi);
         assert_eq!(ProviderProfile::from_url("http://192.168.1.50:8000/v1").name, "192.168.1.50:8000");
         assert_eq!(ProviderProfile::from_url("  ").name, "Custom");
+    }
+
+    /// The trust given to an MCP server can be taken back: the owner said yes
+    /// once and may say no again.
+    ///
+    /// The panel that offers this needs the list of what is trusted and a way
+    /// to take it back, and both live here.
+    #[test]
+    fn the_trust_given_to_an_mcp_server_can_be_taken_back() {
+        let mut cfg = AppConfig::default();
+        let dir = std::env::temp_dir();
+        cfg.trust_mcp_server(&dir, "sqlite", "uvx mcp-server-sqlite");
+        let trusted = cfg.mcp_servers_trusted_in(&dir);
+        assert_eq!(trusted.len(), 1, "the panel has to be able to show what is trusted");
+        assert_eq!(trusted[0].name, "sqlite");
+        assert!(cfg.forget_mcp_server(&dir, "sqlite"), "there was something to take back");
+        assert!(!cfg.is_mcp_server_trusted(&dir, "sqlite", "uvx mcp-server-sqlite"));
+        assert!(cfg.mcp_servers_trusted_in(&dir).is_empty());
+        assert!(!cfg.forget_mcp_server(&dir, "sqlite"), "there was nothing left to take back");
+    }
+
+    /// The channel is spelled once: in the label the owner reads and in the
+    /// file it is written to. A second spelling of it, which nobody calls, is
+    /// a place for the two to drift apart.
+    #[test]
+    fn the_update_channel_is_spelled_once() {
+        let source = include_str!("config.rs");
+        let second = ["fn ", "as_str"].concat();
+        assert!(!source.contains(&second), "the channel has a second spelling that nobody calls");
+        assert_eq!(serde_json::to_string(&UpdateChannel::Beta).unwrap(), "\"beta\"");
+        assert_eq!(serde_json::to_string(&UpdateChannel::Stable).unwrap(), "\"stable\"");
+    }
+
+    /// One server, one provider: the same host under two spellings is the
+    /// same server, the way a preset is found by its host.
+    #[test]
+    fn the_same_server_under_two_addresses_is_one_provider() {
+        let native = ProviderProfile::new("Ollama", ApiProtocol::Ollama, "http://localhost:11434");
+        let openai = ProviderProfile::new("Ollama", ApiProtocol::OpenAi, "http://localhost:11434/v1");
+        assert!(native.same_server(&openai), "one Ollama, two spellings of its address");
+        assert!(openai.same_server(&native));
+        // Another server is another server, whatever it speaks.
+        let other = ProviderProfile::new("LM Studio", ApiProtocol::OpenAi, "http://localhost:1234/v1");
+        assert!(!native.same_server(&other));
+        // And a protocol the address does not speak is the owner's own choice:
+        // it makes the profile a provider of its own.
+        let anthropic = ProviderProfile::new("Anthropic", ApiProtocol::Anthropic, "https://api.anthropic.com");
+        let as_openai = ProviderProfile::new("Anthropic", ApiProtocol::OpenAi, "https://api.anthropic.com");
+        assert!(!anthropic.same_server(&as_openai));
+    }
+
+    /// The provider that is saved over another one is the one for the same
+    /// server: saving the same Ollama twice under two spellings leaves one
+    /// provider, not two.
+    #[test]
+    fn saving_the_same_server_twice_leaves_one_provider() {
+        let mut cfg = AppConfig::default();
+        cfg.providers.clear();
+        let name = cfg.save_provider(ProviderProfile::new("Ollama", ApiProtocol::Ollama, "http://localhost:11434"));
+        assert_eq!(cfg.providers.len(), 1);
+        let again = cfg.save_provider(ProviderProfile::new("Ollama", ApiProtocol::OpenAi, "http://localhost:11434/v1"));
+        assert_eq!(again, name, "the same server keeps its name");
+        assert_eq!(cfg.providers.len(), 1, "the same server was saved twice: {:?}", cfg.providers);
     }
 
     #[test]
