@@ -15,7 +15,7 @@
 
 </div>
 
-> **Status:** Beta b600 — actively developed by a solo maintainer, and developed with itself: the maintainer uses FlashAgent (Claude Sonnet 5.5 via OpenRouter) to change its own code, alongside other coding agents. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
+> **Status:** Beta b600 — actively developed by a solo maintainer, and developed with itself: the maintainer uses FlashAgent (Claude Sonnet 5.5 via OpenRouter) to change its own code, alongside other coding agents. See the [changelog](CHANGELOG.md).
 
 ## Quick start
 
@@ -31,7 +31,7 @@
    irm https://raw.githubusercontent.com/flashback7766/FlashAgent/main/install.ps1 | iex
    ```
 
-2. **Start a model server**: [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com) or [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server --jinja`), with a model that calls tools. Qwen3.6 and Gemma 4 models scored 6/8 to 8/8 in [the tool-calling test](docs/tool-calling.md). No machine for it? A cloud API works too: Anthropic, OpenAI, Gemini, OpenRouter and [more](#connecting-a-model).
+2. **Start a model server**: [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com) or [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server --jinja`), with a model that calls tools. Qwen3.6 and Gemma 4 models scored 6/8 to 8/8 on the tool-calling test that ships with the app (`flashagent --tool-test`). No machine for it? A cloud API works too: Anthropic, OpenAI, Gemini, OpenRouter and [more](#connecting-a-model).
 
 3. **Run it in your project:**
 
@@ -44,8 +44,8 @@
 ## Why FlashAgent
 
 - **Built for local models.** It reads the loaded model, its context window and its reasoning presets from LM Studio, Ollama, llama.cpp or vLLM. Cloud APIs work too (Anthropic and Gemini through their own protocols, the rest through OpenAI-compatible ones), and `/provider` moves the conversation between a local server and a cloud one without a restart.
-- **Tool calls that work.** Native tool calls, a recovery parser for calls written as text, JSON repair, and a [test](docs/tool-calling.md) that shows which models keep up.
-- **Small, and you stay in control.** One 18 MB binary and about 35 MB of memory when idle ([measured](docs/numbers.md)), four permission modes, a safe mode that leaves only reading and editing inside the project, and approval cards that show the exact command or diff.
+- **Tool calls that work.** Native tool calls, a recovery parser for calls written as text, JSON repair, and a `--tool-test` run that shows which models keep up.
+- **Small, and you stay in control.** One 19 MB binary and about 58 MB of memory when idle (about 47 MB of that is the tokenizer table), four permission modes, a safe mode that leaves only reading and editing inside the project, and approval cards that show the exact command or diff.
 
 <table>
 <tr>
@@ -157,7 +157,7 @@ their commonest argument mistakes and reminds them once of a step left
 undone. On a CPU with Ollama, `qwen3:1.7b` and `qwen2.5:1.5b` went from 5/8 to
 8/8 and `gemma4:e2b` from 7/8 to 8/8; 1B models are still chat models.
 
-[Method, raw results, and how to run it on your own models →](docs/tool-calling.md)
+[Method and how to run it on your own models: `flashagent --tool-test` →](#will-your-model-actually-drive-tools)
 
 ---
 
@@ -368,7 +368,7 @@ crates/tui     crossterm terminal UI (the product today)
 crates/svc     self-updater
 ```
 
-Everything runs in one process: no Node, no Python, no Electron. On Linux the binary links only the system C libraries (libc, libm, libgcc_s). See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit, and [docs/numbers.md](docs/numbers.md) for what it costs: a usable prompt in about 160 ms, about 35 MB of memory when idle.
+Everything runs in one process: no Node, no Python, no Electron. On Linux the binary links only the system C libraries (libc, libm, libgcc_s): a usable prompt goes out in about 120 ms and the app holds about 58 MB of memory when idle, about 47 MB of that the tokenizer table.
 
 ```bash
 cargo test --workspace
@@ -379,11 +379,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Contributing
 
-FlashAgent has one maintainer, so bug reports help a lot.
-
-1. Read [PHILOSOPHY.md](PHILOSOPHY.md) for the design principles.
-2. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow.
-3. Pick something from [ROADMAP.md](ROADMAP.md) or open an issue.
+FlashAgent has one maintainer, so bug reports help a lot. Open an issue, or start a discussion.
 
 Questions, and models that work well for you, go to [Discussions](https://github.com/flashback7766/FlashAgent/discussions).
 
