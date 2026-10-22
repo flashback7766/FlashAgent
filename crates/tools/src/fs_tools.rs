@@ -85,12 +85,34 @@ fn nearest_sibling_of(full: &Path, written: &str) -> Option<String> {
         }
     }
     // Answered in the shape the model wrote the path, so the corrected call is
-    // a paste rather than something to reformat.
+    // a paste rather than something to reformat. The separators follow the
+    // written shape too: the platform's own join would turn the written
+    // `src/config.rs` into `src\config.rs` on Windows.
     let name = best?.1;
     Some(match Path::new(written).parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => dir.join(name).to_string_lossy().into_owned(),
+        Some(dir) if !dir.as_os_str().is_empty() => {
+            join_in_written_shape(dir.to_string_lossy(), &name, written)
+        }
         _ => name,
     })
+}
+
+/// The directory and the corrected name put back together with the separator
+/// the written path used: a path with `/` keeps `/`, one with `\` keeps `\`.
+fn join_in_written_shape(dir: std::borrow::Cow<'_, str>, name: &str, written: &str) -> String {
+    let sep = if written.contains('/') {
+        '/'
+    } else if written.contains('\\') {
+        '\\'
+    } else {
+        '/'
+    };
+    let dir = dir.trim_end_matches(['/', '\\']);
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}{sep}{name}")
+    }
 }
 
 /// [`io_error`] for a caller that already resolved the path.
@@ -1265,7 +1287,12 @@ mod tests {
         for written in ["READM.md", "./READM.md"] {
             let err = read_file(&dir, written, 0, 10).unwrap_err().to_string();
             assert!(err.contains("did you mean"), "{written}: {err}");
-            assert!(err.contains("README.md"), "{written}: {err}");
+            let shape: &str = match written {
+                "READM.md" => "README.md",
+                "./READM.md" => "./README.md",
+                _ => unreachable!(),
+            };
+            assert!(err.contains(shape), "{written}: {err}");
         }
     }
 
