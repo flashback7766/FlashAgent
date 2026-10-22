@@ -56,7 +56,7 @@ jobs:
       - name: Strict Clippy verification
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  # The oldest Rust the README promises (rust-version in
+  # The oldest Rust the README and CONTRIBUTING.md promise (rust-version in
   # Cargo.toml). The floor comes from dependencies in Cargo.lock (icu_*,
   # image), not only from our own code; change it in all four places at once.
   msrv:
