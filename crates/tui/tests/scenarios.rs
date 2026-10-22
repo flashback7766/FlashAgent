@@ -4,7 +4,7 @@
 
 mod support;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use support::mock_server::{MockServer, Reply, MODEL};
 use support::term::{version, Home, Term, ENTER, ESC};
@@ -2925,12 +2925,15 @@ fn show_small_terminal() {
 
 const LEFT: &str = "\x1b[D";
 const HOME: &str = "\x1b[H";
+#[cfg(unix)]
 const ALT_ENTER: &str = "\x1b\r";
 /// What a terminal sends for Shift+Enter once the kitty keyboard protocol is
 /// on; the PTY does not speak it, so the bytes stand in for the terminal.
+#[cfg(unix)]
 const SHIFT_ENTER: &str = "\x1b[13;2u";
 /// What a terminal sends for Shift+` when it reports the key and the shift
 /// apart: the backtick with a shift modifier, and the character on the key.
+#[cfg(unix)]
 const SHIFT_BACKTICK: &str = "\x1b[96;2u";
 const CTRL_F: &str = "\x06";
 const CTRL_W: &str = "\x17";
@@ -3636,10 +3639,14 @@ fn a_background_command_that_ends_wakes_the_agent_with_a_notice() {
 
 #[test]
 fn ctrl_b_moves_a_running_command_to_the_background() {
+    // The marker file says the first line has already been written, so the
+    // key is pressed after there is output to carry over. Waiting for the
+    // screen would not do: a running command shows no output until it ends,
+    // and a slow machine starts the shell late.
     let command = if cfg!(windows) {
-        "echo detach-before && ping -n 7 127.0.0.1 >NUL && echo detach-after"
+        "echo detach-before && ping -n 3 127.0.0.1 >NUL && echo x > detach-marker && ping -n 7 127.0.0.1 >NUL && echo detach-after"
     } else {
-        "echo detach-before; sleep 6; echo detach-after"
+        "echo detach-before; sleep 2; echo x > detach-marker; sleep 6; echo detach-after"
     };
     let server = MockServer::start(vec![
         Reply::ToolCall {
@@ -3656,6 +3663,15 @@ fn ctrl_b_moves_a_running_command_to_the_background() {
     term.send(ENTER);
     // The key is offered only while a command runs.
     term.wait_for("Ctrl+B background", WAIT);
+    // The marker says the first line is already out, so there is output to
+    // carry over. A slow machine starts the shell late, and pressing the key
+    // before that would move a command that has printed nothing yet.
+    let marker = home.work().join("detach-marker");
+    let deadline = Instant::now() + WAIT;
+    while !marker.exists() {
+        assert!(Instant::now() < deadline, "the command printed nothing in time");
+        std::thread::sleep(Duration::from_millis(100));
+    }
     term.send("\x02");
     term.wait_for("Carrying on while it runs.", WAIT);
 

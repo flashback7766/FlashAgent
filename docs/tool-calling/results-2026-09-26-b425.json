@@ -1,0 +1,408 @@
+[
+  {
+    "model": "gemma4:e2b",
+    "needed_recovery": false,
+    "passed": 7,
+    "scenarios": [
+      {
+        "detail": "native, 18.9s",
+        "key": "single_call",
+        "pass": true,
+        "seconds": 18.85506248474121
+      },
+      {
+        "detail": "native, 5.6s",
+        "key": "arguments",
+        "pass": true,
+        "seconds": 5.646244525909424
+      },
+      {
+        "detail": "native, 6.1s",
+        "key": "no_spurious_call",
+        "pass": true,
+        "seconds": 6.148674011230469
+      },
+      {
+        "detail": "native, 40.6s",
+        "key": "uses_result",
+        "pass": true,
+        "seconds": 40.628875732421875
+      },
+      {
+        "detail": "native, 5.4s",
+        "key": "second_step",
+        "pass": true,
+        "seconds": 5.412634372711182
+      },
+      {
+        "detail": "native, 7.2s",
+        "key": "exact_content",
+        "pass": true,
+        "seconds": 7.232868194580078
+      },
+      {
+        "detail": "replied with text, no tool call: I was unable to read the file `src/config.rs`. The system suggested `s",
+        "key": "after_error",
+        "pass": false,
+        "seconds": 19.992481231689453
+      },
+      {
+        "detail": "native, 25.3s",
+        "key": "two_calls",
+        "pass": true,
+        "seconds": 25.299571990966797
+      }
+    ],
+    "seconds": 129.21641540527344,
+    "total": 8,
+    "verdict": "usable, with one rough edge"
+  },
+  {
+    "model": "qwen3:1.7b",
+    "needed_recovery": false,
+    "passed": 5,
+    "scenarios": [
+      {
+        "detail": "native, 54.9s",
+        "key": "single_call",
+        "pass": true,
+        "seconds": 54.930477142333984
+      },
+      {
+        "detail": "native, 20.4s",
+        "key": "arguments",
+        "pass": true,
+        "seconds": 20.412189483642578
+      },
+      {
+        "detail": "native, 20.1s",
+        "key": "no_spurious_call",
+        "pass": true,
+        "seconds": 20.078617095947266
+      },
+      {
+        "detail": "native, 13.6s",
+        "key": "uses_result",
+        "pass": true,
+        "seconds": 13.623129844665527
+      },
+      {
+        "detail": "replied with text, no tool call: The status of the file `status.txt` is 7. I have reported this number ",
+        "key": "second_step",
+        "pass": false,
+        "seconds": 19.372961044311523
+      },
+      {
+        "detail": "native, 17.7s",
+        "key": "exact_content",
+        "pass": true,
+        "seconds": 17.70343589782715
+      },
+      {
+        "detail": "replied with text, no tool call: The file `src/confg.rs` does not exist. You likely meant `src/config.r",
+        "key": "after_error",
+        "pass": false,
+        "seconds": 24.74684715270996
+      },
+      {
+        "detail": "no answer within 120s",
+        "key": "two_calls",
+        "pass": false,
+        "seconds": 123.24093627929688
+      }
+    ],
+    "seconds": 294.10858154296875,
+    "total": 8,
+    "verdict": "unreliable \u2014 expect to babysit it"
+  },
+  {
+    "model": "qwen2.5:1.5b",
+    "needed_recovery": false,
+    "passed": 5,
+    "scenarios": [
+      {
+        "detail": "no answer within 120s",
+        "key": "single_call",
+        "pass": false,
+        "seconds": 495.89642333984375
+      },
+      {
+        "detail": "native, 47.2s",
+        "key": "arguments",
+        "pass": true,
+        "seconds": 47.20033264160156
+      },
+      {
+        "detail": "native, 3.9s",
+        "key": "no_spurious_call",
+        "pass": true,
+        "seconds": 3.8972842693328857
+      },
+      {
+        "detail": "native, 1.8s",
+        "key": "uses_result",
+        "pass": true,
+        "seconds": 1.7645485401153564
+      },
+      {
+        "detail": "replied with text, no tool call: The file status.txt contains 7 lines.",
+        "key": "second_step",
+        "pass": false,
+        "seconds": 1.3895604610443115
+      },
+      {
+        "detail": "native, 2.5s",
+        "key": "exact_content",
+        "pass": true,
+        "seconds": 2.5480334758758545
+      },
+      {
+        "detail": "replied with text, no tool call: It seems there's an issue with the file path. Let's try again with the",
+        "key": "after_error",
+        "pass": false,
+        "seconds": 2.717456579208374
+      },
+      {
+        "detail": "native, 15.4s",
+        "key": "two_calls",
+        "pass": true,
+        "seconds": 15.35960578918457
+      }
+    ],
+    "seconds": 570.7732543945312,
+    "total": 8,
+    "verdict": "unreliable \u2014 expect to babysit it"
+  },
+  {
+    "model": "llama3.2:3b",
+    "needed_recovery": false,
+    "passed": 4,
+    "scenarios": [
+      {
+        "detail": "native, 19.5s",
+        "key": "single_call",
+        "pass": true,
+        "seconds": 19.49364471435547
+      },
+      {
+        "detail": "native, 7.7s",
+        "key": "arguments",
+        "pass": true,
+        "seconds": 7.722029685974121
+      },
+      {
+        "detail": "called report_status on a question that needed no tool",
+        "key": "no_spurious_call",
+        "pass": false,
+        "seconds": 20.219335556030273
+      },
+      {
+        "detail": "native, 47.1s",
+        "key": "uses_result",
+        "pass": true,
+        "seconds": 47.09640884399414
+      },
+      {
+        "detail": "no answer within 120s",
+        "key": "second_step",
+        "pass": false,
+        "seconds": 120.93517303466797
+      },
+      {
+        "detail": "no answer within 120s",
+        "key": "exact_content",
+        "pass": false,
+        "seconds": 120.54842376708984
+      },
+      {
+        "detail": "replied with text, no tool call: Here are the first 5 lines of src/config.rs:\n\n1. // This is a comment\n",
+        "key": "after_error",
+        "pass": false,
+        "seconds": 93.08633422851562
+      },
+      {
+        "detail": "native, 29.3s",
+        "key": "two_calls",
+        "pass": true,
+        "seconds": 29.34569549560547
+      }
+    ],
+    "seconds": 458.4470520019531,
+    "total": 8,
+    "verdict": "unreliable \u2014 expect to babysit it"
+  },
+  {
+    "model": "qwen3:0.6b",
+    "needed_recovery": false,
+    "passed": 5,
+    "scenarios": [
+      {
+        "detail": "native, 71.8s",
+        "key": "single_call",
+        "pass": true,
+        "seconds": 71.82135009765625
+      },
+      {
+        "detail": "native, 2.5s",
+        "key": "arguments",
+        "pass": true,
+        "seconds": 2.549077033996582
+      },
+      {
+        "detail": "native, 2.3s",
+        "key": "no_spurious_call",
+        "pass": true,
+        "seconds": 2.2664177417755127
+      },
+      {
+        "detail": "native, 1.2s",
+        "key": "uses_result",
+        "pass": true,
+        "seconds": 1.2499630451202393
+      },
+      {
+        "detail": "replied with text, no tool call: The number in status.txt is 7.",
+        "key": "second_step",
+        "pass": false,
+        "seconds": 0.8143317103385925
+      },
+      {
+        "detail": "content came through as \"line one\\\"quoted\\\"end\"",
+        "key": "exact_content",
+        "pass": false,
+        "seconds": 1.6194534301757812
+      },
+      {
+        "detail": "replied with text, no tool call: I apologize, but I cannot read from a file that does not exist. Could ",
+        "key": "after_error",
+        "pass": false,
+        "seconds": 2.05930495262146
+      },
+      {
+        "detail": "native, 13.2s",
+        "key": "two_calls",
+        "pass": true,
+        "seconds": 13.16866683959961
+      }
+    ],
+    "seconds": 95.54856872558594,
+    "total": 8,
+    "verdict": "unreliable \u2014 expect to babysit it"
+  },
+  {
+    "model": "llama3.2:1b",
+    "needed_recovery": false,
+    "passed": 1,
+    "scenarios": [
+      {
+        "detail": "code was None, expected 42",
+        "key": "single_call",
+        "pass": false,
+        "seconds": 19.324621200561523
+      },
+      {
+        "detail": "path was \"\", expected src/main.rs",
+        "key": "arguments",
+        "pass": false,
+        "seconds": 17.376131057739258
+      },
+      {
+        "detail": "called report_status on a question that needed no tool",
+        "key": "no_spurious_call",
+        "pass": false,
+        "seconds": 4.018586158752441
+      },
+      {
+        "detail": "called write_lines again instead of answering from the result",
+        "key": "uses_result",
+        "pass": false,
+        "seconds": 3.096306562423706
+      },
+      {
+        "detail": "replied with text, no tool call: {\"status\": \"success\", \"message\": \"Number of lines in status.txt: \" + s",
+        "key": "second_step",
+        "pass": false,
+        "seconds": 12.357687950134277
+      },
+      {
+        "detail": "content came through as \"quoted\"",
+        "key": "exact_content",
+        "pass": false,
+        "seconds": 17.347742080688477
+      },
+      {
+        "detail": "replied with text, no tool call: The error message indicates that the file \"src/config.rs\" does not exi",
+        "key": "after_error",
+        "pass": false,
+        "seconds": 14.219757080078125
+      },
+      {
+        "detail": "native, 8.4s",
+        "key": "two_calls",
+        "pass": true,
+        "seconds": 8.426217079162598
+      }
+    ],
+    "seconds": 96.16704559326172,
+    "total": 8,
+    "verdict": "mostly fails to drive tools"
+  },
+  {
+    "model": "gemma3:1b",
+    "needed_recovery": true,
+    "passed": 2,
+    "scenarios": [
+      {
+        "detail": "replied with text, no tool call: report_status(code=42)",
+        "key": "single_call",
+        "pass": false,
+        "seconds": 73.22953796386719
+      },
+      {
+        "detail": "called report_status, expected read_lines",
+        "key": "arguments",
+        "pass": false,
+        "seconds": 5.922262191772461
+      },
+      {
+        "detail": "native, 3.5s",
+        "key": "no_spurious_call",
+        "pass": true,
+        "seconds": 3.5038247108459473
+      },
+      {
+        "detail": "called arguments again instead of answering from the result",
+        "key": "uses_result",
+        "pass": false,
+        "seconds": 4.9135541915893555
+      },
+      {
+        "detail": "code was None, expected 7 from the file",
+        "key": "second_step",
+        "pass": false,
+        "seconds": 4.939736366271973
+      },
+      {
+        "detail": "replied with text, no tool call: quoted\nquoted",
+        "key": "exact_content",
+        "pass": false,
+        "seconds": 2.863569736480713
+      },
+      {
+        "detail": "recovered, 5.1s",
+        "key": "after_error",
+        "pass": true,
+        "seconds": 5.1308722496032715
+      },
+      {
+        "detail": "one call for two files \u2014 the loop will need a second turn",
+        "key": "two_calls",
+        "pass": false,
+        "seconds": 5.73040771484375
+      }
+    ],
+    "seconds": 106.2337646484375,
+    "total": 8,
+    "verdict": "mostly fails to drive tools"
+  }
+]
