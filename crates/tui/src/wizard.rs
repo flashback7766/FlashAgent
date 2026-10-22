@@ -442,9 +442,9 @@ impl SetupWizard {
             return Some(false); // cancelled
         }
 
-        // Ctrl+V (Ctrl+М on a Russian layout) and Shift+Insert read the clipboard
-        // here: the classic Windows console hands them over as keys instead of
-        // pasting, so the API key could not be pasted at all.
+        // Ctrl+V (the `m` key on a Russian layout) and Shift+Insert read the
+        // clipboard here: the classic Windows console hands them over as keys
+        // instead of pasting, so the API key could not be pasted at all.
         let paste_key = (mods.contains(KeyModifiers::CONTROL)
             && matches!(code, KeyCode::Char('v' | 'V' | '\u{043c}' | '\u{041c}')))
             || (code == KeyCode::Insert && mods.contains(KeyModifiers::SHIFT));
@@ -959,7 +959,7 @@ impl SetupWizard {
                 } else {
                     // The length shows that a paste landed, and whether it landed twice.
                     let masked = mask_api_key(&self.api_key_input);
-                    let count = crate::i18n::count(self.api_key_input.chars().count() as u64, ("character", "characters"), ("символ", "символа", "символов"));
+                    let count = crate::text::plural(self.api_key_input.chars().count(), "character", "characters");
                     format!("\x1b[1;38;2;225;175;95m{masked}\x1b[7m \x1b[27m\x1b[0m \x1b[38;2;135;130;125m({count})\x1b[0m")
                 };
                 lines.push(pad_row(&format!("  \x1b[1;38;2;240;235;225m{}\x1b[0m {key_display}", crate::i18n::tr("API Key:"))));

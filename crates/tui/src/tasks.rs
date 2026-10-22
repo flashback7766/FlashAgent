@@ -360,7 +360,7 @@ impl App {
             BackgroundNotice::fading(
                 format!(
                     "{} running \u{b7} quitting stops {}; do it again to quit",
-                    flashagent_tui::i18n::plural(running, "background task", "background tasks", "фоновая задача", "фоновые задачи", "фоновых задач"),
+                    flashagent_tui::text::plural(running, "background task", "background tasks"),
                     if running == 1 { "it" } else { "them" }
                 ),
                 4,

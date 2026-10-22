@@ -75,7 +75,7 @@ pub(crate) fn box_row(styled: &str, style: &str, inner_w: usize) -> RenderLine {
 }
 
 fn more_lines(n: usize) -> String {
-    format!("+{}", crate::i18n::plural(n, "more line", "more lines", "ещё строка", "ещё строки", "ещё строк"))
+    format!("+{}", crate::text::plural(n, "more line", "more lines"))
 }
 
 /// `──────── +N more lines ────────`
@@ -216,7 +216,7 @@ pub fn render_directory_card(
             let remaining = raw_entries.len() - display_count;
             lines.push((
                 LineKind::Tool,
-                format!("    {TEXT_MUTED}+{}{RESET}", crate::i18n::plural(remaining, "more entry", "more entries", "ещё запись", "ещё записи", "ещё записей")),
+                format!("    {TEXT_MUTED}+{}{RESET}", crate::text::plural(remaining, "more entry", "more entries")),
             ));
         }
     }
@@ -248,7 +248,7 @@ pub fn render_read_card(
     let header = format!(
         "  {TEXT_MUTED}{}{RESET} {TEXT_BRIGHT}{path}{RESET} {TEXT_MUTED}({}){RESET} {chevron}",
         crate::i18n::tr("Read"),
-        crate::i18n::plural(count, "line", "lines", "строка", "строки", "строк")
+        crate::text::plural(count, "line", "lines")
     );
     lines.push((LineKind::Tool, header));
 
@@ -521,7 +521,7 @@ pub fn render_grep_card(
             let remaining = raw_lines.len() - display_count;
             lines.push((
                 LineKind::Tool,
-                format!("    {TEXT_MUTED}+{}{RESET}", crate::i18n::plural(remaining, "more match", "more matches", "ещё совпадение", "ещё совпадения", "ещё совпадений")),
+                format!("    {TEXT_MUTED}+{}{RESET}", crate::text::plural(remaining, "more match", "more matches")),
             ));
         }
     }

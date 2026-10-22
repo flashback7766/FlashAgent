@@ -116,7 +116,7 @@ pub(crate) fn card_rows(value: &str, width: usize, max_rows: usize) -> Vec<Strin
         rows.truncate(max_rows - 1);
         rows.push(format!(
             "\u{2026} {} {}",
-            flashagent_tui::i18n::plural(hidden, "more character", "more characters", "ещё знак", "ещё знака", "ещё знаков"),
+            flashagent_tui::text::plural(hidden, "more character", "more characters"),
             flashagent_tui::i18n::tr("(not shown; deny if unsure)")
         ));
     }

@@ -678,14 +678,7 @@ impl App {
                                 ("latency", &lat),
                                 (
                                     "tools",
-                                    &flashagent_tui::i18n::plural(
-                                        report.tools.len(),
-                                        "tool",
-                                        "tools",
-                                        "инструмент",
-                                        "инструмента",
-                                        "инструментов",
-                                    ),
+                                    &flashagent_tui::text::plural(report.tools.len(), "tool", "tools"),
                                 ),
                             ],
                         )

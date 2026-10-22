@@ -310,12 +310,12 @@ impl SamplingView {
         lines.push((LineKind::System, pad_row(&format!("{ptr0} {label0} {val0}"))));
 
         let fields = [
-            (1, crate::i18n::tr("Temperature"), &self.temp_buf, "0.00..2.00 (кодинг: 0.60, mtp: 0.30, чат: 0.80, точный: 0.10)"),
-            (2, crate::i18n::tr("Top P"), &self.top_p_buf, "0.00..1.00 (кодинг: 0.95, mtp: 0.90, точный: 0.75)"),
-            (3, crate::i18n::tr("Top K"), &self.top_k_buf, "0..500     (кодинг: 20, mtp: 40, чат: 50, точный: 10)"),
-            (4, crate::i18n::tr("Repeat penalty"), &self.repeat_penalty_buf, "0.00..2.00 (кодинг: 1.00, mtp: 1.02, gemma: 1.08, чат: 1.10)"),
-            (5, crate::i18n::tr("Presence penalty"), &self.presence_penalty_buf, "-2.00..2.00 (чат: 0.10, mtp-чат: 0.05, по умолчанию: 0.00)"),
-            (6, crate::i18n::tr("Min P"), &self.min_p_buf, "0.00..1.00 (mtp-код: 0.05, mtp: 0.03, по умолчанию: 0.00)"),
+            (1, crate::i18n::tr("Temperature"), &self.temp_buf, crate::i18n::tr("0.00..2.00 (coding: 0.60, mtp: 0.30, chat: 0.80, precise: 0.10)")),
+            (2, crate::i18n::tr("Top P"), &self.top_p_buf, crate::i18n::tr("0.00..1.00 (coding: 0.95, mtp: 0.90, precise: 0.75)")),
+            (3, crate::i18n::tr("Top K"), &self.top_k_buf, crate::i18n::tr("0..500     (coding: 20, mtp: 40, chat: 50, precise: 10)")),
+            (4, crate::i18n::tr("Repeat penalty"), &self.repeat_penalty_buf, crate::i18n::tr("0.00..2.00 (coding: 1.00, mtp: 1.02, gemma: 1.08, chat: 1.10)")),
+            (5, crate::i18n::tr("Presence penalty"), &self.presence_penalty_buf, crate::i18n::tr("-2.00..2.00 (chat: 0.10, mtp-chat: 0.05, by default: 0.00)")),
+            (6, crate::i18n::tr("Min P"), &self.min_p_buf, crate::i18n::tr("0.00..1.00 (mtp-code: 0.05, mtp: 0.03, by default: 0.00)")),
             (7, crate::i18n::tr("Max tokens"), &self.max_tokens_buf, crate::i18n::tr("empty = the server's own limit")),
             (8, crate::i18n::tr("Seed"), &self.seed_buf, crate::i18n::tr("empty = the server picks one")),
         ];

@@ -31,7 +31,7 @@
 //! second kind is listed below with the reason, so that a new one has to be
 //! written down and not merely forgotten.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The phrases that are English on purpose.
@@ -328,8 +328,16 @@ fn literals(text: &str) -> Vec<Literal> {
 /// read whole: `push_str("...")` ends in `tr(` as well, and it translates
 /// nothing.
 fn asks_for_a_translation(text: &str, quote_at: usize) -> bool {
+    matches!(call_name(text, quote_at).as_deref(), Some("tr") | Some("tr_fill"))
+}
+
+/// The name of the call a literal stands in.
+///
+/// The name is the word before the open bracket, read whole: `push_str("...")`
+/// ends in `tr(` as well, and it translates nothing.
+fn call_name(text: &str, quote_at: usize) -> Option<String> {
     let before = text[..quote_at].trim_end();
-    let Some(open) = before.strip_suffix('(') else { return false };
+    let open = before.strip_suffix('(')?;
     let name: String = open
         .chars()
         .rev()
@@ -338,7 +346,7 @@ fn asks_for_a_translation(text: &str, quote_at: usize) -> bool {
         .into_iter()
         .rev()
         .collect();
-    name == "tr" || name == "tr_fill"
+    Some(name)
 }
 
 /// The source without its test modules: a phrase in a test never reaches the
@@ -398,9 +406,19 @@ fn char_end(text: &str, quote_at: usize) -> usize {
 /// are not. The answer is where the block ends, so the code after it can be
 /// read again.
 fn block_len(text: &str) -> Option<usize> {
+    bracket_len(text, 0, b'{', b'}')
+}
+
+/// The length of the bracketed run that opens at `open`: the place where the
+/// bracket that closes it stands.
+///
+/// The same counting as the block above, with the brackets of the call: the
+/// ones inside a string, a character or a comment are not counted, so a
+/// bracket in a phrase does not end the call early.
+fn bracket_len(text: &str, open: usize, open_ch: u8, close_ch: u8) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut depth = 0usize;
-    let mut i = 0usize;
+    let mut i = open;
     while i < bytes.len() {
         match bytes[i] {
             b'/' if bytes.get(i + 1) == Some(&b'/') => {
@@ -421,11 +439,11 @@ fn block_len(text: &str) -> Option<usize> {
             b'"' => {
                 i = string_end(text, i);
             }
-            b'{' => {
+            _ if bytes[i] == open_ch => {
                 depth += 1;
                 i += 1;
             }
-            b'}' => {
+            _ if bytes[i] == close_ch => {
                 depth -= 1;
                 i += 1;
                 if depth == 0 {
@@ -588,6 +606,161 @@ fn looks_like_text(phrase: &str, table: &BTreeSet<String>) -> bool {
     first.is_ascii_uppercase() || plain.ends_with(':')
 }
 
+/// The words of every call of `plural` in a source.
+///
+/// The call is read as the source spells it: the strings it names, in the
+/// order they stand. The count is not a word, so only the strings count.
+fn counted_calls(text: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for open in plural_calls(text) {
+        let Some(len) = bracket_len(text, open, b'(', b')') else { continue };
+        out.push(literals(&text[open..len]).into_iter().map(|l| l.text).collect());
+    }
+    out.extend(noun_pairs(text));
+    out
+}
+
+/// The pairs of every counted noun in a source: the `one` and `many` of a
+/// `Noun`, which the menu shows in the singular and the count shows in the
+/// plural.
+fn noun_pairs(text: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("one: \"") {
+        let after = &rest[at + "one: \"".len()..];
+        let end = string_end(after, 0);
+        if end == 0 {
+            break;
+        }
+        let one = after[..end - 1].to_string();
+        let tail = &after[end..];
+        let Some(m_at) = tail.find("many: \"") else {
+            rest = tail;
+            continue;
+        };
+        let m_after = &tail[m_at + "many: \"".len()..];
+        let m_end = string_end(m_after, 0);
+        if m_end == 0 {
+            rest = tail;
+            continue;
+        }
+        let many = m_after[..m_end - 1].to_string();
+        out.push(vec![one, many]);
+        rest = &m_after[m_end..];
+    }
+    out
+}
+
+/// Where every call of `plural` opens.
+///
+/// The name is read whole: `plural` is the call and `plural_word` is not, and
+/// a name inside a string or a comment is not a call either.
+fn plural_calls(text: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+            }
+            b'\'' => {
+                i = char_end(text, i);
+            }
+            b'"' => {
+                i = string_end(text, i);
+            }
+            b'p' if text[i..].starts_with("plural") => {
+                let after = i + "plural".len();
+                let before = text[..i].chars().next_back();
+                let whole = before.is_none_or(|c| !c.is_alphanumeric() && c != '_');
+                // A definition is not a call: `fn plural` declares the helper.
+                let declared = word_before(text, i) == "fn";
+                if whole && !declared && text[after..].starts_with('(') {
+                    out.push(after);
+                }
+                i = after;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// The word that ends where `at` begins, the space before it skipped: the
+/// name in front of it.
+fn word_before(text: &str, at: usize) -> &str {
+    let before = text[..at].trim_end();
+    let start = before
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
+        .last()
+        .map_or(0, |(i, _)| i);
+    &before[start..]
+}
+
+/// The counted words: the pair of English words the code counts, and the three
+/// Russian forms the table holds for that pair.
+///
+/// The code says which words it counts; the table says how Russian writes
+/// them. A pair the table does not hold shows English in the middle of a
+/// Russian screen, and nothing says so: the word is there, it is just in the
+/// wrong language.
+///
+/// So every pair the code asks for is looked up in the table, and the three
+/// forms it must hold are counted. A call that carries the Russian with it
+/// is caught too: the words of the interface live in the table, not in the
+/// code.
+#[test]
+fn every_pair_the_code_counts_is_in_the_table_with_three_forms() {
+    let table: BTreeMap<String, String> = pairs().into_iter().collect();
+    let mut gaps: Vec<String> = Vec::new();
+    for path in sources() {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        if name == "i18n.rs" || name == "untranslated.rs" {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        // The tests are not the interface.
+        let body = without_tests(&text);
+        for words in counted_calls(&body) {
+            if words.iter().any(|w| !w.is_ascii()) {
+                gaps.push(format!("{name}: the call of plural carries the Russian with it: {words:?}"));
+                continue;
+            }
+            if words.len() != 2 {
+                // A call whose words are variables carries no Russian with it:
+                // the words come from the table, and the pairs of those are
+                // checked where they are written down.
+                continue;
+            }
+            let key = format!("plural: {}/{}", words[0], words[1]);
+            match table.get(&key) {
+                Some(ru) => {
+                    let forms: Vec<&str> = ru.split('|').collect();
+                    if forms.len() != 3 || forms.iter().any(|f| f.trim().is_empty()) {
+                        gaps.push(format!("{name}: {key:?} holds {} forms, not three", forms.len()));
+                    }
+                }
+                None => gaps.push(format!("{name}: {key:?} is not in the table")),
+            }
+        }
+    }
+    gaps.sort();
+    gaps.dedup();
+    assert!(gaps.is_empty(), "these counted words have no Russian forms:\n{}", gaps.join("\n"));
+}
+
 #[test]
 fn every_phrase_the_interface_shows_is_translated() {
     let table = table();
@@ -738,3 +911,5 @@ fn the_allowlist_is_not_lying() {
     }
     assert!(stale.is_empty(), "these are on the list and are nowhere: {stale:#?}");
 }
+
+

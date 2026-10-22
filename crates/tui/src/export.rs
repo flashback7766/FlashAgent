@@ -30,14 +30,7 @@ pub(crate) fn conversation_markdown(history: &[ChatMessage], session_id: &str, m
                     md.push_str("\n\n");
                 }
                 if !m.images.is_empty() {
-                    let images = flashagent_tui::i18n::plural(
-                        m.images.len(),
-                        "image",
-                        "images",
-                        "картинка",
-                        "картинки",
-                        "картинок",
-                    );
+                    let images = flashagent_tui::text::plural(m.images.len(), "image", "images");
                     md.push_str(&format!("*[{images} attached]*\n\n"));
                 }
                 md.push_str("## FlashAgent\n\n");

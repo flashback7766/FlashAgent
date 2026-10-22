@@ -249,11 +249,7 @@ impl SettingsView {
 // one of the two reasons was wrong about the other, and the setting it
 // describes now does exactly what it says.
 (crate::i18n::tr("Network retries"), {
-                let n = crate::i18n::count(
-                    self.config.network_retries as u64,
-                    ("retry", "retries"),
-                    ("повтор", "повтора", "повторов"),
-                );
+                let n = crate::text::plural(self.config.network_retries, "retry", "retries");
                 match self.config.network_retries {
                     0 => crate::i18n::tr("None · a rate limit is reported instead of waited out").into(),
                     _ => crate::i18n::tr("{n} · before anything is generated, so never twice").replace("{n}", &n),
@@ -275,7 +271,7 @@ impl SettingsView {
         SettingsTab::Goal => vec![
             (crate::i18n::tr("Step limit"), match self.config.goal_max_steps {
                 None | Some(0) => crate::i18n::tr("Unlimited").to_string(),
-                Some(n) => crate::i18n::count(n as u64, ("step", "steps"), ("шаг", "шага", "шагов")),
+                Some(n) => crate::text::plural(n as usize, "step", "steps"),
             }),
             (crate::i18n::tr("Time limit"), goal_minutes_label(self.config.goal_max_minutes)),
             (crate::i18n::tr("Token limit"), goal_tokens_label(self.config.goal_max_output_tokens)),
@@ -305,7 +301,7 @@ impl SettingsView {
                 if off == 0 {
                     crate::i18n::tr("Every tool is on").into()
                 } else {
-                    crate::i18n::tr("{} switched off").replace("{}", &crate::i18n::count(off as u64, ("tool", "tools"), ("инструмент", "инструмента", "инструментов")))
+                    crate::i18n::tr("{} switched off").replace("{}", &crate::text::plural(off, "tool", "tools"))
                 }
             }),
             (crate::i18n::tr("MCP servers"), crate::i18n::tr("Configured servers and the marketplace").into()),
