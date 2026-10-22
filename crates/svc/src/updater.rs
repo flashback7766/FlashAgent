@@ -1,5 +1,7 @@
 //! Self-updater: checks GitHub releases on the chosen channel, downloads the
-//! platform binary, verifies it and replaces the executable in place.
+//! platform binary, verifies its SHA-256 against the release's `SHA256SUMS`
+//! manifest and replaces the executable in place. Releases carry no
+//! signatures: the checksum is the only integrity check there is.
 
 use std::path::{Path, PathBuf};
 use serde::Deserialize;
@@ -33,7 +35,8 @@ pub enum UpdateStatus {
         is_downgrade: bool,
         asset_name: String,
         download_url: String,
-        /// `SHA256SUMS` of the same release, when published.
+        /// `SHA256SUMS` of the same release. `None` means the download cannot
+        /// be verified, so applying it is refused.
         checksums_url: Option<String>,
     },
 }
@@ -310,26 +313,26 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// The asset's checksum from the release's manifest, or `None` for a release
-/// older than the manifest. A manifest that lacks the asset is a hard failure.
-async fn published_checksum(client: &reqwest::Client, checksums_url: Option<&str>, asset_name: &str) -> anyhow::Result<Option<String>> {
+/// The asset's checksum from the release's manifest. A download from the
+/// network is never installed unchecked, so a release that publishes no
+/// `SHA256SUMS` is refused rather than accepted silently; a manifest that
+/// lacks the asset is a hard failure too.
+async fn published_checksum(client: &reqwest::Client, checksums_url: Option<&str>, asset_name: &str) -> anyhow::Result<String> {
     let Some(url) = checksums_url else {
-        return Ok(None);
+        anyhow::bail!(
+            "{asset_name} cannot be verified: this release has no {CHECKSUMS_ASSET} asset, and installing an unchecked download is refused"
+        );
     };
     let resp = client.get(url).send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("could not fetch {CHECKSUMS_ASSET}: HTTP {}", resp.status());
     }
     let manifest = resp.text().await?;
-    let expected = expected_checksum(&manifest, asset_name)
-        .ok_or_else(|| anyhow::anyhow!("{asset_name} is not listed in {CHECKSUMS_ASSET}"))?;
-    Ok(Some(expected))
+    expected_checksum(&manifest, asset_name)
+        .ok_or_else(|| anyhow::anyhow!("{asset_name} is not listed in {CHECKSUMS_ASSET}"))
 }
 
-fn check_checksum(asset_name: &str, payload: &[u8], expected: Option<&str>) -> anyhow::Result<()> {
-    let Some(expected) = expected else {
-        return Ok(());
-    };
+fn check_checksum(asset_name: &str, payload: &[u8], expected: &str) -> anyhow::Result<()> {
     let actual = sha256_hex(payload);
     if actual != expected {
         anyhow::bail!("checksum mismatch for {asset_name}: expected {expected}, got {actual}");
@@ -389,9 +392,10 @@ fn resolve_install_target() -> anyhow::Result<PathBuf> {
     Ok(target)
 }
 
-/// On Windows a replaced binary is parked beside the new one while it still
-/// runs; nothing removed it, so every update left a full copy behind and
-/// uninstall found the folder not empty. Removed at the next start.
+/// A replaced binary is parked beside the new one while it still runs (on
+/// Windows) and kept as a rollback copy (on unix); nothing removed it, so
+/// every update left a full copy behind and uninstall found the folder not
+/// empty. Removed at the next start.
 pub fn remove_stale_backups(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -411,51 +415,100 @@ pub fn remove_stale_backups_beside_exe() {
 }
 
 fn atomic_replace_executable(target: &Path, new_binary_bytes: &[u8]) -> anyhow::Result<()> {
+    replace_executable(target, new_binary_bytes, place_binary)
+}
+
+/// Writes the download next to its destination and only then puts it in place.
+/// The current binary is parked first on every platform, so a failed install
+/// can put it back; a temp file never survives the attempt.
+fn replace_executable(
+    target: &Path,
+    new_binary_bytes: &[u8],
+    place: impl FnOnce(&Path, &Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     let temp_file = parent.join(format!(".flashagent-update.{}.tmp", std::process::id()));
-
-    std::fs::write(&temp_file, new_binary_bytes)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp_file, std::fs::Permissions::from_mode(0o755))?;
-    }
-
-    // A running .exe cannot be overwritten, but can be renamed.
-    #[cfg(windows)]
     let old_backup = parent.join(format!(".flashagent-old.{}.bak", std::process::id()));
-    #[cfg(windows)]
-    {
-        if target.exists() {
-            let _ = std::fs::remove_file(&old_backup);
-            let _ = std::fs::rename(target, &old_backup);
-        }
+
+    let result = install_executable(target, &temp_file, &old_backup, new_binary_bytes, place);
+    if result.is_err() {
+        // A half-written update must not stay behind for the next start to
+        // mistake for something worth keeping.
+        let _ = std::fs::remove_file(&temp_file);
+    }
+    result
+}
+
+fn install_executable(
+    target: &Path,
+    temp_file: &Path,
+    old_backup: &Path,
+    new_binary_bytes: &[u8],
+    place: impl FnOnce(&Path, &Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    write_synced(temp_file, new_binary_bytes)?;
+
+    // A running .exe cannot be overwritten, but can be renamed; on unix the
+    // same move keeps the current build available for a rollback.
+    let parked = target.is_file();
+    if parked {
+        let _ = std::fs::remove_file(old_backup);
+        std::fs::rename(target, old_backup).map_err(|e| {
+            anyhow::anyhow!("could not move the current binary {} aside: {e}", target.display())
+        })?;
     }
 
-    if let Err(rename_err) = std::fs::rename(&temp_file, target) {
-        // A rename across devices fails where a copy does not.
-        let copied = std::fs::copy(&temp_file, target);
-        let _ = std::fs::remove_file(&temp_file);
-        if let Err(copy_err) = copied {
-            // Something at the path is usually the old build, not proof of success.
-            // Put a moved-away binary back.
-            #[cfg(windows)]
-            {
-                if !target.exists() {
-                    let _ = std::fs::rename(&old_backup, target);
+    match place(temp_file, target) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if parked {
+                // A failed copy can leave part of the new build at the path.
+                let _ = std::fs::remove_file(target);
+                if let Err(restore) = std::fs::rename(old_backup, target) {
+                    anyhow::bail!(
+                        "{e}; the old binary at {} could not be put back: {restore}",
+                        target.display()
+                    );
                 }
+            } else {
+                let _ = std::fs::remove_file(target);
             }
-            anyhow::bail!("could not replace {}: {rename_err}; copying failed too: {copy_err}", target.display());
+            Err(e)
         }
+    }
+}
+
+fn place_binary(temp_file: &Path, target: &Path) -> anyhow::Result<()> {
+    if let Err(rename_err) = std::fs::rename(temp_file, target) {
+        // A rename across devices fails where a copy does not.
+        std::fs::copy(temp_file, target).map_err(|copy_err| {
+            anyhow::anyhow!("could not replace {}: {rename_err}; copying failed too: {copy_err}", target.display())
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755));
+            std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))?;
         }
+        let _ = std::fs::remove_file(temp_file);
     }
-
     Ok(())
+}
+
+/// `sync_all` before the rename: otherwise a power cut can install a file
+/// whose contents never left the page cache, and there would be no old binary
+/// left to fall back to.
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+    }
+    // The mode is set before the sync, so a power cut cannot leave the new
+    // build behind without the right to run it.
+    file.sync_all()
 }
 
 /// Shown for a background update only when the user asks to watch it
@@ -472,7 +525,8 @@ pub enum UpdateProgress {
 /// more than the download.
 const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
 
-/// Downloads, verifies against the release checksums, and installs.
+/// Downloads, verifies against the release's mandatory SHA-256 manifest, and
+/// installs.
 pub async fn download_and_apply(download_url: &str, asset_name: &str, checksums_url: Option<&str>) -> anyhow::Result<PathBuf> {
     download_and_apply_with_progress(download_url, asset_name, checksums_url, |_| {}).await
 }
@@ -499,7 +553,7 @@ pub async fn download_and_apply_with_progress(
     on_progress(UpdateProgress::Verifying);
     let expected = published_checksum(&client, checksums_url, asset_name).await?;
     let asset = asset_name.to_string();
-    let payload = off_runtime(move || check_checksum(&asset, &payload, expected.as_deref()).map(|()| payload)).await?;
+    let payload = off_runtime(move || check_checksum(&asset, &payload, &expected).map(|()| payload)).await?;
 
     on_progress(UpdateProgress::Installing);
     let asset = asset_name.to_string();
@@ -802,9 +856,54 @@ mod tests {
         assert_eq!(expected_checksum(stable, "flashagent-v1.0.0+b400-linux-x86_64.tar.gz").as_deref(), Some("beef"));
         assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-        assert!(check_checksum("a", b"abc", Some(abc)).is_ok());
-        assert!(check_checksum("a", b"abd", Some(abc)).is_err(), "a changed download passed");
-        assert!(check_checksum("a", b"anything", None).is_ok(), "a release without a manifest");
+        assert!(check_checksum("a", b"abc", abc).is_ok());
+        assert!(check_checksum("a", b"abd", abc).is_err(), "a changed download passed");
+    }
+
+    #[tokio::test]
+    async fn a_release_without_a_checksum_manifest_is_refused() {
+        let client = reqwest::Client::new();
+        let err = published_checksum(&client, None, "flashagent")
+            .await
+            .expect_err("a download with no checksum must not be installed")
+            .to_string();
+        assert!(err.contains(CHECKSUMS_ASSET), "{err}");
+        assert!(err.contains("refused"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_manifest_that_does_not_list_the_asset_is_refused() {
+        let url = serve_once("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", b"deadbeef  another-file\n").await;
+        let err = published_checksum(&reqwest::Client::new(), Some(&url), "flashagent")
+            .await
+            .expect_err("an unlisted asset has no checksum")
+            .to_string();
+        assert!(err.contains("not listed"), "{err}");
+    }
+
+    #[test]
+    fn a_failed_replacement_puts_the_old_binary_back_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("flashagent");
+        std::fs::write(&target, b"old build").unwrap();
+
+        let result = replace_executable(&target, b"new build", |_, _| anyhow::bail!("injected install failure"));
+
+        assert!(result.is_err(), "a failed install must not be reported as done");
+        assert_eq!(std::fs::read(&target).unwrap(), b"old build", "the rollback must restore the previous binary");
+        let temp = dir.path().join(format!(".flashagent-update.{}.tmp", std::process::id()));
+        assert!(!temp.exists(), "the temp file must not survive a failed install");
+    }
+
+    #[test]
+    fn an_untagged_build_does_not_pin_a_past_release() {
+        // A hardcoded fallback made every build without git report that release
+        // (b286 once); the "what's new" screen then named a build never run.
+        for line in include_str!("../build.rs").lines() {
+            if let Some((_, value)) = line.split_once("FLASHAGENT_VERSION=") {
+                assert!(value.starts_with('{'), "build.rs pins a version instead of leaving it to CARGO_PKG_VERSION: {line}");
+            }
+        }
     }
 
     #[test]
@@ -828,6 +927,9 @@ mod tests {
 
         let read_back = std::fs::read(&target).unwrap();
         assert_eq!(read_back, b"version-new");
+
+        let old_backup = dir.join(format!(".flashagent-old.{}.bak", std::process::id()));
+        assert_eq!(std::fs::read(&old_backup).unwrap(), b"version-old", "the previous build is kept for a rollback");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
