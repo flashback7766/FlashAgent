@@ -1,5 +1,20 @@
 # Changelog
 
+## b601 — a checkout the same on every system, and suggestions that keep the written shape
+
+- **The repository pins its line endings.** No `.gitattributes` stood in the
+  way of a checkout deciding for itself, and a Windows one kept CRLF in the
+  sources; the tests that read the sources came apart on it. The endings are
+  pinned here, for every platform.
+- **A suggested name keeps the shape the path was written with.** The
+  near-miss error put the corrected name back through the platform's join, so
+  a model that wrote `src/config.rs` got `src\config.rs` on Windows. The
+  written separators win, and the correction stays a paste.
+- **The path-line tests say where they apply.** The `.bashrc` PATH line is
+  read the POSIX way, and on Windows that reading stops at the drive colon;
+  the two tests of it run where it applies, and the Windows PATH entry is
+  edited in the user environment as it already was.
+
 ## b600 — the prompt becomes a contract, the tokens get one counter, and a hundred quiet failures start saying so
 
 This build carries everything since b570. The three builds between shipped

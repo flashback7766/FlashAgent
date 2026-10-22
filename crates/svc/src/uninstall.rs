@@ -601,6 +601,11 @@ mod tests {
         assert!(data_parts(&home.path().join("missing")).is_empty());
     }
 
+    // The `.bashrc` PATH line and the `.local/bin` layout are POSIX only: the
+    // line's folders are read as a colon list, and on Windows that reading
+    // stops at the drive colon. The Windows PATH entry lives in the user
+    // environment and is edited apart.
+    #[cfg(unix)]
     #[test]
     fn an_uninstall_removes_the_program_its_path_line_and_only_the_chosen_data() {
         let home = home_with_everything();
@@ -624,6 +629,7 @@ mod tests {
         assert!(data.join("something-new.txt").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_path_line_stays_while_its_folder_still_holds_other_programs() {
         let home = home_with_everything();
