@@ -75,11 +75,28 @@ impl Outcome {
     }
 }
 
+/// What a scenario needs to run.
+///
+/// The delegation scenarios are told about subagents and offered the tools to
+/// spawn one; the rest are told about tools and offered the probe set. A
+/// model asked about a tool it was never offered is being asked a question it
+/// cannot answer, so the two kinds are kept apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScenarioKind {
+    /// A tool call of the model's own.
+    Tools,
+    /// Work handed over to a subagent.
+    Delegation,
+}
+
 pub struct Scenario {
     /// Stable, for machine-readable output.
     pub key: &'static str,
     pub title: &'static str,
+    /// What the scenario proves, in a sentence: a list of names says nothing
+    /// about what was checked.
     pub matters: &'static str,
+    pub kind: ScenarioKind,
 }
 
 pub fn scenarios() -> Vec<Scenario> {
@@ -88,103 +105,134 @@ pub fn scenarios() -> Vec<Scenario> {
             key: "single_call",
             title: "makes a tool call at all",
             matters: "without this the agent can only talk about doing the work",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "arguments",
             title: "gets the arguments right",
             matters: "wrong arguments edit the wrong file or run the wrong command",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "no_spurious_call",
             title: "answers plainly when no tool is needed",
             matters: "a model that always calls something loops instead of replying",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "uses_result",
             title: "uses a tool result instead of calling again",
             matters: "otherwise every turn repeats the same call until the budget ends it",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "second_step",
             title: "moves on to the next tool",
             matters: "multi-step work is the whole point of an agent",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "exact_content",
             title: "keeps content exact through JSON",
             matters: "quotes and newlines mangled in transit corrupt the file being written",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "after_error",
             title: "recovers from a failed tool call",
             matters: "tools fail constantly; a model that cannot adapt stalls on the first one",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "two_calls",
             title: "asks for two files in one turn",
             matters: "one call per turn turns a ten-file job into ten round trips",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "no_invented_calls",
             title: "calls only the tools it was given",
             matters: "a name it was never offered is a call the loop cannot run",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "long_stream",
             title: "keeps a long answer coming to the end",
             matters: "an answer that stops halfway leaves the transcript wrong and the work undone",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "ten_steps",
             title: "stays on the rails over many steps",
             matters: "real work is a long chain; drift shows up in step ten, not step two",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "sees_picture",
             title: "looks at a picture",
             matters: "a model that cannot see cannot review a screenshot or a design",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "chain_survives_failure",
             title: "keeps a long job going through a failure",
             matters: "one bad read is routine; a model that stops the whole job over it never finishes anything",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "reads_before_writing",
             title: "reads a file before changing it",
             matters: "writing blind costs the rest of the file, which is the whole file",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "remembers_the_start",
             title: "still knows a fact from the start",
             matters: "this is what compaction has to keep, or every trim costs a re-read",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "delegates_wide_work",
             title: "hands over a wide job, whole",
             matters: "a child cannot ask what was meant, so a topic comes back as a summary or as nothing",
+            kind: ScenarioKind::Delegation,
         },
         Scenario {
             key: "does_not_duplicate_a_search",
             title: "does not run a search it handed over",
             matters: "two answers to pay for and no way to tell which one is right",
+            kind: ScenarioKind::Delegation,
         },
         Scenario {
             key: "never_invents_a_pending_answer",
             title: "invents nothing while an agent is still running",
             matters: "the one failure a user cannot tell from a real one until they open the file",
+            kind: ScenarioKind::Delegation,
         },
         Scenario {
             key: "checks_a_report_before_acting",
             title: "reads the file a report named, then acts",
             matters: "a report is a claim, and acting on it unchecked is a wrong reading made permanent",
+            kind: ScenarioKind::Delegation,
         },
         Scenario {
             key: "does_not_delegate_a_lookup",
             title: "does not delegate one file it could open itself",
             matters: "the other half of the same rule: delegation has a cost and a point",
+            kind: ScenarioKind::Delegation,
         },
     ]
+}
+
+/// The scenario by its key, if there is one.
+fn scenario(key: &str) -> Option<Scenario> {
+    scenarios().into_iter().find(|s| s.key == key)
+}
+
+/// Whether the scenario hands work to a subagent: those run with another
+/// prompt and another table of tools.
+fn is_delegation_scenario(key: &str) -> bool {
+    scenario(key).is_some_and(|s| s.kind == ScenarioKind::Delegation)
 }
 
 fn probe_tools() -> Vec<ToolSpec> {
@@ -482,18 +530,23 @@ impl CheckReport {
         // By key, not by position: a report narrowed with `--scenario` holds a
         // subset, and zipping it against the full list titled every line with
         // whatever happened to come first.
-        let titles: Vec<(String, String)> = scenarios()
-            .iter()
-            .map(|s| (s.key.to_string(), s.title.to_string()))
-            .collect();
+        let described: Vec<(String, String, &'static str)> =
+            scenarios().iter().map(|s| (s.key.to_string(), s.title.to_string(), s.matters)).collect();
         for (key, outcome) in &self.results {
-            let title = titles.iter().find(|(k, _)| k == key).map(|(_, t)| t.as_str()).unwrap_or(key);
+            let (title, matters) = described
+                .iter()
+                .find(|(k, _, _)| k == key)
+                .map(|(_, t, m)| (t.as_str(), Some(*m)))
+                .unwrap_or((key.as_str(), None));
             let mark = match outcome {
                 Outcome::Pass { .. } => "ok  ",
                 Outcome::Unavailable { .. } => "--  ",
                 _ => "FAIL",
             };
             out.push(format!("  {mark}  {:<width$} {}", title, outcome.detail(), width = title_width));
+            if let Some(matters) = matters {
+                out.push(format!("        what it proves: {matters}"));
+            }
         }
         let (passed, total) = self.score();
         out.push(format!(
@@ -541,6 +594,9 @@ pub fn only(&self, keys: &[String]) -> CheckReport {
                 "key": key,
                 "pass": outcome.is_pass(),
                 "detail": outcome.detail(),
+                // What the scenario proves, so the machine-readable copy says
+                // what was checked and not only how it came out.
+                "matters": scenario(key).map(|s| s.matters),
                 "seconds": outcome.secs(),
                 "tokens": outcome.tokens(),
             })).collect::<Vec<_>>(),
@@ -1158,6 +1214,42 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
 CheckReport { model: model.to_string(), results }
 }
 
+/// Runs the scenarios that were asked for.
+///
+/// The delegation scenarios need another prompt and another table of tools, so
+/// they are run apart: asking for one of them runs it, and a report that says
+/// nothing about a scenario is a scenario that was not run.
+///
+/// `keys` empty means every scenario. The scenarios are run as they are and
+/// the report is narrowed afterwards, so a check that names no scenario costs
+/// the same as one that names several: the work is the model's, not ours.
+pub async fn check_scenarios(
+    llm: &dyn LlmSource,
+    model: &str,
+    timeout: Duration,
+    keys: &[String],
+) -> CheckReport {
+    let wants_delegation = keys.is_empty() || keys.iter().any(|k| is_delegation_scenario(k));
+    let wants_tools = keys.is_empty() || keys.iter().any(|k| !is_delegation_scenario(k));
+    let mut results = Vec::new();
+    if wants_tools {
+        results.extend(check_model(llm, model, timeout).await.results);
+    }
+    if wants_delegation {
+        results.extend(check_delegation_model(llm, model, timeout).await.results);
+    }
+    // In the order the scenarios are listed, so the report reads the same way
+    // whatever was asked for.
+    let order: Vec<&str> = scenarios().iter().map(|s| s.key).collect();
+    results.sort_by_key(|(key, _)| order.iter().position(|k| *k == key).unwrap_or(usize::MAX));
+    let report = CheckReport { model: model.to_string(), results };
+    if keys.is_empty() {
+        report
+    } else {
+        report.only(keys)
+    }
+}
+
 /// Delegation scenarios use a different system prompt (with subagents enabled)
 /// and different tools (spawn_agent, send_message). They are run separately so
 /// the scripted model can be given the right responses for each conversation.
@@ -1605,7 +1697,8 @@ mod tests {
         let lines = report.lines();
         assert!(lines[0].contains("--") && lines[0].contains("not tested: backend returned 429"), "{}", lines[0]);
         assert!(!lines[0].contains("retry later"), "one line of the error is enough: {}", lines[0]);
-        assert!(lines[1].contains("ok"), "{}", lines[1]);
+        assert!(lines[1].contains("what it proves"), "{}", lines[1]);
+        assert!(lines[2].contains("ok"), "{}", lines[2]);
         assert_eq!(report.to_json()["untested"], 7);
 
         // A model that answered nothing in time did fail.
@@ -1731,6 +1824,40 @@ mod tests {
         assert!(!report.needed_recovery());
     }
 
+    /// Asking for a delegation scenario runs it: the scenarios are listed and
+    /// a CLI accepts them by name, so a request for one that is never run is a
+    /// request that is quietly dropped.
+    #[test]
+    fn asking_for_a_delegation_scenario_runs_it() {
+        let llm = Scripted::new(perfect_delegating());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let report = rt.block_on(check_scenarios(&llm, "scripted-delegation", Duration::from_secs(5), &["delegates_wide_work".to_string()]));
+        assert_eq!(report.results.len(), 1, "the scenario that was asked for is the one that ran: {:?}", report.results);
+        assert_eq!(report.results[0].0, "delegates_wide_work");
+        assert!(report.results[0].1.is_pass(), "{:?}", report.results[0].1);
+        assert_eq!(report.score(), (1, 1));
+        // And the plain scenarios are not run for it: the other kind costs
+        // another set of requests.
+        assert!(!report.results.iter().any(|(key, _)| key == "single_call"));
+    }
+
+    /// Every scenario there is runs when none is named, the delegation ones
+    /// among them: a report that leaves five out is not the whole check.
+    #[test]
+    fn the_whole_set_runs_the_delegation_scenarios_too() {
+        // A server that answers nothing: every scenario is still run, and each
+        // one of them is in the report. A report that leaves five out is not
+        // the whole check.
+        let llm = Scripted::new(Vec::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let report = rt.block_on(check_scenarios(&llm, "silent", Duration::from_secs(5), &[]));
+        assert_eq!(report.results.len(), scenarios().len(), "not every scenario ran: {:?}", report.results);
+        let keys: Vec<&str> = report.results.iter().map(|(key, _)| key.as_str()).collect();
+        for delegation in scenarios().iter().filter(|s| s.kind == ScenarioKind::Delegation) {
+            assert!(keys.contains(&delegation.key), "{} did not run", delegation.key);
+        }
+    }
+
     #[test]
     fn a_delegating_model_that_does_everything_right_scores_full_marks() {
         let llm = Scripted::new(perfect_delegating());
@@ -1852,12 +1979,19 @@ mod tests {
     fn the_report_renders_for_humans_and_for_a_table() {
         let report = run(perfect());
         let lines = report.lines();
-        // check_model runs only the non-delegation scenarios (all()), plus one summary line.
-        assert_eq!(lines.len(), all() + 1);
+        // check_model runs only the non-delegation scenarios (all()), each with
+        // the line saying what the scenario proves, plus one summary line.
+        assert_eq!(lines.len(), all() * 2 + 1);
+        assert!(lines[1].contains("what it proves: without this the agent can only talk about doing the work"), "{}", lines[1]);
         let full = format!("{}/{}", all(), all());
         assert!(lines.last().unwrap().contains(&full), "{}", lines.last().unwrap());
         assert!(report.markdown_row().starts_with(&format!("| `scripted` | {full} |")), "{}", report.markdown_row());
         assert_eq!(report.to_json()["passed"], all());
         assert_eq!(report.to_json()["scenarios"].as_array().unwrap().len(), all());
+        assert!(
+            report.to_json()["scenarios"][0]["matters"].as_str().unwrap_or_default().contains("talk about doing the work"),
+            "the machine-readable copy says what the scenario proves: {}",
+            report.to_json()
+        );
     }
 }

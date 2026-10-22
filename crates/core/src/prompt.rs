@@ -95,7 +95,8 @@ impl SystemPromptConfig {
 /// and "do not explain the error" is what got qwen3 1.7B to retry a call.
 /// Argument types are not mentioned: asked for numbers as numbers, llama3.2
 /// quoted them, and a quoted number is converted anyway
-/// (`llm::coerce_to_schema`). gemma4:e2b made one call where two were asked
+/// (`flashagent_llm::repair::coerced_args`, which the agent loop calls on every
+/// call before it runs). gemma4:e2b made one call where two were asked
 /// for until the several-calls rule said "one call each".
 pub const TOOL_CALL_RULES: &str = "CALLING TOOLS:\n\
      - Call tools by their listed names, with the argument names their schema gives.\n\
@@ -265,7 +266,8 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
 
     sections.push(
         "PERMISSIONS:\n\
-         - Four modes: Planning reads only; Manual asks before anything that is not a read; Accept Edits runs file changes and asks for the shell; Accept All runs both. Reads inside the project and the web tools always run.\n\
+         - Four modes: Planning reads only; Manual asks before anything that is not a read; Accept Edits runs file changes and asks for the shell; Accept All runs file changes and shell commands too, with the one exception below. Reads inside the project and the web tools always run.\n\
+         - The exception: a few commands are asked about even in Accept All — the ones that delete, overwrite or publish (rm -rf, git push --force, dd, sudo and the like). That card is answered by the owner, not by you: say what the command does and wait. An \"Always\" the owner gave for that very command is honoured in Manual and Accept Edits; in Accept All it does not silence the card. In Planning such a command is refused, and so is one that comes during an autonomous run: nobody is there to answer.\n\
          - A call is judged by what it would do, not by what you mean by it. The mode that a call lands in is decided by the tool, before anything you write about it.\n\
          - Outside the project the rules change: reading or writing there asks in Manual and Accept Edits, is allowed in Accept All, and is refused in Planning and during a run. A local network address asks in every mode and is refused in some. Either way the way through is another route, not the same call again."
             .to_string(),
@@ -555,6 +557,26 @@ mod tests {
         assert!(prompt.ends_with("# Memory (automatically loaded)\nuse tabs"), "{prompt}");
         let without = build_system_prompt(&SystemPromptConfig::new().with_memory("   "));
         assert!(!without.contains("automatically loaded"), "{without}");
+    }
+
+    #[test]
+    fn the_prompt_does_not_promise_that_accept_all_asks_nothing() {
+        // A model that reads "Accept All runs both" waits for a command to pass
+        // silently — and is then asked a question it cannot answer.
+        let prompt = build_system_prompt(&SystemPromptConfig::new());
+        assert!(!prompt.contains("Accept All runs both"), "the blacklist asks even in Accept All: {prompt}");
+        assert!(prompt.contains("asked about even in Accept All"), "the exception is stated: {prompt}");
+        assert!(prompt.contains("Accept All"), "the mode is still described: {prompt}");
+    }
+
+    #[test]
+    fn the_prompt_names_no_function_that_does_not_exist() {
+        // The coercion is done by the loop, and a note that names a function
+        // that is not there sends the reader looking for it.
+        let source = include_str!("prompt.rs");
+        let missing = ["llm", "coerce_to_schema"].join("::");
+        assert!(!source.contains(&missing), "the note names a function that does not exist");
+        assert!(source.contains("coerced_args"), "the note names the one that does");
     }
 
     #[test]
