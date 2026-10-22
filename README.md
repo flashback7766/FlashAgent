@@ -60,7 +60,7 @@
 </tr>
 </table>
 
-<sub>Every recording on this page is a real session against a small local model — Gemma 4 E2B (Q4_K_XL) in LM Studio on a laptop — so the thoughts, timings and token counts are the ones it produced. Playback is sped up; nothing else is edited.</sub>
+<sub>Every recording on this page is a real session against MiniMax M3.1 Flash through OpenRouter — so the thoughts, timings and token counts are the ones it produced. Playback is sped up; nothing else is edited.</sub>
 
 ---
 

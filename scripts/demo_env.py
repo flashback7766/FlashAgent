@@ -59,6 +59,7 @@ class Demo:
             "setup_completed": True,
             "permission_mode": "AcceptEdits",
             "thinking_effort": "auto",
+            "max_tokens": int(os.environ.get("FLASHAGENT_DEMO_MAX_TOKENS", "4096")),
             "auto_check_updates": False,
             "last_seen_version": os.environ.get("FLASHAGENT_VERSION", "b425"),
             "trusted_directories": [],
