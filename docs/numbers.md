@@ -31,7 +31,7 @@ model's own tokenizer table. Loading it costs about 47 MB of resident
 memory, measured on its own:
 
 ```
-до: 3.4 МБ · после: 50.6 МБ · токенов: 5001
+before: 3.4 MB · after: 50.6 MB · tokens: 5001
 ```
 
 That table is the price of counting the way the model counts. The app is
