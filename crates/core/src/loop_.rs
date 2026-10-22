@@ -434,7 +434,7 @@ impl AgentLoop {
         let mut promise_nudges: usize = 0;
         let mut error_nudges: usize = 0;
         let mut named_nudges: usize = 0;
-let mut report_nudges: usize = 0;
+        let mut report_nudges: usize = 0;
         // The last batch had a call that failed on its own terms: a wrong path,
         // name or argument, which a corrected call can fix.
         let mut call_failed = false;
@@ -471,10 +471,10 @@ let mut report_nudges: usize = 0;
                         wrapped_up = true;
                         grace = 1;
                         history.push(ChatMessage::user(format!(
-                            "[The step budget of {limit} is spent. This is your last step: do not call \
-                             another tool. Say what you found, what you changed and what you could not \
-                             confirm, and finish your answer now. This is a notice from the app, not \
-                             from the user.]"
+                            "{APP_NOTICE_OPENING} the step budget of {limit} is spent. This is your \
+                             last step: do not call another tool. Say what you found, what you \
+                             changed and what you could not confirm, and finish your answer now. \
+                             {APP_NOTICE_CLOSING}"
                         )));
                         transient.clear();
                         events(LoopEvent::SteeringInjected(WRAP_UP_NOTE.to_string()));
@@ -689,9 +689,15 @@ let mut report_nudges: usize = 0;
 
             // A nameless call cannot be dispatched and would poison the history.
             let mut calls: Vec<ToolCall> = indexed_calls.into_iter().map(|(_, call)| call).filter(|c| !c.name.trim().is_empty()).collect();
-            // Native calls win: some servers also echo the markup in the text.
-            if calls.is_empty() {
-                calls = text_calls;
+            // A server that sends a call natively and also writes the markup in
+            // its text has sent one call, not two: the same one is dropped. A
+            // call that is only in the text is a different call and is run —
+            // throwing it away loses work the model asked for and never hears
+            // about.
+            for text_call in text_calls {
+                if !calls.iter().any(|native| same_call(native, &text_call)) {
+                    calls.push(text_call);
+                }
             }
             // Results are matched to calls by id; missing or duplicate ids would break that.
             let mut seen_ids = HashSet::new();
@@ -863,13 +869,14 @@ let mut report_nudges: usize = 0;
             }
 
             // The model keeps working and never makes the call the request named.
-            // Told once, before the next round of calls leaves: a loop of the same
-            // read is what a stuck model does, and it costs a turn every time.
+            // It is told once, and only with the next request: like the other
+            // nudges it is not kept in the history, where it would read as
+            // something the user said. It waits until the calls it made have
+            // come back, so the model has what the named call needs.
             if report_nudges < 1 && !truncated {
                 if let Some(nudge) = unreported_call_nudge(&history, &specs) {
                     report_nudges += 1;
-                    history.push(ChatMessage::user(nudge));
-                    continue;
+                    transient = vec![ChatMessage::user(app_notice(&nudge))];
                 }
             }
 
@@ -1007,6 +1014,32 @@ let mut report_nudges: usize = 0;
 const TOOL_PICTURE_OPENING: &str = "[Image opened by ";
 const TOOL_PICTURE_NOTE: &str = "it is the result of that call, not a new request.]";
 
+/// How a note from the app opens, and the clause every one of them closes
+/// with.
+///
+/// Both halves are needed. The wording in between changes with the numbers in
+/// it — how many steps were spent, how many calls were made — so the text
+/// itself cannot be matched, and a note is the app's own writing, never
+/// something the user typed. A user message that only happens to contain the
+/// closing clause is still the user's message: it did not open like a note.
+///
+/// Public so that the parts of the app outside this crate can write a note
+/// that is told apart from something the user said.
+pub const APP_NOTICE_OPENING: &str = "[FlashAgent notice:";
+pub const APP_NOTICE_CLOSING: &str = "This is a notice from the app, not from the user.]";
+
+/// Whether this text is a note from the app rather than something the user
+/// said.
+pub fn is_app_notice(text: &str) -> bool {
+    text.starts_with(APP_NOTICE_OPENING) && text.contains(APP_NOTICE_CLOSING)
+}
+
+/// A note from the app, framed as one: the model is told who is speaking, so
+/// it does not read the app's own words as a request from the owner.
+pub fn app_notice(text: &str) -> String {
+    format!("{APP_NOTICE_OPENING} {text} {APP_NOTICE_CLOSING}")
+}
+
 /// Steering reaches the model mid-work, and a bare directive reads as the newest
 /// and most urgent thing in the conversation: the model drops what it was doing
 /// and chases it. That is not what was asked. The order matters, but only for
@@ -1036,15 +1069,21 @@ fn steer_as_message(steer: Steer) -> ChatMessage {
 }
 
 /// Something the user said, not the user-role message that carries a tool's
-/// picture, a background task's notice, a queued steering note or a nudge from
-/// the loop: finding "the last prompt" must skip those, or Ctrl+R answers a
-/// picture, a rewind takes back a turn too many, and compaction cuts the running
-/// turn at a directive instead of at the request that started it.
+/// picture, a background task's notice, a queued steering note, a note from
+/// the app itself or a nudge from the loop: finding "the last prompt" must
+/// skip those, or Ctrl+R answers a picture, a rewind takes back a turn too
+/// many, and compaction cuts the running turn at a directive instead of at the
+/// request that started it.
 pub fn is_prompt(msg: &ChatMessage) -> bool {
     let tool_picture = msg.content.starts_with(TOOL_PICTURE_OPENING) && msg.content.contains(TOOL_PICTURE_NOTE);
     let nudge = [STALL_NUDGE, PROMISE_NUDGE, CONTINUE_NUDGE, ERROR_NUDGE].contains(&msg.content.as_str()) || msg.content.starts_with(NAMED_NUDGE_HEAD);
     let steered = msg.content.starts_with(STEER_QUEUE_NOTE);
-    msg.role == Role::User && !tool_picture && !nudge && !steered && !crate::task_notices::is_task_notice(&msg.content)
+    msg.role == Role::User
+        && !tool_picture
+        && !nudge
+        && !steered
+        && !is_app_notice(&msg.content)
+        && !crate::task_notices::is_task_notice(&msg.content)
 }
 
 /// 9 alphanumeric characters (Mistral chat templates insist on it), unique for
@@ -1375,6 +1414,23 @@ fn push_partial_assistant(history: &mut Vec<ChatMessage>, text: String, reasonin
         images: Vec::new(),
         replay: None,
     });
+}
+
+/// Whether two calls are the same call: the same tool, with the same
+/// arguments.
+///
+/// The arguments are compared as they parse, so a server that sends the same
+/// call natively and writes the markup in its text is not run twice over a
+/// space. Arguments that are not JSON at all are compared as written: the tool
+/// will refuse them either way, and there is nothing to tell them apart.
+fn same_call(a: &ToolCall, b: &ToolCall) -> bool {
+    if a.name != b.name {
+        return false;
+    }
+    match (serde_json::from_str::<serde_json::Value>(&a.args_json), serde_json::from_str::<serde_json::Value>(&b.args_json)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a.args_json.trim() == b.args_json.trim(),
+    }
 }
 
 /// A text-embedded call naming an unknown tool goes back into the text: a JSON
@@ -1800,7 +1856,7 @@ mod tests {
                 MockTurn {
                     events: vec![
                         Ok(LlmEvent::ToolCallDelta { index: 0, id: Some("a".into()), name: Some("shell".into()), args_delta: "{}".into() }),
-                        Ok(LlmEvent::Usage(flashagent_llm::Usage { prompt: Some(5000), completion: Some(5000), cached: None, mtp: None, cost: None })),
+                        Ok(LlmEvent::Usage(flashagent_llm::Usage { prompt: Some(5000), completion: Some(5000), cached: None, mtp: None, cost: None, cost_details: None })),
                         Ok(LlmEvent::Done(FinishReason::ToolUse)),
                     ],
                 },
@@ -1888,7 +1944,7 @@ mod tests {
                     completion: Some(completion),
                     cached: None,
                     mtp: None,
-                    cost: None,
+                    cost: None, cost_details: None,
                 })),
                 Ok(LlmEvent::Done(FinishReason::ToolUse)),
             ],
@@ -2104,7 +2160,7 @@ mod tests {
         let cut_off = || MockTurn {
             events: vec![
                 Ok(LlmEvent::ToolCallDelta { index: 0, id: Some("c".into()), name: Some("shell".into()), args_delta: "{\"cmd\":\"l".into() }),
-                Ok(LlmEvent::Usage(flashagent_llm::Usage { prompt: Some(10), completion: Some(600), cached: None, mtp: None, cost: None })),
+                Ok(LlmEvent::Usage(flashagent_llm::Usage { prompt: Some(10), completion: Some(600), cached: None, mtp: None, cost: None, cost_details: None })),
                 Ok(LlmEvent::Done(FinishReason::Length)),
             ],
         };
@@ -2376,6 +2432,103 @@ mod tests {
         let llm = RecordingLlm::new(vec![tool_turn("read_file", "c1"), text_turn("It says 7."), text_turn("unexpected")]);
         let (_, _) = run_loop(&l, &llm, &ScriptedTools::new(vec![]), |_| {});
         assert_eq!(llm.requests.lock().unwrap().len(), 2);
+    }
+
+    /// A note from the app is not something the user said, whatever it says
+    /// and however it is worded.
+    #[test]
+    fn a_note_from_the_app_is_not_something_the_user_said() {
+        let note = app_notice("the step budget of 3 is spent. Say what you found.");
+        assert!(!is_prompt(&ChatMessage::user(&note)), "a note is not a request: {note}");
+        // Both halves are needed: a message that only carries the closing
+        // clause is the user's own.
+        assert!(is_prompt(&ChatMessage::user("please stop. This is a notice from the app, not from the user.")));
+        assert!(is_prompt(&ChatMessage::user("[FlashAgent notice: is that a question?")));
+    }
+
+    /// The reminder about the call the request named is a nudge like the
+    /// others: it goes out with the next request and is not kept, so it never
+    /// reads as something the user said.
+    #[test]
+    fn the_reminder_about_the_missing_call_goes_with_the_next_request_and_is_not_kept() {
+        let llm = RecordingLlm::new(vec![
+            tool_turn("read_file", "c1"),
+            tool_turn("read_file", "c2"),
+            tool_turn("run_shell", "c3"),
+            text_turn("Done."),
+        ]);
+        let tools = ScriptedTools::new(vec![]);
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (history, _) = rt
+            .block_on(l.run(&llm, &tools, SharedHistory::new(vec![ChatMessage::user("Read status.txt, then run the tests with run_shell.")]), |_| {}))
+            .unwrap();
+        let history = history.snapshot();
+        let requests = llm.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4, "{requests:?}");
+        let sent = requests[2].last().expect("the third request carries the reminder");
+        assert!(sent.content.contains("run_shell"), "the reminder names the call: {sent:?}");
+        assert!(!is_prompt(sent), "a reminder is not something the user said: {sent:?}");
+        assert!(
+            history.iter().all(|m| !m.content.contains("but the request also names")),
+            "the reminder is not kept in the history: {history:?}"
+        );
+        assert_eq!(history.iter().filter(|m| is_prompt(m)).count(), 1, "the request is the only prompt: {history:?}");
+        // The calls the model made anyway still ran: the reminder is not a reason
+        // to drop what the model asked for.
+        assert_eq!(tools.calls.lock().unwrap().len(), 3, "every call ran");
+    }
+
+    /// The note about the step budget is the app's own writing. Finding "the
+    /// last prompt" must not stop at it: the owner's request is still the one
+    /// the turn began with.
+    #[test]
+    fn the_note_about_the_step_budget_is_not_something_the_user_said() {
+        let l = AgentLoop::new(
+            LoopConfig { max_steps: Some(1), wrap_up_at_step_limit: true, ..LoopConfig::default() },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let llm = MockLlm { turns: std::sync::Mutex::new(vec![tool_turn("shell", "c1"), text_turn("All done.")]) };
+        let tools = MockTools::new();
+        let (history, done) = run_loop(&l, &llm, &tools, |_| {});
+        assert!(matches!(done, DoneReason::Completed));
+        let notes: Vec<&ChatMessage> = history.iter().filter(|m| m.content.contains("step budget")).collect();
+        assert_eq!(notes.len(), 1, "the note is in the history once: {history:?}");
+        assert!(notes[0].content.starts_with(APP_NOTICE_OPENING), "{}", notes[0].content);
+        assert!(!is_prompt(notes[0]), "a note from the app is not the user's request");
+        assert_eq!(history.iter().filter(|m| is_prompt(m)).count(), 1, "the request is the only prompt: {history:?}");
+    }
+
+    /// A server that sends one call natively and writes the same call in its
+    /// text has sent one call. A call that is only in the text is another
+    /// call, and it is run: throwing it away loses work the model asked for
+    /// and never hears about.
+    #[test]
+    fn a_native_call_and_a_call_in_the_text_are_both_run_and_the_echo_only_once() {
+        let echoed = "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.txt\"}}</tool_call>";
+        let other = "<tool_call>{\"name\":\"run_shell\",\"arguments\":{\"command\":\"ls\"}}</tool_call>";
+        let llm = RecordingLlm::new(vec![
+            MockTurn {
+                events: vec![
+                    Ok(LlmEvent::ToolCallDelta {
+                        index: 0,
+                        id: Some("c1".into()),
+                        name: Some("read_file".into()),
+                        args_delta: r#"{"path":"a.txt"}"#.into(),
+                    }),
+                    Ok(LlmEvent::TextDelta(format!("{echoed}{other}"))),
+                    Ok(LlmEvent::Done(FinishReason::ToolUse)),
+                ],
+            },
+            text_turn("Done."),
+        ]);
+        let tools = ScriptedTools::new(vec![]);
+        let l = AgentLoop::new(LoopConfig::default(), Arc::new(AtomicBool::new(false)));
+        let (history, done) = run_loop(&l, &llm, &tools, |_| {});
+        assert!(matches!(done, DoneReason::Completed));
+        let names: Vec<String> = tools.calls.lock().unwrap().iter().map(|c| c.name.clone()).collect();
+        assert_eq!(names, ["read_file", "run_shell"], "the echoed call runs once, the other text call runs too");
+        assert_eq!(history[1].tool_calls.len(), 2, "both calls are in the history: {history:?}");
     }
 
     #[test]

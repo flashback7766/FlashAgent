@@ -26,6 +26,10 @@ pub struct CostLedger {
     /// Turns that actually came back with a price. Turns without one are not
     /// counted as free either: they are simply not known.
     priced_turns: u64,
+    /// What the providers behind the gateways charged, when they said. The
+    /// difference from the total is what the gateway added for itself.
+    upstream_total: f64,
+    upstream_turns: u64,
 }
 
 impl CostLedger {
@@ -34,6 +38,17 @@ impl CostLedger {
     /// could not price would be a number with a hole in it, and this is shown
     /// to the person as a real figure.
     pub fn record(&mut self, provider: &str, cost: Option<f64>) {
+        self.record_with_details(provider, cost, None);
+    }
+
+    /// What the turn cost, and what the provider behind the gateway said it
+    /// cost. The second number is what the upstream provider charged: the
+    /// difference from the first is the gateway's own margin.
+    pub fn record_with_details(&mut self, provider: &str, cost: Option<f64>, upstream: Option<f64>) {
+        if let Some(upstream) = upstream.filter(|c| c.is_finite() && *c >= 0.0) {
+            self.upstream_total += upstream;
+            self.upstream_turns += 1;
+        }
         let Some(cost) = cost.filter(|c| c.is_finite() && *c >= 0.0) else { return };
         let entry = self.providers.entry(provider.to_string()).or_insert_with(|| ProviderCost {
             name: provider.to_string(),
@@ -44,6 +59,15 @@ impl CostLedger {
         entry.turns += 1;
         self.total += cost;
         self.priced_turns += 1;
+    }
+
+    /// What the providers behind the gateways charged, when they said.
+    pub fn upstream_total(&self) -> Option<f64> {
+        (self.upstream_turns > 0).then_some(self.upstream_total)
+    }
+
+    pub fn upstream_turns(&self) -> u64 {
+        self.upstream_turns
     }
 
     /// `None` until something has actually been priced, so the status bar can

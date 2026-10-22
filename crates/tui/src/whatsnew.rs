@@ -300,7 +300,7 @@ impl WhatsNew {
     }
 
     fn inner_width(&self) -> usize {
-        self.width.saturating_sub(6).clamp(14, 110)
+        self.width.saturating_sub(6).min(110)
     }
 
     fn text_width(&self) -> usize {

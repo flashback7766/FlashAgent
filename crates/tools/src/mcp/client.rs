@@ -18,7 +18,6 @@ use super::protocol::{
     JsonRpcRequest, JsonRpcResponse, McpServerInfo, McpTool, ToolsListResult,
 };
 
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const STDERR_RING_BUFFER_SIZE: usize = 100;
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, JsonRpcError>>>>>;
@@ -201,10 +200,6 @@ impl McpClient {
             stderr_lines,
             child: Arc::new(tokio::sync::Mutex::new(Some(child))),
         }))
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
     }
 
     pub fn command(&self) -> &str {
@@ -405,14 +400,14 @@ done
         )
         .expect("spawn mock");
 
-        let init = client.initialize(DEFAULT_TIMEOUT).await.expect("initialize");
+        let init = client.initialize(Duration::from_secs(30)).await.expect("initialize");
         assert_eq!(init.server_info.name, "mock-server");
 
         let tools = client.tools();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "test_tool");
 
-        let result = client.call_tool("test_tool", None, DEFAULT_TIMEOUT).await.expect("call_tool");
+        let result = client.call_tool("test_tool", None, Duration::from_secs(30)).await.expect("call_tool");
         assert_eq!(result.plain_text(), "hello from mock");
 
         client.kill().await;
@@ -432,7 +427,7 @@ done
 "#;
         let client = McpClient::spawn("slow", "bash", &["-c".to_string(), mock_script.to_string()], &HashMap::new(), Path::new("."))
             .expect("spawn mock");
-        client.initialize(DEFAULT_TIMEOUT).await.expect("initialize");
+        client.initialize(Duration::from_secs(30)).await.expect("initialize");
         let err = client.call_tool("deploy", None, Duration::from_millis(200)).await.unwrap_err();
         assert!(err.contains("timed out"), "{err}");
         assert!(err.contains("may have done it anyway"), "{err}");

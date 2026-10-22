@@ -24,6 +24,12 @@ pub(crate) enum Overlay {
     Tasks(flashagent_tui::TasksModal),
     /// Ctrl+K: every command, searched by typing.
     Palette(SelectMenu<String>),
+    /// /tools: what the model may call, and what it may not.
+    Tools(flashagent_tui::tools_view::ToolsView),
+    /// /notices: what the app said, kept so it can be read again.
+    Notices(flashagent_tui::notice_log::NoticeLog),
+    /// /rules: the standing permissions, and a way to take them back.
+    Rules(flashagent_tui::rules_view::RulesView),
 }
 
 impl Overlay {
@@ -50,6 +56,9 @@ impl Overlay {
             Overlay::Memory(modal) => modal.render(width),
             Overlay::Mcp(modal) => modal.render(width),
             Overlay::Tasks(modal) => modal.render(width),
+            Overlay::Tools(view) => view.render(width),
+            Overlay::Notices(view) => view.render(width),
+            Overlay::Rules(view) => view.render(width),
         }
     }
 }
@@ -91,7 +100,7 @@ impl App {
                 SelectItem::with_description(label, c.description, value)
             })
             .collect();
-        self.open_overlay(Overlay::Palette(SelectMenu::new("Command palette", items).with_noun("commands")));
+        self.open_overlay(Overlay::Palette(SelectMenu::new(flashagent_tui::i18n::tr("Command palette"), items).with_noun(flashagent_tui::select::Noun::COMMANDS)));
     }
 
     pub(crate) fn open_overlay(&mut self, overlay: Overlay) {

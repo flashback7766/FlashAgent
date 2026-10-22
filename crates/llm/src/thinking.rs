@@ -107,9 +107,17 @@ impl DiscoveredModel {
         Some(format!("{} ctx", token_count_label(len).replace('K', "k")))
     }
 
-    /// E.g. `128k ctx · tools · thinking: on [off,on]`.
+    /// E.g. `Gemini 3 Flash · 128k ctx · tools · thinking: on [off,on]`.
+    ///
+    /// The name the server gave the model comes first: it is what the
+    /// server calls the model, and the list of models is where the owner
+    /// sees it.
     pub fn capabilities_summary(&self) -> String {
         let mut parts = Vec::new();
+
+        if let Some(name) = self.display_name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+            parts.push(name.to_string());
+        }
 
         if let Some(ctx) = self.context_display() {
             parts.push(ctx);
@@ -191,6 +199,11 @@ impl Default for ThinkingProfile {
                 "low".to_string(),
                 "medium".to_string(),
                 "high".to_string(),
+                // The two levels above high that the models with an effort
+                // ladder have: not every model has them, and a level the
+                // server never sent is still sent as the person asked for it.
+                "xhigh".to_string(),
+                "max".to_string(),
             ],
             protocol: ThinkingProtocol::ReasoningEffort,
             supported: true,
@@ -207,17 +220,6 @@ pub enum TaskComplexity {
     Medium,
     /// Code, file edits, debugging.
     High,
-}
-
-impl TaskComplexity {
-    /// Saturates rather than wrapping: a model that overthinks greetings cannot be
-    /// pushed below "no thinking".
-    pub fn shifted(self, steps: i8) -> Self {
-        let ladder = [Self::Minimal, Self::Low, Self::Medium, Self::High];
-        let at = ladder.iter().position(|c| *c == self).unwrap_or(0) as i32;
-        let moved = (at + steps as i32).clamp(0, ladder.len() as i32 - 1) as usize;
-        ladder[moved]
-    }
 }
 
 impl ThinkingProfile {
@@ -361,13 +363,6 @@ impl ThinkingProfile {
             }
             TaskComplexity::High => last,
         }
-    }
-
-    pub fn resolve_for_complexity(&self, complexity: TaskComplexity) -> Option<&str> {
-        if !self.supported || self.presets.is_empty() {
-            return None;
-        }
-        self.presets.get(self.ladder_index(complexity)).map(String::as_str)
     }
 
     pub fn apply_to_request(&self, body: &mut serde_json::Value, effort: &str) {
@@ -1305,6 +1300,24 @@ mod tests {
     }
 
     #[test]
+    fn a_model_is_listed_under_the_name_the_server_gave_it() {
+        let model = DiscoveredModel {
+            id: "models/gemini-3-flash".into(),
+            display_name: Some("Gemini 3 Flash".into()),
+            is_loaded: false,
+            context_length: Some(1_048_576),
+            max_context_length: None,
+            thinking: ThinkingProfile::unsupported(),
+            supports_tools: true,
+            supports_vision: false,
+        };
+        assert_eq!(model.capabilities_summary(), "Gemini 3 Flash · 1M ctx · tools · no reasoning");
+        // A model the server named nothing is listed as it is.
+        let plain = DiscoveredModel { display_name: None, ..model.clone() };
+        assert_eq!(plain.capabilities_summary(), "1M ctx · tools · no reasoning");
+    }
+
+    #[test]
     fn gemini_models_bring_their_context_and_thinking_levels() {
         let native = serde_json::json!({ "models": [
             { "name": "models/gemini-2.5-flash", "inputTokenLimit": 1048576, "thinking": true,
@@ -1362,8 +1375,6 @@ mod tests {
         let p = gemini_profile("gemini-3-flash", true);
         assert_eq!(p.min_effort(), Some("minimal"));
         assert_eq!(p.resolve_effort(crate::types::ThinkingEffort::Low), Some("low"));
-        assert_eq!(p.resolve_for_complexity(TaskComplexity::Low), Some("low"));
-        assert_eq!(p.resolve_for_complexity(TaskComplexity::Minimal), Some("minimal"));
     }
 
     #[test]
@@ -1431,16 +1442,6 @@ mod tests {
 
         let text_only = serde_json::json!({"data":[{"id":"m","type":"llm","capabilities":["tool_use"]}]});
         assert!(!parse_server_models(&text_only)[0].supports_vision);
-    }
-
-    #[test]
-    fn a_learned_correction_moves_one_preset_and_stops_at_the_ends() {
-        use TaskComplexity::*;
-        assert_eq!(Medium.shifted(-1), Low);
-        assert_eq!(Medium.shifted(1), High);
-        assert_eq!(Minimal.shifted(-1), Minimal, "there is nothing below not thinking");
-        assert_eq!(High.shifted(1), High);
-        assert_eq!(Medium.shifted(0), Medium);
     }
 
     #[test]

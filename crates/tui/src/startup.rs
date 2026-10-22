@@ -106,23 +106,23 @@ impl TrustScreen {
                 KeyCode::Enter => {
                     let trimmed = input.trim();
                     if trimmed.is_empty() {
-                        *error = Some("Path cannot be empty".to_string());
+                        *error = Some(crate::i18n::tr("Path cannot be empty").to_string());
                         return None;
                     }
                     let resolved = resolve_path(trimmed);
                     if resolved.is_dir() {
                         let canon = std::fs::canonicalize(&resolved).unwrap_or(resolved);
                         if let Err(e) = std::env::set_current_dir(&canon) {
-                            *error = Some(format!("Failed to enter directory: {e}"));
+                            *error = Some(crate::i18n::tr("Failed to enter directory: {e}").replace("{e}", &e.to_string()));
                         } else {
                             self.cwd = canon;
                             self.selected = 0;
                             self.mode = TrustScreenMode::Select;
                         }
                     } else if resolved.exists() {
-                        *error = Some(format!("'{}' is not a directory", trimmed));
+                        *error = Some(format!("'{}' {}", trimmed, crate::i18n::tr("is not a directory")));
                     } else {
-                        *error = Some(format!("Directory '{}' does not exist", trimmed));
+                        *error = Some(format!("{} '{}'", crate::i18n::tr("Directory"), trimmed));
                     }
                     None
                 }
@@ -148,7 +148,7 @@ impl TrustScreen {
 
         match &self.mode {
             TrustScreenMode::Select => {
-                lines.push(format!("{prompt_style}FlashAgent{reset} {text_dim}\u{b7} trust this folder?{reset}"));
+                lines.push(format!("{prompt_style}FlashAgent{reset} {text_dim}\u{b7} {}{reset}", crate::i18n::tr("trust this folder?")));
                 lines.push(String::new());
                 // The folder's own name is at the end of the path: in a narrow window
                 // the start goes, never the name of what is being trusted.
@@ -157,14 +157,16 @@ impl TrustScreen {
                 lines.push(format!("  {text_bright}{shown}{reset}"));
                 lines.push(String::new());
 
-                let desc = "FlashAgent will read, edit and run commands here. Continue only if you trust \
-                            its files: they can carry instructions aimed at the model.";
+                let desc = crate::i18n::tr(
+                    "FlashAgent will read, edit and run commands here. Continue only if you trust \
+                     its files: they can carry instructions aimed at the model.",
+                );
                 for l in wrap_words(desc, width.saturating_sub(4).max(20)) {
                     lines.push(format!("  {text_dim}{l}{reset}"));
                 }
                 lines.push(String::new());
 
-                let options = ["1. Yes, continue", "2. Change folder", "3. No, quit"];
+                let options = [crate::i18n::tr("1. Yes, continue"), crate::i18n::tr("2. Change folder"), crate::i18n::tr("3. No, quit")];
                 for (idx, opt) in options.iter().enumerate() {
                     if idx == self.selected {
                         lines.push(format!("{prompt_style}\u{25b8} {text_bright}{opt}{reset}"));
@@ -178,16 +180,17 @@ impl TrustScreen {
                 lines.push(format!("  {}", crate::key_hints(&hints, width.saturating_sub(2))));
             }
             TrustScreenMode::ChangeDir { input, error } => {
-                lines.push(format!("{prompt_style}FlashAgent{reset} {text_dim}\u{b7} change folder{reset}"));
+                lines.push(format!("{prompt_style}FlashAgent{reset} {text_dim}\u{b7} {}{reset}", crate::i18n::tr("change folder")));
                 lines.push(String::new());
                 lines.push(format!(
-                    "  {text_dim}Folder to work in (relative, absolute, or starting with ~):{reset}"
+                    "  {text_dim}{}{reset}",
+                    crate::i18n::tr("Folder to work in (relative, absolute, or starting with ~):")
                 ));
                 lines.push(format!(
                     "  {prompt_style}› {text_bright}{input}\x1b[7m {reset}"
                 ));
                 if let Some(err) = error {
-                    lines.push(format!("  {text_error}Error: {err}{reset}"));
+                    lines.push(format!("  {text_error}{} {err}{reset}", crate::i18n::tr("Error:")));
                 } else {
                     lines.push(String::new());
                 }
@@ -225,6 +228,174 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+/// The MCP servers a project's `.mcp.json` wants to run, and the answer.
+///
+/// A project's config can start a program, so a repository somebody else
+/// wrote could run code before the owner asked anything. The screen says which
+/// program, and the answer is remembered: the same server in the same folder
+/// is not asked about again, unless the safe mode is on, where nothing runs
+/// without a question every time.
+pub struct McpTrustScreen {
+    /// The servers to ask about, in order.
+    pub servers: Vec<McpServerToAsk>,
+    /// Which one is on screen.
+    pub current: usize,
+    /// The ones the owner said yes to.
+    pub allowed: Vec<String>,
+}
+
+/// One server to ask about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerToAsk {
+    pub name: String,
+    /// The command it runs, with its arguments.
+    pub command: String,
+}
+
+impl McpTrustScreen {
+    pub fn new(servers: Vec<McpServerToAsk>) -> Self {
+        Self { servers, current: 0, allowed: Vec::new() }
+    }
+
+    /// `Some(true)` when every server has been asked about, `Some(false)` when
+    /// the owner stopped asking.
+    pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<bool> {
+        match code {
+            KeyCode::Esc => return Some(false),
+            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('\u{0441}') | KeyCode::Char('\u{0421}')
+                if mods.contains(KeyModifiers::CONTROL) =>
+            {
+                return Some(false);
+            }
+            // Yes, and remember.
+            KeyCode::Char('1') | KeyCode::Enter => {
+                self.allowed.push(self.servers[self.current].name.clone());
+                self.advance();
+            }
+            // Yes, but only this time.
+            KeyCode::Char('2') => {
+                self.advance();
+            }
+            // No.
+            KeyCode::Char('3') => {
+                self.advance();
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn advance(&mut self) {
+        self.current += 1;
+    }
+
+    pub fn done(&self) -> bool {
+        self.current >= self.servers.len()
+    }
+
+    pub fn render(&self, width: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        let reset = "\x1b[0m";
+        let prompt_style = "\x1b[1;38;2;225;175;95m"; // amber accent
+        let text_dim = "\x1b[38;2;160;155;145m";
+        let text_bright = "\x1b[1;38;2;240;235;225m";
+        let text_error = "\x1b[1;38;2;235;105;105m";
+
+        let Some(server) = self.servers.get(self.current) else {
+            return lines;
+        };
+
+        lines.push(format!("{prompt_style}FlashAgent{reset} {text_dim}\u{b7} {}{reset}", crate::i18n::tr("run this MCP server?")));
+        lines.push(String::new());
+        lines.push(format!("  {text_bright}{}{reset}", crate::i18n::tr("This project wants to start an MCP server:")));
+        lines.push(String::new());
+        lines.push(format!("  {text_bright}{}{reset}", server.name));
+        // The command is the whole point of the question: it is what runs.
+        for l in wrap_words(&server.command, width.saturating_sub(4).max(20)) {
+            lines.push(format!("  {text_dim}{l}{reset}"));
+        }
+        lines.push(String::new());
+        let desc = crate::i18n::tr("It runs a program from this project. Continue only if you trust what it does.");
+        for l in wrap_words(desc, width.saturating_sub(4).max(20)) {
+            lines.push(format!("  {text_dim}{l}{reset}"));
+        }
+        lines.push(String::new());
+        let options = [
+            crate::i18n::tr("1. Yes, and remember"),
+            crate::i18n::tr("2. Yes, just this time"),
+            crate::i18n::tr("3. No, do not start it"),
+        ];
+        for opt in options {
+            lines.push(format!("  {text_dim}{opt}{reset}"));
+        }
+        let _ = text_error;
+        lines.push(String::new());
+        if self.servers.len() > 1 {
+            lines.push(format!(
+                "  {text_dim}{}{reset}",
+                crate::i18n::tr_fill("{current} of {total} servers", &[("current", &self.current.to_string()), ("total", &self.servers.len().to_string())])
+            ));
+            lines.push(String::new());
+        }
+        let hints = [("Enter", crate::i18n::tr("confirm")), ("Esc", crate::i18n::tr("skip the rest"))];
+        lines.push(format!("  {}", crate::key_hints(&hints, width.saturating_sub(2))));
+        lines
+    }
+}
+
+/// Asks about the servers a project wants to run, and returns the ones the
+/// owner allowed.
+///
+/// The screen is only shown when there is something to ask about: a project
+/// without an `.mcp.json`, or one whose servers were allowed before, opens
+/// without a word.
+pub async fn run_mcp_trust_screen(servers: Vec<McpServerToAsk>) -> anyhow::Result<Vec<String>> {
+    use crossterm::{
+        cursor,
+        event::{Event, KeyEventKind},
+        execute,
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    };
+
+    if servers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    let _ = execute!(stdout, EnterAlternateScreen, cursor::Hide);
+
+    let mut screen = McpTrustScreen::new(servers);
+    let mut painter = crate::screen::Screen::new();
+
+    loop {
+        // Every server has been asked about: the screen goes back to the app.
+        if screen.done() {
+            break;
+        }
+        let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
+        crate::screen::paint_page(&mut painter, &screen.render(term_w as usize), false);
+
+        if crossterm::event::poll(std::time::Duration::from_millis(50))? {
+            if let Event::Key(key) = crossterm::event::read()? {
+                if key.kind != KeyEventKind::Release {
+                    if let Some(quit) = screen.handle_key(key.code, key.modifiers) {
+                        // Esc means "do not start the rest": the ones already
+                        // allowed stay allowed.
+                        let _ = quit;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = execute!(stdout, cursor::Show, LeaveAlternateScreen);
+    disable_raw_mode()?;
+
+    Ok(std::mem::take(&mut screen.allowed))
 }
 
 pub async fn run_trust_screen(cwd: &mut PathBuf) -> anyhow::Result<StartupAction> {
@@ -270,6 +441,47 @@ pub async fn run_trust_screen(cwd: &mut PathBuf) -> anyhow::Result<StartupAction
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The screen says which program it wants to run: that is the whole
+    /// point of the question.
+    #[test]
+    fn the_mcp_screen_names_the_command_it_wants_to_run() {
+        let screen = McpTrustScreen::new(vec![McpServerToAsk {
+            name: "sqlite".into(),
+            command: "uvx mcp-server-sqlite --db-path data.db".into(),
+        }]);
+        let lines = screen.render(100).join("\n");
+        assert!(lines.contains("sqlite"), "{lines}");
+        assert!(lines.contains("uvx mcp-server-sqlite"), "{lines}");
+    }
+
+    /// "Yes, and remember" allows the server; "just this time" does not.
+    #[test]
+    fn the_mcp_screen_remembers_only_what_was_asked_to_remember() {
+        let servers = vec![
+            McpServerToAsk { name: "one".into(), command: "run one".into() },
+            McpServerToAsk { name: "two".into(), command: "run two".into() },
+        ];
+
+        let mut screen = McpTrustScreen::new(servers.clone());
+        screen.handle_key(KeyCode::Char('1'), KeyModifiers::NONE);
+        assert_eq!(screen.allowed, vec!["one".to_string()]);
+        screen.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
+        assert_eq!(screen.allowed, vec!["one".to_string()], "just this time is not remembered");
+        assert!(screen.done());
+
+        // "No" is not a yes.
+        let mut screen = McpTrustScreen::new(servers.clone());
+        screen.handle_key(KeyCode::Char('3'), KeyModifiers::NONE);
+        assert!(screen.allowed.is_empty());
+
+        // Esc stops asking; what was allowed stays allowed.
+        let mut screen = McpTrustScreen::new(servers);
+        screen.handle_key(KeyCode::Char('1'), KeyModifiers::NONE);
+        let quit = screen.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(quit, Some(false));
+        assert_eq!(screen.allowed, vec!["one".to_string()]);
+    }
 
     #[test]
     fn test_startup_initial_selection() {

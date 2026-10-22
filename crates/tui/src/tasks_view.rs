@@ -28,16 +28,26 @@ const OUTPUT_ROWS: usize = 14;
 /// A state in a few letters, for the list.
 fn short_state(state: &TaskState) -> String {
     match state {
-        TaskState::Running => "running".into(),
-        TaskState::Exited(Some(code)) => format!("exit {code}"),
-        TaskState::Exited(None) => "signal".into(),
-        TaskState::Killed => "stopped".into(),
+        TaskState::Running => crate::i18n::tr("running").into(),
+        TaskState::Exited(Some(code)) => format!("{} {code}", crate::i18n::tr("exit")),
+        TaskState::Exited(None) => crate::i18n::tr("signal").into(),
+        TaskState::Killed => crate::i18n::tr("stopped").into(),
     }
 }
 
 /// Output and commands come from programs: no escape of theirs reaches the screen.
 fn plain(text: &str) -> String {
     crate::terminal_safe(&crate::strip_ansi(text))
+}
+
+/// The top edge, closed: the dashes are counted in cells, since a translated
+/// title takes more bytes than columns and byte count left the frame open.
+fn frame_top(title: &str, inner_w: usize, border: &str, reset: &str) -> String {
+    let dashes = inner_w.saturating_sub(visible_width(title) + 1);
+    format!(
+        "  {border}\u{256d}\u{2500}\x1b[1;38;2;225;175;95m{title}{border}{}\u{256e}{reset}",
+        "\u{2500}".repeat(dashes)
+    )
 }
 
 impl TasksModal {
@@ -101,20 +111,14 @@ impl TasksModal {
         let border = "\x1b[38;2;100;95;90m";
         let dim = "\x1b[38;2;135;130;125m";
         let reset = "\x1b[0m";
-        let inner_w = width.saturating_sub(6).clamp(20, 110);
+        let inner_w = width.saturating_sub(6).min(110);
         let row = |content: &str| -> RenderLine {
             let clipped = crate::tool_views::clip_ellipsis(content, inner_w.saturating_sub(2));
             let pad = " ".repeat(inner_w.saturating_sub(visible_width(&clipped) + 2));
             (LineKind::System, format!("  {border}\u{2502}{reset} {clipped}{pad} {border}\u{2502}{reset}"))
         };
-        let title = " Background tasks ";
-        let mut lines = vec![(
-            LineKind::System,
-            format!(
-                "  {border}\u{256d}\u{2500}\x1b[1;38;2;225;175;95m{title}{border}{}\u{256e}{reset}",
-                "\u{2500}".repeat(inner_w.saturating_sub(title.len() + 1))
-            ),
-        )];
+        let title = format!(" {} ", crate::i18n::tr("Background tasks"));
+        let mut lines = vec![(LineKind::System, frame_top(&title, inner_w, border, reset))];
         let state_colour = |state: &TaskState| match state {
             TaskState::Running => "\x1b[38;2;145;205;140m",
             TaskState::Exited(Some(0)) => "\x1b[38;2;160;155;145m",
@@ -133,7 +137,7 @@ impl TasksModal {
                 lines.push(row(""));
                 let out: Vec<&str> = output.lines().collect();
                 if out.iter().all(|l| l.trim().is_empty()) {
-                    lines.push(row(&format!("{dim}(no output yet){reset}")));
+                    lines.push(row(&format!("{dim}({}){reset}", crate::i18n::tr("no output yet"))));
                 }
                 for line in &out[out.len().saturating_sub(OUTPUT_ROWS)..] {
                     lines.push(row(&plain(line)));
@@ -141,8 +145,8 @@ impl TasksModal {
                 if task.state == TaskState::Running { vec![("k", "stop it"), ("Esc", "back")] } else { vec![("Esc", "back")] }
             }
             None if self.tasks.is_empty() => {
-                lines.push(row("No background tasks yet."));
-                lines.push(row(&format!("{dim}The agent starts them for servers and long builds; Ctrl+B moves a running command here.{reset}")));
+                lines.push(row(crate::i18n::tr("No background tasks yet.")));
+                lines.push(row(&format!("{dim}{}{reset}", crate::i18n::tr("The agent starts them for servers and long builds; Ctrl+B moves a running command here."))));
                 vec![("Esc", "close")]
             }
             None => {
@@ -200,6 +204,16 @@ mod tests {
         assert_eq!(modal.handle_key(KeyCode::Char('k'), KeyModifiers::NONE), TasksAction::None, "stopped a task that ended");
         assert_eq!(modal.handle_key(KeyCode::Enter, KeyModifiers::NONE), TasksAction::Open(1));
         assert_eq!(modal.handle_key(KeyCode::Esc, KeyModifiers::NONE), TasksAction::Close);
+    }
+
+    #[test]
+    fn a_translated_title_is_measured_in_cells_and_the_frame_closes() {
+        let title = format!(" {} ", crate::i18n::translate(crate::i18n::Lang::Russian, "Background tasks"));
+        assert!(title.len() > visible_width(&title) + 1, "the Russian title takes more bytes than cells");
+        let inner_w = 60;
+        let line = crate::strip_ansi(&frame_top(&title, inner_w, "", ""));
+        assert_eq!(visible_width(&line), inner_w + 4, "the top edge is the width of the box: {line:?}");
+        assert!(line.ends_with('\u{256e}'), "the frame closes: {line:?}");
     }
 
     #[test]

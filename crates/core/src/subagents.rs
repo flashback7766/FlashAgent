@@ -851,11 +851,28 @@ impl ToolExec for SubagentTool {
             name: "spawn_agent".into(),
             description: format!(
                 "Start a subagent on a self-contained task and carry on without waiting for it. \
-                 Returns an agent_id at once. The answer arrives later on its own, as a notice \
-                 telling you what the subagent found; you do not poll for it and you do not \
-                 pass its result on. Up to {} may run at once: past that the call is refused, and \
-                 a researcher or reviewer cannot write files or run commands.",
-                self.host.max_live()
+                 Returns an agent_id at once; the answer arrives later on its own as a notice, and \
+                 you neither poll for it nor wait for it.\n\
+                 - When it earns its place: the work is wide and separable — an audit across many \
+                 files, a search you would otherwise run yourself, a change worth checking by \
+                 someone who did not write it. Start as many as the work has, {limit}.\n\
+                 - When it does not: a single lookup you already know the answer to. That costs a \
+                 whole turn and returns a paragraph about your own repository.\n\
+                 - The task has to be self-contained. It cannot see this conversation and it cannot \
+                 ask the user anything, so anything it would have to ask, you decide here and write \
+                 into the task.\n\
+                 - Its report is not shown to the user: what you make of it is what they see.\n\
+                 - Never write, guess or predict a result that has not arrived. If the user asks \
+                 before it does, say it is still running.\n\
+                 - Once you have handed a search to a subagent, do not run it yourself beside it: \
+                 two answers to pay for and no way to tell which is right.\n\
+                 - A role's tools are its boundary: a researcher or reviewer cannot write files or \
+                 run commands, however much it wants to.",
+                limit = if self.host.max_live() == usize::MAX {
+                    "with no ceiling in this build".to_string()
+                } else {
+                    format!("up to {}", self.host.max_live())
+                },
             ),
             parameters_json: spawn_agent_schema(),
         }]
@@ -1358,7 +1375,7 @@ mod tests {
                         completion: Some(20),
                         cached: Some(30),
                         mtp: None,
-                        cost: None,
+                        cost: None, cost_details: None,
                     })),
                     Ok(LlmEvent::TextDelta("done".into())),
                     Ok(LlmEvent::Done(FinishReason::Stop)),

@@ -8,12 +8,21 @@ pub struct MarketplaceItem {
     pub id: &'static str,
     pub name: &'static str,
     pub description: &'static str,
+    /// Who publishes it. It is what tells two extensions with the same name
+    /// apart, and it was in the list without being shown anywhere.
     pub vendor: &'static str,
     pub command: &'static str,
     pub args: &'static [&'static str],
     pub env_vars: &'static [&'static str],
     pub read_only_by_default: bool,
     pub category: &'static str,
+}
+
+impl MarketplaceItem {
+    /// The name of the extension and who publishes it, as the list shows it.
+    pub fn display_line(&self) -> String {
+        format!("{} · {}", self.name, self.vendor)
+    }
 }
 
 pub const MARKETPLACE_ITEMS: &[MarketplaceItem] = &[
@@ -134,8 +143,14 @@ pub fn get_marketplace() -> &'static [MarketplaceItem] {
 }
 
 /// By id or case-insensitive query.
+///
+/// An empty query matches nothing: every name contains it, so it used to
+/// pick the first extension in the list, and `/mcp add ""` added it.
 pub fn find_marketplace_item(query: &str) -> Option<&'static MarketplaceItem> {
     let lower = query.trim().to_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
     // The exact id first: "git" is the Git server, not the first name containing it (GitHub).
     MARKETPLACE_ITEMS
         .iter()
@@ -169,6 +184,24 @@ mod tests {
     fn an_exact_id_wins_over_a_name_that_contains_it() {
         assert_eq!(find_marketplace_item("git").map(|i| i.id), Some("git"));
         assert_eq!(find_marketplace_item("github").map(|i| i.id), Some("github"));
+    }
+
+    /// An empty query names nothing: every name contains it, so it used to
+    /// pick the first extension in the list.
+    #[test]
+    fn an_empty_query_matches_nothing() {
+        assert_eq!(find_marketplace_item(""), None);
+        assert_eq!(find_marketplace_item("   "), None);
+    }
+
+    /// The publisher is shown with the extension: it is what tells two
+    /// extensions with the same name apart.
+    #[test]
+    fn the_publisher_is_shown_with_the_extension() {
+        let item = find_marketplace_item("sqlite").expect("sqlite exists");
+        assert!(!item.vendor.is_empty());
+        assert!(item.display_line().contains(item.vendor), "{}", item.display_line());
+        assert!(item.display_line().contains(item.name), "{}", item.display_line());
     }
 
     #[test]

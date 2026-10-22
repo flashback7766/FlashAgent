@@ -262,9 +262,12 @@ pub fn key_hints(pairs: &[(&str, &str)], width: usize) -> String {
     const KEY: &str = "\x1b[38;2;185;180;170m";
     const WHAT: &str = "\x1b[38;2;125;121;115m";
     const OFF: &str = "\x1b[0m";
+    // The key is a shape the hand remembers and stays as it is; the meaning
+    // follows the language of the interface.
     let parts: Vec<(String, String)> = pairs
         .iter()
         .map(|(key, what)| {
+            let what = crate::i18n::tr(what);
             if what.is_empty() {
                 (key.to_string(), format!("{KEY}{key}{OFF}"))
             } else {
@@ -359,11 +362,11 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
     } else {
         username
     };
-    let greeting = if been_here_before() { "Welcome back" } else { "Welcome" };
+    let greeting = if been_here_before() { crate::i18n::tr("Welcome back") } else { crate::i18n::tr("Welcome") };
 
     let th_str = thinking.unwrap_or("auto");
     // Nothing is made up while the server has not said.
-    let model = if model.trim().is_empty() { "none yet (F3)" } else { model };
+    let model = if model.trim().is_empty() { crate::i18n::tr("none yet (F3)") } else { model };
     let ctx_short = context_window.unwrap_or("");
     let mascot = if show_mascot {
         mascot_swift_lines_mood(tick_n, mood)
@@ -371,7 +374,7 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         [
             "".to_string(),
             format!("{M3_PRI_B}FlashAgent{RESET}"),
-            format!("{M3_MUT}the coding agent for local models{RESET}"),
+            format!("{M3_MUT}{}{RESET}", crate::i18n::tr("the coding agent for local models")),
             "".to_string(),
             "".to_string(),
             "".to_string(),
@@ -400,7 +403,7 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         let w1: usize = if card_w >= 76 {
             ((card_w * 44) / 100).clamp(36, 46)
         } else {
-            ((card_w * 40) / 100).clamp(24, 32)
+            ((card_w * 40) / 100).clamp(24, 32).min(card_w)
         };
         let w2: usize = card_w.saturating_sub(w1 + 3);
 
@@ -408,11 +411,11 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         let d1 = w1.saturating_sub(t_left_vis.chars().count() + 3);
         let t_left_colored = format!("{M3_PRI_B}>_ FlashAgent{RESET} {M3_LGT}{ver_disp}{RESET}");
 
-        let t_r1_vis = "System & Context";
+        let t_r1_vis = crate::i18n::tr("System & Context");
         let d2 = w2.saturating_sub(t_r1_vis.chars().count() + 3);
         let t_r1_colored = format!("{M3_LGT_B}{t_r1_vis}{RESET}");
 
-        let t_r2_vis = "Quick Commands";
+        let t_r2_vis = crate::i18n::tr("Quick Commands");
         let d_mid = w2.saturating_sub(t_r2_vis.chars().count() + 3);
         let t_r2_colored = format!("{M3_LGT_B}{t_r2_vis}{RESET}");
 
@@ -444,35 +447,41 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
 
         let model_val = truncate_middle(model, w2.saturating_sub(13));
         // The name first; how to switch only where both fit.
-        let provider_name = provider.unwrap_or("not chosen yet");
+        let provider_name = provider.unwrap_or_else(|| crate::i18n::tr("not chosen yet"));
         let provider_hint = if provider_name.chars().count() + 12 <= w2.saturating_sub(13) {
             format!(" {M3_MUT}(/provider){RESET}")
         } else {
             String::new()
         };
         let provider_val = truncate_middle(provider_name, w2.saturating_sub(13));
-        let ctx_val = truncate_middle(context_window.unwrap_or("not known yet"), w2.saturating_sub(13));
+        let ctx_val = truncate_middle(context_window.unwrap_or_else(|| crate::i18n::tr("not known yet")), w2.saturating_sub(13));
         let memory_val = match memory_docs {
-            0 => format!("{M3_MUT}no rule files yet{RESET}"),
-            1 => format!("{M3_TXT}1{RESET} {M3_MUT}rule file{RESET}"),
-            n => format!("{M3_TXT}{n}{RESET} {M3_MUT}rule files{RESET}"),
+            0 => format!("{M3_MUT}{}{RESET}", crate::i18n::tr("no rule files yet")),
+            1 => format!("{M3_TXT}1{RESET} {M3_MUT}{}{RESET}", crate::i18n::tr("rule file")),
+            n => format!("{M3_TXT}{n}{RESET} {M3_MUT}{}{RESET}", crate::i18n::tr("rule files")),
         };
 
+        // The labels are a column of their own, so the values line up whatever
+        // the language calls them.
+        let field = |text: &str| format!("{:<11}", crate::i18n::tr(text));
         let right_top = [
-            format!(" {M3_MUT}Model:   {RESET} {M3_TXT_B}{model_val}{RESET}"),
-            format!(" {M3_MUT}Provider:{RESET} {M3_LGT}{provider_val}{RESET}{provider_hint}"),
-            format!(" {M3_MUT}Context: {RESET} {M3_ICE}{ctx_val}{RESET}"),
+            format!(" {M3_MUT}{}{RESET} {M3_TXT_B}{model_val}{RESET}", field("Model:")),
+            format!(" {M3_MUT}{}{RESET} {M3_LGT}{provider_val}{RESET}{provider_hint}", field("Provider:")),
+            format!(" {M3_MUT}{}{RESET} {M3_ICE}{ctx_val}{RESET}", field("Context:")),
             // The mode is on the status line under the prompt.
-            format!(" {M3_MUT}Effort:  {RESET} {M3_LGT}{th_short}{RESET} {M3_MUT}(F4){RESET}"),
-            format!(" {M3_MUT}Memory:  {RESET} {memory_val}"),
+            format!(" {M3_MUT}{}{RESET} {M3_LGT}{th_short}{RESET} {M3_MUT}(F4){RESET}", field("Effort:")),
+            format!(" {M3_MUT}{}{RESET} {memory_val}", field("Memory:")),
         ];
 
         // A narrow card drops whole hints rather than cutting one mid-word.
-        let key = |k: &str, what: &str| (format!("{k} {what}"), format!("{M3_ICE}{k}{RESET} {M3_MUT}{what}{RESET}"));
+        let key = |k: &str, what: &str| {
+            let what = crate::i18n::tr(what);
+            (format!("{k} {what}"), format!("{M3_ICE}{k}{RESET} {M3_MUT}{what}{RESET}"))
+        };
         let sep = format!(" {M3_MUT}\u{b7}{RESET} ");
         let fit = |parts: &[(String, String)]| format!(" {}", fit_parts(parts, &sep, w2.saturating_sub(1)));
         let right_bot = [
-            format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}for autonomy{RESET}"),
+            format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}{}{RESET}", crate::i18n::tr("for autonomy")),
             fit(&[key("Ctrl+K", "commands"), key("Ctrl+D", "quit")]),
             fit(&[key("F1", "context"), key("F2", "verbose"), key("F3", "model")]),
             fit(&[key("F4", "effort"), key("Tab", "settings"), key("Ctrl+V", "paste image")]),
@@ -538,21 +547,26 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(&cwd_meta, inner_w))));
 
         if shape.quick_commands {
-            let div_cmd = format!("{M3_BRD}├─{RESET} {M3_LGT_B}Quick Commands{RESET} {M3_BRD}{}┤{RESET}", "─".repeat(inner_w.saturating_sub(17)));
+            let div_cmd = format!("{M3_BRD}├─{RESET} {M3_LGT_B}{}{RESET} {M3_BRD}{}┤{RESET}", crate::i18n::tr("Quick Commands"), "─".repeat(inner_w.saturating_sub(17)));
             lines.push((LineKind::System, div_cmd));
-            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}for autonomy{RESET}"), inner_w))));
+            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}{}{RESET}", crate::i18n::tr("for autonomy")), inner_w))));
             let hints = fit_parts(
                 &[
-                    ("Tab settings".into(), format!("{M3_ICE}Tab{RESET} {M3_MUT}settings{RESET}")),
-                    ("Ctrl+K commands".into(), format!("{M3_ICE}Ctrl+K{RESET} {M3_MUT}commands{RESET}")),
-                    ("Ctrl+D quit".into(), format!("{M3_ICE}Ctrl+D{RESET} {M3_MUT}quit{RESET}")),
+                    (format!("Tab {}", crate::i18n::tr("settings")), format!("{M3_ICE}Tab{RESET} {M3_MUT}{}{RESET}", crate::i18n::tr("settings"))),
+                    (format!("Ctrl+K {}", crate::i18n::tr("commands")), format!("{M3_ICE}Ctrl+K{RESET} {M3_MUT}{}{RESET}", crate::i18n::tr("commands"))),
+                    (format!("Ctrl+D {}", crate::i18n::tr("quit")), format!("{M3_ICE}Ctrl+D{RESET} {M3_MUT}{}{RESET}", crate::i18n::tr("quit"))),
                 ],
                 &format!(" {M3_MUT}\u{b7}{RESET} "),
                 inner_w.saturating_sub(2),
             );
             lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {hints}"), inner_w))));
         } else {
-            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+K{RESET} {M3_MUT}commands{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+D{RESET} {M3_MUT}quit{RESET}"), inner_w))));
+            let line = format!(
+                " {M3_PRI_B}/goal{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+K{RESET} {M3_MUT}{}{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+D{RESET} {M3_MUT}{}{RESET}",
+                crate::i18n::tr("commands"),
+                crate::i18n::tr("quit")
+            );
+            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&line, inner_w))));
         }
         lines.push((LineKind::System, bot));
     }
@@ -574,19 +588,17 @@ pub fn render_session_saved_card(session_id: &str, width: usize) -> Vec<String> 
         ];
     }
 
-    let title_styled = " \x1b[1;38;2;225;175;95mSession saved\x1b[0m ";
-    let title_vis = visible_width(title_styled);
+    let title_styled = format!(" \x1b[1;38;2;225;175;95m{}\x1b[0m ", crate::i18n::tr("Session saved"));
+    let title_vis = visible_width(&title_styled);
     let dashes = box_w.saturating_sub(title_vis + 1);
     let top = format!("  {border_color}╭─{title_styled}{}╮{reset}", "─".repeat(dashes));
 
     let msg = if inner_text_w >= 86 {
-        format!(
-            "To resume: \x1b[1;38;2;240;235;225mflashagent --continue\x1b[0m here, or \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m"
-        )
+        crate::i18n::tr_fill("To resume: \x1b[1;38;2;240;235;225mflashagent --continue\x1b[0m here, or \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m", &[("resume_cmd", &resume_cmd)]).to_string()
     } else if inner_text_w >= resume_cmd.chars().count() + 21 {
-        format!("To resume next time: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m")
+        crate::i18n::tr_fill("To resume next time: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m", &[("resume_cmd", &resume_cmd)]).to_string()
     } else {
-        format!("Resume: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m")
+        crate::i18n::tr_fill("Resume: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m", &[("resume_cmd", &resume_cmd)]).to_string()
     };
     let msg_clipped = if visible_width(&msg) > inner_text_w {
         clip_ansi(&msg, inner_text_w)

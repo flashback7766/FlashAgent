@@ -1,4 +1,5 @@
 use super::*;
+use flashagent_tui::i18n::{tr, tr_fill};
 
 impl App {
     /// The next launch starts in the current mode. A `/goal` run's Accept All is
@@ -16,7 +17,13 @@ impl App {
     pub(crate) fn save_config(&mut self) {
         flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(&self.config));
         if let Err(e) = self.config.save() {
-            self.notice(format!("Settings not saved: {e}"));
+            self.notice(flashagent_tui::i18n::tr_fill("Settings not saved: {e}", &[("e", &e.to_string())]));
+        }
+        // What the models were measured to be goes with it: a model that was
+        // measured today is not measured again tomorrow, and the first
+        // request of the next session is counted with what was learned here.
+        if let Some(path) = flashagent_llm::measurements_path() {
+            flashagent_llm::save_measurements(&path);
         }
     }
 
@@ -32,6 +39,13 @@ impl App {
         self.save_config();
     }
 
+    /// Remembers which thinking level the session runs on now. The rule is
+    /// written with the next message that uses it; the menu closing is not a
+    /// message.
+    pub(crate) fn remember_effort_switch(&mut self) {
+        self.remember_switch(None, false, true);
+    }
+
     /// `/update: watch an update already under way in the background,
     /// or check, download and install in one go.
     /// /editor and Ctrl+X Ctrl+E.
@@ -41,7 +55,7 @@ impl App {
                 self.input.set(edited);
                 self.autocomplete_idx = 0;
             }
-            Err(err) => self.notice(format!("Failed to launch external editor: {err}")),
+            Err(err) => self.notice(flashagent_tui::i18n::tr_fill("Failed to launch external editor: {err}", &[("err", &err.to_string())])),
         }
         self.renderer.request_reprint();
     }
@@ -55,23 +69,23 @@ impl App {
         );
         self.renderer.request_reprint();
         let checking = |channel: flashagent_core::config::UpdateChannel| {
-            BackgroundNotice::fading(format!("{UPDATE_LINE_PREFIX}\u{b7} checking the {} channel\u{2026}", channel.label()), 30)
+            BackgroundNotice::fading(format!("{UPDATE_LINE_PREFIX}\u{b7} {}", flashagent_tui::i18n::tr_fill("checking the {channel} channel\u{2026}", &[("channel", channel.label())])), 30)
         };
         match action {
             UpdateKeyAction::DevMode => {
-                self.background = Some(BackgroundNotice::fading("Auto-updater is disabled in dev mode", 6));
+                self.say(BackgroundNotice::fading(tr("Auto-updater is disabled in dev mode"), 6));
                 return;
             }
             UpdateKeyAction::ShowProgress => {
                 self.update_watched = true;
                 if let Some((version, stage)) = &self.update_progress {
-                    self.background = Some(BackgroundNotice::sticky(update_progress_line(version, *stage)));
+                    self.say(BackgroundNotice::sticky(update_progress_line(version, *stage)));
                 }
                 return;
             }
             UpdateKeyAction::WatchCheck => {
                 self.update_watched = true;
-                self.background = Some(checking(self.config.update_channel));
+                self.say(checking(self.config.update_channel));
                 return;
             }
             UpdateKeyAction::InstallPending | UpdateKeyAction::CheckAndInstall => {}
@@ -79,15 +93,18 @@ impl App {
         // Claimed, not just read: the background updater may have started in between.
         if cx.update_busy.swap(true, Ordering::SeqCst) {
             self.update_watched = true;
-            self.background = Some(checking(self.config.update_channel));
+            self.say(checking(self.config.update_channel));
             return;
         }
         self.update_watched = true;
         let update_tx = cx.update_tx.clone();
         let busy = cx.update_busy.clone();
         let pending = if action == UpdateKeyAction::InstallPending { self.pending_update.clone() } else { None };
-        self.background = Some(match &pending {
-            Some((version, ..)) => BackgroundNotice::sticky(format!("{UPDATE_LINE_PREFIX}{version} \u{b7} starting the download\u{2026}")),
+        self.say(match &pending {
+            Some((version, ..)) => BackgroundNotice::sticky(format!(
+                "{UPDATE_LINE_PREFIX}{}",
+                tr_fill("{version} \u{b7} starting the download\u{2026}", &[("version", version)])
+            )),
             None => checking(self.config.update_channel),
         });
         let channel = self.config.update_channel;
@@ -222,7 +239,7 @@ impl App {
                     self.renderer.request_reprint();
                 } else if !self.attachments.is_empty() {
                     self.attachments.clear();
-                    self.background = Some(BackgroundNotice::fading("Attachments cleared".to_string(), 4));
+                    self.say(BackgroundNotice::fading(tr("Attachments cleared").to_string(), 4));
                     self.renderer.request_reprint();
                 } else {
                     // Esc closes and cancels, and never quits: it is pressed twice to close a
@@ -240,15 +257,14 @@ impl App {
             {
                 // It did nothing and said nothing while an answer was written.
                 if self.running {
-                    self.background = Some(BackgroundNotice::fading("Ctrl+R regenerates once the answer is done · Esc stops it now".to_string(), 4));
+                    self.say(BackgroundNotice::fading(tr("Ctrl+R regenerates once the answer is done · Esc stops it now").to_string(), 4));
                     self.renderer.request_reprint();
-                } else if cx.gate.pending().is_none()
-                    && cx.question_gate.pending().is_none()
+                } else if cx.question_gate.pending().is_none()
                     && self.overlay.is_none()
                     && !self.regenerate(cx)
                 {
                     let now = std::time::Instant::now();
-                    self.copy_toast = Some(("No previous turn to regenerate".to_string(), now));
+                    self.copy_toast = Some((tr("No previous turn to regenerate").to_string(), now));
                     self.renderer.request_reprint();
                 }
             }
@@ -323,20 +339,21 @@ impl App {
 
                     if !self.input.is_empty() {
                         flashagent_tui::clipboard::set_clipboard_text(&self.input);
-                        self.copy_toast = Some(("Copied input to clipboard".to_string(), now));
+                        self.copy_toast = Some((tr("Copied input to clipboard").to_string(), now));
                         self.renderer.request_reprint();
                     } else if let Some(text) = self.chat.last_assistant_text() {
                         if is_double_tap {
                             return Some(Flow::Quit);
                         }
                         flashagent_tui::clipboard::set_clipboard_text(&text);
-                        self.copy_toast = Some(("Copied assistant response (press Ctrl+C again to exit)".to_string(), now));
+                        self.copy_toast = Some((tr("Copied assistant response (press Ctrl+C again to exit)").to_string(), now));
                         self.renderer.request_reprint();
                     } else if is_double_tap {
                         return Some(Flow::Quit);
                     } else {
                         // Twice, as /help says: once quit a new session at a stray press.
-                        self.copy_toast = Some(("Press Ctrl+C again to exit".to_string(), now));
+                        self.copy_toast =
+                            Some((flashagent_tui::i18n::tr("Press Ctrl+C again to exit").to_string(), now));
                         self.renderer.request_reprint();
                     }
                 }
@@ -360,16 +377,16 @@ impl App {
                     self.attachments.push(att);
                     self.suggested_prompt = None;
                     if !model_sees_images(cx.source, &self.current_model) {
-                        self.background = Some(
-                            BackgroundNotice::sticky(format!(
-                                "{label} attached · {} cannot see images — press F3 for one that can",
-                                self.current_model
+                        self.say(
+                            BackgroundNotice::sticky(flashagent_tui::i18n::tr_fill(
+                                "{label} attached · {model} cannot see images — press F3 for one that can",
+                                &[("label", &label), ("model", &self.current_model)]
                             ))
                             .warning(),
                         );
                     } else {
-                        self.background = Some(BackgroundNotice::fading(
-                            format!("{label} attached · Ctrl+Z removes it"),
+                        self.say(BackgroundNotice::fading(
+                            flashagent_tui::i18n::tr_fill("{label} attached · Ctrl+Z removes it", &[("label", &label)]),
                             8,
                         ));
                     }
@@ -389,8 +406,8 @@ impl App {
                 if mods.contains(KeyModifiers::CONTROL) && !self.attachments.is_empty() =>
             {
                 if let Some(removed) = self.attachments.pop() {
-                    self.background = Some(BackgroundNotice::fading(
-                        format!("{} removed", removed.label()),
+                    self.say(BackgroundNotice::fading(
+                        flashagent_tui::i18n::tr_fill("{what} removed", &[("what", &removed.label())]),
                         5,
                     ));
                 }
@@ -415,16 +432,15 @@ impl App {
                 cx.perm.state().set_mode(next_mode);
                 self.remember_mode(next_mode);
                 self.refresh_welcome(cx.source, cx.mascot_mood);
-                self.custom_placeholder = Some(format!("Permission mode set to: {}", next_mode.label()));
+                self.custom_placeholder = Some(format!("{} {}", tr("Permission mode set to:"), tr(next_mode.label())));
                 self.suggested_prompt = None;
                 self.renderer.request_reprint();
             }
-            KeyCode::Tab if self.input.is_empty() && cx.gate.pending().is_none() => {
+            // While a card is up the keys go to it: `handle_overlay_key` claims
+            // them before this runs, and the card's own handler answers them.
+            KeyCode::Tab if self.input.is_empty() => {
                 let view = self.runtime_settings(cx.perm.state().mode(), cx.source);
                 self.open_overlay(Overlay::Settings(Box::new(view)));
-            }
-            KeyCode::Tab if cx.gate.pending().is_some() => {
-                self.confirm_select.toggle();
             }
             KeyCode::Tab if self.input.starts_with('/') => {
                 if let Some(ac) = AutocompletePopup::for_input(&self.input, std::path::Path::new("."), self.autocomplete_idx) {
@@ -433,18 +449,14 @@ impl App {
                 }
             }
             KeyCode::Left => {
-                if cx.gate.pending().is_some() {
-                    self.confirm_select.left();
-                } else if word_mods(mods) {
+                if word_mods(mods) {
                     self.input.word_left();
                 } else {
                     self.input.left();
                 }
             }
             KeyCode::Right => {
-                if cx.gate.pending().is_some() {
-                    self.confirm_select.right();
-                } else if !self.running && self.input.is_empty() {
+                if !self.running && self.input.is_empty() {
                     if let Some(sug) = self.suggested_prompt.take() {
                         self.latest_suggestion = None;
                         self.input.set(sug);
@@ -456,16 +468,14 @@ impl App {
                     self.input.right();
                 }
             }
-            KeyCode::Home if cx.gate.pending().is_none() => self.input.home(),
-            KeyCode::End if cx.gate.pending().is_none() => self.input.end(),
-            KeyCode::Delete if cx.gate.pending().is_none() => {
+            KeyCode::Home => self.input.home(),
+            KeyCode::End => self.input.end(),
+            KeyCode::Delete => {
                 self.input.delete();
                 self.edited();
             }
             KeyCode::Up => {
-                if cx.gate.pending().is_some() {
-                    self.confirm_select.toggle();
-                } else if let Some(ac) = self.command_popup() {
+                if let Some(ac) = self.command_popup() {
                     if self.autocomplete_idx == 0 {
                         self.autocomplete_idx = ac.items.len().saturating_sub(1);
                     } else {
@@ -491,9 +501,7 @@ impl App {
                 }
             }
             KeyCode::Down => {
-                if cx.gate.pending().is_some() {
-                    self.confirm_select.toggle();
-                } else if let Some(ac) = self.command_popup() {
+                if let Some(ac) = self.command_popup() {
                     self.autocomplete_idx = (self.autocomplete_idx + 1) % ac.items.len();
                 } else if self.input.down() {
                     // Moved within a multi-line text.
@@ -516,26 +524,27 @@ impl App {
     }
 
     async fn handle_editing_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Option<Flow> {
+        // A card that waits for an answer owns the keyboard: `handle_overlay_key`
+        // claims every key while it is up, and its own handler answers them.
+        // Nothing here has to ask a second time whether a card is waiting.
         match code {
             // Ctrl+Backspace arrives as Ctrl+H in many terminals, Alt+Backspace as
             // Backspace with Alt: both delete a word.
-            KeyCode::Backspace if cx.gate.pending().is_none() && word_mods(mods) => {
+            KeyCode::Backspace if word_mods(mods) => {
                 self.input.delete_word_before();
                 self.edited();
             }
-            KeyCode::Backspace if cx.gate.pending().is_none() => {
+            KeyCode::Backspace => {
                 self.input.backspace();
                 self.edited();
             }
             // Newline instead of send: Alt+Enter, and Shift+Enter where the terminal
             // reports it; elsewhere `\` + Enter or Ctrl+J.
-            KeyCode::Enter
-                if cx.gate.pending().is_none() && (mods.contains(KeyModifiers::ALT) || mods.contains(KeyModifiers::SHIFT)) =>
-            {
+            KeyCode::Enter if mods.contains(KeyModifiers::ALT) || mods.contains(KeyModifiers::SHIFT) => {
                 self.input.insert_char('\n');
                 self.edited();
             }
-            KeyCode::Enter if cx.gate.pending().is_none() && self.input[..self.input.cursor()].ends_with('\\') => {
+            KeyCode::Enter if self.input[..self.input.cursor()].ends_with('\\') => {
                 self.input.backspace();
                 self.input.insert_char('\n');
                 self.edited();
@@ -546,16 +555,13 @@ impl App {
                 self.latest_suggestion = None;
                 let typed_provider = self.input.line_count() == 1
                     && matches!(self.input.split_whitespace().next(), Some("/provider" | "/providers"));
-                if cx.gate.pending().is_some() {
-                    cx.gate.respond(self.confirm_select.decision());
-                    self.confirm_select = ConfirmSelect::new();
-                } else if typed_provider && self.running {
+                if typed_provider && self.running {
                     // Not steering for the model: it stays typed for when the answer is done.
                     self.refuse_switch_while_busy();
                 } else if let Some(switch) = self.provider_switch.as_ref().filter(|_| !self.input.starts_with('/') && !self.running) {
                     // It would go to whichever server the client has at that moment.
                     let name = switch.name.clone();
-                    self.background = Some(BackgroundNotice::fading(format!("Still connecting to {name} \u{b7} send it once it answers"), 5).warning());
+                    self.say(BackgroundNotice::fading(flashagent_tui::i18n::tr_fill("Still connecting to {name} \u{b7} send it once it answers", &[("name", &name)]), 5).warning());
                 } else if self.running && matches!(self.input.trim(), "/tasks" | "/bg") {
                     // Not steering: a task may need stopping while the turn runs.
                     self.input.clear();
@@ -612,8 +618,7 @@ impl App {
                 }
             }
             KeyCode::Char(c)
-                if cx.gate.pending().is_none()
-                    && !mods.contains(KeyModifiers::CONTROL)
+                if !mods.contains(KeyModifiers::CONTROL)
                     && !mods.contains(KeyModifiers::ALT) =>
             {
                 self.input.insert_char(c);
@@ -621,9 +626,9 @@ impl App {
                 self.autocomplete_idx = 0;
             }
             // Shell editing keys, on either layout.
-            KeyCode::Char(c) if cx.gate.pending().is_none() && mods.contains(KeyModifiers::CONTROL) => match latin(c) {
+            KeyCode::Char(c) if mods.contains(KeyModifiers::CONTROL) => match latin(c) {
                 'k' if self.running => {
-                    self.background = Some(BackgroundNotice::fading("Commands open once the turn is done · Esc interrupts it", 4));
+                    self.say(BackgroundNotice::fading(tr("Commands open once the turn is done · Esc interrupts it"), 4));
                     self.renderer.request_reprint();
                 }
                 'k' => self.open_palette(),
@@ -645,7 +650,7 @@ impl App {
                     self.edited();
                 }
                 'f' if self.input_history.is_empty() => {
-                    self.background = Some(BackgroundNotice::fading("No earlier prompts to search yet", 4));
+                    self.say(BackgroundNotice::fading(tr("No earlier prompts to search yet"), 4));
                     self.renderer.request_reprint();
                 }
                 'f' => {
@@ -654,7 +659,7 @@ impl App {
                 }
                 _ => {}
             },
-            KeyCode::Char(c) if cx.gate.pending().is_none() && mods.contains(KeyModifiers::ALT) => match latin(c) {
+            KeyCode::Char(c) if mods.contains(KeyModifiers::ALT) => match latin(c) {
                 'b' => self.input.word_left(),
                 'f' => self.input.word_right(),
                 // Ctrl+K belongs to the command palette.
@@ -682,11 +687,82 @@ fn latin_key(code: KeyCode) -> Option<char> {
     }
 }
 
+/// The Russian layout: the letter on each key, and the letter on the same key
+/// of the Latin layout.
+///
+/// One place for the whole interface. There were two tables for one job — one
+/// for the letters, one for the keys with a sign — and a fix to one did not
+/// reach the other. The letters are the ones that stay letters on both
+/// layouts; the signs are the keys the Russian layout turned into letters.
+const RU_LETTERS: &str = "йцукенгшщзфывапролдячсмить";
+const LATIN_LETTERS: &str = "qwertyuiopasdfghjklzxcvbnm";
+const RU_SIGNS: &str = "хъжэбюё";
+const LATIN_SIGNS: &str = "[];',.`";
+
 /// The Latin letter on the same key in the Russian layout, so Ctrl+W works
 /// with the layout switched.
+///
+/// Only the letters: a letter of the Russian layout that shares its key with
+/// a sign is left as it is. A shortcut never waits for it, and typing it is
+/// the owner's own text.
 fn latin(c: char) -> char {
-    const RU: &str = "йцукенгшщзфывапролдячсмить";
-    const EN: &str = "qwertyuiopasdfghjklzxcvbnm";
     let c = c.to_lowercase().next().unwrap_or(c);
-    RU.chars().position(|r| r == c).and_then(|i| EN.chars().nth(i)).unwrap_or(c)
+    latin_letter(c).unwrap_or(c)
+}
+
+/// The Latin letter on the same key of the Russian layout, if that key holds
+/// a letter on both layouts.
+pub(crate) fn latin_letter(c: char) -> Option<char> {
+    lookup(RU_LETTERS, LATIN_LETTERS, c)
+}
+
+/// The character on the same key of the Russian layout, signs included: with
+/// a Russian layout a shortcut arrives under the letter of that layout, and
+/// it is read by the key pressed, not by the letter on it.
+pub(crate) fn latin_key_char(c: char) -> Option<char> {
+    latin_letter(c).or_else(|| lookup(RU_SIGNS, LATIN_SIGNS, c))
+}
+
+/// The pair of the two tables at the position of the character.
+fn lookup(ru: &str, en: &str, c: char) -> Option<char> {
+    ru.chars().position(|r| r == c).and_then(|i| en.chars().nth(i))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The typing table is the letter part of the shortcut table. They used to
+    /// be two tables for one job, and a fix to one did not reach the other.
+    #[test]
+    fn the_typing_table_is_the_letter_part_of_the_shortcut_table() {
+        for (ru, en) in RU_LETTERS.chars().zip(LATIN_LETTERS.chars()) {
+            assert_eq!(latin_letter(ru), Some(en), "{ru}");
+            assert_eq!(latin_key_char(ru), Some(en), "{ru}");
+            assert_eq!(latin(ru), en, "{ru}");
+        }
+        for (ru, en) in RU_SIGNS.chars().zip(LATIN_SIGNS.chars()) {
+            assert_eq!(latin_key_char(ru), Some(en), "{ru}");
+            // Typing leaves a letter that shares its key with a sign as it
+            // is: the person is typing Russian.
+            assert_eq!(latin(ru), ru, "{ru}");
+        }
+    }
+
+    /// Every letter of the Russian layout is on the table. The typing one did
+    /// not know the seven letters that share their key with a sign.
+    #[test]
+    fn every_letter_of_the_russian_layout_is_known() {
+        for c in "абвгдеёжзийклмнопрстуфхцчшщъыьэюя".chars() {
+            assert!(latin_key_char(c).is_some(), "{c} is not on the table");
+        }
+    }
+
+    /// A key of another layout is left alone.
+    #[test]
+    fn a_key_from_another_layout_is_left_alone() {
+        assert_eq!(latin('q'), 'q');
+        assert_eq!(latin_key_char('q'), None);
+        assert_eq!(latin_key_char('7'), None);
+    }
 }

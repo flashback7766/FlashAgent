@@ -226,7 +226,9 @@ pub fn patch_file(cwd: &Path, rel_path: &str, patch_text: &str) -> Result<String
         .map_err(|e| ToolError::Other(format!("failed to read file '{rel_path}': {e}")))?;
     let hunks = parse_hunks(patch_text)?;
     let new_content = apply_hunks(&orig_content, &hunks, rel_path)?;
-    std::fs::write(&full, &new_content)
+    // The file is replaced in one step: a failure in the middle of a write
+    // would leave a half-patched file behind.
+    crate::fs_tools::write_atomic(&full, &new_content)
         .map_err(|e| ToolError::Other(format!("failed to write patched file '{rel_path}': {e}")))?;
     Ok(format!("Successfully applied {} hunk(s) to '{rel_path}'", hunks.len()))
 }
@@ -402,5 +404,27 @@ mod tests {
         assert!(preview.contains("-b") && preview.contains("+B"));
         patch_file(&temp, "b.txt", patch).unwrap();
         assert_eq!(std::fs::read_to_string(temp.join("b.txt")).unwrap(), "a\nB\nc\n");
+    }
+
+    /// The patched file is replaced, not written over: a failure in the middle
+    /// of the write would leave a half-patched file behind.
+    #[test]
+    #[cfg(unix)]
+    fn a_patched_file_is_replaced_in_one_step() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = crate::testing::tempdir();
+        let file = temp.join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        let before = std::fs::metadata(&file).unwrap().ino();
+        patch_file(&temp, "a.txt", "@@ -1,1 +1,1 @@\n-one\n+two\n").unwrap();
+        let after = std::fs::metadata(&file).unwrap().ino();
+        assert_ne!(before, after, "the file was written in place instead of being replaced");
+        let leftovers: Vec<String> = std::fs::read_dir(temp)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "a.txt")
+            .collect();
+        assert!(leftovers.is_empty(), "a temporary file was left behind: {leftovers:?}");
     }
 }

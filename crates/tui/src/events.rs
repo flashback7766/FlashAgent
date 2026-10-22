@@ -1,4 +1,5 @@
 use super::*;
+use flashagent_tui::i18n::tr_fill;
 
 /// Checking while a look may still answer; offline once one got nothing
 /// (after a moment, so the face does not flash) or when none has answered
@@ -15,37 +16,7 @@ pub(crate) fn server_mood(switching: bool, answered: bool, silent: bool, since_s
     }
 }
 
-/// How long a finished compaction keeps the tip's row: ten seconds at the 80 ms
-/// idle tick, the span a tip itself gets. It borrows a tip's place, so it has to
-/// hand that place back.
-pub(crate) const COMPACT_STATUS_HOLD_TICKS: usize = 125;
-
-/// Whether a compaction line has been shown long enough that the row is due back
-/// to the tips. A hold of zero is a line with no deadline — the one written while
-/// `/compact` is still running — and it does not run out on its own.
-fn compact_status_expired(hold: &mut usize) -> bool {
-    match *hold {
-        0 => false,
-        1 => {
-            *hold = 0;
-            true
-        }
-        n => {
-            *hold = n - 1;
-            false
-        }
-    }
-}
-
 impl App {
-    /// Puts the compaction line under the prompt, where the status of the moment
-    /// belongs rather than in the chat. `hold` is how many idle ticks it keeps
-    /// the tip's row for; zero leaves it up for as long as it lasts.
-    pub(crate) fn set_compact_status(&mut self, text: String, hold: usize) {
-        self.compact_status = Some(text);
-        self.compact_status_hold = hold;
-        self.renderer.request_reprint();
-    }
     /// One event from the terminal, the agent loop or a background task.
     pub(crate) async fn on_ui_event(&mut self, cx: &mut LoopCtx<'_>, ev: UiEvent) -> Flow {
         match ev {
@@ -60,7 +31,7 @@ impl App {
             UiEvent::ToolTestResult(verdict) => {
                 match self.settings_view_mut() {
                     Some(s) => s.tool_test_status = Some(verdict),
-                    None => self.notice(format!("Tool test: {verdict}")),
+                    None => self.notice(tr_fill("Tool test: {verdict}", &[("verdict", &verdict)])),
                 }
                 self.renderer.request_reprint();
             }
@@ -73,7 +44,9 @@ impl App {
                 self.on_server_discovered(cx, disc)
             }
             UiEvent::ServerSilent(url) => self.server_silent = self.provider_switch.is_none() && url == cx.source.0.base_url(),
-            UiEvent::Compacted { history, saved } => self.on_compacted(cx, history, saved),
+            UiEvent::CompactionDelta(delta) => self.chat.append_compaction_delta(&delta),
+            UiEvent::CompactionReset => self.chat.restart_compaction_card(),
+            UiEvent::Compacted { history, saved, card } => self.on_compacted(cx, history, saved, card),
             UiEvent::Loop { turn_id, event } => self.on_loop_event(cx, turn_id, &event),
             UiEvent::Finished { turn_id, result } => return self.finish_turn(cx, turn_id, result).await,
             UiEvent::Resize(cols, rows) => {
@@ -129,16 +102,29 @@ impl App {
                 // that is already answering their questions is worse than saying
                 // nothing was learned: reported live against OpenRouter, which
                 // lists models fine but answers nothing to a name it is not given.
-                self.background = Some(BackgroundNotice::fading(
-                    format!("{OFFLINE_NOTICE} · could not read the model list from {url} · /provider picks another"),
+                self.say(BackgroundNotice::fading(
+                    format!(
+                        "{} · {} {url} · {}",
+                        offline_notice(),
+                        flashagent_tui::i18n::tr("could not read the model list from"),
+                        flashagent_tui::i18n::tr("/provider picks another")
+                    ),
                     8,
                 ));
             }
-            MascotMood::Happy if previous == MascotMood::Offline => {
-                self.background = Some(BackgroundNotice::fading(
-                    format!("Model server is answering \u{b7} {}", self.current_model),
-                    5,
-                ));
+            MascotMood::Happy => {
+                // The server answered: the "no answer" notice is no longer true,
+                // however it got there. Coming from Offline say so briefly;
+                // otherwise just take the stale notice away.
+                if previous == MascotMood::Offline {
+                    self.say(BackgroundNotice::fading(
+                        flashagent_tui::i18n::tr_fill("Model server is answering \u{b7} {model}", &[("model", &self.current_model)]),
+                        5,
+                    ));
+                } else if self.background.as_ref().is_some_and(|b| b.text.starts_with(offline_notice())) {
+                    self.background = None;
+                    self.renderer.request_reprint();
+                }
             }
             _ => {}
         }
@@ -163,11 +149,12 @@ impl App {
         match notice {
             UpdateNotice::Available { version, asset_name, download_url, checksums_url } => {
                 self.pending_update = Some((version.clone(), asset_name, download_url, checksums_url));
-                self.background = Some(BackgroundNotice::sticky(format!(
-                    "Update available: {version} · /update installs it"
+                self.say(BackgroundNotice::sticky(tr_fill(
+                    "Update available: {version} · /update installs it",
+                    &[("version", &version)],
                 )));
                 if let Some(s) = self.settings_view_mut() {
-                    s.update_check_status = Some(format!("Available: {version} (/update)"));
+                    s.update_check_status = Some(flashagent_tui::i18n::tr("Available: {version} (/update)").to_string());
                 }
             }
             UpdateNotice::Progress { version, stage } => {
@@ -181,20 +168,21 @@ impl App {
                 self.pending_update = None;
                 self.update_progress = None;
                 self.update_watched = false;
-                self.background = Some(BackgroundNotice::sticky(format!(
-                    "Updated to {version} \u{b7} restart FlashAgent to use it"
+                self.say(BackgroundNotice::sticky(flashagent_tui::i18n::tr_fill(
+                    "Updated to {version} \u{b7} restart FlashAgent to use it",
+                    &[("version", &version)]
                 )));
                 if let Some(s) = self.settings_view_mut() {
-                    s.update_check_status = Some(format!("Ready: {version} (restart to apply)"));
+                    s.update_check_status = Some(flashagent_tui::i18n::tr("Ready: {version} (restart to apply)").to_string());
                 }
             }
             UpdateNotice::UpToDate { version } => {
                 if let Some(s) = self.settings_view_mut() {
-                    s.update_check_status = Some(format!("Up to date ({version})"));
+                    s.update_check_status = Some(flashagent_tui::i18n::tr_fill("Up to date ({version})", &[("version", &version)]));
                 }
                 if std::mem::take(&mut self.update_watched) {
-                    self.background = Some(BackgroundNotice::fading(
-                        format!("FlashAgent {version} is up to date"),
+                    self.say(BackgroundNotice::fading(
+                        flashagent_tui::i18n::tr_fill("FlashAgent {version} is up to date", &[("version", &version)]),
                         6,
                     ));
                 }
@@ -205,9 +193,12 @@ impl App {
                     s.update_check_status = Some(format!("Error: {error}"));
                 }
                 if std::mem::take(&mut self.update_watched) {
-                    self.background = Some(
+                    self.say(
                         BackgroundNotice::fading(
-                            format!("Update failed: {}", flashagent_tui::truncate_middle(&error, 90)),
+                            tr_fill(
+                                "Update failed: {error}",
+                                &[("error", &flashagent_tui::truncate_middle(&error, 90))],
+                            ),
                             10,
                         )
                         .warning(),
@@ -236,13 +227,6 @@ impl App {
         }
         if self.background.as_ref().is_some_and(BackgroundNotice::expired) {
             self.background = None;
-            self.renderer.request_reprint();
-        }
-        // A compaction that has finished reports itself once and then lets the
-        // tips have their row again: the line takes a tip's place, so holding it
-        // forever means no tip ever comes round.
-        if compact_status_expired(&mut self.compact_status_hold) {
-            self.compact_status = None;
             self.renderer.request_reprint();
         }
         if self.running && self.cancel_requested.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(3)) {
@@ -281,6 +265,8 @@ impl App {
         self.turn_started = None;
         self.cancel_requested = None;
         self.aborted_turn = Some(self.turn_counter);
+        self.chat.abandon_compaction_card(flashagent_tui::i18n::tr("the turn was abandoned before the summary landed"));
+        self.mid_turn_report = None;
         // The turn's own history, dropped with the turn. Left set, the next
         // turn's autosave_during_turn wrote this one back over the session file
         // for as long as it kept running: the abandoned turn's half steps
@@ -294,26 +280,21 @@ impl App {
         self.task_inbox.turn_aborted();
         self.flush_task_lines();
         self.token_tracker.on_finished();
-        if let Some(saved) = self.goal_state.take() {
-            cx.tools_arc.set_goal_mode(false);
-            cx.perm.state().set_goal_active(false);
-            cx.perm.state().set_mode(saved.mode);
-            self.current_effort = saved.effort.clone();
-            self.max_steps = saved.max_steps;
-            if let Some(ledger) = self.goal_ledger.take() {
-                push_goal_report(&mut self.chat, &ledger, DoneReason::Cancelled);
-            }
+        // The same handback as any other ending: a run that would not wind
+        // down is a run that ended, and the app must not stay in its mode.
+        if self.end_goal(cx, DoneReason::Cancelled) {
+            self.apply_personality();
         }
         self.chat.on_event(&LoopEvent::Done(DoneReason::Cancelled));
         self.flash_turn_end(Some(DoneReason::Cancelled));
-        self.custom_placeholder = Some("Turn aborted; its partial output was not kept in the model context".to_string());
+        self.custom_placeholder = Some(flashagent_tui::i18n::tr("Turn aborted; its partial output was not kept in the model context").to_string());
         self.renderer.request_reprint();
     }
 
     /// Asks the server again what it runs, unless a turn or another look is
     /// already talking to it.
     pub(crate) fn poll_server(&mut self, cx: &LoopCtx<'_>) {
-        self.warm_prompt_cache(cx.source, cx.perm, cx.memory_block);
+        self.warm_prompt_cache(cx.source, cx.perm);
         if !should_poll_server(self.running, cx.source.0.requests_in_flight(), cx.is_discovering.load(Ordering::Relaxed)) {
             return;
         }
@@ -332,22 +313,47 @@ impl App {
     }
 
     /// The compaction task came back with the history it was given, shortened
-    /// or untouched. The line under the prompt keeps the result, so the chat is
-    /// not where a status belongs.
-    pub(crate) fn on_compacted(&mut self, cx: &LoopCtx<'_>, history: Vec<ChatMessage>, saved: Option<usize>) {
+    /// or untouched. The card in the transcript carries the result, so there is
+    /// no second status line under the prompt to keep.
+    pub(crate) fn on_compacted(
+        &mut self,
+        cx: &LoopCtx<'_>,
+        history: Vec<ChatMessage>,
+        _saved: Option<usize>,
+        card: Option<CompactionResult>,
+    ) {
         self.history = history;
         self.compacting = false;
+        match card {
+            Some(result) => {
+                // The turns the summary replaced go with the session: one file
+                // holds the conversation and the archive of what it left out.
+                let replaced = result.archive.len();
+                self.archive.extend(result.archive.iter().cloned());
+                self.chat.finish_compaction_card(&result);
+                // A standing line about the compaction itself: what went, what
+                // it freed and where the exact words are kept. The card holds
+                // the summary; this holds the facts about it.
+                self.chat.push_system(&flashagent_tui::i18n::tr_fill(
+                    "Context compacted: {replaced} messages became a summary, about {saved} tokens freed. The full transcript is in the session file.",
+                    &[
+                        ("replaced", &replaced.to_string()),
+                        ("saved", &result.saved.to_string()),
+                    ],
+                ));
+            }
+            None => self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the conversation is unchanged")),
+        }
         self.chat.forget_counted_context();
-        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-        self.set_compact_status(
-            match saved {
-                Some(saved) => {
-                    format!("Compacted · {} saved · {} left in the window", ContextUsage::format_tokens(saved), ContextUsage::format_tokens(self.context_usage.total_used()))
-                }
-                None => "Compaction saved no space · conversation unchanged".to_string(),
-            },
-            COMPACT_STATUS_HOLD_TICKS,
-        );
+        // On disk now, not at the next turn or at the exit: a machine that
+        // loses power here used to lose the compaction with it, and the
+        // conversation came back as it was before the summary.
+        self.autosave(cx.session_id, cx.cwd_display);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        // Whatever was typed while compaction ran goes out now — whether the
+        // summary was saved or not — as steering if a turn is under way, or a
+        // fresh turn otherwise.
+        self.send_queued_after_compaction(cx);
     }
 
     /// The model a discovery answers for. A cloud listing names no active model
@@ -373,13 +379,16 @@ impl App {
                 self.config.active_profile_mut().model = self.current_model.clone();
                 self.save_config();
             }
-            self.refresh_welcome(cx.source, cx.mascot_mood);
+            self.refresh_welcome_state(cx.source, cx.mascot_mood);
             self.renderer.request_reprint();
         }
         // Kept rather than swapped for a model that would be billed instead,
         // so the user hears about it before the first request fails.
         if disc.active_model.is_none() && self.on_active_provider(cx.source) && self.config.endpoint().api_key.is_some() && !self.current_model.is_empty() && disc.model(&self.current_model).is_none() {
-            self.custom_placeholder = Some(format!("{} does not list {} · F3 picks one of its models", self.config.active_profile().name, self.current_model));
+            self.custom_placeholder = Some(tr_fill(
+                "{name} does not list {model} · F3 picks one of its models",
+                &[("name", &self.config.active_profile().name), ("model", &self.current_model)],
+            ));
             self.suggested_prompt = None;
             self.renderer.request_reprint();
         }
@@ -397,11 +406,15 @@ impl App {
                 self.current_model = active.id.clone();
                 self.current_context = new_ctx_disp;
                 self.context_usage.total_capacity = new_ctx_len.max(1024);
+                cx.tools_arc.set_prompt_tokens(self.prompt_tokens);
                 cx.tools_arc.set_context_window(Some(new_ctx_len));
                 cx.source.set_model(&self.current_model);
+                // The schemas are counted for this model, not for whatever was
+                // in use when the window was first read.
+                cx.tools_arc.set_model_name(&self.current_model);
                 cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
                 cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
-                update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
 
                 // Only for the provider the client talks to: another's model
                 // must not be written beside it.
@@ -417,20 +430,22 @@ impl App {
                     }
                 }
 
-                self.refresh_welcome(cx.source, cx.mascot_mood);
+                self.refresh_welcome_state(cx.source, cx.mascot_mood);
                 let ctx_tag = self.current_context.clone().unwrap_or_default();
 
                 if model_changed {
-                    let msg = format!(
-                        "Server active model switched: {old_m} -> {}", self.current_model
+                    let msg = tr_fill(
+                        "Server active model switched: {old} -> {new}",
+                        &[("old", &old_m), ("new", &self.current_model)],
                     );
                     self.custom_placeholder = Some(msg);
                     self.suggested_prompt = None;
                 } else if ctx_changed {
                     let old_formatted = ContextUsage::format_tokens(old_ctx_len);
                     let new_formatted = ContextUsage::format_tokens(new_ctx_len);
-                    let msg = format!(
-                        "Model context capacity: {old_formatted} -> {new_formatted} ({ctx_tag})"
+                    let msg = tr_fill(
+                        "Model context capacity: {old} -> {new} ({tag})",
+                        &[("old", &old_formatted), ("new", &new_formatted), ("tag", &ctx_tag)],
                     );
                     self.custom_placeholder = Some(msg);
                     self.suggested_prompt = None;
@@ -438,7 +453,7 @@ impl App {
                 self.renderer.request_reprint();
             }
         }
-        self.warm_prompt_cache(cx.source, cx.perm, cx.memory_block);
+        self.warm_prompt_cache(cx.source, cx.perm);
     }
 
     fn on_recap(&mut self, turn_id: u64, recap: &str, suggestion: Option<String>) {
@@ -501,7 +516,7 @@ impl App {
         if self.chat.take_needs_reprint() {
             self.renderer.request_reprint();
         }
-        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
     }
 
     /// The live phase, the token rate and what the turn did, for the status
@@ -535,8 +550,8 @@ impl App {
                     .is_some_and(|n| matches!(n, "memory_create" | "memory_update" | "memory_remove"));
                 if wrote_memory && !*is_error {
                     if let Some(said) = result.as_deref().and_then(|r| r.lines().next()) {
-                        self.background = Some(BackgroundNotice::fading(
-                            format!("{said}  ·  /memory to see or change it"),
+                        self.say(BackgroundNotice::fading(
+                            tr_fill("{said}  ·  /memory to see or change it", &[("said", said)]),
                             10,
                         ));
                     }
@@ -566,40 +581,42 @@ impl App {
                 self.token_tracker.on_usage(u);
                 // Only what the server priced. A local backend reports nothing,
                 // and the ledger stays silent rather than inventing a bill.
-                self.cost.record(&self.config.active_profile().name, u.cost);
+                self.cost.record_with_details(
+                    &self.config.active_profile().name,
+                    u.cost,
+                    u.cost_details.and_then(|d| d.upstream_cost),
+                );
                 if let Some(ledger) = self.goal_ledger.as_mut() {
                     ledger.record_cost(&self.config.active_profile().name, u.cost);
                 }
             }
-            // A running turn is about to summarize itself. This one is said in
-            // the transcript, not the status line: nothing streams for the half
-            // minute it takes, and a line that simply stops moving reads as a
-            // hang rather than as work.
+            // A running turn is about to summarize itself. The card says why
+            // the turn is quiet for a while, and stays in the transcript as
+            // the record of what the model now remembers.
             LoopEvent::CompactionStarted => {
-                self.chat.push_line(
-                    flashagent_tui::LineKind::System,
-                    "Window nearly full: writing a full summary of this task so it can carry on \u{b7} the turn continues in a moment",
-                );
+                self.chat.start_compaction_card();
                 self.renderer.request_reprint();
             }
-            // Nothing was saved: the summarizing failed. The promise
-            // CompactionStarted made is withdrawn here, in the transcript
-            // where it was made, because the window is still full and the next
-            // steps go on filling it.
-            LoopEvent::Compacted { saved: 0 } => {
-                self.chat.push_line(
-                    flashagent_tui::LineKind::System,
-                    "Could not summarize this task \u{b7} the conversation is unchanged and the window is still full",
-                );
+            // Nothing was saved: the summarizing failed. The card withdraws the
+            // promise `CompactionStarted` made, because the window is still full
+            // and the next steps go on filling it.
+            LoopEvent::Compacted { saved } if *saved == 0 => {
+                self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the conversation is unchanged and the window is still full"));
                 self.renderer.request_reprint();
             }
-            // The window was nearly full; the work goes on. Said on the status line,
-            // not in the transcript: nothing in the conversation changed for the reader.
-            LoopEvent::Compacted { saved } => {
-                self.background = Some(BackgroundNotice::fading(
-                    format!("Context nearly full: older steps summarized mid-turn \u{b7} {} saved", ContextUsage::format_tokens(*saved)),
-                    8,
-                ));
+            // The window was nearly full; the work goes on. The compactor handed
+            // the summary and the call's token counts over before the event was
+            // queued, so the card can be filled in where it was started.
+            LoopEvent::Compacted { .. } => {
+                let report = self
+                    .mid_turn_report
+                    .as_ref()
+                    .and_then(|slot| slot.lock().ok().and_then(|mut slot| slot.take()));
+                match report {
+                    Some(result) => self.chat.finish_compaction_card(&result),
+                    None => self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the summary was not kept")),
+                }
+                self.renderer.request_reprint();
             }
             LoopEvent::SteeringInjected(directive) if self.task_inbox.injected(directive) => {
                 self.flush_task_lines();
@@ -667,7 +684,7 @@ impl App {
                     let picked = self.renderer.text_in(top, m.row, left, m.column);
                     if picked.chars().count() > 1 && flashagent_tui::clipboard::set_clipboard_text(&picked) {
                         self.background =
-                            Some(BackgroundNotice::fading(format!("Copied {} characters", picked.chars().count()), 4));
+                            Some(BackgroundNotice::fading(flashagent_tui::i18n::tr_fill("Copied {n} characters", &[("n", &picked.chars().count().to_string())]), 4));
                         self.renderer.request_reprint();
                     }
                 }
@@ -747,7 +764,10 @@ impl App {
             let label = att.label();
             self.attachments.push(att);
             self.suggested_prompt = None;
-            self.background = Some(BackgroundNotice::fading(format!("{label} attached · Ctrl+Z removes it"), 8));
+            self.say(BackgroundNotice::fading(
+                tr_fill("{label} attached · Ctrl+Z removes it", &[("label", &label)]),
+                8,
+            ));
         } else if !pasted.is_empty() {
             // Pasted code or logs keep their line breaks.
             self.input.insert_str(pasted);
@@ -769,34 +789,6 @@ fn decayed(momentum: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_finished_compaction_hands_the_tip_row_back() {
-        let mut hold = COMPACT_STATUS_HOLD_TICKS;
-        for _ in 1..COMPACT_STATUS_HOLD_TICKS {
-            assert!(!compact_status_expired(&mut hold), "the row went back before the time was up");
-        }
-        assert_eq!(hold, 1);
-        assert!(compact_status_expired(&mut hold), "the row was never handed back: the line stays forever");
-        assert_eq!(hold, 0);
-    }
-
-    #[test]
-    fn a_running_compaction_line_does_not_expire_on_its_own() {
-        let mut hold = 0;
-        for _ in 0..COMPACT_STATUS_HOLD_TICKS * 10 {
-            assert!(!compact_status_expired(&mut hold), "a line about a running compaction vanished mid-write");
-        }
-        assert_eq!(hold, 0);
-    }
-
-    #[test]
-    fn a_cleared_status_does_not_keep_expiring() {
-        let mut hold = 1;
-        assert!(compact_status_expired(&mut hold));
-        for _ in 0..5 {
-            assert!(!compact_status_expired(&mut hold), "clearing again after the row went back");
-        }
-    }
     use super::*;
 
     #[test]

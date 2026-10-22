@@ -75,11 +75,28 @@ impl Outcome {
     }
 }
 
+/// What a scenario needs to run.
+///
+/// The delegation scenarios are told about subagents and offered the tools to
+/// spawn one; the rest are told about tools and offered the probe set. A
+/// model asked about a tool it was never offered is being asked a question it
+/// cannot answer, so the two kinds are kept apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScenarioKind {
+    /// A tool call of the model's own.
+    Tools,
+    /// Work handed over to a subagent.
+    Delegation,
+}
+
 pub struct Scenario {
     /// Stable, for machine-readable output.
     pub key: &'static str,
     pub title: &'static str,
+    /// What the scenario proves, in a sentence: a list of names says nothing
+    /// about what was checked.
     pub matters: &'static str,
+    pub kind: ScenarioKind,
 }
 
 pub fn scenarios() -> Vec<Scenario> {
@@ -88,67 +105,146 @@ pub fn scenarios() -> Vec<Scenario> {
             key: "single_call",
             title: "makes a tool call at all",
             matters: "without this the agent can only talk about doing the work",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "arguments",
             title: "gets the arguments right",
             matters: "wrong arguments edit the wrong file or run the wrong command",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "no_spurious_call",
             title: "answers plainly when no tool is needed",
             matters: "a model that always calls something loops instead of replying",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "uses_result",
             title: "uses a tool result instead of calling again",
             matters: "otherwise every turn repeats the same call until the budget ends it",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "second_step",
             title: "moves on to the next tool",
             matters: "multi-step work is the whole point of an agent",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "exact_content",
             title: "keeps content exact through JSON",
             matters: "quotes and newlines mangled in transit corrupt the file being written",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "after_error",
             title: "recovers from a failed tool call",
             matters: "tools fail constantly; a model that cannot adapt stalls on the first one",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "two_calls",
             title: "asks for two files in one turn",
             matters: "one call per turn turns a ten-file job into ten round trips",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "no_invented_calls",
             title: "calls only the tools it was given",
             matters: "a name it was never offered is a call the loop cannot run",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "long_stream",
             title: "keeps a long answer coming to the end",
             matters: "an answer that stops halfway leaves the transcript wrong and the work undone",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "ten_steps",
             title: "stays on the rails over many steps",
             matters: "real work is a long chain; drift shows up in step ten, not step two",
+            kind: ScenarioKind::Tools,
         },
         Scenario {
             key: "sees_picture",
             title: "looks at a picture",
             matters: "a model that cannot see cannot review a screenshot or a design",
+            kind: ScenarioKind::Tools,
+        },
+        Scenario {
+            key: "chain_survives_failure",
+            title: "keeps a long job going through a failure",
+            matters: "one bad read is routine; a model that stops the whole job over it never finishes anything",
+            kind: ScenarioKind::Tools,
+        },
+        Scenario {
+            key: "reads_before_writing",
+            title: "reads a file before changing it",
+            matters: "writing blind costs the rest of the file, which is the whole file",
+            kind: ScenarioKind::Tools,
+        },
+        Scenario {
+            key: "remembers_the_start",
+            title: "still knows a fact from the start",
+            matters: "this is what compaction has to keep, or every trim costs a re-read",
+            kind: ScenarioKind::Tools,
+        },
+        Scenario {
+            key: "delegates_wide_work",
+            title: "hands over a wide job, whole",
+            matters: "a child cannot ask what was meant, so a topic comes back as a summary or as nothing",
+            kind: ScenarioKind::Delegation,
+        },
+        Scenario {
+            key: "does_not_duplicate_a_search",
+            title: "does not run a search it handed over",
+            matters: "two answers to pay for and no way to tell which one is right",
+            kind: ScenarioKind::Delegation,
+        },
+        Scenario {
+            key: "never_invents_a_pending_answer",
+            title: "invents nothing while an agent is still running",
+            matters: "the one failure a user cannot tell from a real one until they open the file",
+            kind: ScenarioKind::Delegation,
+        },
+        Scenario {
+            key: "checks_a_report_before_acting",
+            title: "reads the file a report named, then acts",
+            matters: "a report is a claim, and acting on it unchecked is a wrong reading made permanent",
+            kind: ScenarioKind::Delegation,
+        },
+        Scenario {
+            key: "does_not_delegate_a_lookup",
+            title: "does not delegate one file it could open itself",
+            matters: "the other half of the same rule: delegation has a cost and a point",
+            kind: ScenarioKind::Delegation,
         },
     ]
 }
 
+/// The scenario by its key, if there is one.
+fn scenario(key: &str) -> Option<Scenario> {
+    scenarios().into_iter().find(|s| s.key == key)
+}
+
+/// Whether the scenario hands work to a subagent: those run with another
+/// prompt and another table of tools.
+fn is_delegation_scenario(key: &str) -> bool {
+    scenario(key).is_some_and(|s| s.kind == ScenarioKind::Delegation)
+}
+
 fn probe_tools() -> Vec<ToolSpec> {
-    vec![
+    probe_tools_with(&[])
+}
+
+/// [`probe_tools`] plus the tools a model delegates through. Kept apart so the
+/// delegation scenarios advertise them and nothing else does: a model told a
+/// subagent exists, on a table with no way to spawn one, is being asked a
+/// question about a tool it does not have.
+fn probe_tools_with(extra: &[ToolSpec]) -> Vec<ToolSpec> {
+    let mut tools = vec![
         ToolSpec {
             name: "read_lines".into(),
             description: "Read the first N lines of a file.".into(),
@@ -164,7 +260,25 @@ fn probe_tools() -> Vec<ToolSpec> {
             description: "Report a numeric status code back to the harness.".into(),
             parameters_json: r#"{"type":"object","properties":{"code":{"type":"integer","description":"The status code"}},"required":["code"]}"#.into(),
         },
-    ]
+    ];
+    tools.extend_from_slice(extra);
+    tools
+}
+
+/// The two tools a model delegates through, as the app offers them.
+fn delegation_tools() -> Vec<ToolSpec> {
+    probe_tools_with(&[
+        ToolSpec {
+            name: "spawn_agent".into(),
+            description: "Start a separate agent with its own tools and its own context. It cannot see this conversation and cannot ask the user anything.".into(),
+            parameters_json: r#"{"type":"object","properties":{"role":{"type":"string","description":"Which kind of agent to start"},"task":{"type":"string","description":"The whole job for it, self-contained: what to look at, what to decide, and what an answer worth reading looks like"}},"required":["role","task"]}"#.into(),
+        },
+        ToolSpec {
+            name: "send_message".into(),
+            description: "Send a message to another agent by name.".into(),
+            parameters_json: r#"{"type":"object","properties":{"to":{"type":"string","description":"Name of the agent"},"text":{"type":"string","description":"What to say"}},"required":["to","text"]}"#.into(),
+        },
+    ])
 }
 
 fn opts() -> TurnOptions {
@@ -209,11 +323,19 @@ impl Turn {
 }
 
 async fn run_turn(llm: &dyn LlmSource, messages: &[ChatMessage], timeout: Duration) -> Turn {
-    let started = Instant::now();
     let tools = probe_tools();
+    run_turn_with(llm, messages, &tools, timeout).await
+}
+
+/// The same turn with a different table in front of the model. The delegation
+/// scenarios need `spawn_agent` on offer, and adding it to [`probe_tools`] for
+/// every scenario would hand the other fourteen an extra reason to call
+/// something.
+async fn run_turn_with(llm: &dyn LlmSource, messages: &[ChatMessage], tools: &[ToolSpec], timeout: Duration) -> Turn {
+    let started = Instant::now();
     let collect = async {
         let mut stream = llm
-            .turn_with_options(messages, &tools, &opts())
+            .turn_with_options(messages, tools, &opts())
             .await
             .map_err(|e| e.to_string())?;
         // Deltas arrive interleaved by index, as in the agent loop, and the index
@@ -324,6 +446,41 @@ impl CheckReport {
         (self.results.iter().filter(|(_, o)| o.is_pass()).count(), self.results.len())
     }
 
+    /// Which scenarios a model failed every time, and which it failed only
+    /// sometimes.
+    ///
+    /// A single run of this check does not decide anything. Measured on the same
+    /// model and the same code, three runs of twelve scenarios came out 9, 11
+    /// and 9 — so a number from one run is worth about as much as a coin. What
+    /// separates a real weakness from a coin flip is whether it survives the
+    /// repeats, and that is what this is for.
+    pub fn stability(runs: &[&CheckReport]) -> (Vec<String>, Vec<String>) {
+        let (always, sometimes) = if runs.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            let names: Vec<&str> = runs[0].results.iter().map(|(key, _)| key.as_str()).collect();
+            let mut always = Vec::new();
+            let mut sometimes = Vec::new();
+            for (i, name) in names.iter().enumerate() {
+                let failures = runs.iter().filter(|run| !run.results[i].1.is_pass()).count();
+                if failures == runs.len() {
+                    always.push((*name).to_string());
+                } else if failures > 0 {
+                    sometimes.push((*name).to_string());
+                }
+            }
+            (always, sometimes)
+        };
+        (always, sometimes)
+    }
+
+    /// The middle score of several runs. No `f64` sort: these are counts.
+    pub fn median_score(runs: &[&CheckReport]) -> usize {
+        let mut passed: Vec<usize> = runs.iter().map(|r| r.score().0).collect();
+        passed.sort_unstable();
+        passed.get(passed.len() / 2).copied().unwrap_or(0)
+    }
+
     /// Scenarios the server did not let run.
     pub fn untested(&self) -> usize {
         self.results.iter().filter(|(_, o)| matches!(o, Outcome::Unavailable { .. })).count()
@@ -370,14 +527,26 @@ impl CheckReport {
     pub fn lines(&self) -> Vec<String> {
         let mut out = Vec::new();
         let title_width = scenarios().iter().map(|s| s.title.len()).max().unwrap_or(40);
-        for (scenario, (key, outcome)) in scenarios().iter().zip(&self.results) {
-            debug_assert_eq!(scenario.key, key);
+        // By key, not by position: a report narrowed with `--scenario` holds a
+        // subset, and zipping it against the full list titled every line with
+        // whatever happened to come first.
+        let described: Vec<(String, String, &'static str)> =
+            scenarios().iter().map(|s| (s.key.to_string(), s.title.to_string(), s.matters)).collect();
+        for (key, outcome) in &self.results {
+            let (title, matters) = described
+                .iter()
+                .find(|(k, _, _)| k == key)
+                .map(|(_, t, m)| (t.as_str(), Some(*m)))
+                .unwrap_or((key.as_str(), None));
             let mark = match outcome {
                 Outcome::Pass { .. } => "ok  ",
                 Outcome::Unavailable { .. } => "--  ",
                 _ => "FAIL",
             };
-            out.push(format!("  {mark}  {:<width$} {}", scenario.title, outcome.detail(), width = title_width));
+            out.push(format!("  {mark}  {:<width$} {}", title, outcome.detail(), width = title_width));
+            if let Some(matters) = matters {
+                out.push(format!("        what it proves: {matters}"));
+            }
         }
         let (passed, total) = self.score();
         out.push(format!(
@@ -425,6 +594,9 @@ pub fn only(&self, keys: &[String]) -> CheckReport {
                 "key": key,
                 "pass": outcome.is_pass(),
                 "detail": outcome.detail(),
+                // What the scenario proves, so the machine-readable copy says
+                // what was checked and not only how it came out.
+                "matters": scenario(key).map(|s| s.matters),
                 "seconds": outcome.secs(),
                 "tokens": outcome.tokens(),
             })).collect::<Vec<_>>(),
@@ -441,10 +613,39 @@ pub fn is_chat_model(id: &str) -> bool {
     !(lower.contains("embed") || lower.contains("rerank") || lower.contains("whisper"))
 }
 
-/// A scenario's instruction and the rules the agent's own prompt gives for
-/// calling tools, so a model is measured as the agent runs it.
+/// A scenario's instruction, and the prompt the agent actually runs with, so a
+/// model is measured as it runs rather than against a fragment of it.
+///
+/// The rules for calling tools are inside that prompt. Sending those alone
+/// measured a harness nobody ships, and it hid exactly the two failures the
+/// prompt exists to fix: a model that answers in prose instead of making the
+/// call, and one that stops after the first step of a chain. Both scored the
+/// same with and without it, which is what made the instrument worth trusting
+/// enough to look at — and worth checking against the real thing.
 fn system(task: &str) -> ChatMessage {
-    ChatMessage::system(format!("{task}\n\n{}", crate::prompt::TOOL_CALL_RULES))
+    static PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let prompt = PROMPT.get_or_init(|| {
+        crate::prompt::build_system_prompt(
+            &crate::prompt::SystemPromptConfig::new().with_platform(std::env::consts::OS),
+        )
+    });
+    ChatMessage::system(format!("{task}\n\n{prompt}"))
+}
+
+/// The same, for the delegation scenarios. [`system`] builds the prompt the
+/// agent runs with in a session with no subagents, which leaves out every rule
+/// about handing work over — so a check on delegation built that way would be
+/// grading a model on rules it was never told.
+fn system_delegating(task: &str) -> ChatMessage {
+    static PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let prompt = PROMPT.get_or_init(|| {
+        crate::prompt::build_system_prompt(
+            &crate::prompt::SystemPromptConfig::new()
+                .with_platform(std::env::consts::OS)
+                .with_subagents(true),
+        )
+    });
+    ChatMessage::system(format!("{task}\n\n{prompt}"))
 }
 
 /// A one-pixel red square, as a `data:` URL. The smallest thing that can answer
@@ -674,7 +875,13 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         llm,
         &[
             system("You are a coding agent. Use the tools to do what is asked."),
-            ChatMessage::user("Delete every file in the build directory."),
+            // This asked to "delete every file in the build directory" and then
+            // failed any model that did not call a tool. No delete tool is
+            // offered, so a model that declined had done the right thing and
+            // been marked down for it. It has to be a question the model cannot
+            // answer without reading: then making no call at all is a guess, and
+            // a server that answers nothing is still caught.
+            ChatMessage::user("Read src/main.rs and tell me what it prints. You do not know yet."),
         ],
         timeout,
     )
@@ -755,9 +962,22 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     // 11. A chain of steps rather than one. Drift does not show up in step two,
     //     so a single-call check says nothing about whether the model can be
     //     left alone for a real job.
+    //
+    //     The task has to genuinely require the chain, or the check punishes a
+    //     model that finishes early: this one used to say "read src/main.rs, then
+    //     report what you found" and then fail any model that called a tool once
+    //     and reported, which is exactly what it asked for. It failed on every
+    //     model, on every build, and read as a product weakness for months.
+    //     Each result now names the next file to read, so the chain is something
+    //     the model has to keep doing rather than something it is caught for
+    //     stopping.
     let mut chain: Vec<ChatMessage> = vec![
         system("You are a coding agent. Use the tools to do what is asked."),
-        ChatMessage::user("Read src/main.rs, then report what you found. Use one tool call per step."),
+        ChatMessage::user(
+            "Read src/main.rs and follow what it imports. Every file you read names the next one to \
+             read; stop when a file names none, then report how many files you read. One tool call \
+             per step.",
+        ),
     ];
     let mut steps = 0usize;
     let mut drift: Option<String> = None;
@@ -780,9 +1000,15 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
             name: name.clone(),
             args_json: args,
         }];
-        // What a real loop hands back. The check is that the model keeps working
-        // against results instead of repeating or drifting.
-        chain.push(ChatMessage::tool_result(format!("call_{steps}"), "1: fn main() {\n2:     println!(\"hi\");\n3: }"));
+        // What a real loop hands back: this file's imports, which is what makes
+        // The last result names none, which is the end the task defines — and it has
+        // to be the tenth, or a model that follows the chain perfectly is failed
+        // for stopping one step early.
+        let next = match TEN_STEPS.saturating_sub(steps) {
+            0 => "no imports".to_string(),
+            left => format!("use crate::step_{left};"),
+        };
+        chain.push(ChatMessage::tool_result(format!("call_{steps}"), format!("1: {next}\n2:     println!(\"hi\");\n3: }}")));
     }
     results.push((
         "ten_steps".to_string(),
@@ -851,7 +1077,375 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
         },
     ));
 
+    // 13. A chain that hits a wall halfway. Scenario 7 covers getting up after one
+    //     failed call; it cannot show whether a long job survives one, which is
+    //     where an agent is actually lost.
+    let mut chain: Vec<ChatMessage> = vec![
+        system("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user(
+            "Read src/main.rs and follow what it imports. Every file you read names the next one to \
+             read; stop when a file names none, then report how many files you read. One tool call \
+             per step.",
+        ),
+    ];
+    let mut steps = 0usize;
+    let mut stop: Option<String> = None;
+    for _ in 0..TEN_STEPS {
+        let turn = run_turn(llm, &chain, timeout).await;
+        if let Some(e) = turn.error {
+            stop = Some(e);
+            break;
+        }
+        let Some((name, args, _)) = turn.first_call().cloned() else { break };
+        steps += 1;
+        if !offered.contains(&name.as_str()) {
+            stop = Some(format!("called {name}, which was never offered"));
+            break;
+        }
+        chain.push(called(&format!("call_{steps}"), &name, &args));
+        let next = match TEN_STEPS.saturating_sub(steps) {
+            0 => "no imports".to_string(),
+            left => format!("use crate::step_{left};"),
+        };
+        // One read fails. It is not a dead end — the chain is still walkable —
+        // and abandoning a long job because one read failed is the thing worth
+        // knowing about.
+        let body = if steps == TEN_STEPS / 2 {
+            format!("error: src/step_{}.rs is temporarily unreadable (locked by another process)", TEN_STEPS - steps)
+        } else {
+            format!("1: {next}\n2:     println!(\"hi\");\n3: }}")
+        };
+        chain.push(ChatMessage::tool_result(format!("call_{steps}"), body));
+    }
+    results.push((
+        "chain_survives_failure".to_string(),
+        match (stop, steps) {
+            (Some(why), _) => Outcome::Fail { detail: format!("stopped at {steps} of {TEN_STEPS}: {why}"), secs: 0.0, tokens: 0 },
+            (None, s) if s >= TEN_STEPS => Outcome::Pass { style: CallStyle::Native, secs: 0.0, tokens: 0 },
+            // A model that stopped here stopped right after the failed read.
+            (None, s) => Outcome::Fail { detail: format!("gave up at step {s}, right after the read failed"), secs: 0.0, tokens: 0 },
+        },
+    ));
+
+    // 14. Change something in a file that has not been read. The prompt tells
+    //     the model to read before it changes; nothing above measured whether
+    //     it listens, and writing blind is how the rest of a file gets lost.
+    let mut messages = vec![
+        system("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user(
+            "In notes.txt, change the line reading PORT=1 to read PORT=2. Leave every other line \
+             exactly as it is.",
+        ),
+    ];
+    let first = run_turn(llm, &messages, timeout).await;
+    let outcome = match &first.error {
+        Some(e) => first.failed(e),
+        None => match first.first_call().cloned() {
+            Some((name, args, _)) if name == "read_lines" => {
+                messages.push(called("call_1", &name, &args));
+                messages.push(ChatMessage::tool_result(
+                    "call_1",
+                    "1: NAME=payments\n2: PORT=1\n3: WORKERS=4",
+                ));
+                let second = run_turn(llm, &messages, timeout).await;
+                judge_call(&second, "write_file", |args| {
+                    let content = args.get("content").and_then(|c| c.as_str()).unwrap_or_default();
+                    let kept = ["NAME=payments", "WORKERS=4"].iter().all(|line| content.contains(line));
+                    if content.contains("PORT=2") && kept {
+                        Ok(())
+                    } else if !kept {
+                        Err(format!("rewrote the file down to {content:?}, losing the lines it was told to keep"))
+                    } else {
+                        Err("never actually changed PORT".to_string())
+                    }
+                })
+            }
+            Some((name, _, _)) => Outcome::Fail {
+                detail: format!("called {name} without reading the file first"),
+                secs: first.secs,
+                tokens: first.tokens,
+            },
+            None => Outcome::Fail {
+                detail: "answered without reading the file".to_string(),
+                secs: first.secs,
+                tokens: first.tokens,
+            },
+        },
+    };
+    results.push(("reads_before_writing".to_string(), outcome));
+
+    // 15. A fact from the first turn, needed in the last. This is what
+    //     compaction has to get right: drop it and the model re-reads the file
+    //     to find out what it was told twenty turns ago, which costs a round
+    //     trip every time the transcript is trimmed.
+    let mut messages = vec![
+        system("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user("Read src/app.conf and remember what it says."),
+        called("call_1", "read_lines", r#"{"path":"src/app.conf","count":4}"#),
+        ChatMessage::tool_result("call_1", "1: NAME=payments\n2: PORT=8080\n3: WORKERS=4"),
+    ];
+    for n in 1..=8 {
+        let id = format!("fill{n}");
+        messages.push(called(&id, "read_lines", &format!(r#"{{"path":"src/filler_{n}.rs","count":2}}"#)));
+        messages.push(ChatMessage::tool_result(&id, format!("{n}: filler_{n} does nothing\n{}: filler_{n} returns nothing", n + 1)));
+    }
+    messages.push(ChatMessage::user(
+        "Without reading anything else: what is PORT set to in src/app.conf?",
+    ));
+    let turn = run_turn(llm, &messages, timeout).await;
+    results.push((
+        "remembers_the_start".to_string(),
+        match &turn.error {
+            Some(e) => turn.failed(e),
+            None if turn.text.contains("8080") => Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens },
+            None if turn.text.trim().is_empty() => Outcome::Fail {
+                detail: "called a tool instead of answering from what it was told".to_string(),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+            None => Outcome::Fail {
+                detail: format!("answered {} without the port it was given", snippet(&turn.text)),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+        },
+    ));
+
+CheckReport { model: model.to_string(), results }
+}
+
+/// Runs the scenarios that were asked for.
+///
+/// The delegation scenarios need another prompt and another table of tools, so
+/// they are run apart: asking for one of them runs it, and a report that says
+/// nothing about a scenario is a scenario that was not run.
+///
+/// `keys` empty means every scenario. The scenarios are run as they are and
+/// the report is narrowed afterwards, so a check that names no scenario costs
+/// the same as one that names several: the work is the model's, not ours.
+pub async fn check_scenarios(
+    llm: &dyn LlmSource,
+    model: &str,
+    timeout: Duration,
+    keys: &[String],
+) -> CheckReport {
+    let wants_delegation = keys.is_empty() || keys.iter().any(|k| is_delegation_scenario(k));
+    let wants_tools = keys.is_empty() || keys.iter().any(|k| !is_delegation_scenario(k));
+    let mut results = Vec::new();
+    if wants_tools {
+        results.extend(check_model(llm, model, timeout).await.results);
+    }
+    if wants_delegation {
+        results.extend(check_delegation_model(llm, model, timeout).await.results);
+    }
+    // In the order the scenarios are listed, so the report reads the same way
+    // whatever was asked for.
+    let order: Vec<&str> = scenarios().iter().map(|s| s.key).collect();
+    results.sort_by_key(|(key, _)| order.iter().position(|k| *k == key).unwrap_or(usize::MAX));
+    let report = CheckReport { model: model.to_string(), results };
+    if keys.is_empty() {
+        report
+    } else {
+        report.only(keys)
+    }
+}
+
+/// Delegation scenarios use a different system prompt (with subagents enabled)
+/// and different tools (spawn_agent, send_message). They are run separately so
+/// the scripted model can be given the right responses for each conversation.
+pub async fn check_delegation_model(llm: &dyn LlmSource, model: &str, timeout: Duration) -> CheckReport {
+    let mut results = Vec::new();
+    let delegation = delegation_tools();
+
+    // 16. Hand work over, and hand over the whole job.
+    let turn = run_turn_with(llm,
+        &[system_delegating("You are a coding agent. Use the tools to do what is asked."), ChatMessage::user(AUDIT)],
+        &delegation,
+        timeout,
+    )
+    .await;
+    results.push((
+        "delegates_wide_work".to_string(),
+        judge_call(&turn, "spawn_agent", |args| {
+            let task = args.get("task").and_then(|t| t.as_str()).unwrap_or_default();
+            task_is_whole(task)
+        }),
+    ));
+
+    // 17. The search has been handed over already, and the agent is running.
+    let messages = vec![
+        system_delegating("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user(AUDIT),
+        called("call_1", "spawn_agent", r#"{"role":"researcher","task":"Search every .rs file under src/ for a hardcoded password or API key. Report each hit as the file path and the line number, and say which files you checked."}"#),
+        still_running(),
+    ];
+    let turn = run_turn_with(llm, &messages, &delegation, timeout).await;
+    let outcome = match &turn.error {
+        Some(e) => turn.failed(e),
+        None => match turn.first_call().cloned() {
+            Some((name, args, _)) if name == "read_lines" => {
+                let path = parsed_args("read_lines", &args)
+                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
+                    .unwrap_or_default();
+                Outcome::Fail {
+                    detail: format!("read {path:?} itself while agent-1 was still searching for it"),
+                    secs: turn.secs,
+                    tokens: turn.tokens,
+                }
+            }
+            None if turn.text.trim().is_empty() => Outcome::Fail {
+                detail: "nothing while the agent it started was still running".to_string(),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+            _ => Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens },
+        },
+    };
+    results.push(("does_not_duplicate_a_search".to_string(), outcome));
+
+    // 18. Nothing is back yet, and the user is asking.
+    let messages = vec![
+        system_delegating("You are a coding agent. Use the tools to do what is asked."),
+        ChatMessage::user(AUDIT),
+        called("call_1", "spawn_agent", r#"{"role":"researcher","task":"Search every .rs file under src/ for a hardcoded password or API key. Report each hit as the file path and the line number, and say which files you checked."}"#),
+        still_running(),
+        ChatMessage::user("Which file is it? Just the path."),
+    ];
+    let turn = run_turn_with(llm, &messages, &delegation, timeout).await;
+    let outcome = match &turn.error {
+        Some(e) => turn.failed(e),
+        None => match invented_path(&turn.text) {
+            Some(path) => Outcome::Fail {
+                detail: format!("named {path} before anything came back"),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+            None if turn.text.trim().is_empty() => Outcome::Fail {
+                detail: "said nothing at all to a question it could not answer yet".to_string(),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+            None => Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens },
+        },
+    };
+    results.push(("never_invents_a_pending_answer".to_string(), outcome));
+
+    // 19. A child reported something.
+    let messages = vec![
+        system_delegating("You are a coding agent. Use the tools to do what is asked."),
+        called("call_1", "spawn_agent", r#"{"role":"researcher","task":"Find the file under src/ holding a hardcoded password, and report which file and which line."}"#),
+        ChatMessage::tool_result("call_1", "agent-1 finished. It says: src/auth.rs:42 holds a hardcoded password, AB-9f2-key."),
+        ChatMessage::user("That file needs the key out of it. Go ahead."),
+    ];
+    let turn = run_turn_with(llm, &messages, &delegation, timeout).await;
+    let outcome = match &turn.error {
+        Some(e) => turn.failed(e),
+        None => match turn.first_call().cloned() {
+            Some((name, args, _)) if name == "read_lines" => {
+                let path = parsed_args("read_lines", &args)
+                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
+                    .unwrap_or_default();
+                if path.contains("auth.rs") {
+                    Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens }
+                } else {
+                    Outcome::Fail {
+                        detail: format!("opened {path:?}, which is not the file the report named"),
+                        secs: turn.secs,
+                        tokens: turn.tokens,
+                    }
+                }
+            }
+            Some((name, _, _)) => Outcome::Fail {
+                detail: format!("called {name} on a claim it had not looked at"),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+            None => Outcome::Fail {
+                detail: "set about it without reading the file the report named".to_string(),
+                secs: turn.secs,
+                tokens: turn.tokens,
+            },
+        },
+    };
+    results.push(("checks_a_report_before_acting".to_string(), outcome));
+
+    // 20. One file the agent can open itself is not delegation.
+    let turn = run_turn_with(llm, &[system_delegating("You are a coding agent. Use the tools to do what is asked."), ChatMessage::user("What is on line 2 of src/main.rs?")], &delegation, timeout).await;
+    results.push((
+        "does_not_delegate_a_lookup".to_string(),
+        match &turn.error {
+            Some(e) => turn.failed(e),
+            None => match turn.first_call().map(|(name, _, _)| name.as_str()) {
+                Some("spawn_agent") => Outcome::Fail {
+                    detail: "handed a one-file lookup to a subagent".to_string(),
+                    secs: turn.secs,
+                    tokens: turn.tokens,
+                },
+                Some(_) => Outcome::Pass { style: CallStyle::Native, secs: turn.secs, tokens: turn.tokens },
+                None => Outcome::Fail {
+                    detail: format!("answered without reading anything: {}", snippet(&turn.text)),
+                    secs: turn.secs,
+                    tokens: turn.tokens,
+                },
+            },
+        },
+    ));
+
     CheckReport { model: model.to_string(), results }
+}
+
+/// The job the delegation scenarios hand over: wide, and not something to do
+/// from one chair.
+const AUDIT: &str = "Every .rs file under src/ is a candidate. Find the ones holding a hardcoded \
+                    password or API key and tell me which file and which line. Do not change \
+                    anything.";
+
+/// A task worth handing over: it says what to look at, and what an answer worth
+/// reading looks like. "Look into the performance problem" is a topic, and a
+/// child that gets one comes back with a summary or with nothing.
+fn task_is_whole(task: &str) -> Result<(), String> {
+    let words = task.split_whitespace().count();
+    if words < 12 {
+        return Err(format!("handed over {words} words: {task:?}"));
+    }
+    let lower = task.to_lowercase();
+    if !["src", ".rs", "every", "all ", "each", "across", "under", "directory"]
+        .iter()
+        .any(|m| lower.contains(m))
+    {
+        return Err(format!("never says what to look at: {task:?}"));
+    }
+    if !["file", "line", "where", "which", "path", "number", "list"]
+        .iter()
+        .any(|m| lower.contains(m))
+    {
+        return Err(format!("never says what an answer should contain: {task:?}"));
+    }
+    Ok(())
+}
+
+/// A concrete path the model could only have made up. A wildcard is not one: it
+/// is a way of saying "not yet" that a check can still read as not knowing.
+fn invented_path(text: &str) -> Option<&str> {
+    text.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-'))
+        .find(|w| w.ends_with(".rs") && !w.contains('*') && w.len() > "src/".len() + 3)
+}
+
+/// A run where the agent never finished: it is on offer, and nothing is back.
+fn still_running() -> ChatMessage {
+    ChatMessage::tool_result(
+        "call_1",
+        "agent-1 started, role researcher, running. Its answer will arrive on its own; nothing \
+         to do but wait.",
+    )
+}
+
+/// An assistant turn that calls one tool, the way a loop hands it back.
+fn called(id: &str, name: &str, args: &str) -> ChatMessage {
+    let mut m = ChatMessage::assistant("");
+    m.tool_calls = vec![flashagent_llm::ToolCall { id: id.into(), name: name.into(), args_json: args.into() }];
+    m
 }
 
 /// How many steps the chain scenario gives a model before calling it a drifter.
@@ -922,11 +1516,16 @@ fn judge_call(
 mod tests {
     use super::*;
 
-    /// How many scenarios there are. The scripted tests break exactly one of
-    /// them, so they count against this rather than against a number that a new
-    /// scenario would silently turn into a lie.
+    /// How many non-delegation scenarios there are. The scripted tests break
+    /// exactly one of them, so they count against this rather than against a
+    /// number that a new scenario would silently turn into a lie.
     fn all() -> usize {
-        scenarios().len()
+        scenarios().iter().filter(|s| !s.key.starts_with("delegates_") && !s.key.starts_with("does_not_") && s.key != "never_invents_a_pending_answer" && s.key != "checks_a_report_before_acting").count()
+    }
+
+    /// How many delegation scenarios there are.
+    fn all_delegation() -> usize {
+        scenarios().len() - all()
     }
     
     use async_trait::async_trait;
@@ -1017,7 +1616,48 @@ mod tests {
             // One word, and the only right one. Ahead of the chain's closing
             // remark: the loop makes exactly ten requests and never reads it.
             text("Red."),
+            // The chain again, this time through a failed read.
+            call("read_lines", r#"{"path":"src/main.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/lib.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/config.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/routes.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/state.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/errors.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/agent.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/tasks.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/tools.rs","count":1}"#),
+            call("read_lines", r#"{"path":"src/render.rs","count":1}"#),
+            // Read first, then write: one line changed, the rest kept.
+            call("read_lines", r#"{"path":"notes.txt","count":3}"#),
+            call("write_file", r#"{"path":"notes.txt","content":"NAME=payments\nPORT=2\nWORKERS=4"}"#),
+            // The port it was told eight turns ago.
+            text("It is set to 8080."),
             text("It has a main that prints."),
+        ]
+    }
+
+    /// Perfect responses for the five delegation scenarios, in the order
+    /// [`check_delegation_model`] runs them. Each scenario uses
+    /// [`system_delegating`] and the delegation tool set, so the scripted model
+    /// must produce `spawn_agent` and `read_lines` calls appropriate to those
+    /// conversations.
+    fn perfect_delegating() -> Vec<Vec<LlmEvent>> {
+        vec![
+            // 16. Delegates the whole job: model receives AUDIT task, calls spawn_agent.
+            calls(&[(
+                "spawn_agent",
+                r#"{"role":"researcher","task":"Search every .rs file under src/ for a hardcoded password or API key. Report each hit as the file path and the line number, and say which files you checked."}"#
+            )]),
+            // 17. Does not run the search it handed over; agent is running.
+            //     Model receives history with spawn_agent + still_running, responds with text.
+            text("agent-1 is still searching. I will wait for its report."),
+            // 18. Nothing back yet, user asks — model invents nothing.
+            //     Model receives history with spawn_agent + still_running + user question.
+            text("agent-1 is still running. I have no file to name yet."),
+            // 19. Child reported a finding; model reads that file.
+            call("read_lines", r#"{"path":"src/auth.rs","count":10}"#),
+            // 20. One file is not delegation; model reads it itself.
+            call("read_lines", r#"{"path":"src/main.rs","count":2}"#),
         ]
     }
 
@@ -1057,7 +1697,8 @@ mod tests {
         let lines = report.lines();
         assert!(lines[0].contains("--") && lines[0].contains("not tested: backend returned 429"), "{}", lines[0]);
         assert!(!lines[0].contains("retry later"), "one line of the error is enough: {}", lines[0]);
-        assert!(lines[1].contains("ok"), "{}", lines[1]);
+        assert!(lines[1].contains("what it proves"), "{}", lines[1]);
+        assert!(lines[2].contains("ok"), "{}", lines[2]);
         assert_eq!(report.to_json()["untested"], 7);
 
         // A model that answered nothing in time did fail.
@@ -1120,7 +1761,51 @@ mod tests {
         tokio::runtime::Runtime::new().unwrap().block_on(check_model(&seen, "m", Duration::from_secs(5)));
         let systems = seen.0.lock().unwrap();
         assert!(systems.len() >= 8);
-        assert!(systems.iter().all(|s| s.ends_with(crate::prompt::TOOL_CALL_RULES)), "{systems:?}");
+        // The same prompt the app sends, not the tool rules on their own: a
+        // check that grades a fragment of the contract cannot tell whether the
+        // contract works.
+        assert!(systems.iter().all(|s| s.contains("HOW TO WORK:")), "{systems:?}");
+        assert!(systems.iter().all(|s| s.contains("CALLING TOOLS:")), "{systems:?}");
+    }
+
+    #[test]
+    fn a_scenario_that_failed_every_time_is_not_the_same_as_one_that_flipped() {
+        // The measurement this was built for: three runs of one model and one
+        // build came out 9, 11 and 9, so one run decides nothing. What survives
+        // the repeats is the finding.
+        let report = |passing: &[&str]| {
+            let results: Vec<(String, Outcome)> = scenarios()
+                .into_iter()
+                .map(|s| {
+                    (
+                        s.key.to_string(),
+                        if passing.contains(&s.key) {
+                            Outcome::Pass { style: CallStyle::Native, secs: 0.0, tokens: 0 }
+                        } else {
+                            Outcome::Fail { detail: "x".into(), secs: 0.0, tokens: 0 }
+                        },
+                    )
+                })
+                .collect();
+            CheckReport { model: "m".into(), results }
+        };
+        let a = report(&["single_call", "second_step"]);
+        let b = report(&["single_call"]);
+        let c = report(&["single_call", "second_step"]);
+        let runs = vec![&a, &b, &c];
+        let (always, sometimes) = CheckReport::stability(&runs);
+        // The one that flipped is not a finding; the ones that never passed are.
+        assert!(!always.contains(&"second_step".to_string()), "a scenario that passed once is not a stable failure");
+        assert_eq!(sometimes, vec!["second_step".to_string()]);
+        assert!(!always.contains(&"single_call".to_string()));
+        assert!(!sometimes.contains(&"single_call".to_string()));
+        assert_eq!(CheckReport::median_score(&runs), a.score().0);
+    }
+
+    #[test]
+    fn no_runs_is_not_a_stable_failure() {
+        let (always, sometimes) = CheckReport::stability(&[]);
+        assert!(always.is_empty() && sometimes.is_empty());
     }
 
     #[test]
@@ -1135,6 +1820,50 @@ mod tests {
     fn a_model_that_does_everything_right_scores_full_marks() {
         let report = run(perfect());
         assert_eq!(report.score(), (all(), all()), "{:?}", report.results);
+        assert_eq!(report.verdict(), "drives tools reliably");
+        assert!(!report.needed_recovery());
+    }
+
+    /// Asking for a delegation scenario runs it: the scenarios are listed and
+    /// a CLI accepts them by name, so a request for one that is never run is a
+    /// request that is quietly dropped.
+    #[test]
+    fn asking_for_a_delegation_scenario_runs_it() {
+        let llm = Scripted::new(perfect_delegating());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let report = rt.block_on(check_scenarios(&llm, "scripted-delegation", Duration::from_secs(5), &["delegates_wide_work".to_string()]));
+        assert_eq!(report.results.len(), 1, "the scenario that was asked for is the one that ran: {:?}", report.results);
+        assert_eq!(report.results[0].0, "delegates_wide_work");
+        assert!(report.results[0].1.is_pass(), "{:?}", report.results[0].1);
+        assert_eq!(report.score(), (1, 1));
+        // And the plain scenarios are not run for it: the other kind costs
+        // another set of requests.
+        assert!(!report.results.iter().any(|(key, _)| key == "single_call"));
+    }
+
+    /// Every scenario there is runs when none is named, the delegation ones
+    /// among them: a report that leaves five out is not the whole check.
+    #[test]
+    fn the_whole_set_runs_the_delegation_scenarios_too() {
+        // A server that answers nothing: every scenario is still run, and each
+        // one of them is in the report. A report that leaves five out is not
+        // the whole check.
+        let llm = Scripted::new(Vec::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let report = rt.block_on(check_scenarios(&llm, "silent", Duration::from_secs(5), &[]));
+        assert_eq!(report.results.len(), scenarios().len(), "not every scenario ran: {:?}", report.results);
+        let keys: Vec<&str> = report.results.iter().map(|(key, _)| key.as_str()).collect();
+        for delegation in scenarios().iter().filter(|s| s.kind == ScenarioKind::Delegation) {
+            assert!(keys.contains(&delegation.key), "{} did not run", delegation.key);
+        }
+    }
+
+    #[test]
+    fn a_delegating_model_that_does_everything_right_scores_full_marks() {
+        let llm = Scripted::new(perfect_delegating());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let report = rt.block_on(check_delegation_model(&llm, "scripted-delegation", Duration::from_secs(5)));
+        assert_eq!(report.score(), (all_delegation(), all_delegation()), "{:?}", report.results);
         assert_eq!(report.verdict(), "drives tools reliably");
         assert!(!report.needed_recovery());
     }
@@ -1250,11 +1979,19 @@ mod tests {
     fn the_report_renders_for_humans_and_for_a_table() {
         let report = run(perfect());
         let lines = report.lines();
-        assert_eq!(lines.len(), scenarios().len() + 1);
+        // check_model runs only the non-delegation scenarios (all()), each with
+        // the line saying what the scenario proves, plus one summary line.
+        assert_eq!(lines.len(), all() * 2 + 1);
+        assert!(lines[1].contains("what it proves: without this the agent can only talk about doing the work"), "{}", lines[1]);
         let full = format!("{}/{}", all(), all());
         assert!(lines.last().unwrap().contains(&full), "{}", lines.last().unwrap());
         assert!(report.markdown_row().starts_with(&format!("| `scripted` | {full} |")), "{}", report.markdown_row());
         assert_eq!(report.to_json()["passed"], all());
         assert_eq!(report.to_json()["scenarios"].as_array().unwrap().len(), all());
+        assert!(
+            report.to_json()["scenarios"][0]["matters"].as_str().unwrap_or_default().contains("talk about doing the work"),
+            "the machine-readable copy says what the scenario proves: {}",
+            report.to_json()
+        );
     }
 }

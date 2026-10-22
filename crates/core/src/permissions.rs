@@ -149,14 +149,67 @@ impl ApprovalGate for AllowAllGate {
     }
 }
 
-/// The "Always" button and narrow shell prefixes, for this session.
-#[derive(Debug, Default, Clone)]
+/// The "Always" button and narrow shell prefixes.
+///
+/// They were kept in memory for the session, and the owner had no way to see
+/// them: a rule that was given once and then forgotten still asked every time
+/// in the next run, and there was no list to look at. So they are kept in the
+/// config, they survive the restart, and `/rules` shows them.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RuleSet {
     pub always_allow_tools: Vec<String>,
     /// Narrow: `npm test` covers `npm test --watch`, never `npm publish`.
     pub shell_prefixes: Vec<String>,
     /// Allowed only verbatim, with no extra arguments.
     pub shell_exact: Vec<String>,
+}
+
+/// One rule, as the person sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleKind {
+    /// A tool that is always allowed.
+    Tool,
+    /// A shell prefix that is always allowed.
+    ShellPrefix,
+    /// A command that is always allowed, verbatim.
+    ShellExact,
+}
+
+impl RuleSet {
+    /// Every rule, in the order the owner gave them: the tools first, then
+    /// the shell ones.
+    pub fn all(&self) -> Vec<(RuleKind, String)> {
+        let mut out: Vec<(RuleKind, String)> = Vec::new();
+        for t in &self.always_allow_tools {
+            out.push((RuleKind::Tool, t.clone()));
+        }
+        for p in &self.shell_prefixes {
+            out.push((RuleKind::ShellPrefix, p.clone()));
+        }
+        for c in &self.shell_exact {
+            out.push((RuleKind::ShellExact, c.clone()));
+        }
+        out
+    }
+
+    /// Takes one rule back.
+    pub fn remove(&mut self, kind: RuleKind, text: &str) -> bool {
+        let list = match kind {
+            RuleKind::Tool => &mut self.always_allow_tools,
+            RuleKind::ShellPrefix => &mut self.shell_prefixes,
+            RuleKind::ShellExact => &mut self.shell_exact,
+        };
+        let before = list.len();
+        list.retain(|t| t != text);
+        list.len() != before
+    }
+
+    /// Takes them all back.
+    pub fn clear(&mut self) {
+        self.always_allow_tools.clear();
+        self.shell_prefixes.clear();
+        self.shell_exact.clear();
+    }
 }
 
 /// How run_shell's shell reads a command line. Git Bash and cmd.exe quote
@@ -195,6 +248,29 @@ fn shell_dialects() -> &'static [ShellDialect] {
 /// line, as in bash.
 pub fn parse_chain(cmd: &str) -> Vec<String> {
     split_chain(cmd, ShellDialect::Posix, true)
+}
+
+/// The segments a command has under every shell that could run it.
+///
+/// A rule is cut as the command is read and is checked under every dialect the
+/// machine may use. On Windows a line may be read by cmd.exe, where `;` is not
+/// a separator: a rule cut the Posix way did not match that reading, so the
+/// owner said "Always" and the card came back. Saving every reading is what
+/// makes "Always" mean always.
+fn segments_in_dialects(cmd: &str, dialects: &[ShellDialect]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for &dialect in dialects {
+        let segs = match dialect {
+            ShellDialect::Posix => parse_chain(cmd),
+            ShellDialect::Cmd => split_chain(cmd, dialect, true),
+        };
+        for seg in segs {
+            if !out.contains(&seg) {
+                out.push(seg);
+            }
+        }
+    }
+    out
 }
 
 fn split_chain(cmd: &str, dialect: ShellDialect, comments: bool) -> Vec<String> {
@@ -252,6 +328,11 @@ fn smuggles_side_effects(cmd: &str, dialects: &[ShellDialect]) -> bool {
     if cmd.contains("$(") || cmd.contains('`') || cmd.contains('\\') || cmd.contains("$'") {
         return true;
     }
+    // `echo <base64> | base64 -d | sh` hides the command from every word-level
+    // check: a base64 blob decoded into an interpreter is a side effect.
+    if base64_into_interpreter(cmd) {
+        return true;
+    }
     dialects.iter().any(|&dialect| smuggles_in(cmd, dialect))
 }
 
@@ -280,6 +361,51 @@ fn smuggles_in(cmd: &str, dialect: ShellDialect) -> bool {
     false
 }
 
+/// A word long enough to be an encoded blob and using only the base64 alphabet
+/// (`=` only at the end): `echo AAAA... | base64 -d | sh` hides the command
+/// from every word-level check. Short names, flags and file names never match.
+fn looks_base64(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    if !(16..=256).contains(&bytes.len()) {
+        return false;
+    }
+    let mut body = 0usize;
+    let mut saw_eq = false;
+    for &b in bytes {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' => {
+                if saw_eq {
+                    return false;
+                }
+                body += 1;
+            }
+            b'=' => saw_eq = true,
+            _ => return false,
+        }
+    }
+    body >= 14
+}
+
+/// `echo <base64> | base64 -d | sh` runs an encoded string through a shell: no
+/// blacklisted word is visible, so a pipeline that decodes text and hands it
+/// to an interpreter is treated as carrying side effects. The interpreter must
+/// be the last pipe segment; decoding into a file (`... > out.txt`) is not.
+fn base64_into_interpreter(cmd: &str) -> bool {
+    let last = cmd.split('|').next_back();
+    let is_interpreter = last.is_some_and(|seg| {
+        seg.split_whitespace()
+            .next()
+            .is_some_and(|w| matches!(shell_word(w).as_str(), "sh" | "bash" | "dash" | "zsh" | "eval" | "source" | "."))
+    });
+    if !is_interpreter || !cmd.split('|').any(|seg| seg.split_whitespace().any(|w| shell_word(w) == "base64")) {
+        return false;
+    }
+    cmd.split('|')
+        .rev()
+        .skip(1)
+        .any(|seg| seg.split_whitespace().any(|w| looks_base64(shell_word(w).as_str())))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ShellRule {
     /// `npm test` covering `npm test --watch`, never `npm publish`.
@@ -300,6 +426,23 @@ fn always_rule(segment: &str) -> ShellRule {
         }
         _ => ShellRule::Exact(segment.to_string()),
     }
+}
+
+/// The rules an "Always" on this command saves.
+///
+/// The command is cut as every shell that could run it reads it, and a
+/// segment that is blacklisted is pinned to the command as written: a prefix
+/// would cover the dangerous variants, which the blacklist then asks about
+/// anyway — "Always" on `git push --force` must stick.
+fn always_rules_for(cmd: &str, dialects: &[ShellDialect]) -> Vec<ShellRule> {
+    let mut rules: Vec<ShellRule> = Vec::new();
+    for seg in segments_in_dialects(cmd, dialects) {
+        let rule = if blacklisted_segment(&seg).is_some() { ShellRule::Exact(seg.clone()) } else { always_rule(&seg) };
+        if !rules.contains(&rule) {
+            rules.push(rule);
+        }
+    }
+    rules
 }
 
 impl RuleSet {
@@ -341,9 +484,15 @@ fn shell_command(args_json: &str) -> Option<String> {
     flashagent_llm::effective_args(args_json, "run_shell")?.get("command")?.as_str().map(str::to_string)
 }
 
-/// Always asked about, whatever the mode or "Always" rules: these reach beyond
-/// what `/rewind` can restore, or leave the project. In practice this matters
-/// for `/goal`, the only mode that would otherwise run them unasked.
+/// Asked about even when the mode would allow it: these reach beyond what
+/// `/rewind` can restore, or leave the project.
+///
+/// Not every mode, and not every rule: a command from the blacklist is asked
+/// about even in Accept All, where no rule silences it, and in Accept All
+/// during a run it is refused outright — there is nobody to answer a card.
+/// What lets it through in Manual and Accept Edits is an exact "Always" rule:
+/// one saved for that very command. In practice this matters for `/goal`, the
+/// only mode that would otherwise run them unasked.
 fn blacklisted_shell_reason(cmd: &str) -> Option<&'static str> {
     // Every reading any shell could take, comments included: missing one is worse
     // than asking once too often.
@@ -646,11 +795,27 @@ fn blacklisted_segment(segment: &str) -> Option<&'static str> {
     let words: Vec<String> = segment.split_whitespace().map(shell_word).collect();
     let mut rest: &[String] = &words;
     // Through what only runs the command after it: `VAR=x rm`, `command rm`,
-    // `env A=b rm`, `nice -n 5 rm`, `xargs rm`.
+    // `env A=b rm`, `nice -n 5 rm`, `xargs rm`. An interpreter told to run a
+    // string (`sh -c '...'`, `eval '...'`) runs whatever is in it, so it is
+    // dangerous on its own. A bare `sh script.sh` / `source script.sh` is not.
     loop {
         match rest.first().map(String::as_str) {
             Some(w) if w.contains('=') && !w.starts_with('-') => rest = &rest[1..],
             Some("command" | "builtin" | "exec" | "env" | "nice" | "nohup" | "time" | "timeout" | "xargs" | "stdbuf") => {
+                rest = &rest[1..];
+                while rest.first().is_some_and(|w| w.starts_with('-') || w.parse::<f64>().is_ok()) {
+                    rest = &rest[1..];
+                }
+            }
+            // `sh -c` / `bash -c` / ... run an arbitrary string, not a file.
+            Some("sh" | "bash" | "dash" | "zsh")
+                if rest.len() >= 2 && matches!(rest[1].as_str(), "-c" | "-e" | "--command") =>
+            {
+                return Some("an interpreter with -c runs an arbitrary string");
+            }
+            // `eval` runs its argument as code.
+            Some("eval") if rest.len() >= 2 => return Some("eval runs an arbitrary string"),
+            Some("sh" | "bash" | "dash" | "zsh" | "source" | ".") => {
                 rest = &rest[1..];
                 while rest.first().is_some_and(|w| w.starts_with('-') || w.parse::<f64>().is_ok()) {
                     rest = &rest[1..];
@@ -785,6 +950,26 @@ impl PermissionState {
         *self.project_root.lock().expect("root lock") = Some(root);
     }
 
+    /// The rules as they stand now.
+    pub fn rules(&self) -> RuleSet {
+        self.rules.lock().expect("rules lock").clone()
+    }
+
+    /// Puts the rules in place: the ones the owner gave in an earlier run.
+    pub fn set_rules(&self, rules: RuleSet) {
+        *self.rules.lock().expect("rules lock") = rules;
+    }
+
+    /// Takes one rule back, and says whether it was there.
+    pub fn remove_rule(&self, kind: RuleKind, text: &str) -> bool {
+        self.rules.lock().expect("rules lock").remove(kind, text)
+    }
+
+    /// Takes them all back.
+    pub fn clear_rules(&self) {
+        self.rules.lock().expect("rules lock").clear();
+    }
+
     /// A web page can talk the model into fetching local addresses, so this is
     /// treated like a file outside the project. Addresses hidden behind DNS or
     /// redirects are refused by the tool itself.
@@ -889,10 +1074,10 @@ impl PermissionState {
             return Vec::new();
         }
         let mut shown = Vec::new();
-        for seg in parse_chain(&cmd) {
-            // A prefix would cover the dangerous variants, which the blacklist
-            // then asks about anyway: "Always" on `git push --force` must stick.
-            let rule = if blacklisted_segment(&seg).is_some() { ShellRule::Exact(seg.clone()) } else { always_rule(&seg) };
+        // Cut as every shell that could run the command reads it: a rule saved
+        // for one reading does not match the other, and "Always" would ask
+        // again on the machine it was given on.
+        for rule in always_rules_for(&cmd, shell_dialects()) {
             match rule {
                 ShellRule::Prefix(p) => {
                     shown.push(format!("{p} ..."));
@@ -1012,6 +1197,9 @@ pub struct PermissionedTools {
     inner: Arc<dyn ToolExec>,
     preview: Option<Arc<dyn crate::loop_::WritePreview>>,
     state: Arc<PermissionState>,
+    /// The tools the owner has switched off. The model is not offered them and
+    /// a call to one is refused, whatever the permissions say.
+    disabled: std::sync::RwLock<Vec<String>>,
 }
 
 impl PermissionedTools {
@@ -1021,7 +1209,45 @@ impl PermissionedTools {
         preview: Option<Arc<dyn crate::loop_::WritePreview>>,
         state: Arc<PermissionState>,
     ) -> Self {
-        Self { inner, preview, state }
+        Self { inner, preview, state, disabled: std::sync::RwLock::new(Vec::new()) }
+    }
+
+    /// The tools that are off. Shared with the app, so the switch takes effect
+    /// in the conversation that is running.
+    pub fn set_disabled_tools(&self, names: Vec<String>) {
+        if let Ok(mut off) = self.disabled.write() {
+            *off = names;
+        }
+    }
+
+    /// The tools that are off right now.
+    pub fn disabled_tools(&self) -> Vec<String> {
+        self.disabled.read().map(|d| d.clone()).unwrap_or_default()
+    }
+
+    /// The standing permissions as they stand now.
+    pub fn rules(&self) -> RuleSet {
+        self.state.rules()
+    }
+
+    /// Puts the rules in place: the ones the owner gave in an earlier run.
+    pub fn set_rules(&self, rules: RuleSet) {
+        self.state.set_rules(rules);
+    }
+
+    /// Takes one rule back, and says whether it was there.
+    pub fn remove_rule(&self, kind: RuleKind, text: &str) -> bool {
+        self.state.remove_rule(kind, text)
+    }
+
+    /// Takes them all back.
+    pub fn clear_rules(&self) {
+        self.state.clear_rules();
+    }
+
+    /// Whether this tool is one of the ones that are off.
+    pub fn tool_disabled(&self, name: &str) -> bool {
+        self.disabled.read().map(|d| d.iter().any(|n| n == name)).unwrap_or(false)
     }
 
     pub fn state(&self) -> &Arc<PermissionState> {
@@ -1049,10 +1275,26 @@ pub const DECLINED: &str = "The user declined this call. Do not retry it and do 
 #[async_trait]
 impl ToolExec for PermissionedTools {
     fn specs(&self) -> Vec<ToolSpec> {
-        self.inner.specs()
+        // A tool that is off is not offered at all: the model should not plan
+        // around something it cannot call.
+        self.inner
+            .specs()
+            .into_iter()
+            .filter(|s| !self.tool_disabled(&s.name))
+            .collect()
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolOutput {
+        if self.tool_disabled(&call.name) {
+            return ToolOutput {
+                content: format!(
+                    "the tool '{}' is switched off in this session · the user turned it off, so do not call it",
+                    call.name
+                ),
+                is_error: true,
+                images: Vec::new(),
+            };
+        }
         match self.state.decide(call, || self.preview.as_deref().and_then(|p| p.write_preview(call))) {
             Verdict::Allow => self.run_allowed(call).await,
             Verdict::Deny(reason) => ToolOutput {
@@ -1225,6 +1467,18 @@ mod tests {
         assert!(is_read_only_shell_in(&here(), "echo '& calc &'", &[ShellDialect::Posix]));
     }
 
+    /// The note on the blacklist claimed it outranks every mode and every
+    /// rule. It does not: an exact "Always" rule lets a blacklisted command
+    /// through in Manual and Accept Edits. A note that says otherwise sends
+    /// the reader looking for a rule that is not there.
+    #[test]
+    fn the_note_on_the_blacklist_says_what_actually_happens() {
+        let source = include_str!("permissions.rs");
+        let stale = ["Always asked about, whatever the mode or ", "\"Always\" rules"].concat();
+        assert!(!source.contains(&stale), "the note claims a rule that does not exist");
+        assert!(source.contains("an exact \"Always\" rule"), "the note says what the rule is");
+    }
+
     #[test]
     fn an_always_rule_never_covers_a_blacklisted_variant() {
         for mode in [PermissionMode::Manual, PermissionMode::AcceptEdits] {
@@ -1262,6 +1516,96 @@ mod tests {
         let write = ApprovalRequest { tool: "write_file".into(), args_json: "{}".into(), category: Category::Write, diff: None };
         assert_eq!(state.allow_always(&write), vec!["write_file".to_string()]);
         assert_eq!(state.decide(&call("write_file", "{}"), || None), Verdict::Allow);
+    }
+
+    /// The rule is cut as the shell that will run the command reads it, and it
+    /// is checked under every shell that could run it. On Windows a line may
+    /// be read by cmd.exe, where `;` is not a separator: the rule was cut the
+    /// Posix way, the check saw one segment, and "Always" asked again.
+    ///
+    /// The test is about the logic, not about the platform: it says which
+    /// shells may run the command, so it is the same on every machine.
+    #[test]
+    fn an_always_rule_covers_the_command_in_every_shell_that_could_run_it() {
+        let both = [ShellDialect::Posix, ShellDialect::Cmd];
+        let mut rules = RuleSet::default();
+        for rule in always_rules_for("git status; git diff", &both) {
+            match rule {
+                ShellRule::Prefix(p) => rules.shell_prefixes.push(p),
+                ShellRule::Exact(e) => rules.shell_exact.push(e),
+            }
+        }
+        assert!(
+            rules.shell_allows_in("git status; git diff", &both),
+            "the rule does not match the command it was saved for: {rules:?}"
+        );
+        // And it covers no more than it was given.
+        assert!(
+            !rules.shell_allows_in("git status; git diff; git log", &both),
+            "the rule grew past the command: {rules:?}"
+        );
+        assert!(
+            !rules.shell_allows_in("git status; git diff --stat", &both),
+            "the rule grew past the command: {rules:?}"
+        );
+    }
+
+    /// The case the audit named: `a; b` is two commands to a POSIX shell and
+    /// one to cmd.exe. A rule cut the POSIX way alone does not match the
+    /// reading of the shell that will run it, so the owner says "Always" and
+    /// the card comes back.
+    ///
+    /// The test is about the logic, not about the platform: it says which
+    /// shells may run the command, so it is the same on every machine.
+    #[test]
+    fn an_always_rule_for_two_commands_matches_the_cmd_reading() {
+        let both = [ShellDialect::Posix, ShellDialect::Cmd];
+        let mut rules = RuleSet::default();
+        for rule in always_rules_for("a; b", &both) {
+            match rule {
+                ShellRule::Prefix(p) => rules.shell_prefixes.push(p),
+                ShellRule::Exact(e) => rules.shell_exact.push(e),
+            }
+        }
+        // The reading of cmd.exe is saved as well: `;` is not a separator
+        // there, so the command is one segment, not two.
+        assert!(
+            rules.shell_exact.iter().any(|e| e == "a; b"),
+            "the cmd reading of the command was not saved: {rules:?}"
+        );
+        assert!(
+            rules.shell_allows_in("a; b", &both),
+            "the rule does not match the command it was saved for: {rules:?}"
+        );
+        // And it covers no more than it was given.
+        assert!(
+            !rules.shell_allows_in("a; b; c", &both),
+            "the rule grew past the command: {rules:?}"
+        );
+        assert!(
+            !rules.shell_allows_in("a; b c", &both),
+            "the rule grew past the command: {rules:?}"
+        );
+    }
+
+    /// The same rule through the public path: what "Always" saves on this
+    /// machine lets the command through on this machine.
+    #[test]
+    fn an_always_rule_lets_the_command_through_where_it_was_given() {
+        let state = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
+        let cmd = "git status; git diff";
+        let req = ApprovalRequest {
+            tool: "run_shell".into(),
+            args_json: serde_json::json!({ "command": cmd }).to_string(),
+            category: Category::Shell,
+            diff: None,
+        };
+        assert!(!state.allow_always(&req).is_empty());
+        assert_eq!(
+            state.decide(&call("run_shell", &serde_json::json!({ "command": cmd }).to_string()), || None),
+            Verdict::Allow,
+            "the owner said always and the card came back"
+        );
     }
 
     #[test]
@@ -1518,6 +1862,10 @@ mod tests {
             state.decide(&call("run_shell", r#"{"command":"rm -rf build"}"#), || None),
             Verdict::NeedApproval { .. }
         ), "a hand-picked Accept All must still ask for this, even with a standing rule");
+        assert!(matches!(
+            state.decide(&call("run_shell", r#"{"command":"sh -c 'rm -rf build'"}"#), || None),
+            Verdict::NeedApproval { .. }
+        ), "an interpreter told to run a string must still ask");
         assert_eq!(state.decide(&call("run_shell", r#"{"command":"cargo test"}"#), || None), Verdict::Allow);
     }
 
@@ -2038,6 +2386,40 @@ mod tests {
 
         let state_bypass = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
         assert_eq!(state_bypass.decide(&call("mcp__docker__restart_container", "{}"), || None), Verdict::Allow);
+    }
+
+    #[test]
+    fn interpreter_with_c_is_blacklisted_but_a_script_file_is_not() {
+        for cmd in [
+            "sh -c 'rm -rf /'",
+            "bash -c 'rm -rf /'",
+            "dash -e 'rm -rf /'",
+            "zsh --command 'rm -rf /'",
+            "FOO=1 sh -c 'rm -rf /'",
+            "command bash -c 'rm -rf /'",
+            "eval 'rm -rf /'",
+        ] {
+            assert!(blacklisted_shell_reason(cmd).is_some(), "should be caught: {cmd}");
+        }
+        for cmd in ["sh script.sh", "bash ./build.sh", "dash script", "zsh myscript.zsh", "source script.sh", ". script.sh", "eval"] {
+            assert!(blacklisted_shell_reason(cmd).is_none(), "should not be caught: {cmd}");
+        }
+    }
+
+    #[test]
+    fn base64_piped_into_an_interpreter_smuggles_side_effects() {
+        let blob = "SSBhbSBhIGJhc2U2NC1lbmNvZGVkIGNvbW1hbmQK";
+        assert!(smuggles_side_effects(&format!("echo {blob} | base64 -d | sh"), &[ShellDialect::Posix]));
+        assert!(smuggles_side_effects(&format!("echo {blob} | base64 -d | bash"), &[ShellDialect::Posix]));
+        assert!(smuggles_side_effects(&format!("base64 -d {blob} | zsh"), &[ShellDialect::Posix]));
+        // Not encoded for the shell, or no base64 step: no smuggling.
+        assert!(!smuggles_side_effects("cat file | sh", &[ShellDialect::Posix]));
+        assert!(!smuggles_side_effects("echo hello | sh", &[ShellDialect::Posix]));
+        assert!(!smuggles_side_effects("echo short | base64 -d | sh", &[ShellDialect::Posix]));
+        assert!(!smuggles_side_effects(&format!("echo {blob} | sh"), &[ShellDialect::Posix]));
+        // `>` writes to a file: that's a side effect on its own, even without
+        // an interpreter at the end of the pipe.
+        assert!(smuggles_side_effects(&format!("echo {blob} | base64 -d > out.txt"), &[ShellDialect::Posix]));
     }
 
 }

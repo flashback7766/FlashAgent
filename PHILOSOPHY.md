@@ -46,7 +46,7 @@ Models and data stay on the machine by default. What FlashAgent sends out:
 | License | MIT |
 | Documentation | README as the entry point; a generated site (mdBook on GitHub Pages) later |
 | Releases | Beta builds numbered `b<N>`, stable releases SemVer cut from a build (`vX.Y.Z+b<N>`); see [VERSIONING.md](VERSIONING.md) |
-| Language | The interface and the repository are English only; the model answers in the language the user wrote in |
+| Language | The interface is English and Russian, chosen in Settings; the repository and the system prompt stay English, and the model answers in the language the user wrote in |
 
 ## 5. Tool calling
 
@@ -57,7 +57,7 @@ Models and data stay on the machine by default. What FlashAgent sends out:
 ## 6. Permissions
 
 - Shift+Tab cycles the four modes. `/goal` runs in Accept All within its limits and restores the previous mode afterwards.
-- Approval cards offer Allow, Always and Deny. Always stores a narrow rule for the session (`npm test` is not `npm publish`). A file change always shows its diff first.
+- Approval cards offer Allow, Always and Deny. Always stores a narrow rule for the session and in the config, where `/rules` shows it (`npm test` is not `npm publish`). A file change always shows its diff first.
 - A subagent has its parent's permissions and can never gain more.
 
 ## 7. `/goal`
@@ -77,7 +77,7 @@ Models and data stay on the machine by default. What FlashAgent sends out:
 
 ## 9. Tools
 
-Chosen by the model's context window: a minimal set around 32k tokens, a core set around 64k, the full set above. MCP servers add their own.
+One set for every model, budgeted flat: the prompt is capped, the schemas get what is left. A tool can be turned off by hand, and that is the only way a model loses one. MCP servers add their own.
 
 ## 10. Interface
 

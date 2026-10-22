@@ -40,17 +40,17 @@ impl GoalBudgets {
 
     pub fn summary(&self) -> String {
         if self.is_unlimited() {
-            return "no limits".to_string();
+            return crate::i18n::tr("no limits").to_string();
         }
         let mut parts = Vec::new();
         if let Some(n) = self.steps {
-            parts.push(crate::plural(n as usize, "step", "steps"));
+            parts.push(crate::text::plural(n as usize, "step", "steps"));
         }
         if let Some(t) = self.time {
-            parts.push(format!("{} max", human_duration(t)));
+            parts.push(crate::i18n::tr_fill("{limit} max", &[("limit", &human_duration(t))]));
         }
         if let Some(t) = self.output_tokens {
-            parts.push(format!("{} generated tokens", human_count(t)));
+            parts.push(crate::i18n::tr_fill("{count} generated tokens", &[("count", &human_count(t))]));
         }
         parts.join(" · ")
     }
@@ -63,10 +63,13 @@ pub fn parse_goal_task(rest: &str) -> Result<String, String> {
     let first = task.split_whitespace().next().unwrap_or("");
     let flag = first.split('=').next().unwrap_or("");
     if matches!(flag, "--steps" | "--time" | "--tokens") {
-        return Err(format!("{flag} is gone: /goal limits are set in Settings → Goal now. Usage: /goal <task>"));
+        return Err(crate::i18n::tr_fill(
+            "{flag} is gone: /goal limits are set in Settings \u{2192} Goal now. Usage: /goal <task>",
+            &[("flag", flag)],
+        ));
     }
     if task.is_empty() {
-        return Err("Nothing to do. Usage: /goal <task>".to_string());
+        return Err(crate::i18n::tr("Nothing to do. Usage: /goal <task>").to_string());
     }
     Ok(task.to_string())
 }
@@ -144,15 +147,6 @@ impl GoalLedger {
     /// A turn the backend priced. Nothing is claimed for a backend that did not.
     pub fn record_cost(&mut self, provider: &str, cost: Option<f64>) {
         self.cost.record(provider, cost);
-    }
-
-    /// 0 before the first turn.
-    pub fn step(&self) -> u32 {
-        self.step
-    }
-
-    pub fn output_tokens(&self) -> i64 {
-        self.output_tokens
     }
 
     pub fn elapsed(&self) -> Duration {
@@ -259,35 +253,37 @@ impl GoalLedger {
             Some(max) => format!("{}/{max}", self.step),
             None => self.step.to_string(),
         };
-        out.push(format!(
-            "Steps {steps} · {} generated tokens · {} elapsed",
-            human_count(self.output_tokens),
-            human_duration(self.elapsed())
+        out.push(crate::i18n::tr_fill(
+            "Steps {steps} \u{b7} {tokens} generated tokens \u{b7} {elapsed} elapsed",
+            &[
+                ("steps", &steps),
+                ("tokens", &human_count(self.output_tokens)),
+                ("elapsed", &human_duration(self.elapsed())),
+            ],
         ));
         // The bill, when there is one. Absent for a local backend: an unpriced
         // run is not a free one, and a fabricated $0.00 would be worse than
         // saying nothing.
         if let Some(total) = self.cost.total() {
             out.push(if total == 0.0 {
-                "Cost: free \u{b7} the backend prices every turn at nothing".to_string()
+                crate::i18n::tr("Cost: free \u{b7} the backend prices every turn at nothing").to_string()
             } else {
-                format!(
-                    "Cost: ${} over {}",
-                    flashagent_core::CostLedger::format_amount(total),
-                    flashagent_core::CostLedger::turns_phrase(self.cost.priced_turns())
-                )
+                crate::i18n::tr_fill("Cost: ${amount} over {turns}", &[
+                    ("amount", &flashagent_core::CostLedger::format_amount(total)),
+                    ("turns", &flashagent_core::CostLedger::turns_phrase(self.cost.priced_turns())),
+                ])
             });
         }
 
         let touched = self.written.len() + self.edited.len();
         if touched == 0 {
-            out.push("Files changed: none".to_string());
+            out.push(crate::i18n::tr("Files changed: none").to_string());
         } else {
-            out.push(format!(
-                "Files changed: {touched} ({} created, {} edited)",
-                self.written.len(),
-                self.edited.len()
-            ));
+            out.push(crate::i18n::tr_fill("Files changed: {touched} ({created} created, {edited} edited)", &[
+                ("touched", &touched.to_string()),
+                ("created", &self.written.len().to_string()),
+                ("edited", &self.edited.len().to_string()),
+            ]));
             for f in self.written.iter().map(|f| format!("  + {f}")).chain(
                 self.edited.iter().map(|f| format!("  ~ {f}")),
             ) {
@@ -295,11 +291,10 @@ impl GoalLedger {
             }
         }
 
-        out.push(format!(
-            "Shell commands: {} ok, {} failed",
-            self.shell_ok,
-            self.shell_failed.len()
-        ));
+        out.push(crate::i18n::tr_fill("Shell commands: {ok} ok, {failed} failed", &[
+            ("ok", &self.shell_ok.to_string()),
+            ("failed", &self.shell_failed.len().to_string()),
+        ]));
         for f in &self.shell_failed {
             out.push(format!("  ! {f}"));
         }
@@ -310,15 +305,17 @@ impl GoalLedger {
         out.push(String::new());
         out.push(match reason {
             DoneReason::Completed => {
-                "The model ended its turn on its own. Verify by hand: this report counts \
-                 actions, it does not judge whether the goal was met."
-                    .to_string()
+                crate::i18n::tr(
+                    "The model ended its turn on its own. Verify by hand: this report counts \
+                     actions, it does not judge whether the goal was met.",
+                )
+                .to_string()
             }
             DoneReason::Cancelled => {
-                "You stopped the run; anything above already happened on disk.".to_string()
+                crate::i18n::tr("You stopped the run; anything above already happened on disk.").to_string()
             }
             DoneReason::Failed => {
-                "The backend failed mid-run; work listed above already happened on disk."
+                crate::i18n::tr("The backend failed mid-run; work listed above already happened on disk.")
                     .to_string()
             }
             _ => "The goal was cut short by a limit — it is not finished. Raise the limit in \
@@ -377,27 +374,27 @@ pub fn commit_goal_milestone(ledger: &GoalLedger, cwd: &Path, completed_steps: u
     }
     Some(format!(
         "  \x1b[38;2;155;165;180mcheckpoint:\x1b[0m \x1b[38;2;225;230;240mcommitted {} after step {completed_steps}\x1b[0m",
-        crate::plural(files.len(), "file", "files")
+        crate::text::plural(files.len(), "file", "files")
     ))
 }
 
 fn stop_line(reason: DoneReason, budgets: &GoalBudgets, step: u32) -> String {
     match reason {
-        DoneReason::Completed => "Stopped: model finished its turn".to_string(),
-        DoneReason::StepLimit => format!(
-            "Stopped: step budget reached ({}) — INCOMPLETE",
-            crate::plural(budgets.steps.unwrap_or(step) as usize, "step", "steps")
-        ),
-        DoneReason::TokenBudget => format!(
-            "Stopped: token budget reached ({}) — INCOMPLETE",
-            budgets.output_tokens.map_or("budget".to_string(), human_count)
-        ),
-        DoneReason::TimeLimit => format!(
-            "Stopped: time budget reached ({}) — INCOMPLETE",
-            budgets.time.map_or("budget".to_string(), human_duration)
-        ),
-        DoneReason::Cancelled => "Stopped: interrupted by you — INCOMPLETE".to_string(),
-        DoneReason::Failed => "Stopped: backend error — INCOMPLETE".to_string(),
+        DoneReason::Completed => crate::i18n::tr("Stopped: model finished its turn").to_string(),
+        DoneReason::StepLimit => crate::i18n::tr_fill("Stopped: step budget reached ({steps}) — INCOMPLETE", &[(
+            "steps",
+            &crate::text::plural(budgets.steps.unwrap_or(step) as usize, "step", "steps"),
+        )]),
+        DoneReason::TokenBudget => crate::i18n::tr_fill("Stopped: token budget reached ({budget}) — INCOMPLETE", &[(
+            "budget",
+            &budgets.output_tokens.map_or_else(|| crate::i18n::tr("budget").to_string(), human_count),
+        )]),
+        DoneReason::TimeLimit => crate::i18n::tr_fill("Stopped: time budget reached ({budget}) — INCOMPLETE", &[(
+            "budget",
+            &budgets.time.map_or_else(|| crate::i18n::tr("budget").to_string(), human_duration),
+        )]),
+        DoneReason::Cancelled => crate::i18n::tr("Stopped: interrupted by you — INCOMPLETE").to_string(),
+        DoneReason::Failed => crate::i18n::tr("Stopped: backend error — INCOMPLETE").to_string(),
     }
 }
 
@@ -432,7 +429,7 @@ fn subject_of(name: &str, args_json: &str) -> String {
         args.as_ref()?.get(key)?.as_str().map(|s| s.to_string())
     };
     let raw = match name {
-        "run_shell" => pick("command").unwrap_or_else(|| "(poll/kill)".to_string()),
+        "run_shell" => pick("command").unwrap_or_else(|| crate::i18n::tr("(poll/kill)").to_string()),
         _ => pick("path")
             .or_else(|| {
                 let files = files_of(name, args_json);
@@ -535,7 +532,7 @@ mod tests {
             completion: Some(120),
             cached: None,
             mtp: None,
-            cost: None,
+            cost: None, cost_details: None,
         }));
 
         let report = l.report(DoneReason::Completed).join("\n");
@@ -544,7 +541,7 @@ mod tests {
         assert!(report.contains("1 ok, 1 failed"), "{report}");
         assert!(report.contains("cargo test — exit code: 101"), "{report}");
         assert!(report.contains("120 generated tokens"), "{report}");
-        assert_eq!(l.output_tokens(), 120, "prompt tokens must not be counted");
+        assert_eq!(l.output_tokens, 120, "prompt tokens must not be counted");
     }
 
     #[test]

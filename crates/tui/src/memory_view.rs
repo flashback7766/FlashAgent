@@ -109,12 +109,19 @@ pub fn parse_summary(raw: &str) -> Option<ParsedSummary> {
 pub fn ago(then: u64, now: u64) -> String {
     let secs = now.saturating_sub(then);
     let (n, unit) = match secs {
-        0..=59 => return "just now".to_string(),
+        0..=59 => return crate::i18n::tr("just now").to_string(),
         60..=3599 => (secs / 60, "minute"),
         3600..=86_399 => (secs / 3600, "hour"),
         _ => (secs / 86_400, "day"),
     };
-    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+    // The word follows the number, and Russian has three forms of it. The
+    // forms live in the translation table, like every other word.
+    let word = match unit {
+        "minute" => crate::text::plural(n as usize, "minute", "minutes"),
+        "hour" => crate::text::plural(n as usize, "hour", "hours"),
+        _ => crate::text::plural(n as usize, "day", "days"),
+    };
+    format!("{} {}", word, crate::i18n::tr("ago"))
 }
 
 #[derive(Debug, Clone)]
@@ -300,15 +307,21 @@ impl MemoryModal {
         let text = "\x1b[38;2;200;195;185m";
         let bright = "\x1b[1;38;2;240;235;225m";
         let accent = "\x1b[1;38;2;225;175;95m";
-        let inner_w = width.saturating_sub(6).clamp(24, 96);
+        let inner_w = width.saturating_sub(6).min(96);
 
         let mut lines: Vec<RenderLine> = Vec::new();
         // The heading shrinks first; a sheared box is worse than a shorter name.
-        let title = [" What FlashAgent remembers ", " What is remembered ", " Memory "]
-            .into_iter()
+        let titles = [
+            format!(" {} ", crate::i18n::tr("What FlashAgent remembers")),
+            format!(" {} ", crate::i18n::tr("What is remembered")),
+            format!(" {} ", crate::i18n::tr("Memory")),
+        ];
+        let title = titles
+            .iter()
             .find(|t| crate::visible_width(t) < inner_w)
-            .unwrap_or(" Memory ");
-        let dashes = inner_w.saturating_sub(crate::visible_width(title) + 1);
+            .cloned()
+            .unwrap_or_else(|| format!(" {} ", crate::i18n::tr("Memory")));
+        let dashes = inner_w.saturating_sub(crate::visible_width(&title) + 1);
         lines.push((
             LineKind::System,
             format!("  {border}╭─{accent}{title}{border}{}╮{reset}", "─".repeat(dashes)),
@@ -323,15 +336,15 @@ impl MemoryModal {
 
         if self.rows.is_empty() {
             lines.push((LineKind::System, pad("")));
-            lines.push((LineKind::System, pad(&format!("{dim}Nothing remembered yet. Facts worth keeping are written as they come up.{reset}"))));
+            lines.push((LineKind::System, pad(&format!("{dim}{}{reset}", crate::i18n::tr("Nothing remembered yet. Facts worth keeping are written as they come up.")))));
         } else {
             lines.push((LineKind::System, pad("")));
             for (i, row) in self.rows.iter().enumerate() {
                 let selected = i == self.selected;
                 let marker = if selected { format!("{accent}▸{reset}") } else { " ".to_string() };
                 let scope_tag = match row.scope {
-                    Scope::Project => "project",
-                    Scope::Global => "global ",
+                    Scope::Project => crate::i18n::tr("project"),
+                    Scope::Global => crate::i18n::tr("global "),
                 };
                 let name = if selected {
                     format!("{bright}{}{reset}", row.entry.name)
@@ -383,7 +396,7 @@ impl MemoryModal {
         let heading = "\x1b[1;38;2;240;235;225m";
         let accent = "\x1b[1;38;2;225;175;95m";
         let link = "\x1b[4;38;2;168;199;250m";
-        let inner_w = width.saturating_sub(6).clamp(24, 96);
+        let inner_w = width.saturating_sub(6).min(96);
         let t = crate::anim::now_ms();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
 
@@ -406,7 +419,7 @@ impl MemoryModal {
         match &self.summary {
             SummaryState::None | SummaryState::Writing => {
                 let words = crate::anim::shimmer(
-                    "Reading what FlashAgent remembers and writing it up…",
+                    crate::i18n::tr("Reading what FlashAgent remembers and writing it up…"),
                     t,
                     2000,
                     crate::anim::Rgb(135, 130, 125),
