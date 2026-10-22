@@ -255,6 +255,9 @@ struct BackendStartup {
     context_capacity: usize,
     cwd_display: String,
     cwd: std::path::PathBuf,
+    /// The directory the app was started in is gone; the home folder stood in
+    /// for it, and the user was told.
+    cwd_missing: bool,
     initial_effort: String,
     available_models: Vec<String>,
     first_run_verdict: Option<String>,
@@ -270,6 +273,23 @@ fn display_cwd(cwd: &std::path::Path) -> String {
         }).unwrap_or_else(|_| cwd.display().to_string())
     } else {
         cwd.display().to_string()
+    }
+}
+
+/// The directory the app starts in. A directory that was deleted while the
+/// terminal sat in it is not a reason to die: the home folder is, and the
+/// trust screen still asks about it.
+fn start_directory(current: std::io::Result<std::path::PathBuf>) -> (std::path::PathBuf, bool) {
+    match current {
+        Ok(dir) => (dir, false),
+        Err(_) => {
+            let home = std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.is_dir())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            (home, true)
+        }
     }
 }
 
@@ -299,8 +319,7 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
         backend_initial.discover_server().await
     });
 
-    let mut cwd = std::env::current_dir()?;
-
+    let (mut cwd, cwd_missing) = start_directory(std::env::current_dir());
     if config.is_directory_trusted(&cwd) {
         skip_trust = true;
     }
@@ -402,7 +421,7 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
     let source: Arc<BackendSource> = Arc::new(BackendSource(backend));
     let cwd_display = display_cwd(&cwd);
 
-    Ok(Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, initial_effort, available_models, first_run_verdict, pending_discovery }))
+    Ok(Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, cwd_missing, initial_effort, available_models, first_run_verdict, pending_discovery }))
 }
 
 /// How many characters the plan of the project may take in the prompt. A
@@ -546,7 +565,7 @@ async fn main() -> Result<()> {
     let Some((force_setup, skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
 
     let Some(ran_setup) = startup_screens(&mut config, force_setup).await else { return Ok(()) };
-    let Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, initial_effort, available_models, first_run_verdict, pending_discovery }) =
+    let Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, cwd_missing, initial_effort, available_models, first_run_verdict, pending_discovery }) =
         prepare_backend(&mut config, skip_trust, ran_setup).await? else { return Ok(()) };
 
     // The interface language before anything renders; the system prompt is
@@ -662,6 +681,7 @@ async fn main() -> Result<()> {
         available_models,
         session_start,
         cwd: cwd.clone(),
+        cwd_missing,
         first_run_verdict,
         pending_discovery,
         agent_events,
@@ -991,6 +1011,9 @@ struct AppContext {
     cwd_display: String,
     /// Where the file tools write.
     cwd: std::path::PathBuf,
+    /// The directory the app was started in is gone; it started in the home
+    /// folder instead, and the user was told.
+    cwd_missing: bool,
     initial_effort: String,
     available_models: Vec<String>,
     session_start: SessionStart,
@@ -1713,6 +1736,12 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     if let Some(verdict) = ctx.first_run_verdict {
         app.chat.push_system(&verdict);
     }
+    if ctx.cwd_missing {
+        app.chat.push_system(flashagent_tui::i18n::tr("The directory you were in is gone; FlashAgent starts in your home folder."));
+    }
+    if ctx.cwd_missing {
+        app.chat.push_system(flashagent_tui::i18n::tr("The directory you were in is gone; FlashAgent starts in your home folder."));
+    }
     // The unreadable file keeps its name: saving over it would destroy what may
     // still be recoverable by hand.
     if let Some(id) = resume_session_id.as_deref() {
@@ -2059,6 +2088,20 @@ fn find_skill_file(name: &str) -> Option<std::path::PathBuf> {
 mod tests {
     use super::*;
     use flashagent_core::Compactor;
+
+    #[test]
+    fn a_deleted_starting_directory_falls_back_to_home() {
+        let (dir, missing) = super::start_directory(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "gone")));
+        assert!(missing);
+        assert!(dir.is_dir() || dir == std::path::Path::new("."));
+    }
+
+    #[test]
+    fn a_present_starting_directory_is_kept() {
+        let (dir, missing) = super::start_directory(Ok(std::path::PathBuf::from("/tmp")));
+        assert!(!missing);
+        assert_eq!(dir, std::path::PathBuf::from("/tmp"));
+    }
 
     #[test]
     fn tmux_extended_keys_are_used_only_in_the_csi_u_format() {

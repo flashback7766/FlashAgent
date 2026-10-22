@@ -1,5 +1,13 @@
 # Changelog
 
+## b604 — a directory that was deleted stops killing the app
+
+- **A deleted folder no longer stops the start.** FlashAgent reads the folder
+  it was started in before anything else; when that folder is gone — a
+  removed worktree, a deleted directory under a still-open shell — it started
+  in the home folder and says so, instead of dying with an operating-system
+  error that said nothing useful.
+
 ## b603 — the documentation back, and the Windows runs that stopped riding the console
 
 - **The repository keeps its documentation again.** The architecture walk, the
