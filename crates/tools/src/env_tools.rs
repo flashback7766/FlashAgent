@@ -1,11 +1,29 @@
 //! `env_info`: platform, architecture, working directory, toolchain versions.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::Stdio;
+use std::time::Duration;
+
 use crate::ToolError;
 
-fn check_tool_version(cmd: &str, arg: &str) -> Option<String> {
-    let out = Command::new(crate::shell::find_program(cmd)).arg(arg).output().ok()?;
+/// How long a toolchain may take to answer `--version`.
+///
+/// A package manager that waits for a lock, or a tool that asks something on
+/// its standard input, never answers at all. The tool call must not wait for
+/// it: the turn would never end.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn check_tool_version(cmd: &str, arg: &str, timeout: Duration) -> Option<String> {
+    let mut command = tokio::process::Command::new(crate::shell::find_program(cmd));
+    command
+        .arg(arg)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        // The program dies with the future that waits for it.
+        .kill_on_drop(true);
+    let child = command.spawn().ok()?;
+    let out = tokio::time::timeout(timeout, child.wait_with_output()).await.ok()?.ok()?;
     if out.status.success() {
         let line = String::from_utf8_lossy(&out.stdout);
         let first_line = line.lines().next()?.trim();
@@ -16,7 +34,7 @@ fn check_tool_version(cmd: &str, arg: &str) -> Option<String> {
     None
 }
 
-pub fn env_info(cwd: &Path) -> Result<String, ToolError> {
+pub async fn env_info(cwd: &Path) -> Result<String, ToolError> {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
     let family = std::env::consts::FAMILY;
@@ -39,16 +57,14 @@ pub fn env_info(cwd: &Path) -> Result<String, ToolError> {
 
     // All at once: each asks a separate program, and `npm --version` alone can
     // take a second.
-    let found_tools: Vec<String> = std::thread::scope(|scope| {
-        let asked: Vec<_> = tools
-            .iter()
-            .map(|&(name, arg)| (name, scope.spawn(move || check_tool_version(name, arg))))
-            .collect();
-        asked
-            .into_iter()
-            .filter_map(|(name, answer)| answer.join().ok().flatten().map(|ver| format!("  - {name}: {ver}")))
-            .collect()
-    });
+    let found_tools: Vec<String> = futures::future::join_all(
+        tools.iter().map(|&(name, arg)| check_tool_version(name, arg, VERSION_TIMEOUT)),
+    )
+    .await
+    .into_iter()
+    .zip(tools.iter())
+    .filter_map(|(answer, &(name, _))| answer.map(|ver| format!("  - {name}: {ver}")))
+    .collect();
 
     if !found_tools.is_empty() {
         report.push("\nInstalled Toolchains:".to_string());
@@ -64,11 +80,21 @@ pub fn env_info(cwd: &Path) -> Result<String, ToolError> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_env_info_reports_platform_and_cwd() {
+    #[tokio::test]
+    async fn test_env_info_reports_platform_and_cwd() {
         let temp = crate::testing::tempdir();
-        let res = env_info(&temp).unwrap();
+        let res = env_info(&temp).await.unwrap();
         assert!(res.contains("Platform:"));
         assert!(res.contains("Working Directory:"));
+    }
+
+    /// A toolchain that never answers is given up on: the call must end.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_toolchain_that_never_answers_is_given_up_on() {
+        let started = std::time::Instant::now();
+        let answer = check_tool_version("sleep", "30", Duration::from_millis(200)).await;
+        assert!(answer.is_none());
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
     }
 }

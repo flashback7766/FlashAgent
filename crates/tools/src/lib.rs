@@ -84,6 +84,35 @@ pub struct BuiltinToolsConfig {
     pub disabled_tools: Option<Vec<String>>,
 }
 
+/// What a tool answered: text for the model, or a picture.
+///
+/// `view_image` is the one tool whose result is not text, so the dispatcher
+/// answers with one or the other instead of pretending every tool is the same.
+enum Answer {
+    Text(String),
+    Picture(ToolOutput),
+}
+
+/// Everything the offered tool list depends on.
+///
+/// Two calls with the same key offer the same tools, so the list is measured
+/// once and kept until one of these changes.
+#[derive(PartialEq, Eq)]
+struct SpecsKey {
+    window: Option<usize>,
+    prompt_tokens: usize,
+    model: String,
+    web: bool,
+    vision: bool,
+    disabled: Vec<String>,
+}
+
+/// The measured tool list, and what it was measured for.
+struct SpecsCache {
+    key: SpecsKey,
+    specs: Vec<ToolSpec>,
+}
+
 /// One per session.
 pub struct BuiltinTools {
     cwd: PathBuf,
@@ -108,6 +137,12 @@ pub struct BuiltinTools {
     /// The tools that are off. Shared with the app, so the switch takes effect
     /// in the conversation that is running.
     disabled: Arc<std::sync::RwLock<Vec<String>>>,
+    /// The measured tool list. Measuring it means tokenizing every schema,
+    /// and the list is asked for on every tool call.
+    specs_cache: parking_lot::Mutex<Option<SpecsCache>>,
+    /// How often the list was measured: what the cache is tested with.
+    #[cfg(test)]
+    specs_measured: std::sync::atomic::AtomicUsize,
 }
 
 impl BuiltinTools {
@@ -135,6 +170,9 @@ impl BuiltinTools {
             vision_supported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_manager,
             disabled: Arc::new(std::sync::RwLock::new(config.disabled_tools.unwrap_or_default())),
+            specs_cache: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            specs_measured: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -209,6 +247,96 @@ impl BuiltinTools {
             .unwrap_or_else(|_| path.to_string())
     }
 
+    /// Everything the offered list depends on.
+    fn specs_key(&self) -> SpecsKey {
+        SpecsKey {
+            window: self.context_window.read().ok().and_then(|c| *c),
+            prompt_tokens: self.prompt_tokens.load(Ordering::Relaxed),
+            model: self.model_name.read().ok().map(|m| m.clone()).unwrap_or_default(),
+            web: self.web_enabled.load(Ordering::Relaxed),
+            vision: self.vision_supported.load(Ordering::Relaxed),
+            disabled: self.disabled_tools(),
+        }
+    }
+
+    /// How often the list was measured from scratch. What the cache is tested
+    /// with.
+    #[cfg(test)]
+    pub(crate) fn specs_measured(&self) -> usize {
+        self.specs_measured.load(Ordering::Relaxed)
+    }
+
+    /// The tool list, measured. Every schema is tokenized with the model it
+    /// is going to, which is the expensive part.
+    fn measured_specs(&self) -> Vec<ToolSpec> {
+        use flashagent_core::registry::{self, Handler};
+
+        let ctx = self.context_window.read().ok().and_then(|c| *c);
+        // One toolset for every model: the budget trims it if it must, the
+        // owner switches tools off by hand.
+        let core = true;
+        let web = self.web_enabled.load(Ordering::Relaxed);
+        let vision = self.vision_supported();
+
+        // One list, read from the registry: a tool's name, its schema and what it
+        // is for cannot disagree with each other any more.
+        let mut specs: Vec<ToolSpec> = registry::TOOLS
+            .iter()
+            // The three that only make sense at the top, added by the composite
+            // in `subagents.rs`: offering them here too would put two tools with
+            // one name in front of the model.
+            .filter(|def| {
+                !matches!(def.handler, Handler::SpawnAgent | Handler::SendMessage | Handler::ReviewAgent)
+            })
+            // `BuiltinTools` is what a subagent is given, so the parent-only
+            // tools are not offered from here.
+            .filter(|def| registry::offered(def, core, vision, web, false))
+            // A tool the owner has switched off is not on the table at all.
+            .filter(|def| !self.tool_disabled(def.name))
+            .map(|def| ToolSpec {
+                name: def.name.to_string(),
+                description: def.description.to_string(),
+                parameters_json: def.schema_json(),
+            })
+            .collect();
+
+        // What the window earns. The prompt has already taken its share and is
+        // not negotiable, so the schemas are what a tier has left: on a small
+        // window the optional end of the list goes first, and the tools a task
+        // cannot happen without are offered whatever it costs.
+        // `Full` is the user asking for the whole toolset whatever the window says,
+        // so the ladder does not apply to it.
+        {
+        let budget = flashagent_core::budget::Budget::for_window(ctx);
+        let model_name = self.model_name.read().ok().map(|m| m.clone()).unwrap_or_default();
+        let allowance = budget.tool_allowance(self.prompt_tokens.load(Ordering::Relaxed));
+        let measured: Vec<(&str, bool, usize)> = specs
+            .iter()
+            .map(|spec| {
+                (
+                    spec.name.as_str(),
+                    registry::TOOLS
+                        .iter()
+                        .find(|def| def.name == spec.name)
+                        .is_some_and(|def| matches!(def.availability, flashagent_core::registry::Availability::Always)),
+                    flashagent_core::budget::tool_cost(
+                        &model_name,
+                        &spec.name,
+                        &spec.description,
+                        &spec.parameters_json,
+                    ),
+                )
+            })
+            .collect();
+        let (kept, _dropped) = flashagent_core::budget::fit_builtin(measured.into_iter(), allowance);
+        let kept: std::collections::HashSet<String> = kept.into_iter().map(str::to_string).collect();
+        specs.retain(|spec| kept.contains(&spec.name));
+        }
+        #[cfg(test)]
+        self.specs_measured.fetch_add(1, Ordering::Relaxed);
+        specs
+    }
+
     /// `None` when the call is not a write or the file cannot be read. Which
     /// diff a call needs is declared next to its schema, so a new tool that
     /// changes files is shown on the card without anyone remembering this.
@@ -275,7 +403,7 @@ impl BuiltinTools {
             .map_err(|e| ToolError::Other(format!("the tool stopped unexpectedly: {e}")))?
     }
 
-    async fn dispatch(&self, call: &ToolCall) -> Result<String, ToolError> {
+    async fn dispatch(&self, call: &ToolCall) -> Result<Answer, ToolError> {
         use flashagent_core::registry::Handler;
         // A built-in tool runs the handler the registry named for it. The match
         // is on the handler, not on the name, so a tool declared with no code
@@ -283,18 +411,18 @@ impl BuiltinTools {
         // "unknown tool" a user has to report.
         let Some(def) = flashagent_core::registry::find(&call.name) else {
             if call.name.starts_with("mcp__") || self.mcp_manager.has_tool(&call.name) {
-                return self.mcp_manager.call_tool(&call.name, &call.args_json).await;
+                return self.mcp_manager.call_tool(&call.name, &call.args_json).await.map(Answer::Text);
             }
             return Err(ToolError::Other(format!("unknown tool: {}", call.name)));
         };
         match def.handler {
             Handler::ReadFile => {
                 let a: ReadArgs = parse_args(&call.args_json, &call.name)?;
-                self.off_runtime(move |cwd| a.read(cwd)).await
+                Ok(Answer::Text(self.off_runtime(move |cwd| a.read(cwd)).await?))
             }
             Handler::WriteFile => {
                 let a: WriteArgs = parse_args(&call.args_json, &call.name)?;
-                fs_tools::write_file(&self.cwd, &a.path, &a.content)
+                fs_tools::write_file(&self.cwd, &a.path, &a.content).map(Answer::Text)
             }
             Handler::EditFile => {
                 let a: EditArgs = parse_args(&call.args_json, &call.name)?;
@@ -302,70 +430,70 @@ impl BuiltinTools {
                     if a.path.trim().is_empty() || a.edits.is_empty() {
                         return Err(ToolError::Other("edit_file needs a path and edits, or files to edit several".into()));
                     }
-                    return fs_tools::edit_file(&self.cwd, &a.path, &a.edits);
+                    return fs_tools::edit_file(&self.cwd, &a.path, &a.edits).map(Answer::Text);
                 }
-                fs_tools::edit_files(&self.cwd, &a.targets())
+                fs_tools::edit_files(&self.cwd, &a.targets()).map(Answer::Text)
             }
             Handler::PatchFile => {
                 let a: PatchArgs = parse_args(&call.args_json, &call.name)?;
-                patch::patch_file(&self.cwd, &a.path, &a.patch)
+                patch::patch_file(&self.cwd, &a.path, &a.patch).map(Answer::Text)
             }
             Handler::ListDir => {
                 let a: ListArgs = parse_args(&call.args_json, &call.name)?;
-                self.off_runtime(move |cwd| fs_tools::list_dir(cwd, a.path.as_deref().unwrap_or("."))).await
+                Ok(Answer::Text(self.off_runtime(move |cwd| fs_tools::list_dir(cwd, a.path.as_deref().unwrap_or("."))).await?))
             }
             Handler::Glob => {
                 let a: GlobArgs = parse_args(&call.args_json, &call.name)?;
-                self.off_runtime(move |cwd| fs_tools::glob_files(cwd, &a.pattern)).await
+                Ok(Answer::Text(self.off_runtime(move |cwd| fs_tools::glob_files(cwd, &a.pattern)).await?))
             }
             Handler::Grep => {
                 let a: GrepArgs = parse_args(&call.args_json, &call.name)?;
-                self.off_runtime(move |cwd| fs_tools::grep(cwd, &a.pattern, a.glob.as_deref(), a.case_insensitive)).await
+                Ok(Answer::Text(self.off_runtime(move |cwd| fs_tools::grep(cwd, &a.pattern, a.glob.as_deref(), a.case_insensitive)).await?))
             }
             Handler::OutlineFile => {
                 let a: OutlineArgs = parse_args(&call.args_json, &call.name)?;
-                self.off_runtime(move |cwd| outline::outline_file(cwd, &a.path)).await
+                Ok(Answer::Text(self.off_runtime(move |cwd| outline::outline_file(cwd, &a.path)).await?))
             }
             Handler::GitStatus => {
                 let a: GitStatusArgs = parse_args(&call.args_json, &call.name)?;
-                self.off_runtime(move |cwd| git::git_status(cwd, a.path.as_deref())).await
+                git::git_status(&self.cwd, a.path.as_deref()).await.map(Answer::Text)
             }
             Handler::GitDiff => {
                 let a: GitDiffArgs = parse_args(&call.args_json, &call.name)?;
-                self.off_runtime(move |cwd| git::git_diff(cwd, a.staged.unwrap_or(false), a.path.as_deref())).await
+                git::git_diff(&self.cwd, a.staged.unwrap_or(false), a.path.as_deref()).await.map(Answer::Text)
             }
             Handler::RunShell => {
                 let a: ShellArgs = parse_args(&call.args_json, &call.name)?;
-                self.run_shell(a).await
+                self.run_shell(a).await.map(Answer::Text)
             }
-            Handler::EnvInfo => self.off_runtime(env_tools::env_info).await,
+            Handler::EnvInfo => env_tools::env_info(&self.cwd).await.map(Answer::Text),
             Handler::AskUser => {
                 let a: ask_user::AskUserArgs = parse_args(&call.args_json, &call.name)?;
-                ask_user::run_ask_user(self.question_gate.as_ref(), &self.is_goal_mode, a).await
+                ask_user::run_ask_user(self.question_gate.as_ref(), &self.is_goal_mode, a).await.map(Answer::Text)
             }
-            Handler::UpdatePlan => plan_tool::run_update_plan(&self.is_goal_mode, &call.args_json),
+            Handler::UpdatePlan => plan_tool::run_update_plan(&call.args_json).map(Answer::Text),
             Handler::MemoryRead => {
                 let a: memory_tools::MemoryReadArgs = parse_args(&call.args_json, &call.name)?;
-                self.off_runtime(move |cwd| memory_tools::memory_read(cwd, a)).await
+                Ok(Answer::Text(self.off_runtime(move |cwd| memory_tools::memory_read(cwd, a)).await?))
             }
             Handler::MemoryCreate => {
                 let a: memory_tools::MemoryWriteArgs = parse_args(&call.args_json, &call.name)?;
-                memory_tools::memory_create(&self.cwd, &self.is_goal_mode, a)
+                memory_tools::memory_create(&self.cwd, &self.is_goal_mode, a).map(Answer::Text)
             }
             Handler::MemoryUpdate => {
                 let a: memory_tools::MemoryWriteArgs = parse_args(&call.args_json, &call.name)?;
-                memory_tools::memory_update(&self.cwd, &self.is_goal_mode, a)
+                memory_tools::memory_update(&self.cwd, &self.is_goal_mode, a).map(Answer::Text)
             }
             Handler::MemoryRemove => {
                 let a: memory_tools::MemoryRemoveArgs = parse_args(&call.args_json, &call.name)?;
-                memory_tools::memory_remove(&self.cwd, &self.is_goal_mode, a)
+                memory_tools::memory_remove(&self.cwd, &self.is_goal_mode, a).map(Answer::Text)
             }
             Handler::WebFetch => {
                 if !self.web_enabled.load(Ordering::Relaxed) {
                     return Err(ToolError::Other("web_fetch is turned off in Settings (LLM & Reasoning → Web Tools).".into()));
                 }
                 let a: FetchArgs = parse_args(&call.args_json, &call.name)?;
-                web::fetch_text(&a.url).await
+                web::fetch_text(&a.url).await.map(Answer::Text)
             }
             Handler::WebSearch => {
                 if !self.web_enabled.load(Ordering::Relaxed) {
@@ -377,10 +505,10 @@ impl BuiltinTools {
                 match key {
                     // A rejected, expired or exhausted key falls back to the free search.
                     Some(key) => match web::search(&self.http, key, &a.query, count).await {
-                        Ok(found) => Ok(found),
-                        Err(_) => web::search_free(&self.http, &a.query, count).await,
+                        Ok(found) => Ok(Answer::Text(found)),
+                        Err(_) => web::search_free(&self.http, &a.query, count).await.map(Answer::Text),
                     },
-                    None => web::search_free(&self.http, &a.query, count).await,
+                    None => web::search_free(&self.http, &a.query, count).await.map(Answer::Text),
                 }
             }
             // The only tool whose result is a picture, not text. It is a branch
@@ -389,9 +517,10 @@ impl BuiltinTools {
             Handler::ViewImage => {
                 let args = call.args_json.clone();
                 let vision = self.vision_supported();
-                Err(ToolError::Other(format!(
-                    "view_image: the picture cannot be returned from inside the dispatcher ({args}, vision {vision})"
-                )))
+                let opened = self.off_runtime(move |cwd| Ok(image_tool::view_image(cwd, &args, vision))).await;
+                Ok(Answer::Picture(opened.unwrap_or_else(|e| {
+                    ToolOutput { content: format!("error: {e}"), is_error: true, images: Vec::new() }
+                })))
             }
             // `spawn_agent`, `send_message` and `review_agent` have handlers here
             // so the registry covers every tool the model is ever offered, but
@@ -486,84 +615,28 @@ impl ToolExec for BuiltinTools {
                 images: Vec::new(),
             };
         }
-        // The only tool whose result is a picture, not text.
-        if call.name == "view_image" {
-            let args = call.args_json.clone();
-            let vision = self.vision_supported();
-            let opened = self.off_runtime(move |cwd| Ok(image_tool::view_image(cwd, &args, vision))).await;
-            return opened.unwrap_or_else(|e| ToolOutput { content: format!("error: {e}"), is_error: true, images: Vec::new() });
-        }
         match self.dispatch(call).await {
-            Ok(text) => ToolOutput { content: truncate_output(text), is_error: false, images: Vec::new() },
+            Ok(Answer::Text(text)) => ToolOutput { content: truncate_output(text), is_error: false, images: Vec::new() },
+            // The picture is the answer: it goes to the model as it is.
+            Ok(Answer::Picture(out)) => out,
             Err(e) => ToolOutput { content: format!("error: {e}"), is_error: true, images: Vec::new() },
         }
     }
 
     fn specs(&self) -> Vec<ToolSpec> {
-        use flashagent_core::registry::{self, Handler};
-
-        let ctx = self.context_window.read().ok().and_then(|c| *c);
-        // One toolset for every model: the budget trims it if it must, the
-        // owner switches tools off by hand.
-        let core = true;
-        let web = self.web_enabled.load(Ordering::Relaxed);
-        let vision = self.vision_supported();
-
-        // One list, read from the registry: a tool's name, its schema and what it
-        // is for cannot disagree with each other any more.
-        let mut specs: Vec<ToolSpec> = registry::TOOLS
-            .iter()
-            // The three that only make sense at the top, added by the composite
-            // in `subagents.rs`: offering them here too would put two tools with
-            // one name in front of the model.
-            .filter(|def| {
-                !matches!(def.handler, Handler::SpawnAgent | Handler::SendMessage | Handler::ReviewAgent)
-            })
-            // `BuiltinTools` is what a subagent is given, so the parent-only
-            // tools are not offered from here.
-            .filter(|def| registry::offered(def, core, vision, web, false))
-            // A tool the owner has switched off is not on the table at all.
-            .filter(|def| !self.tool_disabled(def.name))
-            .map(|def| ToolSpec {
-                name: def.name.to_string(),
-                description: def.description.to_string(),
-                parameters_json: def.schema_json(),
-            })
-            .collect();
-
-        // What the window earns. The prompt has already taken its share and is
-        // not negotiable, so the schemas are what a tier has left: on a small
-        // window the optional end of the list goes first, and the tools a task
-        // cannot happen without are offered whatever it costs.
-        // `Full` is the user asking for the whole toolset whatever the window says,
-        // so the ladder does not apply to it.
-        {
-        let budget = flashagent_core::budget::Budget::for_window(ctx);
-        let model_name = self.model_name.read().ok().map(|m| m.clone()).unwrap_or_default();
-        let allowance = budget.tool_allowance(self.prompt_tokens.load(Ordering::Relaxed));
-        let measured: Vec<(&str, bool, usize)> = specs
-            .iter()
-            .map(|spec| {
-                (
-                    spec.name.as_str(),
-                    registry::TOOLS
-                        .iter()
-                        .find(|def| def.name == spec.name)
-                        .is_some_and(|def| matches!(def.availability, flashagent_core::registry::Availability::Always)),
-                    flashagent_core::budget::tool_cost(
-                        &model_name,
-                        &spec.name,
-                        &spec.description,
-                        &spec.parameters_json,
-                    ),
-                )
-            })
-            .collect();
-        let (kept, _dropped) = flashagent_core::budget::fit_builtin(measured.into_iter(), allowance);
-        let kept: std::collections::HashSet<String> = kept.into_iter().map(str::to_string).collect();
-        specs.retain(|spec| kept.contains(&spec.name));
-        }
-
+        let key = self.specs_key();
+        let builtin = {
+            let mut cache = self.specs_cache.lock();
+            match cache.as_ref() {
+                Some(cached) if cached.key == key => cached.specs.clone(),
+                _ => {
+                    let specs = self.measured_specs();
+                    *cache = Some(SpecsCache { key, specs: specs.clone() });
+                    specs
+                }
+            }
+        };
+        let mut specs = builtin;
         // Names a server chose, with the schemas it chose.
         specs.extend(self.mcp_manager.get_all_tool_specs());
         specs
@@ -605,8 +678,10 @@ impl ReadArgs {
         }
         items.extend(self.files.into_iter().map(|f| (f.path, f.offset, f.limit)));
         // The usual 2000 lines are shared out, so the output limit does not cut the
-        // last file away.
-        let share = (2000 / items.len().max(1)).max(200);
+        // last file away. The share is the division itself: a floor of 200
+        // lines undid it, and twenty files were read at 200 lines each — four
+        // thousand lines, of which the end was cut off.
+        let share = (2000 / items.len().max(1)).max(1);
         let items: Vec<(String, usize, usize)> = items.into_iter().map(|(p, o, l)| (p, o.unwrap_or(0), l.unwrap_or(share))).collect();
         fs_tools::read_files(cwd, &items)
     }
@@ -1078,9 +1153,75 @@ mod tests {
         assert!(!specs.iter().any(|s| s.name == "web_search"), "the optional end still goes first");
     }
 
+    #[tokio::test]
+    async fn twenty_files_share_the_line_budget_so_the_last_one_is_read_too() {
+        // The 2000 lines are shared out. The share used to have a floor of
+        // 200 lines, which undid the division: twenty files were read at 200
+        // lines each, four thousand lines, and the end of the answer was cut
+        // off by the output limit.
+        let dir = testing::tempdir();
+        let files: Vec<String> = (0..20)
+            .map(|i| {
+                let name = format!("f{i}.txt");
+                std::fs::write(dir.join(&name), "x\n".repeat(400)).unwrap();
+                name
+            })
+            .collect();
+        let tools = BuiltinTools::new(BuiltinToolsConfig { cwd: dir, ..Default::default() }).unwrap();
+        let listed: Vec<serde_json::Value> =
+            files.iter().map(|path| serde_json::json!({ "path": path })).collect();
+        let out = tools
+            .execute(&ToolCall {
+                id: "t".into(),
+                name: "read_file".into(),
+                args_json: serde_json::json!({ "files": listed }).to_string(),
+            })
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        for name in &files {
+            assert!(out.content.contains(&format!("=== {name} ===")), "{name} is missing from the answer");
+        }
+        let lines = out.content.lines().filter(|l| l.contains('\t')).count();
+        assert!(lines <= 2000, "{lines} lines were read, the budget is 2000");
+    }
+
     #[test]
-    fn truncate_output_caps_and_marks() {
-        let long = "x".repeat(MAX_OUTPUT_CHARS + 10);
+    fn the_tool_list_is_measured_once_and_kept() {
+        // Measuring it means tokenizing every schema, and the list is asked
+        // for on every tool call.
+        let tools = BuiltinTools::new(BuiltinToolsConfig {
+            cwd: testing::tempdir(),
+            ..Default::default()
+        })
+        .unwrap();
+        let first = tools.specs();
+        let second = tools.specs();
+        assert_eq!(first.len(), second.len());
+        assert_eq!(tools.specs_measured(), 1, "the schemas were measured again for the same list");
+
+        // Something that changes the list is measured again.
+        tools.set_model_name("gpt-4");
+        let third = tools.specs();
+        assert_eq!(tools.specs_measured(), 2, "a new model must be measured with its own tokenizer");
+        assert_eq!(first.len(), third.len());
+    }
+
+    #[test]
+    fn a_tool_that_is_switched_off_is_gone_from_the_kept_list() {
+        let tools = BuiltinTools::new(BuiltinToolsConfig {
+            cwd: testing::tempdir(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(tools.specs().iter().any(|s| s.name == "web_search"));
+        tools.set_disabled_tools(vec!["web_search".into()]);
+        let specs = tools.specs();
+        assert!(!specs.iter().any(|s| s.name == "web_search"), "a tool that is off is still offered");
+        assert_eq!(tools.specs_measured(), 2, "the list must be measured again after the change");
+    }
+
+    #[test]
+    fn truncate_output_caps_and_marks() {        let long = "x".repeat(MAX_OUTPUT_CHARS + 10);
         let out = truncate_output(long);
         assert!(out.contains("[truncated"));
         assert_eq!(out.chars().count(), MAX_OUTPUT_CHARS + "\n...[truncated at 32000 chars]".len());

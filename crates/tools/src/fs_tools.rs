@@ -3,6 +3,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Deserialize;
 
@@ -156,8 +157,58 @@ pub(crate) fn write_file(cwd: &Path, path: &str, content: &str) -> Result<String
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&file, content)?;
+    write_atomic(&file, content)?;
     Ok(format!("wrote {} bytes to {path}", content.len()))
+}
+
+/// Writes a file in one step: the new text goes into a temporary file beside
+/// it and is renamed over the old one.
+///
+/// `std::fs::write` truncates the file first and writes afterwards, so a
+/// failure in between (a full disk, a quota, a killed process) left a
+/// truncated file behind and the old text was gone for good. Here the old
+/// file is whole until the moment it is replaced, and it is replaced in one
+/// step, so a reader never sees half of it.
+pub(crate) fn write_atomic(file: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    // A symlink is written through, not replaced: the file it points at is
+    // the one the caller means.
+    let target = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let dir = target.parent().unwrap_or_else(|| Path::new("."));
+    let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let temp = dir.join(format!(".{name}.flashagent-{}-{}.tmp", std::process::id(), next_temp_id()));
+
+    let result = (|| -> std::io::Result<()> {
+        // The file's own permissions decide whether it may be written: a
+        // rename would replace it whatever they say.
+        if let Ok(meta) = std::fs::metadata(&target) {
+            if meta.is_file() {
+                std::fs::OpenOptions::new().write(true).open(&target)?;
+            }
+        }
+        let mut handle = std::fs::File::create(&temp)?;
+        handle.write_all(content.as_bytes())?;
+        // The bytes are on the disk before the name points at them.
+        handle.sync_all()?;
+        drop(handle);
+        // The permissions the file had are the ones it keeps.
+        if let Ok(meta) = std::fs::metadata(&target) {
+            let _ = std::fs::set_permissions(&temp, meta.permissions());
+        }
+        std::fs::rename(&temp, &target)
+    })();
+    if result.is_err() {
+        // A temporary file left behind is litter in the user's project.
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+/// A number that tells two temporary files of the same process apart.
+fn next_temp_id() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 /// No line numbers; used for diff previews.
@@ -408,11 +459,17 @@ pub(crate) fn apply_edits(path: &str, mut text: String, edits: &[EditChunk]) -> 
             )));
         }
         let mut applied = 0usize;
-        for planned in planned.into_iter().rev() {
-            for (from, to, new_text) in planned.places.into_iter().rev() {
-                text.replace_range(from..to, &new_text);
-                applied += 1;
-            }
+        // The edits are applied from the end of the file towards its start,
+        // whatever order the model listed them in. Every edit was planned
+        // against the text as it was, so an edit that makes the file longer
+        // must not move the ones before it — and the order in the list says
+        // nothing about where in the file the edits are.
+        let mut places: Vec<(usize, usize, String)> =
+            planned.iter().flat_map(|edit| edit.places.iter().cloned()).collect();
+        places.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        for (from, to, new_text) in places {
+            text.replace_range(from..to, &new_text);
+            applied += 1;
         }
         return Ok((text, applied));
     }
@@ -532,7 +589,12 @@ fn plan_one_edit(path: &str, text: &str, edit: &EditChunk) -> Result<PlannedEdit
             .map(|(at, _)| (at, at + target.len(), new_text.clone()))
             .collect()
     } else {
-        let at = text.find(target.as_str()).expect("the match was found a moment ago");
+        // The match was found a moment ago; if it is not there now, the text
+        // said one thing and the model another, and that is an error to report
+        // rather than a panic to hand the model.
+        let at = text.find(target.as_str()).ok_or_else(|| {
+            ToolError::Other(format!("edit: the text to replace is not in {path}"))
+        })?;
         vec![(at, at + target.len(), new_text)]
     };
     Ok(PlannedEdit { places })
@@ -586,7 +648,7 @@ pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<S
     let text = std::fs::read_to_string(&file)
         .map_err(|e| io_error("read", cwd, path, &e))?;
     let (text, applied) = apply_edits(path, text, edits)?;
-    std::fs::write(&file, &text)?;
+    write_atomic(&file, &text)?;
     Ok(format!("applied {applied} edit(s) to {path}"))
 }
 
@@ -675,15 +737,27 @@ fn plan_edits(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Result<Vec<Plan
     Ok(planned)
 }
 
-/// A write that fails puts back every file written before it.
+/// A write that fails puts back every file written before it, and the file
+/// whose write failed is whole: a write is a rename, so the old text is still
+/// there until the moment it is replaced.
 fn write_planned(planned: &[PlannedFile]) -> Result<String, ToolError> {
     for (i, target) in planned.iter().enumerate() {
-        if let Err(e) = std::fs::write(&target.file, &target.new) {
-            let rollback_failed: Vec<String> = planned[..i]
-                .iter()
-                .rev()
-                .filter_map(|done| std::fs::write(&done.file, &done.original).err().map(|err| format!("{}: {err}", done.path)))
-                .collect();
+        if let Err(e) = write_atomic(&target.file, &target.new) {
+            let mut rollback_failed: Vec<String> = Vec::new();
+            // The file whose write failed is whole: a write is a rename, so
+            // the old text is still there until the moment it is replaced.
+            // It is put back anyway, for the case where something else
+            // touched it in between.
+            if target.file.is_file() {
+                if let Err(err) = write_atomic(&target.file, &target.original) {
+                    rollback_failed.push(format!("{}: {err}", target.path));
+                }
+            }
+            for done in planned[..i].iter().rev() {
+                if let Err(err) = write_atomic(&done.file, &done.original) {
+                    rollback_failed.push(format!("{}: {err}", done.path));
+                }
+            }
             let done = if rollback_failed.is_empty() {
                 format!("rolled back {i} earlier file(s)")
             } else {
@@ -727,8 +801,13 @@ pub(crate) fn glob_files(cwd: &Path, pattern: &str) -> Result<String, ToolError>
     let pattern = flashagent_core::expand_home(pattern);
     let pattern = pattern.as_ref();
     let absolute = Path::new(pattern).is_absolute();
-    let fixed = pattern.split(['*', '?', '[', '{']).next().unwrap_or("");
-    let confine = !absolute && flashagent_core::path_is_inside(cwd, if fixed.is_empty() { "." } else { fixed });
+    // A relative pattern stays inside the project, whatever its first part
+    // is. It used to be decided by the part before the first wildcard, so a
+    // pattern that named a symlink pointing out of the project (or one that
+    // climbed out of it with `..`) switched the filter off — while `grep`,
+    // which never follows a symlink, kept looking inside. The two tools
+    // answered the same question differently.
+    let confine = !absolute;
     let full = if absolute {
         pattern.to_string()
     } else {
@@ -1018,6 +1097,145 @@ mod tests {
         assert_eq!(applied, 2);
     }
 
+    /// The order the model lists the edits in says nothing about where in the
+    /// file they are. A model that lists them bottom-up used to make the tool
+    /// write over the wrong bytes: the offsets were right for the text as it
+    /// was, but they were applied in the order of the list.
+    #[test]
+    fn edits_listed_bottom_up_are_applied_in_text_order() {
+        let text = "one\ntwo\nthree\n";
+        // Bottom-up, and the first edit makes the file longer: applied in the
+        // order of the list, the second edit would land three bytes too far.
+        let edits = [
+            EditChunk { old_string: "three".into(), new_string: "3".into(), ..Default::default() },
+            EditChunk { old_string: "one".into(), new_string: "ONE-TWO".into(), ..Default::default() },
+        ];
+        let (out, applied) = apply_edits("f", text.into(), &edits).unwrap();
+        assert_eq!(out, "ONE-TWO\ntwo\n3\n");
+        assert_eq!(applied, 2);
+    }
+
+    /// The same edits, the other way round: the answer must not depend on the
+    /// order of the list.
+    #[test]
+    fn the_order_of_the_list_does_not_change_the_result() {
+        let text = "one\ntwo\nthree\n";
+        let bottom_up = [
+            EditChunk { old_string: "three".into(), new_string: "3".into(), ..Default::default() },
+            EditChunk { old_string: "one".into(), new_string: "ONE-TWO".into(), ..Default::default() },
+        ];
+        let top_down = [
+            EditChunk { old_string: "one".into(), new_string: "ONE-TWO".into(), ..Default::default() },
+            EditChunk { old_string: "three".into(), new_string: "3".into(), ..Default::default() },
+        ];
+        let (a, _) = apply_edits("f", text.into(), &bottom_up).unwrap();
+        let (b, _) = apply_edits("f", text.into(), &top_down).unwrap();
+        assert_eq!(a, b);
+    }
+
+    /// Edits by line number, listed bottom-up: the same rule applies.
+    #[test]
+    fn lines_listed_bottom_up_are_applied_in_text_order() {
+        let text = "one\ntwo\nthree\nfour\n";
+        let edits = [
+            EditChunk { start_line: Some(4), end_line: Some(4), new_string: "FOUR".into(), ..Default::default() },
+            EditChunk { start_line: Some(1), end_line: Some(1), new_string: "ONE\nONE-AND-A-HALF".into(), ..Default::default() },
+        ];
+        let (out, applied) = apply_edits("f", text.into(), &edits).unwrap();
+        assert_eq!(out, "ONE\nONE-AND-A-HALF\ntwo\nthree\nFOUR\n");
+        assert_eq!(applied, 2);
+    }
+
+    /// The file is replaced, not written over: a reader never sees half of the
+    /// new text, and a failure cannot leave a truncated file behind.
+    #[test]
+    #[cfg(unix)]
+    fn a_written_file_is_replaced_in_one_step() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempdir();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        let before = std::fs::metadata(&file).unwrap().ino();
+        write_file(&dir, "a.txt", "two\n").unwrap();
+        let after = std::fs::metadata(&file).unwrap().ino();
+        assert_ne!(before, after, "the file was written in place instead of being replaced");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "two\n");
+    }
+
+    /// A write that fails leaves nothing of its own behind.
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file_behind() {
+        let dir = tempdir();
+        // A folder where the file should be: the rename cannot replace it.
+        let file = dir.join("a.txt");
+        std::fs::create_dir(&file).unwrap();
+        let err = write_atomic(&file, "content").unwrap_err();
+        assert!(err.raw_os_error().is_some(), "the failure must be the system's: {err}");
+        assert!(file.is_dir(), "the folder was replaced by a file");
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "a.txt")
+            .collect();
+        assert!(leftovers.is_empty(), "a temporary file was left behind: {leftovers:?}");
+    }
+
+    /// A file the owner made read-only is not replaced: the rename would
+    /// replace it whatever its permissions say.
+    #[test]
+    #[cfg(unix)]
+    fn a_read_only_file_is_not_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let err = write_atomic(&file, "two\n").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n");
+        // The permissions are kept when the write does go through.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_atomic(&file, "two\n").unwrap();
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "the file lost its permissions");
+    }
+
+    /// Nothing of a failed batch is left changed: not the files written
+    /// before the failure, and not the file whose write failed.
+    #[test]
+    fn a_batch_that_fails_leaves_every_file_as_it_was() {
+        let dir = tempdir();
+        let first = dir.join("first.txt");
+        let blocked = dir.join("blocked.txt");
+        std::fs::write(&first, "old first\n").unwrap();
+        std::fs::write(&blocked, "old blocked\n").unwrap();
+
+        let planned = plan_edits(
+            &dir,
+            &[
+                ("first.txt".into(), vec![chunk("old first", "new first", false)]),
+                ("blocked.txt".into(), vec![chunk("old blocked", "new blocked", false)]),
+            ],
+        )
+        .unwrap();
+        // A folder where the second file was read: no write gets through that.
+        std::fs::remove_file(&blocked).unwrap();
+        std::fs::create_dir(&blocked).unwrap();
+        let err = write_planned(&planned).unwrap_err().to_string();
+
+        assert!(err.contains("blocked.txt"), "{err}");
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "old first\n", "the first file was not put back");
+        assert!(blocked.is_dir(), "nothing was written in place of the folder");
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "first.txt" && name != "blocked.txt")
+            .collect();
+        assert!(leftovers.is_empty(), "a temporary file was left behind: {leftovers:?}");
+    }
+
     #[test]
     fn a_file_that_is_not_there_names_the_one_that_is() {
         // The scenario `docs/tool-calling.md` measures: handed a bare "no such
@@ -1283,7 +1501,19 @@ mod tests {
 
         assert_eq!(grep(&dir, "outside-only-marker", None, false).unwrap(), "no matches");
         assert!(!glob_files(&dir, "**/*").unwrap().contains("secret.txt"));
-        assert!(glob_files(&dir, "linked-outside/*.txt").unwrap().contains("secret.txt"));
+        // The same rule as `grep`: a symlink out of the project is not
+        // followed, so the file behind it is not part of the project.
+        assert!(!glob_files(&dir, "linked-outside/*.txt").unwrap().contains("secret.txt"));
+    }
+
+    #[test]
+    fn a_glob_pattern_that_climbs_out_of_the_project_finds_nothing() {
+        let dir = tempdir();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret\n").unwrap();
+        let pattern = format!("../{}/secret.txt", outside.path().file_name().unwrap().to_string_lossy());
+        let out = glob_files(&dir, &pattern).unwrap();
+        assert!(!out.contains("secret.txt"), "the project filter was switched off: {out}");
     }
 
     #[test]
