@@ -87,6 +87,21 @@ pub fn view_image(cwd: &Path, args_json: &str, vision_supported: bool) -> ToolOu
             args.path
         ));
     };
+    // The size is looked at before the file is read: a limit that is checked
+    // afterwards has already let the whole file into memory, which is the
+    // thing the limit was there to prevent.
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.len() > MAX_BYTES as u64 => {
+            return fail(format!(
+                "view_image: {} is {:.1} MB, over the {} MB limit — resize it or point at a smaller copy",
+                args.path,
+                meta.len() as f64 / (1024.0 * 1024.0),
+                MAX_BYTES / (1024 * 1024)
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => return fail(format!("view_image: could not read {}: {e}", args.path)),
+    }
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => return fail(format!("view_image: could not read {}: {e}", args.path)),
@@ -196,6 +211,30 @@ mod tests {
         let mut big = png(10, 10);
         big.resize(MAX_BYTES + 1024, 0);
         std::fs::write(dir.path().join("huge.png"), &big).unwrap();
+        let out = view_image(dir.path(), r#"{"path":"huge.png"}"#, true);
+        assert!(out.is_error);
+        assert!(out.content.contains("over the"), "{}", out.content);
+        assert!(out.images.is_empty());
+    }
+
+    /// The size is looked at before the file is read: a limit that is checked
+    /// afterwards has already let the whole file into memory, which is what
+    /// the limit was there to prevent.
+    #[test]
+    #[cfg(unix)]
+    fn a_file_too_big_to_send_is_refused_without_being_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("huge.png");
+        std::fs::write(&file, png(10, 10)).unwrap();
+        // A sparse file: as big as it says, and no bytes on the disk.
+        let handle = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
+        handle.set_len(MAX_BYTES as u64 * 4).unwrap();
+        drop(handle);
+        // And unreadable: the refusal must be about the size, not about the
+        // read that must not happen.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+
         let out = view_image(dir.path(), r#"{"path":"huge.png"}"#, true);
         assert!(out.is_error);
         assert!(out.content.contains("over the"), "{}", out.content);
