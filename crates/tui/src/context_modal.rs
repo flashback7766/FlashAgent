@@ -16,7 +16,7 @@ impl ContextModal {
         let mut lines = Vec::new();
         let border_color = "\x1b[38;2;100;95;90m";
         let reset = "\x1b[0m";
-        let inner_w = width.saturating_sub(6).clamp(20, 76);
+        let inner_w = width.saturating_sub(6).min(76);
 
         let title = format!(" {} ", crate::i18n::tr("Context usage"));
         let dash_count = inner_w.saturating_sub(title.chars().count() + 1);

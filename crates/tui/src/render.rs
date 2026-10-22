@@ -196,15 +196,16 @@ pub(crate) fn work_box(
     let lead = usize::from(box_w >= 3);
     let room = box_w.saturating_sub(2 + lead);
     let full = flashagent_tui::i18n::tr(" subagents & background ");
-    let title: String = if full.chars().count() <= room {
+    let title: String = if visible_width(full) <= room {
         full.to_string()
-    } else if " work ".chars().count() <= room {
+    } else if visible_width(" work ") <= room {
         " work ".to_string()
     } else if room == 0 {
         String::new()
     } else {
-        // Narrower than the word: what is left says there was more.
-        let mut cut_title: String = full.trim().chars().take(room - 1).collect();
+        // Narrower than the word: what is left says there was more. Cut by
+        // cells, since a translated title may hold wide characters.
+        let mut cut_title = clip_ansi(full.trim(), room - 1);
         cut_title.push('\u{2026}');
         cut_title
     };
@@ -871,7 +872,10 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
     let field = |k: &str| args.get(k).and_then(|v| v.as_str()).map(card_safe);
     let label_row = |label: &str, value: &str| {
         pad_box_row(
-            &format!(" \x1b[38;2;160;155;145m{label}\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m", clip_ansi(value, inner_w.saturating_sub(label.len() + 4))),
+            &format!(
+                " \x1b[38;2;160;155;145m{label}\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m",
+                clip_ansi(value, inner_w.saturating_sub(visible_width(label) + 4))
+            ),
             width,
         )
     };
@@ -879,20 +883,24 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
     // any other width lost their ends.
     let value_w = inner_w.saturating_sub(12).max(1);
     let (label, value): (&str, String) = if let Some(cmd) = field("command") {
-        ("command:", cmd)
+        (flashagent_tui::i18n::tr("command:"), cmd)
     } else if let Some(path) = field("path") {
-        ("target:", flashagent_tui::relative_to_cwd(&path))
+        (flashagent_tui::i18n::tr("target:"), flashagent_tui::relative_to_cwd(&path))
     } else if let Some(files) = args.get("files").and_then(|f| f.as_array()) {
         if let Some(first_path) = files.first().and_then(|f| f.get("path").or_else(|| f.get("filePath"))).and_then(|p| p.as_str()) {
-            let extra = if files.len() > 1 { format!(" (+{} more)", files.len() - 1) } else { String::new() };
-            ("target:", format!("{}{extra}", flashagent_tui::relative_to_cwd(first_path)))
+            let extra = if files.len() > 1 {
+                flashagent_tui::i18n::tr_fill(" (+{n} more)", &[("n", &(files.len() - 1).to_string())])
+            } else {
+                String::new()
+            };
+            (flashagent_tui::i18n::tr("target:"), format!("{}{extra}", flashagent_tui::relative_to_cwd(first_path)))
         } else if args.as_object().is_some_and(|o| !o.is_empty()) {
-            ("args:", card_safe(&args.to_string()))
+            (flashagent_tui::i18n::tr("args:"), card_safe(&args.to_string()))
         } else {
             ("", String::new())
         }
     } else if args.as_object().is_some_and(|o| !o.is_empty()) {
-        ("args:", card_safe(&args.to_string()))
+        (flashagent_tui::i18n::tr("args:"), card_safe(&args.to_string()))
     } else {
         ("", String::new())
     };
@@ -911,7 +919,7 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
         }
         if rows.len() > shown {
             let more = flashagent_tui::plural(rows.len() - shown, "more line", "more lines");
-            tail.push((LineKind::System, pad_box_row(&format!("    \x1b[38;2;100;95;90m+{more} · \x1b[38;2;225;175;95mv\x1b[38;2;100;95;90m shows the whole change\x1b[0m"), width)));
+            tail.push((LineKind::System, pad_box_row(&format!("    \x1b[38;2;100;95;90m+{more} · \x1b[38;2;225;175;95mv\x1b[38;2;100;95;90m {}\x1b[0m", flashagent_tui::i18n::tr("shows the whole change")), width)));
         }
     }
 
@@ -953,8 +961,8 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
     let req = question_gate.pending().expect("question card needs a pending request");
     let reset = "\x1b[0m";
     // The composer becomes the question card.
-    let title = " Question from FlashAgent ";
-    let vis_title_len = visible_width(title);
+    let title = format!(" {} ", flashagent_tui::i18n::tr("Question from FlashAgent"));
+    let vis_title_len = visible_width(&title);
     let dash_w = inner_w.saturating_sub(vis_title_len + 1);
 
     if !joined {
@@ -1011,7 +1019,7 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
             };
             // A long option wraps under its own text, not under its number.
             let lead = format!("{num}. ");
-            let indent = 4 + if req.multi_select { 4 } else { 0 } + lead.len();
+            let indent = 4 + if req.multi_select { 4 } else { 0 } + visible_width(&lead);
             let mut rows: Vec<String> = opt
                 .lines()
                 .flat_map(|line| wrap_plain(&card_safe(line), inner_w.saturating_sub(indent + 1).max(10)))
@@ -1035,11 +1043,11 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
         let write_ptr = if is_write_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
         if is_writing {
             typing_line_idx = Some(tail.len());
-            let label = format!("{write_num}. Your answer: ");
-            let shown = answer_in(4 + label.len());
+            let label = format!("{write_num}. {} ", flashagent_tui::i18n::tr("Your answer:"));
+            let shown = answer_in(4 + visible_width(&label));
             tail.push((
                 LineKind::User,
-                pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. Your answer:\x1b[0m \x1b[1;38;2;240;235;225m{shown}\x1b[0m"), width),
+                pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. {}\x1b[0m \x1b[1;38;2;240;235;225m{shown}\x1b[0m", flashagent_tui::i18n::tr("Your answer:")), width),
             ));
             let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "back to the choices")], inner_w.saturating_sub(4));
             tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
@@ -1077,6 +1085,15 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
         format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
     ));
     input_line_idx
+}
+
+/// Where the cursor sits while a search of the history is typed: after the
+/// query, and after the label and the marks in front of it. Derived from the
+/// label rather than fixed, since a translated label is another width.
+fn history_cursor(query: &str, label: &str, width: usize) -> u16 {
+    // " " + prompt mark + " " + label + " " + query.
+    let col = 1 + 1 + 1 + visible_width(label) + 1 + visible_width(query);
+    col.min(width.saturating_sub(2)) as u16
 }
 
 /// `joined` is true when the work box is already the top of this block: its
@@ -1120,11 +1137,12 @@ fn append_composer(
     let input_rows: Vec<String> = if let Some((query, found)) = st.history_search {
         // The found prompt stands in the input, the search above it.
         let found_line = found.map_or_else(
-            || "\x1b[38;2;200;120;110mno match\x1b[0m".to_string(),
+            || format!("\x1b[38;2;200;120;110m{}\x1b[0m", flashagent_tui::i18n::tr("no match")),
             |f| format!("\x1b[38;2;155;160;175m{}\x1b[0m", f.lines().next().unwrap_or_default()),
         );
-        let label = "\x1b[38;2;135;130;125mfind in history:\x1b[0m";
-        text_cursor = Some((visible_width(query) + 21).min(width.saturating_sub(2)) as u16);
+        let label_text = flashagent_tui::i18n::tr("find in history:");
+        let label = format!("\x1b[38;2;135;130;125m{label_text}\x1b[0m");
+        text_cursor = Some(history_cursor(query, label_text, width));
         vec![format!(" {prompt_styled} {label} \x1b[1;38;2;240;235;225m{query}\x1b[0m"), format!("   {found_line}")]
     } else if let (true, Some(custom)) = (st.input.is_empty() && st.prefill_status.is_none() && !st.running && st.suggested_prompt.is_none(), st.custom_placeholder) {
         // Up to three rows: a notice cut at the edge loses its advice.
@@ -1226,7 +1244,14 @@ fn append_channel_card(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: u
     }
     tail.push((
         LineKind::System,
-        pad_box_row(" \x1b[1;38;2;30;26;22;48;2;225;175;95m Yes \x1b[0m  \x1b[38;2;190;185;175m No \x1b[0m", width),
+        pad_box_row(
+            &format!(
+                " \x1b[1;38;2;30;26;22;48;2;225;175;95m {} \x1b[0m  \x1b[38;2;190;185;175m {} \x1b[0m",
+                flashagent_tui::i18n::tr("Yes"),
+                flashagent_tui::i18n::tr("No")
+            ),
+            width,
+        ),
     ));
     let input_line_idx = tail.len();
     tail.push((
@@ -1551,9 +1576,11 @@ impl App {
         let composer_flash = self.composer_flash();
         let channel_prompt: Option<String> = if self.uninstall_confirm {
             Some(
-                "Close FlashAgent and remove it? The uninstaller then shows what it will remove and asks, \
-                 part by part, which of your data to delete. Your session is saved first."
-                    .to_string(),
+                flashagent_tui::i18n::tr(
+                    "Close FlashAgent and remove it? The uninstaller then shows what it will remove and asks, \
+                     part by part, which of your data to delete. Your session is saved first.",
+                )
+                .to_string(),
             )
         } else {
             self.channel_switch.as_ref().map(|sw| {
@@ -1749,6 +1776,19 @@ mod footer_tests {
     /// A room of one row cannot hold the marker, so nothing may be scrolled back.
     /// Taking an offset here would move no line on screen and say nothing about
     /// it, leaving the view scrolled with no way back.
+    #[test]
+    fn the_search_cursor_follows_the_label_it_is_typed_after() {
+        let ru = flashagent_tui::i18n::Lang::Russian;
+        let english_label = flashagent_tui::i18n::translate(flashagent_tui::i18n::Lang::English, "find in history:");
+        let russian_label = flashagent_tui::i18n::translate(ru, "find in history:");
+        let english = history_cursor("bug", english_label, 80);
+        let russian = history_cursor("bug", russian_label, 80);
+        // " " + prompt mark + " " + label + " " + query.
+        assert_eq!(u32::from(english), (1 + 1 + 1 + visible_width(english_label) + 1 + 3) as u32, "space, mark, space, label, space, query");
+        assert_eq!(russian, (1 + 1 + 1 + visible_width(russian_label) + 1 + 3) as u16, "the cursor stands after the label it is typed after");
+        assert_ne!(english, russian, "a translated label of another width moves the cursor with it");
+    }
+
     #[test]
     fn a_room_too_small_for_the_marker_cannot_be_scrolled_back() {
         assert_eq!(scroll_max(500, 0), 0);

@@ -29,7 +29,7 @@ fn track_style(word: &str, active_style: &mut Option<String>) {
 /// Text and escape sequences in order, `(true, seq)` for an escape. A CSI
 /// sequence ends at its final byte, searched for after `ESC [`: `[` is itself
 /// in the final-byte range, and stopping there printed `38;2;220;215;205m`.
-fn ansi_pieces(text: &str) -> Vec<(bool, &str)> {
+pub(crate) fn ansi_pieces(text: &str) -> Vec<(bool, &str)> {
     let mut out = Vec::new();
     let mut plain_from = 0;
     let mut i = 0;
@@ -45,13 +45,15 @@ fn ansi_pieces(text: &str) -> Vec<(bool, &str)> {
         let end = if bytes.get(i + 1) == Some(&b'[') {
             bytes[i + 2..].iter().position(|b| (0x40..=0x7e).contains(b)).map_or(bytes.len(), |p| i + 2 + p + 1)
         } else if bytes.get(i + 1) == Some(&b']') {
-            // An OSC string runs to BEL or ESC \.
+            // An OSC string runs to BEL or ESC \, whichever comes first.
             let body = &bytes[i + 2..];
-            body.iter()
-                .position(|b| *b == 0x07)
-                .map(|p| i + 2 + p + 1)
-                .or_else(|| body.windows(2).position(|w| w == b"\x1b\\").map(|p| i + 2 + p + 2))
-                .unwrap_or(bytes.len())
+            let bel = body.iter().position(|b| *b == 0x07).map(|p| i + 2 + p + 1);
+            let st = body.windows(2).position(|w| w == b"\x1b\\").map(|p| i + 2 + p + 2);
+            match (bel, st) {
+                (Some(bel), Some(st)) => bel.min(st),
+                (Some(end), None) | (None, Some(end)) => end,
+                (None, None) => bytes.len(),
+            }
         } else {
             (i + 2).min(bytes.len())
         };
@@ -294,8 +296,10 @@ pub fn format_cmd(cmd: &str) -> String {
     let first_line = relative_to_cwd(clean.lines().next().unwrap_or(clean).trim());
     let first_line = first_line.as_str();
     let max_len = 70;
-    if first_line.chars().count() > max_len {
-        let truncated: String = first_line.chars().take(max_len - 1).collect();
+    // By cells: a command in a wide script takes two columns a character,
+    // and a count of characters let it run past the row it is printed on.
+    if visible_width(first_line) > max_len {
+        let truncated = clip_ansi(first_line, max_len - 1);
         format!("{truncated}\u{2026}")
     } else {
         first_line.to_string()
@@ -336,6 +340,35 @@ pub fn clip_ansi(text: &str, width: usize) -> String {
     out
 }
 
+/// Rows of at most `width` cells, split anywhere: for a column narrower than
+/// `wrap_styled` will work with. Escapes travel with their piece.
+pub(crate) fn split_cells_styled(text: &str, width: usize) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let width = width.max(1);
+    let mut out = Vec::new();
+    let mut row = String::new();
+    let mut used = 0usize;
+    for (escape, piece) in ansi_pieces(text) {
+        if escape {
+            row.push_str(piece);
+            continue;
+        }
+        for g in piece.graphemes(true) {
+            let w = cells(g);
+            if used > 0 && used + w > width {
+                out.push(std::mem::take(&mut row));
+                used = 0;
+            }
+            row.push_str(g);
+            used += w;
+        }
+    }
+    if !row.is_empty() {
+        out.push(row);
+    }
+    out
+}
+
 /// Grapheme by grapheme, as the composer measures, so a joined emoji takes
 /// the same cells in both.
 pub fn visible_width(text: &str) -> usize {
@@ -348,47 +381,36 @@ pub fn visible_width(text: &str) -> usize {
 }
 
 /// With a leading ellipsis when the start had to go. The composer shows the
-/// end, where the user is typing.
+/// end, where the user is typing. Cut by grapheme cluster: a joined emoji or a
+/// letter and its combining mark is one symbol, and half of one is not text.
 pub fn tail_window(text: &str, width: usize) -> (String, usize) {
-    let total: usize = text.chars().map(|c| c.width().unwrap_or(0)).sum();
+    use unicode_segmentation::UnicodeSegmentation;
+    let total = visible_width(text);
     if total <= width {
         return (text.to_string(), total);
     }
     let room = width.saturating_sub(1);
     let mut kept = Vec::new();
-    let mut cells = 0usize;
-    for c in text.chars().rev() {
-        let w = c.width().unwrap_or(0);
-        if cells + w > room {
+    let mut used = 0usize;
+    for g in text.graphemes(true).rev() {
+        let w = cells(g);
+        if used + w > room {
             break;
         }
-        cells += w;
-        kept.push(c);
+        used += w;
+        kept.push(g);
     }
     let mut out = String::from("\u{2026}");
-    out.extend(kept.into_iter().rev());
-    (out, cells + 1)
+    for g in kept.into_iter().rev() {
+        out.push_str(g);
+    }
+    (out, used + 1)
 }
 
+/// Every escape goes, its payload too: a CSI sequence ends at its final byte,
+/// an OSC string at BEL or ST.
 pub fn strip_ansi(text: &str) -> String {
-    let mut out = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                while let Some(&n) = chars.peek() {
-                    chars.next();
-                    if ('@'..='~').contains(&n) {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        out.push(c);
-    }
-    out
+    ansi_pieces(text).into_iter().filter(|(escape, _)| !escape).map(|(_, piece)| piece).collect()
 }
 
 pub fn pad_box_row(content: &str, width: usize) -> String {
@@ -407,23 +429,72 @@ pub fn pad_box_row(content: &str, width: usize) -> String {
 }
 
 /// E.g. "qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved-i1" -> "qwen3.6-35b...preserved-i1".
+///
+/// Measured in cells and cut by grapheme cluster: a name in a wide script
+/// takes two columns a character, and half an emoji is not text.
 pub fn truncate_middle(s: &str, max_len: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max_len || max_len < 5 {
-        return s.chars().take(max_len).collect();
+    use unicode_segmentation::UnicodeSegmentation;
+    if visible_width(s) <= max_len {
+        return s.to_string();
     }
-    let keep = max_len.saturating_sub(1);
+    if max_len < 5 {
+        // Too narrow for an ellipsis between two halves: the head alone.
+        return clip_ansi(s, max_len);
+    }
+    let keep = max_len - 1; // the ellipsis takes one cell
     let left = keep.div_ceil(2);
     let right = keep / 2;
 
-    let prefix: String = s.chars().take(left).collect();
-    let suffix: String = s.chars().skip(char_count - right).collect();
+    let mut prefix = String::new();
+    let mut used = 0usize;
+    for g in s.graphemes(true) {
+        let w = cells(g);
+        if used + w > left {
+            break;
+        }
+        used += w;
+        prefix.push_str(g);
+    }
+    let mut suffix = String::new();
+    let mut used = 0usize;
+    for g in s.graphemes(true).rev() {
+        let w = cells(g);
+        if used + w > right {
+            break;
+        }
+        used += w;
+        suffix.insert_str(0, g);
+    }
     format!("{prefix}\u{2026}{suffix}")
 }
 
 /// `1 line`, `3 lines`.
+///
+/// The word is translated: the table holds the three Russian forms for the
+/// pair of English words, separated by a bar. A pair the table does not hold
+/// stays English, which is what a phrase nobody translated looks like.
 pub fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
+    format!("{n} {}", plural_word(n, one, many))
+}
+
+/// The word that goes with the count. Russian has three forms where English
+/// has two, and which one is right depends on the number.
+fn plural_word(n: usize, one: &str, many: &str) -> String {
+    let key = format!("plural: {one}/{many}");
+    let forms: Vec<&str> = crate::i18n::tr(&key).split('|').collect();
+    if forms.len() != 3 {
+        return if n == 1 { one.to_string() } else { many.to_string() };
+    }
+    let n10 = n % 10;
+    let n100 = n % 100;
+    let form = if n10 == 1 && n100 != 11 {
+        0
+    } else if (2..=4).contains(&n10) && !(12..=14).contains(&n100) {
+        1
+    } else {
+        2
+    };
+    forms[form].to_string()
 }
 
 #[cfg(test)]
@@ -496,8 +567,64 @@ mod tests {
     }
 
     #[test]
-    fn a_wrapped_styled_line_does_not_start_its_continuation_with_a_space() {
-        // The carried-over style made every continuation row start one column right.
+    fn a_tail_window_keeps_a_joined_emoji_whole() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let (shown, cells) = tail_window(&format!("abc{family}"), 3);
+        assert_eq!(shown, format!("\u{2026}{family}"), "the family is one symbol and must not be split");
+        assert_eq!(cells, 3);
+
+        // A combining mark belongs to its letter and goes with it.
+        let (shown, _) = tail_window("abcе\u{0301}", 2);
+        assert_eq!(shown, "\u{2026}е\u{0301}");
+    }
+
+    #[test]
+    fn an_operating_system_sequence_is_not_shown_as_text() {
+        assert_eq!(strip_ansi("a\x1b]0;title\x07b"), "ab", "an OSC payload ends at BEL");
+        assert_eq!(strip_ansi("a\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\b"), "alinkb", "ST ends it too");
+        assert_eq!(strip_ansi("x\x1b[31mred\x1b[0my"), "xredy");
+    }
+
+    #[test]
+    fn a_counted_word_takes_the_form_of_the_number() {
+        // English has two forms, Russian three: the table holds all of them.
+        assert_eq!(plural(1, "task", "tasks"), "1 task");
+        assert_eq!(plural(3, "task", "tasks"), "3 tasks");
+        assert_eq!(
+            crate::i18n::translate(crate::i18n::Lang::Russian, "plural: task/tasks"),
+            "задача|задачи|задач",
+            "the table holds the three forms"
+        );
+
+        // A pair the table does not hold stays English.
+        assert_eq!(plural(2, "wombat", "wombats"), "2 wombats");
+    }
+
+    #[test]
+    fn a_cut_in_the_middle_is_measured_in_cells_and_keeps_an_emoji_whole() {
+        // A wide name takes two columns a character: counted in characters,
+        // the row came out twice as wide as the box it is printed in.
+        let cut = truncate_middle(&"日".repeat(40), 11);
+        assert!(visible_width(&cut) <= 11, "{cut:?}");
+        assert!(cut.contains('…'), "{cut:?}");
+
+        // A joined emoji is one symbol, and half of one is not text.
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let cut = truncate_middle(&format!("abc{family}"), 5);
+        assert!(cut.ends_with(family), "the family is one symbol and must not be split: {cut:?}");
+        assert!(visible_width(&cut) <= 5, "{cut:?}");
+    }
+
+    #[test]
+    fn a_command_is_cut_by_cells_and_not_by_characters() {
+        let cmd = format!("echo {}", "日".repeat(80));
+        let shown = format_cmd(&cmd);
+        assert!(visible_width(&shown) <= 70, "{} cells: {shown}", visible_width(&shown));
+        assert!(shown.ends_with('…'), "{shown}");
+    }
+
+    #[test]
+    fn a_wrapped_styled_line_does_not_start_its_continuation_with_a_space() {        // The carried-over style made every continuation row start one column right.
         let styled = format!("\x1b[38;2;200;195;185m{}\x1b[0m", "alpha beta gamma delta epsilon zeta eta theta");
         let rows = wrap_styled(&styled, 12);
         assert!(rows.len() > 1, "{rows:?}");

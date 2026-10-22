@@ -117,8 +117,9 @@ impl NoticeLog {
         };
 
         let title = format!(
-            " \x1b[1;38;2;225;175;95mNotices{RESET} \x1b[38;2;160;155;145m{} kept{RESET} ",
-            self.entries.len()
+            " \x1b[1;38;2;225;175;95m{}\x1b[0m \x1b[38;2;160;155;145m{}\x1b[0m ",
+            crate::i18n::tr("Notices"),
+            crate::i18n::tr_fill("{n} kept", &[("n", &self.entries.len().to_string())])
         );
         let dashes = box_w.saturating_sub(visible_width(&title) + 1);
         lines.push((LineKind::System, format!("  {BORDER_GOLD}╭─{title}{}╮{RESET}", "─".repeat(dashes))));
@@ -183,5 +184,13 @@ mod tests {
         let v = NoticeLog::new(Vec::new());
         let screen: Vec<String> = v.render(80).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
         assert!(screen.iter().any(|l| l.contains("Nothing has been said yet")), "{screen:#?}");
+    }
+
+    #[test]
+    fn the_title_of_the_list_is_in_the_language_of_the_interface() {
+        let v = NoticeLog::new(entries());
+        let screen: Vec<String> = v.render(80).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
+        assert!(screen[0].contains(crate::i18n::tr("Notices")), "{screen:#?}");
+        assert!(screen[0].contains(&crate::i18n::tr_fill("{n} kept", &[("n", "2")])), "{screen:#?}");
     }
 }

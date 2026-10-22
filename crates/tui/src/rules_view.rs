@@ -37,6 +37,10 @@ pub struct RulesView {
     pub scroll: usize,
     /// How many rows the window shows.
     pub height: usize,
+    /// The owner asked for every rule to be taken back and has not confirmed
+    /// it yet. One press arms it, the next one does it: a stray `x` used to
+    /// take away every standing permission the owner had given.
+    pub confirm_clear: bool,
 }
 
 impl RulesView {
@@ -46,12 +50,7 @@ impl RulesView {
             .into_iter()
             .map(|(kind, text)| RuleRow { kind, text })
             .collect();
-        RulesView { rows, selected: 0, scroll: 0, height: 10 }
-    }
-
-    /// What the rule under the cursor is.
-    pub fn selected_rule(&self) -> Option<&RuleRow> {
-        self.rows.get(self.selected)
+        RulesView { rows, selected: 0, scroll: 0, height: 10, confirm_clear: false }
     }
 
     /// The list as it stands now, after a rule was taken back. The cursor
@@ -72,13 +71,18 @@ impl RulesView {
 
     pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> RulesAction {
         match code {
-            KeyCode::Esc => RulesAction::Close,
+            KeyCode::Esc => {
+                self.confirm_clear = false;
+                RulesAction::Close
+            }
             KeyCode::Up | KeyCode::Char('k') => {
+                self.confirm_clear = false;
                 self.selected = self.selected.saturating_sub(1);
                 self.keep_visible();
                 RulesAction::None
             }
             KeyCode::Down | KeyCode::Char('j') => {
+                self.confirm_clear = false;
                 if self.selected + 1 < self.rows.len() {
                     self.selected += 1;
                 }
@@ -86,29 +90,43 @@ impl RulesView {
                 RulesAction::None
             }
             KeyCode::Home => {
+                self.confirm_clear = false;
                 self.selected = 0;
                 self.keep_visible();
                 RulesAction::None
             }
             KeyCode::End => {
+                self.confirm_clear = false;
                 self.selected = self.rows.len().saturating_sub(1);
                 self.keep_visible();
                 RulesAction::None
             }
             // One rule is taken back.
             KeyCode::Delete | KeyCode::Char('d') => {
+                self.confirm_clear = false;
                 if self.selected < self.rows.len() {
                     RulesAction::Remove(self.selected)
                 } else {
                     RulesAction::None
                 }
             }
-            // All of them are taken back. The keys are held down so that a
-            // stray press does not take away a rule that was there for a
-            // reason.
-            KeyCode::Char('D') | KeyCode::Char('x') => RulesAction::ClearAll,
+            // All of them are taken back. The first press only arms it and
+            // says so: a stray `x` in this panel used to take away every
+            // standing permission the owner had given, with nothing to undo it.
+            KeyCode::Char('D') | KeyCode::Char('x') => {
+                if self.confirm_clear {
+                    self.confirm_clear = false;
+                    RulesAction::ClearAll
+                } else {
+                    self.confirm_clear = true;
+                    RulesAction::None
+                }
+            }
             _ if mods.contains(KeyModifiers::CONTROL) => RulesAction::None,
-            _ => RulesAction::None,
+            _ => {
+                self.confirm_clear = false;
+                RulesAction::None
+            }
         }
     }
 
@@ -177,15 +195,25 @@ impl RulesView {
         }
 
         lines.push((LineKind::System, pad_row("")));
-        let hints = crate::key_hints(
-            &[
-                ("↑/↓", "move"),
-                ("d", "remove"),
-                ("x", "remove all"),
-                ("Esc", "close"),
-            ],
-            inner_w.saturating_sub(2),
-        );
+        if self.confirm_clear {
+            lines.push((
+                LineKind::System,
+                pad_row(&format!("\x1b[38;2;225;175;95m{}\x1b[0m", crate::i18n::tr("Press x again to remove every rule"))),
+            ));
+        }
+        let hints = if self.confirm_clear {
+            crate::key_hints(&[("x", "press again"), ("Esc", "close")], inner_w.saturating_sub(2))
+        } else {
+            crate::key_hints(
+                &[
+                    ("↑/↓", "move"),
+                    ("d", "remove"),
+                    ("x", "remove all"),
+                    ("Esc", "close"),
+                ],
+                inner_w.saturating_sub(2),
+            )
+        };
         lines.push((LineKind::System, pad_row(&hints)));
         lines.push((LineKind::System, format!("  {border_color}╰{}╯{reset}", "─".repeat(inner_w))));
         lines
@@ -227,6 +255,18 @@ mod tests {
     #[test]
     fn all_of_them_are_removed_at_once() {
         let mut v = view();
+        // The first press only arms it: a stray `x` in this panel used to take
+        // away every standing permission the owner had given.
+        assert_eq!(v.handle_key(KeyCode::Char('x'), KeyModifiers::empty()), RulesAction::None);
+        assert_eq!(v.handle_key(KeyCode::Char('x'), KeyModifiers::empty()), RulesAction::ClearAll);
+    }
+
+    #[test]
+    fn another_key_cancels_the_removal_of_every_rule() {
+        let mut v = view();
+        v.handle_key(KeyCode::Char('x'), KeyModifiers::empty());
+        v.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(v.handle_key(KeyCode::Char('x'), KeyModifiers::empty()), RulesAction::None);
         assert_eq!(v.handle_key(KeyCode::Char('x'), KeyModifiers::empty()), RulesAction::ClearAll);
     }
 
@@ -265,6 +305,8 @@ mod tests {
             "move",
             "remove",
             "remove all",
+            "press again",
+            "Press x again to remove every rule",
             "close",
         ] {
             assert_ne!(

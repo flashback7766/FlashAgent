@@ -794,11 +794,17 @@ impl PendingSwitch {
     /// carries the model and effort it runs, so it must not be split in two.
     fn label(&self, model: &str, effort: &str) -> Option<String> {
         if let Some(provider) = &self.provider {
-            Some(format!("Provider: {provider} \u{b7} {model} \u{b7} thinking effort: {effort}"))
+            Some(flashagent_tui::i18n::tr_fill(
+                "Provider: {provider} \u{b7} {model} \u{b7} thinking effort: {effort}",
+                &[("provider", provider), ("model", model), ("effort", effort)],
+            ))
         } else if self.model {
-            Some(format!("Model: {model} \u{b7} thinking effort: {effort}"))
+            Some(flashagent_tui::i18n::tr_fill(
+                "Model: {model} \u{b7} thinking effort: {effort}",
+                &[("model", model), ("effort", effort)],
+            ))
         } else if self.effort {
-            Some(format!("Thinking effort: {effort}"))
+            Some(flashagent_tui::i18n::tr_fill("Thinking effort: {effort}", &[("effort", effort)]))
         } else {
             None
         }
@@ -1039,7 +1045,10 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     let mut words = editor.split_whitespace();
     let status = match words.next() {
         Some(program) => std::process::Command::new(program).args(words).arg(&temp_file).status(),
-        None => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no editor configured")),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            flashagent_tui::i18n::tr("no editor configured"),
+        )),
     };
 
     let _ = crossterm::terminal::enable_raw_mode();
@@ -1071,15 +1080,17 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
 /// With a Russian layout Ctrl+D arrives as Ctrl+в. A shortcut is read by the key
 /// pressed, so the letter goes back to the Latin one on the same key (ЙЦУКЕН →
 /// QWERTY). Plain typing is left alone.
+///
+/// The layout itself is in `keys`: one table for the letters and one for the
+/// signs, and the typing table is the part of it that keeps letters on both
+/// sides.
 fn latin_shortcut(code: KeyCode, mods: KeyModifiers) -> KeyCode {
-    const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбюё";
-    const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
     let KeyCode::Char(c) = code else { return code };
     if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
         return code;
     }
     let lower = c.to_lowercase().next().unwrap_or(c);
-    match RU.chars().position(|r| r == lower).and_then(|i| EN.chars().nth(i)) {
+    match keys::latin_key_char(lower) {
         Some(l) if c.is_uppercase() => KeyCode::Char(l.to_ascii_uppercase()),
         Some(l) => KeyCode::Char(l),
         None => code,
@@ -1456,9 +1467,9 @@ fn initial_app(init: InitialApp) -> App {
         queued_commands: Vec::new(),
         task_inbox: flashagent_core::NoticeInbox::default(),
         agents: flashagent_tui::agents::AgentTree::default(),
-    expanded_agents: std::collections::HashSet::new(),
-    selection_anchor: None,
-    wheel_momentum: 0,
+        expanded_agents: std::collections::HashSet::new(),
+        selection_anchor: None,
+        wheel_momentum: 0,
         task_lines: Vec::new(),
         tasks_refreshed: std::time::Instant::now(),
         quit_armed: None,
@@ -3236,6 +3247,17 @@ mod tests {
         assert_eq!(latin_shortcut(KeyCode::Enter, ctrl), KeyCode::Enter);
     }
 
+    /// A key the Russian layout turned into a letter is read by that key too:
+    /// `ж` stands on the Latin `;`, and `ё` on the backquote.
+    #[test]
+    fn a_russian_letter_over_a_latin_sign_is_read_as_the_sign() {
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(latin_shortcut(KeyCode::Char('ж'), ctrl), KeyCode::Char(';'));
+        assert_eq!(latin_shortcut(KeyCode::Char('э'), ctrl), KeyCode::Char('\''));
+        assert_eq!(latin_shortcut(KeyCode::Char('Ё'), ctrl), KeyCode::Char('`'));
+        assert_eq!(latin_shortcut(KeyCode::Char('х'), ctrl), KeyCode::Char('['));
+    }
+
     #[test]
     fn the_status_line_names_the_mode_and_what_the_turn_waits_on() {
         let running = format_status_left(true, false, false, None, "Normal", "");
@@ -3403,6 +3425,124 @@ mod tests {
         };
         assert_eq!(shown, "[screenshot 1920×1080]");
         assert!(!shown.starts_with(' '));
+    }
+
+    /// The app a test can poke at: the parts of it the goal handback touches.
+    fn test_app() -> App {
+        initial_app(InitialApp {
+            app_config: AppConfig::default(),
+            model: "test-model".into(),
+            context_display: None,
+            context_capacity: 32_000,
+            cwd_display: "~/work".into(),
+            initial_effort: "low".into(),
+            available_models: Vec::new(),
+            system_prompt_text: "SYSTEM PROMPT".into(),
+            system_prompt_config: SystemPromptConfig::default(),
+            memory_docs: 0,
+            effort_memory: flashagent_core::EffortMemory::load(),
+        })
+    }
+
+    /// A finished goal takes the autonomous prompt with it. The flag that says
+    /// a goal run is under way was left on, and the model read "there is no
+    /// user to answer between now and the end" for the rest of the session,
+    /// long after the status bar said the goal was over.
+    #[test]
+    fn a_finished_goal_leaves_no_autonomous_prompt_behind() {
+        let mut app = test_app();
+        app.goal_active = true;
+        app.goal_state = Some(SavedGoalState {
+            mode: PermissionMode::Manual,
+            effort: "low".into(),
+            max_steps: Some(7),
+            task: "write the docs".into(),
+        });
+        app.current_effort = "high".into();
+        app.max_steps = Some(250);
+
+        let saved = app.take_goal().expect("the goal is handed back");
+        assert_eq!(saved.mode, PermissionMode::Manual);
+        assert!(!app.goal_active, "the prompt still says an autonomous run is under way");
+        assert_eq!(app.current_effort, "low", "the effort the run took over was not given back");
+        assert_eq!(app.max_steps, Some(7), "the step limit the run took over was not given back");
+
+        // And the prompt the model reads from now on says so.
+        let prompt = build_system_prompt(&app.prompt_config.clone().with_goal_mode(app.goal_active));
+        assert!(!prompt.contains("AN AUTONOMOUS RUN IS UNDER WAY"), "{prompt}");
+    }
+
+    /// The card says what the compaction cost. A conversation too long for one
+    /// request is summarized in parts and the parts are summarized into one:
+    /// every one of those calls is part of the price, and only the last one
+    /// was counted — the card said a fraction of what was spent.
+    #[tokio::test]
+    async fn a_compaction_in_parts_costs_what_all_of_its_calls_cost() {
+        /// Answers with a summary and a bill, and counts its own calls.
+        struct CountingUsage {
+            calls: std::sync::Mutex<usize>,
+        }
+        #[async_trait::async_trait]
+        impl LlmSource for CountingUsage {
+            async fn turn(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[flashagent_llm::ToolSpec],
+            ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+                let n = {
+                    let mut calls = self.calls.lock().unwrap();
+                    *calls += 1;
+                    *calls
+                };
+                let events = vec![
+                    Ok(flashagent_llm::LlmEvent::TextDelta(SHAPED_SUMMARY.into())),
+                    Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)),
+                    Ok(flashagent_llm::LlmEvent::Usage(flashagent_llm::Usage {
+                        prompt: Some(1_000 * n as i64),
+                        completion: Some(10),
+                        ..Default::default()
+                    })),
+                ];
+                Ok(Box::pin(futures::stream::iter(events)))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let mut history = long_history();
+        // Big enough that the parts have to be cut.
+        history.push(ChatMessage::assistant("a long middle ".repeat(4000)));
+        history.push(ChatMessage::user("second question"));
+        history.push(ChatMessage::assistant("second answer"));
+
+        let source = CountingUsage { calls: std::sync::Mutex::new(0) };
+        // A room of 4k tokens: the conversation is far bigger, so it is cut.
+        let result = compact_context_with_sink(
+            &source,
+            &mut history,
+            crate::compact::Compaction {
+                focus_prompt: None,
+                archive_path: &archive,
+                real_used: None,
+                room: Some(4_000),
+                allow_growth: true,
+                model: "test-model",
+            },
+            None,
+        )
+        .await
+        .expect("the summary is accepted");
+
+        let calls = *source.calls.lock().unwrap();
+        assert!(calls >= 3, "the parts are summarized one by one and then together: {calls} calls");
+        // Every call is paid for: the parts and the reduction that joined them.
+        let expected: i64 = (1..=calls as i64).sum::<i64>() * 1_000;
+        assert_eq!(
+            result.input_tokens as i64, expected,
+            "the card shows the cost of the last call only: {} of {} tokens",
+            result.input_tokens, expected
+        );
+        assert_eq!(result.output_tokens, calls * 10, "the words of every call are counted");
     }
 }
 

@@ -1,4 +1,5 @@
 use super::*;
+use flashagent_tui::i18n::tr_fill;
 
 /// Checking while a look may still answer; offline once one got nothing
 /// (after a moment, so the face does not flash) or when none has answered
@@ -30,7 +31,7 @@ impl App {
             UiEvent::ToolTestResult(verdict) => {
                 match self.settings_view_mut() {
                     Some(s) => s.tool_test_status = Some(verdict),
-                    None => self.notice(format!("Tool test: {verdict}")),
+                    None => self.notice(tr_fill("Tool test: {verdict}", &[("verdict", &verdict)])),
                 }
                 self.renderer.request_reprint();
             }
@@ -148,8 +149,9 @@ impl App {
         match notice {
             UpdateNotice::Available { version, asset_name, download_url, checksums_url } => {
                 self.pending_update = Some((version.clone(), asset_name, download_url, checksums_url));
-                self.say(BackgroundNotice::sticky(format!(
-                    "Update available: {version} · /update installs it"
+                self.say(BackgroundNotice::sticky(tr_fill(
+                    "Update available: {version} · /update installs it",
+                    &[("version", &version)],
                 )));
                 if let Some(s) = self.settings_view_mut() {
                     s.update_check_status = Some(flashagent_tui::i18n::tr("Available: {version} (/update)").to_string());
@@ -193,7 +195,10 @@ impl App {
                 if std::mem::take(&mut self.update_watched) {
                     self.say(
                         BackgroundNotice::fading(
-                            format!("Update failed: {}", flashagent_tui::truncate_middle(&error, 90)),
+                            tr_fill(
+                                "Update failed: {error}",
+                                &[("error", &flashagent_tui::truncate_middle(&error, 90))],
+                            ),
                             10,
                         )
                         .warning(),
@@ -275,18 +280,10 @@ impl App {
         self.task_inbox.turn_aborted();
         self.flush_task_lines();
         self.token_tracker.on_finished();
-        if let Some(saved) = self.goal_state.take() {
-            cx.tools_arc.set_goal_mode(false);
-            cx.perm.state().set_goal_active(false);
-            self.goal_active = false;
+        // The same handback as any other ending: a run that would not wind
+        // down is a run that ended, and the app must not stay in its mode.
+        if self.end_goal(cx, DoneReason::Cancelled) {
             self.apply_personality();
-            cx.perm.state().set_mode(saved.mode);
-            self.current_effort = saved.effort.clone();
-            self.max_steps = saved.max_steps;
-            self.refresh_welcome_state(cx.source, cx.mascot_mood);
-            if let Some(ledger) = self.goal_ledger.take() {
-                push_goal_report(&mut self.chat, &ledger, DoneReason::Cancelled);
-            }
         }
         self.chat.on_event(&LoopEvent::Done(DoneReason::Cancelled));
         self.flash_turn_end(Some(DoneReason::Cancelled));
@@ -388,7 +385,10 @@ impl App {
         // Kept rather than swapped for a model that would be billed instead,
         // so the user hears about it before the first request fails.
         if disc.active_model.is_none() && self.on_active_provider(cx.source) && self.config.endpoint().api_key.is_some() && !self.current_model.is_empty() && disc.model(&self.current_model).is_none() {
-            self.custom_placeholder = Some(format!("{} does not list {} · F3 picks one of its models", self.config.active_profile().name, self.current_model));
+            self.custom_placeholder = Some(tr_fill(
+                "{name} does not list {model} · F3 picks one of its models",
+                &[("name", &self.config.active_profile().name), ("model", &self.current_model)],
+            ));
             self.suggested_prompt = None;
             self.renderer.request_reprint();
         }
@@ -434,16 +434,18 @@ impl App {
                 let ctx_tag = self.current_context.clone().unwrap_or_default();
 
                 if model_changed {
-                    let msg = format!(
-                        "Server active model switched: {old_m} -> {}", self.current_model
+                    let msg = tr_fill(
+                        "Server active model switched: {old} -> {new}",
+                        &[("old", &old_m), ("new", &self.current_model)],
                     );
                     self.custom_placeholder = Some(msg);
                     self.suggested_prompt = None;
                 } else if ctx_changed {
                     let old_formatted = ContextUsage::format_tokens(old_ctx_len);
                     let new_formatted = ContextUsage::format_tokens(new_ctx_len);
-                    let msg = format!(
-                        "Model context capacity: {old_formatted} -> {new_formatted} ({ctx_tag})"
+                    let msg = tr_fill(
+                        "Model context capacity: {old} -> {new} ({tag})",
+                        &[("old", &old_formatted), ("new", &new_formatted), ("tag", &ctx_tag)],
                     );
                     self.custom_placeholder = Some(msg);
                     self.suggested_prompt = None;
@@ -549,7 +551,7 @@ impl App {
                 if wrote_memory && !*is_error {
                     if let Some(said) = result.as_deref().and_then(|r| r.lines().next()) {
                         self.say(BackgroundNotice::fading(
-                            format!("{said}  ·  /memory to see or change it"),
+                            tr_fill("{said}  ·  /memory to see or change it", &[("said", said)]),
                             10,
                         ));
                     }
@@ -762,7 +764,10 @@ impl App {
             let label = att.label();
             self.attachments.push(att);
             self.suggested_prompt = None;
-            self.say(BackgroundNotice::fading(format!("{label} attached · Ctrl+Z removes it"), 8));
+            self.say(BackgroundNotice::fading(
+                tr_fill("{label} attached · Ctrl+Z removes it", &[("label", &label)]),
+                8,
+            ));
         } else if !pasted.is_empty() {
             // Pasted code or logs keep their line breaks.
             self.input.insert_str(pasted);
