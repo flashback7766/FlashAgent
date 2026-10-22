@@ -10,10 +10,6 @@
 //! full toolset (~5k) = 20k, regardless of the window size. There is no ladder
 //! anymore; every window gets the same 20k.
 
-/// The window assumed when the server said nothing about its own. It no longer
-/// changes the static total, which is flat for every window.
-pub const ASSUMED_WINDOW: usize = 128_000;
-
 /// What the prompt may cost at any window, from the owner, 2026-10-05.
 ///
 /// A full contract runs to about this, and it is the same at every window: a
@@ -21,57 +17,65 @@ pub const ASSUMED_WINDOW: usize = 128_000;
 /// budget is for schemas.
 pub const PROMPT_CEILING: usize = 10_000;
 
-/// Total tokens of static context, the same for every window. What is left
-/// after the prompt is split two ways and keeps a tenth spare, in the ratio the
-/// owner's first figures gave: 20 parts built-in to 12 to MCP.
-const TOTALS: &[(usize, usize)] = &[(0, 20_000)];
+/// Everything static, together: the ceiling, the same at every window.
+const FLAT_TOTAL: usize = 20_000;
 
+/// What is left after the prompt, split two ways and keeps a tenth spare, in
+/// the ratio the owner's first figures gave: 20 parts built-in to 12 to MCP.
 const BUILTIN_SHARE: usize = 20;
 const MCP_SHARE: usize = 12;
 const SHARE_TOTAL: usize = BUILTIN_SHARE + MCP_SHARE + 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
-    /// The smallest window this tier answers to.
-    pub window_floor: usize,
-    /// Everything static, together.
+    /// Everything static, together: the ceiling.
     pub total: usize,
     /// [`PROMPT_CEILING`] at every window.
     pub prompt: usize,
+    /// What the built-in schemas get when the prompt has taken its whole
+    /// ceiling: their share of what is left.
     pub builtin_tools: usize,
+    /// What the MCP schemas get: their share, charged first.
     pub mcp_tools: usize,
-    /// Left unspent on purpose: the total is a ceiling.
+    /// Held back on purpose: the total is a ceiling, and a count of tokens is
+    /// never exact enough to spend the last of it.
     pub reserve: usize,
 }
 
 impl Budget {
-    pub fn for_window(window: Option<usize>) -> Budget {
-        let window = window.unwrap_or(ASSUMED_WINDOW);
-        let (window_floor, total) = TOTALS
-            .iter()
-            .find(|(floor, _)| window >= *floor)
-            .copied()
-            .unwrap_or_else(|| TOTALS.last().copied().expect("the flat budget has a floor"));
-        let share = total.saturating_sub(PROMPT_CEILING);
+    /// The flat budget, whatever window the server reported.
+    ///
+    /// The window is taken and not used: the static budget is flat, and every
+    /// window gets the same 20k. The parameter stays because the caller has
+    /// the window at hand and asks about the budget in terms of it.
+    pub fn for_window(_window: Option<usize>) -> Budget {
+        let share = FLAT_TOTAL.saturating_sub(PROMPT_CEILING);
         let builtin_tools = share * BUILTIN_SHARE / SHARE_TOTAL;
         let mcp_tools = share * MCP_SHARE / SHARE_TOTAL;
         let reserve = share - builtin_tools - mcp_tools;
-        Budget { window_floor, total, prompt: PROMPT_CEILING, builtin_tools, mcp_tools, reserve }
+        Budget { total: FLAT_TOTAL, prompt: PROMPT_CEILING, builtin_tools, mcp_tools, reserve }
     }
 
-    /// What the built-in schemas get once the prompt has taken what it actually
-    /// measures, not what it is allowed.
+    /// What the built-in schemas get once the prompt has taken what it
+    /// actually measures, not what it is allowed.
     ///
-    /// The ceiling is 4k and the prompt is written to fill it, but on a small
-    /// window a full prompt plus the MCP share would leave nothing for the
-    /// tools that make any task possible, so the schemas are given what is
-    /// really left. MCP is charged first: those schemas come and go with the
-    /// servers a user happens to have configured, the built-in ones are the
-    /// product.
+    /// The ceiling is 10k and the prompt is written to fill it, but a full
+    /// prompt plus the MCP share would leave nothing for the tools that make
+    /// any task possible, so the schemas are given what is really left. MCP is
+    /// charged first: those schemas come and go with the servers a user
+    /// happens to have configured, the built-in ones are the product.
+    ///
+    /// The reserve is never spent: the total is a ceiling, not a target. What
+    /// the prompt did not take is the built-in schemas' — they are what the
+    /// rest of the budget is for.
     pub fn tool_allowance(&self, prompt_tokens: usize) -> usize {
-        self.total
-            .saturating_sub(prompt_tokens)
-            .saturating_sub(self.mcp_tools)
+        // What the prompt really took, up to its own ceiling.
+        let prompt = prompt_tokens.min(self.prompt);
+        // What is left for the schemas: MCP first, then the reserve, which is
+        // held back.
+        let left = self.total.saturating_sub(prompt).saturating_sub(self.mcp_tools).saturating_sub(self.reserve);
+        // Their share of it, and no less: the built-in schemas are the product.
+        left.max(self.builtin_tools)
     }
 }
 
@@ -109,6 +113,16 @@ pub fn fit_builtin<'a>(
 mod tests {
     use super::*;
 
+    /// The note on the allowance named a ceiling of 4k; the ceiling is 10k.
+    /// A note that names the wrong number is worse than no note.
+    #[test]
+    fn the_note_on_the_allowance_names_the_ceiling_that_is() {
+        let source = include_str!("budget.rs");
+        let stale = ["The ceiling is ", "4k"].concat();
+        assert!(!source.contains(&stale), "the note names a ceiling that is not there");
+        assert!(source.contains("PROMPT_CEILING"), "the note names the constant that is");
+    }
+
     #[test]
     fn the_flat_budget_splits_what_the_prompt_leaves() {
         let b = Budget::for_window(Some(1_000_000));
@@ -134,16 +148,16 @@ mod tests {
 
     #[test]
     fn a_server_that_says_nothing_is_treated_as_mid() {
-        assert_eq!(Budget::for_window(None), Budget::for_window(Some(ASSUMED_WINDOW)));
+        // The budget is flat, so the window the server did not report makes no
+        // difference: the same budget either way.
+        assert_eq!(Budget::for_window(None), Budget::for_window(Some(128_000)));
     }
 
     #[test]
     fn the_parts_leave_room_under_the_total() {
-        for (floor, total) in TOTALS {
-            let b = Budget::for_window(Some(*floor));
-            assert!(b.prompt + b.builtin_tools + b.mcp_tools <= b.total, "{floor}");
-            assert!(*total == b.total);
-        }
+        let b = Budget::for_window(Some(64_000));
+        assert!(b.prompt + b.builtin_tools + b.mcp_tools <= b.total);
+        assert!(b.prompt + b.builtin_tools + b.mcp_tools + b.reserve <= b.total);
     }
 
     #[test]
@@ -152,13 +166,54 @@ mod tests {
         // Enforced literally, its 10% share would be 500 at 64k and the schemas
         // would be left with nothing, so it takes what it measures and the
         // schemas take the rest. What has to hold is that it cannot crowd them
-        // out, at any tier.
+        // out, at any window.
         let prompt_tokens = 1_778;
-        for (floor, _) in TOTALS {
-            let b = Budget::for_window(Some(*floor));
-            assert!(b.tool_allowance(prompt_tokens) > 0, "at {floor} no schema fits");
-            assert!(prompt_tokens * 3 < b.total * 2, "at {floor} the prompt takes over half the budget");
+        let b = Budget::for_window(Some(64_000));
+        assert!(b.tool_allowance(prompt_tokens) > 0, "no schema fits");
+        assert!(prompt_tokens * 3 < b.total * 2, "the prompt takes over half the budget");
+    }
+
+    /// The built-in schemas get their share, and what the prompt did not take
+    /// is theirs too. MCP is charged first and the reserve is never spent.
+    #[test]
+    fn the_built_in_schemas_get_their_share_and_the_slack_the_prompt_left() {
+        let b = Budget::for_window(Some(128_000));
+        // A prompt that used its whole ceiling leaves the schemas their share.
+        assert_eq!(b.tool_allowance(b.prompt), b.builtin_tools, "the share is what is left");
+        // A prompt under its ceiling gives the slack to the schemas.
+        let slack = 2_000;
+        assert_eq!(b.tool_allowance(b.prompt - slack), b.builtin_tools + slack);
+        // A prompt over its ceiling is charged no more than the ceiling.
+        assert_eq!(b.tool_allowance(b.prompt * 10), b.builtin_tools);
+        // The reserve is never spent, and MCP is served before the schemas.
+        assert!(b.prompt + b.builtin_tools + b.mcp_tools + b.reserve <= b.total);
+        assert!(b.tool_allowance(0) <= b.total - b.mcp_tools - b.reserve);
+    }
+
+    /// The reserve is held back and never spent, and the schemas are counted
+    /// by what the prompt really cost, not by the ceiling it was allowed to
+    /// take.
+    #[test]
+    fn the_reserve_is_never_spent_and_the_schemas_are_counted_by_what_the_prompt_cost() {
+        let b = Budget::for_window(Some(128_000));
+        // The schemas get their share and the slack the prompt left: a prompt
+        // that used less leaves more for them.
+        let small = b.tool_allowance(1_000);
+        let large = b.tool_allowance(b.prompt - 1_000);
+        assert!(small > large, "the schemas got the same whatever the prompt cost");
+        assert_eq!(small, b.builtin_tools + (b.prompt - 1_000), "the share and the slack");
+        // The reserve is in none of it: what is left is the total without the
+        // prompt, the MCP share and the reserve.
+        for prompt in [0usize, 1_000, 1_778, 5_000, b.prompt] {
+            let allowance = b.tool_allowance(prompt);
+            assert!(
+                allowance <= b.total - prompt - b.mcp_tools - b.reserve,
+                "the reserve was spent at {prompt}"
+            );
+            assert!(allowance >= b.builtin_tools, "the built-in schemas got less than their share at {prompt}");
         }
+        // And a prompt over its ceiling is charged no more than the ceiling.
+        assert_eq!(b.tool_allowance(b.prompt * 10), b.builtin_tools);
     }
 
     #[test]
