@@ -350,6 +350,28 @@ async fn a_patch_is_applied_as_a_diff() {
     assert_eq!(project.read("notes.txt"), "first\npatched\nthird\n");
 }
 
+/// The model lists the edits in whatever order it thinks of them. The order
+/// says nothing about where in the file the edits are, and the file must come
+/// out the same either way.
+#[tokio::test]
+async fn edits_listed_bottom_up_are_applied_in_the_order_of_the_file() {
+    let project = Project::new();
+    // notes.txt holds "first\nsecond\nthird\n".
+    project
+        .call(
+            "edit_file",
+            serde_json::json!({
+                "path": "notes.txt",
+                "edits": [
+                    { "old_string": "third", "new_string": "3" },
+                    { "old_string": "first", "new_string": "1st-and-a-half" }
+                ]
+            }),
+        )
+        .await;
+    assert_eq!(project.read("notes.txt"), "1st-and-a-half\nsecond\n3\n");
+}
+
 #[tokio::test]
 async fn the_project_is_listed_searched_and_outlined() {
     let project = Project::new();

@@ -70,8 +70,16 @@ fn expand_env_vars(raw: &str) -> String {
                     }
                     var_name.push(c);
                 }
-                if let Ok(val) = std::env::var(&var_name) {
-                    result.push_str(&val);
+                match std::env::var(&var_name) {
+                    Ok(val) => result.push_str(&val),
+                    // The variable is not set: the text stays as it was written.
+                    // An empty string would give the server an empty token
+                    // where a token was meant.
+                    Err(_) => {
+                        result.push_str("${");
+                        result.push_str(&var_name);
+                        result.push('}');
+                    }
                 }
             } else {
                 let mut var_name = String::new();
@@ -84,8 +92,12 @@ fn expand_env_vars(raw: &str) -> String {
                     }
                 }
                 if !var_name.is_empty() {
-                    if let Ok(val) = std::env::var(&var_name) {
-                        result.push_str(&val);
+                    match std::env::var(&var_name) {
+                        Ok(val) => result.push_str(&val),
+                        Err(_) => {
+                            result.push('$');
+                            result.push_str(&var_name);
+                        }
                     }
                 } else {
                     result.push('$');
@@ -146,14 +158,25 @@ pub fn load_mcp_configs_with_origin(cwd: &Path) -> (HashMap<String, McpServerCon
     // .mcp.json or mcp.json
     let project_candidates = [cwd.join(".mcp.json"), cwd.join("mcp.json")];
     for p in &project_candidates {
-        if p.is_file() {
-            if let Some(parsed) = std::fs::read_to_string(p).ok().and_then(|c| parse_servers(&c)) {
-                from_project.extend(parsed.keys().cloned());
-                servers.extend(parsed);
-                loaded_paths.push(p.clone());
-                break;
-            }
+        if !p.is_file() {
+            continue;
         }
+        let Some(parsed) = std::fs::read_to_string(p).ok().and_then(|c| parse_servers(&c)) else {
+            // A file that is not a JSON object is not ours: the next one is
+            // still read.
+            continue;
+        };
+        if parsed.is_empty() {
+            // A file that parses but names no server does not hide the next
+            // one: a project may keep its own settings in `.mcp.json` and its
+            // servers in `mcp.json`.
+            loaded_paths.push(p.clone());
+            continue;
+        }
+        from_project.extend(parsed.keys().cloned());
+        servers.extend(parsed);
+        loaded_paths.push(p.clone());
+        break;
     }
 
     (servers, loaded_paths, from_project)
@@ -196,7 +219,10 @@ pub fn save_server_to_project(cwd: &Path, name: &str, config: McpServerConfig) -
     let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(root))
         .map_err(|e| format!("Failed to serialize config: {e}"))?;
 
-    std::fs::write(&target, serialized)
+    // The file is replaced in one step: a failure in the middle of a write
+    // would leave a half-written config behind, and a config that cannot be
+    // read is not read at all.
+    crate::fs_tools::write_atomic(&target, &serialized)
         .map_err(|e| format!("Failed to write {}: {e}", target.display()))?;
 
     Ok(target)
@@ -230,6 +256,50 @@ mod tests {
         std::env::set_var("TEST_MCP_FOO", "hello_world");
         assert_eq!(expand_env_vars("value_${TEST_MCP_FOO}_ok"), "value_hello_world_ok");
         assert_eq!(expand_env_vars("value_$TEST_MCP_FOO/path"), "value_hello_world/path");
+    }
+
+    /// The config file is replaced in one step: a failure in the middle of a
+    /// write would leave a file that cannot be read at all.
+    #[test]
+    fn a_saved_config_is_written_in_one_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".mcp.json");
+        std::fs::write(&file, r#"{"mcpServers":{}}"#).unwrap();
+        save_server_to_project(dir.path(), "db", McpServerConfig::new("uvx", vec!["db".into()])).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert!(saved["mcpServers"].get("db").is_some(), "{saved}");
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != ".mcp.json")
+            .collect();
+        assert!(leftovers.is_empty(), "a temporary file was left behind: {leftovers:?}");
+    }
+
+    /// A variable that is not set stays as it was written: the server gets
+    /// `${GITHUB_TOKEN}`, not an empty token where a token was meant.
+    #[test]
+    fn a_variable_that_is_not_set_stays_a_literal() {
+        let name = "FLASHAGENT_TEST_UNSET_VARIABLE_9F3A";
+        std::env::remove_var(name);
+        assert_eq!(expand_env_vars(&format!("${{{name}}}")), format!("${{{name}}}"));
+        assert_eq!(expand_env_vars(&format!("${name}")), format!("${name}"));
+        assert_eq!(expand_env_vars(&format!("token=${{{name}}}!")), format!("token=${{{name}}}!"));
+    }
+
+    /// A file that names no server does not hide the next one.
+    #[test]
+    fn a_project_file_without_servers_does_not_hide_the_next_one() {        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".mcp.json"), r#"{"someOtherSetting": true}"#).unwrap();
+        std::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers": {"db": {"command": "uvx", "args": ["db"]}}}"#,
+        )
+        .unwrap();
+        let (servers, paths) = load_mcp_configs(dir.path());
+        assert!(servers.contains_key("db"), "the servers of mcp.json were lost: {servers:?}");
+        assert!(paths.iter().any(|p| p.ends_with("mcp.json")), "{paths:?}");
     }
 
     #[test]

@@ -3,9 +3,6 @@
 //! deserves one, and it only spends tokens on a plan when it is genuinely doing
 //! several things in order.
 
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-
 use serde::Deserialize;
 
 use crate::ToolError;
@@ -81,7 +78,7 @@ pub fn parse_plan(args_json: &str) -> Option<Vec<PlanStep>> {
 /// task is a long task whether or not someone asked for autonomy, and refusing
 /// the call outside `/goal` meant a model that had planned the work silently had
 /// nowhere to show it.
-pub fn run_update_plan(_is_goal_mode: &Arc<AtomicBool>, args_json: &str) -> Result<String, ToolError> {
+pub fn run_update_plan(args_json: &str) -> Result<String, ToolError> {
     let steps = parse_plan(args_json)
         .ok_or_else(|| ToolError::Other("update_plan needs `steps`: a list of {text, status}".into()))?;
     if steps.is_empty() {
@@ -100,16 +97,13 @@ mod tests {
     fn the_plan_is_kept_outside_a_goal_run_too() {
         // It used to refuse itself here, so a model that had planned a long task
         // in ordinary chat had nowhere to put the plan.
-        let flag = Arc::new(AtomicBool::new(false));
-        let msg = run_update_plan(&flag, r#"{"steps":[{"text":"a"}]}"#).unwrap();
+        let msg = run_update_plan(r#"{"steps":[{"text":"a"}]}"#).unwrap();
         assert!(msg.contains("Plan recorded"), "{msg}");
     }
 
     #[test]
     fn a_plan_reports_how_many_steps_are_done_and_in_progress() {
-        let flag = Arc::new(AtomicBool::new(true));
         let msg = run_update_plan(
-            &flag,
             r#"{"steps":[
                 {"text":"read the failing test","status":"completed"},
                 {"text":"find the bug","status":"in_progress"},
@@ -130,15 +124,13 @@ mod tests {
 
     #[test]
     fn an_empty_plan_clears_rather_than_erroring() {
-        let flag = Arc::new(AtomicBool::new(true));
-        let msg = run_update_plan(&flag, r#"{"steps":[]}"#).unwrap();
+        let msg = run_update_plan(r#"{"steps":[]}"#).unwrap();
         assert_eq!(msg, "Plan cleared");
     }
 
     #[test]
     fn a_call_with_no_steps_field_at_all_is_an_error() {
-        let flag = Arc::new(AtomicBool::new(true));
-        let err = run_update_plan(&flag, r#"{}"#).unwrap_err();
+        let err = run_update_plan(r#"{}"#).unwrap_err();
         assert!(err.to_string().contains("needs `steps`"), "{err}");
     }
 
