@@ -15,7 +15,7 @@
 
 </div>
 
-> **Status:** Beta b601 — actively developed by a solo maintainer, and developed with itself: the maintainer uses FlashAgent (Claude Sonnet 5.5 via OpenRouter) to change its own code, alongside other coding agents. See the [changelog](CHANGELOG.md).
+> **Status:** Beta b602 — actively developed by a solo maintainer, and developed with itself: the maintainer uses FlashAgent (Claude Sonnet 5.5 via OpenRouter) to change its own code, alongside other coding agents. See the [changelog](CHANGELOG.md).
 
 ## Quick start
 
