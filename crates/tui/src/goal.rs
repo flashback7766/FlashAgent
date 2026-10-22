@@ -44,7 +44,7 @@ impl GoalBudgets {
         }
         let mut parts = Vec::new();
         if let Some(n) = self.steps {
-            parts.push(crate::i18n::plural(n as usize, "step", "steps", "шаг", "шага", "шагов"));
+            parts.push(crate::text::plural(n as usize, "step", "steps"));
         }
         if let Some(t) = self.time {
             parts.push(crate::i18n::tr_fill("{limit} max", &[("limit", &human_duration(t))]));
@@ -374,7 +374,7 @@ pub fn commit_goal_milestone(ledger: &GoalLedger, cwd: &Path, completed_steps: u
     }
     Some(format!(
         "  \x1b[38;2;155;165;180mcheckpoint:\x1b[0m \x1b[38;2;225;230;240mcommitted {} after step {completed_steps}\x1b[0m",
-        crate::i18n::plural(files.len(), "file", "files", "файл", "файла", "файлов")
+        crate::text::plural(files.len(), "file", "files")
     ))
 }
 
@@ -383,7 +383,7 @@ fn stop_line(reason: DoneReason, budgets: &GoalBudgets, step: u32) -> String {
         DoneReason::Completed => crate::i18n::tr("Stopped: model finished its turn").to_string(),
         DoneReason::StepLimit => crate::i18n::tr_fill("Stopped: step budget reached ({steps}) — INCOMPLETE", &[(
             "steps",
-            &crate::i18n::plural(budgets.steps.unwrap_or(step) as usize, "step", "steps", "шаг", "шага", "шагов"),
+            &crate::text::plural(budgets.steps.unwrap_or(step) as usize, "step", "steps"),
         )]),
         DoneReason::TokenBudget => crate::i18n::tr_fill("Stopped: token budget reached ({budget}) — INCOMPLETE", &[(
             "budget",

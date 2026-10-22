@@ -122,36 +122,33 @@ impl<T> SelectItem<T> {
     }
 }
 
-/// The word the count and the empty states use. English has two forms and
-/// Russian three, so the word comes with all of them.
+/// The word the count and the empty states use.
+///
+/// The Russian forms live in the translation table, like every other word
+/// the user reads: the pair of English words is the key, the three Russian
+/// forms are the value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Noun {
-    pub en_one: &'static str,
-    pub en_many: &'static str,
-    pub ru_one: &'static str,
-    pub ru_few: &'static str,
-    pub ru_many: &'static str,
+    pub one: &'static str,
+    pub many: &'static str,
 }
 
 impl Noun {
-    pub const COMMANDS: Self = Self { en_one: "command", en_many: "commands", ru_one: "команда", ru_few: "команды", ru_many: "команд" };
-    pub const PROVIDERS: Self = Self { en_one: "provider", en_many: "providers", ru_one: "провайдер", ru_few: "провайдера", ru_many: "провайдеров" };
-    pub const MODELS: Self = Self { en_one: "model", en_many: "models", ru_one: "модель", ru_few: "модели", ru_many: "моделей" };
-    pub const OPTIONS: Self = Self { en_one: "option", en_many: "options", ru_one: "вариант", ru_few: "варианта", ru_many: "вариантов" };
-    pub const SESSIONS: Self = Self { en_one: "session", en_many: "sessions", ru_one: "сессия", ru_few: "сессии", ru_many: "сессий" };
-    pub const ITEMS: Self = Self { en_one: "item", en_many: "items", ru_one: "пункт", ru_few: "пункта", ru_many: "пунктов" };
+    pub const COMMANDS: Self = Self { one: "command", many: "commands" };
+    pub const PROVIDERS: Self = Self { one: "provider", many: "providers" };
+    pub const MODELS: Self = Self { one: "model", many: "models" };
+    pub const OPTIONS: Self = Self { one: "option", many: "options" };
+    pub const SESSIONS: Self = Self { one: "session", many: "sessions" };
+    pub const ITEMS: Self = Self { one: "item", many: "items" };
 
     /// The word as the current language says it, in the singular.
-    pub fn one(&self) -> &'static str {
-        match crate::i18n::current() {
-            crate::i18n::Lang::English => self.en_one,
-            crate::i18n::Lang::Russian => self.ru_one,
-        }
+    pub fn one(&self) -> String {
+        crate::text::singular(self.one, self.many)
     }
 
     /// The word with the number in front of it, in the form the number wants.
     pub fn counted(&self, n: u64) -> String {
-        crate::i18n::count(n, (self.en_one, self.en_many), (self.ru_one, self.ru_few, self.ru_many))
+        crate::text::plural(n as usize, self.one, self.many)
     }
 }
 
@@ -346,7 +343,7 @@ impl<T> SelectMenu<T> {
 
         if matches.is_empty() {
             let said = match (self.custom_entry, self.filter.trim()) {
-                (true, "") => crate::i18n::tr_with("(No {noun} listed \u{b7} type an id and press Enter)", item_noun.one()),
+                (true, "") => crate::i18n::tr_with("(No {noun} listed \u{b7} type an id and press Enter)", &item_noun.one()),
                 (true, typed) => {
                     // The name is not in the list: the closest one that is, so
                     // a typo costs a keystroke instead of a search.
@@ -355,13 +352,13 @@ impl<T> SelectMenu<T> {
                         self.items.iter().map(|i| i.label.as_str()).filter(|l| !l.is_empty()),
                     );
                     match closest {
-                        Some(near) => crate::i18n::tr_with("(Not listed \u{b7} did you mean \"{near}\"? \u{b7} Enter uses \"{typed}\")", item_noun.one())
+                        Some(near) => crate::i18n::tr_with("(Not listed \u{b7} did you mean \"{near}\"? \u{b7} Enter uses \"{typed}\")", &item_noun.one())
                             .replace("{near}", near)
                             .replace("{typed}", typed),
-                        None => crate::i18n::tr_with("(Not listed \u{b7} Enter uses \"{typed}\")", item_noun.one()).replace("{typed}", typed),
+                        None => crate::i18n::tr_with("(Not listed \u{b7} Enter uses \"{typed}\")", &item_noun.one()).replace("{typed}", typed),
                     }
                 }
-                (false, _) => crate::i18n::tr_with("(No matching {noun} found)", item_noun.one()),
+                (false, _) => crate::i18n::tr_with("(No matching {noun} found)", &item_noun.one()),
             };
             lines.push((LineKind::System, pad_row(&format!("  \x1b[38;2;135;130;125m{said}\x1b[0m"))));
         } else {

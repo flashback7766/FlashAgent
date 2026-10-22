@@ -703,8 +703,8 @@ const LATIN_SIGNS: &str = "[];',.`";
 /// with the layout switched.
 ///
 /// Only the letters: a letter of the Russian layout that shares its key with
-/// a sign (`ж`, `э`, `б`, `ю`, `х`, `ъ`, `ё`) is left as it is. A shortcut
-/// never waits for it, and typing it is the owner's own text.
+/// a sign is left as it is. A shortcut never waits for it, and typing it is
+/// the owner's own text.
 fn latin(c: char) -> char {
     let c = c.to_lowercase().next().unwrap_or(c);
     latin_letter(c).unwrap_or(c)
@@ -716,9 +716,9 @@ pub(crate) fn latin_letter(c: char) -> Option<char> {
     lookup(RU_LETTERS, LATIN_LETTERS, c)
 }
 
-/// The character on the same key of the Russian layout, signs included: with a
-/// Russian layout Ctrl+D arrives as Ctrl+в, and a shortcut is read by the key
-/// pressed, not by the letter on it.
+/// The character on the same key of the Russian layout, signs included: with
+/// a Russian layout a shortcut arrives under the letter of that layout, and
+/// it is read by the key pressed, not by the letter on it.
 pub(crate) fn latin_key_char(c: char) -> Option<char> {
     latin_letter(c).or_else(|| lookup(RU_SIGNS, LATIN_SIGNS, c))
 }
@@ -750,7 +750,7 @@ mod tests {
     }
 
     /// Every letter of the Russian layout is on the table. The typing one did
-    /// not know `х`, `ъ`, `ж`, `э`, `б`, `ю` and `ё`.
+    /// not know the seven letters that share their key with a sign.
     #[test]
     fn every_letter_of_the_russian_layout_is_known() {
         for c in "абвгдеёжзийклмнопрстуфхцчшщъыьэюя".chars() {

@@ -114,13 +114,13 @@ pub fn ago(then: u64, now: u64) -> String {
         3600..=86_399 => (secs / 3600, "hour"),
         _ => (secs / 86_400, "day"),
     };
-    // The word follows the number, and Russian has three forms of it.
-    let (en_one, en_many, ru_one, ru_few, ru_many) = match unit {
-        "minute" => ("minute", "minutes", "минуту", "минуты", "минут"),
-        "hour" => ("hour", "hours", "час", "часа", "часов"),
-        _ => ("day", "days", "день", "дня", "дней"),
+    // The word follows the number, and Russian has three forms of it. The
+    // forms live in the translation table, like every other word.
+    let word = match unit {
+        "minute" => crate::text::plural(n as usize, "minute", "minutes"),
+        "hour" => crate::text::plural(n as usize, "hour", "hours"),
+        _ => crate::text::plural(n as usize, "day", "days"),
     };
-    let word = crate::i18n::count(n, (en_one, en_many), (ru_one, ru_few, ru_many));
     format!("{} {}", word, crate::i18n::tr("ago"))
 }
 

@@ -458,14 +458,7 @@ impl App {
                 let title = if s.title.is_empty() { flashagent_tui::i18n::tr("(no prompt)").to_string() } else { s.title };
                 // The count with its word: English has two forms, Russian three,
                 // and the word follows the number in both.
-                let messages = flashagent_tui::i18n::plural(
-                    s.messages,
-                    "message",
-                    "messages",
-                    "сообщение",
-                    "сообщения",
-                    "сообщений",
-                );
+                let messages = flashagent_tui::text::plural(s.messages, "message", "messages");
                 SelectItem::with_description(title, format!("{} · {messages}", ago(s.timestamp, now)), s.id)
                     .with_search_text(s.text)
             })

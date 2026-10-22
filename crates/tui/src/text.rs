@@ -477,6 +477,18 @@ pub fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", plural_word(n, one, many))
 }
 
+/// The singular of a counted word, in the language of the interface. The
+/// table holds the three Russian forms; the first of them is the singular.
+pub fn singular(one: &str, many: &str) -> String {
+    let key = format!("plural: {one}/{many}");
+    let forms: Vec<&str> = crate::i18n::tr(&key).split('|').collect();
+    if forms.len() == 3 {
+        forms[0].to_string()
+    } else {
+        one.to_string()
+    }
+}
+
 /// The word that goes with the count. Russian has three forms where English
 /// has two, and which one is right depends on the number.
 fn plural_word(n: usize, one: &str, many: &str) -> String {

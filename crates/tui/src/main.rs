@@ -1077,9 +1077,9 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     Ok(result)
 }
 
-/// With a Russian layout Ctrl+D arrives as Ctrl+в. A shortcut is read by the key
-/// pressed, so the letter goes back to the Latin one on the same key (ЙЦУКЕН →
-/// QWERTY). Plain typing is left alone.
+/// With a Russian layout Ctrl+D arrives as the key that holds `v` in Latin
+/// letters. A shortcut is read by the key pressed, so the letter goes back to
+/// the Latin one on the same key. Plain typing is left alone.
 ///
 /// The layout itself is in `keys`: one table for the letters and one for the
 /// signs, and the typing table is the part of it that keeps letters on both
