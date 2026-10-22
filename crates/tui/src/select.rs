@@ -104,9 +104,16 @@ impl<T> SelectItem<T> {
         let text = self.search_text.as_deref()?;
         let lower = text.to_lowercase();
         let at = lower.find(query)?;
-        // Lower-casing keeps byte offsets for nearly every script; where it does not,
-        // the piece is shown lower-cased rather than cut wrongly.
-        let source = if lower.len() == text.len() { text } else { lower.as_str() };
+        // The piece is cut from the string the offset was found in. Lower-casing
+        // keeps the byte offsets for nearly every script; where it does not,
+        // the piece is shown lower-cased rather than cut wrongly. "İaẞ" is the
+        // case that got through: it lower-cases to the same number of bytes
+        // and a different number of characters, so the offset sat inside a
+        // character and the slice panicked.
+        let same_shape = lower.len() == text.len()
+            && lower.chars().count() == text.chars().count()
+            && text.is_char_boundary(at);
+        let source = if same_shape { text } else { lower.as_str() };
         let chars_before = source[..at].chars().count();
         let start = chars_before.saturating_sub(25);
         let piece: String = source.chars().skip(start).take(query.chars().count() + 50).collect();
@@ -132,7 +139,6 @@ impl Noun {
     pub const MODELS: Self = Self { en_one: "model", en_many: "models", ru_one: "модель", ru_few: "модели", ru_many: "моделей" };
     pub const OPTIONS: Self = Self { en_one: "option", en_many: "options", ru_one: "вариант", ru_few: "варианта", ru_many: "вариантов" };
     pub const SESSIONS: Self = Self { en_one: "session", en_many: "sessions", ru_one: "сессия", ru_few: "сессии", ru_many: "сессий" };
-    pub const SERVERS: Self = Self { en_one: "server", en_many: "servers", ru_one: "сервер", ru_few: "сервера", ru_many: "серверов" };
     pub const ITEMS: Self = Self { en_one: "item", en_many: "items", ru_one: "пункт", ru_few: "пункта", ru_many: "пунктов" };
 
     /// The word as the current language says it, in the singular.
@@ -295,7 +301,7 @@ impl<T> SelectMenu<T> {
     /// In at most `max_rows` rows, so the title and the selected item stay on
     /// a short screen: at 80x24 ten two-row items did not fit.
     pub fn render_in(&self, width: usize, max_rows: usize) -> Vec<RenderLine> {
-        let card_w = width.clamp(24, 96);
+        let card_w = width.min(96);
         let inner_w = card_w.saturating_sub(2);
         let border_color = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
@@ -375,7 +381,10 @@ impl<T> SelectMenu<T> {
             if start > 0 {
                 lines.push((
                     LineKind::System,
-                    pad_row(&format!("  \x1b[38;2;135;130;125m▲ {start} more above\x1b[0m")),
+                    pad_row(&format!(
+                        "  \x1b[38;2;135;130;125m{}\x1b[0m",
+                        crate::i18n::tr_fill("▲ {n} more above", &[("n", &start.to_string())])
+                    )),
                 ));
             }
 
@@ -403,7 +412,10 @@ impl<T> SelectMenu<T> {
             if end < total_matches {
                 lines.push((
                     LineKind::System,
-                    pad_row(&format!("  \x1b[38;2;135;130;125m▼ {} more below\x1b[0m", total_matches - end)),
+                    pad_row(&format!(
+                        "  \x1b[38;2;135;130;125m{}\x1b[0m",
+                        crate::i18n::tr_fill("▼ {n} more below", &[("n", &(total_matches - end).to_string())])
+                    )),
                 ));
             }
         }
@@ -430,6 +442,21 @@ impl<T> SelectMenu<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hidden_match_is_cut_on_a_character_boundary() {
+        // "İaẞ" lower-cases to the same number of bytes and a different number
+        // of characters, so the offset found in the lower-cased text is not a
+        // boundary in the original: the slice panicked.
+        let mut item = SelectItem::new("session", 0usize);
+        item.search_text = Some("İaẞ".into());
+        assert!(item.hidden_match("ß").is_some(), "the hidden match was not found");
+        // The label must not hold the query itself: a visible match needs no
+        // hidden piece, and the piece is only cut for what the label hides.
+        let mut item = SelectItem::new("session", 0usize);
+        item.search_text = Some("İaẞ".into());
+        assert!(item.hidden_match("a").is_some(), "the hidden match was not found");
+    }
 
     #[test]
     fn a_search_of_several_words_finds_them_in_any_order() {
@@ -595,12 +622,5 @@ mod tests {
         );
         let effort_lines = effort_menu.render(80);
         assert!(effort_lines.iter().any(|(_, t)| t.contains("(2 options)")));
-
-        let custom_menu = SelectMenu::new(
-            "Select Server",
-            vec![SelectItem::new("local", "local")],
-        ).with_noun(Noun::SERVERS);
-        let custom_lines = custom_menu.render(80);
-        assert!(custom_lines.iter().any(|(_, t)| t.contains("(1 server)")));
     }
 }

@@ -225,7 +225,6 @@ pub struct ChatLine {
     pub tool_calls: Vec<ToolCallRecord>,
     /// Which running subagent this line reports, so its row can be updated in
     /// place as the child works instead of a new line per event.
-    pub agent_id: Option<String>,
     /// Set on a [`LineKind::Compaction`] line.
     pub compaction: Option<CompactionCard>,
 }
@@ -243,7 +242,6 @@ impl ChatLine {
             tool_result: None,
             is_expanded: None,
             tool_calls: Vec::new(),
-            agent_id: None,
             compaction: None,
         }
     }
@@ -260,7 +258,6 @@ impl ChatLine {
             tool_result: None,
             is_expanded: None,
             tool_calls: Vec::new(),
-            agent_id: None,
             compaction: None,
         }
     }
@@ -305,29 +302,35 @@ pub struct ChatView {
     /// Settled lines rendered once, not re-parsed every frame.
     settled_cache: Mutex<SettledRenderCache>,
     row_owners: Mutex<RowOwners>,
-    /// What the transcript held when the context was last compacted: those
-    /// lines are no longer sent, so they no longer count.
-    context_baseline: (usize, usize, usize, usize),
+    /// Where the transcript stood when the context was last compacted: the
+    /// lines before it are no longer sent, so they no longer count.
+    ///
+    /// A boundary and not a number: the baseline used to be counted in
+    /// characters and subtracted from a count in tokens, and after every
+    /// compaction the gauge read zero.
+    context_baseline_line: usize,
 }
 
 pub fn format_explore(is_running: bool, files: usize, searches: usize, last_target: &str) -> String {
-    let verb = if is_running { "Exploring" } else { "Explored" };
+    let verb = if is_running { crate::i18n::tr("Exploring") } else { crate::i18n::tr("Explored") };
     let chevron = "\x1b[38;2;120;125;140m›\x1b[0m";
     // In the same column as every other tool line's mark.
     let mark = format!("\x1b[38;2;120;125;140m{}\x1b[0m", tool_cards::TOOL_MARK);
     if files > 0 && searches > 0 {
-        let f_str = if files == 1 { "1 file".to_string() } else { format!("{files} files") };
-        let s_str = if searches == 1 { "1 search".to_string() } else { format!("{searches} searches") };
+        let f_str = crate::i18n::plural(files, "file", "files", "файл", "файла", "файлов");
+        let s_str = crate::i18n::plural(searches, "search", "searches", "поиск", "поиска", "поисков");
         format!("  {mark} \x1b[38;2;160;165;180m{verb} {f_str}, {s_str}\x1b[0m {chevron}")
     } else if files > 1 {
-        format!("  {mark} \x1b[38;2;160;165;180m{verb} {files} files\x1b[0m {chevron}")
+        let f_str = crate::i18n::plural(files, "file", "files", "файл", "файла", "файлов");
+        format!("  {mark} \x1b[38;2;160;165;180m{verb} {f_str}\x1b[0m {chevron}")
     } else if searches > 1 {
-        format!("  {mark} \x1b[38;2;160;165;180m{verb} {searches} searches\x1b[0m {chevron}")
+        let s_str = crate::i18n::plural(searches, "search", "searches", "поиск", "поиска", "поисков");
+        format!("  {mark} \x1b[38;2;160;165;180m{verb} {s_str}\x1b[0m {chevron}")
     } else if files == 1 {
-        let v = if is_running { "Reading" } else { "Read" };
+        let v = if is_running { crate::i18n::tr("Reading") } else { crate::i18n::tr("Read") };
         format!("  {mark} \x1b[38;2;160;165;180m{v}\x1b[0m \x1b[38;2;225;230;240m{last_target}\x1b[0m {chevron}")
     } else if searches == 1 {
-        let v = if is_running { "Searching" } else { "Searched" };
+        let v = if is_running { crate::i18n::tr("Searching") } else { crate::i18n::tr("Searched") };
         format!("  {mark} \x1b[38;2;160;165;180m{v}\x1b[0m \x1b[38;2;225;230;240m{last_target}\x1b[0m {chevron}")
     } else {
         format!("  {mark} \x1b[38;2;160;165;180m{verb} {last_target}\x1b[0m {chevron}")
@@ -586,14 +589,6 @@ impl ChatView {
             .unwrap_or(self.lines.len())
     }
 
-    /// (user, assistant, reasoning, tools)
-    /// Since the last compaction; see [`Self::forget_counted_context`].
-    pub fn raw_content_chars(&self) -> (usize, usize, usize, usize) {
-        let (user, assistant, reasoning, tools) = self.all_content_chars();
-        let (bu, ba, br, bt) = self.context_baseline;
-        (user.saturating_sub(bu), assistant.saturating_sub(ba), reasoning.saturating_sub(br), tools.saturating_sub(bt))
-    }
-
     /// The same four numbers, counted as tokens with the counter of the model
     /// in use.
     ///
@@ -604,9 +599,7 @@ impl ChatView {
     /// bytes, and the bar said the window was half full when the model had
     /// read a third of it.
     pub fn raw_content_tokens(&self, count: &dyn Fn(&str) -> usize) -> (usize, usize, usize, usize) {
-        let (user, assistant, reasoning, tools) = self.all_content_tokens(count);
-        let (bu, ba, br, bt) = self.context_baseline;
-        (user.saturating_sub(bu), assistant.saturating_sub(ba), reasoning.saturating_sub(br), tools.saturating_sub(bt))
+        self.all_content_tokens(count)
     }
 
     fn all_content_tokens(&self, count: &dyn Fn(&str) -> usize) -> (usize, usize, usize, usize) {
@@ -614,7 +607,8 @@ impl ChatView {
         let mut assistant = 0;
         let mut reasoning = 0;
         let mut tools = 0;
-        for l in &self.lines {
+        let from = self.context_baseline_line.min(self.lines.len());
+        for l in &self.lines[from..] {
             match l.kind {
                 LineKind::User => user += count(&l.text),
                 LineKind::Assistant => assistant += count(&l.text),
@@ -634,31 +628,13 @@ impl ChatView {
     /// After compaction the transcript still shows what the model no longer
     /// gets; counting it kept the gauge over the threshold, so every later turn
     /// compacted again.
+    ///
+    /// What is remembered is where the transcript stood, not a number: the
+    /// baseline used to be counted in characters and subtracted from a count in
+    /// tokens, so after every compaction the gauge read zero — the summary, the
+    /// only thing the model gets now, was the one thing that was not counted.
     pub fn forget_counted_context(&mut self) {
-        self.context_baseline = self.all_content_chars();
-    }
-
-    fn all_content_chars(&self) -> (usize, usize, usize, usize) {
-        let mut user = 0;
-        let mut assistant = 0;
-        let mut reasoning = 0;
-        let mut tools = 0;
-        for l in &self.lines {
-            match l.kind {
-                LineKind::User => user += l.text.len(),
-                LineKind::Assistant => assistant += l.text.len(),
-                LineKind::Reasoning => reasoning += l.text.len(),
-                LineKind::Tool | LineKind::ToolError => {
-                    if let Some(ref d) = l.details {
-                        tools += d.len();
-                    }
-                    tools += l.tool_result_len;
-                    tools += l.text.len();
-                }
-                _ => {}
-            }
-        }
-        (user, assistant, reasoning, tools)
+        self.context_baseline_line = self.lines.len();
     }
 
     pub fn clear(&mut self) {
@@ -669,7 +645,7 @@ impl ChatView {
         self.open_tool = None;
         self.card_len = 0;
         self.needs_reprint = false;
-        self.context_baseline = (0, 0, 0, 0);
+        self.context_baseline_line = 0;
         *self.settled_cache.lock() = SettledRenderCache::default();
     }
 
@@ -906,8 +882,9 @@ impl ChatView {
         self.streaming_reasoning = None;
         let head = format!("message from {from_role} {from} \u{b7} to {to}");
         let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-        let preview: String =
-            first.chars().take(96).collect::<String>() + if first.chars().count() > 96 { "\u{2026}" } else { "" };
+        // Cut by cells, not by characters: a CJK line is twice as wide as it is
+        // long, and the preview has to fit where it is shown.
+        let preview = tool_views::clip_ellipsis(first, 96);
         let mut line = ChatLine::with_details(LineKind::Subagent, head, text.to_string());
         line.tool_name = Some("subagent_message".to_string());
         // The first line of what was said stands in for the whole message while
@@ -931,12 +908,13 @@ impl ChatView {
         let answer = finished.answer.as_str();
         self.streaming = None;
         self.streaming_reasoning = None;
-        let said = if finished.done == DoneReason::Completed { "answered" } else { crate::i18n::tr("stopped early") };
+        let said = if finished.done == DoneReason::Completed { crate::i18n::tr("answered") } else { crate::i18n::tr("stopped early") };
         let head = format!(
-            "{role} {} {said} \u{b7} {} \u{b7} {} tokens \u{b7} {secs}s",
+            "{role} {} {said} \u{b7} {} \u{b7} {} {} \u{b7} {secs}s",
             finished.id,
-            plural(finished.usage.steps as usize, "step", "steps"),
+            crate::i18n::plural(finished.usage.steps as usize, "step", "steps", "шаг", "шага", "шагов"),
             goal::human_count(finished.usage.total_tokens() as i64),
+            crate::i18n::tr("tokens"),
         );
         let mut line = ChatLine::with_details(LineKind::Tool, tool_line(&head, answer), answer.to_string());
         line.tool_name = Some("subagent_answer".to_string());
@@ -944,19 +922,6 @@ impl ChatView {
         // card is closed, so a glance says what was found without the wall.
         line.tool_result = Some(answer.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string());
         self.lines.push(line);
-    }
-
-    /// Replaces the newest system row in place, so a line that is corrected
-    /// does not move down the transcript.
-    pub fn replace_last_system(&mut self, text: &str) {
-        match self.lines.iter().rposition(|l| l.kind == LineKind::System) {
-            Some(i) => {
-                self.lines[i].text = text.to_string();
-                *self.settled_cache.lock() = SettledRenderCache::default();
-                self.needs_reprint = true;
-            }
-            None => self.push_system(text),
-        }
     }
 
     /// The rule and header that stand in the transcript while a summary is
@@ -1072,30 +1037,6 @@ impl ChatView {
         open
     }
 
-    /// A running subagent's row, written over in place. One child is one line
-    /// for as long as it runs, so a long task reads as progress on a row the
-    /// eye can stay on, not as a wall of new lines.
-    pub fn upsert_agent(&mut self, id: &str, text: impl Into<String>) {
-        let text = text.into();
-        match self.lines.iter().position(|l| l.agent_id.as_deref() == Some(id)) {
-            Some(i) => {
-                if self.lines[i].text != text {
-                    self.lines[i].text = text;
-                    *self.settled_cache.lock() = SettledRenderCache::default();
-                    self.needs_reprint = true;
-                }
-            }
-            None => {
-                let mut line = ChatLine::new(LineKind::Subagent, text);
-                line.agent_id = Some(id.to_string());
-                self.lines.push(line);
-                *self.settled_cache.lock() = SettledRenderCache::default();
-                self.needs_reprint = true;
-            }
-        }
-    }
-
-
     pub fn push_line(&mut self, kind: LineKind, text: impl Into<String>) {
         self.streaming = None;
         self.streaming_reasoning = None;
@@ -1106,12 +1047,6 @@ impl ChatView {
     pub fn push_user(&mut self, text: &str) {
         self.streaming = None;
         self.lines.push(ChatLine::new(LineKind::User, text.to_string()));
-    }
-
-    pub fn push_assistant(&mut self, text: &str) {
-        self.streaming = None;
-        self.streaming_reasoning = None;
-        self.lines.push(ChatLine::new(LineKind::Assistant, text.to_string()));
     }
 
     pub fn on_event(&mut self, ev: &LoopEvent) {
@@ -1153,7 +1088,7 @@ impl ChatView {
             }
             LoopEvent::Usage(_) => {}
             // The summary is not something the gauge counts up again.
-            LoopEvent::Compacted { .. } => self.forget_counted_context(),            // Its own line was drawn when the task ended.
+            LoopEvent::Compacted { .. } => self.forget_counted_context(), // Its own line was drawn when the task ended.
             LoopEvent::SteeringInjected(directive) if flashagent_core::is_task_notice(directive) => {}
             LoopEvent::SteeringInjected(directive) => {
                 self.streaming = None;
@@ -1242,9 +1177,10 @@ fn tool_line(head: &str, subject_source: &str) -> String {
     let subject = subject_source.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
     let mut out = format!("  {FAINT}{}{OFF} {MUTED}{head}{OFF}", tool_cards::TOOL_MARK);
     if !subject.is_empty() {
-        let clipped: String = subject.chars().take(72).collect();
-        let ellipsis = if subject.chars().count() > 72 { "\u{2026}" } else { "" };
-        out.push_str(&format!(" {STRONG}{clipped}{ellipsis}{OFF}"));
+        // Cut by cells, not by characters: the line it is shown on has a width,
+        // and a CJK line is twice as wide as it is long.
+        let clipped = tool_views::clip_ellipsis(subject, 72);
+        out.push_str(&format!(" {STRONG}{clipped}{OFF}"));
     }
     out.push_str(&format!(" {FAINT}\u{203a}{OFF}"));
     out
@@ -1409,7 +1345,7 @@ fn render_single_tool_card(
 
     if tool_name == "subagent_answer" {
         return render_subagent_answer_card(
-            folded.unwrap_or("A subagent answered"),
+            folded.unwrap_or(crate::i18n::tr("A subagent answered")),
             call.args_json.as_str(),
             width,
         );
@@ -1426,9 +1362,20 @@ fn render_single_tool_card(
     }
 
     if tool_name.starts_with("memory_") {
-        let scope = parsed.get("scope").and_then(|s| s.as_str()).unwrap_or("project");
+        // The scope is the model's word; the card shows it in the language of
+        // the interface. So does the action: the name of the tool is an
+        // identifier, and an identifier in the middle of a Russian sentence
+        // is the thing the collector is there to catch.
+        let scope = crate::i18n::tr(parsed.get("scope").and_then(|s| s.as_str()).unwrap_or("project"));
+        let action = match tool_name {
+            "memory_read" => crate::i18n::tr("Reading"),
+            "memory_create" => crate::i18n::tr("Creating"),
+            "memory_update" => crate::i18n::tr("Updating"),
+            "memory_remove" => crate::i18n::tr("Removing"),
+            _ => crate::i18n::tr("Memory"),
+        };
         return card(tool_views::render_memory_card(
-            tool_name,
+            action,
             &[scope.to_string()],
             call.result.as_deref().or(Some(&call.args_json)),
             width,
@@ -1562,7 +1509,7 @@ impl ChatView {
                         crate::i18n::tr(stage)
                     )
                 };
-                let box_w = width.saturating_sub(4).clamp(30, 84);
+                let box_w = width.saturating_sub(4).min(84);
                 let border_color = "\x1b[38;2;75;99;130m";
                 let reset = "\x1b[0m";
 
@@ -1962,7 +1909,6 @@ pub type RenderLine = (LineKind, String);
 
 pub const SPINNER: &[&str] = anim::SPINNER;
 
-pub const GLYPH_PROMPT: &str = "›";
 /// The bar down the side of a prompt the user typed.
 ///
 /// Not the filled `▌`: that one is the caret on a line the model is writing this
@@ -1973,6 +1919,20 @@ pub const USER_BAR: &str = "│";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The explore line says what happened, in the words the interface uses.
+    ///
+    /// The verbs and the counts were English in a Russian screen: the table
+    /// holds them now, and the line says "2 файла", not "2 files".
+    #[test]
+    fn the_explore_line_says_what_happened_in_the_language_of_the_interface() {
+        let line = strip_ansi(&format_explore(false, 2, 1, "src/main.rs"));
+        assert!(line.contains("Explored") && line.contains("2 files") && line.contains("1 search"), "{line}");
+        let ru = crate::i18n::Lang::Russian;
+        for phrase in ["Exploring", "Explored", "Reading", "Read", "Searching", "Searched"] {
+            assert_ne!(crate::i18n::translate(ru, phrase), phrase, "{phrase:?} has no Russian version");
+        }
+    }
 
     #[test]
     fn late_recap_for_an_earlier_turn_does_not_derail_the_live_turn() {
@@ -1994,6 +1954,23 @@ mod tests {
         let user2 = text.iter().find(|l| l.contains("second")).unwrap();
         assert!(!user2.contains("answer two"), "stream leaked into the user line: {user2}");
         assert!(joined.find("recap: one").unwrap() < joined.find("second").unwrap());
+    }
+
+    #[test]
+    fn the_baseline_after_a_compaction_is_counted_in_tokens() {
+        // The baseline used to be counted in characters and subtracted from a
+        // count in tokens, so the gauge read zero after every compaction: the
+        // summary, the only thing the model gets now, was the one thing that
+        // was not counted.
+        let model = "gpt-4o";
+        let mut chat = ChatView::default();
+        chat.push_user(&"a".repeat(600));
+        chat.forget_counted_context();
+        chat.push_user("the summary");
+        let count = |text: &str| flashagent_llm::count_tokens(model, text);
+        let (user, ..) = chat.raw_content_tokens(&count);
+        assert!(user > 0, "the summary after a compaction counts as nothing: {user}");
+        assert!(user < 600, "the compacted conversation is still counted: {user}");
     }
 
     #[test]
@@ -2024,7 +2001,7 @@ mod tests {
     fn a_prompt_reads_as_a_block_of_its_own_and_not_as_part_of_the_answer() {
         let mut v = ChatView::default();
         v.push_user("what does the gate at line 41 do");
-        v.push_assistant("It approves a tool call before it runs.");
+        v.push_line(LineKind::Assistant, "It approves a tool call before it runs.");
         let lines = v.render(80);
 
         let bar = lines

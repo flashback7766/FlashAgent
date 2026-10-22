@@ -144,7 +144,14 @@ impl App {
             return;
         }
         let (width, _) = crossterm::terminal::size().unwrap_or((100, 24));
-        self.chat.push_line(LineKind::System, format!("  \x1b[1;38;2;225;175;95mThe whole change\x1b[0m \x1b[38;2;135;130;125m· {}\x1b[0m", req.tool));
+        self.chat.push_line(
+            LineKind::System,
+            format!(
+                "  \x1b[1;38;2;225;175;95m{}\x1b[0m \x1b[38;2;135;130;125m· {}\x1b[0m",
+                tr("The whole change"),
+                req.tool
+            ),
+        );
         for row in crate::render::diff_rows(diff, (width as usize).saturating_sub(2)) {
             self.chat.push_line(LineKind::System, row);
         }
@@ -181,9 +188,9 @@ impl App {
             if let Some(view) = self.settings_view_mut() {
                 view.config.update_channel = sw.to;
             }
-            self.say(BackgroundNotice::sticky(format!(
-                "Release channel is now {} \u{b7} /update moves to it",
-                sw.to.label()
+            self.say(BackgroundNotice::sticky(tr_fill(
+                "Release channel is now {channel} \u{b7} /update moves to it",
+                &[("channel", sw.to.label())],
             )));
         } else {
             // Other changes stay applied; only this one is put back.
@@ -529,7 +536,11 @@ impl App {
                 let removed = flashagent_core::MemoryStore::for_scope(scope, &cwd)
                     .map(|store| store.remove(&name).unwrap_or(false))
                     .unwrap_or(false);
-                self.notice(if removed { format!("Forgot \"{name}\"") } else { format!("Could not forget \"{name}\"") });
+                self.notice(if removed {
+                    tr_fill("Forgot \"{name}\"", &[("name", &name)])
+                } else {
+                    tr_fill("Could not forget \"{name}\"", &[("name", &name)])
+                });
                 self.overlay = Some(Overlay::Memory(open_memory_modal()));
             }
             MemoryAction::Summarize { .. } => {
@@ -659,9 +670,27 @@ impl App {
                     Ok(report) => {
                         let ver = report.server_version.as_deref().unwrap_or("1.0.0");
                         let lat = format!("{:.1}ms", report.latency.as_secs_f64() * 1000.0);
-                        format!("√ {name} connected (v{ver}, {lat}, {} tools)", report.tools.len())
+                        tr_fill(
+                            "√ {name} connected (v{version}, {latency}, {tools})",
+                            &[
+                                ("name", &name),
+                                ("version", ver),
+                                ("latency", &lat),
+                                (
+                                    "tools",
+                                    &flashagent_tui::i18n::plural(
+                                        report.tools.len(),
+                                        "tool",
+                                        "tools",
+                                        "инструмент",
+                                        "инструмента",
+                                        "инструментов",
+                                    ),
+                                ),
+                            ],
+                        )
                     }
-                    Err(e) => format!("× {name} failed: {e}"),
+                    Err(e) => tr_fill("× {name} failed: {e}", &[("name", &name), ("e", &e.to_string())]),
                 });
                 modal.servers = mgr.server_status_list().await;
             }
@@ -670,7 +699,10 @@ impl App {
                     let cfg = flashagent_tools::mcp::scaffold_config(item);
                     match flashagent_tools::mcp::save_server_to_project(std::path::Path::new("."), item.id, cfg) {
                         Ok(path) => {
-                            modal.status_message = Some(format!("√ Added {} to {}", item.name, path.display()));
+                            modal.status_message = Some(tr_fill(
+                                "√ Added {name} to {path}",
+                                &[("name", item.name), ("path", &path.display().to_string())],
+                            ));
                             let mgr = cx.tools_arc.mcp_manager();
                             let server_id = item.id.to_string();
                             tokio::spawn(async move {
@@ -678,9 +710,29 @@ impl App {
                                 let _ = mgr.start_server(&server_id).await;
                             });
                         }
-                        Err(e) => modal.status_message = Some(format!("× Failed to install {id}: {e}")),
+                        Err(e) => modal.status_message = Some(tr_fill(
+                            "× Failed to install {id}: {e}",
+                            &[("id", &id), ("e", &e.to_string())],
+                        )),
                     }
                 }
+            }
+            // The trust of the server is taken back. The server stays in its
+            // config file and asks again the next time it starts.
+            McpModalAction::ForgetServer(name) => {
+                let forgotten = self.config.forget_mcp_server(cx.cwd, &name);
+                if forgotten {
+                    self.save_config();
+                }
+                modal.trusted.retain(|t| t.name != name);
+                modal.status_message = Some(
+                    if forgotten {
+                        tr("The trust of this server is taken back")
+                    } else {
+                        tr("There was nothing to take back")
+                    }
+                    .to_string(),
+                );
             }
             McpModalAction::None => {}
         }
@@ -691,7 +743,18 @@ impl App {
     /// turn, which owns the session id and snapshot store.
     fn session_menu_key(&mut self, mut menu: SelectMenu<String>, code: KeyCode, mods: KeyModifiers) {
         match code {
-            KeyCode::Enter => self.pending_resume = menu.selected_value().cloned(),
+            KeyCode::Enter => {
+                // What the list shows is what Enter opens. A filter that matched
+                // nothing opens nothing: the row that was selected before the
+                // filter is still in the list, and opening it would hand the
+                // owner a session they did not pick.
+                let matches = menu.filtered_indices();
+                let Some(&idx) = matches.iter().find(|&&i| i == menu.selected).or_else(|| matches.first()) else {
+                    self.overlay = Some(Overlay::Sessions(menu));
+                    return;
+                };
+                self.pending_resume = menu.items.get(idx).map(|item| item.value.clone());
+            }
             KeyCode::Esc => {}
             _ => {
                 navigate_menu(&mut menu, code, mods);
@@ -874,7 +937,10 @@ impl App {
     pub(crate) fn open_model_menu(&mut self, source: &BackendSource) {
         if let Some(switch) = &self.provider_switch {
             let name = switch.name.clone();
-            self.notice(format!("Still connecting to {name}; its models are listed once it answers"));
+            self.notice(tr_fill(
+                "Still connecting to {name}; its models are listed once it answers",
+                &[("name", &name)],
+            ));
             return;
         }
         let mut menu = build_model_menu(source, &self.config.active_profile().name);
@@ -892,7 +958,20 @@ impl App {
         let mgr = cx.tools_arc.mcp_manager();
         let paths = mgr.loaded_paths();
         let statuses = mgr.server_status_list().await;
-        self.open_overlay(Overlay::Mcp(McpModal::new(paths, statuses, tab)));
+        let trusted = self.trusted_mcp_servers(cx);
+        self.open_overlay(Overlay::Mcp(McpModal::new(paths, statuses, tab).with_trusted(trusted)));
+    }
+
+    /// The servers the owner allowed to run in this folder.
+    ///
+    /// The trust is what can be taken back: the server itself is written in a
+    /// config file, and the permission to run it is kept beside it.
+    pub(crate) fn trusted_mcp_servers(&self, cx: &LoopCtx<'_>) -> Vec<flashagent_tui::mcp_view::TrustedServer> {
+        self.config
+            .mcp_servers_trusted_in(cx.cwd)
+            .into_iter()
+            .map(|t| flashagent_tui::mcp_view::TrustedServer { name: t.name.clone(), command: t.command.clone() })
+            .collect()
     }
 }
 

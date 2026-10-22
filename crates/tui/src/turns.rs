@@ -1,5 +1,5 @@
 use super::*;
-use flashagent_tui::i18n::tr;
+use flashagent_tui::i18n::{tr, tr_fill};
 
 /// The tools the prompt talks about, and whether they are on offer.
 ///
@@ -154,45 +154,45 @@ impl App {
     }
 
     /// Marks where the live context line starts, so the next turn replaces it
-/// rather than stacking another one underneath.
-pub(crate) const CONTEXT_LINE_MARK: &str = "\n\n[Context]";
+    /// rather than stacking another one underneath.
+    pub(crate) const CONTEXT_LINE_MARK: &str = "\n\n[Context]";
 
-/// Rewrites the last line of the system prompt with what the context costs
-/// now, so the model can see the room it has left instead of finding out by
-/// being cut off.
-///
-/// It goes at the very end for the same reason the compacted summary does, and
-/// it moves in steps for a third reason: see below.
-pub(crate) fn refresh_context_line(&mut self) {
-    let used = self.context_usage.total_used();
-    let capacity = self.context_usage.total_capacity;
-    // Quantised, and this is the whole trick. The provider caches the prefix of
-    // a request, so a system message that changes on every turn invalidates
-    // everything after it: the memory block and the whole conversation are
-    // read again for a number that moved by a few hundred tokens. Rounding down
-    // to a twentieth of the window moves this line about twenty times in a
-    // session instead of once a turn, and between those the prefix holds.
-    let (used, capacity) = if capacity > 0 {
-        let step = (capacity / 20).max(1);
-        (used / step * step, capacity)
-    } else {
-        (used / 4_000 * 4_000, capacity)
-    };
-    let line = if capacity > 0 {
-        format!("\n\n[Context] {used} of {capacity} tokens used, {} left.", capacity.saturating_sub(used))
-    } else {
-        format!(
-            "\n\n[Context] {used} tokens used. The size of this window is not known, so nothing is counted against it."
-        )
-    };
-    let Some(system) = self.history.first_mut().filter(|m| m.role == flashagent_llm::Role::System) else {
-        return;
-    };
-    if let Some(at) = system.content.find(Self::CONTEXT_LINE_MARK) {
-        system.content.truncate(at);
+    /// Rewrites the last line of the system prompt with what the context costs
+    /// now, so the model can see the room it has left instead of finding out by
+    /// being cut off.
+    ///
+    /// It goes at the very end for the same reason the compacted summary does, and
+    /// it moves in steps for a third reason: see below.
+    pub(crate) fn refresh_context_line(&mut self) {
+        let used = self.context_usage.total_used();
+        let capacity = self.context_usage.total_capacity;
+        // Quantised, and this is the whole trick. The provider caches the prefix of
+        // a request, so a system message that changes on every turn invalidates
+        // everything after it: the memory block and the whole conversation are
+        // read again for a number that moved by a few hundred tokens. Rounding down
+        // to a twentieth of the window moves this line about twenty times in a
+        // session instead of once a turn, and between those the prefix holds.
+        let (used, capacity) = if capacity > 0 {
+            let step = (capacity / 20).max(1);
+            (used / step * step, capacity)
+        } else {
+            (used / 4_000 * 4_000, capacity)
+        };
+        let line = if capacity > 0 {
+            format!("\n\n[Context] {used} of {capacity} tokens used, {} left.", capacity.saturating_sub(used))
+        } else {
+            format!(
+                "\n\n[Context] {used} tokens used. The size of this window is not known, so nothing is counted against it."
+            )
+        };
+        let Some(system) = self.history.first_mut().filter(|m| m.role == flashagent_llm::Role::System) else {
+            return;
+        };
+        if let Some(at) = system.content.find(Self::CONTEXT_LINE_MARK) {
+            system.content.truncate(at);
+        }
+        system.content.push_str(&line);
     }
-    system.content.push_str(&line);
-}
 
 pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         self.sync_system_prompt(OfferedTools::from_specs(&cx.perm.specs()));
@@ -314,6 +314,49 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         self.turn_elapsed = elapsed(&mut self.turn_started);
     }
 
+    /// The app's own half of the handback: the flag that says a goal run is
+    /// under way, the effort and the step limit the run took over.
+    ///
+    /// The prompt is built from `goal_active`, and a flag left on tells the
+    /// model for the rest of the session that there is no user to answer it.
+    pub(crate) fn take_goal(&mut self) -> Option<SavedGoalState> {
+        let saved = self.goal_state.take()?;
+        self.goal_active = false;
+        self.current_effort = saved.effort.clone();
+        self.max_steps = saved.max_steps;
+        Some(saved)
+    }
+
+    /// The run is over: the mode, the effort and the step limit the goal took
+    /// over go back to what they were, and the prompt stops saying that an
+    /// autonomous run is under way.
+    ///
+    /// One place for every ending — a turn that finished, a turn that failed,
+    /// a turn that would not wind down — so a goal can never leave the app in
+    /// a mode the owner did not choose. The prompt matters most here: it is
+    /// rebuilt with `goal_active`, and a flag left on says to the model for
+    /// the rest of the session that there is no user to answer it.
+    ///
+    /// False when no goal was running.
+    pub(crate) fn end_goal(&mut self, cx: &LoopCtx<'_>, reason: DoneReason) -> bool {
+        let Some(saved) = self.take_goal() else {
+            return false;
+        };
+        cx.tools_arc.set_goal_mode(false);
+        cx.perm.state().set_goal_active(false);
+        cx.perm.state().set_mode(saved.mode);
+        self.refresh_welcome_state(cx.source, cx.mascot_mood);
+        if let Some(ledger) = self.goal_ledger.take() {
+            push_goal_report(&mut self.chat, &ledger, reason);
+        }
+        let task = flashagent_tui::truncate_middle(&saved.task, 40);
+        self.notice(tr_fill(
+            "Goal \"{task}\" finished · back to {mode} mode, thinking {effort}",
+            &[("task", task.as_str()), ("mode", saved.mode.label()), ("effort", &saved.effort)],
+        ));
+        true
+    }
+
     pub(crate) async fn finish_turn(
         &mut self,
         cx: &mut LoopCtx<'_>,
@@ -337,7 +380,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         // A turn can end while its mid-turn compaction is still writing (Esc,
         // a failed request). The card promised a summary, so it is withdrawn
         // rather than left spinning in a transcript that will never change.
-        self.chat.abandon_compaction_card("the turn ended before the summary landed");
+        self.chat.abandon_compaction_card(tr("the turn ended before the summary landed"));
         self.mid_turn_report = None;
         self.task_inbox.turn_ended(matches!(res, Ok((_, DoneReason::Cancelled))));
         self.flush_task_lines();
@@ -390,27 +433,16 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         }
         self.turn_outcome = flashagent_core::TurnOutcome::default();
 
-        if let Some(saved) = self.goal_state.take() {
-            cx.tools_arc.set_goal_mode(false);
-            cx.perm.state().set_goal_active(false);
-            cx.perm.state().set_mode(saved.mode);
-            self.current_effort = saved.effort.clone();
-            self.max_steps = saved.max_steps;
-            self.refresh_welcome_state(cx.source, cx.mascot_mood);
-            if let Some(ledger) = self.goal_ledger.take() {
-                let reason = match &res {
-                    Ok((_, r)) => *r,
-                    Err(_) => DoneReason::Failed,
-                };
-                push_goal_report(&mut self.chat, &ledger, reason);
-            }
-            self.notice(format!(
-                "Goal \"{}\" finished · back to {} mode, thinking {}",
-                flashagent_tui::truncate_middle(&saved.task, 40),
-                saved.mode.label(),
-                saved.effort
-            ));
-        }
+        // The goal ends the same way whether the turn finished or failed: the
+        // mode, the effort and the limits the run took over go back to what
+        // they were, and the prompt stops saying that an autonomous run is
+        // under way. A goal that failed is a goal that ended — the app must
+        // not stay in Accept All with the goal's limits.
+        let goal_reason = match &res {
+            Ok((_, reason)) => *reason,
+            Err(_) => DoneReason::Failed,
+        };
+        self.end_goal(cx, goal_reason);
 
         match res {
             Ok((h, reason)) => {
@@ -427,7 +459,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                 if reason == DoneReason::Cancelled {
                     flashagent_core::mark_cut_short(&mut self.history, flashagent_core::CutShort::ByUser);
                     self.suggested_prompt = None;
-                    let interrupt_msg = flashagent_tui::i18n::tr(flashagent_tui::i18n::tr("Request interrupted by user"));
+                    let interrupt_msg = flashagent_tui::i18n::tr("Request interrupted by user");
                     self.custom_placeholder = Some(interrupt_msg.to_string());
                     self.renderer.request_reprint();
                 } else {
@@ -528,7 +560,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                                 self.chat.forget_counted_context();
                                 update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                             }
-                            None => self.chat.fail_compaction_card("the conversation is unchanged"),
+                            None => self.chat.fail_compaction_card(tr("the conversation is unchanged")),
                         }
                         self.renderer.request_reprint();
                     }
@@ -634,9 +666,9 @@ pub(crate) fn cut_off_notice(raw: &str, arrived: usize) -> Option<String> {
         flashagent_tui::i18n::tr("The connection to the model server dropped before the answer began \u{b7} nothing of this turn was written")
             .to_string()
     } else {
-        format!(
-            "The connection to the model server dropped mid-answer \u{b7} about {} arrived and the answer above is cut off, not finished",
-            flashagent_tui::goal::human_count(arrived as i64)
+        tr_fill(
+            "The connection to the model server dropped mid-answer \u{b7} about {arrived} arrived and the answer above is cut off, not finished",
+            &[("arrived", &flashagent_tui::goal::human_count(arrived as i64))],
         )
     })
 }

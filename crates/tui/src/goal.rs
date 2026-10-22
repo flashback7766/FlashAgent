@@ -40,7 +40,7 @@ impl GoalBudgets {
 
     pub fn summary(&self) -> String {
         if self.is_unlimited() {
-            return "no limits".to_string();
+            return crate::i18n::tr("no limits").to_string();
         }
         let mut parts = Vec::new();
         if let Some(n) = self.steps {
@@ -63,7 +63,10 @@ pub fn parse_goal_task(rest: &str) -> Result<String, String> {
     let first = task.split_whitespace().next().unwrap_or("");
     let flag = first.split('=').next().unwrap_or("");
     if matches!(flag, "--steps" | "--time" | "--tokens") {
-        return Err(format!("{flag} is gone: /goal limits are set in Settings → Goal now. Usage: /goal <task>"));
+        return Err(crate::i18n::tr_fill(
+            "{flag} is gone: /goal limits are set in Settings \u{2192} Goal now. Usage: /goal <task>",
+            &[("flag", flag)],
+        ));
     }
     if task.is_empty() {
         return Err(crate::i18n::tr("Nothing to do. Usage: /goal <task>").to_string());
@@ -144,15 +147,6 @@ impl GoalLedger {
     /// A turn the backend priced. Nothing is claimed for a backend that did not.
     pub fn record_cost(&mut self, provider: &str, cost: Option<f64>) {
         self.cost.record(provider, cost);
-    }
-
-    /// 0 before the first turn.
-    pub fn step(&self) -> u32 {
-        self.step
-    }
-
-    pub fn output_tokens(&self) -> i64 {
-        self.output_tokens
     }
 
     pub fn elapsed(&self) -> Duration {
@@ -259,10 +253,13 @@ impl GoalLedger {
             Some(max) => format!("{}/{max}", self.step),
             None => self.step.to_string(),
         };
-        out.push(format!(
-            "Steps {steps} · {} generated tokens · {} elapsed",
-            human_count(self.output_tokens),
-            human_duration(self.elapsed())
+        out.push(crate::i18n::tr_fill(
+            "Steps {steps} \u{b7} {tokens} generated tokens \u{b7} {elapsed} elapsed",
+            &[
+                ("steps", &steps),
+                ("tokens", &human_count(self.output_tokens)),
+                ("elapsed", &human_duration(self.elapsed())),
+            ],
         ));
         // The bill, when there is one. Absent for a local backend: an unpriced
         // run is not a free one, and a fabricated $0.00 would be worse than
@@ -377,7 +374,7 @@ pub fn commit_goal_milestone(ledger: &GoalLedger, cwd: &Path, completed_steps: u
     }
     Some(format!(
         "  \x1b[38;2;155;165;180mcheckpoint:\x1b[0m \x1b[38;2;225;230;240mcommitted {} after step {completed_steps}\x1b[0m",
-        crate::plural(files.len(), "file", "files")
+        crate::i18n::plural(files.len(), "file", "files", "файл", "файла", "файлов")
     ))
 }
 
@@ -535,7 +532,7 @@ mod tests {
             completion: Some(120),
             cached: None,
             mtp: None,
-            cost: None, reasoning: None, cost_details: None,
+            cost: None, cost_details: None,
         }));
 
         let report = l.report(DoneReason::Completed).join("\n");
@@ -544,7 +541,7 @@ mod tests {
         assert!(report.contains("1 ok, 1 failed"), "{report}");
         assert!(report.contains("cargo test — exit code: 101"), "{report}");
         assert!(report.contains("120 generated tokens"), "{report}");
-        assert_eq!(l.output_tokens(), 120, "prompt tokens must not be counted");
+        assert_eq!(l.output_tokens, 120, "prompt tokens must not be counted");
     }
 
     #[test]

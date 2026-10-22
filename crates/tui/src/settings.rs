@@ -129,7 +129,6 @@ pub struct SettingsView {
     pub tool_test_status: Option<String>,
     pub update_check_status: Option<String>,
     pub available_models: Vec<String>,
-    pub is_dirty: bool,
     /// So an automatic threshold can show what it works out to.
     pub context_capacity: usize,
     /// The efforts the model in use actually takes, read from what the server
@@ -178,7 +177,6 @@ impl SettingsView {
             tool_test_status: None,
             update_check_status: None,
             available_models,
-            is_dirty: false,
             context_capacity: 0,
             effort_choices: effort_choices_defaults(),
             opened_on,
@@ -402,27 +400,22 @@ impl SettingsView {
                 1 => SettingsAction::OpenModelMenu,
                 2 => {
                     self.config.permission_mode = self.config.permission_mode.next();
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 3 => {
                     self.config.safe_mode = !self.config.safe_mode;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 4 => {
                     self.config.crash_reports = !self.config.crash_reports;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 5 => {
                     self.config.auto_save_sessions = !self.config.auto_save_sessions;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 6 => {
                     self.cycle_editor();
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 7 => {
@@ -435,12 +428,10 @@ impl SettingsView {
             SettingsTab::Updates => match self.selected_index {
                 0 => {
                     self.config.auto_check_updates = !self.config.auto_check_updates;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 1 => {
                     self.config.update_channel = self.config.update_channel.toggle();
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 2 => SettingsAction::CheckUpdatesNow,
@@ -453,32 +444,26 @@ impl SettingsView {
             SettingsTab::Aesthetics => match self.selected_index {
                 0 => {
                     self.config.show_mascot = !self.config.show_mascot;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 1 => {
                     self.config.show_tips = !self.config.show_tips;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 2 => {
                     self.config.show_ttft = !self.config.show_ttft;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 3 => {
                     self.config.show_tokens = !self.config.show_tokens;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 4 => {
                     self.config.show_toasts = !self.config.show_toasts;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 5 => {
                     self.config.animations = !self.config.animations;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 6 => {
@@ -491,27 +476,22 @@ impl SettingsView {
                 0 => SettingsAction::OpenEffortMenu,
                 1 => {
                     self.cycle_warn_threshold();
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 2 => {
                     self.config.auto_compact_context = !self.config.auto_compact_context;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 3 => {
                     self.config.auto_warm_prompt_cache = !self.config.auto_warm_prompt_cache;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 4 => {
                     self.config.web_tools = !self.config.web_tools;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 5 => {
                     self.cycle_network_retries();
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 6 => SettingsAction::OpenSamplingMenu,
@@ -586,7 +566,6 @@ impl SettingsView {
             // Nothing on this tab is a value: the rows open other screens.
             SettingsTab::Tools => {}
         }
-        self.is_dirty = true;
     }
 
     /// Among the saved providers; the switch happens when Settings closes.
@@ -602,7 +581,6 @@ impl SettingsView {
             None => 0,
         };
         self.config.activate(&names[next]);
-        self.is_dirty = true;
     }
 
     /// The models of the server in use; not while another provider is picked
@@ -616,7 +594,6 @@ impl SettingsView {
             .map(|i| (i + 1) % self.available_models.len())
             .unwrap_or(0);
         self.config.active_profile_mut().model = self.available_models[next_idx].clone();
-        self.is_dirty = true;
     }
 
     /// Another provider than the one Settings opened on.
@@ -631,7 +608,6 @@ impl SettingsView {
             .map(|i| (i + 1) % editors.len())
             .unwrap_or(0);
         self.config.external_editor = editors[next_idx].to_string();
-        self.is_dirty = true;
     }
 
     /// The interface language, English and Russian. It applies at once: the
@@ -644,7 +620,6 @@ impl SettingsView {
         };
         self.config.interface_language = next.code().to_string();
         crate::i18n::set(next);
-        self.is_dirty = true;
     }
 
     /// Steps through what the model in use really accepts. A fixed ladder would
@@ -660,20 +635,17 @@ impl SettingsView {
             // A saved level this model does not offer: the first one it does.
             None => presets[0].clone(),
         };
-        self.is_dirty = true;
     }
 
     /// Applied at once: a theme picked by name is guesswork until seen.
     fn cycle_theme(&mut self) {
         self.config.color_theme = self.config.color_theme.next();
         crate::theme::set(self.config.color_theme);
-        self.is_dirty = true;
     }
 
     fn cycle_sampling(&mut self) {
         let next = self.config.sampling_preset.next();
         next.apply_to_config(&mut self.config);
-        self.is_dirty = true;
     }
 
     fn cycle_warn_threshold(&mut self) {
@@ -683,7 +655,6 @@ impl SettingsView {
             .map(|i| (i + 1) % thresholds.len())
             .unwrap_or(0);
         self.config.context_warn_threshold = thresholds[next_idx];
-        self.is_dirty = true;
     }
 
     fn cycle_network_retries(&mut self) {
@@ -693,7 +664,6 @@ impl SettingsView {
             .map(|i| (i + 1) % retries.len())
             .unwrap_or(0);
         self.config.network_retries = retries[next_idx];
-        self.is_dirty = true;
     }
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {

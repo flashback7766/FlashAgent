@@ -10,14 +10,22 @@
 //!
 //! - is a literal in the sources of the interface,
 //! - has no translation in the table,
-//! - and looks like something a person reads: two words or more, in Latin
-//!   letters, written with a capital, without a hole in it.
+//! - and looks like something a person reads: in Latin letters, without a
+//!   hole in it, and either two words or more, or one word the table of
+//!   translations knows.
 //!
 //! Whether the phrase stands next to a `tr` call does not matter: a call
 //! without a translation in the table shows the English all the same, and
 //! that was the first kind of gap this collector found — a phrase that went
 //! through `tr` and still came out in English, because the table did not
-//! hold it.
+//! hold it. The other way round is a gap as well: a phrase the code asks for
+//! and the table does not hold. Both are looked for here, the second one by
+//! reading the calls and the first one by reading the literals.
+//!
+//! The walk had blind spots of its own, and they are closed: a test module
+//! in the middle of a file no longer hides the interface after it, and a
+//! lifetime (`'a`) is no longer read as a character and swallowed with
+//! everything up to the next quote.
 //!
 //! What is left is either a gap or a phrase that is English on purpose. The
 //! second kind is listed below with the reason, so that a new one has to be
@@ -80,6 +88,7 @@ const ENGLISH_ON_PURPOSE: &[(&str, &str)] = &[
         "a prompt to the model",
     ),
     ("FAIL: no answer within 120s", "the report of the tool test, for the developer who ran it"),
+    ("\nThe tool-calling check is done.", "the report of the tool test, for the developer who ran it"),
     (
         "\nContinue the current task from this summary and the retained messages that follow. If an exact prior message or tool result is needed, read the archive in the session file named below, under its \"archive\" field, subject to normal file permissions. Verify changeable facts before acting.",
         "the model reads it",
@@ -100,6 +109,63 @@ const ENGLISH_ON_PURPOSE: &[(&str, &str)] = &[
     (
         "\nA model that fails these will talk about doing the work instead of doing it.\nYou can re-run this any time with `flashagent --tool-test`, or compare models\nwith `flashagent --tool-test --all-models`.",
         "the report of the tool test, for the developer who ran it",
+    ),
+    // --- The prompts the app sends to the model ---
+    (
+        "Summarize the conversation above for the same assistant to continue the task.",
+        "a prompt to the model",
+    ),
+    (
+        "The summaries above are the parts of one conversation. Write one summary of the whole conversation for the same assistant to continue the task.",
+        "a prompt to the model",
+    ),
+    (
+        "These are the summaries of the parts of one conversation, in order:\n\n",
+        "a prompt to the model",
+    ),
+    (
+        "This is a summary the person asked for: the exact transcript stays in the archive, so keep this readable, but the current task and every instruction that still applies must survive.",
+        "a prompt to the model",
+    ),
+    (
+        "The context window is full and the work is not finished. This summary is the assistant's only memory of what has already happened: keep everything that could matter, with exact paths, commands, line numbers, errors verbatim and results. Length is not the problem here; losing a detail is.",
+        "a prompt to the model",
+    ),
+    (
+        "An earlier summary of what came before this point is already in the system message; fold it in rather than repeating it.\n",
+        "a prompt to the model",
+    ),
+    (
+        "Your previous answer was not accepted: it did not have the required headings. ",
+        "a prompt to the model",
+    ),
+    (
+        "Write the summary again, starting with '## Objective' and using exactly these headings, ",
+        "a prompt to the model",
+    ),
+    (
+        "Output only the summary: no preamble, no apology, nothing about what you were asked.",
+        "a prompt to the model",
+    ),
+    // The headings the summary must have: a contract with the model, and the
+    // model writes them in every summary.
+    ("## Objective\n", "the heading the summary must have, a contract with the model"),
+    ("## Requirements\n", "the heading the summary must have, a contract with the model"),
+    ("## Decisions\n", "the heading the summary must have, a contract with the model"),
+    ("## Work State\n", "the heading the summary must have, a contract with the model"),
+    ("### Completed\n", "the heading the summary must have, a contract with the model"),
+    ("### Active\n", "the heading the summary must have, a contract with the model"),
+    ("### Blocked\n", "the heading the summary must have, a contract with the model"),
+    ("## Next Move\n", "the heading the summary must have, a contract with the model"),
+    ("## Relevant Files\n", "the heading the summary must have, a contract with the model"),
+    ("## Important Context\n", "the heading the summary must have, a contract with the model"),
+    (
+        "Chinese or Japanese, matching the user",
+        "the language named in a prompt to the model",
+    ),
+    (
+        "  \\x1b[38;2;225;175;95mAuto-updater is disabled in dev mode\\x1b[0m (running from source repository / cargo build).\n  To update your dev build, pull latest git commits and run `cargo build --release`.",
+        "the command line is for the person who runs it, in any language",
     ),
 ];
 
@@ -124,23 +190,39 @@ fn sources() -> Vec<PathBuf> {
 /// The table is read with the same walk as the sources, so a phrase that is
 /// written over several lines is the same phrase as one written on one.
 fn table() -> BTreeSet<String> {
+    pairs().into_iter().map(|(en, _)| en).collect()
+}
+
+/// The table as it is written: every pair, in the order it stands.
+///
+/// The pairs are read one after another — the English phrase, then the
+/// Russian one — so a pair that lost its second half shows as a pair that
+/// lost its first, and the guard below catches it.
+fn pairs() -> Vec<(String, String)> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("i18n.rs");
-    let Ok(text) = std::fs::read_to_string(path) else { return BTreeSet::new() };
-    let Some(start) = text.find("&[(&str, &str)] = &[") else { return BTreeSet::new() };
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let Some(start) = text.find("&[(&str, &str)] = &[") else { return Vec::new() };
     let rest = &text[start..];
     let end = rest.find("\n];").unwrap_or(rest.len());
     let body = &rest[..end];
-    let mut out = BTreeSet::new();
     let mut all = literals(body).into_iter();
-    // The pairs come one after another: the English phrase, then the Russian.
-    let mut take_english = true;
-    for (_, phrase) in all.by_ref() {
-        if take_english {
-            out.insert(phrase);
-        }
-        take_english = !take_english;
+    let mut out = Vec::new();
+    while let (Some(en), Some(ru)) = (all.next(), all.next()) {
+        out.push((en.text, ru.text));
     }
     out
+}
+
+/// One literal of a source.
+struct Literal {
+    /// What it says, with the escapes read.
+    text: String,
+    /// The code asked for a translation: the literal is an argument of `tr`
+    /// or of `tr_fill`.
+    ///
+    /// The phrase is looked up in the source that holds it, so the answer is
+    /// the same for every call of the same function.
+    asked: bool,
 }
 
 /// The string literals of a source, with the place they stand at.
@@ -149,7 +231,7 @@ fn table() -> BTreeSet<String> {
 /// strings. A phrase in a comment is not shown to anybody, and a phrase in a
 /// string is. The phrase is given as the text means it: the escapes read,
 /// the line continuations gone.
-fn literals(text: &str) -> Vec<(usize, String)> {
+fn literals(text: &str) -> Vec<Literal> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
     let mut i = 0usize;
@@ -169,13 +251,10 @@ fn literals(text: &str) -> Vec<(usize, String)> {
                 }
                 i = (i + 2).min(bytes.len());
             }
-            // A character literal: a quote, a character, a quote.
+            // A character literal: a quote, a character, a quote. A lifetime
+            // is not one, and reading it as one hides the phrases in between.
             b'\'' => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'\'' {
-                    i += if bytes[i] == b'\\' { 2 } else { 1 };
-                }
-                i = (i + 1).min(bytes.len());
+                i = char_end(text, i);
             }
             b'"' => {
                 // A raw string is skipped whole: it holds code, not words.
@@ -233,13 +312,144 @@ fn literals(text: &str) -> Vec<(usize, String)> {
                 if !closed {
                     break;
                 }
-                out.push((start, unescape(&phrase)));
+                out.push(Literal { text: unescape(&phrase), asked: asks_for_a_translation(text, i) });
                 i = j;
             }
             _ => i += 1,
         }
     }
     out
+}
+
+/// Whether the literal stands where a translation was asked for.
+///
+/// The call is named right before the phrase: `tr("...")`, `tr_fill("...")`,
+/// `i18n::tr("...")`. A literal anywhere else is shown as it is. The name is
+/// read whole: `push_str("...")` ends in `tr(` as well, and it translates
+/// nothing.
+fn asks_for_a_translation(text: &str, quote_at: usize) -> bool {
+    let before = text[..quote_at].trim_end();
+    let Some(open) = before.strip_suffix('(') else { return false };
+    let name: String = open
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+    name == "tr" || name == "tr_fill"
+}
+
+/// The source without its test modules: a phrase in a test never reaches the
+/// screen.
+///
+/// The whole module is taken out, not everything after the first
+/// `#[cfg(test)]`: a file may hold a test module in the middle and the
+/// interface after it, and that part used to go unread.
+fn without_tests(text: &str) -> String {
+    const MARK: &str = "#[cfg(test)]";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(MARK) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + MARK.len()..];
+        let Some(open) = after.find('{') else { break };
+        let Some(len) = block_len(&after[open..]) else { break };
+        rest = &after[open + len..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The end of the character literal or of the lifetime that starts at the
+/// quote.
+///
+/// A lifetime (`'a`, `'static`) is not a character: treating it as one
+/// swallows everything up to the next quote, and the phrases in between go
+/// unread.
+fn char_end(text: &str, quote_at: usize) -> usize {
+    let bytes = text.as_bytes();
+    if let Some(next) = bytes.get(quote_at + 1) {
+        if next.is_ascii_alphabetic() || *next == b'_' {
+            let mut j = quote_at + 1;
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            if bytes.get(j) != Some(&b'\'') {
+                return quote_at + 1;
+            }
+        }
+    }
+    let mut j = quote_at + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\\' => j += 2,
+            b'\'' => return j + 1,
+            _ => j += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// The length of the block that opens at the start of the text.
+///
+/// The braces are counted; the ones inside a string, a character or a comment
+/// are not. The answer is where the block ends, so the code after it can be
+/// read again.
+fn block_len(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+            }
+            b'\'' => {
+                i = char_end(text, i);
+            }
+            b'"' => {
+                i = string_end(text, i);
+            }
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The end of the string literal that starts at the opening quote.
+fn string_end(text: &str, quote_at: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut j = quote_at + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\\' => j += 2,
+            b'"' => return j + 1,
+            _ => j += 1,
+        }
+    }
+    bytes.len()
 }
 
 /// The source text of a literal, with the escapes read as what they mean, so
@@ -342,21 +552,40 @@ fn strip_codes(phrase: &str) -> String {
 }
 
 /// Whether the phrase looks like something a person reads.
-fn looks_like_text(phrase: &str) -> bool {
+///
+/// Two words or more are read when the first letter is a capital one: that
+/// was the old rule, and it kept the names of the code out. Two more kinds
+/// used to slip past it:
+///
+/// - a label that ends with a colon (`find in history:`): the small letter
+///   and the colon are what a label looks like;
+/// - a word the table of translations knows (`used`, `Searched`, `Memory`,
+///   `Editing`, `stopped`): the table holds the words of the interface, so a
+///   word it knows is a word a person reads, and a word it does not know is
+///   a name, a path or a command — `config`, `src/main.rs`, `uvx` — and those
+///   are not something a person reads.
+fn looks_like_text(phrase: &str, table: &BTreeSet<String>) -> bool {
     let plain = strip_codes(phrase);
-    if plain.split_whitespace().count() < 2 {
-        return false;
-    }
     if !plain.is_ascii() {
         return false;
     }
     if plain.contains('{') || plain.contains('}') {
         return false;
     }
-    // The first letter, not the first character: a phrase that starts with
-    // a colour code starts with a backslash.
+    let words = plain.split_whitespace().count();
+    if words == 0 {
+        return false;
+    }
+    if table.contains(&plain) {
+        return true;
+    }
+    if words == 1 {
+        return false;
+    }
+    // The first letter, not the first character: a phrase that starts with a
+    // colour code starts with a backslash.
     let first = plain.chars().find(|c| c.is_alphabetic()).unwrap_or(' ');
-    first.is_ascii_uppercase()
+    first.is_ascii_uppercase() || plain.ends_with(':')
 }
 
 #[test]
@@ -370,21 +599,18 @@ fn every_phrase_the_interface_shows_is_translated() {
         }
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
         // The tests are not the interface.
-        let body = match text.find("#[cfg(test)]") {
-            Some(at) => &text[..at],
-            None => &text[..],
-        };
-        for (_, phrase) in literals(body) {
-            if !looks_like_text(&phrase) {
+        let body = without_tests(&text);
+        for literal in literals(&body) {
+            if !looks_like_text(&literal.text, &table) {
                 continue;
             }
-            if table.contains(&phrase) {
+            if table.contains(&literal.text) {
                 continue;
             }
-            if ENGLISH_ON_PURPOSE.iter().any(|(p, _)| *p == phrase) {
+            if ENGLISH_ON_PURPOSE.iter().any(|(p, _)| *p == literal.text) {
                 continue;
             }
-            untranslated.push(format!("{name}: {phrase:?}"));
+            untranslated.push(format!("{name}: {:?}", literal.text));
         }
     }
     untranslated.sort();
@@ -394,6 +620,96 @@ fn every_phrase_the_interface_shows_is_translated() {
         "these phrases reach the screen in English only:\n{}",
         untranslated.join("\n")
     );
+}
+
+/// The other kind of gap: the code asked for a translation and the table did
+/// not hold the phrase.
+///
+/// The phrase goes through `tr` and comes out in English all the same, in the
+/// middle of a Russian screen. It is not found by looking the table up — the
+/// table has no such entry — but by walking the sources.
+#[test]
+fn every_phrase_the_code_asks_for_is_in_the_table() {
+    let table = table();
+    let mut missing: Vec<String> = Vec::new();
+    for path in sources() {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        if name == "i18n.rs" || name == "untranslated.rs" {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let body = without_tests(&text);
+        for literal in literals(&body) {
+            if !literal.asked {
+                continue;
+            }
+            if table.contains(&literal.text) {
+                continue;
+            }
+            if ENGLISH_ON_PURPOSE.iter().any(|(p, _)| *p == literal.text) {
+                continue;
+            }
+            missing.push(format!("{name}: {:?}", literal.text));
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    assert!(
+        missing.is_empty(),
+        "these phrases are asked for and the table does not hold them:\n{}",
+        missing.join("\n")
+    );
+}
+
+/// The table of translations is read by the walk, and the walk takes the first
+/// column of every pair as the English one.
+///
+/// Were the columns ever swapped, the collector would look for Russian in the
+/// sources, find nothing, and the test above would pass in vain. So the
+/// table is checked: it is not empty, its second column is Russian, and its
+/// first column holds a phrase the sources use.
+#[test]
+fn the_table_is_read_as_it_is_written() {
+    let pairs = pairs();
+    assert!(pairs.len() > 100, "the table of translations was not read: {} pairs", pairs.len());
+    assert!(
+        pairs.iter().any(|(_, ru)| !ru.is_ascii()),
+        "not one pair in the table has a Russian translation: the columns are swapped"
+    );
+    let in_sources: BTreeSet<String> = sources()
+        .into_iter()
+        .filter(|path| {
+            !matches!(path.file_name().and_then(|n| n.to_str()), Some("i18n.rs") | Some("untranslated.rs"))
+        })
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .flat_map(|text| literals(&text).into_iter().map(|l| l.text))
+        .collect();
+    assert!(
+        pairs.iter().any(|(en, _)| in_sources.contains(en)),
+        "not one phrase of the table is used in the sources: the columns are swapped"
+    );
+}
+
+/// The collector has to see the phrases of the interface. Were the walk to
+/// stop early, it would find nothing and the test above would pass on
+/// emptiness.
+#[test]
+fn the_collector_sees_the_phrases_of_the_interface() {
+    let table = table();
+    let sample = "A phrase the collector has never seen";
+    assert!(looks_like_text(sample, &table));
+    assert!(!table.contains(sample));
+    // The words the collector used to look past.
+    for phrase in ["used", "Searched", "Memory", "Editing", "stopped"] {
+        assert!(table.contains(phrase), "{phrase:?} is not in the table");
+        assert!(looks_like_text(phrase, &table), "{phrase:?} is not read");
+    }
+    assert!(looks_like_text("find in history:", &table));
+    assert!(looks_like_text("no match", &table));
+    // The names of the code are not phrases.
+    for phrase in ["config", "src/main.rs", "uvx", "run_shell"] {
+        assert!(!looks_like_text(phrase, &table), "{phrase:?} is read as if it were a phrase");
+    }
 }
 
 #[test]
@@ -409,8 +725,8 @@ fn the_allowlist_is_not_lying() {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        for (_, phrase) in literals(&text) {
-            in_sources.insert(phrase);
+        for literal in literals(&text) {
+            in_sources.insert(literal.text);
         }
     }
     let mut stale: Vec<&str> = Vec::new();

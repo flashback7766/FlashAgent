@@ -24,11 +24,11 @@ pub fn busy() -> &'static str {
 /// Where a provider's key comes from, never the key.
 pub fn key_status(profile: &ProviderProfile) -> String {
     match profile.key_source() {
-        KeySource::Saved => "key saved".to_string(),
-        KeySource::Env(var) => format!("key from {var}"),
+        KeySource::Saved => crate::i18n::tr("key saved").to_string(),
+        KeySource::Env(var) => crate::i18n::tr_fill("key from {var}", &[("var", var)]),
         KeySource::None => match profile.key_env().first() {
-            Some(var) => format!("no key yet ({var})"),
-            None => "no key".to_string(),
+            Some(var) => crate::i18n::tr_fill("no key yet ({var})", &[("var", var)]),
+            None => crate::i18n::tr("no key").to_string(),
         },
     }
 }
@@ -50,11 +50,15 @@ pub fn provider_menu(config: &AppConfig) -> SelectMenu<String> {
     let in_use = config.active_profile();
     let mut items = Vec::new();
     if let Some(run) = &config.run_provider {
-        items.push(SelectItem::with_description(format!("\u{25cf} {}  (--url, this run only)", run.name), describe(run), THIS_RUN.to_string()));
+        items.push(SelectItem::with_description(
+            format!("\u{25cf} {}  {}", run.name, crate::i18n::tr("(--url, this run only)")),
+            describe(run),
+            THIS_RUN.to_string(),
+        ));
     }
     for p in &config.providers {
         let label = if config.run_provider.is_none() && p.name == in_use.name {
-            format!("\u{25cf} {}  (in use)", p.name)
+            format!("\u{25cf} {}  {}", p.name, crate::i18n::tr("(in use)"))
         } else {
             format!("\u{25cb} {}", p.name)
         };
@@ -136,6 +140,28 @@ pub fn offered_models(disc: &ServerDiscovery) -> Vec<String> {
     disc.models.iter().filter(|m| !(lm_studio && any_loaded) || m.is_loaded).map(|m| m.id.clone()).collect()
 }
 
+/// The name the server gave a model, when it gave one that says something the
+/// id does not: an empty name and a name that only repeats the id are both no
+/// news, and the list of models shows the id anyway.
+pub fn model_display_name(model: &flashagent_llm::DiscoveredModel) -> Option<&str> {
+    model
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(model.id.trim()))
+}
+
+/// The line under a model in the list of models: the name the server gave it
+/// and what the model can do. The name the server gave is what it calls the
+/// model, and the owner has never seen it anywhere else.
+pub fn model_detail(model: &flashagent_llm::DiscoveredModel) -> String {
+    let capabilities = model.capabilities_summary();
+    let Some(name) = model_display_name(model) else { return capabilities };
+    // The summary leads with the name; the list says it once, on its own.
+    let rest = capabilities.split(" \u{b7} ").filter(|part| *part != name).collect::<Vec<_>>().join(" \u{b7} ");
+    if rest.is_empty() { name.to_string() } else { format!("{name} \u{b7} {rest}") }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvidersAction {
     None,
@@ -165,6 +191,19 @@ const FIELDS_WITH_CONTEXT: [Field; 7] = [Field::Name, Field::Protocol, Field::Ad
 
 fn fields(profile: &ProviderProfile) -> &'static [Field] {
     if profile.protocol == ApiProtocol::Ollama { &FIELDS_WITH_CONTEXT } else { &FIELDS }
+}
+
+/// The name of a field, in the language of the interface.
+fn field_label(field: Field) -> &'static str {
+    crate::i18n::tr(match field {
+        Field::Name => "Name",
+        Field::Protocol => "Protocol",
+        Field::Address => "Address",
+        Field::Key => "API key",
+        Field::Model => "Model",
+        Field::Context => "Context",
+        Field::Save => "",
+    })
 }
 
 /// "32768", "32k", "128K" or "1m"; `None` for empty (FlashAgent's choice) or nonsense.
@@ -237,7 +276,7 @@ impl ProvidersView {
         self.form = None;
         self.refresh(config);
         self.selected = self.profiles.iter().position(|p| p.name == name).unwrap_or(self.selected);
-        self.status = Some(format!("Saved {name}"));
+        self.status = Some(crate::i18n::tr_fill("Saved {name}", &[("name", name)]));
     }
 
     /// The edit stays open to be put right.
@@ -304,9 +343,15 @@ impl ProvidersView {
     fn ask_delete(&mut self) {
         let Some(p) = self.selected_profile() else { return };
         if p.name == self.active {
-            self.status = Some(format!("{} is in use; switch to another provider before deleting it", p.name));
+            self.status = Some(crate::i18n::tr_fill(
+                "{name} is in use; switch to another provider before deleting it",
+                &[("name", &p.name)],
+            ));
         } else {
-            self.status = Some(format!("Delete {}? Enter deletes it, any other key keeps it", p.name));
+            self.status = Some(crate::i18n::tr_fill(
+                "Delete {name}? Enter deletes it, any other key keeps it",
+                &[("name", &p.name)],
+            ));
             self.confirm_delete = true;
         }
     }
@@ -388,8 +433,8 @@ impl ProvidersView {
             format!("  {border}\u{2502}{OFF} {clipped}{pad} {border}\u{2502}{OFF}")
         };
         let title = match &self.form {
-            Some(f) => format!(" {GOLD}Edit provider{OFF} {DIM}{}{OFF} ", f.original),
-            None => format!(" {GOLD}Providers{OFF} {DIM}({}){OFF} ", self.profiles.len()),
+            Some(f) => format!(" {GOLD}{}{OFF} {DIM}{}{OFF} ", crate::i18n::tr("Edit provider"), f.original),
+            None => format!(" {GOLD}{}{OFF} {DIM}({}){OFF} ", crate::i18n::tr("Providers"), self.profiles.len()),
         };
         let title = crate::tool_views::clip_ellipsis(&title, box_w.saturating_sub(2));
         let dashes = box_w.saturating_sub(crate::visible_width(&title) + 1);
@@ -398,7 +443,15 @@ impl ProvidersView {
 
         let hints: Vec<(&str, &str)> = match &self.form {
             Some(form) => {
-                let label_w = 10;
+                // The labels are a column of their own: the width comes from
+                // the longest of them, so the values line up whatever the
+                // language calls them.
+                let label_w = fields(&form.draft)
+                    .iter()
+                    .map(|f| crate::visible_width(field_label(*f)))
+                    .max()
+                    .unwrap_or(10)
+                    .max(8);
                 for (i, field) in fields(&form.draft).iter().enumerate() {
                     let current = i == form.row;
                     let ptr = if current { format!("{GOLD}\u{25b8}{OFF}") } else { " ".to_string() };
@@ -414,18 +467,20 @@ impl ProvidersView {
                         (Field::Protocol, None) => format!("{}  {DIM}\u{2190}/\u{2192}{OFF}", form.draft.protocol.label()),
                         (Field::Address, None) => form.draft.url.clone(),
                         (Field::Key, None) => match &form.draft.api_key {
-                            Some(key) => format!("{} {DIM}(saved){OFF}", crate::wizard::mask_api_key(key)),
+                            Some(key) => format!("{} {DIM}({}){OFF}", crate::wizard::mask_api_key(key), crate::i18n::tr("saved")),
                             None => {
                                 let mut keyless = form.draft.clone();
                                 keyless.api_key = None;
                                 format!("{DIM}{}{OFF}", key_status(&keyless))
                             }
                         },
-                        (Field::Model, None) if form.draft.model.is_empty() => format!("{DIM}the one the server has loaded{OFF}"),
+                        (Field::Model, None) if form.draft.model.is_empty() => {
+                            format!("{DIM}{}{OFF}", crate::i18n::tr("the one the server has loaded"))
+                        }
                         (Field::Model, None) => form.draft.model.clone(),
                         (Field::Context, None) => match form.draft.context_window {
-                            Some(n) => format!("{n} tokens"),
-                            None => format!("{DIM}chosen for the model (32k unless loaded larger){OFF}"),
+                            Some(n) => crate::i18n::tr_fill("{n} tokens", &[("n", &n.to_string())]),
+                            None => format!("{DIM}{}{OFF}", crate::i18n::tr("chosen for the model (32k unless loaded larger)")),
                         },
                         (Field::Save, _) => String::new(),
                     };
@@ -433,20 +488,14 @@ impl ProvidersView {
                         Field::Save => {
                             push(pad_row(""));
                             let style = if current { GOLD } else { TEXT };
-                            format!("{ptr} {style}[ Save ]{OFF}")
+                            format!("{ptr} {style}[ {} ]{OFF}", crate::i18n::tr("Save"))
                         }
                         _ => {
-                            let label = match field {
-                                Field::Name => "Name",
-                                Field::Protocol => "Protocol",
-                                Field::Address => "Address",
-                                Field::Key => "API key",
-                                Field::Model => "Model",
-                                Field::Context => "Context",
-                                Field::Save => "",
-                            };
+                            let label = field_label(*field);
                             let label_style = if current { BRIGHT } else { DIM };
-                            format!("{ptr} {label_style}{label:<label_w$}{OFF} {TEXT}{value}{OFF}")
+                            // Padded by cells: a wide character takes two.
+                            let pad = " ".repeat(label_w.saturating_sub(crate::visible_width(label)));
+                            format!("{ptr} {label_style}{label}{pad}{OFF} {TEXT}{value}{OFF}")
                         }
                     };
                     push(pad_row(&row));
@@ -462,7 +511,7 @@ impl ProvidersView {
                 let rows = self.profiles.len() + 1;
                 let start = (self.selected + 1).saturating_sub(LIST_WINDOW).min(rows.saturating_sub(LIST_WINDOW));
                 if start > 0 {
-                    push(pad_row(&format!("  {DIM}\u{25b2} {start} more above{OFF}")));
+                    push(pad_row(&format!("  {DIM}\u{25b2} {}{OFF}", crate::i18n::tr_fill("{n} more above", &[("n", &start.to_string())]))));
                 }
                 for i in start..(start + LIST_WINDOW).min(rows) {
                     let current = i == self.selected;
@@ -472,18 +521,21 @@ impl ProvidersView {
                             let in_use = p.name == self.active;
                             let mark = if in_use { format!("{GOLD}\u{25cf}{OFF}") } else { format!("{DIM}\u{25cb}{OFF}") };
                             let name_style = if current { BRIGHT } else { TEXT };
-                            let tag = if in_use { "in use \u{b7} " } else { "" };
+                            let tag = if in_use { format!("{} \u{b7} ", crate::i18n::tr("in use")) } else { String::new() };
                             push(pad_row(&format!("{cursor} {mark} {name_style}{}{OFF}  {DIM}{tag}{}{OFF}", p.name, key_status(p))));
                             push(pad_row(&format!("      {DIM}{}{OFF}", describe(p))));
                         }
                         None => {
                             let style = if current { BRIGHT } else { TEXT };
-                            push(pad_row(&format!("{cursor} {style}+ Add a provider{OFF}")));
+                            push(pad_row(&format!("{cursor} {style}{}{OFF}", crate::i18n::tr("+ Add a provider"))));
                         }
                     }
                 }
                 if start + LIST_WINDOW < rows {
-                    push(pad_row(&format!("  {DIM}\u{25bc} {} more below{OFF}", rows - start - LIST_WINDOW)));
+                    push(pad_row(&format!(
+                        "  {DIM}\u{25bc} {}{OFF}",
+                        crate::i18n::tr_fill("{n} more below", &[("n", &(rows - start - LIST_WINDOW).to_string())])
+                    )));
                 }
                 if self.confirm_delete {
                     vec![("Enter", "delete"), ("Esc", "keep it")]
@@ -648,6 +700,41 @@ mod tests {
         assert_eq!(offered_models(&disc), ["loaded"]);
         disc.models[0].is_loaded = false;
         assert_eq!(offered_models(&disc), ["loaded", "on-disk"], "nothing loaded: all of them");
+    }
+
+    #[test]
+    fn the_editor_says_its_labels_in_the_language_of_the_interface() {
+        let cfg = config();
+        let mut view = ProvidersView::new(&cfg);
+        view.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+        let shown = text(&view.render(100));
+        for label in ["Name", "Protocol", "Address", "API key", "Model"] {
+            assert!(shown.contains(crate::i18n::tr(label)), "{label} is not in the editor: {shown}");
+        }
+        assert!(shown.contains(crate::i18n::tr("Save")), "the button is there: {shown}");
+    }
+
+    #[test]
+    fn the_name_the_server_gave_a_model_is_shown_beside_its_id() {
+        let mut named = model("models/gemini-3-flash", true);
+        named.display_name = Some("Gemini 3 Flash".into());
+        assert_eq!(model_display_name(&named), Some("Gemini 3 Flash"), "the name the server gave");
+        assert_eq!(model_detail(&named), "Gemini 3 Flash · 8k ctx · tools", "the name comes first, once");
+
+        // A name that says nothing new is not repeated.
+        let same = DiscoveredModel { display_name: Some("models/gemini-3-flash".into()), ..named.clone() };
+        assert_eq!(model_display_name(&same), None, "the id is already on the row");
+        assert_eq!(model_detail(&same), "models/gemini-3-flash · 8k ctx · tools", "the name is not said twice");
+
+        // No name at all: the list says what the model can do.
+        let plain = model("qwen3-coder", false);
+        assert_eq!(model_display_name(&plain), None);
+        assert_eq!(model_detail(&plain), "8k ctx · tools");
+
+        // An empty name is no name.
+        let empty = DiscoveredModel { display_name: Some("   ".into()), ..plain.clone() };
+        assert_eq!(model_display_name(&empty), None);
+        assert_eq!(model_detail(&empty), "8k ctx · tools");
     }
 
     #[test]

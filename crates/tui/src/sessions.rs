@@ -197,7 +197,9 @@ pub(crate) fn save_session_in(
     archive: &[ChatMessage],
     turn_in_flight: bool,
 ) -> Result<std::path::PathBuf, String> {
-    std::fs::create_dir_all(base_dir).map_err(|e| format!("cannot create {}: {e}", base_dir.display()))?;
+    std::fs::create_dir_all(base_dir).map_err(|e| {
+        tr_fill("cannot create {path}: {e}", &[("path", &base_dir.display().to_string()), ("e", &e.to_string())])
+    })?;
     // The folder holds conversations: only the user should see what is in it.
     #[cfg(unix)]
     {
@@ -217,13 +219,14 @@ pub(crate) fn save_session_in(
         archive: archive.iter().map(SavedMessage::from).collect(),
         turn_in_flight,
     };
-    let data = serde_json::to_string_pretty(&saved).map_err(|e| format!("cannot encode the session: {e}"))?;
+    let data = serde_json::to_string_pretty(&saved)
+        .map_err(|e| tr_fill("cannot encode the session: {e}", &[("e", &e.to_string())]))?;
     // The pid keeps two instances saving the same id from sharing a temp file.
     let tmp = base_dir.join(format!(".{session_id}.{}.tmp", std::process::id()));
     let written = write_private(&tmp, data.as_bytes());
     if let Err(e) = written.and_then(|_| std::fs::rename(&tmp, &path)) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(format!("cannot write {}: {e}", path.display()));
+        return Err(tr_fill("cannot write {path}: {e}", &[("path", &path.display().to_string()), ("e", &e.to_string())]));
     }
     // The rename itself is only durable once the folder says so: a crash after
     // it but before this can leave the previous save in place, which is how a
@@ -233,22 +236,9 @@ pub(crate) fn save_session_in(
 }
 
 /// With the mode set at creation: a session holds the whole conversation,
-/// including whatever the user pasted into it.
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    #[cfg(unix)]
-    let mut options = {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut o = std::fs::OpenOptions::new();
-        o.write(true).create(true).truncate(true).mode(0o600);
-        o
-    };
-    #[cfg(not(unix))]
-    let mut options = std::fs::OpenOptions::new();
-    let mut f = options.write(true).create(true).truncate(true).open(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()
-}
+/// including whatever the user pasted into it. The same helper writes the
+/// config, so the two cannot drift apart.
+use flashagent_core::paths::write_private;
 
 #[cfg(unix)]
 fn sync_dir(dir: &std::path::Path) {
@@ -269,11 +259,14 @@ pub(crate) fn save_on_exit(session_id: &str, model: &str, cwd: &str, history: &[
     };
     let spare = std::env::temp_dir().join("flashagent-unsaved");
     match save_session_in(&spare, session_id, model, cwd, history, &[], false) {
-        Ok(path) => Err(format!(
-            "{why}.\nA copy was written to {} — move it into ~/.flashagent/sessions/ to resume it.",
-            path.display()
+        Ok(path) => Err(tr_fill(
+            "{why}.\nA copy was written to {path} — move it into ~/.flashagent/sessions/ to resume it.",
+            &[("why", &why), ("path", &path.display().to_string())],
         )),
-        Err(also) => Err(format!("{why}; the spare copy failed too: {also}")),
+        Err(also) => Err(tr_fill(
+            "{why}; the spare copy failed too: {also}",
+            &[("why", &why), ("also", &also)],
+        )),
     }
 }
 
@@ -321,11 +314,11 @@ fn unused_session_id(dir: Option<&std::path::Path>, ts: u64, pid: u32) -> String
 pub(crate) fn ago(timestamp: u64, now: u64) -> String {
     let secs = now.saturating_sub(timestamp);
     match secs {
-        0..=59 => "just now".to_string(),
-        60..=3599 => format!("{} min ago", secs / 60),
-        3600..=86_399 => format!("{} h ago", secs / 3600),
-        86_400..=172_799 => "yesterday".to_string(),
-        _ => format!("{} days ago", secs / 86_400),
+        0..=59 => tr("just now").to_string(),
+        60..=3599 => tr_fill("{n} min ago", &[("n", &(secs / 60).to_string())]),
+        3600..=86_399 => tr_fill("{n} h ago", &[("n", &(secs / 3600).to_string())]),
+        86_400..=172_799 => tr("yesterday").to_string(),
+        _ => tr_fill("{n} days ago", &[("n", &(secs / 86_400).to_string())]),
     }
 }
 
@@ -340,7 +333,10 @@ impl App {
         let model = self.current_model.clone();
         let err = save_session_file(session_id, &model, cwd_display, &self.history, &self.archive).err();
         if let Some(why) = err {
-            self.notice(format!("Session not saved: {why} · retrying after the next turn and on exit"));
+            self.notice(tr_fill(
+                "Session not saved: {why} · retrying after the next turn and on exit",
+                &[("why", &why)],
+            ));
         }
         self.last_autosave = Some(std::time::Instant::now());
     }
@@ -372,7 +368,10 @@ impl App {
         // knows not to read it as the conclusion.
         let err = save_session_file_marked(cx.session_id, &model, cx.cwd_display, &snapshot, &self.archive, true).err();
         if let Some(why) = err {
-            self.notice(format!("Session not saved: {why} · retrying after the next turn and on exit"));
+            self.notice(tr_fill(
+                "Session not saved: {why} · retrying after the next turn and on exit",
+                &[("why", &why)],
+            ));
         }
         self.last_autosave = Some(std::time::Instant::now());
     }
@@ -404,7 +403,10 @@ impl App {
         if self.config.auto_save_sessions && worth_saving(&self.history) {
             if let Err(why) = save_session_file(current, &self.current_model, &self.cwd_display, &self.history, &self.archive) {
                 // Switching away would drop the only copy, the one in memory.
-                self.notice(format!("Not switching: this session could not be saved ({why})"));
+                self.notice(tr_fill(
+                    "Not switching: this session could not be saved ({why})",
+                    &[("why", &why)],
+                ));
                 return false;
             }
         }
@@ -454,7 +456,17 @@ impl App {
             .filter(|s| s.id != current_session || !worth_saving(&self.history))
             .map(|s| {
                 let title = if s.title.is_empty() { flashagent_tui::i18n::tr("(no prompt)").to_string() } else { s.title };
-                SelectItem::with_description(title, format!("{} · {} messages", ago(s.timestamp, now), s.messages), s.id)
+                // The count with its word: English has two forms, Russian three,
+                // and the word follows the number in both.
+                let messages = flashagent_tui::i18n::plural(
+                    s.messages,
+                    "message",
+                    "messages",
+                    "сообщение",
+                    "сообщения",
+                    "сообщений",
+                );
+                SelectItem::with_description(title, format!("{} · {messages}", ago(s.timestamp, now)), s.id)
                     .with_search_text(s.text)
             })
             .collect();
@@ -517,13 +529,16 @@ pub(crate) fn sessions_in(dir: &std::path::Path, cwd: &str) -> Vec<SessionSummar
 /// `--resume ../../somewhere` must not read outside `dir`.
 pub(crate) fn read_session(dir: &std::path::Path, id: &str) -> Result<SavedSession, String> {
     if !is_session_id(id) {
-        return Err(format!("'{id}' is not a session id; starting a new session."));
+        return Err(tr_fill("'{id}' is not a session id; starting a new session.", &[("id", id)]));
     }
     let path = dir.join(format!("{id}.json"));
     let content = std::fs::read_to_string(&path)
-        .map_err(|_| format!("No saved session '{id}' in ~/.flashagent/sessions; starting fresh."))?;
+        .map_err(|_| tr_fill("No saved session '{id}' in ~/.flashagent/sessions; starting fresh.", &[("id", id)]))?;
     serde_json::from_str(&content).map_err(|_| {
-        format!("Session '{id}' is unreadable, so a new session starts; the file is left as it was: {}", path.display())
+        tr_fill(
+            "Session '{id}' is unreadable, so a new session starts; the file is left as it was: {path}",
+            &[("id", id), ("path", &path.display().to_string())],
+        )
     })
 }
 
@@ -602,12 +617,13 @@ pub(crate) fn restore_session(
                     // The context line of the saved one is left out: the live
                     // one counts, and two of them would say two different
                     // things about the same window.
-                    let carried = carried
-                        .split(crate::App::CONTEXT_LINE_MARK)
-                        .next()
-                        .unwrap_or(carried.as_str())
-                        .trim_end()
-                        .to_string();
+                    let carried = carried.split(crate::App::CONTEXT_LINE_MARK).next().unwrap_or(carried.as_str());
+                    // Only the summary travels: the archive marker, the path to
+                    // the archive and the card's token counts are the reader's,
+                    // and the model read them as instructions of its own.
+                    let carried = carried.split(ARCHIVE_MARK).next().unwrap_or(carried);
+                    let carried = carried.split(crate::compact::COMPACTION_STATS_MARK).next().unwrap_or(carried);
+                    let carried = carried.trim_end().to_string();
                     let block = format!("{COMPACTED_MARK}{carried}");
                     // The summary goes before the live context line, not after
                     // it: the first turn rewrites that line and truncates from

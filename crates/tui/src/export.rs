@@ -30,14 +30,21 @@ pub(crate) fn conversation_markdown(history: &[ChatMessage], session_id: &str, m
                     md.push_str("\n\n");
                 }
                 if !m.images.is_empty() {
-                    let n = m.images.len();
-                    md.push_str(&format!("*[{n} image{} attached]*\n\n", if n == 1 { "" } else { "s" }));
+                    let images = flashagent_tui::i18n::plural(
+                        m.images.len(),
+                        "image",
+                        "images",
+                        "картинка",
+                        "картинки",
+                        "картинок",
+                    );
+                    md.push_str(&format!("*[{images} attached]*\n\n"));
                 }
                 md.push_str("## FlashAgent\n\n");
             }
             flashagent_llm::Role::Assistant => {
                 if let Some(thinking) = m.reasoning.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
-                    md.push_str(&details("Thinking", thinking));
+                    md.push_str(&details(flashagent_tui::i18n::tr("Thinking"), thinking));
                 }
                 if !m.content.trim().is_empty() {
                     md.push_str(m.content.trim());
@@ -48,10 +55,18 @@ pub(crate) fn conversation_markdown(history: &[ChatMessage], session_id: &str, m
                 }
             }
             flashagent_llm::Role::Tool => {
-                let name = m.tool_call_id.as_deref().and_then(|id| tool_names.get(id)).copied().unwrap_or("tool");
+                let name = m
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(|id| tool_names.get(id))
+                    .copied()
+                    .unwrap_or_else(|| flashagent_tui::i18n::tr("tool"));
                 let mut result: String = m.content.chars().take(RESULT_CHARS).collect();
                 if m.content.chars().count() > RESULT_CHARS {
-                    result.push_str("\n… (cut here; the session file has all of it)");
+                    result.push_str(&format!(
+                        "\n{}",
+                        flashagent_tui::i18n::tr("… (cut here; the session file has all of it)")
+                    ));
                 }
                 md.push_str(&details(&format!("`{name}`"), &fenced(&result)));
             }
