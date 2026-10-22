@@ -313,23 +313,41 @@ impl Drop for TreeGuard {
 
 /// Bounded: a backgrounded grandchild (`server &`) inherits the pipes and can
 /// hold them open forever.
-async fn drain_pumps(p1: tokio::task::JoinHandle<()>, p2: tokio::task::JoinHandle<()>) -> bool {
-    tokio::time::timeout(Duration::from_millis(500), async {
-        let _ = tokio::join!(p1, p2);
+///
+/// A pump that is still running when the wait is over is stopped: it would
+/// otherwise live on for the rest of the session, holding the pipe and the
+/// buffer it writes into.
+async fn drain_pumps(p1: &mut tokio::task::JoinHandle<()>, p2: &mut tokio::task::JoinHandle<()>) -> bool {
+    let finished = tokio::time::timeout(Duration::from_millis(500), async {
+        let _ = tokio::join!(&mut *p1, &mut *p2);
     })
     .await
-    .is_ok()
+    .is_ok();
+    if !finished {
+        p1.abort();
+        p2.abort();
+    }
+    finished
 }
 
 /// A non-zero exit is an error whose text still carries the output.
-pub async fn run_foreground(cmd: &str, timeout: Duration) -> Result<String, ToolError> {
+///
+/// Only the tests use it: the application runs its commands through
+/// [`ShellRegistry::run_foreground`], which runs them in the session's own
+/// folder.
+#[cfg(test)]
+pub(crate) async fn run_foreground(cmd: &str, timeout: Duration) -> Result<String, ToolError> {
     let cwd = std::env::current_dir().unwrap_or_default();
     run_in(&cwd, cmd, timeout, None).await
 }
 
-/// As [`run_foreground`], in a directory the caller chose.
-pub async fn run_foreground_in(cwd: &std::path::Path, cmd: &str, timeout: Duration) -> Result<String, ToolError> {
-    run_in(cwd, cmd, timeout, None).await
+/// How long a timeout is, as it is said to the model: `150ms`, `30s`.
+fn timeout_label(timeout: Duration) -> String {
+    if timeout.as_secs() == 0 {
+        format!("{}ms", timeout.as_millis())
+    } else {
+        format!("{}s", timeout.as_secs())
+    }
 }
 
 /// Resolves when the user asks to move the command to the background; never
@@ -350,8 +368,8 @@ async fn run_in(cwd: &std::path::Path, cmd: &str, timeout: Duration, registry: O
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let buffer = Arc::new(Mutex::new(String::new()));
-    let p1 = tokio::spawn(pump(stdout, buffer.clone()));
-    let p2 = tokio::spawn(pump(stderr, buffer.clone()));
+    let mut p1 = tokio::spawn(pump(stdout, buffer.clone()));
+    let mut p2 = tokio::spawn(pump(stderr, buffer.clone()));
     let mut guard = TreeGuard(Some(child));
     let mut slot = registry.map(ShellRegistry::foreground_slot);
 
@@ -394,24 +412,33 @@ async fn run_in(cwd: &std::path::Path, cmd: &str, timeout: Duration, registry: O
                 kill_tree(&mut child);
                 let _ = child.wait().await;
             }
-            drain_pumps(p1, p2).await;
+            drain_pumps(&mut p1, &mut p2).await;
             let out = buffer.lock();
             let out = tail_noted(&out, 4000);
             return Err(ToolError::Other(format!(
-                "timeout after {}s, process killed; it may have done part of its work, so check what it changed before running it again. partial output:\n{}",
-                timeout.as_secs(),
+                "timeout after {}, process killed; it may have done part of its work, so check what it changed before running it again. partial output:\n{}",
+                timeout_label(timeout),
                 if out.trim().is_empty() { "(no output)" } else { &out }
             )));
         }
     };
 
-    let complete = drain_pumps(p1, p2).await;
+    let complete = drain_pumps(&mut p1, &mut p2).await;
     let out = buffer.lock();
     let out = tail_noted(&out, 16_000);
-    let out = if out.trim().is_empty() { "(no output)" } else { &out };
+    // A search that matched nothing exits 1 and prints nothing: `grep`, `rg`
+    // and the diff tools all report "no matches" that way. An agent reading it
+    // as a failure cannot tell that apart from a tool that broke, and answers
+    // such a call by retrying or by asking the user. Exit 1 with nothing to say
+    // is an answer, not an error.
+    let silence = out.trim().is_empty();
+    let out = if silence { "(no output)" } else { &out };
     let note = if complete { "" } else { "\n[a background process still holds the output pipe; later output is not captured]" };
-    if status.success() {
-        Ok(format!("exit code: 0\noutput:\n{out}{note}"))
+    if status.success() || (silence && status.code() == Some(1)) {
+        // The real code either way: this project has been bitten by a status
+        // line showing a number that was not true, and "not an error" has to be
+        // said without inventing a 0.
+        Ok(format!("exit code: {}\noutput:\n{out}{note}", status.code().unwrap_or(0)))
     } else {
         Err(ToolError::Other(format!(
             "exit code: {}\noutput:\n{out}{note}",
@@ -633,8 +660,8 @@ async fn watch(shared: Arc<Shared>, id: u32, child: Child, stop: oneshot::Receiv
         None => return,
     };
     guard.0 = None;
-    let [p1, p2] = pumps;
-    drain_pumps(p1, p2).await;
+    let [mut p1, mut p2] = pumps;
+    drain_pumps(&mut p1, &mut p2).await;
     let notice = {
         let mut tasks = shared.tasks.lock();
         let Some(task) = tasks.get_mut(&id) else { return };
@@ -981,11 +1008,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_search_that_matched_nothing_is_an_answer_not_a_failure() {
+        // `grep` exits 1 on no match and says nothing else. Read as a tool that
+        // broke, an agent either retries the same search or hands the question
+        // back to the user instead of saying the file is not there.
+        #[cfg(windows)]
+        let cmd = "exit 1";
+        #[cfg(not(windows))]
+        let cmd = "printf 'a\\n' | grep -q zzz-not-there";
+        let out = run_foreground(cmd, Duration::from_secs(10)).await.unwrap();
+        assert!(out.contains("(no output)"), "{out}");
+        // The code stays what it was: "not an error" must not be told as a 0.
+        assert!(out.contains("exit code: 1"), "{out}");
+    }
+
+    #[tokio::test]
     async fn timeout_kills_process() {
         let err = run_foreground("sleep 5", Duration::from_millis(150)).await.unwrap_err();
-        assert!(err.to_string().contains("timeout after 0s"));
+        assert!(err.to_string().contains("timeout after 150ms"), "{err}");
         // It may have changed something before it was killed.
         assert!(err.to_string().contains("check what it changed"));
+    }
+
+    /// A timeout shorter than a second is said in milliseconds: "timeout after
+    /// 0s" says nothing about how long the command was given.
+    #[tokio::test]
+    async fn a_short_timeout_is_said_in_milliseconds() {
+        let err = run_foreground("sleep 5", Duration::from_millis(150)).await.unwrap_err();
+        assert!(err.to_string().contains("timeout after 150ms"), "{err}");
+        assert!(!err.to_string().contains("timeout after 0s"), "{err}");
+    }
+
+    /// A pump that is still running when the wait is over is stopped: it would
+    /// otherwise live on for the rest of the session, holding the pipe and the
+    /// buffer it writes into.
+    #[tokio::test]
+    async fn a_pump_that_will_not_finish_is_stopped() {
+        // A stream that never ends: the other end is kept and nothing is
+        // written, so the read waits for ever.
+        let (stream, _held) = tokio::io::duplex(64);
+        let buffer = Arc::new(Mutex::new(String::new()));
+        let mut p1 = tokio::spawn(pump(Some(stream), buffer.clone()));
+        let (stream2, _held2) = tokio::io::duplex(64);
+        let mut p2 = tokio::spawn(pump(Some(stream2), buffer.clone()));
+        let finished = super::drain_pumps(&mut p1, &mut p2).await;
+        assert!(!finished, "the pumps were reported as finished");
+        // Stopping a task is a request: it ends at the next await point.
+        assert!((&mut p1).await.is_err(), "the pump was not stopped");
+        assert!((&mut p2).await.is_err(), "the pump was not stopped");
+        assert!(p1.is_finished(), "the pump is still running and holds the pipe");
+        assert!(p2.is_finished(), "the pump is still running and holds the pipe");
     }
 
     #[cfg(unix)]

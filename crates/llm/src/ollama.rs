@@ -106,6 +106,9 @@ fn body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: 
     set("presence_penalty", options.presence_penalty.map(Value::from));
     set("min_p", options.min_p.map(Value::from));
     set("num_predict", options.max_tokens.map(Value::from));
+    // The seed of the sampling: the same seed and the same request give the
+    // same answer, which is what makes a run repeatable.
+    set("seed", options.seed.map(Value::from));
 
     let in_text = !tools.is_empty() && !takes_tools(client, &model);
     let flattened;
@@ -277,7 +280,7 @@ impl Decoder {
             let count = |key: &str| v.get(key).and_then(Value::as_i64);
             let (prompt, completion) = (count("prompt_eval_count"), count("eval_count"));
             if prompt.is_some() || completion.is_some() {
-                out.push(Ok(LlmEvent::Usage(Usage { prompt, completion, cached: count("prompt_eval_cached_count"), mtp: None, cost: None })));
+                out.push(Ok(LlmEvent::Usage(Usage { prompt, completion, cached: count("prompt_eval_cached_count"), mtp: None, cost: None, cost_details: None })));
             }
             let reason = if self.calls > 0 {
                 FinishReason::ToolUse
@@ -749,7 +752,7 @@ mod tests {
                 LlmEvent::ReasoningDelta("Plan: ".into()),
                 LlmEvent::ReasoningDelta("read ✓".into()),
                 LlmEvent::TextDelta("Héllo".into()),
-                LlmEvent::Usage(Usage { prompt: Some(1200), completion: Some(7), cached: Some(1100), mtp: None, cost: None }),
+                LlmEvent::Usage(Usage { prompt: Some(1200), completion: Some(7), cached: Some(1100), mtp: None, cost: None, cost_details: None }),
                 LlmEvent::Done(FinishReason::Length),
             ]
         );
@@ -980,7 +983,7 @@ mod tests {
         let events: Vec<LlmEvent> = llm.stream_with_options(&[ChatMessage::user("read a.rs")], &tools, &options).await.unwrap().map(|e| e.unwrap()).collect().await;
         assert_eq!(events[0], LlmEvent::ReasoningDelta("hmm".into()));
         assert!(matches!(&events[1], LlmEvent::ToolCallDelta { index: 0, name: Some(n), args_delta, .. } if n == "read_file" && args_delta == r#"{"path":"a.rs"}"#));
-        assert_eq!(events[2], LlmEvent::Usage(Usage { prompt: Some(900), completion: Some(30), cached: None, mtp: None, cost: None }));
+        assert_eq!(events[2], LlmEvent::Usage(Usage { prompt: Some(900), completion: Some(30), cached: None, mtp: None, cost: None, cost_details: None }));
         assert_eq!(events[3], LlmEvent::Done(FinishReason::ToolUse));
         assert_eq!(llm.requests_in_flight(), 0);
         let sent = log.lock().unwrap()[0].clone();

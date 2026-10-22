@@ -3,18 +3,36 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Deserialize;
 
 use crate::ToolError;
 
 #[derive(Debug, Deserialize)]
+#[derive(Default)]
 pub struct EditChunk {
+    /// The text to replace, exactly as in the file. Not needed when the edit
+    /// names lines.
+    #[serde(default)]
     pub old_string: String,
+    /// The text that replaces it. With a line range it replaces those lines
+    /// whole, with the indentation it should have.
+    #[serde(default)]
     pub new_string: String,
     /// Every occurrence instead of exactly one.
     #[serde(default)]
     pub replace_all: bool,
+    /// `old_string` is a regular expression, and `new_string` may use `$1` and
+    /// `${name}` to put the matched parts back.
+    #[serde(default)]
+    pub regex: bool,
+    /// The first line to replace, counted from 1.
+    #[serde(default)]
+    pub start_line: Option<usize>,
+    /// The last line to replace, counted from 1 and included.
+    #[serde(default)]
+    pub end_line: Option<usize>,
 }
 
 /// The file a batch entry names, for telling `a.txt` and `./a.txt` apart
@@ -28,6 +46,99 @@ fn resolve(cwd: &Path, path: &str) -> PathBuf {
     flashagent_core::resolve_path(cwd, path)
 }
 
+/// How an io failure is put to the model.
+///
+/// A file that is not there is not a dead end, and a model handed "No such file
+/// or directory (os error 2)" answers it the way a person does: with a sentence
+/// about the file, or by asking which one. A model handed the near miss makes
+/// the corrected call without being told to. In `docs/tool-calling.md` this one
+/// scenario is what a small local model either recovers from or does not, and it
+/// is the reason for this shape rather than the raw error.
+fn io_error(action: &str, cwd: &Path, path: &str, e: &std::io::Error) -> ToolError {
+    if e.kind() != std::io::ErrorKind::NotFound {
+        return ToolError::Other(format!("{action} {path}: {e}"));
+    }
+    match nearest_sibling(cwd, path) {
+        Some(near) => ToolError::Other(format!("{action} {path}: no such file (did you mean {near}?)")),
+        None => ToolError::Other(format!("{action} {path}: no such file")),
+    }
+}
+
+fn nearest_sibling(cwd: &Path, path: &str) -> Option<String> {
+    nearest_sibling_of(&resolve(cwd, path), path)
+}
+
+/// The nearest name in the same directory, if one is close enough to be a
+/// misspelling rather than a different file.
+fn nearest_sibling_of(full: &Path, written: &str) -> Option<String> {
+    let wanted = full.file_name()?.to_string_lossy().to_string();
+    let mut best: Option<(usize, String)> = None;
+    for entry in std::fs::read_dir(full.parent()?).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Half the word apart is a different name; a typo is closer than that.
+        let distance = edit_distance(&wanted.to_lowercase(), &name.to_lowercase());
+        if distance * 2 >= wanted.len().max(name.len()) + 2 {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(best, _)| distance < *best) {
+            best = Some((distance, name));
+        }
+    }
+    // Answered in the shape the model wrote the path, so the corrected call is
+    // a paste rather than something to reformat. The separators follow the
+    // written shape too: the platform's own join would turn the written
+    // `src/config.rs` into `src\config.rs` on Windows.
+    let name = best?.1;
+    Some(match Path::new(written).parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => {
+            join_in_written_shape(dir.to_string_lossy(), &name, written)
+        }
+        _ => name,
+    })
+}
+
+/// The directory and the corrected name put back together with the separator
+/// the written path used: a path with `/` keeps `/`, one with `\` keeps `\`.
+fn join_in_written_shape(dir: std::borrow::Cow<'_, str>, name: &str, written: &str) -> String {
+    let sep = if written.contains('/') {
+        '/'
+    } else if written.contains('\\') {
+        '\\'
+    } else {
+        '/'
+    };
+    let dir = dir.trim_end_matches(['/', '\\']);
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}{sep}{name}")
+    }
+}
+
+/// [`io_error`] for a caller that already resolved the path.
+fn io_error_at(action: &str, full: &Path, written: &str, e: &std::io::Error) -> ToolError {
+    if e.kind() != std::io::ErrorKind::NotFound {
+        return ToolError::Other(format!("{action} {written}: {e}"));
+    }
+    match nearest_sibling_of(full, written) {
+        Some(near) => ToolError::Other(format!("{action} {written}: no such file (did you mean {near}?)")),
+        None => ToolError::Other(format!("{action} {written}: no such file")),
+    }
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut next = vec![i + 1];
+        for (j, &cb) in b.iter().enumerate() {
+            next.push((row[j] + usize::from(ca != cb)).min(row[j + 1] + 1).min(next[j] + 1));
+        }
+        row = next;
+    }
+    row.last().copied().unwrap_or(0)
+}
+
 /// Returns 1-based numbered lines, reading one line at a time so a small
 /// window of a big log stays cheap. A non-text file says so plainly: "stream
 /// did not contain valid UTF-8" does not tell the model to use another tool.
@@ -35,7 +146,7 @@ pub(crate) fn read_file(cwd: &Path, path: &str, offset: usize, limit: usize) -> 
     use std::io::{BufRead, BufReader};
 
     let file = std::fs::File::open(resolve(cwd, path))
-        .map_err(|e| ToolError::Other(format!("read {path}: {e}")))?;
+        .map_err(|e| io_error("read", cwd, path, &e))?;
     let mut reader = BufReader::new(file);
     let mut out = String::new();
     let mut line = Vec::new();
@@ -68,8 +179,58 @@ pub(crate) fn write_file(cwd: &Path, path: &str, content: &str) -> Result<String
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&file, content)?;
+    write_atomic(&file, content)?;
     Ok(format!("wrote {} bytes to {path}", content.len()))
+}
+
+/// Writes a file in one step: the new text goes into a temporary file beside
+/// it and is renamed over the old one.
+///
+/// `std::fs::write` truncates the file first and writes afterwards, so a
+/// failure in between (a full disk, a quota, a killed process) left a
+/// truncated file behind and the old text was gone for good. Here the old
+/// file is whole until the moment it is replaced, and it is replaced in one
+/// step, so a reader never sees half of it.
+pub(crate) fn write_atomic(file: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    // A symlink is written through, not replaced: the file it points at is
+    // the one the caller means.
+    let target = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let dir = target.parent().unwrap_or_else(|| Path::new("."));
+    let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let temp = dir.join(format!(".{name}.flashagent-{}-{}.tmp", std::process::id(), next_temp_id()));
+
+    let result = (|| -> std::io::Result<()> {
+        // The file's own permissions decide whether it may be written: a
+        // rename would replace it whatever they say.
+        if let Ok(meta) = std::fs::metadata(&target) {
+            if meta.is_file() {
+                std::fs::OpenOptions::new().write(true).open(&target)?;
+            }
+        }
+        let mut handle = std::fs::File::create(&temp)?;
+        handle.write_all(content.as_bytes())?;
+        // The bytes are on the disk before the name points at them.
+        handle.sync_all()?;
+        drop(handle);
+        // The permissions the file had are the ones it keeps.
+        if let Ok(meta) = std::fs::metadata(&target) {
+            let _ = std::fs::set_permissions(&temp, meta.permissions());
+        }
+        std::fs::rename(&temp, &target)
+    })();
+    if result.is_err() {
+        // A temporary file left behind is litter in the user's project.
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+/// A number that tells two temporary files of the same process apart.
+fn next_temp_id() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 /// No line numbers; used for diff previews.
@@ -301,38 +462,215 @@ fn first_difference(want: &str, have: &str) -> Option<String> {
 /// guess. Shared by the edit tools, the diff preview and the check made before
 /// anyone is asked to approve an edit.
 pub(crate) fn apply_edits(path: &str, mut text: String, edits: &[EditChunk]) -> Result<(String, usize), ToolError> {
-    let mut applied = 0usize;
-    for edit in edits {
-        if edit.old_string.is_empty() {
-            return Err(ToolError::Other("edit: old_string must not be empty".into()));
-        }
-        let Some((target, indents)) = find_actual_string(&text, &edit.old_string) else {
-            return Err(not_found(path, &text, &edit.old_string));
-        };
-        let count = text.matches(target.as_str()).count();
-        if count > 1 && !edit.replace_all {
+    // Several cursors in one call: every edit is found in the text as it was,
+    // and the edits are then applied from the last to the first. A line number
+    // or a match found earlier keeps its place while the ones after it change,
+    // and one edit that shifts the file cannot move the next.
+    if let Some(planned) = plan_all_edits(path, &text, edits) {
+        // Two edits that cover the same bytes would each overwrite the other,
+        // and the second one to be applied would win while the first was lost
+        // without a word. That is a silent loss, so it is refused instead.
+        if let Some((a, b, at)) = overlapping_places(&planned) {
             return Err(ToolError::Other(format!(
-                "edit: old_string matches {count} times in {path}; add more context or set replace_all"
+                "edit: two edits in this call cover the same part of {path} \
+                 (edit {} and edit {}, at line {}); apply them one at a time, \
+                 or make them cover different text",
+                a + 1,
+                b + 1,
+                line_of(&text, at),
             )));
         }
-        applied += if edit.replace_all { count } else { 1 };
-        let reindented = with_file_indent(&edit.new_string, &indents);
-        let new_string = in_line_endings_of(&text, &reindented);
-        text = if edit.replace_all {
-            text.replace(target.as_str(), &new_string)
-        } else {
-            text.replacen(target.as_str(), &new_string, 1)
-        };
+        let mut applied = 0usize;
+        // The edits are applied from the end of the file towards its start,
+        // whatever order the model listed them in. Every edit was planned
+        // against the text as it was, so an edit that makes the file longer
+        // must not move the ones before it — and the order in the list says
+        // nothing about where in the file the edits are.
+        let mut places: Vec<(usize, usize, String)> =
+            planned.iter().flat_map(|edit| edit.places.iter().cloned()).collect();
+        places.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        for (from, to, new_text) in places {
+            text.replace_range(from..to, &new_text);
+            applied += 1;
+        }
+        return Ok((text, applied));
+    }
+    // An edit that cannot be found in the text as it was depends on the one
+    // before it -- the second edit renames what the first wrote. Those are
+    // applied one after another, as they always were.
+    let mut applied = 0usize;
+    for edit in edits {
+        let planned = plan_one_edit(path, &text, edit)?;
+        for (from, to, new_text) in planned.places.into_iter().rev() {
+            text.replace_range(from..to, &new_text);
+            applied += 1;
+        }
     }
     Ok((text, applied))
+}
+
+/// Every edit resolved against the text as it was, or `None` when one of them
+/// cannot be found that way.
+fn plan_all_edits(path: &str, text: &str, edits: &[EditChunk]) -> Option<Vec<PlannedEdit>> {
+    let mut planned = Vec::with_capacity(edits.len());
+    for edit in edits {
+        planned.push(plan_one_edit(path, text, edit).ok()?);
+    }
+    Some(planned)
+}
+
+/// Two edits that would write over the same bytes, and where they meet.
+///
+/// The edits of one call are all planned against the text as it was, and then
+/// applied from the last to the first. That is what makes several cursors
+/// possible, and it is also what makes two edits over the same text lose one
+/// of them: the one applied later wins and the other is gone without a word.
+/// The file is left in a state nobody asked for, and the model is told the
+/// edits were applied. So they are found here instead, and refused.
+fn overlapping_places(planned: &[PlannedEdit]) -> Option<(usize, usize, usize)> {
+    // Each place with the edit it belongs to, so a match inside one edit (the
+    // several places `replace_all` makes) is not mistaken for a conflict.
+    let mut all: Vec<(usize, usize, usize)> = Vec::new();
+    for (n, edit) in planned.iter().enumerate() {
+        for (from, to, _) in &edit.places {
+            all.push((*from, *to, n));
+        }
+    }
+    all.sort_unstable();
+    for pair in all.windows(2) {
+        let (_from_a, to_a, edit_a) = pair[0];
+        let (from_b, _to_b, edit_b) = pair[1];
+        // Sorted by start, so the second starts no earlier than the first.
+        // The bytes they share are the overlap.
+        if edit_a != edit_b && to_a > from_b {
+            return Some((edit_a, edit_b, from_b));
+        }
+    }
+    None
+}
+
+/// The line a byte offset falls on, counted from 1.
+fn line_of(text: &str, at: usize) -> usize {
+    text[..at.min(text.len())].matches('\n').count() + 1
+}
+
+/// One edit, resolved against the text as it was before any edit.
+struct PlannedEdit {
+    /// Where the text goes and what goes there: the bytes it replaces and the
+    /// text that takes their place.
+    places: Vec<(usize, usize, String)>,
+}
+
+/// What one edit does to the file.
+fn plan_one_edit(path: &str, text: &str, edit: &EditChunk) -> Result<PlannedEdit, ToolError> {
+    // By line numbers: the lines themselves, counted from 1, the last one
+    // included.
+    if edit.start_line.is_some() || edit.end_line.is_some() {
+        let start = edit.start_line.unwrap_or(1);
+        let end = edit.end_line.unwrap_or(start);
+        if start == 0 {
+            return Err(ToolError::Other("edit: lines are counted from 1".into()));
+        }
+        if end < start {
+            return Err(ToolError::Other(format!("edit: line {end} is before line {start}")));
+        }
+        let Some((from, to)) = line_span(text, start, end) else {
+            return Err(ToolError::Other(format!("edit: lines {start}-{end} are not in {path}")));
+        };
+        // The text the model wrote carries the indentation it wants: the lines
+        // it replaces are known by number, not by a match.
+        let mut new_text = in_line_endings_of(text, &edit.new_string).into_owned();
+        // The lines that went had a line ending after them; the text that
+        // takes their place needs one too, or the next line joins it.
+        let replaced = &text[from..to];
+        if replaced.ends_with('\n') && !new_text.ends_with('\n') {
+            let ending = if replaced.ends_with("\r\n") { "\r\n" } else { "\n" };
+            new_text.push_str(ending);
+        }
+        return Ok(PlannedEdit { places: vec![(from, to, new_text)] });
+    }
+    if edit.old_string.is_empty() {
+        return Err(ToolError::Other("edit: old_string must not be empty".into()));
+    }
+    if edit.regex {
+        return plan_regex_edit(path, text, edit);
+    }
+    let Some((target, indents)) = find_actual_string(text, &edit.old_string) else {
+        return Err(not_found(path, text, &edit.old_string));
+    };
+    let count = text.matches(target.as_str()).count();
+    if count > 1 && !edit.replace_all {
+        return Err(ToolError::Other(format!(
+            "edit: old_string matches {count} times in {path}; add more context or set replace_all"
+        )));
+    }
+    let reindented = with_file_indent(&edit.new_string, &indents);
+    let new_text = in_line_endings_of(text, &reindented).into_owned();
+    let places = if edit.replace_all {
+        text.match_indices(target.as_str())
+            .map(|(at, _)| (at, at + target.len(), new_text.clone()))
+            .collect()
+    } else {
+        // The match was found a moment ago; if it is not there now, the text
+        // said one thing and the model another, and that is an error to report
+        // rather than a panic to hand the model.
+        let at = text.find(target.as_str()).ok_or_else(|| {
+            ToolError::Other(format!("edit: the text to replace is not in {path}"))
+        })?;
+        vec![(at, at + target.len(), new_text)]
+    };
+    Ok(PlannedEdit { places })
+}
+
+/// A regular expression: every match, or the first one, with the groups put
+/// back where the replacement says.
+fn plan_regex_edit(path: &str, text: &str, edit: &EditChunk) -> Result<PlannedEdit, ToolError> {
+    let re = regex::Regex::new(&edit.old_string)
+        .map_err(|e| ToolError::Other(format!("edit: the pattern is not a regular expression: {e}")))?;
+    let mut places: Vec<(usize, usize, String)> = Vec::new();
+    for m in re.find_iter(text) {
+        let Some(caps) = re.captures_at(text, m.start()) else { continue };
+        let mut buf = String::new();
+        caps.expand(&edit.new_string, &mut buf);
+        let expanded = in_line_endings_of(text, &buf).into_owned();
+        places.push((m.start(), m.end(), expanded));
+    }
+    if places.is_empty() {
+        return Err(not_found(path, text, &edit.old_string));
+    }
+    if places.len() > 1 && !edit.replace_all {
+        return Err(ToolError::Other(format!(
+            "edit: the pattern matches {} times in {path}; set replace_all",
+            places.len()
+        )));
+    }
+    Ok(PlannedEdit { places })
+}
+
+/// The bytes of the lines `start..=end`, counted from 1. The last line's own
+/// line ending goes with it, so a replacement does not eat it.
+fn line_span(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
+    let mut offset = 0;
+    let mut begin = None;
+    for (n, line) in text.split_inclusive('\n').enumerate() {
+        let n = n + 1;
+        if n == start {
+            begin = Some(offset);
+        }
+        if n == end {
+            return Some((begin?, offset + line.len()));
+        }
+        offset += line.len();
+    }
+    None
 }
 
 pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<String, ToolError> {
     let file = resolve(cwd, path);
     let text = std::fs::read_to_string(&file)
-        .map_err(|e| ToolError::Other(format!("read {path}: {e}")))?;
+        .map_err(|e| io_error("read", cwd, path, &e))?;
     let (text, applied) = apply_edits(path, text, edits)?;
-    std::fs::write(&file, &text)?;
+    write_atomic(&file, &text)?;
     Ok(format!("applied {applied} edit(s) to {path}"))
 }
 
@@ -421,21 +759,39 @@ fn plan_edits(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Result<Vec<Plan
     Ok(planned)
 }
 
-/// A write that fails puts back every file written before it.
+/// A write that fails puts back every file written before it, and the file
+/// whose write failed is whole: a write is a rename, so the old text is still
+/// there until the moment it is replaced.
 fn write_planned(planned: &[PlannedFile]) -> Result<String, ToolError> {
     for (i, target) in planned.iter().enumerate() {
-        if let Err(e) = std::fs::write(&target.file, &target.new) {
-            let rollback_failed: Vec<String> = planned[..i]
-                .iter()
-                .rev()
-                .filter_map(|done| std::fs::write(&done.file, &done.original).err().map(|err| format!("{}: {err}", done.path)))
-                .collect();
+        if let Err(e) = write_atomic(&target.file, &target.new) {
+            let mut rollback_failed: Vec<String> = Vec::new();
+            // The file whose write failed is whole: a write is a rename, so
+            // the old text is still there until the moment it is replaced.
+            // It is put back anyway, for the case where something else
+            // touched it in between.
+            if target.file.is_file() {
+                if let Err(err) = write_atomic(&target.file, &target.original) {
+                    rollback_failed.push(format!("{}: {err}", target.path));
+                }
+            }
+            for done in planned[..i].iter().rev() {
+                if let Err(err) = write_atomic(&done.file, &done.original) {
+                    rollback_failed.push(format!("{}: {err}", done.path));
+                }
+            }
             let done = if rollback_failed.is_empty() {
                 format!("rolled back {i} earlier file(s)")
             } else {
                 format!("rollback failed for {}", rollback_failed.join(", "))
             };
-            return Err(ToolError::Other(format!("write {}: {e}; {done}", target.path)));
+            return Err(match io_error_at("write", &target.file, &target.path, &e) {
+                ToolError::Other(mut message) => {
+                    let _ = write!(message, "; {done}");
+                    ToolError::Other(message)
+                }
+                other => other,
+            });
         }
     }
     let total: usize = planned.iter().map(|p| p.edits).sum();
@@ -447,7 +803,7 @@ fn write_planned(planned: &[PlannedFile]) -> Result<String, ToolError> {
 pub(crate) fn list_dir(cwd: &Path, path: &str) -> Result<String, ToolError> {
     let dir = resolve(cwd, path);
     let mut entries: Vec<String> = Vec::new();
-    let rd = std::fs::read_dir(&dir).map_err(|e| ToolError::Other(format!("list {path}: {e}")))?;
+    let rd = std::fs::read_dir(&dir).map_err(|e| io_error("list", cwd, path, &e))?;
     for entry in rd {
         let entry = entry.map_err(|e| ToolError::Other(format!("entry: {e}")))?;
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -467,8 +823,13 @@ pub(crate) fn glob_files(cwd: &Path, pattern: &str) -> Result<String, ToolError>
     let pattern = flashagent_core::expand_home(pattern);
     let pattern = pattern.as_ref();
     let absolute = Path::new(pattern).is_absolute();
-    let fixed = pattern.split(['*', '?', '[', '{']).next().unwrap_or("");
-    let confine = !absolute && flashagent_core::path_is_inside(cwd, if fixed.is_empty() { "." } else { fixed });
+    // A relative pattern stays inside the project, whatever its first part
+    // is. It used to be decided by the part before the first wildcard, so a
+    // pattern that named a symlink pointing out of the project (or one that
+    // climbed out of it with `..`) switched the filter off — while `grep`,
+    // which never follows a symlink, kept looking inside. The two tools
+    // answered the same question differently.
+    let confine = !absolute;
     let full = if absolute {
         pattern.to_string()
     } else {
@@ -588,7 +949,366 @@ mod tests {
     use crate::testing::tempdir;
 
     fn chunk(old: &str, new: &str, replace_all: bool) -> EditChunk {
-        EditChunk { old_string: old.into(), new_string: new.into(), replace_all }
+        EditChunk { old_string: old.into(), new_string: new.into(), replace_all, ..Default::default() }
+    }
+
+    /// Lines are counted from 1 and the last one is included: the model reads
+    /// the file with those numbers and names them back.
+    #[test]
+    fn an_edit_can_name_its_lines() {
+        let text = "one\ntwo\nthree\nfour\n";
+        let edit = EditChunk {
+            start_line: Some(2),
+            end_line: Some(3),
+            new_string: "TWO\nTHREE".into(),
+            ..Default::default()
+        };
+        let (out, applied) = apply_edits("f", text.into(), &[edit]).unwrap();
+        assert_eq!(out, "one\nTWO\nTHREE\nfour\n");
+        assert_eq!(applied, 1);
+    }
+
+    /// One line is one edit: the range that names it.
+    #[test]
+    fn a_single_line_can_be_replaced() {
+        let text = "one\ntwo\nthree\n";
+        let edit = EditChunk { start_line: Some(3), end_line: Some(3), new_string: "THREE".into(), ..Default::default() };
+        let (out, _) = apply_edits("f", text.into(), &[edit]).unwrap();
+        assert_eq!(out, "one\ntwo\nTHREE\n");
+    }
+
+    /// A line that is not in the file is refused, not silently guessed at.
+    #[test]
+    fn lines_that_are_not_in_the_file_are_refused() {
+        let text = "one\ntwo\n";
+        let edit = EditChunk { start_line: Some(5), end_line: Some(6), new_string: "x".into(), ..Default::default() };
+        let err = apply_edits("f", text.into(), &[edit]).unwrap_err().to_string();
+        assert!(err.contains("not in"), "{err}");
+        let zero = EditChunk { start_line: Some(0), new_string: "x".into(), ..Default::default() };
+        assert!(apply_edits("f", text.into(), &[zero]).is_err(), "lines are counted from 1");
+    }
+
+    /// A regular expression, with the matched part put back.
+    #[test]
+    fn a_regular_expression_can_replace_and_keep_the_groups() {
+        let text = "let a = 1;\nlet b = 2;\n";
+        let edit = EditChunk {
+            old_string: r"let (\w) = (\d);".into(),
+            new_string: "let $1 = $2 + 1;".into(),
+            regex: true,
+            replace_all: true,
+            ..Default::default()
+        };
+        let (out, applied) = apply_edits("f", text.into(), &[edit]).unwrap();
+        assert_eq!(out, "let a = 1 + 1;\nlet b = 2 + 1;\n");
+        assert_eq!(applied, 2);
+    }
+
+    /// One match is replaced; the groups go back where the replacement says.
+    #[test]
+    fn a_regular_expression_replaces_one_match() {
+        let text = "value = 1;\n";
+        let edit = EditChunk {
+            old_string: r"value = (\d);".into(),
+            new_string: "value = $1 + 1;".into(),
+            regex: true,
+            ..Default::default()
+        };
+        let (out, applied) = apply_edits("f", text.into(), &[edit]).unwrap();
+        assert_eq!(out, "value = 1 + 1;\n");
+        assert_eq!(applied, 1);
+    }
+
+    /// A pattern that matches many times is refused unless it says so.
+    #[test]
+    fn a_pattern_that_matches_many_times_needs_replace_all() {
+        let text = "x\nx\n";
+        let edit = EditChunk { old_string: "x".into(), new_string: "y".into(), regex: true, ..Default::default() };
+        let err = apply_edits("f", text.into(), &[edit]).unwrap_err().to_string();
+        assert!(err.contains("replace_all"), "{err}");
+        let all = EditChunk { old_string: "x".into(), new_string: "y".into(), regex: true, replace_all: true, ..Default::default() };
+        let (out, applied) = apply_edits("f", text.into(), &[all]).unwrap();
+        assert_eq!(out, "y\ny\n");
+        assert_eq!(applied, 2);
+    }
+
+    /// Several cursors: the line numbers count the file as it was, so an edit
+    /// that changes the lines before another does not move it.
+    #[test]
+    fn several_cursors_do_not_move_each_other() {
+        let text = "one\ntwo\nthree\nfour\n";
+        let edits = [
+            EditChunk { start_line: Some(1), end_line: Some(1), new_string: "ONE\nONE-AND-A-HALF".into(), ..Default::default() },
+            EditChunk { start_line: Some(4), end_line: Some(4), new_string: "FOUR".into(), ..Default::default() },
+        ];
+        let (out, applied) = apply_edits("f", text.into(), &edits).unwrap();
+        assert_eq!(out, "ONE\nONE-AND-A-HALF\ntwo\nthree\nFOUR\n");
+        assert_eq!(applied, 2);
+    }
+
+    /// Two edits over the same text would each overwrite the other, and the
+    /// one applied later would win while the other was lost without a word.
+    /// The file was left in a state nobody asked for, and the model was told
+    /// both edits were applied. They are refused instead.
+    #[test]
+    fn two_edits_over_the_same_text_are_refused() {
+        let text = "x = foo()\n";
+        let edits = [
+            EditChunk { old_string: "foo".into(), new_string: "bar".into(), ..Default::default() },
+            EditChunk { old_string: "foo()".into(), new_string: "qux()".into(), ..Default::default() },
+        ];
+        let err = apply_edits("f", text.into(), &edits).unwrap_err().to_string();
+        assert!(err.contains("cover the same part"), "{err}");
+        assert!(err.contains("edit 1 and edit 2"), "the model must know which two: {err}");
+        assert!(err.contains("line 1"), "the model must know where: {err}");
+    }
+
+    /// The same text twice is the same conflict, and it used to cut the file
+    /// in half: "one" replaced by "A" and then "one" by "B" left "Awo".
+    #[test]
+    fn two_edits_over_the_same_words_are_refused() {
+        let text = "one\ntwo\n";
+        let edits = [
+            EditChunk { old_string: "one".into(), new_string: "A".into(), ..Default::default() },
+            EditChunk { old_string: "one".into(), new_string: "B".into(), ..Default::default() },
+        ];
+        let err = apply_edits("f", text.into(), &edits).unwrap_err().to_string();
+        assert!(err.contains("cover the same part"), "{err}");
+    }
+
+    /// The same text inside one edit is not a conflict: `replace_all` means
+    /// every occurrence, and that has to keep working.
+    #[test]
+    fn one_edit_over_many_places_is_not_a_conflict() {
+        let text = "x\nx\n";
+        let edit = EditChunk {
+            old_string: "x".into(),
+            new_string: "y".into(),
+            replace_all: true,
+            ..Default::default()
+        };
+        let (out, applied) = apply_edits("f", text.into(), &[edit]).unwrap();
+        assert_eq!(out, "y\ny\n");
+        assert_eq!(applied, 2);
+    }
+
+    /// A line and a word inside it are a conflict too, and the same one: the
+    /// word's place is inside the line's.
+    #[test]
+    fn a_line_and_a_word_inside_it_are_refused() {
+        let text = "one\ntwo\nthree\n";
+        let edits = [
+            EditChunk { start_line: Some(1), end_line: Some(2), new_string: "ONE TWO".into(), ..Default::default() },
+            EditChunk { old_string: "two".into(), new_string: "TWO".into(), ..Default::default() },
+        ];
+        let err = apply_edits("f", text.into(), &edits).unwrap_err().to_string();
+        assert!(err.contains("cover the same part"), "{err}");
+    }
+
+    /// Edits that do not touch each other still go through as several
+    /// cursors: this is the case the check must not break.
+    #[test]
+    fn edits_that_do_not_touch_each_other_are_still_applied() {
+        let text = "one\ntwo\nthree\n";
+        let edits = [
+            EditChunk { old_string: "one".into(), new_string: "ONE".into(), ..Default::default() },
+            EditChunk { old_string: "three".into(), new_string: "THREE".into(), ..Default::default() },
+        ];
+        let (out, applied) = apply_edits("f", text.into(), &edits).unwrap();
+        assert_eq!(out, "ONE\ntwo\nTHREE\n");
+        assert_eq!(applied, 2);
+    }
+
+    /// The order the model lists the edits in says nothing about where in the
+    /// file they are. A model that lists them bottom-up used to make the tool
+    /// write over the wrong bytes: the offsets were right for the text as it
+    /// was, but they were applied in the order of the list.
+    #[test]
+    fn edits_listed_bottom_up_are_applied_in_text_order() {
+        let text = "one\ntwo\nthree\n";
+        // Bottom-up, and the first edit makes the file longer: applied in the
+        // order of the list, the second edit would land three bytes too far.
+        let edits = [
+            EditChunk { old_string: "three".into(), new_string: "3".into(), ..Default::default() },
+            EditChunk { old_string: "one".into(), new_string: "ONE-TWO".into(), ..Default::default() },
+        ];
+        let (out, applied) = apply_edits("f", text.into(), &edits).unwrap();
+        assert_eq!(out, "ONE-TWO\ntwo\n3\n");
+        assert_eq!(applied, 2);
+    }
+
+    /// The same edits, the other way round: the answer must not depend on the
+    /// order of the list.
+    #[test]
+    fn the_order_of_the_list_does_not_change_the_result() {
+        let text = "one\ntwo\nthree\n";
+        let bottom_up = [
+            EditChunk { old_string: "three".into(), new_string: "3".into(), ..Default::default() },
+            EditChunk { old_string: "one".into(), new_string: "ONE-TWO".into(), ..Default::default() },
+        ];
+        let top_down = [
+            EditChunk { old_string: "one".into(), new_string: "ONE-TWO".into(), ..Default::default() },
+            EditChunk { old_string: "three".into(), new_string: "3".into(), ..Default::default() },
+        ];
+        let (a, _) = apply_edits("f", text.into(), &bottom_up).unwrap();
+        let (b, _) = apply_edits("f", text.into(), &top_down).unwrap();
+        assert_eq!(a, b);
+    }
+
+    /// Edits by line number, listed bottom-up: the same rule applies.
+    #[test]
+    fn lines_listed_bottom_up_are_applied_in_text_order() {
+        let text = "one\ntwo\nthree\nfour\n";
+        let edits = [
+            EditChunk { start_line: Some(4), end_line: Some(4), new_string: "FOUR".into(), ..Default::default() },
+            EditChunk { start_line: Some(1), end_line: Some(1), new_string: "ONE\nONE-AND-A-HALF".into(), ..Default::default() },
+        ];
+        let (out, applied) = apply_edits("f", text.into(), &edits).unwrap();
+        assert_eq!(out, "ONE\nONE-AND-A-HALF\ntwo\nthree\nFOUR\n");
+        assert_eq!(applied, 2);
+    }
+
+    /// The file is replaced, not written over: a reader never sees half of the
+    /// new text, and a failure cannot leave a truncated file behind.
+    #[test]
+    #[cfg(unix)]
+    fn a_written_file_is_replaced_in_one_step() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempdir();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        let before = std::fs::metadata(&file).unwrap().ino();
+        write_file(&dir, "a.txt", "two\n").unwrap();
+        let after = std::fs::metadata(&file).unwrap().ino();
+        assert_ne!(before, after, "the file was written in place instead of being replaced");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "two\n");
+    }
+
+    /// A write that fails leaves nothing of its own behind.
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file_behind() {
+        let dir = tempdir();
+        // A folder where the file should be: the rename cannot replace it.
+        let file = dir.join("a.txt");
+        std::fs::create_dir(&file).unwrap();
+        let err = write_atomic(&file, "content").unwrap_err();
+        assert!(err.raw_os_error().is_some(), "the failure must be the system's: {err}");
+        assert!(file.is_dir(), "the folder was replaced by a file");
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "a.txt")
+            .collect();
+        assert!(leftovers.is_empty(), "a temporary file was left behind: {leftovers:?}");
+    }
+
+    /// A file the owner made read-only is not replaced: the rename would
+    /// replace it whatever its permissions say.
+    #[test]
+    #[cfg(unix)]
+    fn a_read_only_file_is_not_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let err = write_atomic(&file, "two\n").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n");
+        // The permissions are kept when the write does go through.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_atomic(&file, "two\n").unwrap();
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "the file lost its permissions");
+    }
+
+    /// Nothing of a failed batch is left changed: not the files written
+    /// before the failure, and not the file whose write failed.
+    #[test]
+    fn a_batch_that_fails_leaves_every_file_as_it_was() {
+        let dir = tempdir();
+        let first = dir.join("first.txt");
+        let blocked = dir.join("blocked.txt");
+        std::fs::write(&first, "old first\n").unwrap();
+        std::fs::write(&blocked, "old blocked\n").unwrap();
+
+        let planned = plan_edits(
+            &dir,
+            &[
+                ("first.txt".into(), vec![chunk("old first", "new first", false)]),
+                ("blocked.txt".into(), vec![chunk("old blocked", "new blocked", false)]),
+            ],
+        )
+        .unwrap();
+        // A folder where the second file was read: no write gets through that.
+        std::fs::remove_file(&blocked).unwrap();
+        std::fs::create_dir(&blocked).unwrap();
+        let err = write_planned(&planned).unwrap_err().to_string();
+
+        assert!(err.contains("blocked.txt"), "{err}");
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "old first\n", "the first file was not put back");
+        assert!(blocked.is_dir(), "nothing was written in place of the folder");
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "first.txt" && name != "blocked.txt")
+            .collect();
+        assert!(leftovers.is_empty(), "a temporary file was left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn a_file_that_is_not_there_names_the_one_that_is() {
+        // The scenario `docs/tool-calling.md` measures: handed a bare "no such
+        // file", a small model explains it in prose and leaves the next step to
+        // the user. Handed the near miss, it calls again.
+        let dir = tempdir();
+        write_file(&dir, "src/config.rs", "x").unwrap();
+        let err = read_file(&dir, "src/confg.rs", 0, 10).unwrap_err().to_string();
+        assert!(err.contains("no such file"), "{err}");
+        assert!(err.contains("did you mean src/config.rs"), "{err}");
+        assert!(!err.contains("os error"), "the raw io error says nothing the model can use: {err}");
+    }
+
+    #[test]
+    fn a_file_with_nearby_name_but_no_near_match_is_not_a_typo() {
+        let dir = tempdir();
+        write_file(&dir, "src/config.rs", "x").unwrap();
+        let err = read_file(&dir, "src/completely_different.rs", 0, 10).unwrap_err().to_string();
+        assert!(err.contains("no such file"), "{err}");
+        assert!(!err.contains("did you mean"), "a different file is not a misspelling: {err}");
+    }
+
+    #[test]
+    fn the_suggestion_keeps_the_shape_the_model_wrote() {
+        let dir = tempdir();
+        write_file(&dir, "README.md", "x").unwrap();
+        for written in ["READM.md", "./READM.md"] {
+            let err = read_file(&dir, written, 0, 10).unwrap_err().to_string();
+            assert!(err.contains("did you mean"), "{written}: {err}");
+            let shape: &str = match written {
+                "READM.md" => "README.md",
+                "./READM.md" => "./README.md",
+                _ => unreachable!(),
+            };
+            assert!(err.contains(shape), "{written}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_directory_nobody_wrote_has_nothing_to_suggest() {
+        let dir = tempdir();
+        let err = read_file(&dir, "nothing-here.rs", 0, 10).unwrap_err().to_string();
+        assert_eq!(err, "read nothing-here.rs: no such file");
+    }
+
+    #[test]
+    fn an_edit_of_a_misspelled_file_says_which_one_it_meant() {
+        let dir = tempdir();
+        write_file(&dir, "lib.rs", "fn a() {}").unwrap();
+        let err = edit_file(&dir, "lib.rss", &[chunk("fn a() {}", "fn b() {}", false)]).unwrap_err().to_string();
+        assert!(err.contains("did you mean lib.rs"), "{err}");
     }
 
     #[test]
@@ -642,7 +1362,7 @@ mod tests {
         edit_file(
             &dir,
             "a.txt",
-            &[EditChunk { old_string: "two".into(), new_string: "dos".into(), replace_all: false }],
+            &[EditChunk { old_string: "two".into(), new_string: "dos".into(), replace_all: false, ..Default::default() }],
         )
         .unwrap();
         assert!(std::fs::read_to_string(dir.join("a.txt")).unwrap().contains("dos"));
@@ -650,7 +1370,7 @@ mod tests {
         let err = edit_file(
             &dir,
             "a.txt",
-            &[EditChunk { old_string: "zzz".into(), new_string: "y".into(), replace_all: false }],
+            &[EditChunk { old_string: "zzz".into(), new_string: "y".into(), replace_all: false, ..Default::default() }],
         )
         .unwrap_err();
         assert!(err.to_string().contains("not found"));
@@ -659,7 +1379,7 @@ mod tests {
         let err = edit_file(
             &dir,
             "a.txt",
-            &[EditChunk { old_string: "x".into(), new_string: "y".into(), replace_all: false }],
+            &[EditChunk { old_string: "x".into(), new_string: "y".into(), replace_all: false, ..Default::default() }],
         )
         .unwrap_err();
         assert!(err.to_string().contains("3 times"));
@@ -674,8 +1394,8 @@ mod tests {
             &dir,
             "a.txt",
             &[
-                EditChunk { old_string: "one".into(), new_string: "two".into(), replace_all: false },
-                EditChunk { old_string: "two".into(), new_string: "three".into(), replace_all: false },
+                EditChunk { old_string: "one".into(), new_string: "two".into(), replace_all: false, ..Default::default() },
+                EditChunk { old_string: "two".into(), new_string: "three".into(), replace_all: false, ..Default::default() },
             ],
         )
         .unwrap();
@@ -750,11 +1470,11 @@ mod tests {
             &[
                 (
                     "actual.txt".into(),
-                    vec![EditChunk { old_string: "one".into(), new_string: "two".into(), replace_all: false }],
+                    vec![EditChunk { old_string: "one".into(), new_string: "two".into(), replace_all: false, ..Default::default() }],
                 ),
                 (
                     "alias.txt".into(),
-                    vec![EditChunk { old_string: "two".into(), new_string: "three".into(), replace_all: false }],
+                    vec![EditChunk { old_string: "two".into(), new_string: "three".into(), replace_all: false, ..Default::default() }],
                 ),
             ],
         )
@@ -808,7 +1528,19 @@ mod tests {
 
         assert_eq!(grep(&dir, "outside-only-marker", None, false).unwrap(), "no matches");
         assert!(!glob_files(&dir, "**/*").unwrap().contains("secret.txt"));
-        assert!(glob_files(&dir, "linked-outside/*.txt").unwrap().contains("secret.txt"));
+        // The same rule as `grep`: a symlink out of the project is not
+        // followed, so the file behind it is not part of the project.
+        assert!(!glob_files(&dir, "linked-outside/*.txt").unwrap().contains("secret.txt"));
+    }
+
+    #[test]
+    fn a_glob_pattern_that_climbs_out_of_the_project_finds_nothing() {
+        let dir = tempdir();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret\n").unwrap();
+        let pattern = format!("../{}/secret.txt", outside.path().file_name().unwrap().to_string_lossy());
+        let out = glob_files(&dir, &pattern).unwrap();
+        assert!(!out.contains("secret.txt"), "the project filter was switched off: {out}");
     }
 
     #[test]
@@ -832,7 +1564,7 @@ mod tests {
     fn a_missing_old_string_points_at_the_closest_line() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("lib.rs"), "use std::io;\n\npub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n").unwrap();
-        let edits = [EditChunk { old_string: "pub fn add(a: u32, b: u32) -> u32 {".into(), new_string: "x".into(), replace_all: false }];
+        let edits = [EditChunk { old_string: "pub fn add(a: u32, b: u32) -> u32 {".into(), new_string: "x".into(), replace_all: false, ..Default::default() }];
         let err = edit_file(dir.path(), "lib.rs", &edits).unwrap_err().to_string();
         assert!(err.contains("closest line is 3: `pub fn add(a: i32, b: i32) -> i32 {`"), "{err}");
     }
@@ -998,6 +1730,7 @@ mod tests {
             old_string: "fn hello() {\n    println!(\"world\");\n}".into(),
             new_string: "fn hello() {\n    println!(\"FlashAgent\");\n}".into(),
             replace_all: false,
+            ..Default::default()
         };
         let (res, _) = apply_edits("f", text.to_string(), &[edit]).unwrap();
         assert!(res.contains("FlashAgent"));

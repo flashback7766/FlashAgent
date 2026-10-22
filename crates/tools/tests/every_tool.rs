@@ -40,7 +40,6 @@ impl Project {
         let tools = Arc::new(
             BuiltinTools::new(BuiltinToolsConfig {
                 cwd: dir.clone(),
-                toolset_profile: Some(flashagent_core::ToolsetProfile::Full),
                 web_enabled: Some(true),
                 context_window: Some(200_000),
                 ..Default::default()
@@ -351,6 +350,28 @@ async fn a_patch_is_applied_as_a_diff() {
     assert_eq!(project.read("notes.txt"), "first\npatched\nthird\n");
 }
 
+/// The model lists the edits in whatever order it thinks of them. The order
+/// says nothing about where in the file the edits are, and the file must come
+/// out the same either way.
+#[tokio::test]
+async fn edits_listed_bottom_up_are_applied_in_the_order_of_the_file() {
+    let project = Project::new();
+    // notes.txt holds "first\nsecond\nthird\n".
+    project
+        .call(
+            "edit_file",
+            serde_json::json!({
+                "path": "notes.txt",
+                "edits": [
+                    { "old_string": "third", "new_string": "3" },
+                    { "old_string": "first", "new_string": "1st-and-a-half" }
+                ]
+            }),
+        )
+        .await;
+    assert_eq!(project.read("notes.txt"), "1st-and-a-half\nsecond\n3\n");
+}
+
 #[tokio::test]
 async fn the_project_is_listed_searched_and_outlined() {
     let project = Project::new();
@@ -544,7 +565,6 @@ async fn a_tool_turned_off_in_settings_says_so_rather_than_running() {
     let project = Project::new();
     let tools = BuiltinTools::new(BuiltinToolsConfig {
         cwd: project.dir.clone(),
-        toolset_profile: Some(flashagent_core::ToolsetProfile::Full),
         web_enabled: Some(false),
         context_window: Some(200_000),
         ..Default::default()

@@ -101,6 +101,20 @@ pub enum KeySource {
     None,
 }
 
+/// An MCP server the owner allowed to run from a project's `.mcp.json`.
+///
+/// The command it runs is remembered with it: a config that changes what it
+/// runs is a different program, and it is asked about again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedMcpServer {
+    /// The folder the server was allowed in.
+    pub directory: PathBuf,
+    /// The name it has in the config.
+    pub name: String,
+    /// What it runs, as it was when it was allowed.
+    pub command: String,
+}
+
 /// A saved provider: a server, how to talk to it, its key and the model to
 /// start with there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -178,9 +192,29 @@ impl ProviderProfile {
         Endpoint::new(self.protocol, &self.url, key).with_context_window(self.context_window)
     }
 
-    /// The same server under the same protocol, however the address is written.
+    /// The same server, however the address is written.
+    ///
+    /// By host, not by the whole address, the way a preset is found: an
+    /// address says what speaks there, so `http://localhost:11434` and
+    /// `http://localhost:11434/v1` are one Ollama — the first its own
+    /// dialect, the second the OpenAI-compatible side — and saving it twice
+    /// must not leave two providers behind.
+    ///
+    /// A profile whose protocol is not what its address speaks is a choice the
+    /// owner made, and that makes it a provider of its own.
     pub fn same_server(&self, other: &ProviderProfile) -> bool {
-        self.protocol == other.protocol && normalize_url(&self.url) == normalize_url(&other.url)
+        let same_host = match (host_of(&self.url), host_of(&other.url)) {
+            (Some(a), Some(b)) => a == b,
+            _ => normalize_url(&self.url) == normalize_url(&other.url),
+        };
+        same_host
+            && (self.protocol == other.protocol
+                || (self.speaks_its_own_dialect() && other.speaks_its_own_dialect()))
+    }
+
+    /// Whether the address says what this profile says speaks there.
+    fn speaks_its_own_dialect(&self) -> bool {
+        ApiProtocol::detect(&self.url) == self.protocol
     }
 }
 
@@ -396,6 +430,20 @@ pub struct AppConfig {
     pub presence_penalty: Option<f32>,
     #[serde(default = "default_min_p")]
     pub min_p: Option<f32>,
+    /// The most the model may write in one answer. `None`: the server's own
+    /// limit, which is what it was before.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// The seed of the sampling. The same seed and the same request give the
+    /// same answer, which is what makes a run repeatable. `None`: the server
+    /// picks one.
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// The standing permissions the owner gave with "Always". They are kept
+    /// between the runs: a rule that is not written down has to be given
+    /// again, and `/rules` shows what there is.
+    #[serde(default)]
+    pub always_rules: crate::permissions::RuleSet,
     /// `None` means unlimited.
     #[serde(default)]
     pub max_steps: Option<u32>,
@@ -415,11 +463,34 @@ pub struct AppConfig {
     #[serde(default)]
     pub goal_max_output_tokens: Option<i64>,
     pub setup_completed: bool,
+    /// Tools the owner has switched off: the model is not offered them, and a
+    /// call to one is refused. By name, so a tool that is not there any more
+    /// does not keep a name alive.
     #[serde(default)]
-    pub toolset_profile: ToolsetProfile,
+    pub disabled_tools: Vec<String>,
+    /// The safe mode: reading and editing inside the project, and nothing
+    /// else. No shell, no network, no subagents.
+    #[serde(default)]
+    pub safe_mode: bool,
+    /// Write a crash report when the app falls over. Off by default: the
+    /// report holds a backtrace and the paths of the machine.
+    #[serde(default)]
+    pub crash_reports: bool,
+    /// The language of what the user reads: hints, /help, tips, notices. The
+    /// model keeps English: the system prompt is not translated here.
+    #[serde(default = "default_interface_language")]
+    pub interface_language: String,
     /// Trust confirmation is skipped for these.
     #[serde(default)]
     pub trusted_directories: Vec<PathBuf>,
+    /// MCP servers the owner allowed to run from a project's `.mcp.json`.
+    ///
+    /// A project config can start a program, so a cloned repository could run
+    /// code before the person asked anything. The command that was allowed is
+    /// remembered with the server, so a config that changes what it runs is
+    /// asked about again.
+    #[serde(default)]
+    pub trusted_mcp_servers: Vec<TrustedMcpServer>,
     #[serde(default = "default_update_channel")]
     pub update_channel: UpdateChannel,
     /// Check, download and install in the background.
@@ -449,6 +520,12 @@ pub struct AppConfig {
     pub color_theme: ColorTheme,
     #[serde(default = "default_true")]
     pub auto_compact_context: bool,
+    /// Warms the prompt cache before the first message, so the first request
+    /// does not read the system prompt and the tool schemas from scratch. Off
+    /// by default: it costs a request of its own, and only a server on this
+    /// machine or network can profit from it.
+    #[serde(default)]
+    pub auto_warm_prompt_cache: bool,
     #[serde(default = "default_warn_threshold")]
     pub context_warn_threshold: usize,
     /// 0 chooses by window size.
@@ -481,6 +558,12 @@ fn default_compact_threshold() -> usize {
 
 fn default_editor() -> String {
     "$EDITOR".to_string()
+}
+
+/// English until the interface says otherwise: `Lang::from_code` scopes what
+/// the code accepts, a typo here reads as English, not as a failure.
+fn default_interface_language() -> String {
+    "en".to_string()
 }
 
 fn default_retries() -> usize {
@@ -568,39 +651,6 @@ impl UpdateChannel {
             Self::Stable => "Stable",
         }
     }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Beta => "beta",
-            Self::Stable => "stable",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
-pub enum ToolsetProfile {
-    #[default]
-    Auto,
-    Full,
-    Compact,
-}
-
-impl ToolsetProfile {
-    pub fn next(self) -> Self {
-        match self {
-            Self::Auto => Self::Full,
-            Self::Full => Self::Compact,
-            Self::Compact => Self::Auto,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Auto => "Auto",
-            Self::Full => "Full",
-            Self::Compact => "Compact",
-        }
-    }
 }
 
 impl Default for AppConfig {
@@ -617,6 +667,11 @@ impl Default for AppConfig {
             repeat_penalty: Some(1.00),
             presence_penalty: Some(0.00),
             min_p: Some(0.00),
+            // The server's own limits and its own choice of seed stand until
+            // the owner sets them.
+            max_tokens: None,
+            seed: None,
+            always_rules: Default::default(),
             max_steps: None, // no step limit per turn
             token_budget: 2000,
             web_tools: true,
@@ -624,8 +679,12 @@ impl Default for AppConfig {
             goal_max_minutes: None,
             goal_max_output_tokens: None,
             setup_completed: false,
-            toolset_profile: ToolsetProfile::Auto,
+            disabled_tools: Vec::new(),
+            safe_mode: false,
+            crash_reports: false,
+            interface_language: default_interface_language(),
             trusted_directories: Vec::new(),
+            trusted_mcp_servers: Vec::new(),
             update_channel: default_update_channel(),
             auto_check_updates: true,
             show_mascot: true,
@@ -638,6 +697,7 @@ impl Default for AppConfig {
             personality: Default::default(),
             color_theme: ColorTheme::default(),
             auto_compact_context: true,
+            auto_warm_prompt_cache: false,
             context_warn_threshold: 70,
             context_compact_threshold: 0,
             auto_save_sessions: true,
@@ -887,9 +947,6 @@ impl AppConfig {
     }
 
     fn normalised(mut self) -> Self {
-        if self.toolset_profile == ToolsetProfile::Compact {
-            self.toolset_profile = ToolsetProfile::Auto;
-        }
         if self.thinking_effort == "default" || self.thinking_effort.is_empty() {
             self.thinking_effort = "auto".to_string();
         }
@@ -919,6 +976,64 @@ impl AppConfig {
             let d_canon = std::fs::canonicalize(d).unwrap_or_else(|_| d.clone());
             d_canon == canon
         })
+    }
+
+    /// Whether the owner already allowed this server, in this folder, to run
+    /// this command.
+    ///
+    /// The command is part of the answer: a config that changed what it runs
+    /// is a different program, and it is asked about again.
+    pub fn is_mcp_server_trusted(&self, dir: &Path, name: &str, command: &str) -> bool {
+        let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        self.trusted_mcp_servers.iter().any(|t| {
+            let d_canon = std::fs::canonicalize(&t.directory).unwrap_or_else(|_| t.directory.clone());
+            d_canon == canon && t.name == name && t.command == command
+        })
+    }
+
+    /// Remembers that the owner allowed this server to run.
+    pub fn trust_mcp_server(&mut self, dir: &Path, name: &str, command: &str) {
+        let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        if self.is_mcp_server_trusted(&canon, name, command) {
+            return;
+        }
+        self.trusted_mcp_servers.push(TrustedMcpServer {
+            directory: canon,
+            name: name.to_string(),
+            command: command.to_string(),
+        });
+    }
+
+    /// Forgets an allowed server: the folder it was allowed in is given, and
+    /// the server may be left running for this session.
+    ///
+    /// Returns whether there was anything to take back, so that a panel can
+    /// say so instead of pretending it worked.
+    pub fn forget_mcp_server(&mut self, dir: &Path, name: &str) -> bool {
+        let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let before = self.trusted_mcp_servers.len();
+        self.trusted_mcp_servers.retain(|t| {
+            let d_canon = std::fs::canonicalize(&t.directory).unwrap_or_else(|_| t.directory.clone());
+            !(d_canon == canon && t.name == name)
+        });
+        self.trusted_mcp_servers.len() != before
+    }
+
+    /// The servers the owner has allowed in this folder, with the command each
+    /// was allowed to run.
+    ///
+    /// A panel that shows what is trusted needs this: an owner who trusted a
+    /// server can only take the trust back if the trusted servers can be
+    /// listed.
+    pub fn mcp_servers_trusted_in(&self, dir: &Path) -> Vec<&TrustedMcpServer> {
+        let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        self.trusted_mcp_servers
+            .iter()
+            .filter(|t| {
+                let d_canon = std::fs::canonicalize(&t.directory).unwrap_or_else(|_| t.directory.clone());
+                d_canon == canon
+            })
+            .collect()
     }
 
     pub fn trust_directory(&mut self, dir: &Path) {
@@ -960,7 +1075,7 @@ impl AppConfig {
         // The file holds API keys: another account on the machine must not read
         // it. Set on the temp file, so it is never briefly readable at the
         // final name.
-        let written = Self::write_private(&tmp, json.as_bytes());
+        let written = crate::paths::write_private(&tmp, json.as_bytes());
         let result = written.and_then(|_| std::fs::rename(&tmp, path));
         if result.is_err() {
             let _ = std::fs::remove_file(&tmp);
@@ -975,25 +1090,6 @@ impl AppConfig {
             }
         }
         Ok(())
-    }
-
-    /// Written with the mode set at creation, never widened afterwards: the
-    /// config holds API keys, and a file that is briefly world-readable has
-    /// already leaked to every other account on the machine.
-    fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-        use std::io::Write;
-        #[cfg(unix)]
-        let mut options = {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut o = std::fs::OpenOptions::new();
-            o.write(true).create(true).truncate(true).mode(0o600);
-            o
-        };
-        #[cfg(not(unix))]
-        let mut options = std::fs::OpenOptions::new();
-        let mut f = options.write(true).create(true).truncate(true).open(path)?;
-        f.write_all(bytes)?;
-        f.sync_all()
     }
 
     /// What a build from before providers reads (`backend_url`, `api_key`,
@@ -1381,16 +1477,78 @@ mod tests {
         assert_eq!(ProviderProfile::from_url("  ").name, "Custom");
     }
 
+    /// The trust given to an MCP server can be taken back: the owner said yes
+    /// once and may say no again.
+    ///
+    /// The panel that offers this needs the list of what is trusted and a way
+    /// to take it back, and both live here.
+    #[test]
+    fn the_trust_given_to_an_mcp_server_can_be_taken_back() {
+        let mut cfg = AppConfig::default();
+        let dir = std::env::temp_dir();
+        cfg.trust_mcp_server(&dir, "sqlite", "uvx mcp-server-sqlite");
+        let trusted = cfg.mcp_servers_trusted_in(&dir);
+        assert_eq!(trusted.len(), 1, "the panel has to be able to show what is trusted");
+        assert_eq!(trusted[0].name, "sqlite");
+        assert!(cfg.forget_mcp_server(&dir, "sqlite"), "there was something to take back");
+        assert!(!cfg.is_mcp_server_trusted(&dir, "sqlite", "uvx mcp-server-sqlite"));
+        assert!(cfg.mcp_servers_trusted_in(&dir).is_empty());
+        assert!(!cfg.forget_mcp_server(&dir, "sqlite"), "there was nothing left to take back");
+    }
+
+    /// The channel is spelled once: in the label the owner reads and in the
+    /// file it is written to. A second spelling of it, which nobody calls, is
+    /// a place for the two to drift apart.
+    #[test]
+    fn the_update_channel_is_spelled_once() {
+        let source = include_str!("config.rs");
+        let second = ["fn ", "as_str"].concat();
+        assert!(!source.contains(&second), "the channel has a second spelling that nobody calls");
+        assert_eq!(serde_json::to_string(&UpdateChannel::Beta).unwrap(), "\"beta\"");
+        assert_eq!(serde_json::to_string(&UpdateChannel::Stable).unwrap(), "\"stable\"");
+    }
+
+    /// One server, one provider: the same host under two spellings is the
+    /// same server, the way a preset is found by its host.
+    #[test]
+    fn the_same_server_under_two_addresses_is_one_provider() {
+        let native = ProviderProfile::new("Ollama", ApiProtocol::Ollama, "http://localhost:11434");
+        let openai = ProviderProfile::new("Ollama", ApiProtocol::OpenAi, "http://localhost:11434/v1");
+        assert!(native.same_server(&openai), "one Ollama, two spellings of its address");
+        assert!(openai.same_server(&native));
+        // Another server is another server, whatever it speaks.
+        let other = ProviderProfile::new("LM Studio", ApiProtocol::OpenAi, "http://localhost:1234/v1");
+        assert!(!native.same_server(&other));
+        // And a protocol the address does not speak is the owner's own choice:
+        // it makes the profile a provider of its own.
+        let anthropic = ProviderProfile::new("Anthropic", ApiProtocol::Anthropic, "https://api.anthropic.com");
+        let as_openai = ProviderProfile::new("Anthropic", ApiProtocol::OpenAi, "https://api.anthropic.com");
+        assert!(!anthropic.same_server(&as_openai));
+    }
+
+    /// The provider that is saved over another one is the one for the same
+    /// server: saving the same Ollama twice under two spellings leaves one
+    /// provider, not two.
+    #[test]
+    fn saving_the_same_server_twice_leaves_one_provider() {
+        let mut cfg = AppConfig::default();
+        cfg.providers.clear();
+        let name = cfg.save_provider(ProviderProfile::new("Ollama", ApiProtocol::Ollama, "http://localhost:11434"));
+        assert_eq!(cfg.providers.len(), 1);
+        let again = cfg.save_provider(ProviderProfile::new("Ollama", ApiProtocol::OpenAi, "http://localhost:11434/v1"));
+        assert_eq!(again, name, "the same server keeps its name");
+        assert_eq!(cfg.providers.len(), 1, "the same server was saved twice: {:?}", cfg.providers);
+    }
+
     #[test]
     fn stored_values_are_read_whatever_their_case() {
         let (cfg, rejected) = AppConfig::from_json_str(
-            r#"{"update_channel":"Beta","permission_mode":"Accept Edits","sampling_preset":"MTP_Coding","toolset_profile":"FULL"}"#,
+            r#"{"update_channel":"Beta","permission_mode":"Accept Edits","sampling_preset":"MTP_Coding","web_tools":true}"#,
         );
         assert!(rejected.is_empty(), "{rejected:?}");
         assert_eq!(cfg.update_channel, UpdateChannel::Beta);
         assert_eq!(cfg.permission_mode, crate::PermissionMode::AcceptEdits);
         assert_eq!(cfg.sampling_preset, SamplingPreset::MtpCoding);
-        assert_eq!(cfg.toolset_profile, ToolsetProfile::Full);
     }
 
     #[test]
@@ -1492,6 +1650,58 @@ mod tests {
         let _ = std::fs::remove_file(&temp);
     }
 
+    /// The interface language is a written code in the config; a fresh one is
+    /// English, a named one comes back whatever was written.
+    #[test]
+    fn the_interface_language_round_trips_and_defaults_to_english() {
+        assert_eq!(AppConfig::default().interface_language, "en");
+        let (cfg, rejected) = AppConfig::from_json_str(r#"{"interface_language":"ru"}"#);
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert_eq!(cfg.interface_language, "ru");
+    }
+
+    /// The standing permissions are kept between the runs. They used to live
+    /// in memory until the app closed, so a rule the owner gave on purpose
+    /// had to be given again every morning.
+    #[test]
+    fn the_standing_permissions_survive_the_restart() {
+        let (cfg, rejected) = AppConfig::from_json_str(
+            r#"{"always_rules":{"always_allow_tools":["read_file"],"shell_prefixes":["npm test"],"shell_exact":["ls -la"]}}"#,
+        );
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert_eq!(cfg.always_rules.always_allow_tools, vec!["read_file".to_string()]);
+        assert_eq!(cfg.always_rules.shell_prefixes, vec!["npm test".to_string()]);
+        assert_eq!(cfg.always_rules.shell_exact, vec!["ls -la".to_string()]);
+        // And a config that never heard of the rules has none.
+        let (old, rejected) = AppConfig::from_json_str(r#"{}"#);
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert!(old.always_rules.all().is_empty());
+    }
+
+    /// The warm-up costs a request of its own, so it is off unless the owner
+    /// asks for it. A config that never heard of the setting stays off.
+    #[test]
+    fn a_crash_report_is_only_written_when_it_is_asked_for() {
+        // A backtrace holds the paths of the machine it was taken on, so
+        // nothing is written until the owner says so.
+        assert!(!AppConfig::default().crash_reports, "a crash report is off by default");
+        let (cfg, rejected) = AppConfig::from_json_str(r#"{}"#);
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert!(!cfg.crash_reports, "a config without the key writes nothing");
+        let (on, _) = AppConfig::from_json_str(r#"{"crash_reports":true}"#);
+        assert!(on.crash_reports, "and it can be turned on");
+    }
+
+    #[test]
+    fn the_prompt_cache_warm_up_is_off_until_it_is_asked_for() {
+        assert!(!AppConfig::default().auto_warm_prompt_cache);
+        let (cfg, rejected) = AppConfig::from_json_str(r#"{}"#);
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert!(!cfg.auto_warm_prompt_cache, "a config without the key keeps the warm-up off");
+        let (on, _) = AppConfig::from_json_str(r#"{"auto_warm_prompt_cache":true}"#);
+        assert!(on.auto_warm_prompt_cache, "and it can be turned on");
+    }
+
     #[test]
     fn test_backwards_compatible_deserialization_from_older_schema() {
         // Missing fields added later; "language" and "silent_update_check" no longer
@@ -1511,7 +1721,6 @@ mod tests {
         assert!(cfg.setup_completed, "setup_completed flag must be preserved!");
         assert_eq!(cfg.sampling_preset, SamplingPreset::Coding);
         assert!(cfg.web_tools);
-        assert_eq!(cfg.toolset_profile, ToolsetProfile::Auto);
         assert!(cfg.trusted_directories.is_empty());
     }
 
@@ -1527,6 +1736,42 @@ mod tests {
         let prev_len = cfg.trusted_directories.len();
         cfg.trust_directory(&temp_dir);
         assert_eq!(cfg.trusted_directories.len(), prev_len);
+    }
+
+    /// An allowed MCP server is remembered with the command it was allowed
+    /// to run: a config that changes what it runs is a different program, and
+    /// it is asked about again.
+    #[test]
+    fn an_allowed_mcp_server_is_remembered_with_its_command() {
+        let mut cfg = AppConfig::default();
+        let dir = std::env::temp_dir();
+
+        assert!(!cfg.is_mcp_server_trusted(&dir, "sqlite", "uvx mcp-server-sqlite"));
+        cfg.trust_mcp_server(&dir, "sqlite", "uvx mcp-server-sqlite");
+        assert!(cfg.is_mcp_server_trusted(&dir, "sqlite", "uvx mcp-server-sqlite"));
+
+        // The same name, a different program: asked about again.
+        assert!(!cfg.is_mcp_server_trusted(&dir, "sqlite", "sh -c something else"));
+        // A different server in the same folder: asked about again.
+        assert!(!cfg.is_mcp_server_trusted(&dir, "other", "uvx mcp-server-sqlite"));
+
+        // Remembered once, not twice.
+        let len = cfg.trusted_mcp_servers.len();
+        cfg.trust_mcp_server(&dir, "sqlite", "uvx mcp-server-sqlite");
+        assert_eq!(cfg.trusted_mcp_servers.len(), len);
+
+        // Forgotten, when the owner takes it back.
+        cfg.forget_mcp_server(&dir, "sqlite");
+        assert!(!cfg.is_mcp_server_trusted(&dir, "sqlite", "uvx mcp-server-sqlite"));
+    }
+
+    /// An older config has no allowed servers, and says so rather than
+    /// refusing to load.
+    #[test]
+    fn an_older_config_knows_of_no_allowed_mcp_servers() {
+        let (cfg, rejected) = AppConfig::from_json_str(r#"{"model":"qwen"}"#);
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert!(cfg.trusted_mcp_servers.is_empty());
     }
 
     #[test]
@@ -1583,9 +1828,4 @@ lenient_enum!(UpdateChannel, "update channel", {
     "release" => UpdateChannel::Stable,
 });
 
-lenient_enum!(ToolsetProfile, "toolset profile", {
-    "auto" => ToolsetProfile::Auto,
-    "full" => ToolsetProfile::Full,
-    "compact" => ToolsetProfile::Compact,
-});
 

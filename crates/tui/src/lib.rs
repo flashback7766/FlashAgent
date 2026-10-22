@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flashagent_core::{ApprovalGate, ApprovalRequest, Decision, DoneReason, LoopEvent};
+use flashagent_core::{ApprovalGate, ApprovalRequest, ContextUsage, Decision, DoneReason, LoopEvent};
 use parking_lot::Mutex;
 use unicode_width::UnicodeWidthChar;
 
@@ -18,22 +18,28 @@ pub mod composer;
 pub mod context_modal;
 pub mod goal;
 pub mod mcp_view;
+pub mod notice_log;
 pub mod prefill;
 pub mod providers;
+pub mod rules_view;
 pub mod sampling;
 pub mod screen;
 pub mod select;
 pub mod settings;
 pub mod startup;
 pub mod tasks_view;
+pub mod tools_view;
 pub mod theme;
+#[cfg(test)]
+mod untranslated;
 mod tool_cards;
 pub mod tips;
 pub mod image_cost;
+pub mod i18n;
 pub mod memory_view;
 pub mod whatsnew;
 pub mod wizard;
-mod text;
+pub mod text;
 mod stages;
 mod welcome;
 mod markdown;
@@ -61,6 +67,23 @@ pub use ReasoningExpansion as VerboseMode;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseEvent};
 use flashagent_llm::{ChatMessage, ServerDiscovery};
+
+/// What one compaction produced. The summary is also written into the system
+/// message; the card reads it from here.
+#[derive(Debug, Clone)]
+pub struct CompactionResult {
+    /// Tokens the window got back, in the unit the status line uses.
+    pub saved: usize,
+    /// The summary as it was stored, with the card's headings.
+    pub summary: String,
+    /// The summarising call's prompt and answer, when the server reported them;
+    /// estimated from the conversation otherwise.
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    /// The conversation the summary replaced, kept with the session so the
+    /// exact words of the earlier turns are not lost.
+    pub archive: Vec<ChatMessage>,
+}
 
 #[derive(Debug)]
 pub enum UiEvent {
@@ -98,9 +121,14 @@ pub enum UiEvent {
     SubagentEvent(flashagent_core::SubagentEvent),
     /// What a child has finished, said, or what the parent made of a report.
     SubagentOutbound(flashagent_core::SubagentOutbound),
+    /// A piece of a compaction summary, as the model writes it.
+    CompactionDelta(String),
+    /// The previous summary attempt was refused: the open card starts again.
+    CompactionReset,
     /// `/compact` finished. `saved` is `None` when nothing was compacted: the
-    /// history comes back either way, unchanged in that case.
-    Compacted { history: Vec<ChatMessage>, saved: Option<usize> },
+    /// history comes back either way, unchanged in that case. `card` carries
+    /// the summary for the transcript; it is `None` when there is none.
+    Compacted { history: Vec<ChatMessage>, saved: Option<usize>, card: Option<CompactionResult> },
 }
 
 /// Drives terminal colours.
@@ -113,6 +141,12 @@ pub enum LineKind {
     ToolError,
     Diff,
     System,
+    /// A compaction card: a rule, the summary, and a rule with what it cost.
+    Compaction,
+    /// A centred rule naming the model or thinking level the session runs on
+    /// now. Written with the first message that uses the switch, not when the
+    /// menu opened.
+    Model,
     /// A running subagent: its role, what it is doing now, and what it spent.
     Subagent,
 }
@@ -153,6 +187,25 @@ pub struct ToolCallRecord {
     pub diff: Option<String>,
 }
 
+/// One compaction as the transcript shows it: a header while the summary is
+/// being written, then the summary and what the call cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionCard {
+    pub state: CompactionState,
+    pub summary: String,
+    /// `None` for a card restored from a session file, which stores the
+    /// summary but not the summarising call's bill.
+    pub input_tokens: Option<usize>,
+    pub output_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionState {
+    Started,
+    Done,
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatLine {
     pub kind: LineKind,
@@ -172,7 +225,8 @@ pub struct ChatLine {
     pub tool_calls: Vec<ToolCallRecord>,
     /// Which running subagent this line reports, so its row can be updated in
     /// place as the child works instead of a new line per event.
-    pub agent_id: Option<String>,
+    /// Set on a [`LineKind::Compaction`] line.
+    pub compaction: Option<CompactionCard>,
 }
 
 impl ChatLine {
@@ -188,7 +242,7 @@ impl ChatLine {
             tool_result: None,
             is_expanded: None,
             tool_calls: Vec::new(),
-            agent_id: None,
+            compaction: None,
         }
     }
 
@@ -204,7 +258,7 @@ impl ChatLine {
             tool_result: None,
             is_expanded: None,
             tool_calls: Vec::new(),
-            agent_id: None,
+            compaction: None,
         }
     }
 }
@@ -248,35 +302,134 @@ pub struct ChatView {
     /// Settled lines rendered once, not re-parsed every frame.
     settled_cache: Mutex<SettledRenderCache>,
     row_owners: Mutex<RowOwners>,
-    /// What the transcript held when the context was last compacted: those
-    /// lines are no longer sent, so they no longer count.
-    context_baseline: (usize, usize, usize, usize),
+    /// Where the transcript stood when the context was last compacted: the
+    /// lines before it are no longer sent, so they no longer count.
+    ///
+    /// A boundary and not a number: the baseline used to be counted in
+    /// characters and subtracted from a count in tokens, and after every
+    /// compaction the gauge read zero.
+    context_baseline_line: usize,
 }
 
 pub fn format_explore(is_running: bool, files: usize, searches: usize, last_target: &str) -> String {
-    let verb = if is_running { "Exploring" } else { "Explored" };
+    let verb = if is_running { crate::i18n::tr("Exploring") } else { crate::i18n::tr("Explored") };
     let chevron = "\x1b[38;2;120;125;140m›\x1b[0m";
     // In the same column as every other tool line's mark.
     let mark = format!("\x1b[38;2;120;125;140m{}\x1b[0m", tool_cards::TOOL_MARK);
     if files > 0 && searches > 0 {
-        let f_str = if files == 1 { "1 file".to_string() } else { format!("{files} files") };
-        let s_str = if searches == 1 { "1 search".to_string() } else { format!("{searches} searches") };
+        let f_str = crate::text::plural(files, "file", "files");
+        let s_str = crate::text::plural(searches, "search", "searches");
         format!("  {mark} \x1b[38;2;160;165;180m{verb} {f_str}, {s_str}\x1b[0m {chevron}")
     } else if files > 1 {
-        format!("  {mark} \x1b[38;2;160;165;180m{verb} {files} files\x1b[0m {chevron}")
+        let f_str = crate::text::plural(files, "file", "files");
+        format!("  {mark} \x1b[38;2;160;165;180m{verb} {f_str}\x1b[0m {chevron}")
     } else if searches > 1 {
-        format!("  {mark} \x1b[38;2;160;165;180m{verb} {searches} searches\x1b[0m {chevron}")
+        let s_str = crate::text::plural(searches, "search", "searches");
+        format!("  {mark} \x1b[38;2;160;165;180m{verb} {s_str}\x1b[0m {chevron}")
     } else if files == 1 {
-        let v = if is_running { "Reading" } else { "Read" };
+        let v = if is_running { crate::i18n::tr("Reading") } else { crate::i18n::tr("Read") };
         format!("  {mark} \x1b[38;2;160;165;180m{v}\x1b[0m \x1b[38;2;225;230;240m{last_target}\x1b[0m {chevron}")
     } else if searches == 1 {
-        let v = if is_running { "Searching" } else { "Searched" };
+        let v = if is_running { crate::i18n::tr("Searching") } else { crate::i18n::tr("Searched") };
         format!("  {mark} \x1b[38;2;160;165;180m{v}\x1b[0m \x1b[38;2;225;230;240m{last_target}\x1b[0m {chevron}")
     } else {
         format!("  {mark} \x1b[38;2;160;165;180m{verb} {last_target}\x1b[0m {chevron}")
     }
 }
 
+
+/// A thin rule with a centred label, the way a compaction card opens and
+/// closes. The label is dimmer than the body so the summary stays the thing
+/// the eye lands on.
+fn compaction_rule(label: &str, width: usize) -> String {
+    const RULE: &str = "\x1b[38;2;82;80;76m";
+    const LABEL: &str = "\x1b[38;2;160;155;148m";
+    let width = width.max(20);
+    let text = format!(" {label} ");
+    let label_width = visible_width(&text);
+    if label_width >= width {
+        return format!("{LABEL}{}\x1b[0m", clip_ansi(&text, width));
+    }
+    let left = (width - label_width) / 2;
+    let right = width - label_width - left;
+    format!("{RULE}{}{LABEL}{text}{RULE}{}\x1b[0m", "─".repeat(left), "─".repeat(right))
+}
+
+/// Markdown headings keep their emphasis but lose the list-style mark the
+/// transcript uses elsewhere: a compaction summary is a document, not a block
+/// of the chat. Heading levels stay distinguishable by weight.
+fn restyle_compaction_heading(row: &str) -> String {
+    for (mark, colour) in [
+        ("\x1b[1;38;2;255;255;255m♦ ", "\x1b[1;38;2;240;235;225m"),
+        ("\x1b[1;38;2;194;231;255m◊ ", "\x1b[1;38;2;235;230;220m"),
+        ("\x1b[1;38;2;225;230;240m▸ ", "\x1b[1;38;2;205;200;190m"),
+        ("\x1b[38;2;180;185;200m▪ ", "\x1b[38;2;190;185;175m"),
+    ] {
+        if let Some(rest) = row.strip_prefix(mark) {
+            return format!("{colour}{rest}");
+        }
+    }
+    row.to_string()
+}
+
+/// The card that takes the place of the turns a summary replaced: a rule, the
+/// summary rendered as markdown, and a rule saying what the call cost.
+fn render_compaction_card(card: &CompactionCard, width: usize) -> Vec<RenderLine> {
+    let mut out = Vec::new();
+    out.push((LineKind::Compaction, compaction_rule(crate::i18n::tr("Session compaction started"), width)));
+    out.push((LineKind::Compaction, String::new()));
+    match card.state {
+        CompactionState::Started => {
+            // The summary follows the header word by word, and the spinner sits
+            // under what has arrived, so a quiet prefill still looks alive.
+            if !card.summary.is_empty() {
+                let inner = width.saturating_sub(4).max(20);
+                for row in render_markdown_text(&card.summary, inner) {
+                    out.push((LineKind::Compaction, format!("  {}", restyle_compaction_heading(&row))));
+                }
+                out.push((LineKind::Compaction, String::new()));
+            }
+            // Drawn from the clock, not from event count: the open card is live
+            // while the model writes, so the spinner shows the wait is moving.
+            let t = anim::now_ms();
+            out.push((
+                LineKind::Compaction,
+                format!(
+                    "  \x1b[38;2;145;140;134m{}\x1b[0m \x1b[38;2;190;185;178mWriting a summary of the conversation…\x1b[0m",
+                    anim::spinner(t)
+                ),
+            ));
+        }
+        CompactionState::Failed => {
+            let body = format!("  \x1b[38;2;230;145;135m{}\x1b[0m", card.summary);
+            for row in wrap(&body, width.saturating_sub(2)) {
+                out.push((LineKind::Compaction, row));
+            }
+        }
+        CompactionState::Done => {
+            let inner = width.saturating_sub(4).max(20);
+            for row in render_markdown_text(&card.summary, inner) {
+                out.push((LineKind::Compaction, format!("  {}", restyle_compaction_heading(&row))));
+            }
+        }
+    }
+    // The card opens when the summary starts and closes when it lands: a rule
+    // at the bottom while it is still being written would be claiming a result.
+    if card.state != CompactionState::Started {
+        out.push((LineKind::Compaction, String::new()));
+        let footer = match card.state {
+            CompactionState::Failed => crate::i18n::tr("Session compaction failed").to_string(),
+            _ => match (card.input_tokens, card.output_tokens) {
+                (Some(input), Some(output)) => {
+                    format!("Session compacted · {} in · {} out", ContextUsage::format_tokens(input), ContextUsage::format_tokens(output))
+                }
+                _ => crate::i18n::tr("Session compacted").to_string(),
+            },
+        };
+        out.push((LineKind::Compaction, compaction_rule(&footer, width)));
+    }
+    out
+}
 
 /// Its `path`, then each of its `files`.
 fn call_paths(parsed: &serde_json::Value) -> Vec<String> {
@@ -411,7 +564,7 @@ pub fn call_facts(name: &str, parsed: &serde_json::Value, diff: Option<&str>) ->
             .or_else(|| parsed.get("query"))
             .and_then(|p| p.as_str())
             .map(|p| format!("\"{}\"", format_cmd(p))),
-        "list_dir" => Some(path_of("path").unwrap_or_else(|| "the project".to_string())),
+        "list_dir" => Some(path_of("path").unwrap_or_else(|| crate::i18n::tr("the project").to_string())),
         _ => None,
     }
 }
@@ -420,51 +573,68 @@ impl ChatView {
     /// First still-changing line, or `lines.len()`. Everything before it is
     /// printed to the scrollback once and never touched again.
     pub fn settled_boundary(&self) -> usize {
+        // An open compaction card carries a spinner. Its rows are drawn from
+        // the clock, so they stay in the live tail until the summary lands.
+        let open_card = self.lines.iter().rposition(|l| {
+            l.kind == LineKind::Compaction
+                && l.compaction.as_ref().is_some_and(|c| c.state == CompactionState::Started)
+        });
         // min(): taking the first Some() would freeze a line that still receives appends.
         self.streaming
             .into_iter()
             .chain(self.streaming_reasoning)
             .chain(self.open_tool)
+            .chain(open_card)
             .min()
             .unwrap_or(self.lines.len())
     }
 
-    /// (user, assistant, reasoning, tools)
-    /// Since the last compaction; see [`Self::forget_counted_context`].
-    pub fn raw_content_chars(&self) -> (usize, usize, usize, usize) {
-        let (user, assistant, reasoning, tools) = self.all_content_chars();
-        let (bu, ba, br, bt) = self.context_baseline;
-        (user.saturating_sub(bu), assistant.saturating_sub(ba), reasoning.saturating_sub(br), tools.saturating_sub(bt))
+    /// The same four numbers, counted as tokens with the counter of the model
+    /// in use.
+    ///
+    /// The transcript is what is on the screen, and while a turn runs it holds
+    /// more than the history does: the answer is being written. Counting
+    /// characters and dividing by four was a different number from the one
+    /// the budget used, and for Russian it was far off: a letter is two
+    /// bytes, and the bar said the window was half full when the model had
+    /// read a third of it.
+    pub fn raw_content_tokens(&self, count: &dyn Fn(&str) -> usize) -> (usize, usize, usize, usize) {
+        self.all_content_tokens(count)
     }
 
-    /// After compaction the transcript still shows what the model no longer
-    /// gets; counting it kept the gauge over the threshold, so every later turn
-    /// compacted again.
-    pub fn forget_counted_context(&mut self) {
-        self.context_baseline = self.all_content_chars();
-    }
-
-    fn all_content_chars(&self) -> (usize, usize, usize, usize) {
+    fn all_content_tokens(&self, count: &dyn Fn(&str) -> usize) -> (usize, usize, usize, usize) {
         let mut user = 0;
         let mut assistant = 0;
         let mut reasoning = 0;
         let mut tools = 0;
-        for l in &self.lines {
+        let from = self.context_baseline_line.min(self.lines.len());
+        for l in &self.lines[from..] {
             match l.kind {
-                LineKind::User => user += l.text.len(),
-                LineKind::Assistant => assistant += l.text.len(),
-                LineKind::Reasoning => reasoning += l.text.len(),
+                LineKind::User => user += count(&l.text),
+                LineKind::Assistant => assistant += count(&l.text),
+                LineKind::Reasoning => reasoning += count(&l.text),
                 LineKind::Tool | LineKind::ToolError => {
                     if let Some(ref d) = l.details {
-                        tools += d.len();
+                        tools += count(d);
                     }
-                    tools += l.tool_result_len;
-                    tools += l.text.len();
+                    tools += count(&l.text);
                 }
                 _ => {}
             }
         }
         (user, assistant, reasoning, tools)
+    }
+
+    /// After compaction the transcript still shows what the model no longer
+    /// gets; counting it kept the gauge over the threshold, so every later turn
+    /// compacted again.
+    ///
+    /// What is remembered is where the transcript stood, not a number: the
+    /// baseline used to be counted in characters and subtracted from a count in
+    /// tokens, so after every compaction the gauge read zero — the summary, the
+    /// only thing the model gets now, was the one thing that was not counted.
+    pub fn forget_counted_context(&mut self) {
+        self.context_baseline_line = self.lines.len();
     }
 
     pub fn clear(&mut self) {
@@ -475,7 +645,7 @@ impl ChatView {
         self.open_tool = None;
         self.card_len = 0;
         self.needs_reprint = false;
-        self.context_baseline = (0, 0, 0, 0);
+        self.context_baseline_line = 0;
         *self.settled_cache.lock() = SettledRenderCache::default();
     }
 
@@ -624,6 +794,18 @@ impl ChatView {
         if self.has_user_message() {
             return;
         }
+        self.replace_welcome_card(new_card);
+    }
+
+    /// The card at the top of a conversation that has already started: the
+    /// model, the provider or the level changed, and the card says what runs
+    /// now instead of what ran when the session started.
+    pub fn update_welcome_card_state(&mut self, new_card: Vec<RenderLine>) {
+        self.replace_welcome_card(new_card);
+    }
+
+    /// The card's lines become the new ones; everything after it stays.
+    fn replace_welcome_card(&mut self, new_card: Vec<RenderLine>) {
         *self.settled_cache.lock() = SettledRenderCache::default();
         let end_idx = if self.card_len > 0 {
             self.card_len.min(self.lines.len())
@@ -671,6 +853,26 @@ impl ChatView {
         self.lines.push(ChatLine::new(LineKind::System, text.to_string()));
     }
 
+    /// A centred rule that says what the session runs on now. The app writes
+    /// it with the first message that uses the new state, so a menu pick alone
+    /// never leaves a rule above an empty chat. The same rule twice in a row
+    /// says nothing new. Returns whether a row was added.
+    pub fn push_model_notice(&mut self, label: &str) -> bool {
+        let label = label.trim();
+        if label.is_empty() {
+            return false;
+        }
+        if self.lines.last().is_some_and(|l| l.kind == LineKind::Model && l.text == label) {
+            return false;
+        }
+        self.streaming = None;
+        self.streaming_reasoning = None;
+        self.lines.push(ChatLine::new(LineKind::Model, label));
+        *self.settled_cache.lock() = SettledRenderCache::default();
+        self.needs_reprint = true;
+        true
+    }
+
     /// One agent wrote to another, shown as a folded line the way a tool call is
     /// shown: who it is from, who it is for, and the message itself only when the
     /// line is opened. Dumped as text it read as the user having said it, and a
@@ -680,8 +882,9 @@ impl ChatView {
         self.streaming_reasoning = None;
         let head = format!("message from {from_role} {from} \u{b7} to {to}");
         let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-        let preview: String =
-            first.chars().take(96).collect::<String>() + if first.chars().count() > 96 { "\u{2026}" } else { "" };
+        // Cut by cells, not by characters: a CJK line is twice as wide as it is
+        // long, and the preview has to fit where it is shown.
+        let preview = tool_views::clip_ellipsis(first, 96);
         let mut line = ChatLine::with_details(LineKind::Subagent, head, text.to_string());
         line.tool_name = Some("subagent_message".to_string());
         // The first line of what was said stands in for the whole message while
@@ -705,12 +908,13 @@ impl ChatView {
         let answer = finished.answer.as_str();
         self.streaming = None;
         self.streaming_reasoning = None;
-        let said = if finished.done == DoneReason::Completed { "answered" } else { "stopped early" };
+        let said = if finished.done == DoneReason::Completed { crate::i18n::tr("answered") } else { crate::i18n::tr("stopped early") };
         let head = format!(
-            "{role} {} {said} \u{b7} {} \u{b7} {} tokens \u{b7} {secs}s",
+            "{role} {} {said} \u{b7} {} \u{b7} {} {} \u{b7} {secs}s",
             finished.id,
-            plural(finished.usage.steps as usize, "step", "steps"),
+            crate::text::plural(finished.usage.steps as usize, "step", "steps"),
             goal::human_count(finished.usage.total_tokens() as i64),
+            crate::i18n::tr("tokens"),
         );
         let mut line = ChatLine::with_details(LineKind::Tool, tool_line(&head, answer), answer.to_string());
         line.tool_name = Some("subagent_answer".to_string());
@@ -720,41 +924,118 @@ impl ChatView {
         self.lines.push(line);
     }
 
-    /// "Compacting context…" becomes "Context compacted · 12k saved" in place.
-    pub fn replace_last_system(&mut self, text: &str) {
-        match self.lines.iter().rposition(|l| l.kind == LineKind::System) {
+    /// The rule and header that stand in the transcript while a summary is
+    /// being written. Finished in place, so the header stays where it started.
+    pub fn start_compaction_card(&mut self) {
+        // Mid-turn the card lands between two steps: text that arrives after it
+        // must start a new block below the card, not continue one above it.
+        self.streaming = None;
+        self.streaming_reasoning = None;
+        let mut line = ChatLine::new(LineKind::Compaction, "");
+        line.compaction = Some(CompactionCard {
+            state: CompactionState::Started,
+            summary: String::new(),
+            input_tokens: None,
+            output_tokens: None,
+        });
+        self.lines.push(line);
+        *self.settled_cache.lock() = SettledRenderCache::default();
+        self.needs_reprint = true;
+    }
+
+    /// Adds the model's next words to the open card, so the summary is read as
+    /// it is written rather than only when the call ends.
+    pub fn append_compaction_delta(&mut self, delta: &str) {
+        if let Some(card) = self.open_compaction_card() {
+            card.summary.push_str(delta);
+        }
+    }
+
+    /// Drops the open card's text before a refused summary is asked for again.
+    pub fn restart_compaction_card(&mut self) {
+        if let Some(card) = self.open_compaction_card() {
+            card.summary.clear();
+        }
+    }
+
+    fn open_compaction_card(&mut self) -> Option<&mut CompactionCard> {
+        self.lines.iter_mut().rev().find_map(|line| match line.compaction.as_mut() {
+            Some(card) if card.state == CompactionState::Started => Some(card),
+            _ => None,
+        })
+    }
+
+    /// Fills the card started for this compaction with the summary and what the
+    /// call cost. A card that was not started (a compaction from an older
+    /// build) still gets one, so the summary is never invisible.
+    pub fn finish_compaction_card(&mut self, result: &CompactionResult) {
+        let card = CompactionCard {
+            state: CompactionState::Done,
+            summary: result.summary.clone(),
+            input_tokens: Some(result.input_tokens),
+            output_tokens: Some(result.output_tokens),
+        };
+        self.settle_compaction_card(card, &result.summary);
+    }
+
+    /// The card a resumed session gets: the summary is in the session file,
+    /// along with the summarising call's token counts when this build stored
+    /// them. Cards from older files show no bill rather than inventing one.
+    pub fn push_restored_compaction_card(&mut self, summary: &str, input_tokens: Option<usize>, output_tokens: Option<usize>) {
+        let card = CompactionCard {
+            state: CompactionState::Done,
+            summary: summary.to_string(),
+            input_tokens,
+            output_tokens,
+        };
+        self.settle_compaction_card(card, summary);
+    }
+
+    fn settle_compaction_card(&mut self, card: CompactionCard, text: &str) {
+        let found = self
+            .lines
+            .iter()
+            .rposition(|l| l.kind == LineKind::Compaction && l.compaction.as_ref().is_some_and(|c| c.state == CompactionState::Started));
+        match found {
             Some(i) => {
                 self.lines[i].text = text.to_string();
-                *self.settled_cache.lock() = SettledRenderCache::default();
-                self.needs_reprint = true;
-            }
-            None => self.push_system(text),
-        }
-    }
-
-    /// A running subagent's row, written over in place. One child is one line
-    /// for as long as it runs, so a long task reads as progress on a row the
-    /// eye can stay on, not as a wall of new lines.
-    pub fn upsert_agent(&mut self, id: &str, text: impl Into<String>) {
-        let text = text.into();
-        match self.lines.iter().position(|l| l.agent_id.as_deref() == Some(id)) {
-            Some(i) => {
-                if self.lines[i].text != text {
-                    self.lines[i].text = text;
-                    *self.settled_cache.lock() = SettledRenderCache::default();
-                    self.needs_reprint = true;
-                }
+                self.lines[i].compaction = Some(card);
             }
             None => {
-                let mut line = ChatLine::new(LineKind::Subagent, text);
-                line.agent_id = Some(id.to_string());
+                let mut line = ChatLine::new(LineKind::Compaction, text);
+                line.compaction = Some(card);
                 self.lines.push(line);
-                *self.settled_cache.lock() = SettledRenderCache::default();
-                self.needs_reprint = true;
             }
         }
+        *self.settled_cache.lock() = SettledRenderCache::default();
+        self.needs_reprint = true;
     }
 
+    /// The compaction did not happen: the card says so where the reader is
+    /// already looking for the summary.
+    pub fn fail_compaction_card(&mut self, reason: &str) {
+        let card = CompactionCard {
+            state: CompactionState::Failed,
+            summary: reason.to_string(),
+            input_tokens: None,
+            output_tokens: None,
+        };
+        let text = format!("Session compaction failed · {reason}");
+        self.settle_compaction_card(card, &text);
+    }
+
+    /// Ends a card left open by a turn that stopped before its compaction
+    /// reported. Only an open card is touched: every other turn ends with no
+    /// card, and pushing a failure there would invent one.
+    pub fn abandon_compaction_card(&mut self, reason: &str) -> bool {
+        let open = self.lines.iter().any(|line| {
+            line.kind == LineKind::Compaction && line.compaction.as_ref().is_some_and(|card| card.state == CompactionState::Started)
+        });
+        if open {
+            self.fail_compaction_card(reason);
+        }
+        open
+    }
 
     pub fn push_line(&mut self, kind: LineKind, text: impl Into<String>) {
         self.streaming = None;
@@ -766,12 +1047,6 @@ impl ChatView {
     pub fn push_user(&mut self, text: &str) {
         self.streaming = None;
         self.lines.push(ChatLine::new(LineKind::User, text.to_string()));
-    }
-
-    pub fn push_assistant(&mut self, text: &str) {
-        self.streaming = None;
-        self.streaming_reasoning = None;
-        self.lines.push(ChatLine::new(LineKind::Assistant, text.to_string()));
     }
 
     pub fn on_event(&mut self, ev: &LoopEvent) {
@@ -813,7 +1088,7 @@ impl ChatView {
             }
             LoopEvent::Usage(_) => {}
             // The summary is not something the gauge counts up again.
-            LoopEvent::Compacted { .. } => self.forget_counted_context(),            // Its own line was drawn when the task ended.
+            LoopEvent::Compacted { .. } => self.forget_counted_context(), // Its own line was drawn when the task ended.
             LoopEvent::SteeringInjected(directive) if flashagent_core::is_task_notice(directive) => {}
             LoopEvent::SteeringInjected(directive) => {
                 self.streaming = None;
@@ -837,9 +1112,9 @@ impl ChatView {
                 self.open_tool = None;
                 // The enum's own name ("— StepLimit —") used to reach the chat.
                 let said = match reason {
-                    flashagent_core::DoneReason::StepLimit => Some("stopped: the step limit was reached"),
-                    flashagent_core::DoneReason::TokenBudget => Some("stopped: the token budget was spent"),
-                    flashagent_core::DoneReason::TimeLimit => Some("stopped: the time limit was reached"),
+                    flashagent_core::DoneReason::StepLimit => Some(crate::i18n::tr("stopped: the step limit was reached")),
+                    flashagent_core::DoneReason::TokenBudget => Some(crate::i18n::tr("stopped: the token budget was spent")),
+                    flashagent_core::DoneReason::TimeLimit => Some(crate::i18n::tr("stopped: the time limit was reached")),
                     // The explanation of what failed follows; a line announcing it said it twice.
                     flashagent_core::DoneReason::Failed
                     | flashagent_core::DoneReason::Cancelled
@@ -902,9 +1177,10 @@ fn tool_line(head: &str, subject_source: &str) -> String {
     let subject = subject_source.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
     let mut out = format!("  {FAINT}{}{OFF} {MUTED}{head}{OFF}", tool_cards::TOOL_MARK);
     if !subject.is_empty() {
-        let clipped: String = subject.chars().take(72).collect();
-        let ellipsis = if subject.chars().count() > 72 { "\u{2026}" } else { "" };
-        out.push_str(&format!(" {STRONG}{clipped}{ellipsis}{OFF}"));
+        // Cut by cells, not by characters: the line it is shown on has a width,
+        // and a CJK line is twice as wide as it is long.
+        let clipped = tool_views::clip_ellipsis(subject, 72);
+        out.push_str(&format!(" {STRONG}{clipped}{OFF}"));
     }
     out.push_str(&format!(" {FAINT}\u{203a}{OFF}"));
     out
@@ -1069,7 +1345,7 @@ fn render_single_tool_card(
 
     if tool_name == "subagent_answer" {
         return render_subagent_answer_card(
-            folded.unwrap_or("A subagent answered"),
+            folded.unwrap_or(crate::i18n::tr("A subagent answered")),
             call.args_json.as_str(),
             width,
         );
@@ -1086,9 +1362,20 @@ fn render_single_tool_card(
     }
 
     if tool_name.starts_with("memory_") {
-        let scope = parsed.get("scope").and_then(|s| s.as_str()).unwrap_or("project");
+        // The scope is the model's word; the card shows it in the language of
+        // the interface. So does the action: the name of the tool is an
+        // identifier, and an identifier in the middle of a Russian sentence
+        // is the thing the collector is there to catch.
+        let scope = crate::i18n::tr(parsed.get("scope").and_then(|s| s.as_str()).unwrap_or("project"));
+        let action = match tool_name {
+            "memory_read" => crate::i18n::tr("Reading"),
+            "memory_create" => crate::i18n::tr("Creating"),
+            "memory_update" => crate::i18n::tr("Updating"),
+            "memory_remove" => crate::i18n::tr("Removing"),
+            _ => crate::i18n::tr("Memory"),
+        };
         return card(tool_views::render_memory_card(
-            tool_name,
+            action,
             &[scope.to_string()],
             call.result.as_deref().or(Some(&call.args_json)),
             width,
@@ -1125,6 +1412,8 @@ fn block_of(kind: LineKind) -> Block {
         LineKind::Reasoning | LineKind::Tool | LineKind::ToolError => Block::Work,
         LineKind::Assistant => Block::Answer,
         LineKind::Diff | LineKind::System => Block::Other,
+        // The card and the switch rule bring their own spacing.
+        LineKind::Compaction | LineKind::Model => Block::Other,
         // A subagent is work under way, next to the parent's own tool calls.
         LineKind::Subagent => Block::Work,
     }
@@ -1144,13 +1433,36 @@ impl ChatView {
         let mut previous_block: Option<Block> = None;
         let last_user_idx = self.lines.iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0);
 
-        let cached_settled_match = {
+        // The rows for the lines before the boundary do not change when the
+        // boundary moves forward: the same lines, drawn the same way. So the
+        // cache is kept when it covers fewer lines than the new boundary, and
+        // only the lines after it are drawn again.
+        //
+        // It is only true when the expansion does not depend on which turn is
+        // the last one: "verbose: last" expands the newest turn, and a new
+        // question would collapse the turn the cached rows were drawn for.
+        let turn_independent = expansion.all || !expansion.last;
+        let cached_prefix = {
             let cache = self.settled_cache.lock();
-            if cache.boundary == boundary && cache.width == width && cache.expansion == expansion && !cache.lines.is_empty() {
-                Some((cache.lines.clone(), cache.owners.clone()))
+            if turn_independent
+                // A boundary of zero is how the cache is thrown away: the lines
+                // it holds are then older than the ones on screen.
+                && cache.boundary > 0
+                && cache.boundary <= boundary
+                && cache.width == width
+                && cache.expansion == expansion
+                && !cache.lines.is_empty()
+            {
+                Some((cache.boundary, cache.lines.clone(), cache.owners.clone()))
             } else {
                 None
             }
+        };
+        // The lines the cached rows already cover.
+        let cached_boundary = cached_prefix.as_ref().map(|(b, _, _)| *b).unwrap_or(0);
+        let cached_settled_match = match &cached_prefix {
+            Some((b, lines, owners)) if *b == boundary => Some((lines.clone(), owners.clone())),
+            _ => None,
         };
         // Where each line's rows start, in settled or live, for `RowOwners`.
         let mut starts: Vec<(bool, usize, usize)> = Vec::new();
@@ -1164,14 +1476,14 @@ impl ChatView {
                     format!(
                         "  \x1b[38;2;138;180;248m{}\x1b[0m \x1b[1m{}\x1b[0m {chevron}",
                         anim::spinner(t),
-                        anim::shimmer(&format!("Thinking: {stage}"), t, 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255)),
+                        anim::shimmer(&crate::i18n::tr("Thinking: {stage}").replace("{stage}", stage), t, 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255)),
                     )
                 } else if let Some(s) = secs {
-                    format!("  \x1b[38;2;120;125;140m•\x1b[0m \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m \x1b[38;2;140;145;160m({s}s)\x1b[0m {chevron}")
+                    format!("  \x1b[38;2;120;125;140m•\x1b[0m \x1b[1;38;2;194;231;255m{}:\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m \x1b[38;2;140;145;160m({s}s)\x1b[0m {chevron}", crate::i18n::tr("Thought"), crate::i18n::tr(stage))
                 } else {
                     // Thinking lifted out of the answer text has no measured duration, but it
                     // is plainly over.
-                    format!("  \x1b[38;2;120;125;140m•\x1b[0m \x1b[1;38;2;194;231;255mThought:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m {chevron}")
+                    format!("  \x1b[38;2;120;125;140m•\x1b[0m \x1b[1;38;2;194;231;255m{}:\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m {chevron}", crate::i18n::tr("Thought"), crate::i18n::tr(stage))
                 };
                 let budget = width.saturating_sub(4);
                 let clipped_styled = clip_ansi(&text_styled, budget);
@@ -1184,18 +1496,20 @@ impl ChatView {
                     (false, Some(s)) => format!(" ({s}s)"),
                     _ => String::new(),
                 };
-                let title_vis = format!("{verb}: {stage}{elapsed}");
+                let title_vis = format!("{}: {}{}", crate::i18n::tr(verb), crate::i18n::tr(stage), elapsed);
                 let title_styled = if is_streaming {
                     format!(
                         "\x1b[1m{}\x1b[0m",
-                        anim::shimmer(&format!("{verb}: {stage}"), anim::now_ms(), 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255))
+                        anim::shimmer(&format!("{}: {}", crate::i18n::tr(verb), crate::i18n::tr(stage)), anim::now_ms(), 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255))
                     )
                 } else {
                     format!(
-                        "\x1b[1;38;2;194;231;255m{verb}:\x1b[0m \x1b[1;38;2;240;235;225m{stage}\x1b[0m\x1b[38;2;140;145;160m{elapsed}\x1b[0m"
+                        "\x1b[1;38;2;194;231;255m{}:\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m\x1b[38;2;140;145;160m{elapsed}\x1b[0m",
+                        crate::i18n::tr(verb),
+                        crate::i18n::tr(stage)
                     )
                 };
-                let box_w = width.saturating_sub(4).clamp(30, 84);
+                let box_w = width.saturating_sub(4).min(84);
                 let border_color = "\x1b[38;2;75;99;130m";
                 let reset = "\x1b[0m";
 
@@ -1243,17 +1557,17 @@ impl ChatView {
         let mut last_tool_group: Option<ToolGroupKind> = None;
         let mut current_turn_user_idx = 0usize;
 
-        let has_cached = cached_settled_match.is_some();
+        let has_cached = cached_prefix.is_some();
         // With settled rows cached, only the turn the boundary falls in is re-read;
         // earlier turns ended at their next question, where state resets.
         let scan_from = if has_cached {
-            self.lines[..boundary.min(self.lines.len())].iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0)
+            self.lines[..cached_boundary.min(self.lines.len())].iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0)
         } else {
             0
         };
 
         for (i, line) in self.lines.iter().enumerate().skip(scan_from) {
-            if i < boundary && has_cached {
+            if i < cached_boundary && has_cached {
                 if line.kind == LineKind::User {
                     current_turn_user_idx = i;
                     turn_reasoning_stages.clear();
@@ -1297,10 +1611,18 @@ impl ChatView {
             // cache: the question settles while its thinking is still live.
             let blank = |row: &RenderLine| row.1.trim().is_empty();
             let row_above_blank = if i < boundary {
-                settled.last().map(blank)
+                // The row above is the last one drawn; with the cached rows in
+                // front, that is their last row.
+                settled
+                    .last()
+                    .or_else(|| cached_prefix.as_ref().and_then(|(_, rows, _)| rows.last()))
+                    .map(blank)
             } else {
                 live.last()
                     .or_else(|| settled.last())
+                    // The rows the cache holds are the ones above, when the
+                    // boundary moved and the new rows start after them.
+                    .or_else(|| cached_prefix.as_ref().and_then(|(_, rows, _)| rows.last()))
                     .or_else(|| cached_settled_match.as_ref().and_then(|(rows, _)| rows.last()))
                     .map(blank)
             };
@@ -1344,6 +1666,18 @@ impl ChatView {
                 let answer_begun = self.streaming.is_some_and(|a| a > i && !self.lines[a].text.trim().is_empty());
                 let is_streaming = self.streaming_reasoning == Some(i) && !answer_begun;
                 push_reasoning(target, &line.text, line.reasoning_secs, is_streaming, is_expanded, &stage);
+                continue;
+            }
+
+            if line.kind == LineKind::Model {
+                target.push((line.kind, compaction_rule(&line.text, width)));
+                continue;
+            }
+
+            if line.kind == LineKind::Compaction {
+                if let Some(card) = &line.compaction {
+                    target.extend(render_compaction_card(card, width));
+                }
                 continue;
             }
 
@@ -1499,8 +1833,29 @@ impl ChatView {
             owners
         };
         let live_owners = owners_of(&live, false);
-        let (settled, settled_owners) = match cached_settled_match {
-            Some(cached) => cached,
+        let (settled, settled_owners) = match cached_prefix {
+            // The whole settled part is cached: nothing to draw.
+            Some((cached_boundary, lines, owners)) if cached_boundary == boundary => (lines, owners),
+            // The boundary moved forward: the rows for the lines before it are
+            // the same, so they are kept and the new ones are added after.
+            Some((_, lines, owners)) => {
+                let new_owners = owners_of(&settled, true);
+                let mut rows = lines.as_ref().clone();
+                rows.extend(settled.iter().cloned());
+                let rows = std::sync::Arc::new(rows);
+                let mut all_owners = owners.as_ref().clone();
+                all_owners.extend(new_owners);
+                let all_owners = std::sync::Arc::new(all_owners);
+                if boundary > 0 {
+                    let mut cache = self.settled_cache.lock();
+                    cache.lines = rows.clone();
+                    cache.owners = all_owners.clone();
+                    cache.boundary = boundary;
+                    cache.width = width;
+                    cache.expansion = expansion;
+                }
+                (rows, all_owners)
+            }
             None => {
                 let owners = std::sync::Arc::new(owners_of(&settled, true));
                 let settled = std::sync::Arc::new(settled);
@@ -1554,7 +1909,6 @@ pub type RenderLine = (LineKind, String);
 
 pub const SPINNER: &[&str] = anim::SPINNER;
 
-pub const GLYPH_PROMPT: &str = "›";
 /// The bar down the side of a prompt the user typed.
 ///
 /// Not the filled `▌`: that one is the caret on a line the model is writing this
@@ -1565,6 +1919,20 @@ pub const USER_BAR: &str = "│";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The explore line says what happened, in the words the interface uses.
+    ///
+    /// The verbs and the counts were English in a Russian screen: the table
+    /// holds them now, and the line says "2 файла", not "2 files".
+    #[test]
+    fn the_explore_line_says_what_happened_in_the_language_of_the_interface() {
+        let line = strip_ansi(&format_explore(false, 2, 1, "src/main.rs"));
+        assert!(line.contains("Explored") && line.contains("2 files") && line.contains("1 search"), "{line}");
+        let ru = crate::i18n::Lang::Russian;
+        for phrase in ["Exploring", "Explored", "Reading", "Read", "Searching", "Searched"] {
+            assert_ne!(crate::i18n::translate(ru, phrase), phrase, "{phrase:?} has no Russian version");
+        }
+    }
 
     #[test]
     fn late_recap_for_an_earlier_turn_does_not_derail_the_live_turn() {
@@ -1586,6 +1954,23 @@ mod tests {
         let user2 = text.iter().find(|l| l.contains("second")).unwrap();
         assert!(!user2.contains("answer two"), "stream leaked into the user line: {user2}");
         assert!(joined.find("recap: one").unwrap() < joined.find("second").unwrap());
+    }
+
+    #[test]
+    fn the_baseline_after_a_compaction_is_counted_in_tokens() {
+        // The baseline used to be counted in characters and subtracted from a
+        // count in tokens, so the gauge read zero after every compaction: the
+        // summary, the only thing the model gets now, was the one thing that
+        // was not counted.
+        let model = "gpt-4o";
+        let mut chat = ChatView::default();
+        chat.push_user(&"a".repeat(600));
+        chat.forget_counted_context();
+        chat.push_user("the summary");
+        let count = |text: &str| flashagent_llm::count_tokens(model, text);
+        let (user, ..) = chat.raw_content_tokens(&count);
+        assert!(user > 0, "the summary after a compaction counts as nothing: {user}");
+        assert!(user < 600, "the compacted conversation is still counted: {user}");
     }
 
     #[test]
@@ -1616,7 +2001,7 @@ mod tests {
     fn a_prompt_reads_as_a_block_of_its_own_and_not_as_part_of_the_answer() {
         let mut v = ChatView::default();
         v.push_user("what does the gate at line 41 do");
-        v.push_assistant("It approves a tool call before it runs.");
+        v.push_line(LineKind::Assistant, "It approves a tool call before it runs.");
         let lines = v.render(80);
 
         let bar = lines
@@ -1858,6 +2243,107 @@ mod tests {
         let (settled, live) = v.render_split(80, true);
         assert!(live.is_empty(), "nothing is live once the turn is over: {live:?}");
         assert!(!settled.is_empty());
+    }
+
+    #[test]
+    fn an_open_compaction_card_stays_live_until_the_summary_lands() {
+        let mut v = ChatView::default();
+        v.push_user("go");
+        let before_card = v.lines.len();
+        v.start_compaction_card();
+        assert_eq!(v.settled_boundary(), before_card, "a spinning card must not be printed and frozen");
+        let (settled, live) = v.render_split(80, false);
+        assert!(
+            live.iter().any(|(k, t)| *k == LineKind::Compaction && t.contains("Writing a summary")),
+            "the card is not in the live tail: {live:?}"
+        );
+        assert!(
+            !settled.iter().any(|(_, t)| t.contains("Writing a summary")),
+            "the card was also printed: {settled:?}"
+        );
+        v.finish_compaction_card(&CompactionResult {
+            archive: Vec::new(),
+            saved: 10,
+            summary: "## Objective\nship it".into(),
+            input_tokens: 20,
+            output_tokens: 5,
+        });
+        assert_eq!(v.settled_boundary(), v.lines.len(), "a finished card may be printed once");
+    }
+
+    #[test]
+    fn a_compaction_card_shows_the_summary_while_it_streams() {
+        let mut v = ChatView::default();
+        v.start_compaction_card();
+        v.append_compaction_delta("## Objective\nship");
+        let (settled, live) = v.render_split(80, false);
+        assert!(
+            live.iter().any(|(k, t)| *k == LineKind::Compaction && t.contains("Objective")),
+            "the streamed heading is not in the card: {live:?}"
+        );
+        assert!(
+            live.iter().any(|(_, t)| t.contains("ship")),
+            "the streamed text is not in the card: {live:?}"
+        );
+        assert!(
+            live.iter().any(|(_, t)| t.contains("Writing a summary")),
+            "the spinner left the open card: {live:?}"
+        );
+        assert!(settled.is_empty(), "an open card must not be printed and frozen: {settled:?}");
+
+        v.append_compaction_delta(" it");
+        let (_, live) = v.render_split(80, false);
+        assert!(
+            live.iter().any(|(_, t)| t.contains("ship it")),
+            "the next delta was not appended: {live:?}"
+        );
+
+        // A refused attempt is cleared before the second one starts, not left
+        // above the answer that replaces it.
+        v.restart_compaction_card();
+        let (_, live) = v.render_split(80, false);
+        assert!(
+            !live.iter().any(|(_, t)| t.contains("ship")),
+            "the refused summary was not cleared: {live:?}"
+        );
+        assert!(
+            live.iter().any(|(_, t)| t.contains("Writing a summary")),
+            "the card lost its spinner after the reset: {live:?}"
+        );
+
+        v.finish_compaction_card(&CompactionResult {
+            archive: Vec::new(),
+            saved: 10,
+            summary: "## Objective\nfinal".into(),
+            input_tokens: 20,
+            output_tokens: 5,
+        });
+        v.append_compaction_delta(" after it landed");
+        let (settled, live) = v.render_split(80, false);
+        assert!(live.is_empty(), "a finished card belongs to the printed transcript: {live:?}");
+        assert!(
+            settled.iter().any(|(_, t)| t.contains("final")),
+            "the accepted summary is not in the printed card: {settled:?}"
+        );
+        assert!(
+            !settled.iter().any(|(_, t)| t.contains("after it landed")),
+            "a late delta changed a finished card: {settled:?}"
+        );
+    }
+
+    #[test]
+    fn a_model_switch_is_a_centred_rule_and_is_not_repeated() {
+        let mut v = ChatView::default();
+        assert!(v.push_model_notice("Model: next"), "the first message after a switch opens with the rule");
+        let rows = v.render(80);
+        let rule = rows
+            .iter()
+            .find(|(k, _)| *k == LineKind::Model)
+            .map(|(_, t)| strip_ansi(t))
+            .expect("the rule is in the transcript");
+        assert!(rule.contains("Model: next"), "{rule:?}");
+        assert!(rule.trim_start().starts_with('─') && rule.trim_end().ends_with('─'), "not a centred rule: {rule:?}");
+        assert!(!v.push_model_notice("Model: next"), "the same rule twice in a row says nothing new");
     }
 
     #[test]
@@ -2440,6 +2926,19 @@ hm".into()));
         let new_card_c = vec![(LineKind::System, "banner-v3".to_string())];
         v.update_welcome_card(new_card_c);
         assert!(!v.lines.iter().any(|l| l.text.contains("banner-v3")));
+    }
+
+    #[test]
+    fn the_welcome_card_says_what_runs_now_after_the_conversation_started() {
+        let mut v = ChatView::default();
+        v.update_welcome_card(vec![(LineKind::System, "model-a".to_string())]);
+        v.push_user("hello");
+        // The model changed: the card at the top says so, and the
+        // conversation stays where it was.
+        v.update_welcome_card_state(vec![(LineKind::System, "model-b".to_string())]);
+        assert!(v.lines.iter().any(|l| l.text.contains("model-b")), "the card must show what runs now");
+        assert!(!v.lines.iter().any(|l| l.text.contains("model-a")), "the old model is gone from the card");
+        assert!(v.lines.iter().any(|l| l.text.contains("hello")), "the conversation is still there");
     }
 
     #[test]
@@ -3126,6 +3625,161 @@ hm".into()));
         assert_eq!(counts_from_diff("--- n.txt\n+++ n.txt\n"), (0, 0));
         assert_eq!(counts_from_diff("--- n.txt\n+++ n.txt\n-gone\n"), (0, 1));
     }
+
+    fn summary_with_card_shape() -> &'static str {
+        "## Objective\nShip the release.\n\n## Requirements\n- none\n\n## Decisions\n- none\n\n## Work State\n### Completed\n- work\n### Active\n- none\n### Blocked\n- none\n\n## Next Move\n1. ship\n\n## Relevant Files\n- `a.rs`\n\n## Important Context\n- none"
+    }
+
+    #[test]
+    fn a_compaction_card_draws_rules_around_the_summary() {
+        let card = CompactionCard {
+            state: CompactionState::Done,
+            summary: summary_with_card_shape().into(),
+            input_tokens: Some(90_000),
+            output_tokens: Some(5_100),
+        };
+        let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
+        let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains(crate::i18n::tr("Session compaction started")), "{text}");
+        let footer = format!(
+            "Session compacted · {} in · {} out",
+            ContextUsage::format_tokens(90_000),
+            ContextUsage::format_tokens(5_100)
+        );
+        assert!(text.contains(&footer), "{text}");
+        assert!(text.contains("Objective") && text.contains("Next Move"), "{text}");
+        assert!(!text.contains('◊') && !text.contains('▸'), "the card's headings are not list marks: {text}");
+        assert_eq!(rows.iter().filter(|row| strip_ansi(row).starts_with('─')).count(), 2, "{rows:?}");
+    }
+
+    #[test]
+    fn a_started_compaction_card_opens_with_the_header_only() {
+        let card = CompactionCard {
+            state: CompactionState::Started,
+            summary: String::new(),
+            input_tokens: None,
+            output_tokens: None,
+        };
+        let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
+        let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains(crate::i18n::tr("Session compaction started")), "{text}");
+        assert!(text.contains("Writing a summary"), "{text}");
+        assert!(!text.contains(crate::i18n::tr("Session compacted")), "{text}");
+    }
+
+    #[test]
+    fn a_restored_compaction_card_says_compacted_without_a_bill() {
+        let card = CompactionCard {
+            state: CompactionState::Done,
+            summary: summary_with_card_shape().into(),
+            input_tokens: None,
+            output_tokens: None,
+        };
+        let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
+        let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains(crate::i18n::tr("Session compacted")), "{text}");
+        assert!(!text.contains(" in · ") && !text.contains(" out"), "no bill was kept: {text}");
+    }
+
+    #[test]
+    fn a_failed_compaction_card_says_the_conversation_is_unchanged() {
+        let card = CompactionCard {
+            state: CompactionState::Failed,
+            summary: "the conversation is unchanged".into(),
+            input_tokens: None,
+            output_tokens: None,
+        };
+        let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
+        let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains(crate::i18n::tr("Session compaction failed")), "{text}");
+        assert!(text.contains("unchanged"), "{text}");
+        assert!(!text.contains(crate::i18n::tr("Session compacted")), "{text}");
+    }
+
+    /// A turn can end while its mid-turn compaction is still writing (Esc, a
+    /// failed request). The card promised a summary, so it is withdrawn rather
+    /// than left spinning — but only when one is open: every other turn ends
+    /// with no card, and pushing a failure there would invent one.
+    #[test]
+    fn abandoning_a_mid_turn_compaction_settles_only_an_open_card() {
+        let mut chat = ChatView::default();
+        chat.push_user("go");
+        assert!(!chat.abandon_compaction_card("no card was open"), "nothing to settle");
+        let settled = chat.render(80);
+        assert!(!settled.iter().any(|(_, t)| t.contains(crate::i18n::tr("Session compaction failed"))), "{settled:?}");
+
+        chat.start_compaction_card();
+        assert!(chat.abandon_compaction_card("the turn ended before the summary landed"));
+        let settled = chat.render(80);
+        assert!(
+            settled.iter().any(|(k, t)| *k == LineKind::Compaction && t.contains(crate::i18n::tr("Session compaction failed"))),
+            "{settled:?}"
+        );
+        assert!(
+            settled.iter().any(|(_, t)| t.contains("the turn ended before the summary landed")),
+            "{settled:?}"
+        );
+        // A second abandon is a no-op: the card is already settled.
+        assert!(!chat.abandon_compaction_card("again"));
+    }
+
+    /// Mid-turn the card lands between two steps: text that arrives after it
+    /// must start a new block below the card, not continue the answer above it.
+    #[test]
+    fn a_mid_turn_card_resets_the_stream_so_the_answer_continues_below_it() {
+        let mut chat = ChatView::default();
+        chat.push_user("go");
+        chat.on_event(&LoopEvent::TurnDelta("before".into()));
+        chat.start_compaction_card();
+        chat.on_event(&LoopEvent::TurnDelta("after".into()));
+        let lines = chat.render(80);
+        let card_pos = lines
+            .iter()
+            .position(|(k, _)| *k == LineKind::Compaction)
+            .expect("the card is on screen");
+        let after_pos = lines
+            .iter()
+            .position(|(_, t)| t.contains("after"))
+            .expect("the continued answer is on screen");
+        assert!(after_pos > card_pos, "the answer continues below the card: {lines:?}");
+        assert!(
+            lines[..card_pos].iter().any(|(_, t)| t.contains("before")),
+            "the text before the card stays above it: {lines:?}"
+        );
+    }
 }
 
 
+
+#[cfg(test)]
+mod bench_tmp {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn where_does_the_time_go() {
+        let call = ToolCallRecord {
+            name: "read_file".into(),
+            args_json: r#"{"header":"Reading the file","path":"src/main.rs"}"#.into(),
+            result: Some("fn main() {}".into()),
+            is_error: false,
+            is_running: false,
+            added: 0,
+            deleted: 0,
+            diff: None,
+        };
+        let n = 10_000;
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = render_single_tool_card(&call, 120, false, None);
+        }
+        println!("tool card: {:.1} ms for {n} cards", t.elapsed().as_secs_f64() * 1000.0);
+
+        let text = "It parses the arguments, **opens the config** and starts the loop.\n\n- one\n- two\n\n```rust\nfn main() {}\n```\n";
+        let t = Instant::now();
+        for _ in 0..n {
+            let _ = render_markdown_text(text, 120);
+        }
+        println!("render_markdown_text: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+    }
+}

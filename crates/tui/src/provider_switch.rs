@@ -4,6 +4,7 @@
 //! history is the same whatever protocol carries it.
 
 use super::*;
+use flashagent_tui::i18n::tr_fill;
 use flashagent_core::config::normalize_url;
 use flashagent_tui::providers::{self, ProviderArg, ProvidersAction};
 use flashagent_tui::ProvidersView;
@@ -31,7 +32,7 @@ impl App {
     /// On the line under the prompt, which shows while a turn runs and while
     /// something is typed.
     pub(crate) fn refuse_switch_while_busy(&mut self) {
-        self.background = Some(BackgroundNotice::fading(providers::BUSY.to_string(), 6).warning());
+        self.say(BackgroundNotice::fading(providers::busy().to_string(), 6).warning());
         self.renderer.request_reprint();
     }
 
@@ -86,10 +87,10 @@ impl App {
         self.cache_warm_key = None;
         // The old server's absence is not the new one's; the new one's is said anew.
         self.announced_mood = MascotMood::Checking;
-        if self.background.as_ref().is_some_and(|b| b.text.starts_with(OFFLINE_NOTICE)) {
+        if self.background.as_ref().is_some_and(|b| b.text.starts_with(offline_notice())) {
             self.background = None;
         }
-        self.notice(format!("Connecting to {} \u{b7} {}\u{2026}", profile.name, endpoint.url));
+        self.notice(tr_fill("Connecting to {name} \u{b7} {url}\u{2026}", &[("name", &profile.name), ("url", &endpoint.url)]));
         // Here, not in the task, so quick switches reach the client in order. A
         // look at the old server still under way is dropped by the client.
         cx.source.0.set_endpoint(endpoint.clone());
@@ -121,25 +122,30 @@ impl App {
         self.current_context = None;
         self.context_usage.total_capacity = UNKNOWN_CONTEXT;
         cx.tools_arc.set_context_window(Some(UNKNOWN_CONTEXT));
+        cx.tools_arc.set_model_name(&model);
+
+        // A working switch is one rule with the provider, its model and the
+        // effort, written when the next message uses them. A failure or an
+        // empty listing is said at once: there is no model to wait for.
+        if discovery.is_some() && !model.is_empty() {
+            self.remember_switch(Some(&switch.name), false, false);
+        } else {
+            let profile = self.config.active_profile();
+            let how = format!("{} \u{b7} {}", profile.protocol.label(), profile.url);
+            let line = if discovery.is_some() {
+                format!("Provider: {} ({how}) lists no models yet", switch.name)
+            } else {
+                format!("Provider: {} ({how}) did not answer; its models are listed once it does", switch.name)
+            };
+            self.chat.push_system(&line);
+        }
+
         self.switch_model(cx, &model);
         if !model.is_empty() && model != saved {
             self.config.active_profile_mut().model = model.clone();
             self.save_config();
         }
-        self.refresh_welcome(cx.source, cx.mascot_mood);
-
-        let profile = self.config.active_profile();
-        let how = format!("{} \u{b7} {}", profile.protocol.label(), profile.url);
-        let line = match (&discovery, model.is_empty()) {
-            (Some(_), false) => format!("Provider: {} \u{b7} {model} ({how})", switch.name),
-            (Some(_), true) => format!("Provider: {} ({how}) lists no models yet", switch.name),
-            (None, _) => format!("Provider: {} ({how}) did not answer; its models are listed once it does", switch.name),
-        };
-        self.chat.push_system(&line);
-        match discovery {
-            Some(_) if !model.is_empty() => self.notice(format!("Switched to {} \u{b7} {model}", switch.name)),
-            _ => self.notice(format!("Switched to {} \u{b7} /provider goes back", switch.name)),
-        }
+        self.refresh_welcome_state(cx.source, cx.mascot_mood);
         self.renderer.request_reprint();
     }
 
@@ -152,7 +158,7 @@ impl App {
                     None => self.overlay = Some(Overlay::Provider(menu)),
                     Some(providers::ADD) => self.run_setup_in_app(cx, true).await,
                     Some(providers::MANAGE) => self.open_providers_view(),
-                    Some(providers::THIS_RUN) => self.notice(format!("Already on {} for this run", self.config.active_profile().name)),
+                    Some(providers::THIS_RUN) => self.notice(tr_fill("Already on {name} for this run", &[("name", &self.config.active_profile().name)])),
                     Some(name) => self.switch_provider(cx, name),
                 }
             }
@@ -191,7 +197,7 @@ impl App {
         let reconnect = in_use
             && before.is_some_and(|b| b.url != profile.url || b.protocol != profile.protocol || b.api_key != profile.api_key || b.model != profile.model);
         if reconnect && self.running {
-            view.refused(providers::BUSY);
+            view.refused(providers::busy());
             return;
         }
         let name = profile.name.trim().to_string();

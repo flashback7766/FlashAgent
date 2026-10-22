@@ -1,4 +1,5 @@
 use super::*;
+use flashagent_tui::i18n::tr_fill;
 use flashagent_tui::anim::{self, Rgb};
 use flashagent_tui::theme;
 
@@ -11,6 +12,12 @@ pub(crate) fn color(kind: LineKind) -> crossterm::style::Color {
         LineKind::ToolError => crossterm::style::Color::Rgb { r: 230, g: 110, b: 95 },
         LineKind::Diff => crossterm::style::Color::Rgb { r: 145, g: 205, b: 140 },
         LineKind::System => crossterm::style::Color::Rgb { r: 225, g: 175, b: 95 },
+        // The card paints its own rules and headings; the body reads as an
+        // answer, not as a warning.
+        LineKind::Compaction => crossterm::style::Color::Rgb { r: 232, g: 227, b: 218 },
+        // The rule paints its own muted label and will use this when a row has
+        // no ANSI of its own.
+        LineKind::Model => crossterm::style::Color::Rgb { r: 160, g: 155, b: 148 },
         // Between the tool colour and the reasoning grey: a child is work in
         // progress, closer to a tool call than to something said.
         LineKind::Subagent => crossterm::style::Color::Rgb { r: 150, g: 170, b: 195 },
@@ -58,6 +65,8 @@ pub(crate) struct FrameState<'a> {
     /// Ctrl+F: the query and the prompt it found.
     pub(crate) history_search: Option<(&'a str, Option<&'a str>)>,
     pub(crate) mode: PermissionMode,
+    /// The safe mode is on: the shell, the web and the subagents are off.
+    pub(crate) safe_mode: bool,
     pub(crate) is_goal_active: bool,
     pub(crate) goal_progress: Option<&'a str>,
     /// Laid out by `TipAnimator::render_lines`; `None` with tips off.
@@ -101,9 +110,6 @@ pub(crate) struct FrameState<'a> {
     /// capacity in use is then a guess, and a percentage off it is a guess
     /// wearing the clothes of a number.
     pub(crate) context_reported: bool,
-    /// What `/compact` is doing, in the row under the prompt: a status belongs
-    /// with the other running things, not in the conversation as a line.
-    pub(crate) compact_status: Option<&'a str>,
     pub(crate) pending_steers: &'a [(String, Vec<Attachment>)],
     /// Every subagent row, pinned above the composer: id and the line itself.
     pub(crate) agent_rows: &'a [(String, String)],
@@ -189,16 +195,17 @@ pub(crate) fn work_box(
     // than the bottom of its own frame.
     let lead = usize::from(box_w >= 3);
     let room = box_w.saturating_sub(2 + lead);
-    let full = " subagents & background ";
-    let title: String = if full.chars().count() <= room {
+    let full = flashagent_tui::i18n::tr(" subagents & background ");
+    let title: String = if visible_width(full) <= room {
         full.to_string()
-    } else if " work ".chars().count() <= room {
+    } else if visible_width(" work ") <= room {
         " work ".to_string()
     } else if room == 0 {
         String::new()
     } else {
-        // Narrower than the word: what is left says there was more.
-        let mut cut_title: String = full.trim().chars().take(room - 1).collect();
+        // Narrower than the word: what is left says there was more. Cut by
+        // cells, since a translated title may hold wide characters.
+        let mut cut_title = clip_ansi(full.trim(), room - 1);
         cut_title.push('\u{2026}');
         cut_title
     };
@@ -558,17 +565,17 @@ pub(crate) fn format_status_left(
     expand_status: &str,
 ) -> String {
     let mode_str = if is_goal_active {
-        "\x1b[1;38;2;225;175;95m[Goal: Autonomous]\x1b[0m".to_string()
+        format!("\x1b[1;38;2;225;175;95m{}\x1b[0m", flashagent_tui::i18n::tr("[Goal: Autonomous]"))
     } else {
         format!("\x1b[38;2;145;205;140m[{mode_label}]\x1b[0m")
     };
     let activity = match (running, awaiting_user, goal_progress) {
         // Stopped at an approval card: waiting for the user, not generating.
-        (true, true, _) => "\x1b[38;2;225;175;95mWaiting for your answer\x1b[0m".to_string(),
+        (true, true, _) => format!("\x1b[38;2;225;175;95m{}\x1b[0m", flashagent_tui::i18n::tr("Waiting for your answer")),
         // During a goal the budget burn-down.
         (true, false, Some(p)) => format!("\x1b[38;2;168;199;250m{p}\x1b[0m"),
         (true, false, None) => return format!("  {mode_str}{expand_status}"),
-        (false, ..) => "\x1b[38;2;140;135;130mReady\x1b[0m".to_string(),
+        (false, ..) => format!("\x1b[38;2;140;135;130m{}\x1b[0m", flashagent_tui::i18n::tr("Ready")),
     };
     format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m {activity}{expand_status}")
 }
@@ -671,7 +678,7 @@ fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u6
     } else if let Some(text) = st.background {
         format!("  {}", st.background_style.paint(text))
     } else if !st.input.is_empty() {
-        let hints = [("Enter", "send"), ("Alt+Enter", "new line"), ("Ctrl+W", "delete word"), ("Ctrl+F", "history"), ("Esc", "clear")];
+        let hints = [("Enter", "send"), ("Alt/Shift+Enter", "new line"), ("Ctrl+W", "delete word"), ("Ctrl+F", "history"), ("Esc", "clear")];
         format!("  {}", key_hints(&hints, width.saturating_sub(2)))
     } else {
         // The one key that finds every other. The welcome card lists more, but
@@ -682,12 +689,6 @@ fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u6
 }
 
 fn append_tip_rows(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize) {
-    // A running compaction is the status of the moment: it takes the tip's row
-    // rather than pushing the chat down, and it is clipped, never wrapped.
-    if let Some(status) = st.compact_status {
-        tail.push((LineKind::System, format!("  {}", clip_ansi(status, width.saturating_sub(2)))));
-        return;
-    }
     for line in st.tip_lines.unwrap_or_default() {
         tail.push((LineKind::System, clip_ansi(line, width.saturating_sub(2))));
     }
@@ -700,8 +701,9 @@ fn context_gauges(context_usage: &ContextUsage, reported: bool, warn_threshold: 
     let percent = context_usage.percentage().clamp(0.0, 100.0);
     if !reported {
         let used = format!(
-            "\x1b[38;2;135;215;165m{}\x1b[0m used",
-            ContextUsage::format_tokens(context_usage.total_used())
+            "\x1b[38;2;135;215;165m{}\x1b[0m {}",
+            ContextUsage::format_tokens(context_usage.total_used()),
+            flashagent_tui::i18n::tr("used")
         );
         return [used.clone(), used.clone(), used];
     }
@@ -722,7 +724,19 @@ fn context_gauges(context_usage: &ContextUsage, reported: bool, warn_threshold: 
 }
 
 fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>, awaiting_user: bool) -> String {
-    let mode_room = 2 + visible_width(st.mode.label()) + 2 + 1;
+    // The safe mode is said where the permission mode is: both say what the
+    // session may do, and one of them can change what the other allows.
+    // The mode and the safe marker are the interface's own words.
+    let mode_label = if st.safe_mode {
+        format!(
+            "{} \u{b7} {}",
+            flashagent_tui::i18n::tr(st.mode.label()),
+            flashagent_tui::i18n::tr("Safe")
+        )
+    } else {
+        flashagent_tui::i18n::tr(st.mode.label()).to_string()
+    };
+    let mode_room = 2 + visible_width(&mode_label) + 2 + 1;
     let gauges = context_gauges(context_usage, st.context_reported, st.context_warn_threshold);
     let gauge_str = gauges.into_iter().find(|g| mode_room + visible_width(g) + 3 <= width).unwrap_or_default();
     // What the session costs sits next to the context gauge, and goes before it
@@ -735,18 +749,21 @@ fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>
         _ => gauge_str,
     };
     let expand_status = if st.reasoning_expand.all {
-        " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: all]\x1b[0m"
+        // The words are the interface's; the brackets are a label's.
+        " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m{v}\x1b[0m"
+            .replace("{v}", flashagent_tui::i18n::tr("[verbose: all]"))
     } else if st.reasoning_expand.last {
-        " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m[verbose: last]\x1b[0m"
+        " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m{v}\x1b[0m"
+            .replace("{v}", flashagent_tui::i18n::tr("[verbose: last]"))
     } else {
-        ""
+        String::new()
     };
     let left_telemetry = format_status_left(
         st.running,
         st.is_goal_active,
         awaiting_user,
         st.goal_progress,
-        st.mode.label(),
+        &mode_label,
         &format!("{}{expand_status}", tasks_status(st.background_tasks)),
     );
     fit_status_row(width, &left_telemetry, &format_provider(st.provider.0, st.provider.1), &gauge_str)
@@ -832,12 +849,16 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
             .filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ") && !l.starts_with("@@"))
             .all(|l| l.starts_with('+'))
     });
+    // The card speaks the language of the person who reads it. These four
+    // questions and the three buttons under them went past the translation
+    // table, so a Russian interface showed an English card in the middle of
+    // a Russian conversation.
     let question = match req.tool.as_str() {
-        "run_shell" => "Run this command?".to_string(),
-        "write_file" if new_file => "Create this file?".to_string(),
-        "edit_file" | "patch_file" | "write_file" if several_files => "Change these files?".to_string(),
-        "edit_file" | "patch_file" | "write_file" => "Change this file?".to_string(),
-        tool => format!("Allow {tool}?"),
+        "run_shell" => tr("Run this command?").to_string(),
+        "write_file" if new_file => tr("Create this file?").to_string(),
+        "edit_file" | "patch_file" | "write_file" if several_files => tr("Change these files?").to_string(),
+        "edit_file" | "patch_file" | "write_file" => tr("Change this file?").to_string(),
+        tool => tr_fill("Allow {tool}?", &[("tool", tool)]),
     };
     let title = format!(" \x1b[1;38;2;225;175;95m{question}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m ", req.tool);
     let dash_w = inner_w.saturating_sub(visible_width(&title) + 1);
@@ -851,7 +872,10 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
     let field = |k: &str| args.get(k).and_then(|v| v.as_str()).map(card_safe);
     let label_row = |label: &str, value: &str| {
         pad_box_row(
-            &format!(" \x1b[38;2;160;155;145m{label}\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m", clip_ansi(value, inner_w.saturating_sub(label.len() + 4))),
+            &format!(
+                " \x1b[38;2;160;155;145m{label}\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m",
+                clip_ansi(value, inner_w.saturating_sub(visible_width(label) + 4))
+            ),
             width,
         )
     };
@@ -859,20 +883,24 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
     // any other width lost their ends.
     let value_w = inner_w.saturating_sub(12).max(1);
     let (label, value): (&str, String) = if let Some(cmd) = field("command") {
-        ("command:", cmd)
+        (flashagent_tui::i18n::tr("command:"), cmd)
     } else if let Some(path) = field("path") {
-        ("target:", flashagent_tui::relative_to_cwd(&path))
+        (flashagent_tui::i18n::tr("target:"), flashagent_tui::relative_to_cwd(&path))
     } else if let Some(files) = args.get("files").and_then(|f| f.as_array()) {
         if let Some(first_path) = files.first().and_then(|f| f.get("path").or_else(|| f.get("filePath"))).and_then(|p| p.as_str()) {
-            let extra = if files.len() > 1 { format!(" (+{} more)", files.len() - 1) } else { String::new() };
-            ("target:", format!("{}{extra}", flashagent_tui::relative_to_cwd(first_path)))
+            let extra = if files.len() > 1 {
+                flashagent_tui::i18n::tr_fill(" (+{n} more)", &[("n", &(files.len() - 1).to_string())])
+            } else {
+                String::new()
+            };
+            (flashagent_tui::i18n::tr("target:"), format!("{}{extra}", flashagent_tui::relative_to_cwd(first_path)))
         } else if args.as_object().is_some_and(|o| !o.is_empty()) {
-            ("args:", card_safe(&args.to_string()))
+            (flashagent_tui::i18n::tr("args:"), card_safe(&args.to_string()))
         } else {
             ("", String::new())
         }
     } else if args.as_object().is_some_and(|o| !o.is_empty()) {
-        ("args:", card_safe(&args.to_string()))
+        (flashagent_tui::i18n::tr("args:"), card_safe(&args.to_string()))
     } else {
         ("", String::new())
     };
@@ -891,7 +919,7 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
         }
         if rows.len() > shown {
             let more = flashagent_tui::plural(rows.len() - shown, "more line", "more lines");
-            tail.push((LineKind::System, pad_box_row(&format!("    \x1b[38;2;100;95;90m+{more} · \x1b[38;2;225;175;95mv\x1b[38;2;100;95;90m shows the whole change\x1b[0m"), width)));
+            tail.push((LineKind::System, pad_box_row(&format!("    \x1b[38;2;100;95;90m+{more} · \x1b[38;2;225;175;95mv\x1b[38;2;100;95;90m {}\x1b[0m", flashagent_tui::i18n::tr("shows the whole change")), width)));
         }
     }
 
@@ -910,9 +938,9 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
         pad_box_row(
             &format!(
                 " {}  {}  {}",
-                button("Allow", ConfirmChoice::Allow),
-                button("Always allow", ConfirmChoice::Always),
-                button("Deny", ConfirmChoice::Deny)
+                button(tr("Allow"), ConfirmChoice::Allow),
+                button(tr("Always allow"), ConfirmChoice::Always),
+                button(tr("Deny"), ConfirmChoice::Deny)
             ),
             width,
         ),
@@ -933,8 +961,8 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
     let req = question_gate.pending().expect("question card needs a pending request");
     let reset = "\x1b[0m";
     // The composer becomes the question card.
-    let title = " Question from FlashAgent ";
-    let vis_title_len = visible_width(title);
+    let title = format!(" {} ", flashagent_tui::i18n::tr("Question from FlashAgent"));
+    let vis_title_len = visible_width(&title);
     let dash_w = inner_w.saturating_sub(vis_title_len + 1);
 
     if !joined {
@@ -991,7 +1019,7 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
             };
             // A long option wraps under its own text, not under its number.
             let lead = format!("{num}. ");
-            let indent = 4 + if req.multi_select { 4 } else { 0 } + lead.len();
+            let indent = 4 + if req.multi_select { 4 } else { 0 } + visible_width(&lead);
             let mut rows: Vec<String> = opt
                 .lines()
                 .flat_map(|line| wrap_plain(&card_safe(line), inner_w.saturating_sub(indent + 1).max(10)))
@@ -1015,11 +1043,11 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
         let write_ptr = if is_write_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
         if is_writing {
             typing_line_idx = Some(tail.len());
-            let label = format!("{write_num}. Your answer: ");
-            let shown = answer_in(4 + label.len());
+            let label = format!("{write_num}. {} ", flashagent_tui::i18n::tr("Your answer:"));
+            let shown = answer_in(4 + visible_width(&label));
             tail.push((
                 LineKind::User,
-                pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. Your answer:\x1b[0m \x1b[1;38;2;240;235;225m{shown}\x1b[0m"), width),
+                pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. {}\x1b[0m \x1b[1;38;2;240;235;225m{shown}\x1b[0m", flashagent_tui::i18n::tr("Your answer:")), width),
             ));
             let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "back to the choices")], inner_w.saturating_sub(4));
             tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
@@ -1057,6 +1085,15 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
         format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
     ));
     input_line_idx
+}
+
+/// Where the cursor sits while a search of the history is typed: after the
+/// query, and after the label and the marks in front of it. Derived from the
+/// label rather than fixed, since a translated label is another width.
+fn history_cursor(query: &str, label: &str, width: usize) -> u16 {
+    // " " + prompt mark + " " + label + " " + query.
+    let col = 1 + 1 + 1 + visible_width(label) + 1 + visible_width(query);
+    col.min(width.saturating_sub(2)) as u16
 }
 
 /// `joined` is true when the work box is already the top of this block: its
@@ -1100,11 +1137,12 @@ fn append_composer(
     let input_rows: Vec<String> = if let Some((query, found)) = st.history_search {
         // The found prompt stands in the input, the search above it.
         let found_line = found.map_or_else(
-            || "\x1b[38;2;200;120;110mno match\x1b[0m".to_string(),
+            || format!("\x1b[38;2;200;120;110m{}\x1b[0m", flashagent_tui::i18n::tr("no match")),
             |f| format!("\x1b[38;2;155;160;175m{}\x1b[0m", f.lines().next().unwrap_or_default()),
         );
-        let label = "\x1b[38;2;135;130;125mfind in history:\x1b[0m";
-        text_cursor = Some((visible_width(query) + 21).min(width.saturating_sub(2)) as u16);
+        let label_text = flashagent_tui::i18n::tr("find in history:");
+        let label = format!("\x1b[38;2;135;130;125m{label_text}\x1b[0m");
+        text_cursor = Some(history_cursor(query, label_text, width));
         vec![format!(" {prompt_styled} {label} \x1b[1;38;2;240;235;225m{query}\x1b[0m"), format!("   {found_line}")]
     } else if let (true, Some(custom)) = (st.input.is_empty() && st.prefill_status.is_none() && !st.running && st.suggested_prompt.is_none(), st.custom_placeholder) {
         // Up to three rows: a notice cut at the edge loses its advice.
@@ -1121,28 +1159,30 @@ fn append_composer(
         vec![if let Some(prefill) = st.prefill_status {
             format!(" {prompt_styled}  {prefill}")
         } else if st.running {
-            let what = st.turn_phase.map_or_else(|| "Working on task".to_string(), TurnPhase::label);
+            // What the agent is at, in the language of the interface; the
+            // label itself stays English for the tests that pin it.
+            let what = st.turn_phase.map_or_else(|| flashagent_tui::i18n::tr("Working on task").to_string(), |p| flashagent_tui::i18n::tr(p.label().as_str()).to_string());
             let glow = if matches!(st.turn_phase, Some(TurnPhase::Stopping)) { Rgb(235, 150, 120) } else { Rgb(235, 225, 205) };
             format!(" {prompt_styled} {}", anim::shimmer(&format!("{what}…"), t, 2000, Rgb(135, 130, 125), glow))
         } else if let Some(sug) = st.suggested_prompt {
             format!(" {prompt_styled}  \x1b[38;2;155;160;175m{sug}\x1b[0m  {}", key_hints(&[("→", "use")], width))
         } else if !st.attachments.is_empty() {
             let prompt_text = if width >= 60 {
-                "Press Enter to send the image, or type a message\u{2026}"
+                flashagent_tui::i18n::tr("Press Enter to send the image, or type a message\u{2026}")
             } else if width >= 40 {
-                "Enter sends the image\u{2026}"
+                flashagent_tui::i18n::tr("Enter sends the image\u{2026}")
             } else {
-                "Enter to send\u{2026}"
+                flashagent_tui::i18n::tr("Enter to send\u{2026}")
             };
             format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
         } else {
             // The long form when it fits.
             let prompt_text = if width >= 60 {
-                "Ask FlashAgent to do anything\u{2026}"
+                flashagent_tui::i18n::tr("Ask FlashAgent to do anything\u{2026}")
             } else if width >= 40 {
-                "Ask FlashAgent\u{2026}"
+                flashagent_tui::i18n::tr("Ask FlashAgent\u{2026}")
             } else {
-                "Ask\u{2026}"
+                flashagent_tui::i18n::tr("Ask\u{2026}")
             };
             format!(" {prompt_styled}  \x1b[38;2;135;130;125m{prompt_text}\x1b[0m")
         }]
@@ -1204,7 +1244,14 @@ fn append_channel_card(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: u
     }
     tail.push((
         LineKind::System,
-        pad_box_row(" \x1b[1;38;2;30;26;22;48;2;225;175;95m Yes \x1b[0m  \x1b[38;2;190;185;175m No \x1b[0m", width),
+        pad_box_row(
+            &format!(
+                " \x1b[1;38;2;30;26;22;48;2;225;175;95m {} \x1b[0m  \x1b[38;2;190;185;175m {} \x1b[0m",
+                flashagent_tui::i18n::tr("Yes"),
+                flashagent_tui::i18n::tr("No")
+            ),
+            width,
+        ),
     ));
     let input_line_idx = tail.len();
     tail.push((
@@ -1529,9 +1576,11 @@ impl App {
         let composer_flash = self.composer_flash();
         let channel_prompt: Option<String> = if self.uninstall_confirm {
             Some(
-                "Close FlashAgent and remove it? The uninstaller then shows what it will remove and asks, \
-                 part by part, which of your data to delete. Your session is saved first."
-                    .to_string(),
+                flashagent_tui::i18n::tr(
+                    "Close FlashAgent and remove it? The uninstaller then shows what it will remove and asks, \
+                     part by part, which of your data to delete. Your session is saved first.",
+                )
+                .to_string(),
             )
         } else {
             self.channel_switch.as_ref().map(|sw| {
@@ -1603,6 +1652,7 @@ impl App {
                     .as_ref()
                     .map(|h| (h.query.as_str(), h.found(&self.input_history))),
                 mode: cx.perm.state().mode(),
+                safe_mode: self.config.safe_mode,
                 is_goal_active: self.goal_state.is_some(),
                 goal_progress: goal_progress.as_deref(),
                 tip_lines: config.show_tips.then_some(cx.tip_lines.as_slice()),
@@ -1629,7 +1679,6 @@ impl App {
                 background_style: self.background.as_ref().map_or(NoticeStyle::FULL, BackgroundNotice::style),
                 context_warn_threshold: config.context_warn_threshold,
                 context_reported: self.current_context.is_some(),
-                compact_status: self.compact_status.as_deref(),
                 pending_steers: &self.pending_steers,
                 queued_commands: &self.queued_commands,
                 agent_rows: &agent_rows,
@@ -1727,6 +1776,19 @@ mod footer_tests {
     /// A room of one row cannot hold the marker, so nothing may be scrolled back.
     /// Taking an offset here would move no line on screen and say nothing about
     /// it, leaving the view scrolled with no way back.
+    #[test]
+    fn the_search_cursor_follows_the_label_it_is_typed_after() {
+        let ru = flashagent_tui::i18n::Lang::Russian;
+        let english_label = flashagent_tui::i18n::translate(flashagent_tui::i18n::Lang::English, "find in history:");
+        let russian_label = flashagent_tui::i18n::translate(ru, "find in history:");
+        let english = history_cursor("bug", english_label, 80);
+        let russian = history_cursor("bug", russian_label, 80);
+        // " " + prompt mark + " " + label + " " + query.
+        assert_eq!(u32::from(english), (1 + 1 + 1 + visible_width(english_label) + 1 + 3) as u32, "space, mark, space, label, space, query");
+        assert_eq!(russian, (1 + 1 + 1 + visible_width(russian_label) + 1 + 3) as u16, "the cursor stands after the label it is typed after");
+        assert_ne!(english, russian, "a translated label of another width moves the cursor with it");
+    }
+
     #[test]
     fn a_room_too_small_for_the_marker_cannot_be_scrolled_back() {
         assert_eq!(scroll_max(500, 0), 0);

@@ -12,7 +12,7 @@ pub(crate) fn conversation_markdown(history: &[ChatMessage], session_id: &str, m
         .find(|m| flashagent_core::is_prompt(m))
         .map(|m| extract_user_prompt(&m.content).lines().next().unwrap_or_default().trim().to_string())
         .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| "FlashAgent session".to_string());
+        .unwrap_or_else(|| flashagent_tui::i18n::tr("FlashAgent session").to_string());
     let mut md = format!("# {title}\n\n| | |\n|---|---|\n| Session | `{session_id}` |\n| Model | `{model}` |\n| Folder | `{cwd}` |\n\n");
 
     // Tool results carry only the call id; the name is on the call.
@@ -23,21 +23,21 @@ pub(crate) fn conversation_markdown(history: &[ChatMessage], session_id: &str, m
             // A tool's picture, a task's notice or a nudge from the loop.
             flashagent_llm::Role::User if !flashagent_core::is_prompt(m) => {}
             flashagent_llm::Role::User => {
-                md.push_str("---\n\n## You\n\n");
+                md.push_str(&format!("---\n\n{}\n\n", flashagent_tui::i18n::tr("## You")));
                 let prompt = extract_user_prompt(&m.content);
                 if !prompt.is_empty() {
                     md.push_str(prompt);
                     md.push_str("\n\n");
                 }
                 if !m.images.is_empty() {
-                    let n = m.images.len();
-                    md.push_str(&format!("*[{n} image{} attached]*\n\n", if n == 1 { "" } else { "s" }));
+                    let images = flashagent_tui::text::plural(m.images.len(), "image", "images");
+                    md.push_str(&format!("*[{images} attached]*\n\n"));
                 }
                 md.push_str("## FlashAgent\n\n");
             }
             flashagent_llm::Role::Assistant => {
                 if let Some(thinking) = m.reasoning.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
-                    md.push_str(&details("Thinking", thinking));
+                    md.push_str(&details(flashagent_tui::i18n::tr("Thinking"), thinking));
                 }
                 if !m.content.trim().is_empty() {
                     md.push_str(m.content.trim());
@@ -48,10 +48,18 @@ pub(crate) fn conversation_markdown(history: &[ChatMessage], session_id: &str, m
                 }
             }
             flashagent_llm::Role::Tool => {
-                let name = m.tool_call_id.as_deref().and_then(|id| tool_names.get(id)).copied().unwrap_or("tool");
+                let name = m
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(|id| tool_names.get(id))
+                    .copied()
+                    .unwrap_or_else(|| flashagent_tui::i18n::tr("tool"));
                 let mut result: String = m.content.chars().take(RESULT_CHARS).collect();
                 if m.content.chars().count() > RESULT_CHARS {
-                    result.push_str("\n… (cut here; the session file has all of it)");
+                    result.push_str(&format!(
+                        "\n{}",
+                        flashagent_tui::i18n::tr("… (cut here; the session file has all of it)")
+                    ));
                 }
                 md.push_str(&details(&format!("`{name}`"), &fenced(&result)));
             }
@@ -87,7 +95,7 @@ mod tests {
         let result = ChatMessage::tool_result("c1", "src/\n```\nREADME.md");
         vec![
             ChatMessage::system("You are FlashAgent. Huge system prompt."),
-            ChatMessage::user("memory: likes Rust\n\n---\n\nwhat is in this folder?"),
+            ChatMessage::user("# Memory (automatically loaded)\n\nlikes Rust\n\n---\n\nwhat is in this folder?"),
             call,
             result,
             ChatMessage::assistant("A `src` folder and a README."),

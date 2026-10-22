@@ -7,7 +7,37 @@
 
 use std::io::Write as _;
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::{clip_ansi, terminal_safe, visible_width};
+
+/// The characters of `text` that lie under the columns `left..=right`. A mouse
+/// reports cells, not characters: on a row with CJK every character takes two
+/// of them, so a column is not an index. A wide character picked in either
+/// half is taken whole, and so is the combining mark after it.
+fn columns_of(text: &str, left: usize, right: usize) -> Option<(usize, usize)> {
+    let mut column = 0usize;
+    let mut start = None;
+    let mut end = None;
+    for (i, c) in text.chars().enumerate() {
+        let w = c.width().unwrap_or(0);
+        if w == 0 {
+            if start.is_some() {
+                end = Some(i);
+            }
+            continue;
+        }
+        let next = column + w;
+        if start.is_none() && next > left {
+            start = Some(i);
+        }
+        if column <= right {
+            end = Some(i);
+        }
+        column = next;
+    }
+    start.zip(end).filter(|(start, end)| start <= end)
+}
 
 /// A terminal that knows the mode shows the frame only once complete; others
 /// ignore it.
@@ -53,10 +83,8 @@ impl Screen {
             }
             let Some(raw) = self.rows.get(y) else { break };
             let plain = crate::text::strip_ansi(raw);
-            let chars: Vec<char> = plain.chars().collect();
-            if left < chars.len() {
-                let end = right.min(chars.len().saturating_sub(1));
-                out.extend(chars[left..=end].iter());
+            if let Some((start, end)) = columns_of(&plain, left, right) {
+                out.extend(plain.chars().skip(start).take(end + 1 - start));
             }
         }
         out.trim().to_string()
@@ -329,6 +357,23 @@ mod tests {
         assert_eq!(Progress::Waiting.sequence(), "\x1b]9;4;4;100\x07");
         assert_eq!(Progress::Percent(250).sequence(), "\x1b]9;4;1;100\x07");
         assert_eq!(Progress::None.sequence(), "\x1b]9;4;0;0\x07");
+    }
+
+    #[test]
+    fn a_mouse_selection_is_cut_by_column_and_not_by_character() {
+        let mut s = Screen::new();
+        s.compose(&rows(&["日本語abc"]), None, 20, 2);
+
+        // 日(0-1) 本(2-3) 語(4-5) a(6) b(7) c(8)
+        assert_eq!(s.text_in(0, 0, 2, 5), "本語", "the whole wide characters under the columns");
+        assert_eq!(s.text_in(0, 0, 3, 3), "本", "a column in the middle of a wide character picks it whole");
+        assert_eq!(s.text_in(0, 0, 1, 7), "日本語ab");
+        assert_eq!(s.text_in(0, 0, 6, 8), "abc");
+        assert_eq!(s.text_in(0, 0, 9, 12), "", "past the end there is nothing");
+
+        // A combining mark stays with the letter it belongs to.
+        s.compose(&rows(&["ae\u{0301}b"]), None, 20, 2);
+        assert_eq!(s.text_in(0, 0, 1, 1), "e\u{0301}");
     }
 
     #[test]

@@ -20,6 +20,8 @@ pub enum SettingsAction {
     OpenSamplingMenu,
     CheckUpdatesNow,
     OpenMcpMenu,
+    /// Settings -> Tools: what the model may call.
+    OpenTools,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -48,14 +50,15 @@ impl SettingsTab {
     }
 
     pub fn label(self) -> &'static str {
+        // The number stays first: it is how the tab is chosen.
         match self {
-            Self::General => "1 General",
-            Self::Updates => "2 Updates",
-            Self::Aesthetics => "3 UI",
-            Self::Reasoning => "4 LLM",
-            Self::Goal => "5 Goal",
-            Self::Tools => "6 Tools",
-            Self::Style => "7 Style",
+            Self::General => crate::i18n::tr("1 General"),
+            Self::Updates => crate::i18n::tr("2 Updates"),
+            Self::Aesthetics => crate::i18n::tr("3 UI"),
+            Self::Reasoning => crate::i18n::tr("4 LLM"),
+            Self::Goal => crate::i18n::tr("5 Goal"),
+            Self::Tools => crate::i18n::tr("6 Tools"),
+            Self::Style => crate::i18n::tr("7 Style"),
         }
     }
 
@@ -104,18 +107,18 @@ fn cycle_choice<T: PartialEq + Copy>(choices: &[Option<T>], current: Option<T>, 
 
 fn goal_minutes_label(minutes: Option<u32>) -> String {
     match minutes {
-        None | Some(0) => "Unlimited".to_string(),
-        Some(m) if m % 60 == 0 => format!("{} h", m / 60),
-        Some(m) => format!("{m} min"),
+        None | Some(0) => crate::i18n::tr("Unlimited").to_string(),
+        Some(m) if m % 60 == 0 => crate::i18n::tr("{} h").replace("{}", &(m / 60).to_string()),
+        Some(m) => crate::i18n::tr("{m} min").replace("{m}", &m.to_string()),
     }
 }
 
 fn goal_tokens_label(tokens: Option<i64>) -> String {
     match tokens {
-        None | Some(0) => "Unlimited".to_string(),
-        Some(t) if t >= 1_000_000 && t % 1_000_000 == 0 => format!("{}M generated tokens", t / 1_000_000),
-        Some(t) if t >= 1_000 => format!("{}k generated tokens", t / 1_000),
-        Some(t) => format!("{t} generated tokens"),
+        None | Some(0) => crate::i18n::tr("Unlimited").to_string(),
+        Some(t) if t >= 1_000_000 && t % 1_000_000 == 0 => crate::i18n::tr("{}M generated tokens").replace("{}", &(t / 1_000_000).to_string()),
+        Some(t) if t >= 1_000 => crate::i18n::tr("{}k generated tokens").replace("{}", &(t / 1_000).to_string()),
+        Some(t) => crate::i18n::tr("{t} generated tokens").replace("{t}", &t.to_string()),
     }
 }
 
@@ -126,7 +129,6 @@ pub struct SettingsView {
     pub tool_test_status: Option<String>,
     pub update_check_status: Option<String>,
     pub available_models: Vec<String>,
-    pub is_dirty: bool,
     /// So an automatic threshold can show what it works out to.
     pub context_capacity: usize,
     /// The efforts the model in use actually takes, read from what the server
@@ -175,7 +177,6 @@ impl SettingsView {
             tool_test_status: None,
             update_check_status: None,
             available_models,
-            is_dirty: false,
             context_capacity: 0,
             effort_choices: effort_choices_defaults(),
             opened_on,
@@ -186,91 +187,125 @@ impl SettingsView {
     fn items(&self) -> Vec<(&'static str, String)> {
     match self.active_tab {
         SettingsTab::General => vec![
-            ("Provider", {
+            (crate::i18n::tr("Provider"), {
                 let p = self.config.active_profile();
                 format!("{} \u{b7} {}", p.name, p.url)
             }),
-            ("Active model", {
+            (crate::i18n::tr("Active model"), {
                 let model = &self.config.active_profile().model;
-                if model.is_empty() { "(auto-detected)".to_string() } else { model.clone() }
+                if model.is_empty() { crate::i18n::tr("(auto-detected)").to_string() } else { model.clone() }
             }),
-            ("Permission mode", self.config.permission_mode.label().to_string()),
-            ("Auto-save sessions", if self.config.auto_save_sessions { "Enabled (auto-resume)".into() } else { "Disabled".into() }),
-            ("External editor", self.config.external_editor.clone()),
-            ("Setup wizard", "Run the setup again; a new server is added".into()),
+            (crate::i18n::tr("Permission mode"), crate::i18n::tr(self.config.permission_mode.label()).to_string()),
+            (crate::i18n::tr("Safe mode"), if self.config.safe_mode {
+                crate::i18n::tr("On (reading and editing inside the project; no shell, no web, no subagents)").into()
+            } else { crate::i18n::tr("Off").into() }),
+            (crate::i18n::tr("Crash reports"), if self.config.crash_reports {
+                crate::i18n::tr("On (a backtrace is written to ~/.flashagent/crash.log)").into()
+            } else { crate::i18n::tr("Off (nothing is written when the app falls over)").into() }),
+            (crate::i18n::tr("Auto-save sessions"), if self.config.auto_save_sessions { crate::i18n::tr("Enabled (auto-resume)").into() } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("External editor"), self.config.external_editor.clone()),
+            // The language of what the user reads. It applies at once: the
+            // hints, /help and the tips speak it from the next frame. The
+            // Settings screen stays English for now: half of it in two
+            // languages is worse than all of it in one.
+            (
+                crate::i18n::tr("Interface language"),
+                crate::i18n::Lang::from_code(&self.config.interface_language).label().to_string(),
+            ),
+            (crate::i18n::tr("Setup wizard"), crate::i18n::tr("Run the setup again; a new server is added").into()),
         ],
         SettingsTab::Updates => vec![
-            ("Auto-update *", if self.config.auto_check_updates { "On (installs in the background)".into() } else { "Off (/update only)".into() }),
-            ("Release channel", self.config.update_channel.label().to_string()),
-            ("Check for updates", self.update_check_status.clone().unwrap_or_else(|| "Ask GitHub for the newest release".into())),
+            (crate::i18n::tr("Auto-update *"), if self.config.auto_check_updates { crate::i18n::tr("On (installs in the background)").into() } else { crate::i18n::tr("Off (/update only)").into() }),
+            (crate::i18n::tr("Release channel"), self.config.update_channel.label().to_string()),
+            (crate::i18n::tr("Check for updates"), self.update_check_status.clone().unwrap_or_else(|| crate::i18n::tr("Ask GitHub for the newest release").into())),
         ],
         SettingsTab::Aesthetics => vec![
-            ("Swift mascot", if self.config.show_mascot { "Enabled (animated)".into() } else { "Disabled".into() }),
-            ("Developer tips", if self.config.show_tips { "Enabled (rotating deck)".into() } else { "Disabled".into() }),
-            ("Prefill / cache", if self.config.show_ttft { "Enabled (TTFT and t/s on a local server, cache share on a hosted API)".into() } else { "Disabled".into() }),
-            ("Generation speed", if self.config.show_tokens { "Enabled (t/s while the model writes)".into() } else { "Disabled".into() }),
-            ("Clipboard toasts", if self.config.show_toasts { "Enabled".into() } else { "Disabled".into() }),
-            ("Animations", if self.config.animations { "Enabled (sweeps, pulses, unfolding panels)".into() } else { "Reduced (spinners only)".into() }),
-            ("Color theme", self.config.color_theme.label().to_string()),
+            (crate::i18n::tr("Swift mascot"), if self.config.show_mascot { crate::i18n::tr("Enabled (animated)").into() } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Developer tips"), if self.config.show_tips { crate::i18n::tr("Enabled (rotating deck)").into() } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Prefill / cache"), if self.config.show_ttft { crate::i18n::tr("Enabled (TTFT and t/s on a local server, cache share on a hosted API)").into() } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Generation speed"), if self.config.show_tokens { crate::i18n::tr("Enabled (t/s while the model writes)").into() } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Clipboard toasts"), if self.config.show_toasts { crate::i18n::tr("Enabled").into() } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Animations"), if self.config.animations { crate::i18n::tr("Enabled (sweeps, pulses, unfolding panels)").into() } else { crate::i18n::tr("Reduced (spinners only)").into() }),
+            (crate::i18n::tr("Color theme"), crate::i18n::tr(self.config.color_theme.label()).to_string()),
         ],
         SettingsTab::Reasoning => vec![
-            ("Thinking effort", self.config.thinking_effort.clone()),
-            ("Context alert", if self.config.context_warn_threshold > 0 { format!("Warn at {}%", self.config.context_warn_threshold) } else { "Disabled".into() }),
-            ("Auto-compact history", if self.config.auto_compact_context {
+            (crate::i18n::tr("Thinking effort"), self.config.thinking_effort.clone()),
+            (crate::i18n::tr("Context alert"), if self.config.context_warn_threshold > 0 { crate::i18n::tr("Warn at {}%").replace("{}", &self.config.context_warn_threshold.to_string()) } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Auto-compact history"), if self.config.auto_compact_context {
                 // Zero follows the window; "0%" would read as "always".
                 match self.config.context_compact_threshold {
-                    0 => format!("Enabled (auto: {}% for this window)", flashagent_core::default_compact_threshold(self.context_capacity)),
-                    pct => format!("Enabled (at {pct}%)"),
+                    0 => crate::i18n::tr("Enabled (auto: {}% for this window)").replace("{}", &flashagent_core::default_compact_threshold(self.context_capacity).to_string()),
+                    pct => crate::i18n::tr("Enabled (at {pct}%)").replace("{pct}", &pct.to_string()),
                 }
             } else { "Disabled".into() }),
-            ("Web tools", if self.config.web_tools { "Enabled (web_fetch, web_search)".into() } else { "Disabled".into() }),
+            // Off by default: the warm-up is a request of its own, and only a
+            // local server profits from it.
+            (crate::i18n::tr("Context Auto Warm-up"), if self.config.auto_warm_prompt_cache {
+                crate::i18n::tr("Enabled (the prefix is cached before the first message)").into()
+            } else { crate::i18n::tr("Disabled").into() }),
+            (crate::i18n::tr("Web tools"), if self.config.web_tools { crate::i18n::tr("Enabled (web_fetch, web_search)").into() } else { crate::i18n::tr("Disabled").into() }),
             // Not "on connection failure" any more: the retries also wait out the statuses
 // a gateway returns while it is busy, and zero means zero. A label that named
 // one of the two reasons was wrong about the other, and the setting it
 // describes now does exactly what it says.
-("Network retries", {
-                let n = crate::plural(self.config.network_retries, "retry", "retries");
+(crate::i18n::tr("Network retries"), {
+                let n = crate::text::plural(self.config.network_retries, "retry", "retries");
                 match self.config.network_retries {
-                    0 => "None · a rate limit is reported instead of waited out".into(),
-                    _ => format!("{n} · before anything is generated, so never twice"),
+                    0 => crate::i18n::tr("None · a rate limit is reported instead of waited out").into(),
+                    _ => crate::i18n::tr("{n} · before anything is generated, so never twice").replace("{n}", &n),
                 }
             }),
             // Last, and for those who know what the numbers do.
-            ("Sampling (advanced)", {
+            (crate::i18n::tr("Sampling (advanced)"), {
                 // Mirrors `Client::set_user_sampling`: the presets are tuned for local models.
                 let maker_tuned = matches!(self.config.active_profile().protocol, flashagent_llm::ApiProtocol::Anthropic | flashagent_llm::ApiProtocol::Gemini);
                 if maker_tuned && self.config.sampling_preset != flashagent_core::SamplingPreset::Custom {
-                    format!("{} · {} chooses its own", self.config.sampling_preset.label(), self.config.active_profile().protocol.label())
+                    crate::i18n::tr("{preset} · {protocol} chooses its own")
+                        .replace("{preset}", crate::i18n::tr(self.config.sampling_preset.label()))
+                        .replace("{protocol}", self.config.active_profile().protocol.label())
                 } else {
-                    format!("{} · temperature {:.2}", self.config.sampling_preset.label(), self.config.temperature)
+                    crate::i18n::tr("{} · temperature {:.2}").replace("{}", crate::i18n::tr(self.config.sampling_preset.label())).replace("{:.2}", &format!("{:.2}", self.config.temperature))
                 }
             }),
         ],
         SettingsTab::Goal => vec![
-            ("Step limit", match self.config.goal_max_steps {
-                None | Some(0) => "Unlimited".to_string(),
-                Some(n) => crate::plural(n as usize, "step", "steps"),
+            (crate::i18n::tr("Step limit"), match self.config.goal_max_steps {
+                None | Some(0) => crate::i18n::tr("Unlimited").to_string(),
+                Some(n) => crate::text::plural(n as usize, "step", "steps"),
             }),
-            ("Time limit", goal_minutes_label(self.config.goal_max_minutes)),
-            ("Token limit", goal_tokens_label(self.config.goal_max_output_tokens)),
+            (crate::i18n::tr("Time limit"), goal_minutes_label(self.config.goal_max_minutes)),
+            (crate::i18n::tr("Token limit"), goal_tokens_label(self.config.goal_max_output_tokens)),
         ],
         SettingsTab::Style => {
             let p = &self.config.personality;
-            let mut rows = vec![("Base style and tone", format!("{} — {}", p.base.label(), p.base.blurb()))];
+            let mut rows = vec![(crate::i18n::tr("Base style and tone"), format!("{} — {}", crate::i18n::tr(p.base.label()), crate::i18n::tr(p.base.blurb())))];
             for t in PersonalityTrait::ALL {
                 let level = p.level(t);
                 let blurb = t.blurb(level);
+                // The trait, its level and what the level means: all three are
+                // the interface's words.
                 rows.push((
-                    t.label(),
-                    if blurb.is_empty() { level.label().to_string() } else { format!("{} — {blurb}", level.label()) },
+                    crate::i18n::tr(t.label()),
+                    if blurb.is_empty() {
+                        crate::i18n::tr(level.label()).to_string()
+                    } else {
+                        format!("{} — {}", crate::i18n::tr(level.label()), crate::i18n::tr(blurb))
+                    },
                 ));
             }
             rows
         }
         SettingsTab::Tools => vec![
-            ("Toolset profile", self.config.toolset_profile.label().to_string()),
-            ("MCP servers", "Configured servers and the marketplace".into()),
-            ("Run tool test", self.tool_test_status.clone().unwrap_or_else(|| "Probe function calling".into())),
+            (crate::i18n::tr("Tools on/off"), {
+                let off = self.config.disabled_tools.len();
+                if off == 0 {
+                    crate::i18n::tr("Every tool is on").into()
+                } else {
+                    crate::i18n::tr("{} switched off").replace("{}", &crate::text::plural(off, "tool", "tools"))
+                }
+            }),
+            (crate::i18n::tr("MCP servers"), crate::i18n::tr("Configured servers and the marketplace").into()),
+            (crate::i18n::tr("Run tool test"), self.tool_test_status.clone().unwrap_or_else(|| crate::i18n::tr("Probe function calling").into())),
         ],
     }
     }
@@ -361,31 +396,38 @@ impl SettingsView {
                 1 => SettingsAction::OpenModelMenu,
                 2 => {
                     self.config.permission_mode = self.config.permission_mode.next();
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 3 => {
-                    self.config.auto_save_sessions = !self.config.auto_save_sessions;
-                    self.is_dirty = true;
+                    self.config.safe_mode = !self.config.safe_mode;
                     SettingsAction::None
                 }
                 4 => {
-                    self.cycle_editor();
-                    self.is_dirty = true;
+                    self.config.crash_reports = !self.config.crash_reports;
                     SettingsAction::None
                 }
-                5 => SettingsAction::OpenWizard,
+                5 => {
+                    self.config.auto_save_sessions = !self.config.auto_save_sessions;
+                    SettingsAction::None
+                }
+                6 => {
+                    self.cycle_editor();
+                    SettingsAction::None
+                }
+                7 => {
+                    self.cycle_language();
+                    SettingsAction::None
+                }
+                8 => SettingsAction::OpenWizard,
                 _ => SettingsAction::None,
             },
             SettingsTab::Updates => match self.selected_index {
                 0 => {
                     self.config.auto_check_updates = !self.config.auto_check_updates;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 1 => {
                     self.config.update_channel = self.config.update_channel.toggle();
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 2 => SettingsAction::CheckUpdatesNow,
@@ -398,32 +440,26 @@ impl SettingsView {
             SettingsTab::Aesthetics => match self.selected_index {
                 0 => {
                     self.config.show_mascot = !self.config.show_mascot;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 1 => {
                     self.config.show_tips = !self.config.show_tips;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 2 => {
                     self.config.show_ttft = !self.config.show_ttft;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 3 => {
                     self.config.show_tokens = !self.config.show_tokens;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 4 => {
                     self.config.show_toasts = !self.config.show_toasts;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 5 => {
                     self.config.animations = !self.config.animations;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 6 => {
@@ -436,33 +472,29 @@ impl SettingsView {
                 0 => SettingsAction::OpenEffortMenu,
                 1 => {
                     self.cycle_warn_threshold();
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 2 => {
                     self.config.auto_compact_context = !self.config.auto_compact_context;
-                    self.is_dirty = true;
                     SettingsAction::None
                 }
                 3 => {
-                    self.config.web_tools = !self.config.web_tools;
-                    self.is_dirty = true;
+                    self.config.auto_warm_prompt_cache = !self.config.auto_warm_prompt_cache;
                     SettingsAction::None
                 }
                 4 => {
-                    self.cycle_network_retries();
-                    self.is_dirty = true;
+                    self.config.web_tools = !self.config.web_tools;
                     SettingsAction::None
                 }
-                5 => SettingsAction::OpenSamplingMenu,
+                5 => {
+                    self.cycle_network_retries();
+                    SettingsAction::None
+                }
+                6 => SettingsAction::OpenSamplingMenu,
                 _ => SettingsAction::None,
             },
             SettingsTab::Tools => match self.selected_index {
-                0 => {
-                    self.config.toolset_profile = self.config.toolset_profile.next();
-                    self.is_dirty = true;
-                    SettingsAction::None
-                }
+                0 => SettingsAction::OpenTools,
                 1 => SettingsAction::OpenMcpMenu,
                 2 => SettingsAction::RunToolTest,
                 _ => SettingsAction::None,
@@ -486,8 +518,11 @@ impl SettingsView {
                 0 => self.cycle_provider(delta),
                 1 => self.cycle_model(),
                 2 => self.config.permission_mode = self.config.permission_mode.next(),
-                3 => self.config.auto_save_sessions = !self.config.auto_save_sessions,
-                4 => self.cycle_editor(),
+                3 => self.config.safe_mode = !self.config.safe_mode,
+                4 => self.config.crash_reports = !self.config.crash_reports,
+                5 => self.config.auto_save_sessions = !self.config.auto_save_sessions,
+                6 => self.cycle_editor(),
+                7 => self.cycle_language(),
                 _ => {}
             },
             SettingsTab::Updates => match self.selected_index {
@@ -518,18 +553,15 @@ impl SettingsView {
                 0 => self.cycle_effort(),
                 1 => self.cycle_warn_threshold(),
                 2 => self.config.auto_compact_context = !self.config.auto_compact_context,
-                3 => self.config.web_tools = !self.config.web_tools,
-                4 => self.cycle_network_retries(),
-                5 => self.cycle_sampling(),
+                3 => self.config.auto_warm_prompt_cache = !self.config.auto_warm_prompt_cache,
+                4 => self.config.web_tools = !self.config.web_tools,
+                5 => self.cycle_network_retries(),
+                6 => self.cycle_sampling(),
                 _ => {}
             },
-            SettingsTab::Tools => {
-                if self.selected_index == 0 {
-                    self.config.toolset_profile = self.config.toolset_profile.next();
-                }
-            }
+            // Nothing on this tab is a value: the rows open other screens.
+            SettingsTab::Tools => {}
         }
-        self.is_dirty = true;
     }
 
     /// Among the saved providers; the switch happens when Settings closes.
@@ -545,7 +577,6 @@ impl SettingsView {
             None => 0,
         };
         self.config.activate(&names[next]);
-        self.is_dirty = true;
     }
 
     /// The models of the server in use; not while another provider is picked
@@ -559,7 +590,6 @@ impl SettingsView {
             .map(|i| (i + 1) % self.available_models.len())
             .unwrap_or(0);
         self.config.active_profile_mut().model = self.available_models[next_idx].clone();
-        self.is_dirty = true;
     }
 
     /// Another provider than the one Settings opened on.
@@ -574,7 +604,18 @@ impl SettingsView {
             .map(|i| (i + 1) % editors.len())
             .unwrap_or(0);
         self.config.external_editor = editors[next_idx].to_string();
-        self.is_dirty = true;
+    }
+
+    /// The interface language, English and Russian. It applies at once: the
+    /// footer hints, /help and the tips speak it from the next frame, and the
+    /// config keeps it for the next start.
+    fn cycle_language(&mut self) {
+        let next = match crate::i18n::Lang::from_code(&self.config.interface_language) {
+            crate::i18n::Lang::Russian => crate::i18n::Lang::English,
+            crate::i18n::Lang::English => crate::i18n::Lang::Russian,
+        };
+        self.config.interface_language = next.code().to_string();
+        crate::i18n::set(next);
     }
 
     /// Steps through what the model in use really accepts. A fixed ladder would
@@ -590,20 +631,17 @@ impl SettingsView {
             // A saved level this model does not offer: the first one it does.
             None => presets[0].clone(),
         };
-        self.is_dirty = true;
     }
 
     /// Applied at once: a theme picked by name is guesswork until seen.
     fn cycle_theme(&mut self) {
         self.config.color_theme = self.config.color_theme.next();
         crate::theme::set(self.config.color_theme);
-        self.is_dirty = true;
     }
 
     fn cycle_sampling(&mut self) {
         let next = self.config.sampling_preset.next();
         next.apply_to_config(&mut self.config);
-        self.is_dirty = true;
     }
 
     fn cycle_warn_threshold(&mut self) {
@@ -613,7 +651,6 @@ impl SettingsView {
             .map(|i| (i + 1) % thresholds.len())
             .unwrap_or(0);
         self.config.context_warn_threshold = thresholds[next_idx];
-        self.is_dirty = true;
     }
 
     fn cycle_network_retries(&mut self) {
@@ -623,7 +660,6 @@ impl SettingsView {
             .map(|i| (i + 1) % retries.len())
             .unwrap_or(0);
         self.config.network_retries = retries[next_idx];
-        self.is_dirty = true;
     }
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
@@ -640,8 +676,8 @@ impl SettingsView {
             format!("  {border_color}│{reset} {clipped}{pad} {border_color}│{reset}")
         };
 
-        let title_styled = " \x1b[1;38;2;225;175;95mSettings\x1b[0m ";
-        let title_vis = crate::visible_width(title_styled);
+        let title_styled = format!(" \x1b[1;38;2;225;175;95m{}\x1b[0m ", crate::i18n::tr("Settings"));
+        let title_vis = crate::visible_width(&title_styled);
         let dashes = box_w.saturating_sub(title_vis + 1);
         lines.push((
             LineKind::System,
@@ -700,14 +736,20 @@ impl SettingsView {
         }
 
         let note = match self.active_tab {
-            SettingsTab::Updates => "\x1b[38;2;225;175;95m* Takes effect after a restart\x1b[0m",
-            SettingsTab::General => "\x1b[38;2;135;130;125m\u{2190}/\u{2192} on Provider switches between the saved ones; Enter edits them.\x1b[0m",
+            SettingsTab::Updates => format!("\x1b[38;2;225;175;95m{}\x1b[0m", crate::i18n::tr("* Takes effect after a restart")),
+            SettingsTab::General => format!(
+                "\x1b[38;2;135;130;125m{}\x1b[0m",
+                crate::i18n::tr("←/→ on Provider switches between the saved ones; Enter edits them.")
+            ),
             SettingsTab::Style => {
-                "\x1b[38;2;135;130;125mTone only — tools and code are unaffected. Applies from your next message.\x1b[0m"
+                format!(
+                    "\x1b[38;2;135;130;125m{}\x1b[0m",
+                    crate::i18n::tr("Tone only — tools and code are unaffected. Applies from your next message.")
+                )
             }
-            _ => "",
+            _ => String::new(),
         };
-        for row in crate::wrap_styled(note, inner_text_w.max(1)) {
+        for row in crate::wrap_styled(&note, inner_text_w.max(1)) {
             lines.push((LineKind::System, pad_row(&row)));
         }
         if note.is_empty() {
@@ -819,6 +861,7 @@ mod tests {
 
         view.handle_key(KeyCode::Char('6'), KeyModifiers::empty());
         assert_eq!(view.active_tab, SettingsTab::Tools);
+        assert_eq!(view.handle_key(KeyCode::Enter, KeyModifiers::empty()), SettingsAction::OpenTools);
         view.handle_key(KeyCode::Down, KeyModifiers::empty());
         assert_eq!(view.handle_key(KeyCode::Enter, KeyModifiers::empty()), SettingsAction::OpenMcpMenu);
         view.handle_key(KeyCode::Down, KeyModifiers::empty());
@@ -971,6 +1014,28 @@ mod tests {
         view.effort_choices = ["auto", "off", "high"].iter().map(|s| s.to_string()).collect();
         view.cycle_effort();
         assert_eq!(view.config.thinking_effort, "auto", "an unsupported saved level must not linger");
+    }
+
+    /// The warm-up of the prompt cache is a request of its own, so it is off
+    /// until the owner turns it on, and it lives with the other context
+    /// settings in the LLM tab.
+    #[test]
+    fn the_cache_warm_up_is_off_until_it_is_turned_on_in_the_llm_tab() {
+        let mut view = SettingsView::new(AppConfig::default(), Vec::new());
+        view.handle_key(KeyCode::Char('4'), KeyModifiers::empty());
+        assert_eq!(view.active_tab, SettingsTab::Reasoning);
+        assert!(!view.config.auto_warm_prompt_cache, "off by default");
+        let rows: Vec<&str> = view.items().into_iter().map(|(name, _)| name).collect();
+        let row = rows.iter().position(|name| *name == "Context Auto Warm-up").expect("the row is there");
+        view.selected_index = row;
+        view.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert!(view.config.auto_warm_prompt_cache, "the row turns it on");
+        let shown = view.items()[row].1.clone();
+        assert!(shown.starts_with("Enabled"), "{shown}");
+        // And back off again.
+        view.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert!(!view.config.auto_warm_prompt_cache);
+        assert!(view.items()[row].1.contains("Disabled"), "{}", view.items()[row].1);
     }
 
     #[test]

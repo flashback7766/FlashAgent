@@ -213,11 +213,21 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 i += 1;
             }
 
-            let num_cols = header_row.len().max(data_rows.iter().map(|r| r.len()).max().unwrap_or(0));
+            // A column needs its cell and the three border cells around it. A
+            // table with more columns than the window can hold keeps the ones
+            // that fit: a row wider than the terminal wraps on its own and
+            // pushes the frame out of step.
+            let all_cols = header_row.len().max(data_rows.iter().map(|r| r.len()).max().unwrap_or(0));
+            let num_cols = all_cols.min((width.saturating_sub(1) / 4).max(1));
             if num_cols > 0 {
                 let mut col_widths = vec![3usize; num_cols];
                 for (c, cell) in header_row.iter().enumerate() {
-                    col_widths[c] = col_widths[c].max(visible_width(&md(cell)));
+                    // The header may have more cells than the table keeps: the
+                    // columns that do not fit are dropped, and their cells go
+                    // with them.
+                    if c < num_cols {
+                        col_widths[c] = col_widths[c].max(visible_width(&md(cell)));
+                    }
                 }
                 for row in &data_rows {
                     for (c, cell) in row.iter().enumerate() {
@@ -227,17 +237,19 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                     }
                 }
 
-                // Shrink the table to the terminal width if needed.
+                // Shrink the table to the terminal width if needed. Every
+                // column keeps at least one cell, which is what the cap on
+                // `num_cols` above leaves room for.
                 let border_chars_count = 3 * num_cols + 1;
                 let total_content_w: usize = col_widths.iter().sum();
                 let total_w = total_content_w + border_chars_count;
                 if total_w > width {
-                    let available_content_w = width.saturating_sub(border_chars_count).max(num_cols * 3);
+                    let available_content_w = width.saturating_sub(border_chars_count);
                     let excess = total_content_w.saturating_sub(available_content_w);
                     if excess > 0 {
                         for _ in 0..excess {
                             if let Some((max_idx, _)) = col_widths.iter().enumerate().max_by_key(|(_, &w)| w) {
-                                if col_widths[max_idx] > 3 {
+                                if col_widths[max_idx] > 1 {
                                     col_widths[max_idx] -= 1;
                                 } else {
                                     break;
@@ -434,7 +446,13 @@ fn table_row_lines(cells: &[String], widths: &[usize], style: &str, border_color
         .enumerate()
         .map(|(c, &w)| {
             let styled = md(cells.get(c).map(String::as_str).unwrap_or(""));
-            if visible_width(&styled) <= w { vec![styled] } else { wrap_styled(&styled, w) }
+            if visible_width(&styled) <= w {
+                vec![styled]
+            } else if w >= 10 {
+                wrap_styled(&styled, w)
+            } else {
+                crate::text::split_cells_styled(&styled, w)
+            }
         })
         .collect();
     let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
@@ -487,6 +505,32 @@ mod tests {
         // A table that fits keeps one line per row.
         let small = render("| a | b |\n| - | - |\n| 1 | 2 |", 80);
         assert_eq!(small.len(), 5);
+    }
+
+    #[test]
+    fn a_table_many_columns_wide_never_runs_past_the_window() {
+        let table = "\
+| one | two | three | four | five | six |
+| --- | --- | --- | --- | --- | --- |
+| a longer first value | второй | 三つ目 | 四番目 | five | six |
+| 1 | 2 | 3 | 4 | 5 | 6 |";
+        for width in [20usize, 24, 30, 40, 60] {
+            let lines = render(table, width);
+            for line in &lines {
+                assert!(
+                    visible_width(line) <= width,
+                    "at {width} a table row came out {} wide: {:?}",
+                    visible_width(line),
+                    strip_ansi(line)
+                );
+            }
+            let plain = plain(&lines);
+            assert!(plain.iter().any(|l| l.starts_with('╭') && l.ends_with('╮')), "the top edge closes: {plain:?}");
+            assert!(plain.iter().any(|l| l.starts_with('╰') && l.ends_with('╯')), "the bottom edge closes: {plain:?}");
+            // Every drawn row has the same number of borders, so the columns line up.
+            let borders: Vec<usize> = plain.iter().filter(|l| l.starts_with('│')).map(|l| l.matches('│').count()).collect();
+            assert!(borders.windows(2).all(|w| w[0] == w[1]), "{width}: {borders:?}");
+        }
     }
 
     #[test]

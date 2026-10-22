@@ -8,20 +8,22 @@ use std::sync::Arc;
 use anyhow::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+    KeyboardEnhancementFlags, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use flashagent_core::{
     build_system_prompt, AgentLoop, AppConfig, ContextUsage, Decision, DoneReason, LlmSource,
-    LoopConfig, LoopEvent, PermissionMode, PermissionState, PermissionedTools, SystemPromptConfig,
+    LoopConfig, LoopEvent, PermissionMode, PermissionState, PermissionedTools, SystemPromptConfig, ToolExec,
 };
 use flashagent_llm::{ChatMessage, LlmBackend};
 use flashagent_tools::{BuiltinTools, BuiltinToolsConfig};
+use flashagent_tui::i18n::tr;
 use flashagent_tui::goal::{commit_goal_milestone, format_plan, GoalBudgets, GoalLedger, MILESTONE_COMMIT_INTERVAL};
 use flashagent_tui::MascotMood;
 use flashagent_tui::{
     clip_ansi, pad_box_row, render_session_saved_card, restore_line_color,
-    visible_width, welcome_card, AutocompletePopup, ChatView, ConfirmChoice, ConfirmSelect,
+    visible_width, welcome_card, AutocompletePopup, ChatView, CompactionResult, ConfirmChoice, ConfirmSelect,
     ContextModal, LineKind, McpModal, McpModalAction, McpViewTab, PrefillTracker, ReasoningExpansion,
     RenderLine, SamplingAction, SamplingView, SelectItem, SelectMenu, SettingsAction, SettingsView,
     TuiGate, TuiQuestionGate, UiEvent,
@@ -81,6 +83,7 @@ async fn cli_start(config: &mut AppConfig) -> Result<Option<(bool, bool, Session
     let mut tool_test: Option<bool> = None;
 let mut tool_test_scenario: Vec<String> = Vec::new();
 let mut tool_test_json: Option<String> = None;
+let mut tool_test_repeat: usize = 1;
     let (mut cli_url, mut cli_model) = (None, None);
     let mut args = std::env::args().skip(1).peekable();
     while let Some(a) = args.next() {
@@ -148,6 +151,13 @@ let mut tool_test_json: Option<String> = None;
             }
             "--tool-test" => tool_test = Some(false),
             "--all-models" => tool_test = Some(true),
+            "--repeat" => {
+                tool_test.get_or_insert(false);
+                let Some(times) = args.next().and_then(|v| v.parse::<usize>().ok()) else {
+                    anyhow::bail!("--repeat needs a number of runs, as in --repeat 3");
+                };
+                tool_test_repeat = times.clamp(1, 20);
+            }
             "--scenario" => {
                 tool_test.get_or_insert(false);
                 let Some(key) = args.next() else { anyhow::bail!("--scenario needs a scenario key, as in --scenario long_stream") };
@@ -180,7 +190,7 @@ let mut tool_test_json: Option<String> = None;
     }
 
     if let Some(all_models) = tool_test {
-        let code = run_tool_check_cli(config, all_models, tool_test_scenario, tool_test_json).await;
+        let code = run_tool_check_cli(config, all_models, tool_test_scenario, tool_test_json, tool_test_repeat).await;
         std::process::exit(code);
     }
 
@@ -245,6 +255,9 @@ struct BackendStartup {
     context_capacity: usize,
     cwd_display: String,
     cwd: std::path::PathBuf,
+    /// The directory the app was started in is gone; the home folder stood in
+    /// for it, and the user was told.
+    cwd_missing: bool,
     initial_effort: String,
     available_models: Vec<String>,
     first_run_verdict: Option<String>,
@@ -260,6 +273,23 @@ fn display_cwd(cwd: &std::path::Path) -> String {
         }).unwrap_or_else(|_| cwd.display().to_string())
     } else {
         cwd.display().to_string()
+    }
+}
+
+/// The directory the app starts in. A directory that was deleted while the
+/// terminal sat in it is not a reason to die: the home folder is, and the
+/// trust screen still asks about it.
+fn start_directory(current: std::io::Result<std::path::PathBuf>) -> (std::path::PathBuf, bool) {
+    match current {
+        Ok(dir) => (dir, false),
+        Err(_) => {
+            let home = std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.is_dir())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            (home, true)
+        }
     }
 }
 
@@ -289,8 +319,7 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
         backend_initial.discover_server().await
     });
 
-    let mut cwd = std::env::current_dir()?;
-
+    let (mut cwd, cwd_missing) = start_directory(std::env::current_dir());
     if config.is_directory_trusted(&cwd) {
         skip_trust = true;
     }
@@ -392,13 +421,97 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
     let source: Arc<BackendSource> = Arc::new(BackendSource(backend));
     let cwd_display = display_cwd(&cwd);
 
-    Ok(Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, initial_effort, available_models, first_run_verdict, pending_discovery }))
+    Ok(Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, cwd_missing, initial_effort, available_models, first_run_verdict, pending_discovery }))
 }
 
-fn install_crash_hook() {
+/// How many characters the plan of the project may take in the prompt. A
+/// thousand tokens is a lot of prefill for a map: enough to name the folders
+/// and the files that matter, and no more.
+const PLAN_CHARS: usize = 4_000;
+
+/// Set when tmux was asked for xterm's `modifyOtherKeys`, so the matching
+/// reset goes out on the way back to the shell and not before.
+static TMUX_MODIFIED_KEYS: AtomicBool = AtomicBool::new(false);
+
+/// True when tmux says modified keys are reported at all and that the report
+/// arrives in the `csi-u` form. tmux's `xterm` form is `CSI 27;mod;key~`,
+/// which crossterm does not parse, so it must not be asked for.
+fn tmux_forwards_extended_keys(report: &str) -> bool {
+    let mut fields = report.split_whitespace();
+    let keys = fields.next().unwrap_or_default();
+    let format = fields.next().unwrap_or_default();
+    matches!(keys, "on" | "always") && format == "csi-u"
+}
+
+/// tmux up to 3.8 does not know the kitty protocol: it reports a modified key
+/// only after an application asks for xterm's `modifyOtherKeys` mode, and only
+/// when its own options say to. Asked for only when the report will be in the
+/// `csi-u` form, which reaches the reader as the same `CSI … u` sequence a
+/// kitty-aware terminal sends.
+fn ask_tmux_for_modified_keys() -> bool {
+    if std::env::var_os("TMUX").is_none() {
+        return false;
+    }
+    let Ok(out) = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "#{extended-keys} #{extended-keys-format}"])
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    if !tmux_forwards_extended_keys(&String::from_utf8_lossy(&out.stdout)) {
+        return false;
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().write_all(b"\x1b[>4;2m");
+    let _ = std::io::stdout().flush();
+    true
+}
+
+fn release_tmux_modified_keys() {
+    if !TMUX_MODIFIED_KEYS.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().write_all(b"\x1b[>4;0m");
+    let _ = std::io::stdout().flush();
+}
+
+/// Shift+Enter reaches an application as plain Enter unless the terminal
+/// speaks the kitty keyboard protocol. `DISAMBIGUATE_ESCAPE_CODES` is enough
+/// for that: the terminal then reports Enter, Tab and Backspace as
+/// `CSI … u` with the shift in the modifier field, and leaves printable keys
+/// as the text they are.
+///
+/// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` is deliberately not used. It makes the
+/// terminal send every key as `CSI key-code;modifiers u` with the *unshifted*
+/// key code, and the shifted character only in a second field that crossterm
+/// 0.28 does not read. The result was that `~` arrived as a backtick with a
+/// shift modifier, and Caps Lock, which the terminal reports the same way,
+/// stopped working: the typed character came out unshifted.
+fn enable_enhanced_keys() {
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
+    TMUX_MODIFIED_KEYS.store(ask_tmux_for_modified_keys(), Ordering::Relaxed);
+}
+
+/// Pops one level of the flags pushed above, so a terminal that shares its
+/// screen with the shell does not keep the enhanced encoding after exit.
+fn restore_enhanced_keys() {
+    release_tmux_modified_keys();
+    let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+}
+
+/// The crash hook, and whether it may write a report: a report holds a
+/// backtrace and the paths of the machine, so it is written only when the
+/// owner has asked for it (Settings → General → Crash reports).
+fn install_crash_hook(reports_enabled: bool) {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
+        restore_enhanced_keys();
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::cursor::Show,
@@ -407,23 +520,32 @@ fn install_crash_hook() {
             LeaveAlternateScreen,
         );
         let _ = crossterm::terminal::disable_raw_mode();
-        let log_content = format!(
-            "FlashAgent Crash Report\nVersion: {}\nTime: {:?}\nPanic: {}\nBacktrace:\n{:?}\n\nPlease report this issue at: https://github.com/flashback7766/FlashAgent/issues\n",
-            flashagent_svc::updater::current_version(),
-            std::time::SystemTime::now(),
-            info,
-            std::backtrace::Backtrace::capture()
+        eprintln!(
+            "\x1b[1;38;2;245;120;120m{}\x1b[0m",
+            flashagent_tui::i18n::tr("FlashAgent encountered an unexpected crash.")
         );
-        // Never into the user's project directory.
-        let log_path = flashagent_home_dir()
-            .map(|d| {
-                let _ = std::fs::create_dir_all(&d);
-                d.join("crash.log")
-            })
-            .unwrap_or_else(|| std::env::temp_dir().join("flashagent-crash.log"));
-        let _ = std::fs::write(&log_path, log_content);
-        eprintln!("\x1b[1;38;2;245;120;120mFlashAgent encountered an unexpected crash.\x1b[0m");
-        eprintln!("Crash report written to {}. Please submit an issue at: https://github.com/flashback7766/FlashAgent/issues", log_path.display());
+        if reports_enabled {
+            let log_content = format!(
+                "FlashAgent Crash Report\nVersion: {}\nTime: {:?}\nPanic: {}\nBacktrace:\n{:?}\n\nPlease report this issue at: https://github.com/flashback7766/FlashAgent/issues\n",
+                flashagent_svc::updater::current_version(),
+                std::time::SystemTime::now(),
+                info,
+                std::backtrace::Backtrace::capture()
+            );
+            // Never into the user's project directory.
+            let log_path = flashagent_home_dir()
+                .map(|d| {
+                    let _ = std::fs::create_dir_all(&d);
+                    d.join("crash.log")
+                })
+                .unwrap_or_else(|| std::env::temp_dir().join("flashagent-crash.log"));
+            let _ = std::fs::write(&log_path, log_content);
+            eprintln!("Crash report written to {}. Please submit an issue at: https://github.com/flashback7766/FlashAgent/issues", log_path.display());
+        } else {
+            // Nothing is written without being asked for: a backtrace holds
+            // the paths of the machine it was taken on.
+            eprintln!("No crash report was written. Turn on \"Crash reports\" in Settings if you want one.");
+        }
         default_hook(info);
     }));
 
@@ -433,15 +555,32 @@ fn install_crash_hook() {
 async fn main() -> Result<()> {
     flashagent_svc::updater::remove_stale_backups_beside_exe();
     let mut config = AppConfig::load();
+    // What the models were measured to be, from the runs before this one. A
+    // model that was measured is not measured again: the server's own count
+    // of its own words is what the counter learns from, and it is the same
+    // model every time.
+    if let Some(path) = flashagent_llm::measurements_path() {
+        flashagent_llm::load_measurements(&path);
+    }
     let Some((force_setup, skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
 
     let Some(ran_setup) = startup_screens(&mut config, force_setup).await else { return Ok(()) };
-    let Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, initial_effort, available_models, first_run_verdict, pending_discovery }) =
+    let Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, cwd_missing, initial_effort, available_models, first_run_verdict, pending_discovery }) =
         prepare_backend(&mut config, skip_trust, ran_setup).await? else { return Ok(()) };
+
+    // The interface language before anything renders; the system prompt is
+    // not part of it. Set before the questions about MCP servers, which the
+    // person reads.
+    flashagent_tui::i18n::set(flashagent_tui::i18n::Lang::from_code(&config.interface_language));
 
     let gate = TuiGate::new();
     let question_gate = TuiQuestionGate::new();
     let mcp_manager = flashagent_tools::mcp::McpManager::new(cwd.clone());
+    // A project's `.mcp.json` can start a program, so the owner is asked
+    // before it runs. The answer is remembered, unless the safe mode is on:
+    // there, nothing runs without a question every time.
+    let allowed = approve_project_mcp_servers(&mut config, &mcp_manager, &cwd).await;
+    mcp_manager.set_allowed(allowed.iter().cloned().collect());
     let mcp_bg = mcp_manager.clone();
     tokio::spawn(async move {
         mcp_bg.start_enabled_servers().await;
@@ -453,16 +592,28 @@ async fn main() -> Result<()> {
     // Only the MCP config (`read_only`, `read_only_tools`) marks external tools as reads.
     let hint_mgr = mcp_manager.clone();
     state.set_read_only_hint(Arc::new(move |tool: &str| hint_mgr.is_tool_read_only(tool)));
+    // The tools that are off: the ones the owner switched off, and the ones
+    // the safe mode takes away.
+    let mut disabled_tools = config.disabled_tools.clone();
+    if config.safe_mode {
+        for name in flashagent_tui::tools_view::SAFE_MODE_TOOLS {
+            if !disabled_tools.iter().any(|n| n == name) {
+                disabled_tools.push(name.to_string());
+            }
+        }
+    }
     let tools_arc: Arc<BuiltinTools> = Arc::new(BuiltinTools::new(BuiltinToolsConfig {
         cwd: cwd.clone(),
         // DuckDuckGo unless the environment names a Brave key.
         brave_api_key: std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.trim().is_empty()),
         question_gate: Some(question_gate.clone()),
         is_goal_mode: None,
-        toolset_profile: Some(config.toolset_profile),
         web_enabled: Some(config.web_tools),
         context_window: Some(context_capacity),
         mcp_manager: Some(mcp_manager.clone()),
+        // The tools the owner has switched off, and the ones the safe mode
+        // takes away: not offered, and refused.
+        disabled_tools: Some(disabled_tools.clone()),
     })?);
     // A closed terminal window (SIGHUP) or a kill (SIGTERM) skips the normal
     // exit; the background tasks run in their own process groups and would
@@ -479,6 +630,7 @@ async fn main() -> Result<()> {
             };
             tools.shells().stop_all();
             // After SIGTERM the terminal is still there, in raw mode on the alternate screen.
+            restore_enhanced_keys();
             let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show, DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen);
             let _ = crossterm::terminal::disable_raw_mode();
             std::process::exit(code);
@@ -493,14 +645,24 @@ async fn main() -> Result<()> {
         flashagent_tools::agent_tools(tools_arc.clone(), source.clone(), state.clone(), Some(agent_tx));
     let perm: &'static PermissionedTools =
         Box::leak(Box::new(PermissionedTools::new(Arc::new(composite), Some(tools_arc.clone()), state.clone())));
+    // The three tools only the top has are not the built-in ones, so the
+    // permission layer is where their switch is kept.
+    perm.set_disabled_tools(disabled_tools.clone());
+    // The standing permissions the owner gave in an earlier run. They are
+    // remembered, not asked for again every morning.
+    perm.set_rules(config.always_rules.clone());
 
-    // Project and global memory docs, injected into the first user message.
+    // Project and global memory docs, injected into the system prompt.
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_default();
     let docs = flashagent_core::collect(&cwd, &home.join(".flashagent"));
-    let memory_block = flashagent_core::injection_block(&docs, config.token_budget);
+    // The budget is in the tokens of the model that will read it, so the
+    // memory is measured the same way.
+    let memory_block = flashagent_core::injection_block(&model, &docs, config.token_budget);
     let memory_docs = docs.len();
 
-    install_crash_hook();
+    // The interface language before anything renders; the system prompt is
+    // not part of it.
+    install_crash_hook(config.crash_reports);
 
     run_terminal(AppContext {
         config,
@@ -519,6 +681,7 @@ async fn main() -> Result<()> {
         available_models,
         session_start,
         cwd: cwd.clone(),
+        cwd_missing,
         first_run_verdict,
         pending_discovery,
         agent_events,
@@ -534,9 +697,12 @@ async fn run_terminal(ctx: AppContext) -> Result<()> {
         EnableBracketedPaste,
         EnableMouseCapture,
     );
+    enable_enhanced_keys();
     let result = run_app(ctx).await;
 
     flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
+    // Before the screen goes: the shell below must get plain Enter and Tab back.
+    restore_enhanced_keys();
     // The frame may have hidden the cursor (a menu was open); the shell needs it back.
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -632,16 +798,45 @@ struct LoopCtx<'a> {
     tip_lines: &'a Vec<String>,
 }
 
+/// A switch made in the app that the transcript has not announced yet. The
+/// rule belongs to the first message that uses the new state: a menu pick
+/// alone must not put a rule above an empty chat.
+#[derive(Default)]
+struct PendingSwitch {
+    /// The provider name, when the change came from `/provider`.
+    provider: Option<String>,
+    model: bool,
+    effort: bool,
+}
+
+impl PendingSwitch {
+    /// One rule for the changes waiting together: a provider switch already
+    /// carries the model and effort it runs, so it must not be split in two.
+    fn label(&self, model: &str, effort: &str) -> Option<String> {
+        if let Some(provider) = &self.provider {
+            Some(flashagent_tui::i18n::tr_fill(
+                "Provider: {provider} \u{b7} {model} \u{b7} thinking effort: {effort}",
+                &[("provider", provider), ("model", model), ("effort", effort)],
+            ))
+        } else if self.model {
+            Some(flashagent_tui::i18n::tr_fill(
+                "Model: {model} \u{b7} thinking effort: {effort}",
+                &[("model", model), ("effort", effort)],
+            ))
+        } else if self.effort {
+            Some(flashagent_tui::i18n::tr_fill("Thinking effort: {effort}", &[("effort", effort)]))
+        } else {
+            None
+        }
+    }
+}
+
 struct App {
     question_ui_state: QuestionUiState,
     history: Vec<ChatMessage>,
-    /// Set while `/compact` runs in the background: the line under the prompt
-    /// says so instead of the interface looking frozen.
-    compact_status: Option<String>,
-    /// Idle ticks that line keeps the tip's row for once the compaction is done.
-    /// Zero while it still runs: that takes as long as it takes, and a line that
-    /// expired mid-write would be hiding the very thing it reports.
-    compact_status_hold: usize,
+    /// What earlier compactions took out of the model's context. Kept with the
+    /// session, in the session's own file.
+    archive: Vec<ChatMessage>,
     /// The history is with the compaction task until it comes back.
     compacting: bool,
     input: flashagent_tui::Composer,
@@ -661,12 +856,17 @@ struct App {
     /// Ctrl+X, waiting for Ctrl+E.
     ctrl_x_at: Option<std::time::Instant>,
     chat: ChatView,
+    /// A model/provider/effort change not yet written to the transcript.
+    pending_switch: PendingSwitch,
     running: bool,
     active_turn_handle: Option<tokio::task::JoinHandle<()>>,
     /// The running turn's own history, held here so a save taken while it runs
     /// writes what it has done so far rather than the conversation as it stood
     /// when the turn started. `None` when no turn is running.
     turn_history: Option<flashagent_core::loop_::SharedHistory>,
+    /// The mid-turn compactor's last result, shared with the turn. The core
+    /// event says how much was saved; the card needs the summary too.
+    mid_turn_report: Option<Arc<std::sync::Mutex<Option<flashagent_tui::CompactionResult>>>>,
     active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<flashagent_core::Steer>>,
     pending_steers: Vec<(String, Vec<Attachment>)>,
     /// Commands typed while a turn ran that change the conversation: they run when it ends.
@@ -711,6 +911,13 @@ struct App {
     last_tool_args: String,
     /// Kept so the prompt can be rebuilt when the voice changes.
     prompt_config: SystemPromptConfig,
+    /// A `/goal` run is under way: the rules that only hold inside one belong in
+    /// the prompt, and they are not there the rest of the time.
+    goal_active: bool,
+    /// What the system prompt measured this session. The tool schemas are given
+    /// what the context window has left after this, so it is kept here rather
+    /// than measured again at every model switch.
+    prompt_tokens: usize,
     /// E.g. `~/project`.
     cwd_display: String,
     /// For the welcome card.
@@ -727,8 +934,10 @@ struct App {
     autocomplete_idx: usize,
     tick_n: usize,
     renderer: Renderer,
-    /// Unprompted things (an update, compaction) go on the line under the input.
+    /// Unprompted things (an update, a notice) go on the line under the input.
     background: Option<BackgroundNotice>,
+    /// What the app told the user, newest last, so it can be read again.
+    notices: Vec<flashagent_tui::notice_log::NoticeEntry>,
     channel_switch: Option<ChannelSwitch>,
     uninstall_confirm: bool,
     /// So a new turn can stop it.
@@ -783,7 +992,9 @@ last_autosave: Option<std::time::Instant>,
 
 /// How the line under the prompt says the server is not there, so a switch
 /// of provider can take it away.
-pub(crate) const OFFLINE_NOTICE: &str = "No answer from";
+pub(crate) fn offline_notice() -> &'static str {
+    flashagent_tui::i18n::tr("No answer from")
+}
 
 struct AppContext {
     config: AppConfig,
@@ -800,6 +1011,9 @@ struct AppContext {
     cwd_display: String,
     /// Where the file tools write.
     cwd: std::path::PathBuf,
+    /// The directory the app was started in is gone; it started in the home
+    /// folder instead, and the user was told.
+    cwd_missing: bool,
     initial_effort: String,
     available_models: Vec<String>,
     session_start: SessionStart,
@@ -840,6 +1054,8 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     INPUT_PAUSED.store(true, Ordering::SeqCst);
     // Let a poll already under way in the reader thread run out.
     std::thread::sleep(std::time::Duration::from_millis(60));
+    // The editor is a normal program: hand its Enter and Tab back before it starts.
+    restore_enhanced_keys();
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -852,7 +1068,10 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     let mut words = editor.split_whitespace();
     let status = match words.next() {
         Some(program) => std::process::Command::new(program).args(words).arg(&temp_file).status(),
-        None => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no editor configured")),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            flashagent_tui::i18n::tr("no editor configured"),
+        )),
     };
 
     let _ = crossterm::terminal::enable_raw_mode();
@@ -861,6 +1080,7 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableMouseCapture
     );
+    enable_enhanced_keys();
 
     INPUT_PAUSED.store(false, Ordering::SeqCst);
 
@@ -880,18 +1100,20 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
     Ok(result)
 }
 
-/// With a Russian layout Ctrl+D arrives as Ctrl+в. A shortcut is read by the key
-/// pressed, so the letter goes back to the Latin one on the same key (ЙЦУКЕН →
-/// QWERTY). Plain typing is left alone.
+/// With a Russian layout Ctrl+D arrives as the key that holds `v` in Latin
+/// letters. A shortcut is read by the key pressed, so the letter goes back to
+/// the Latin one on the same key. Plain typing is left alone.
+///
+/// The layout itself is in `keys`: one table for the letters and one for the
+/// signs, and the typing table is the part of it that keeps letters on both
+/// sides.
 fn latin_shortcut(code: KeyCode, mods: KeyModifiers) -> KeyCode {
-    const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбюё";
-    const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
     let KeyCode::Char(c) = code else { return code };
     if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
         return code;
     }
     let lower = c.to_lowercase().next().unwrap_or(c);
-    match RU.chars().position(|r| r == lower).and_then(|i| EN.chars().nth(i)) {
+    match keys::latin_key_char(lower) {
         Some(l) if c.is_uppercase() => KeyCode::Char(l.to_ascii_uppercase()),
         Some(l) => KeyCode::Char(l),
         None => code,
@@ -918,6 +1140,40 @@ fn alt_code_char(k: &crossterm::event::KeyEvent) -> Option<char> {
     (!was_held).then_some(c)
 }
 
+/// The character a key press means when the terminal reports the key and the
+/// shift apart: `~` is a backtick with shift, `!` is a one with shift. A
+/// terminal that sends the character itself is not touched, and a character
+/// that is already shifted stays as it is.
+fn shifted_char(c: char, mods: KeyModifiers) -> char {
+    if !mods.contains(KeyModifiers::SHIFT) {
+        return c;
+    }
+    match c {
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        '`' => '~',
+        _ => c.to_uppercase().next().unwrap_or(c),
+    }
+}
+
 /// A character, or a newline for Enter.
 fn typed_char(k: &crossterm::event::KeyEvent) -> Option<char> {
     if let KeyCode::Char(c) = k.code {
@@ -935,11 +1191,22 @@ fn typed_char(k: &crossterm::event::KeyEvent) -> Option<char> {
     // Russian one) delivers a pasted brace that way, and it is text, not a shortcut.
     let alt_gr = k.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT);
     match k.code {
-        KeyCode::Char(c) if plain => Some(c),
+        KeyCode::Char(c) if plain => Some(typed_case(c, k)),
         KeyCode::Char(c) if alt_gr && !c.is_ascii_alphanumeric() && !c.is_control() => Some(c),
         KeyCode::Enter if k.modifiers.is_empty() => Some('\n'),
         _ => None,
     }
+}
+
+/// The character as it is meant: the shift a terminal reports apart from the
+/// key is applied here, and Caps Lock, which a terminal reports the same way,
+/// turns a letter into its capital.
+fn typed_case(c: char, k: &crossterm::event::KeyEvent) -> char {
+    let shifted = shifted_char(c, k.modifiers);
+    if k.state.contains(crossterm::event::KeyEventState::CAPS_LOCK) {
+        return shifted.to_uppercase().next().unwrap_or(shifted);
+    }
+    shifted
 }
 
 /// With a newline and more than a line of text among them, they are a paste.
@@ -1119,7 +1386,7 @@ fn resolve_session_start(session_start: SessionStart, cwd_display: &str) -> (Opt
         SessionStart::Continue => {
             let newest = sessions_dir().and_then(|dir| sessions_in(&dir, cwd_display).into_iter().next());
             if newest.is_none() {
-                session_note = Some("No saved session in this folder yet; starting a new one.".to_string());
+                session_note = Some(tr("No saved session in this folder yet; starting a new one.").to_string());
             }
             newest.map(|s| s.id)
         }
@@ -1192,11 +1459,13 @@ struct InitialApp {
 
 fn initial_app(init: InitialApp) -> App {
     let InitialApp { app_config, model, context_display, context_capacity, cwd_display, initial_effort, available_models, system_prompt_text, system_prompt_config, memory_docs, effort_memory } = init;
+    // Measured before the text moves into the history: what the schemas are
+    // given is what the prompt actually costs, not what its ceiling allows.
+    let prompt_tokens = flashagent_llm::count_tokens(&model, &system_prompt_text);
     App {
         question_ui_state: QuestionUiState::default(),
         history: vec![ChatMessage::system(system_prompt_text)],
-        compact_status: None,
-        compact_status_hold: 0,
+        archive: Vec::new(),
         compacting: false,
         input: flashagent_tui::Composer::new(),
         custom_placeholder: None,
@@ -1211,17 +1480,19 @@ fn initial_app(init: InitialApp) -> App {
         whole_change_shown: None,
         ctrl_x_at: None,
         chat: ChatView::default(),
+        pending_switch: PendingSwitch::default(),
         running: false,
         active_turn_handle: None,
         turn_history: None,
+        mid_turn_report: None,
         active_steer_tx: None,
         pending_steers: Vec::new(),
         queued_commands: Vec::new(),
         task_inbox: flashagent_core::NoticeInbox::default(),
         agents: flashagent_tui::agents::AgentTree::default(),
-    expanded_agents: std::collections::HashSet::new(),
-    selection_anchor: None,
-    wheel_momentum: 0,
+        expanded_agents: std::collections::HashSet::new(),
+        selection_anchor: None,
+        wheel_momentum: 0,
         task_lines: Vec::new(),
         tasks_refreshed: std::time::Instant::now(),
         quit_armed: None,
@@ -1238,6 +1509,8 @@ fn initial_app(init: InitialApp) -> App {
         plan: Vec::new(),
         last_tool_args: String::new(),
         prompt_config: system_prompt_config,
+        goal_active: false,
+        prompt_tokens,
         cwd_display: cwd_display.clone(),
         memory_docs,
         turn_flash: None,
@@ -1251,6 +1524,7 @@ fn initial_app(init: InitialApp) -> App {
         tick_n: 0,
         renderer: Renderer::new(),
         background: None,
+        notices: Vec::new(),
         channel_switch: None,
         uninstall_confirm: false,
         recap_task: None,
@@ -1404,14 +1678,27 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         started_at: std::time::Instant::now(),
     };
 
+    // What the model can actually call. The prompt has to agree with it: a
+    // prompt that describes a tool the model was not offered sends it looking
+    // for something that is not there, and a turn is spent on the refusal.
+    let offered = w.perm.specs();
+    let has_tool = |name: &str| offered.iter().any(|s| s.name == name);
     let system_prompt_config = SystemPromptConfig::new()
         .with_cwd(&w.cwd_display)
         .with_platform(flashagent_tools::shell::platform())
         .with_model(&ctx.model)
         .with_effort(&ctx.initial_effort)
-        // `spawn_agent` is always in the composite, so the rules about a
-        // subagent's report belong in the prompt.
-        .with_subagents(true);
+        // `spawn_agent` and `ask_user` are on offer, so the rules about a
+        // subagent's report and about asking belong in the prompt. Both can be
+        // switched off, and then the rules go with them.
+        .with_subagents(has_tool("spawn_agent"))
+        .with_ask_user(has_tool("ask_user"))
+        // Memory is an instruction, not a user turn: it stays in the system
+        // prompt and is rebuilt with it when the voice or model changes.
+        .with_memory(&w.memory_block)
+        // The plan of the project: what is where, so the model does not spend
+        // turns looking for the file it wants.
+        .with_plan(flashagent_core::plan::project_outline(&w.cwd, PLAN_CHARS));
     let system_prompt_text =
         build_system_prompt(&system_prompt_config.clone().with_personality(&ctx.config.personality));
     let (resume_session_id, open_session_picker, session_note) = resolve_session_start(ctx.session_start, &w.cwd_display);
@@ -1435,7 +1722,11 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         effort_memory,
     });
     app.server_silent = startup_silent;
-    update_context_usage(&mut app.context_usage, &app.history, &w.memory_block, &app.chat, w.perm);
+    update_context_usage(&app.current_model, &mut app.context_usage, &app.history, &w.memory_block, &app.chat, w.perm);
+    // Before the warm-up: it exists to prefill exactly the prefix the first turn
+    // will send, and a system message that gains a line after it went out is no
+    // longer that prefix.
+    app.refresh_context_line();
 
     // Before anything is drawn. A resumed session's card is drawn whole: the
     // reveal stops once the transcript has a user message.
@@ -1444,6 +1735,12 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     app.animate_welcome(&w.source, MascotMood::Checking, None, reveal.then_some(1));
     if let Some(verdict) = ctx.first_run_verdict {
         app.chat.push_system(&verdict);
+    }
+    if ctx.cwd_missing {
+        app.chat.push_system(flashagent_tui::i18n::tr("The directory you were in is gone; FlashAgent starts in your home folder."));
+    }
+    if ctx.cwd_missing {
+        app.chat.push_system(flashagent_tui::i18n::tr("The directory you were in is gone; FlashAgent starts in your home folder."));
     }
     // The unreadable file keeps its name: saving over it would destroy what may
     // still be recoverable by hand.
@@ -1461,7 +1758,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     if open_session_picker {
         app.open_session_picker(&w.cwd_display, &session_id);
     }
-    app.warm_prompt_cache(&w.source, w.perm, &w.memory_block);
+    app.warm_prompt_cache(&w.source, w.perm);
 
     event_loop(&mut app, &w, Inbox { events, updates, channel_probes }, &mut session_id).await;
 
@@ -1487,7 +1784,7 @@ async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mu
                 app.tell_of_lost_tasks(&w.tools_arc.shells().tasks());
                 *session_id = id;
                 open_snapshots(w.perm, session_id, &w.cwd);
-                app.warm_prompt_cache(&w.source, w.perm, &w.memory_block);
+                app.warm_prompt_cache(&w.source, w.perm);
             }
         }
         let mascot_mood = app.server_mood(&w.source, w.started_at);
@@ -1554,52 +1851,146 @@ async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mu
     }
 }
 
+/// Asks about the MCP servers a project's config wants to start, and returns
+/// the ones the owner allowed.
+///
+/// A server the owner put in their own global config is theirs and starts
+/// without a word. One that came from a project's `.mcp.json` runs a program
+/// the owner may never have seen, so it is asked about first. The answer is
+/// remembered in the config, together with the command that was allowed: a
+/// config that changes what it runs is asked about again.
+///
+/// The safe mode asks every time: there, nothing runs without a question.
+async fn approve_project_mcp_servers(
+    config: &mut AppConfig,
+    mcp: &flashagent_tools::mcp::McpManager,
+    cwd: &std::path::Path,
+) -> Vec<String> {
+    let servers = mcp.project_servers();
+    if servers.is_empty() {
+        return Vec::new();
+    }
+
+    // The ones already allowed, and the ones to ask about.
+    let mut allowed: Vec<String> = Vec::new();
+    let mut to_ask = Vec::new();
+    for (name, cfg) in servers {
+        let command = mcp_command_line(&cfg);
+        // The safe mode asks every time: nothing runs there without a
+        // question, however often the owner said yes before.
+        if !config.safe_mode && config.is_mcp_server_trusted(cwd, &name, &command) {
+            allowed.push(name);
+            continue;
+        }
+        to_ask.push(flashagent_tui::startup::McpServerToAsk { name, command });
+    }
+    if to_ask.is_empty() {
+        return allowed;
+    }
+
+    if !std::io::stdout().is_terminal() {
+        // No one to ask: the servers stay off rather than run unseen.
+        return allowed;
+    }
+
+    let asked = flashagent_tui::startup::run_mcp_trust_screen(to_ask).await.unwrap_or_default();
+    // Remembered only in the ordinary mode: the safe mode asks every time.
+    if !config.safe_mode {
+        for (name, cfg) in mcp.project_servers() {
+            if asked.contains(&name) {
+                config.trust_mcp_server(cwd, &name, &mcp_command_line(&cfg));
+            }
+        }
+        let _ = config.save();
+    }
+    allowed.extend(asked);
+    allowed
+}
+
+/// What a server runs, as one line: the command and its arguments.
+fn mcp_command_line(cfg: &flashagent_tools::mcp::McpServerConfig) -> String {
+    let mut line = cfg.command.clone();
+    for arg in cfg.args.iter() {
+        line.push(' ');
+        line.push_str(arg);
+    }
+    line
+}
+
 fn update_context_usage(
+    model: &str,
     usage: &mut ContextUsage,
     history: &[ChatMessage],
     memory_block: &str,
     chat: &ChatView,
     tools: &dyn flashagent_core::ToolExec,
 ) {
-    let system_chars: usize = history
+    // One counter for the model in use, everywhere. This used to be a fourth
+    // of the character count while the status line counted with a real
+    // tokenizer and the budget with a third rule, so the bar, the budget and
+    // the speed readout could each be a different number for the same text.
+    // The character rule was the worst of the three: it counted bytes, and a
+    // Russian letter is two of them, so the bar said the window was half
+    // full when the model had read a third of it.
+    let count = |text: &str| flashagent_llm::count_tokens(model, text);
+    let memory_tokens = count(memory_block);
+    let system_has_memory = !memory_block.is_empty()
+        && history
+            .iter()
+            .find(|m| m.role == flashagent_llm::Role::System)
+            .is_some_and(|m| m.content.contains(memory_block));
+    usage.system_tokens = history
         .iter()
         .filter(|m| m.role == flashagent_llm::Role::System)
-        .map(|m| m.content.len())
-        .sum();
-    usage.system_tokens = (system_chars / 4).max(150);
-    usage.memory_tokens = memory_block.len() / 4;
+        .map(|m| count(&m.content))
+        .sum::<usize>()
+        .saturating_sub(if system_has_memory { memory_tokens } else { 0 });
+    usage.memory_tokens = memory_tokens;
     // Every advertised schema, MCP included.
     usage.tools_tokens = tools
         .specs()
         .iter()
-        .map(|t| (t.name.len() + t.description.len() + t.parameters_json.len()) / 4 + 8)
+        .map(|t| count(&t.name) + count(&t.description) + count(&t.parameters_json))
         .sum();
 
-    let (chat_user, chat_assistant, chat_reasoning, chat_tools) = chat.raw_content_chars();
+    let (chat_user, chat_assistant, chat_reasoning, chat_tools) = chat.raw_content_tokens(&count);
 
     let (mut user, mut assistant, mut reasoning, mut tool_out) = (0usize, 0usize, 0usize, 0usize);
     for m in history {
         match m.role {
-            flashagent_llm::Role::User => user += m.content.len(),
+            flashagent_llm::Role::User => user += count(&m.content),
             flashagent_llm::Role::Assistant => {
-                assistant += m.content.len() + m.tool_calls.iter().map(|c| c.args_json.len()).sum::<usize>();
-                reasoning += m.reasoning.as_ref().map_or(0, |r| r.len());
+                assistant += count(&m.content);
+                for call in &m.tool_calls {
+                    assistant += count(&call.name) + count(&call.args_json);
+                }
+                if let Some(ref r) = m.reasoning {
+                    reasoning += count(r);
+                }
             }
-            flashagent_llm::Role::Tool => tool_out += m.content.len(),
+            flashagent_llm::Role::Tool => tool_out += count(&m.content),
             flashagent_llm::Role::System => {}
         }
     }
-    // Already counted once as memory.
+    // New sessions carry memory in the system prompt; older ones kept it in
+    // front of the first user message. Either way it is counted once.
     if !memory_block.is_empty()
         && history.iter().find(|m| m.role == flashagent_llm::Role::User).is_some_and(|m| m.content.starts_with(memory_block))
     {
-        user = user.saturating_sub(memory_block.len());
+        user = user.saturating_sub(memory_tokens);
     }
 
-    usage.user_tokens = user.max(chat_user) / 4;
-    usage.assistant_tokens = assistant.max(chat_assistant) / 4;
-    usage.reasoning_tokens = reasoning.max(chat_reasoning) / 4;
-    usage.tool_output_tokens = tool_out.max(chat_tools) / 4;
+    // The conversation is counted with the same counter as everything else.
+    // It used to be a fourth of the character count, on purpose: it is
+    // recounted on every token of the answer, and a server that reports
+    // usage corrects the total anyway. But a character count of bytes is not
+    // a token count of anything: a Russian letter is two bytes, so the bar
+    // said the window was half full when the model had read a third of it,
+    // and the compaction came too early.
+    usage.user_tokens = user.max(chat_user);
+    usage.assistant_tokens = assistant.max(chat_assistant);
+    usage.reasoning_tokens = reasoning.max(chat_reasoning);
+    usage.tool_output_tokens = tool_out.max(chat_tools);
 }
 
 fn build_turn_options(
@@ -1613,6 +2004,11 @@ fn build_turn_options(
         repeat_penalty: app_config.repeat_penalty,
         presence_penalty: app_config.presence_penalty,
         min_p: app_config.min_p,
+        // How much the model may write, and the seed of the sampling. Both
+        // are `None` until the owner sets them, and then the server's own
+        // limits and its own choice stand.
+        max_tokens: app_config.max_tokens,
+        seed: app_config.seed,
         ..Default::default()
     };
     if effort == "auto" || effort.is_empty() {
@@ -1691,6 +2087,70 @@ fn find_skill_file(name: &str) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flashagent_core::Compactor;
+
+    #[test]
+    fn a_deleted_starting_directory_falls_back_to_home() {
+        let (dir, missing) = super::start_directory(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "gone")));
+        assert!(missing);
+        assert!(dir.is_dir() || dir == std::path::Path::new("."));
+    }
+
+    #[test]
+    fn a_present_starting_directory_is_kept() {
+        let (dir, missing) = super::start_directory(Ok(std::path::PathBuf::from("/tmp")));
+        assert!(!missing);
+        assert_eq!(dir, std::path::PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn tmux_extended_keys_are_used_only_in_the_csi_u_format() {
+        assert!(tmux_forwards_extended_keys("on csi-u\n"));
+        assert!(tmux_forwards_extended_keys("always csi-u"));
+        assert!(!tmux_forwards_extended_keys("on xterm\n"), "the xterm form is not parsed by the reader");
+        assert!(!tmux_forwards_extended_keys("off csi-u\n"), "tmux would not forward it anyway");
+        assert!(!tmux_forwards_extended_keys(""), "no answer means no request");
+    }
+
+    #[test]
+    fn a_shift_reported_apart_from_the_key_is_the_shifted_character() {
+        let shift = KeyModifiers::SHIFT;
+        assert_eq!(shifted_char('`', shift), '~');
+        assert_eq!(shifted_char('1', shift), '!');
+        assert_eq!(shifted_char('a', shift), 'A');
+        assert_eq!(shifted_char('~', shift), '~', "an already shifted character stays as it is");
+        assert_eq!(shifted_char('a', KeyModifiers::NONE), 'a');
+    }
+
+    #[test]
+    fn a_terminal_that_reports_the_key_and_the_shift_apart_types_the_shifted_character() {
+        // A kitty-style terminal that reports the key code and the shift
+        // separately: `~` arrived as a backtick and Caps Lock as a lower case
+        // letter.
+        let tilde = crossterm::event::KeyEvent::new(KeyCode::Char('`'), KeyModifiers::SHIFT);
+        assert_eq!(typed_char(&tilde), Some('~'));
+        let caps = crossterm::event::KeyEvent::new_with_kind_and_state(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+            crossterm::event::KeyEventState::CAPS_LOCK,
+        );
+        assert_eq!(typed_char(&caps), Some('A'), "Caps Lock must still make a capital");
+        let plain = crossterm::event::KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(typed_char(&plain), Some('a'));
+    }
+
+    #[test]
+    fn a_pending_switch_becomes_one_rule() {
+        let mut p = PendingSwitch::default();
+        assert_eq!(p.label("m", "auto"), None);
+        p.model = true;
+        assert_eq!(p.label("m", "high").as_deref(), Some("Model: m · thinking effort: high"));
+        p.provider = Some("Lab".into());
+        assert_eq!(p.label("m", "high").as_deref(), Some("Provider: Lab · m · thinking effort: high"));
+        let p = PendingSwitch { effort: true, ..Default::default() };
+        assert_eq!(p.label("m", "high").as_deref(), Some("Thinking effort: high"));
+    }
 
     #[test]
     fn keys_that_arrive_together_with_a_newline_inside_are_one_paste() {
@@ -1750,6 +2210,8 @@ mod tests {
         BackendSource(flashagent_llm::Client::new(flashagent_llm::Endpoint::detect("http://127.0.0.1:9/v1", None), "m"))
     }
 
+    const SHAPED_SUMMARY: &str = "## Objective\nfirst question\n\n## Requirements\n- none\n\n## Decisions\n- none\n\n## Work State\n### Completed\n- read a file\n### Active\n- none\n### Blocked\n- none\n\n## Next Move\n1. continue the work\n\n## Relevant Files\n- none\n\n## Important Context\n- none";
+
     struct ScriptedCompaction(flashagent_llm::FinishReason);
 
     #[async_trait::async_trait]
@@ -1760,11 +2222,78 @@ mod tests {
             _tools: &[flashagent_llm::ToolSpec],
         ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
             let events = vec![
-                Ok(flashagent_llm::LlmEvent::TextDelta("Summary:\n1. Primary Request and Intent: first question\n7. Pending Tasks: continue the work\n8. Current Work: read a file".into())),
+                Ok(flashagent_llm::LlmEvent::TextDelta(SHAPED_SUMMARY.into())),
                 Ok(flashagent_llm::LlmEvent::Done(self.0)),
             ];
             Ok(Box::pin(futures::stream::iter(events)))
         }
+    }
+
+    /// A model that skipped a section is not refused: what it wrote is kept,
+    /// with a note about what is missing. Free models do this, and a window
+    /// that stays full helps nobody.
+    struct LooseCompaction;
+
+    #[async_trait::async_trait]
+    impl LlmSource for LooseCompaction {
+        async fn turn(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[flashagent_llm::ToolSpec],
+        ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+            let events = vec![
+                Ok(flashagent_llm::LlmEvent::TextDelta("## Objective\nfix the parser\n\n## Next Move\n1. read the file".into())),
+                Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_summary_that_skipped_a_section_is_kept_with_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("conversation.jsonl");
+        let mut history = long_history();
+        let result = compact_context(&LooseCompaction, &mut history, None, &archive, None, "test-model")
+            .await
+            .expect("the text the model wrote is kept even without the shape");
+        assert!(result.summary.contains("## Objective"), "{}", result.summary);
+        assert!(result.summary.contains("did not take the usual shape"), "the shape is said out loud: {}", result.summary);
+        assert!(result.summary.contains("Requirements"), "the missing section is named: {}", result.summary);
+        assert!(result.summary.contains("## Next Move"), "what the model wrote is kept: {}", result.summary);
+    }
+
+    #[tokio::test]
+    async fn a_single_exchange_can_be_compacted_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("conversation.jsonl");
+        let mut history = vec![
+            ChatMessage::system("SYSTEM PROMPT"),
+            ChatMessage::user("fix the parser"),
+            ChatMessage::assistant("here it is"),
+        ];
+        // A compaction the person asked for: it happens even when the summary
+        // is longer than the exchange it replaces.
+        let result = compact_context_with_sink(
+            &ScriptedCompaction(flashagent_llm::FinishReason::Stop),
+            &mut history,
+            crate::compact::Compaction {
+                focus_prompt: None,
+                archive_path: &archive,
+                real_used: None,
+                room: None,
+                allow_growth: true,
+                    model: "test-model",
+            },
+            None,
+        )
+            .await
+            .expect("one exchange is enough to compact");
+        assert!(history[0].content.contains("Compacted Conversation History"), "{}", history[0].content);
+        assert!(history[0].content.contains("longer than the conversation"), "the growth is said out loud: {}", history[0].content);
+        assert_eq!(history[1].content, "fix the parser", "the task stays: the model still has it");
+        assert_eq!(history.len(), 2, "the exchange is replaced by the summary: {}", history.len());
+        assert_eq!(result.saved, 0, "nothing was freed, and the card says so");
     }
 
     #[tokio::test]
@@ -1783,13 +2312,19 @@ mod tests {
             ChatMessage::tool_result("c1", "file body"),
             ChatMessage::assistant("here it is"),
         ];
-        let freed = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None).await;
-        assert!(freed.is_some());
+        let freed = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None, "test-model").await;
+        let freed = freed.expect("the summary is accepted");
+        // The archive travels with the result: the session's own file keeps it.
+        let archived: Vec<String> = freed.archive.iter().map(|m| m.content.clone()).collect();
+        assert!(archived.iter().any(|c| c.contains("first answer")));
+        assert_eq!(archived.iter().filter(|c| c.as_str() == "first question").count(), 1);
+        assert!(!archived.iter().any(|c| c == "read a file"), "the current turn stays live");
         assert_eq!(history.iter().filter(|m| m.role == flashagent_llm::Role::System).count(), 1);
         assert!(history[0].content.starts_with("SYSTEM PROMPT"));
-        assert!(history[0].content.contains("The summary below covers the earlier conversation.\nSummary:"));
+        assert!(history[0].content.contains("The summary below covers the earlier conversation.\n## Objective"));
         assert!(history[0].content.contains("Continue the current task from this summary"));
         assert!(history[0].content.contains(&archive.display().to_string()));
+        assert!(history[0].content.contains(crate::compact::COMPACTION_STATS_MARK.trim()), "the card's bill is stored for a resume");
         assert!(history[0].content.contains("first question"));
         // The kept region is the whole current turn, from its prompt.
         assert_eq!(history[1].role, flashagent_llm::Role::User);
@@ -1801,17 +2336,70 @@ mod tests {
         history.push(ChatMessage::user("next"));
         history.push(ChatMessage::assistant("ok"));
         history.push(ChatMessage::assistant("more work".repeat(1000)));
-        assert!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None).await.is_some());
+        let result = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &archive, None, "test-model").await.expect("the summary is accepted");
+        // The second archive holds what the second summary replaced: the turn
+        // before the new question. The first archive is already in the
+        // session's file.
+        assert!(result.archive.iter().any(|m| m.content == "read a file"), "the second summary replaced the turn before it");
+        assert!(!result.archive.iter().any(|m| m.content == "ok"), "the current turn stays live");
         assert!(history[0].content.contains("first question"));
         assert_eq!(history[0].content.matches(COMPACTED_MARK.trim()).count(), 1);
         assert_eq!(history[0].content.matches("The summary below covers the earlier conversation.").count(), 1);
-        let archived = std::fs::read_to_string(&archive).unwrap();
-        assert!(archived.contains("first answer"));
-        assert!(archived.contains("read a file"));
-        assert!(archived.contains("file body"));
-        let records: Vec<SavedMessage> = archived.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert_eq!(records.iter().filter(|m| m.content == "first question").count(), 1);
-        assert!(!records.iter().any(|m| m.content == "next"), "the active turn stays live");
+    }
+
+    /// The same shaped summary in two pieces, so a test can see the card get
+    /// the first one before the call that writes the second has finished.
+    struct SplitCompaction;
+
+    #[async_trait::async_trait]
+    impl LlmSource for SplitCompaction {
+        async fn turn(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[flashagent_llm::ToolSpec],
+        ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+            let (first, second) = SHAPED_SUMMARY.split_at(SHAPED_SUMMARY.find("## Requirements").unwrap());
+            let events = vec![
+                Ok(flashagent_llm::LlmEvent::TextDelta(first.into())),
+                Ok(flashagent_llm::LlmEvent::TextDelta(second.into())),
+                Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_compaction_summary_reaches_the_card_piece_by_piece() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let mut history = long_history();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = SummarySink::ui(tx);
+        let result = compact_context_with_sink(
+            &SplitCompaction,
+            &mut history,
+            crate::compact::Compaction {
+                focus_prompt: None,
+                archive_path: &archive,
+                real_used: None,
+                room: None,
+                allow_growth: true,
+                    model: "test-model",
+            },
+            Some(&sink),
+        )
+            .await
+            .expect("the summary is accepted");
+        assert!(result.summary.contains("## Objective"));
+
+        let mut pieces = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let UiEvent::CompactionDelta(text) = event {
+                pieces.push(text);
+            }
+        }
+        assert_eq!(pieces.len(), 2, "both streamed pieces reached the card: {pieces:?}");
+        assert_eq!(pieces.concat(), SHAPED_SUMMARY);
     }
 
     /// Answers with `first` on the first call and `second` after that, and
@@ -1841,6 +2429,146 @@ mod tests {
     }
 
     /// A conversation long enough to be worth compacting.
+    /// A conversation that does not fit in one request is summarized in parts,
+    /// and the parts are summarized into one.
+    struct CountingCompaction {
+        calls: std::sync::Mutex<Vec<usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmSource for CountingCompaction {
+        async fn turn(
+            &self,
+            messages: &[ChatMessage],
+            _tools: &[flashagent_llm::ToolSpec],
+        ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+            let parts = messages.iter().filter(|m| m.role == flashagent_llm::Role::User).count();
+            self.calls.lock().unwrap().push(parts);
+            let events = vec![
+                Ok(flashagent_llm::LlmEvent::TextDelta(SHAPED_SUMMARY.into())),
+                Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_conversation_too_long_for_one_request_is_summarized_in_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let mut history = long_history();
+        // Big enough that the parts have to be cut.
+        history.push(ChatMessage::assistant("a long middle ".repeat(4000)));
+        history.push(ChatMessage::user("second question"));
+        history.push(ChatMessage::assistant("second answer"));
+
+        let source = CountingCompaction { calls: std::sync::Mutex::new(Vec::new()) };
+        // A room of 4k tokens: the conversation is far bigger.
+        let result = compact_context_with_sink(
+            &source,
+            &mut history,
+            crate::compact::Compaction {
+                focus_prompt: None,
+                archive_path: &archive,
+                real_used: None,
+                room: Some(4_000),
+                allow_growth: true,
+                    model: "test-model",
+            },
+            None,
+        )
+            .await
+            .expect("the summary is accepted");
+        assert!(result.summary.contains("## Objective"));
+
+        let calls = source.calls.lock().unwrap().clone();
+        assert!(calls.len() >= 3, "the parts are summarized one by one and then together: {calls:?}");
+        // The last call is the reduction: the parts, not the conversation.
+        assert_eq!(calls.last().copied(), Some(2), "the reduction asks with the instruction alone: {calls:?}");
+        // The archive keeps what was replaced; the last turn stays live.
+        let archived: Vec<String> = result.archive.iter().map(|m| m.content.clone()).collect();
+        assert!(archived.iter().any(|c| c.contains("first question")));
+        assert!(archived.iter().any(|c| c.contains("a long middle")));
+        assert!(!archived.iter().any(|c| c.contains("second answer")), "the current turn stays live");
+    }
+
+    /// A conversation that fits in the window goes in one request. The room
+    /// used to be the window minus the fixed part *and* minus what the
+    /// conversation already held, so the same tokens were counted twice: a
+    /// conversation that fitted was cut into parts, and on a small window the
+    /// room came out as nothing, which sent the whole conversation in one
+    /// request that the server refuses.
+    #[tokio::test]
+    async fn a_conversation_that_fits_in_the_window_goes_in_one_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let mut history = long_history();
+        history.push(ChatMessage::assistant("a long middle ".repeat(2000)));
+        history.push(ChatMessage::user("second question"));
+        history.push(ChatMessage::assistant("second answer"));
+
+        let source = CountingCompaction { calls: std::sync::Mutex::new(Vec::new()) };
+        // A window of 128k with a fixed part of 16k: the conversation fits
+        // many times over.
+        let room = crate::compact::room_for(128_000, 16_000);
+        let result = compact_context_with_sink(
+            &source,
+            &mut history,
+            crate::compact::Compaction {
+                focus_prompt: None,
+                archive_path: &archive,
+                real_used: None,
+                room: Some(room),
+                allow_growth: true,
+                    model: "test-model",
+            },
+            None,
+        )
+        .await
+        .expect("the summary is accepted");
+        assert!(result.summary.contains("## Objective"));
+
+        let calls = source.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "it fits, so it is one request and not a set of parts: {calls:?}");
+    }
+
+    /// The same conversation on a window it does not fit: it is cut, and
+    /// every piece goes in its own request.
+    #[tokio::test]
+    async fn a_conversation_that_does_not_fit_is_cut_and_each_piece_goes_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let mut history = long_history();
+        history.push(ChatMessage::assistant("a long middle ".repeat(4000)));
+        history.push(ChatMessage::user("second question"));
+        history.push(ChatMessage::assistant("second answer"));
+
+        let source = CountingCompaction { calls: std::sync::Mutex::new(Vec::new()) };
+        // The same window, but the fixed part eats most of it: what is left
+        // is smaller than the conversation.
+        let room = crate::compact::room_for(32_000, 16_000);
+        let result = compact_context_with_sink(
+            &source,
+            &mut history,
+            crate::compact::Compaction {
+                focus_prompt: None,
+                archive_path: &archive,
+                real_used: None,
+                room: Some(room),
+                allow_growth: true,
+                    model: "test-model",
+            },
+            None,
+        )
+        .await
+        .expect("the summary is accepted");
+        assert!(result.summary.contains("## Objective"));
+
+        let calls = source.calls.lock().unwrap().clone();
+        assert!(calls.len() >= 3, "the parts are summarized one by one and then together: {calls:?}");
+        assert_eq!(calls.last().copied(), Some(2), "the reduction asks with the instruction alone: {calls:?}");
+    }
+
     fn long_history() -> Vec<ChatMessage> {
         vec![
             ChatMessage::system("SYSTEM PROMPT"),
@@ -1852,34 +2580,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_summary_without_the_expected_shape_is_asked_for_once_more() {
+    async fn a_summary_without_the_expected_shape_is_asked_for_once_more_and_kept_afterwards() {
         // Seen live: a model that reads and answers well wrote a plain summary,
         // sections 7 and 8 missing, and the window stayed full behind a message
         // that said only that it had failed.
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("c.jsonl");
         let shapeless = "Summary:\nThe user asked a question and I answered it.";
-        let shaped = "Summary:\n1. Primary Request and Intent: the first question\n7. Pending Tasks: none\n8. Current Work: done";
+        let shaped = SHAPED_SUMMARY;
 
         let mut history = long_history();
         let src = TwoShapeSummaries { first: shapeless, second: shaped, calls: std::sync::Mutex::new(0) };
-        assert!(compact_context(&src, &mut history, None, &archive, None).await.is_some(), "the second ask is taken");
+        assert!(compact_context(&src, &mut history, None, &archive, None, "test-model").await.is_some(), "the second ask is taken");
         assert_eq!(*src.calls.lock().unwrap(), 2, "and it is the last one");
-        assert!(history[0].content.contains("7. Pending Tasks: none"));
+        assert!(history[0].content.contains("continue the work"));
 
-        // Asked twice and refused twice is still a refusal: the rule is not
-        // relaxed, only the first answer is forgiven for its shape.
+        // Asked twice and the shape is still not there: what the model wrote is
+        // kept, with a note about what is missing. The rule is not relaxed
+        // into refusing everything, and the window is freed either way.
         let mut history = long_history();
         let src = TwoShapeSummaries { first: shapeless, second: shapeless, calls: std::sync::Mutex::new(0) };
-        assert!(compact_context(&src, &mut history, None, &archive, None).await.is_none());
+        let kept = compact_context(&src, &mut history, None, &archive, None, "test-model")
+            .await
+            .expect("the text the model wrote is kept");
         assert_eq!(*src.calls.lock().unwrap(), 2, "no third ask");
-        assert_eq!(history[0].content, "SYSTEM PROMPT", "the conversation is untouched");
+        assert!(kept.summary.contains("The user asked a question"), "what it wrote is kept: {}", kept.summary);
+        assert!(kept.summary.contains("did not take the usual shape"), "the shape is said out loud: {}", kept.summary);
+        assert!(kept.summary.contains("Requirements"), "the missing section is named: {}", kept.summary);
 
         // A first answer that already has the shape is not asked for again.
         let mut history = long_history();
         let src = TwoShapeSummaries { first: shaped, second: shapeless, calls: std::sync::Mutex::new(0) };
-        assert!(compact_context(&src, &mut history, None, &archive, None).await.is_some());
+        assert!(compact_context(&src, &mut history, None, &archive, None, "test-model").await.is_some());
         assert_eq!(*src.calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn plain_headings_are_rewritten_into_the_card_shape() {
+        // A model that answers with "Objective:" rather than "## Objective" is
+        // not refused over punctuation: the stored summary gets the headings the
+        // card expects, and the model still receives every required section.
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let plain = "Here is the summary:\n\nObjective:\ncontinue the work\n\nRequirements:\n- none\n\nDecisions:\n- none\n\nWork State:\nCompleted:\n- first question answered\nActive:\n- none\nBlocked:\n- none\n\nNext Move:\n1. ship\n\nRelevant Files:\n- none\n\nImportant Context:\n- none";
+        let mut history = long_history();
+        let src = TwoShapeSummaries { first: plain, second: "nope", calls: std::sync::Mutex::new(0) };
+        let result = compact_context(&src, &mut history, None, &archive, None, "test-model").await.expect("plain headings are accepted after normalization");
+        assert!(result.summary.starts_with("## Objective"), "{}", result.summary);
+        assert!(result.summary.contains("### Completed"), "{}", result.summary);
+        assert_eq!(*src.calls.lock().unwrap(), 1, "it was not asked a second time");
+        assert!(history[0].content.contains("## Objective"));
+    }
+
+    #[test]
+    fn a_session_summary_is_found_in_the_system_message_for_the_card() {
+        let content = format!(
+            "SYSTEM PROMPT{}{}## Objective\nship it{}/tmp/a.jsonl\nContinue{}17 in · 5 out",
+            crate::compact::COMPACTED_MARK,
+            crate::compact::COMPACTED_INTRO,
+            crate::compact::ARCHIVE_MARK,
+            crate::compact::COMPACTION_STATS_MARK
+        );
+        assert_eq!(crate::compact::summary_from_system(&content), Some("## Objective\nship it"));
+        assert_eq!(crate::compact::stats_from_system(&content), Some((17, 5)));
+        assert_eq!(crate::compact::summary_from_system("SYSTEM PROMPT"), None);
+        assert_eq!(crate::compact::stats_from_system("SYSTEM PROMPT"), None);
+    }
+
+    #[tokio::test]
+    async fn compaction_usage_after_the_finish_reason_is_still_counted() {
+        struct LateUsage;
+        #[async_trait::async_trait]
+        impl LlmSource for LateUsage {
+            async fn turn(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[flashagent_llm::ToolSpec],
+            ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+                let events = vec![
+                    Ok(flashagent_llm::LlmEvent::TextDelta(SHAPED_SUMMARY.into())),
+                    Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)),
+                    Ok(flashagent_llm::LlmEvent::Usage(flashagent_llm::Usage {
+                        prompt: Some(90_000),
+                        completion: Some(5_100),
+                        ..Default::default()
+                    })),
+                ];
+                Ok(Box::pin(futures::stream::iter(events)))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let mut history = long_history();
+        let result = compact_context(&LateUsage, &mut history, None, &archive, None, "test-model").await.expect("a shaped summary");
+        assert_eq!((result.input_tokens, result.output_tokens), (90_000, 5_100));
     }
 
     /// A prompt and `steps` tool-using steps: assistant call, then its result.
@@ -1912,38 +2706,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compacting_a_running_turn_keeps_its_prompt_and_last_steps_and_the_project_memory() {
+    async fn compacting_a_running_turn_keeps_its_prompt_last_steps_and_system_memory() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("conversation.jsonl");
         let memory = "PROJECT RULES: use tabs";
         let mut history = running_turn(8);
+        history[0].content = format!("SYSTEM PROMPT\n\n{memory}");
         let before = history.clone();
         let (_, cut) = mid_turn_cut(&history).unwrap();
-        let saved = compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, memory, &archive, None).await;
-        assert!(saved.is_some_and(|n| n > 0));
+        let saved = compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, &archive, None, "test-model").await;
+        let saved = saved.expect("the turn is compacted");
+        assert!(saved.saved > 0);
         assert_eq!(history[0].role, flashagent_llm::Role::System);
         assert!(history[0].content.contains("Compacted Conversation History"));
-        // The task it was given, with the memory the summarized message may have carried.
+        // Memory stays where it belongs, in the system prompt; the task itself
+        // is not padded with a second copy.
+        assert!(history[0].content.contains(memory), "the system prompt lost its memory:\n{}", history[0].content);
         assert_eq!(history[1].role, flashagent_llm::Role::User);
-        assert!(history[1].content.starts_with(memory) && history[1].content.ends_with("fix the parser"), "{}", history[1].content);
+        assert_eq!(history[1].content, "fix the parser");
         // The last steps, whole and in order.
         assert_eq!(history.len(), 2 + before.len() - cut);
         assert_eq!(history[2].content, before[cut].content);
         assert_eq!(history.last().unwrap().tool_call_id, before.last().unwrap().tool_call_id);
         // What went is kept whole for the model to read.
-        let archived = std::fs::read_to_string(&archive).unwrap();
-        assert!(archived.contains("body 0") && !archived.contains(&format!("body {}", before.len() / 2 + 3)));
+        let archived: Vec<String> = saved.archive.iter().map(|m| m.content.clone()).collect();
+        assert!(archived.iter().any(|c| c.contains("body 0")));
+        assert!(!archived.iter().any(|c| c.contains(&format!("body {}", before.len() / 2 + 3))));
 
         // Nothing to cut: untouched.
         let mut short = running_turn(2);
-        assert_eq!(compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut short, memory, &archive, None).await, None);
+        assert!(compact_running_turn(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut short, &archive, None, "test-model").await.is_none());
         assert_eq!(short.len(), 6);
+    }
+
+    /// The mid-turn compactor hands its result to the app through the shared
+    /// slot: the core event says only how much was saved, and the card needs
+    /// the summary and the call's token counts too.
+    #[tokio::test]
+    async fn the_mid_turn_compactor_hands_its_result_to_the_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("conversation.jsonl");
+        let report = Arc::new(std::sync::Mutex::new(None));
+        let compactor = TurnCompactor {
+            model: "test-model".to_string(),
+            source: Arc::new(ScriptedCompaction(flashagent_llm::FinishReason::Stop)),
+            archive: Some(archive),
+            capacity: 40_000,
+            fixed: 0,
+            threshold_pct: 50,
+            report: report.clone(),
+            sink: None,
+        };
+        let mut history = running_turn(8);
+        let prompt_tokens = Some(30_000);
+        assert!(compactor.will_compact(&history, prompt_tokens), "the window is past the threshold");
+        let done = compactor.compact(&mut history, prompt_tokens).await;
+        assert!(matches!(done, flashagent_core::Compaction::Saved(_)));
+        let slot = report.lock().unwrap().take().expect("the app gets the result");
+        assert!(slot.saved > 0);
+        assert!(slot.summary.contains("## Objective"), "{}", slot.summary);
+        assert!(slot.input_tokens > 0 && slot.output_tokens > 0);
+
+        // A compaction that does not happen clears the slot first: the app must
+        // never draw a stale card for a compaction that was not taken.
+        assert!(!compactor.will_compact(&history, Some(1_000)), "the window has room again");
+        let done = compactor.compact(&mut history, Some(1_000)).await;
+        assert!(matches!(done, flashagent_core::Compaction::NotNeeded));
+        assert!(report.lock().unwrap().is_none());
     }
 
     #[tokio::test]
     async fn single_turn_history_is_already_compact() {
         let mut history = vec![ChatMessage::system("s"), ChatMessage::user("u"), ChatMessage::assistant("a")];
-        assert_eq!(compact_context(&offline_source(), &mut history, None, std::path::Path::new("unused.jsonl"), None).await, None);
+        assert!(compact_context(&offline_source(), &mut history, None, std::path::Path::new("unused.jsonl"), None, "test-model").await.is_none());
         assert_eq!(history.len(), 3);
     }
 
@@ -1953,29 +2788,39 @@ mod tests {
     #[tokio::test]
     async fn failed_or_truncated_compaction_keeps_the_original_history() {
         let dir = tempfile::tempdir().unwrap();
-        let archive = dir.path().join("conversation.jsonl");
         let original = vec![
             ChatMessage::system("system"),
             ChatMessage::user("important instruction"),
             ChatMessage::assistant("work already done".repeat(1000)),
             ChatMessage::user("current task"),
         ];
-        for reason in [flashagent_llm::FinishReason::Length, flashagent_llm::FinishReason::ToolUse] {
-            let mut history = original.clone();
-            assert_eq!(compact_context(&ScriptedCompaction(reason), &mut history, None, &archive, None).await, None);
-            assert_eq!(history.len(), original.len());
-            assert_eq!(history[2].content, original[2].content);
-        }
+        // A summary that was cut off is kept, with a note about what is
+        // missing: on a free model the reasoning often eats the output, and a
+        // window that stays full helps nobody.
+        let archive = dir.path().join("cut.jsonl");
         let mut history = original.clone();
-        assert_eq!(compact_context(&offline_source(), &mut history, None, &archive, None).await, None);
+        let cut = compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Length), &mut history, None, &archive, None, "test-model")
+            .await
+            .expect("what the model wrote before the cut is kept");
+        assert!(cut.summary.contains("cut off at the output limit"), "and it says what it is: {}", cut.summary);
+        assert!(cut.summary.contains("## Objective"), "with what it managed to write: {}", cut.summary);
+
+        // An answer that is not a summary at all is refused, and the history
+        // stays as it was.
+        let archive = dir.path().join("tool.jsonl");
+        let mut history = original.clone();
+        assert!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::ToolUse), &mut history, None, &archive, None, "test-model").await.is_none());
+        assert_eq!(history.len(), original.len());
+        assert_eq!(history[2].content, original[2].content);
+
+        let archive = dir.path().join("offline.jsonl");
+        let mut history = original.clone();
+        assert!(compact_context(&offline_source(), &mut history, None, &archive, None, "test-model").await.is_none());
         assert_eq!(history[1].content, "important instruction");
         assert!(!archive.exists());
 
-        let blocker = dir.path().join("not_a_directory");
-        std::fs::write(&blocker, "file").unwrap();
-        let mut history = original.clone();
-        assert_eq!(compact_context(&ScriptedCompaction(flashagent_llm::FinishReason::Stop), &mut history, None, &blocker.join("archive.jsonl"), None).await, None);
-        assert_eq!(history[2].content, original[2].content, "archive failure must not discard history");
+        // The archive is kept in the session's own file now, so there is no
+        // side file left to fail: the session save is what reports a problem.
     }
 
     /// A window that filled up mid-task is the other way round: refusing the
@@ -1991,15 +2836,15 @@ mod tests {
         let saved = compact_running_turn(
             &ScriptedCompaction(flashagent_llm::FinishReason::Length),
             &mut history,
-            "",
             &archive,
             None,
+            "test-model",
         )
         .await;
         assert!(saved.is_some(), "a cut summary still frees the window");
         let summary = &history[0].content;
         assert!(summary.contains("cut off at the output limit"), "and says what it is: {summary}");
-        assert!(summary.contains("1. Primary Request"), "keeping what it reached: {summary}");
+        assert!(summary.contains("## Objective"), "keeping what it reached: {summary}");
         assert!(history.len() < before.len(), "the window must actually be smaller: {} vs {}", history.len(), before.len());
     }
 
@@ -2061,28 +2906,34 @@ mod tests {
     }
 
     #[test]
-    fn compaction_summary_needs_goal_pending_work_and_current_state() {
-        assert!(!summary_has_handoff_state("Summary:\n1. Primary Request and Intent: do the work"));
-        assert!(!summary_has_handoff_state("Summary:\n1. Goal\n7. Pending Tasks"));
-        assert!(summary_has_handoff_state("Summary:\n1. Primary Request and Intent: do the work\n7. Pending Tasks: None\n8. Current Work: waiting for a new task"));
+    fn compaction_summary_needs_every_card_section() {
+        assert!(!summary_has_handoff_state("## Objective\ndo the work"));
+        assert!(!summary_has_handoff_state("## Objective\ndo the work\n## Requirements\n- none\n## Work State\n### Completed\n- none"));
+        // Plain headings are accepted: normalization rewrites them before this
+        // check, but has_heading itself must not care about punctuation.
+        assert!(summary_has_handoff_state(
+            "Objective:\ndo the work\n\nRequirements:\n- none\n\nDecisions:\n- none\n\nWork State:\nCompleted:\n- nothing\nActive:\n- nothing\nBlocked:\n- nothing\n\nNext Move:\n1. wait\n\nRelevant Files:\n- none\n\nImportant Context:\n- none"
+        ));
+        assert!(!summary_has_handoff_state("Summary:\n1. Primary Request and Intent: do the work\n7. Pending Tasks: None\n8. Current Work: waiting"));
     }
 
     /// A window that filled up mid-task has to hand the model everything it
     /// needs to finish, because the summary is its only memory of the work
     /// already done.
     #[test]
-    fn a_window_forced_summary_asks_for_everything_and_leads_with_the_state() {
+    fn a_window_forced_summary_asks_for_everything_and_the_card_shape() {
         let request = compaction_request(&[ChatMessage::user("do it")], None, None, Detail::Exhaustive, false);
         let instruction = &request.last().unwrap().content;
-        assert!(instruction.contains("Keep everything"), "{instruction}");
+        assert!(instruction.to_lowercase().contains("keep everything"), "{instruction}");
         assert!(instruction.contains("Length is not the problem"), "it must not be told to be brief: {instruction}");
         assert!(instruction.contains("line numbers"), "detail is spelled out, not just requested: {instruction}");
         assert!(instruction.contains("verbatim"), "errors are kept as they were: {instruction}");
-        // The state comes first, so a summary cut off at the output limit still
-        // says what was done and what is next.
-        let state_at = instruction.find(CURRENT_STATE).expect("no CURRENT STATE block");
-        let first_section = instruction.find("1. Primary Request").expect("no numbered sections");
-        assert!(state_at < first_section, "the state must come before the detail");
+        // The card's shape is stated in the order it is drawn, so a summary cut
+        // off at the output limit still says what was done and what is next.
+        let objective_at = instruction.find("## Objective").expect("no Objective block");
+        let work_at = instruction.find("## Work State").expect("no Work State block");
+        let next_at = instruction.find("## Next Move").expect("no Next Move block");
+        assert!(objective_at < work_at && work_at < next_at);
         assert!(!instruction.contains("Drop repeated output and dead ends"), "brevity must not be asked for here");
     }
 
@@ -2092,8 +2943,8 @@ mod tests {
     fn an_asked_for_summary_stays_short_and_points_at_the_archive() {
         let request = compaction_request(&[ChatMessage::user("compact")], None, None, Detail::Brief, false);
         let instruction = &request.last().unwrap().content;
-        assert!(instruction.contains("Drop repeated output and dead ends"), "{instruction}");
-        assert!(!instruction.contains("Keep everything"), "brevity is not forbidden for a summary a person asked for");
+        assert!(instruction.contains("exact transcript stays in the archive"), "{instruction}");
+        assert!(!instruction.contains("Length is not the problem"), "brevity is not forbidden for a summary a person asked for");
     }
 
     /// The detail a caller asks for is the detail that is requested, whichever
@@ -2103,15 +2954,27 @@ mod tests {
         for (detail, keeps_everything) in [(Detail::Exhaustive, true), (Detail::Brief, false)] {
             let request = compaction_request(&[ChatMessage::user("x")], None, None, detail, false);
             let instruction = &request.last().unwrap().content;
-            assert_eq!(instruction.contains("Keep everything"), keeps_everything, "{detail:?}");
+            assert_eq!(instruction.contains("Length is not the problem"), keeps_everything, "{detail:?}");
         }
     }
 
-    /// The state a cut-off summary still has to carry.
+    /// The shape the card and the model both expect.
     #[test]
-    fn a_summary_that_starts_with_the_state_is_accepted_however_short() {
-        assert!(summary_has_handoff_state("Summary:\nCURRENT STATE:\n- Done: the guard moved\n- Next: run the tests"));
-        assert!(!summary_has_handoff_state("Summary:\nI read some files and then the model stopped"));
+    fn every_summary_the_card_accepts_has_the_same_headings() {
+        assert!(summary_has_handoff_state(SHAPED_SUMMARY));
+        assert!(!summary_has_handoff_state("Objective:\nonly the goal, no work state"));
+    }
+
+    /// The retry is the last thing between a full window and a lost summary, so
+    /// it spells the shape out one heading per line: the previous version ran
+    /// them together, and a model that copied it wrote `Work State (with ...)`
+    /// as a heading, which is not the heading the validator accepts.
+    #[test]
+    fn the_retry_lists_every_heading_on_its_own_line() {
+        let request = compaction_request(&[ChatMessage::user("do it")], None, None, Detail::Exhaustive, true);
+        let instruction = &request.last().unwrap().content;
+        assert!(instruction.contains("## Work State\n### Completed\n### Active\n### Blocked\n## Next Move"), "{instruction}");
+        assert!(!instruction.contains("Work State (with"), "{instruction}");
     }
 
     #[test]
@@ -2276,7 +3139,15 @@ mod tests {
         let directive = "[AUTONOMOUS GOAL DIRECTIVE]\nYou are operating in fully autonomous /goal mode.\nTarget goal: Создай файл hello.txt\n\nAutonomous Rules:\n1. Do NOT ask...";
         assert_eq!(extract_user_prompt(directive), "Создай файл hello.txt");
         assert_eq!(extract_user_prompt("plain question"), "plain question");
-        assert_eq!(extract_user_prompt("memory block\n\n---\n\nthe question"), "the question");
+        assert_eq!(
+            extract_user_prompt("# Memory (automatically loaded)\n\nmemory block\n\n---\n\nthe question"),
+            "the question"
+        );
+        assert_eq!(
+            extract_user_prompt("before\n\n---\n\nafter"),
+            "before\n\n---\n\nafter",
+            "a separator in the user's own text is not a memory wrapper"
+        );
     }
 
     #[test]
@@ -2307,7 +3178,7 @@ mod tests {
         let parsed = parse_recap_and_suggestion_json(raw);
         assert_eq!(
             parsed,
-            Some(("Explained Swift concepts".to_string(), Some("Show mascot code".to_string())))
+            Some(("Explained Swift concepts".to_string(), Some(tr("Show mascot code").to_string())))
         );
 
         let generic = "{\"recap\": \"Response generated\", \"suggestion\": \"What's next?\"}";
@@ -2318,19 +3189,19 @@ mod tests {
     fn test_sanitize_user_suggestion_conversions() {
         assert_eq!(
             sanitize_user_suggestion("«Tell me about Swift features»"),
-            Some("Tell me about Swift features".to_string())
+            Some(tr("Tell me about Swift features").to_string())
         );
         assert_eq!(
             sanitize_user_suggestion("show code examples of Swift"),
-            Some("Show code examples of Swift".to_string())
+            Some(tr("Show code examples of Swift").to_string())
         );
         assert_eq!(
             sanitize_user_suggestion("tell me about Swift features."),
-            Some("Tell me about Swift features".to_string())
+            Some(tr("Tell me about Swift features").to_string())
         );
         assert_eq!(
             sanitize_user_suggestion("Would you like to know more about memory safety?"),
-            Some("Explain more about memory safety".to_string())
+            Some(tr("Explain more about memory safety").to_string())
         );
         assert_eq!(sanitize_user_suggestion("What's next?"), None);
         assert_eq!(sanitize_user_suggestion("Next"), None);
@@ -2417,6 +3288,17 @@ mod tests {
         assert_eq!(latin_shortcut(KeyCode::Char('в'), KeyModifiers::NONE), KeyCode::Char('в'));
         assert_eq!(latin_shortcut(KeyCode::Char('в'), KeyModifiers::SHIFT), KeyCode::Char('в'));
         assert_eq!(latin_shortcut(KeyCode::Enter, ctrl), KeyCode::Enter);
+    }
+
+    /// A key the Russian layout turned into a letter is read by that key too:
+    /// `ж` stands on the Latin `;`, and `ё` on the backquote.
+    #[test]
+    fn a_russian_letter_over_a_latin_sign_is_read_as_the_sign() {
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(latin_shortcut(KeyCode::Char('ж'), ctrl), KeyCode::Char(';'));
+        assert_eq!(latin_shortcut(KeyCode::Char('э'), ctrl), KeyCode::Char('\''));
+        assert_eq!(latin_shortcut(KeyCode::Char('Ё'), ctrl), KeyCode::Char('`'));
+        assert_eq!(latin_shortcut(KeyCode::Char('х'), ctrl), KeyCode::Char('['));
     }
 
     #[test]
@@ -2586,6 +3468,124 @@ mod tests {
         };
         assert_eq!(shown, "[screenshot 1920×1080]");
         assert!(!shown.starts_with(' '));
+    }
+
+    /// The app a test can poke at: the parts of it the goal handback touches.
+    fn test_app() -> App {
+        initial_app(InitialApp {
+            app_config: AppConfig::default(),
+            model: "test-model".into(),
+            context_display: None,
+            context_capacity: 32_000,
+            cwd_display: "~/work".into(),
+            initial_effort: "low".into(),
+            available_models: Vec::new(),
+            system_prompt_text: "SYSTEM PROMPT".into(),
+            system_prompt_config: SystemPromptConfig::default(),
+            memory_docs: 0,
+            effort_memory: flashagent_core::EffortMemory::load(),
+        })
+    }
+
+    /// A finished goal takes the autonomous prompt with it. The flag that says
+    /// a goal run is under way was left on, and the model read "there is no
+    /// user to answer between now and the end" for the rest of the session,
+    /// long after the status bar said the goal was over.
+    #[test]
+    fn a_finished_goal_leaves_no_autonomous_prompt_behind() {
+        let mut app = test_app();
+        app.goal_active = true;
+        app.goal_state = Some(SavedGoalState {
+            mode: PermissionMode::Manual,
+            effort: "low".into(),
+            max_steps: Some(7),
+            task: "write the docs".into(),
+        });
+        app.current_effort = "high".into();
+        app.max_steps = Some(250);
+
+        let saved = app.take_goal().expect("the goal is handed back");
+        assert_eq!(saved.mode, PermissionMode::Manual);
+        assert!(!app.goal_active, "the prompt still says an autonomous run is under way");
+        assert_eq!(app.current_effort, "low", "the effort the run took over was not given back");
+        assert_eq!(app.max_steps, Some(7), "the step limit the run took over was not given back");
+
+        // And the prompt the model reads from now on says so.
+        let prompt = build_system_prompt(&app.prompt_config.clone().with_goal_mode(app.goal_active));
+        assert!(!prompt.contains("AN AUTONOMOUS RUN IS UNDER WAY"), "{prompt}");
+    }
+
+    /// The card says what the compaction cost. A conversation too long for one
+    /// request is summarized in parts and the parts are summarized into one:
+    /// every one of those calls is part of the price, and only the last one
+    /// was counted — the card said a fraction of what was spent.
+    #[tokio::test]
+    async fn a_compaction_in_parts_costs_what_all_of_its_calls_cost() {
+        /// Answers with a summary and a bill, and counts its own calls.
+        struct CountingUsage {
+            calls: std::sync::Mutex<usize>,
+        }
+        #[async_trait::async_trait]
+        impl LlmSource for CountingUsage {
+            async fn turn(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[flashagent_llm::ToolSpec],
+            ) -> Result<futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>, flashagent_llm::LlmError> {
+                let n = {
+                    let mut calls = self.calls.lock().unwrap();
+                    *calls += 1;
+                    *calls
+                };
+                let events = vec![
+                    Ok(flashagent_llm::LlmEvent::TextDelta(SHAPED_SUMMARY.into())),
+                    Ok(flashagent_llm::LlmEvent::Done(flashagent_llm::FinishReason::Stop)),
+                    Ok(flashagent_llm::LlmEvent::Usage(flashagent_llm::Usage {
+                        prompt: Some(1_000 * n as i64),
+                        completion: Some(10),
+                        ..Default::default()
+                    })),
+                ];
+                Ok(Box::pin(futures::stream::iter(events)))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("c.jsonl");
+        let mut history = long_history();
+        // Big enough that the parts have to be cut.
+        history.push(ChatMessage::assistant("a long middle ".repeat(4000)));
+        history.push(ChatMessage::user("second question"));
+        history.push(ChatMessage::assistant("second answer"));
+
+        let source = CountingUsage { calls: std::sync::Mutex::new(0) };
+        // A room of 4k tokens: the conversation is far bigger, so it is cut.
+        let result = compact_context_with_sink(
+            &source,
+            &mut history,
+            crate::compact::Compaction {
+                focus_prompt: None,
+                archive_path: &archive,
+                real_used: None,
+                room: Some(4_000),
+                allow_growth: true,
+                model: "test-model",
+            },
+            None,
+        )
+        .await
+        .expect("the summary is accepted");
+
+        let calls = *source.calls.lock().unwrap();
+        assert!(calls >= 3, "the parts are summarized one by one and then together: {calls} calls");
+        // Every call is paid for: the parts and the reduction that joined them.
+        let expected: i64 = (1..=calls as i64).sum::<i64>() * 1_000;
+        assert_eq!(
+            result.input_tokens as i64, expected,
+            "the card shows the cost of the last call only: {} of {} tokens",
+            result.input_tokens, expected
+        );
+        assert_eq!(result.output_tokens, calls * 10, "the words of every call are counted");
     }
 }
 

@@ -15,16 +15,42 @@ use crate::BuiltinTools;
 /// The built-in toolset plus `spawn_agent`. `execute` dispatches by name.
 pub struct CompositeTools {
     executors: Vec<Arc<dyn ToolExec>>,
+    /// Name to executor, built on first use instead of calling every
+    /// executor's `specs` (and tokenizing every schema) on every tool call. A
+    /// miss rebuilds it, so a tool that appears later -- an MCP server -- is
+    /// still found.
+    index: std::sync::RwLock<Option<Vec<(String, usize)>>>,
 }
 
 impl CompositeTools {
     /// Order matters only for specs: the first wins on a duplicate name.
     pub fn new(executors: Vec<Arc<dyn ToolExec>>) -> Self {
-        Self { executors }
+        Self { executors, index: std::sync::RwLock::new(None) }
+    }
+
+    fn rebuild_index(&self) -> Vec<(String, usize)> {
+        let mut index: Vec<(String, usize)> = Vec::new();
+        for (at, executor) in self.executors.iter().enumerate() {
+            for spec in executor.specs() {
+                if !index.iter().any(|(name, _)| name == &spec.name) {
+                    index.push((spec.name, at));
+                }
+            }
+        }
+        *self.index.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(index.clone());
+        index
     }
 
     fn executor_for(&self, name: &str) -> Option<&Arc<dyn ToolExec>> {
-        self.executors.iter().find(|e| e.specs().iter().any(|s| s.name == name))
+        if let Some(index) = self.index.read().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref() {
+            if let Some((_, at)) = index.iter().find(|(known, _)| known == name) {
+                return self.executors.get(*at);
+            }
+        }
+        self.rebuild_index()
+            .iter()
+            .find(|(known, _)| known == name)
+            .and_then(|(_, at)| self.executors.get(*at))
     }
 }
 
@@ -199,6 +225,37 @@ mod tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
+    }
+
+    struct CountingSpecs {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ToolExec for CountingSpecs {
+        async fn execute(&self, call: &ToolCall) -> ToolOutput {
+            ToolOutput { content: format!("ran {}", call.name), is_error: false, images: Vec::new() }
+        }
+        fn specs(&self) -> Vec<ToolSpec> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            vec![ToolSpec { name: "read_file".into(), description: "r".into(), parameters_json: "{}".into() }]
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_does_not_rebuild_the_schema_list_each_time() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let composite = CompositeTools::new(vec![Arc::new(CountingSpecs { calls: calls.clone() })]);
+        for _ in 0..3 {
+            let out = composite
+                .execute(&ToolCall { id: "t".into(), name: "read_file".into(), args_json: "{}".into() })
+                .await;
+            assert!(!out.is_error, "{}", out.content);
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "the schemas were rebuilt for every call");
     }
 
     #[tokio::test]

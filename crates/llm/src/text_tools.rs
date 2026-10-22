@@ -4,7 +4,7 @@
 //! of the reply. The history is written the same way, so the model sees its
 //! earlier calls and their results as text it can follow.
 
-use crate::repair::repair_json;
+use crate::repair::effective_args;
 use crate::types::{ChatMessage, Role, ToolSpec};
 
 /// Appended to the system prompt.
@@ -40,9 +40,14 @@ pub(crate) fn flatten(messages: &[ChatMessage], tools: &[ToolSpec]) -> Vec<ChatM
             Role::Assistant if !m.tool_calls.is_empty() => {
                 let mut msg = m.clone();
                 for call in std::mem::take(&mut msg.tool_calls) {
-                    let arguments = repair_json(&call.args_json)
-                        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-                        .unwrap_or_else(|| serde_json::json!({}));
+                    // What the tool ran with, aliases renamed and all: the model
+                    // must not see a call other than the one that happened.
+                    //
+                    // Arguments that cannot be read are shown as they were
+                    // written: such a call fails, and an empty object would
+                    // tell the model it ran with no arguments at all.
+                    let arguments = effective_args(&call.args_json, &call.name)
+                        .unwrap_or_else(|| serde_json::Value::String(call.args_json.clone()));
                     let markup = serde_json::json!({ "name": call.name, "arguments": arguments });
                     if !msg.content.is_empty() && !msg.content.ends_with('\n') {
                         msg.content.push('\n');
@@ -130,6 +135,37 @@ mod tests {
         );
         assert!(flat[2].tool_calls.is_empty());
         assert_eq!(flat[3].content, "<tool_response>\nfn a() {}\n</tool_response>\n<tool_response>\nfn b() {}\n</tool_response>");
+    }
+
+    #[test]
+    fn the_history_shows_the_arguments_the_tool_ran_with() {
+        let mut call = ChatMessage::assistant("");
+        call.tool_calls = vec![ToolCall { id: "a".into(), name: "read_file".into(), args_json: r#"{"filePath":"a.rs"}"#.into() }];
+        let history = [ChatMessage::system("S"), ChatMessage::user("read"), call];
+        let flat = flatten(&history, &[read_file()]);
+        assert_eq!(
+            flat[2].content,
+            r#"<tool_call>{"arguments":{"path":"a.rs"},"name":"read_file"}</tool_call>"#,
+            "an alias the tool renamed was shown as it came in"
+        );
+    }
+
+    #[test]
+    fn a_call_whose_arguments_cannot_be_read_is_shown_as_it_was_written() {
+        let mut call = ChatMessage::assistant("");
+        call.tool_calls = vec![ToolCall { id: "a".into(), name: "read_file".into(), args_json: "not json at all".into() }];
+        let history = [ChatMessage::system("S"), ChatMessage::user("read"), call];
+        let flat = flatten(&history, &[read_file()]);
+        assert!(
+            flat[2].content.contains("not json at all"),
+            "the arguments as written are gone: {}",
+            flat[2].content
+        );
+        assert!(
+            !flat[2].content.contains(r#""arguments":{}"#),
+            "an empty object was shown instead of the arguments: {}",
+            flat[2].content
+        );
     }
 
     #[test]

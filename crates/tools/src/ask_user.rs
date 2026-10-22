@@ -144,6 +144,9 @@ async fn run_ask_user_within(
 ) -> Result<String, ToolError> {
     // One deadline for the whole call, not one per question.
     let deadline = is_goal_mode.load(Ordering::Relaxed).then(|| tokio::time::Instant::now() + goal_timeout);
+    // What is said when nobody answers is how long it really waited, not the
+    // limit it was given.
+    let started = std::time::Instant::now();
 
     let gate = gate.ok_or_else(|| {
         ToolError::Other("interactive question gate is not available in this environment".into())
@@ -206,7 +209,7 @@ async fn run_ask_user_within(
             Some(d) => match tokio::time::timeout_at(d, asked).await {
                 Ok(reply) => reply,
                 // Dropping the pending ask takes its card off the screen.
-                Err(_) => return Ok(no_answer(&answered, goal_timeout)),
+                Err(_) => return Ok(no_answer(&answered, started.elapsed())),
             },
             None => asked.await,
         };
@@ -229,8 +232,12 @@ async fn run_ask_user_within(
 }
 
 fn no_answer(answered: &[String], waited: Duration) -> String {
-    let secs = waited.as_secs();
-    let waited = if secs >= 60 && secs.is_multiple_of(60) { format!("{} minutes", secs / 60) } else { format!("{secs} seconds") };
+    let waited = if waited < Duration::from_secs(1) {
+        "less than a second".to_string()
+    } else {
+        let secs = waited.as_secs();
+        if secs >= 60 && secs.is_multiple_of(60) { format!("{} minutes", secs / 60) } else { format!("{secs} seconds") }
+    };
     let mut out = String::new();
     if !answered.is_empty() {
         out.push_str(&format!("Answered before the user went quiet:\n{}\n\n", answered.join("\n")));
@@ -340,6 +347,9 @@ mod tests {
             .expect("an unanswered question is not an error: the run goes on");
         assert!(res.contains("No answer within"), "{res}");
         assert!(res.contains("Choose the most reasonable option yourself"), "{res}");
+        // How long it really waited, not the limit it was given.
+        assert!(res.contains("less than a second"), "{res}");
+        assert!(!res.contains("2 minutes"), "{res}");
         assert!(started.elapsed() < Duration::from_secs(5), "it must stop waiting at the deadline");
         assert!(concrete.deadline_seen.lock().is_some(), "the card is told when it stops waiting");
     }
