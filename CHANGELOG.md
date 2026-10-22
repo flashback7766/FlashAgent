@@ -1,5 +1,14 @@
 # Changelog
 
+## b602 — three scenarios that rode ConPTY instead of the app, and the gates that put them back
+
+- **The shell tests said what a faithful byte channel does.** Three scenarios
+  on Windows rode the console's own translation rather than the app: the
+  kitty key code with a shift, the Alt/Shift+Enter between lines, and a
+  digit answering a question card. The decode logic they were after is held
+  by the unit tests on every platform, and the scenarios run where the bytes
+  are what was written.
+
 ## b601 — a checkout the same on every system, and suggestions that keep the written shape
 
 - **The repository pins its line endings.** No `.gitattributes` stood in the
