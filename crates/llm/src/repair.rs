@@ -40,6 +40,61 @@ pub fn repair_json(input: &str) -> Option<String> {
     None
 }
 
+/// Whether the body is a whole JSON value: every string closed and every
+/// structure closed, so that reading it invents nothing.
+///
+/// The cosmetics may be wrong — smart quotes, Python literals, a trailing
+/// comma — and are fixed the way [`repair_json`] fixes them. A body cut
+/// off in the middle is not whole: completing it would write something the
+/// model never wrote, and a call made of it would run with arguments the
+/// model did not mean.
+pub fn is_whole_json(body: &str) -> bool {
+    let body = strip_fences_and_tags(body.trim());
+    if serde_json::from_str::<serde_json::Value>(body).is_ok() {
+        return true;
+    }
+    let normalized = normalize_python_dict_and_literals(&normalize_smart_quotes(body));
+    balanced_value(&normalized)
+}
+
+/// A whole value: the brackets match, every string is closed, and nothing
+/// follows the value.
+fn balanced_value(text: &str) -> bool {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut end = None;
+    for (i, c) in text.char_indices() {
+        if in_string {
+            match c {
+                '\\' if !escape => escape = true,
+                '"' if !escape => in_string = false,
+                _ => escape = false,
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+                if depth == 0 {
+                    end = Some(i + c.len_utf8());
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    match end {
+        Some(end) => text[end..].trim().is_empty(),
+        None => false,
+    }
+}
+
 /// The arguments a tool call will actually run with. The permission check,
 /// approval card, diff preview and the tool itself all read them through here,
 /// so what is judged and shown is what runs. Wrappers (`{"<tool>": ..}`,
@@ -300,7 +355,11 @@ fn unwrapped_args(args_json: &str, tool_name: &str) -> Option<serde_json::Value>
     };
     if obj.len() == 1 {
         if let Some(inner) = obj.get(tool_name) {
-            return unwrap_inner(inner);
+            if let Some(inner) = unwrap_inner(inner) {
+                return Some(inner);
+            }
+            // Not an object under the tool's name: the call keeps its
+            // arguments as written, and the tool reports what it cannot use.
         }
     }
     const WRAPPERS: [&str; 3] = ["arguments", "parameters", "args"];
@@ -361,24 +420,28 @@ pub fn normalize_python_dict_and_literals(s: &str) -> String {
 
     let mut in_quote = QuoteStyle::None;
     let mut escape = false;
+    // A Windows path: its backslashes are separators, even where the letter
+    // after one happens to be a JSON escape (`C:\file.txt`).
+    let mut path_like = false;
 
     while i < len {
         let c = chars[i];
 
         if escape {
             escape = false;
-            if in_quote == QuoteStyle::Single {
+            let valid = is_json_escape(&chars, i) && !path_like;
+            if in_quote == QuoteStyle::Single && c == '\'' {
                 // Python's \' inside a single-quoted string.
-                if c == '\'' {
-                    out.push('\'');
-                } else if c == '"' {
-                    out.push_str("\\\"");
-                } else {
-                    out.push('\\');
-                    out.push(c);
-                }
-            } else {
+                out.push('\'');
+            } else if c == '"' {
+                out.push_str("\\\"");
+            } else if valid || c == '\\' {
                 out.push('\\');
+                out.push(c);
+            } else {
+                // Not a JSON escape: the backslash itself is the character
+                // meant (`\d` in a regex, `\U` in a Windows path).
+                out.push_str("\\\\");
                 out.push(c);
             }
             i += 1;
@@ -386,7 +449,13 @@ pub fn normalize_python_dict_and_literals(s: &str) -> String {
         }
 
         if c == '\\' {
-            escape = true;
+            if in_quote == QuoteStyle::None {
+                // Nothing to escape outside a string: dropping it would
+                // change what the model wrote.
+                out.push('\\');
+            } else {
+                escape = true;
+            }
             i += 1;
             continue;
         }
@@ -396,12 +465,14 @@ pub fn normalize_python_dict_and_literals(s: &str) -> String {
                 match c {
                     '\'' => {
                         in_quote = QuoteStyle::Single;
+                        path_like = starts_windows_path(&chars, i + 1, false);
                         out.push('"');
                         i += 1;
                         continue;
                     }
                     '"' => {
                         in_quote = QuoteStyle::Double;
+                        path_like = starts_windows_path(&chars, i + 1, true);
                         out.push('"');
                         i += 1;
                         continue;
@@ -432,6 +503,7 @@ pub fn normalize_python_dict_and_literals(s: &str) -> String {
                 match c {
                     '\'' => {
                         in_quote = QuoteStyle::None;
+                        path_like = false;
                         out.push('"');
                         i += 1;
                         continue;
@@ -467,6 +539,7 @@ pub fn normalize_python_dict_and_literals(s: &str) -> String {
                 match c {
                     '"' => {
                         in_quote = QuoteStyle::None;
+                        path_like = false;
                         out.push('"');
                         i += 1;
                         continue;
@@ -497,6 +570,28 @@ pub fn normalize_python_dict_and_literals(s: &str) -> String {
     }
 
     out
+}
+
+/// Whether `\` + the character at `at` is JSON escaping. `\u` only counts
+/// with the four hex digits it needs; anything else was meant literally.
+fn is_json_escape(chars: &[char], at: usize) -> bool {
+    match chars[at] {
+        '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' => true,
+        'u' => chars.get(at + 1..at + 5).is_some_and(|digits| digits.iter().all(char::is_ascii_hexdigit)),
+        _ => false,
+    }
+}
+
+/// `C:\` or `C:/` where a string starts: every backslash in it separates path
+/// parts, so `C:\file.txt` must not become `C:` + a form feed.
+fn starts_windows_path(chars: &[char], from: usize, double_quoted: bool) -> bool {
+    let drive = chars.get(from).is_some_and(char::is_ascii_alphabetic);
+    let colon = chars.get(from + 1) == Some(&':');
+    let separator = matches!(chars.get(from + 2), Some('\\') | Some('/'));
+    // `C:\\Users` is already JSON-escaped: its first backslash is an escape,
+    // not a separator.
+    let already_escaped = double_quoted && chars.get(from + 2) == Some(&'\\') && chars.get(from + 3) == Some(&'\\');
+    drive && colon && separator && !already_escaped
 }
 
 fn matches_word(chars: &[char], start: usize, word: &str) -> bool {
@@ -711,6 +806,12 @@ mod tests {
         assert!(effective_args("[1,2]", "x").is_none());
     }
 
+    #[test]
+    fn a_value_under_the_tool_name_that_is_not_an_object_is_left_for_the_tool() {
+        assert_eq!(effective_args(r#"{"run_shell":"ls"}"#, "run_shell").unwrap(), serde_json::json!({"run_shell": "ls"}));
+        assert_eq!(effective_args(r#"{"run_shell":"not json"}"#, "run_shell").unwrap(), serde_json::json!({"run_shell": "not json"}));
+    }
+
     fn parsed(s: &str) -> serde_json::Value {
         serde_json::from_str(&repair_json(s).unwrap()).unwrap()
     }
@@ -764,6 +865,49 @@ mod tests {
         assert_eq!(v["multi_select"], false);
         assert_eq!(v["empty"], serde_json::Value::Null);
         assert_eq!(v["active"], true);
+    }
+
+    #[test]
+    fn escapes_that_are_not_json_keep_their_backslash() {
+        let v = parsed(r#"{"pattern": "\d+\s"}"#);
+        assert_eq!(v["pattern"], r"\d+\s");
+        let v = parsed(r#"{'pattern': '\w+\S'}"#);
+        assert_eq!(v["pattern"], r"\w+\S");
+        // `\u` is still an escape where the four digits are there.
+        let v = parsed(r#"{'word': 'caf\u00e9'}"#);
+        assert_eq!(v["word"], "café");
+    }
+
+    #[test]
+    fn a_windows_path_keeps_every_backslash() {
+        let v = parsed(r#"{'path': 'C:\Users\me\file.txt'}"#);
+        assert_eq!(v["path"], r"C:\Users\me\file.txt");
+        let v = parsed(r#"{"path": "C:\Users\me\file.txt"}"#);
+        assert_eq!(v["path"], r"C:\Users\me\file.txt");
+        let v = parsed(r#"{"path": "C:\\Users\\me\\file.txt"}"#);
+        assert_eq!(v["path"], r"C:\Users\me\file.txt");
+    }
+
+    #[test]
+    fn a_backslash_outside_a_string_is_not_dropped() {
+        assert_eq!(normalize_python_dict_and_literals(r#"{"a": 1\"#), r#"{"a": 1\"#);
+    }
+
+    /// A body is whole when reading it invents nothing. The cosmetics may
+    /// be wrong; a body cut off in the middle is not whole.
+    #[test]
+    fn a_body_is_whole_when_nothing_has_to_be_invented_to_read_it() {
+        assert!(is_whole_json(r#"{"name": "read_file", "arguments": {"path": "a.rs"}}"#));
+        // A trailing comma and Python quotes are cosmetics.
+        assert!(is_whole_json(r#"{"name": "read_file", "arguments": {"path": "a.rs",}}"#));
+        assert!(is_whole_json(r#"{'name': 'read_file', 'arguments': {'path': 'a.rs'}}"#));
+        // A brace inside a string is a brace in a string.
+        assert!(is_whole_json(r#"{'name': 'read_file', 'arguments': {'code': 'if x { y(); }'}}"#));
+        // Cut off in the middle: not whole.
+        assert!(!is_whole_json(r#"{"name":"write_file","arguments":{"path":"a.md","content":"fn main() {"}"#));
+        assert!(!is_whole_json(r#"{"path": "/home/user/proj"#));
+        assert!(!is_whole_json(r#"{"name": "read_file", "arguments": {"path": "a.rs"} trailing"#));
+        assert!(!is_whole_json("not json at all"));
     }
 
     #[test]

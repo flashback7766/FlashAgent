@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::repair::repair_json;
+use crate::repair::{is_whole_json, repair_json};
 use crate::types::{FinishReason, LlmEvent};
 
 /// Server-sent events as the standard reads them: a line ends at CRLF, LF or
@@ -105,6 +105,9 @@ impl SseDecoder {
 pub struct ChunkParser {
     tool_ids: Vec<Option<String>>,
     tool_names: Vec<Option<String>>,
+    /// The arguments gathered so far, so a call without an `index` is only
+    /// told apart from the previous one by its name once that one is whole.
+    tool_args: Vec<String>,
     thought: ThoughtTags,
     /// Readers stop at the first `Done`, so there is only one: a finish
     /// reason followed by `[DONE]` must not end the stream twice.
@@ -117,6 +120,13 @@ pub struct ChunkParser {
 
 const THOUGHT_OPEN: &str = "<thought>";
 const THOUGHT_CLOSE: &str = "</thought>";
+
+/// The calls a turn may have at once, and the bound on the slots a call may
+/// be given: an index below the cap is the slot of its call, and a mangled
+/// index gets one of the slots above the cap. The same mangled index must
+/// always get the same slot, or the fragments of one call would be told
+/// apart, and the table must not grow with the fragments.
+const MAX_TOOL_INDEX: usize = 64;
 
 /// Gemini writes thought summaries into the text between `<thought>` and
 /// `</thought>`, besides or instead of marking them as thought. The tags are
@@ -284,16 +294,7 @@ impl ChunkParser {
                 .or_else(|| s.get("accepted_draft_tokens"))
                 .or_else(|| s.get("accepted_tokens"))
                 .and_then(Value::as_u64)?;
-            let rejected = s.get("rejected_draft_tokens_count")
-                .or_else(|| s.get("rejected_draft_tokens"))
-                .or_else(|| s.get("rejected_tokens"))
-                .and_then(Value::as_u64)
-                .unwrap_or(total.saturating_sub(accepted));
-            Some(crate::types::MtpStats {
-                total_draft_tokens: total,
-                accepted_draft_tokens: accepted,
-                rejected_draft_tokens: rejected,
-            })
+            Some(crate::types::MtpStats { total_draft_tokens: total, accepted_draft_tokens: accepted })
         });
 
         let timings = v.get("timings").filter(|t| t.is_object()).and_then(|t| {
@@ -310,30 +311,32 @@ impl ChunkParser {
             // Cached tokens by provider: OpenAI, OpenRouter, Gemini, xAI, vLLM use
             // `prompt_tokens_details.cached_tokens`; DeepSeek `prompt_cache_hit_tokens`;
             // Anthropic-style `cache_read_input_tokens`; llama.cpp `timings`.
+            // Each source is checked on its own: a value of the wrong type in one
+            // of them must not hide the number in the next.
             let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_i64);
+            let cache_written = usage.get("cache_creation_input_tokens").and_then(Value::as_i64);
             let cached = usage
                 .get("prompt_tokens_details")
                 .and_then(|d| d.get("cached_tokens"))
-                .or_else(|| usage.get("cached_tokens"))
-                .or_else(|| usage.get("prompt_cache_hit_tokens"))
                 .and_then(Value::as_i64)
+                .or_else(|| usage.get("cached_tokens").and_then(Value::as_i64))
+                .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_i64))
                 .or(cache_read)
-                .or(timings.map(|(_, cached)| cached));
-            // Anthropic counts cache reads apart from input tokens.
+                .or_else(|| timings.map(|(_, cached)| cached));
+            // Anthropic counts cache reads and cache writes apart from input tokens.
             if let (Some(p), Some(read)) = (prompt, cache_read) {
                 if read > p {
                     prompt = Some(p + read);
                 }
             }
+            if let (Some(p), Some(written)) = (prompt, cache_written) {
+                prompt = Some(p + written);
+            }
             let mtp = mtp.or_else(|| {
                 let details = usage.get("completion_tokens_details")?;
                 let accepted = details.get("accepted_prediction_tokens").and_then(Value::as_u64)?;
                 let rejected = details.get("rejected_prediction_tokens").and_then(Value::as_u64).unwrap_or(0);
-                Some(crate::types::MtpStats {
-                    total_draft_tokens: accepted + rejected,
-                    accepted_draft_tokens: accepted,
-                    rejected_draft_tokens: rejected,
-                })
+                Some(crate::types::MtpStats { total_draft_tokens: accepted + rejected, accepted_draft_tokens: accepted })
             });
             // OpenRouter prices the turn itself: it has already applied the
             // model rate, the provider and the cache discount, so a number
@@ -343,20 +346,10 @@ impl ChunkParser {
                 .get("cost")
                 .or_else(|| usage.get("cost_usd"))
                 .and_then(|c| c.as_f64().filter(|v| v.is_finite() && *v >= 0.0));
-            // The thinking tokens: part of the completion count, not on top
-            // of it, and worth saying apart.
-            let reasoning = usage
-                .get("completion_tokens_details")
-                .and_then(|d| d.get("reasoning_tokens"))
-                .and_then(Value::as_i64);
             // What the provider behind the gateway charged, when it says.
             let cost_details = usage.get("cost_details").and_then(|d| {
                 let upstream_cost = d.get("upstream_inference_cost").and_then(Value::as_f64);
-                let upstream_prompt_tokens = d.get("upstream_inference_prompt_tokens").and_then(Value::as_i64);
-                let upstream_completion_tokens = d.get("upstream_inference_completion_tokens").and_then(Value::as_i64);
-                (upstream_cost.is_some() || upstream_prompt_tokens.is_some() || upstream_completion_tokens.is_some()).then_some(
-                    crate::types::CostDetails { upstream_cost, upstream_prompt_tokens, upstream_completion_tokens },
-                )
+                upstream_cost.is_some().then_some(crate::types::CostDetails { upstream_cost })
             });
             events.push(LlmEvent::Usage(crate::types::Usage {
                 prompt,
@@ -364,7 +357,6 @@ impl ChunkParser {
                 cached,
                 mtp,
                 cost,
-                reasoning,
                 cost_details,
             }));
         } else if let Some((prompt, cached)) = timings {
@@ -373,7 +365,7 @@ impl ChunkParser {
                 completion: None,
                 cached: Some(cached),
                 mtp,
-                cost: None, reasoning: None, cost_details: None,
+                cost: None, cost_details: None,
             }));
         } else if let Some(m) = mtp {
             events.push(LlmEvent::Usage(crate::types::Usage {
@@ -381,7 +373,7 @@ impl ChunkParser {
                 completion: None,
                 cached: None,
                 mtp: Some(m),
-                cost: None, reasoning: None, cost_details: None,
+                cost: None, cost_details: None,
             }));
         }
 
@@ -469,15 +461,34 @@ impl ChunkParser {
         let mut function = call.get_mut("function").map(Value::take).unwrap_or(Value::Null);
         let fresh_name = non_empty(function.get_mut("name").map(Value::take));
         let index = match call.get("index").and_then(Value::as_u64) {
-            // A garbage index must not grow the table without bound.
-            Some(i) => (i as usize).min(self.tool_ids.len() + 64),
+            // A garbage index must not grow the table without bound, and the
+            // same garbage index must always land in the same slot: a call
+            // that arrives in fragments is one call, not one per fragment.
+            //
+            // An index below the cap is the slot of its call. An index above
+            // it is broken, and gets one of the slots above the cap, chosen
+            // by its low bits: two different broken indices do not land on
+            // top of each other, and the table stops at twice the cap.
+            Some(i) => {
+                let i = i as usize;
+                if i < MAX_TOOL_INDEX {
+                    i
+                } else {
+                    MAX_TOOL_INDEX + (i % MAX_TOOL_INDEX)
+                }
+            }
             // Gemini leaves `index` out. A call begins with its name: under a new id,
-            // or without one after a call that already has its name.
+            // or without one after a call that already has its name. A call whose
+            // arguments are still being written is the same call, however often the
+            // server repeats its name.
             None => match self.tool_ids.len().checked_sub(1) {
                 None => 0,
                 Some(last) => {
                     let same_id = fresh_id.is_some() && self.tool_ids[last] == fresh_id;
-                    let begins = fresh_name.is_some() && !same_id && (fresh_id.is_some() || self.tool_names[last].is_some());
+                    let begins = fresh_name.is_some()
+                        && !same_id
+                        && (fresh_id.is_some() || self.tool_names[last].is_some())
+                        && is_whole_json(&self.tool_args[last]);
                     last + usize::from(begins)
                 }
             },
@@ -485,6 +496,7 @@ impl ChunkParser {
         while self.tool_ids.len() <= index {
             self.tool_ids.push(None);
             self.tool_names.push(None);
+            self.tool_args.push(String::new());
         }
         // An empty id or name in a later chunk is absent, not a rename.
         let id = fresh_id.or_else(|| self.tool_ids[index].clone().filter(|id| !id.is_empty()));
@@ -497,6 +509,7 @@ impl ChunkParser {
             Some(Value::Null) | None => String::new(),
             Some(other) => other.to_string(),
         };
+        self.tool_args[index].push_str(&args_delta);
         events.push(LlmEvent::ToolCallDelta { index, id, name, args_delta });
     }
 }
@@ -701,9 +714,12 @@ impl TextToolScanner {
         out
     }
 
-    /// A block missing only `</tool_call>` still counts if its JSON is complete;
+    /// A block missing only `</tool_call>` still counts if its JSON is whole;
     /// a body cut off mid-arguments would be "completed" by repair into something
     /// the model never wrote. Everything else is returned as text.
+    ///
+    /// The same body with its closing tag is read the same way, so what a
+    /// block means does not depend on whether the tag arrived.
     pub fn finish(&mut self) -> Vec<ScannerEvent> {
         self.open = None;
         let rest = std::mem::take(&mut self.buf);
@@ -720,7 +736,7 @@ impl TextToolScanner {
                     .or_else(|| trimmed.strip_prefix(START_CALL_FENCE).map(|b| b.trim_end().trim_end_matches('`')))
             })
             .flatten()
-            .filter(|b| is_complete_json(b));
+            .filter(|b| is_whole_json(b));
         let mut out = Vec::new();
         match body {
             Some(b) => {
@@ -768,6 +784,11 @@ impl TextToolScanner {
     }
 
     fn calls_or_text(&self, body: &str, raw: String) -> Vec<ScannerEvent> {
+        // A block cut off mid-arguments must stay text: repair would close the
+        // string and the object, and a half-written `write_file` would run.
+        if !is_whole_json(body) {
+            return vec![ScannerEvent::Text(raw)];
+        }
         match parse_calls(body) {
             Some(calls) if calls.len() == 1 => {
                 let (name, args_json) = calls.into_iter().next().unwrap_or_default();
@@ -1000,6 +1021,10 @@ fn balanced_len(text: &str) -> Option<usize> {
 
 /// Cosmetic repair (quotes, trailing commas) is allowed.
 /// Closed brackets and nothing after them: arguments not cut off mid-way.
+///
+/// The brackets are counted as they were written: a body in Python quotes
+/// with a brace inside a string is not counted right. [`is_whole_json`]
+/// counts them after the cosmetics are fixed, and is what the scanner asks.
 pub fn is_complete_json(body: &str) -> bool {
     let body = body.trim();
     balanced_len(body).is_some_and(|len| body[len..].trim().is_empty())
@@ -1431,7 +1456,58 @@ mod tests {
     #[test]
     fn a_garbage_index_does_not_grow_the_call_table_without_bound() {
         let events = events_of(&[r#"{"choices":[{"delta":{"tool_calls":[{"index":18446744073709551615,"id":"c","function":{"name":"grep","arguments":"{}"}}]}}]}"#]);
-        assert!(matches!(events.first(), Some(LlmEvent::ToolCallDelta { index, .. }) if *index <= 64));
+        // The index is bounded: a broken one gets a slot of its own, above
+        // the ones a call may be named by, and the table stops there.
+        assert!(matches!(events.first(), Some(LlmEvent::ToolCallDelta { index, .. }) if *index < MAX_TOOL_INDEX * 2));
+    }
+
+    #[test]
+    fn one_call_with_a_garbage_index_stays_one_call_however_many_fragments_come() {
+        let mut p = ChunkParser::default();
+        let mut events = p.feed(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":18446744073709551615,"id":"c","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}"#,
+        );
+        events.extend(p.feed(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":18446744073709551615,"function":{"arguments":"\"a.rs\"}"}}]}}]}"#,
+        ));
+        let calls = calls_of(&events);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].3, r#"{"path":"a.rs"}"#);
+        // The table does not grow with the fragments: a broken index gets a
+        // slot of its own, and the same one always gets that slot.
+        assert!(p.tool_ids.len() <= MAX_TOOL_INDEX * 2, "the table grew with the fragments: {}", p.tool_ids.len());
+    }
+
+    /// Two calls the server named by two different broken indices are two
+    /// calls: landing them on top of each other would run one call with the
+    /// arguments of both.
+    #[test]
+    fn two_broken_indices_are_two_calls() {
+        let events = events_of(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":18446744073709551615,"id":"a","function":{"name":"read_file","arguments":"{\"path\":\"a\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":18446744073709551614,"id":"b","function":{"name":"read_file","arguments":"{\"path\":\"b\"}"}}]}}]}"#,
+        ]);
+        let calls = calls_of(&events);
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[0].3, r#"{"path":"a"}"#, "{calls:?}");
+        assert_eq!(calls[1].3, r#"{"path":"b"}"#, "{calls:?}");
+    }
+
+    #[test]
+    fn a_name_repeated_in_every_fragment_does_not_split_an_unfinished_call() {
+        let events = events_of(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"read_file","arguments":"\"a.rs\"}"}}]}}]}"#,
+        ]);
+        let calls = calls_of(&events);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].3, r#"{"path":"a.rs"}"#);
+        // Once the arguments are whole, the next name is the next call.
+        let events = events_of(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"grep","arguments":"{}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"grep","arguments":"{}"}}]}}]}"#,
+        ]);
+        assert_eq!(calls_of(&events).len(), 2, "{events:?}");
     }
 
     #[test]
@@ -1520,6 +1596,27 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_cache_number_does_not_hide_the_next_source() {
+        let u = usage_of(
+            r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":"many"},"prompt_cache_hit_tokens":750}}"#,
+        );
+        assert_eq!((u.prompt, u.cached), (Some(1000), Some(750)));
+        let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":3515,"completion_tokens":5,"cached_tokens":null},"timings":{"prompt_n":15,"cache_n":3500}}"#);
+        assert_eq!((u.prompt, u.cached), (Some(3515), Some(3500)));
+    }
+
+    #[test]
+    fn tokens_written_to_the_cache_are_part_of_the_prompt() {
+        let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":5,"cache_creation_input_tokens":960}}"#);
+        assert_eq!(u.prompt, Some(1000));
+        let u = usage_of(
+            r#"{"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":5,"cache_read_input_tokens":960,"cache_creation_input_tokens":500}}"#,
+        );
+        assert_eq!(u.prompt, Some(1500), "input, cache reads and cache writes all billed as the prompt");
+        assert_eq!(u.cached, Some(960), "what was written is not what was reused");
+    }
+
+    #[test]
     fn chunk_parser_accepts_object_arguments() {
         let mut p = ChunkParser::default();
         let ev = p.feed(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":{"path":"a.rs"}}}]}}]}"#);
@@ -1598,9 +1695,14 @@ mod tests {
             assert_eq!(calls, ["read_file", "read_file"], "the call after it was hidden: {text:?}");
             assert!(!text.contains("```"), "{text:?}");
         }
-        // Between closed fences a brace the model forgot is put back, as in a Hermes block.
-        let (_, calls) = scan(&pieces("```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a\"}\n```\nok", 3).iter().map(String::as_str).collect::<Vec<_>>());
+        // Between closed fences cosmetic repair still runs, as in a Hermes block.
+        let (_, calls) = scan(&pieces("```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a\",}}\n```\nok", 3).iter().map(String::as_str).collect::<Vec<_>>());
         assert_eq!(calls, ["read_file"]);
+        // A brace the model never wrote is not guessed at: the call would run
+        // on arguments it did not finish.
+        let (text, calls) = scan(&pieces("```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a\"}\n```\nok", 3).iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(calls.is_empty(), "{calls:?}");
+        assert!(text.contains("\"path\": \"a\""), "{text:?}");
         // The stream may end on the JSON, before the fence closes.
         let (_, calls) = scan(&["```tool_call\n{\"name\": \"read_file\", \"arguments\": {}}"]);
         assert_eq!(calls, ["read_file"]);
@@ -1632,6 +1734,49 @@ mod tests {
         assert!(text.contains("compute("));
         let (_, calls) = scan(&["\n{\"name\": \"read_file\""]);
         assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn a_truncated_call_closed_by_the_tag_is_text_and_never_runs() {
+        let cut = r#"<tool_call>{"name":"write_file","arguments":{"path":"a.md","content":"fn main() {"}</tool_call>"#;
+        let mut s = TextToolScanner::default();
+        let mut out = s.feed(cut);
+        out.extend(s.finish());
+        assert!(
+            !out.iter().any(|e| matches!(e, ScannerEvent::ToolCall { .. })),
+            "a half-written file would have been written: {out:?}"
+        );
+        let text: String = out
+            .iter()
+            .map(|e| match e {
+                ScannerEvent::Text(t) => t.clone(),
+                ScannerEvent::ToolCall { raw, .. } => raw.clone(),
+            })
+            .collect();
+        assert_eq!(text, cut);
+    }
+
+    /// The same body with its closing tag and without it: text both ways.
+    /// A call cut off mid-arguments must not become a call because the tag
+    /// that closes it happened to arrive.
+    #[test]
+    fn a_body_cut_off_mid_arguments_is_text_with_or_without_its_closing_tag() {
+        let body = r#"{"name":"write_file","arguments":{"path":"a.md","content":"fn main() {"}"#;
+        let (text, calls) = scan(&[&format!("{START_HERMES}{body}{END_HERMES}")]);
+        assert!(calls.is_empty(), "a truncated call ran: {calls:?}");
+        assert!(text.contains("fn main() {"), "{text}");
+        let (text, calls) = scan(&[&format!("{START_HERMES}{body}")]);
+        assert!(calls.is_empty(), "a truncated call ran: {calls:?}");
+        assert!(text.contains("fn main() {"), "{text}");
+    }
+
+    /// A body in Python quotes with a brace inside a string is whole: the
+    /// brace is in the string, and reading it invents nothing.
+    #[test]
+    fn a_call_in_python_quotes_with_a_brace_in_a_string_is_still_a_call() {
+        let body = r#"{'name': 'read_file', 'arguments': {'code': 'if x { y(); }'}}"#;
+        let (text, calls) = scan(&[&format!("{START_HERMES}{body}{END_HERMES}")]);
+        assert_eq!(calls, vec!["read_file".to_string()], "{text}");
     }
 
     #[test]
@@ -1798,7 +1943,6 @@ mod tests {
         let mtp = usage_ev.mtp.expect("mtp stats present");
         assert_eq!(mtp.total_draft_tokens, 16);
         assert_eq!(mtp.accepted_draft_tokens, 13);
-        assert_eq!(mtp.rejected_draft_tokens, 3);
         assert!((mtp.acceptance_rate() - 81.25).abs() < 0.01);
     }
 }
