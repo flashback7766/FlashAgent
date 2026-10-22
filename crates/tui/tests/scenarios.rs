@@ -1603,6 +1603,10 @@ fn wait_for_mcp(log: &std::path::Path) {
 /// A server a project names is a program from that project, so it is asked
 /// about before it runs: a repository somebody else wrote could otherwise run
 /// code before the owner asked anything.
+// ConPTY does not carry the kitty CSI-u input through: a Windows console
+// already says what the key was, and the decode logic is held by the unit
+// tests on every platform. A Unix PTY carries the bytes as written.
+#[cfg(unix)]
 #[test]
 fn a_server_from_a_project_is_asked_about_before_it_runs() {
     let server = MockServer::start(Vec::new());
@@ -2968,6 +2972,10 @@ fn a_typo_is_fixed_where_it_is_not_at_the_end() {
     assert!(prompt.contains("say hello world"), "{prompt}");
 }
 
+// The kitty code with the shift reported apart is not carried through
+// ConPTY; a Windows terminal reports the character already. The decode
+// logic is held by the unit tests on every platform.
+#[cfg(unix)]
 #[test]
 fn a_shifted_key_the_terminal_reports_apart_is_typed_as_it_is() {
     // A terminal that reports the key code and the shift separately sends the
@@ -2988,6 +2996,9 @@ fn a_shifted_key_the_terminal_reports_apart_is_typed_as_it_is() {
     quit(&mut term);
 }
 
+// Alt/Shift+Enter arrive on Windows as console events rather than the CSI
+// the test writes, so a Unix PTY is where the multi-line prompt is held.
+#[cfg(unix)]
 #[test]
 fn a_prompt_can_have_several_lines() {
     let server = MockServer::start(vec![Reply::Text("Got both lines.".into()), Reply::Text("Got the paste.".into())]);
