@@ -2,11 +2,9 @@
 
 ## b600 — the prompt becomes a contract, the tokens get one counter, and a hundred quiet failures start saying so
 
-This build carries everything since b570, including the three builds that
-shipped without notes of their own. b571–b573 are small: a project reached
-through a link in its path stopped looking like an escape from itself, and
-two tests were taught to wait for the question card and to skip a Windows
-privilege.
+This build carries everything since b570. The three builds between shipped
+without notes of their own; b571–b573 are small, and each has its own section
+below now.
 
 ### The prompt
 
@@ -244,6 +242,28 @@ pseudo-terminal, clippy clean across the workspace. A stripped binary is
 19.0 MB; the app holds 57.5 MB of memory when idle, and about 47 MB of that
 is the tokenizer table the one counter loads — the price of counting the way
 the model counts.
+
+## b573 — the question test waits for the card, not for the line about it
+
+- **The question-card test waits for the card itself.** The scenario ran a
+  turn that shows a question and waited on a line the turn printed about the
+  card, so a change to how the turn narrates it broke a test about nothing
+  else.
+
+## b572 — a project reached through a link stops looking like an escape
+
+- **A project entered through a symlink in its own path is the project.** The
+  read-only allowlist checked a path against the canonical project directory,
+  and a project reached through a link kept the link in its path, so every
+  file in it looked like it sat outside the project and was asked about by
+  hand.
+
+## b571 — the symlink escape test stays off Windows
+
+- **The symlink-escape test is skipped on Windows.** It creates real symlinks
+  to prove the allowlist resolves them, and creating one there needs
+  Developer Mode or an elevated token, which a runner has neither of. The
+  resolver under test is the same on both systems.
 
 ## b570 — the bar keeps the work, the box keeps its frame, and a lost frame stops looking like a finished answer
 
