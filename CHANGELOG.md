@@ -72,8 +72,8 @@ privilege.
 - The panel caches the count of each message, because recounting a hundred
   kilobytes on every token of a streaming answer cost 2.5 ms a frame.
 - The one counter has a price: the tokenizer table takes about 47 MB of
-  memory when it is first loaded. The app is still well under what
-  [PHILOSOPHY.md](PHILOSOPHY.md) asks of it, and the count it buys is the
+  memory when it is first loaded. The app is still well under what the
+  project's guardrails ask of it, and the count it buys is the
   one that decides when to compact.
 
 ### Compaction
@@ -243,8 +243,7 @@ privilege.
 pseudo-terminal, clippy clean across the workspace. A stripped binary is
 19.0 MB; the app holds 57.5 MB of memory when idle, and about 47 MB of that
 is the tokenizer table the one counter loads — the price of counting the way
-the model counts. The details and the commands are in
-[docs/numbers.md](docs/numbers.md).
+the model counts.
 
 ## b570 — the bar keeps the work, the box keeps its frame, and a lost frame stops looking like a finished answer
 
