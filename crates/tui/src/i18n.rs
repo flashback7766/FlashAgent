@@ -268,6 +268,7 @@ static RU: &[(&str, &str)] = &[
     ("/provider switches to another saved provider, local or cloud, and the conversation goes on.", "/provider переходит на другого сохранённого провайдера, локального или облачного; разговор продолжается."),
     ("flashagent -y skips the directory trust question for trusted projects.", "flashagent -y пропускает вопрос о доверии папке для знакомых проектов."),
     ("flashagent --url <endpoint> talks to another server for one run and saves nothing about it.", "flashagent --url <endpoint> говорит с другим сервером один прогон и ничего о нём не запоминает."),
+    ("The directory you were in is gone; FlashAgent starts in your home folder.", "Папка, в которой вы находились, пропала; FlashAgent начинается в домашней папке."),
     ("The line under the input shows what the agent is doing right now.", "Строка под вводом показывает, чем агент занят прямо сейчас."),
     ("Every tool call carries a one-line header from the model saying what it is for.", "У всякого вызова инструмента есть строка от модели — зачем он."),
     ("A declined tool call is not retried; the model is told to ask you instead.", "Отклонённый вызов не повторяется; модель просят спросить вас вместо этого."),
