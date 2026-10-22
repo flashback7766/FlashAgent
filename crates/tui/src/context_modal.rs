@@ -16,9 +16,9 @@ impl ContextModal {
         let mut lines = Vec::new();
         let border_color = "\x1b[38;2;100;95;90m";
         let reset = "\x1b[0m";
-        let inner_w = width.saturating_sub(6).clamp(20, 76);
+        let inner_w = width.saturating_sub(6).min(76);
 
-        let title = " Context usage ";
+        let title = format!(" {} ", crate::i18n::tr("Context usage"));
         let dash_count = inner_w.saturating_sub(title.chars().count() + 1);
         lines.push((
             LineKind::System,
@@ -36,33 +36,43 @@ impl ContextModal {
             format!("  {border_color}│{reset} {clipped}{pad} {border_color}│{reset}")
         };
 
+        // The labels are a column of their own, so the numbers line up in
+        // either language.
+        let label = |text: &str| format!("{:<16}", crate::i18n::tr(text));
+        let tokens = crate::i18n::tr("tokens");
         lines.push((LineKind::System, pad_row(&format!(
-            "\x1b[1;38;2;240;235;225mTotal window:\x1b[0m       \x1b[38;2;200;195;185m{:>7} tokens\x1b[0m ({})",
+            "\x1b[1;38;2;240;235;225m{}\x1b[0m\x1b[38;2;200;195;185m{:>7} {}\x1b[0m ({})",
+            label("Total window:"),
             cap,
+            tokens,
             ContextUsage::format_tokens(cap)
         ))));
         lines.push((LineKind::System, pad_row(&format!(
-            "\x1b[1;38;2;240;235;225mTotal used:\x1b[0m         \x1b[38;2;225;175;95m{:>7} tokens\x1b[0m ({:.1}%)",
+            "\x1b[1;38;2;240;235;225m{}\x1b[0m\x1b[38;2;225;175;95m{:>7} {}\x1b[0m ({:.1}%)",
+            label("Total used:"),
             used,
+            tokens,
             pct
         ))));
         lines.push((LineKind::System, pad_row(&format!(
-            "\x1b[1;38;2;240;235;225mRemaining free:\x1b[0m     \x1b[38;2;145;205;140m{:>7} tokens\x1b[0m ({:.1}%)",
+            "\x1b[1;38;2;240;235;225m{}\x1b[0m\x1b[38;2;145;205;140m{:>7} {}\x1b[0m ({:.1}%)",
+            label("Remaining free:"),
             rem,
+            tokens,
             (100.0 - pct).max(0.0)
         ))));
 
         lines.push((LineKind::System, pad_row("")));
-        lines.push((LineKind::System, pad_row("\x1b[1;38;2;180;175;165mBy component\x1b[0m")));
+        lines.push((LineKind::System, pad_row(&format!("\x1b[1;38;2;180;175;165m{}\x1b[0m", crate::i18n::tr("By component")))));
 
         let items = [
-            ("System prompt", self.usage.system_tokens),
-            ("Memory and project", self.usage.memory_tokens),
-            ("Tool definitions", self.usage.tools_tokens),
-            ("User prompts", self.usage.user_tokens),
-            ("Assistant replies", self.usage.assistant_tokens),
-            ("Reasoning content", self.usage.reasoning_tokens),
-            ("Tool outputs", self.usage.tool_output_tokens),
+            (crate::i18n::tr("System prompt"), self.usage.system_tokens),
+            (crate::i18n::tr("Memory and project"), self.usage.memory_tokens),
+            (crate::i18n::tr("Tool definitions"), self.usage.tools_tokens),
+            (crate::i18n::tr("User prompts"), self.usage.user_tokens),
+            (crate::i18n::tr("Assistant replies"), self.usage.assistant_tokens),
+            (crate::i18n::tr("Reasoning content"), self.usage.reasoning_tokens),
+            (crate::i18n::tr("Tool outputs"), self.usage.tool_output_tokens),
         ];
 
         // Label, count and share take 45 columns; the bar gets what is left, up to 16.
@@ -72,16 +82,17 @@ impl ContextModal {
             let bar_len = ((item_pct / 100.0) * bar_w as f32).round() as usize;
             let bar = "█".repeat(bar_len.min(bar_w));
             lines.push((LineKind::System, pad_row(&format!(
-                "  \x1b[38;2;160;155;145m{:<18}\x1b[0m {:>6} tokens  \x1b[38;2;135;130;125m({:>4.1}%)\x1b[0m  \x1b[38;2;175;170;225m{bar}\x1b[0m",
+                "  \x1b[38;2;160;155;145m{:<22}\x1b[0m {:>6} {}  \x1b[38;2;135;130;125m({:>4.1}%)\x1b[0m  \x1b[38;2;175;170;225m{bar}\x1b[0m",
                 label,
                 count,
+                tokens,
                 item_pct
             ))));
         }
 
         lines.push((LineKind::System, pad_row("")));
         let gauge = self.usage.format_compact_gauge(20);
-        lines.push((LineKind::System, pad_row(&format!("Gauge: {gauge}"))));
+        lines.push((LineKind::System, pad_row(&format!("{} {gauge}", crate::i18n::tr("Gauge:")))));
         lines.push((LineKind::System, pad_row(&crate::key_hints(&[("Esc", "close")], inner_w.saturating_sub(2)))));
 
         lines.push((

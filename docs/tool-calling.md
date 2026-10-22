@@ -15,8 +15,9 @@ so a published table can be checked instead of believed.
 
 ## What is measured
 
-Eight small scenarios, each one something the agent loop does on real work.
-A model that fails one fails a real task the same way, later.
+Twenty scenarios: fifteen single-turn, each one something the agent loop does
+on real work, and five for delegation. A model that fails one fails a real
+task the same way, later.
 
 | Scenario | The model is asked to | Why a failure hurts |
 | :--- | :--- | :--- |
@@ -28,9 +29,33 @@ A model that fails one fails a real task the same way, later.
 | **keeps content exact through JSON** | write a file containing quotes and newlines | content mangled in transit corrupts the file being written |
 | **recovers from a failed tool call** | after `error: no such file …`, retry with the corrected path | tools fail constantly; a model that cannot adapt stalls on the first one |
 | **asks for two files in one turn** | read two files with two calls in one turn | one call per turn turns a ten-file job into ten round trips |
+| **calls only the tools it was given** | answer a question only a read can answer | a name it was never offered is a call the loop cannot run |
+| **keeps a long answer coming to the end** | keep going past two hundred lines | an answer that stops halfway leaves the transcript wrong and the work undone |
+| **stays on the rails over many steps** | follow a chain of ten imports, one call a step | drift shows up in step ten, not step two |
+| **looks at a picture** | name the colour in an image | a model that cannot see cannot review a screenshot, and never says so |
+| **keeps a long job going through a failure** | follow the same ten-step chain with one read failing halfway | one bad read is routine; a model that stops the whole job over it never finishes anything |
+| **reads a file before changing it** | change one line of a file it has not read | writing blind costs the rest of the file, which is the whole file |
+| **still knows a fact from the start** | answer a question about a fact given nine turns earlier | this is what compaction has to keep, or every trim costs a re-read |
+| **hands over a wide job, whole** | delegate a search across many files with a complete task description | a child cannot ask what was meant, so a topic comes back as a summary or as nothing |
+| **does not run a search it handed over** | wait while a subagent searches, do not search yourself | two answers to pay for and no way to tell which one is right |
+| **invents nothing while an agent is still running** | answer a user question about a pending agent's result | the one failure a user cannot tell from a real one until they open the file |
+| **reads the file a report named, then acts** | open the file a child reported before changing it | a report is a claim, and acting on it unchecked is a wrong reading made permanent |
+| **does not delegate one file it could open itself** | read a single known file directly | the other half of the same rule: delegation has a cost and a point |
+
+The last eight exist because the twelve before them all asked for one tool call
+and graded it, which says nothing about multi-step work — and two of them pass on
+almost every model, so they are there to catch a regression rather than to
+separate prompts.
+
+The five delegation scenarios use a different system prompt (with the delegation
+rules enabled) and the delegation tool set (`spawn_agent`, `send_message`). They
+are run separately so the check can measure what the model does when the rules
+about subagents are actually in front of it.
 
 Sampling is the same for every model: temperature 0, reasoning off, 1024
-output tokens, one attempt per scenario. The fixtures leave nothing open to
+output tokens, one attempt per scenario. `--repeat N` runs the set N times
+and reports the median beside the scores, and separates the scenarios that
+failed every time from the ones that flipped. The fixtures leave nothing open to
 interpretation: an earlier version gave the model a tool result that began
 with a line number, two models reported that number, and the fixture was
 fixed.

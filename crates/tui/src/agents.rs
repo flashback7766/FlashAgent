@@ -16,12 +16,12 @@ use flashagent_core::{ChildUsage, DoneReason, SubagentEvent};
 /// How a child ended, and the words the app shows for it.
 fn outcome(done: DoneReason) -> &'static str {
     match done {
-        DoneReason::Completed => "answered",
-        DoneReason::StepLimit => "stopped at its step limit",
-        DoneReason::TokenBudget => "stopped at its token limit",
-        DoneReason::TimeLimit => "stopped at its time limit",
-        DoneReason::Cancelled => "stopped",
-        DoneReason::Failed => "failed",
+        DoneReason::Completed => crate::i18n::tr("answered"),
+        DoneReason::StepLimit => crate::i18n::tr("stopped at its step limit"),
+        DoneReason::TokenBudget => crate::i18n::tr("stopped at its token limit"),
+        DoneReason::TimeLimit => crate::i18n::tr("stopped at its time limit"),
+        DoneReason::Cancelled => crate::i18n::tr("stopped"),
+        DoneReason::Failed => crate::i18n::tr("failed"),
     }
 }
 
@@ -52,10 +52,10 @@ pub enum ChildPhase {
 impl ChildPhase {
     pub fn label(&self) -> String {
         match self {
-            ChildPhase::Waiting => "waiting".to_string(),
-            ChildPhase::Thinking => "thinking".to_string(),
-            ChildPhase::Writing => "writing".to_string(),
-            ChildPhase::Tooling(name) => format!("tooling {name}"),
+            ChildPhase::Waiting => crate::i18n::tr("waiting").to_string(),
+            ChildPhase::Thinking => crate::i18n::tr("thinking").to_string(),
+            ChildPhase::Writing => crate::i18n::tr("writing").to_string(),
+            ChildPhase::Tooling(name) => crate::i18n::tr_fill("tooling {name}", &[("name", name)]),
         }
     }
 }
@@ -134,24 +134,24 @@ impl AgentTree {
                 let thought = last_line(text);
                 if !thought.is_empty() {
                     child.phase = ChildPhase::Thinking;
-                    return set_doing(child, format!("thinking: {thought}"));
+                    return set_doing(child, crate::i18n::tr_fill("thinking: {thought}", &[("thought", &thought)]));
                 }
             }
             LoopEvent::ToolStarted { name, .. } => {
                 child.current_call = Some((name.clone(), false));
                 child.phase = ChildPhase::Tooling(name.clone());
-                return set_doing(child, format!("calling {name}"));
+                return set_doing(child, crate::i18n::tr_fill("calling {name}", &[("name", name)]));
             }
             LoopEvent::ToolFinished { is_error, .. } => {
                 let name = child.current_call.take().map(|(n, _)| n).unwrap_or_else(|| "a tool".into());
                 // The result is in; the model has it and has not spoken yet.
                 child.phase = ChildPhase::Thinking;
-                return set_doing(child, if *is_error { format!("{name} failed") } else { format!("{name} done") });
+                return set_doing(child, if *is_error { crate::i18n::tr_fill("{name} failed", &[("name", &name)]) } else { crate::i18n::tr_fill("{name} done", &[("name", &name)]) });
             }
             LoopEvent::StepStarted { step, max_steps } => {
                 child.usage.steps = child.usage.steps.max(*step);
                 let of = max_steps.map(|m| format!("/{m}")).unwrap_or_default();
-                return set_doing(child, format!("step {step}{of}"));
+                return set_doing(child, crate::i18n::tr_fill("step {step}{of}", &[("step", &step.to_string()), ("of", &of)]));
             }
             LoopEvent::Usage(u) => {
                 child.usage.prompt_tokens += u.prompt.unwrap_or(0).max(0) as u64;
@@ -193,23 +193,28 @@ impl AgentTree {
     /// the side of the box it is in.
     pub fn line(&self, id: &str, width: usize, running_mark: &str) -> Option<String> {
         let child = self.children.get(id)?;
-        // Two columns go to the mark and the space after it: `▸ researcher`,
+        let icon = icon(child.done, running_mark);
+        let icon_w = cells(&icon);
+        // The mark and the space after it come out of the row: `▸ researcher`,
         // not a row built against the window and indented by the caller.
-        let room = width.saturating_sub(2);
+        let room = width.saturating_sub(icon_w + 1);
         let mut parts = vec![child.role.clone()];
         if child.usage.steps > 0 {
-            parts.push(format!("{} steps", child.usage.steps));
+            parts.push(crate::text::plural(child.usage.steps as usize, "step", "steps"));
         }
         if child.usage.total_tokens() > 0 {
-            parts.push(format!("{} tokens", k(child.usage.total_tokens())));
+            parts.push(format!("{} {}", k(child.usage.total_tokens()), crate::i18n::tr("tokens")));
         }
         // Its own part: on a narrow terminal the cache detail is what goes, not
         // the number next to it.
         if child.usage.cached_tokens > 0 {
-            parts.push(format!("{} cached", k(child.usage.cached_tokens)));
+            parts.push(format!("{} {}", k(child.usage.cached_tokens), crate::i18n::tr("cached")));
         }
         if let Some(done) = child.done {
-            parts.push(format!("{} in {}s", outcome(done), child.seconds()));
+            parts.push(crate::i18n::tr_fill(
+                "{outcome} in {seconds}s",
+                &[("outcome", outcome(done)), ("seconds", &child.seconds().to_string())],
+            ));
         }
         if let Some(review) = child.review {
             parts.push(review.describe().to_string());
@@ -220,19 +225,21 @@ impl AgentTree {
         let mut line = parts[0].clone();
         for part in &parts[1..] {
             let piece = format!("{line} · {part}");
-            if piece.chars().count() <= room {
+            if cells(&piece) <= room {
                 line = piece;
             }
         }
-        let used = line.chars().count();
+        let used = cells(&line);
         let phase = if child.done.is_none() { child.phase.label() } else { String::new() };
         if !phase.is_empty() {
-            let left = room.saturating_sub(used + 5);
+            // ` · ` takes three cells; the phase gets the rest.
+            let left = room.saturating_sub(used + 3);
             if left > 4 {
                 line = format!("{line} · {}", cut(&phase, left));
             }
         }
-        Some(format!("{} {}", icon(child.done, running_mark), cut(&line, room)))
+        let body = cut(&line, room);
+        Some(if body.is_empty() { cut(&icon, width) } else { format!("{icon} {body}") })
     }
 
     /// The prose the phase replaced, for the row the mouse opens. F2 does not
@@ -245,8 +252,9 @@ impl AgentTree {
             return None;
         }
         // Six columns of indent come out of `width` as well, for the same
-        // reason the mark does in `line`.
-        Some(format!("      {}", cut(&doing, width.saturating_sub(6))))
+        // reason the mark does in `line`. A narrower window keeps what fits.
+        let indent = width.min(6);
+        Some(format!("{}{}", " ".repeat(indent), cut(&doing, width.saturating_sub(indent))))
     }
 
     /// The prose a phase replaced, for every child that has one. Shown only for
@@ -303,7 +311,7 @@ impl AgentTree {
                 Child {
                     id: id.to_string(),
                     role: role.to_string(),
-                    doing: "starting".to_string(),
+                    doing: crate::i18n::tr("starting").to_string(),
                     phase: ChildPhase::Waiting,
                     usage: ChildUsage::default(),
                     done: None,
@@ -314,7 +322,7 @@ impl AgentTree {
                 },
             );
         }
-        self.children.get_mut(id).expect("just inserted")
+        self.children.get_mut(id).unwrap_or_else(|| panic!("{}", crate::i18n::tr("just inserted")))
     }
 }
 
@@ -383,16 +391,33 @@ fn phrase(text: &str) -> String {
     head.to_string()
 }
 
-/// Cut to `width` characters, saying so with an ellipsis rather than leaving a
-/// half word on the row.
+/// Counted in the cells the row takes, not the characters it is made of: on a
+/// CJK row one character is two columns, and a count of characters built a row
+/// twice as wide as the box it is in.
+fn cells(text: &str) -> usize {
+    crate::visible_width(text)
+}
+
+/// Cut to `width` cells, saying so with an ellipsis rather than leaving a half
+/// word or half an emoji on the row.
 fn cut(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
+    use unicode_segmentation::UnicodeSegmentation;
+    if cells(text) <= width {
         return text.to_string();
     }
     if width <= 1 {
         return String::new();
     }
-    let mut out: String = text.chars().take(width - 1).collect();
+    let mut out = String::new();
+    let mut used = 0usize;
+    for g in text.graphemes(true) {
+        let w = cells(g);
+        if used + w > width - 1 {
+            break;
+        }
+        used += w;
+        out.push_str(g);
+    }
     out.push('…');
     out
 }
@@ -472,7 +497,7 @@ mod tests {
                 completion: Some(200),
                 cached: Some(300),
                 mtp: None,
-                cost: None,
+                cost: None, cost_details: None,
             })));
         }
         tree.apply(&ev("sub1", "coder", LoopEvent::StepStarted { step: 2, max_steps: Some(20) }));
@@ -584,7 +609,7 @@ mod tests {
             completion: Some(500),
             cached: Some(1000),
             mtp: None,
-            cost: None,
+            cost: None, cost_details: None,
         })));
         tree.apply(&ev("sub1", "researcher", LoopEvent::StepStarted { step: 3, max_steps: Some(20) }));
         tree.apply(&ev("sub1", "researcher", LoopEvent::TurnDelta(
@@ -594,6 +619,16 @@ mod tests {
         assert!(line.chars().count() <= 46, "{} chars: {line}", line.chars().count());
         assert!(line.contains("4.5k tokens"), "the cost stays: {line}");
         assert!(line.contains("researcher"), "and who it is: {line}");    }
+
+    #[test]
+    fn a_row_of_the_work_box_is_measured_in_cells_and_not_in_characters() {
+        // A wide name takes two columns a character: counted in characters,
+        // the row was twice as wide as the box it is drawn in.
+        let mut tree = AgentTree::default();
+        tree.apply(&ev("sub1", "исследователь", LoopEvent::TurnDelta("日本語のテキスト".into())));
+        let line = tree.line("sub1", 40, STILL).unwrap();
+        assert!(crate::visible_width(&line) <= 40, "{} cells: {line}", crate::visible_width(&line));
+    }
 
     #[test]
     fn a_thought_is_one_phrase_and_not_the_sentence_it_came_from() {

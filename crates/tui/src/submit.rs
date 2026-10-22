@@ -1,4 +1,25 @@
 use super::*;
+use flashagent_tui::i18n::{tr, tr_fill};
+
+/// Messages typed while a compaction owns the history. The history is with the
+/// task (`std::mem::take` in `compact_command`), so a turn started now would
+/// begin from nothing: the words wait here and go out together once the summary
+/// is back. A static rather than an `App` field because `App` lives in main.rs,
+/// which must not change for this.
+static COMPACT_QUEUE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Typed while the context was being compacted: it waits for the summary.
+fn queue_compacted_message(text: String) {
+    let mut queue = COMPACT_QUEUE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    queue.push(text);
+}
+
+/// Everything typed during the compaction, oldest first. Empty when nothing
+/// waited.
+pub(crate) fn take_compacted_messages() -> Vec<String> {
+    let mut queue = COMPACT_QUEUE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::take(&mut *queue)
+}
 
 const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/goal <task>", "an autonomous run; its limits are in Settings \u{2192} Goal"),
@@ -15,8 +36,12 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/regenerate, Ctrl+R", "answer the last prompt again from scratch"),
     ("/rewind [n]", "files and conversation go back to before turn n"),
     ("/diff, /commit <msg>", "the changed lines and untracked files; commit the staged changes"),
-    ("/export [md|html|jsonl]", "write the conversation to a file"),
+    ("/export [md|html|jsonl] [path]", "write the conversation to a file, where you say"),
     ("/editor, Ctrl+X Ctrl+E", "write the prompt in an external editor"),
+    ("/tools", "what the model may call, and what it may not"),
+    ("/notices", "what the app said, kept so it can be read again"),
+    ("/rules", "the standing permissions, and a way to take them back"),
+    ("/safe", "the safe mode: reading and editing inside the project, nothing else"),
     ("/mcp [list|market|test|add|reload]", "Model Context Protocol servers"),
     ("/tasks", "background commands: their output, and stopping one"),
     ("/sampling", "sampling parameters (advanced)"),
@@ -30,7 +55,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
 
 const HELP_KEYS: &[(&str, &str)] = &[
     ("Enter", "send; while a turn runs, steer it, or run a /command (/compact, /clear, /export and /rewind wait for the turn to end)"),
-    ("Alt+Enter, Ctrl+J, \\ Enter", "a new line in the prompt"),
+    ("Alt+Enter, Shift+Enter, Ctrl+J, \\ Enter", "a new line in the prompt"),
     ("\u{2190}/\u{2192}, Home/End, Ctrl+A/E, Ctrl+W, Ctrl+U, Alt+K", "move and delete in the prompt, as in a shell"),
     ("Ctrl+F", "search the prompts sent before"),
     ("Ctrl+V", "paste a screenshot (Ctrl+Z takes it back); dropping an image works too"),
@@ -49,18 +74,24 @@ fn help_text(width: usize) -> String {
     const WHAT: &str = "\x1b[38;2;165;160;150m";
     const OFF: &str = "\x1b[0m";
     let width = width.max(30);
-    let key_w = (width / 3).clamp(12, 26);
+    let key_w = (width / 3).clamp(12, 26).min(width);
     let what_w = width.saturating_sub(key_w + 4).max(16);
     let mut out = Vec::new();
     for (title, rows) in [
-        ("Commands and skills \u{b7} Tab completes them, Ctrl+K searches everything", HELP_COMMANDS),
-        ("Keys", HELP_KEYS),
+        (
+            tr("Commands and skills \u{b7} Tab completes them, Ctrl+K searches everything"),
+            HELP_COMMANDS,
+        ),
+        (tr("Keys"), HELP_KEYS),
     ] {
         if !out.is_empty() {
             out.push(String::new());
         }
         out.push(format!("{HEAD}{title}{OFF}"));
         for (key, what) in rows {
+            // The meaning follows the language of the interface; the command
+            // and the key stay as the terminal spells them.
+            let what = tr(what);
             let wrapped = wrap_plain(what, what_w);
             let key_cells = visible_width(key);
             // A key too long for its column gets a line of its own.
@@ -80,12 +111,30 @@ fn help_text(width: usize) -> String {
 }
 
 /// `/name arg` as (name, arg); the line starts with a slash.
+///
+/// The one place that reads a command line: the slash is cut here and
+/// nowhere else, so the name and the argument mean the same thing in every
+/// path that takes a command.
 fn split_command(line: &str) -> (&str, &str) {
     let rest = line.strip_prefix('/').unwrap_or(line);
     match rest.split_once(char::is_whitespace) {
         Some((name, arg)) => (name, arg.trim()),
         None => (rest, ""),
     }
+}
+
+/// The paths in a message that attach a picture, and nothing else.
+///
+/// Only a message that is nothing but paths attaches them: a file named in a
+/// sentence is a mention, and the model has `view_image` for it. Attaching it
+/// anyway spends the traffic, the tokens and the money without anyone asking
+/// for a picture.
+fn standalone_paths(text: &str) -> Option<Vec<&str>> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() || !words.iter().all(|word| word.contains('/') || word.contains('\\')) {
+        return None;
+    }
+    Some(words)
 }
 
 /// What a command does when it is typed while a turn runs.
@@ -106,7 +155,9 @@ fn while_running(name: &str) -> WhileRunning {
     match name {
         "help" | "?" | "whatsnew" | "changelog" | "memory" | "memories" | "context" | "verbose" | "expand" | "think"
         | "o" | "diff" | "commit" | "settings" | "config" | "sampling" | "params" | "effort" | "thinking" | "t"
-        | "model" | "models" | "m" | "mode" | "skills" => WhileRunning::Now,
+        | "model" | "models" | "m" | "mode" | "skills" | "tools" | "notices" | "log" | "safe" | "rules" | "cost" => {
+            WhileRunning::Now
+        }
         "compact" | "clear" | "export" | "rewind" => WhileRunning::AfterTurn,
         "goal" | "resume" | "regenerate" | "retry" | "update" | "channel" | "mcp" | "editor" | "exit" | "quit" | "q"
         | "uninstall" => WhileRunning::Refuse,
@@ -117,10 +168,69 @@ fn while_running(name: &str) -> WhileRunning {
     }
 }
 
+/// The first sentence of a tool's description: the list is a list, not a
+/// manual.
+fn first_sentence(text: &str) -> String {
+    let text = text.trim();
+    match text.find(". ") {
+        Some(at) => text[..at + 1].to_string(),
+        None => text.chars().take(90).collect(),
+    }
+}
+
+/// The format and the path of an export: `/export md ~/notes/chat.md` writes
+/// markdown there, `/export "~/my notes/chat.md"` writes markdown to a path
+/// with spaces in it.
+fn split_export_arg(arg: &str) -> (String, Option<String>) {
+    let arg = arg.trim();
+    if let Some(rest) = arg.strip_prefix('"') {
+        let path = rest.strip_suffix('"').unwrap_or(rest);
+        return ("md".to_string(), Some(path.trim().to_string()));
+    }
+    match arg.split_once(char::is_whitespace) {
+        Some((format, rest)) => {
+            let path = rest.trim();
+            (format.to_string(), (!path.is_empty()).then(|| path.to_string()))
+        }
+        None => (arg.to_string(), None),
+    }
+}
+
+/// Where an export goes: the path the person named, with the format's ending
+/// added when they left it out, and the default name when they named a
+/// folder.
+fn export_target(path: &str, default_name: &str) -> String {
+    let expanded = flashagent_core::paths::expand_home(path.trim());
+    let raw = expanded.as_ref();
+    let looks_like_a_folder = raw.ends_with('/') || raw.ends_with('\\') || std::path::Path::new(raw).is_dir();
+    if looks_like_a_folder {
+        return std::path::Path::new(raw).join(default_name).display().to_string();
+    }
+    let candidate = std::path::Path::new(raw);
+    if candidate.extension().is_none() {
+        // No ending: the format's one is used, so "notes/chat" is a markdown file.
+        let default_ext = std::path::Path::new(default_name).extension().map(|e| e.to_string_lossy().to_string());
+        if let Some(ext) = default_ext {
+            return format!("{raw}.{ext}");
+        }
+    }
+    raw.to_string()
+}
+
+/// Commands that begin a model turn. During a compaction these wait with a
+/// message: the history is with the task, and a turn now would start from
+/// nothing.
+fn starts_a_turn(name: &str, arg: &str) -> bool {
+    (name == "goal" && !arg.is_empty())
+        || matches!(name, "regenerate" | "retry")
+        || name.starts_with("skill:")
+        || find_skill_file(name).is_some()
+}
+
 fn untracked_list(files: &[&str]) -> String {
     let mut rows: Vec<String> = files.iter().take(8).map(|f| format!("  {f}")).collect();
     if files.len() > 8 {
-        rows.push(format!("  \u{2026} and {} more", files.len() - 8));
+        rows.push(tr_fill("  \u{2026} and {n} more", &[("n", &(files.len() - 8).to_string())]));
     }
     rows.join("\n")
 }
@@ -129,17 +239,63 @@ impl App {
     /// Enter on a non-empty prompt with no turn running.
     pub(crate) async fn submit_input(&mut self, cx: &mut LoopCtx<'_>) -> Flow {
         let line = self.input.trim().to_string();
-        if let Some(rest) = line.strip_prefix('/') {
-            let (name, arg) = match rest.split_once(char::is_whitespace) {
-                Some((name, arg)) => (name, arg.trim()),
-                None => (rest, ""),
-            };
+        if line.starts_with('/') {
+            let (name, arg) = split_command(&line);
+            // The history is with the compaction task: a command that starts a
+            // turn would begin from nothing, so it waits with a message.
+            if self.compacting && starts_a_turn(name, arg) {
+                return self.queue_while_compacting(&line);
+            }
             if let Some(flow) = self.run_command(cx, name, arg).await {
                 return flow;
             }
         }
+        if self.compacting {
+            return self.queue_while_compacting(&line);
+        }
         self.send_prompt(cx);
         Flow::Next
+    }
+
+    /// Enter while the context is being compacted: the history is with the
+    /// task, so a new turn would start from nothing. The words wait and go out
+    /// together once the summary is back.
+    fn queue_while_compacting(&mut self, line: &str) -> Flow {
+        let text = line.trim().to_string();
+        if !text.is_empty() {
+            queue_compacted_message(text);
+        }
+        self.input.take();
+        self.notice(tr("Compaction is still running \u{b7} your message is queued and will be sent when it finishes"));
+        Flow::Next
+    }
+
+    /// The compaction came back: whatever was typed while it ran goes out now,
+    /// ahead of a draft typed since. Called from the `Compacted` handler
+    /// (`on_compacted`) once the history is restored, whether the summary was
+    /// saved or not. With no turn under way it is one new turn; with one
+    /// running, the words ride it as steering.
+    pub(crate) fn send_queued_after_compaction(&mut self, cx: &LoopCtx<'_>) {
+        let queued = take_compacted_messages();
+        if queued.is_empty() {
+            return;
+        }
+        let joined = queued.join("\n\n");
+        if self.running {
+            if let Some(tx) = self.active_steer_tx.clone() {
+                let _ = tx.send(flashagent_core::Steer::text(joined.clone()));
+                self.pending_steers.push((joined, Vec::new()));
+            } else {
+                // No channel: the words go back to the prompt rather than away.
+                let draft = self.input.take();
+                self.input.set(if draft.trim().is_empty() { joined } else { format!("{joined}\n\n{draft}") });
+            }
+            self.renderer.request_reprint();
+            return;
+        }
+        let draft = self.input.take();
+        self.input.set(if draft.trim().is_empty() { joined } else { format!("{joined}\n\n{draft}") });
+        self.send_prompt(cx);
     }
 
     /// Enter on a `/command` while a turn runs. False when the line is not one
@@ -160,10 +316,26 @@ impl App {
                     self.queued_commands.push(line.clone());
                     // A queued command that says nothing looks like the app
                     // swallowed it, and that reads the same as a hang.
-                    self.background = Some(BackgroundNotice::fading(format!("/{name} will run when this turn finishes \u{b7} Esc ends the turn now instead"), 6).warning());
+                    self.say(BackgroundNotice::fading(
+                        tr_fill(
+                            "/{name} will run when this turn finishes \u{b7} Esc ends the turn now instead",
+                            &[("name", name)],
+                        ),
+                        6,
+                    )
+                    .warning());
                 }
             }
-            WhileRunning::Refuse => self.background = Some(BackgroundNotice::fading(format!("/{name} does not run while the model works \u{b7} Esc interrupts the turn first"), 6).warning()),
+            WhileRunning::Refuse => self.say(
+                BackgroundNotice::fading(
+                    tr_fill(
+                        "/{name} does not run while the model works \u{b7} Esc interrupts the turn first",
+                        &[("name", name)],
+                    ),
+                    6,
+                )
+                .warning(),
+            ),
             WhileRunning::Unknown => self.unknown_command(name),
         }
         self.renderer.request_reprint();
@@ -217,13 +389,13 @@ impl App {
                 self.open_overlay(Overlay::Memory(modal));
             }
             "context" => {
-                update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                 self.open_overlay(Overlay::Context(ContextModal::new(self.context_usage.clone())));
             }
             "clear" => self.clear_chat(),
             "regenerate" | "retry" => {
                 if !self.regenerate(cx) {
-                    self.notice("No previous turn to regenerate");
+                    self.notice(tr("No previous turn to regenerate"));
                 }
             }
             "effort" | "thinking" | "t" if arg.is_empty() => self.open_effort_menu(cx.source),
@@ -260,7 +432,7 @@ impl App {
             "editor" => {
                 match open_in_external_editor("", &self.config.external_editor) {
                     Ok(edited) => self.input.set(edited),
-                    Err(err) => self.notice(format!("Failed to launch external editor: {err}")),
+                    Err(err) => self.notice(tr_fill("Failed to launch external editor: {err}", &[("err", &err.to_string())])),
                 }
                 // Coming back to the alternate screen found it blank.
                 self.renderer.request_reprint();
@@ -269,6 +441,10 @@ impl App {
             "rewind" => self.rewind_command(cx, arg),
             "commit" => self.git_commit(arg),
             "export" => self.export_conversation(cx, arg),
+            "tools" => self.tools_command(cx),
+            "notices" | "log" => self.notices_command(),
+            "rules" => self.rules_command(cx),
+            "safe" => self.safe_command(cx),
             _ => {
                 if let Some(skill) = name.strip_prefix("skill:") {
                     self.run_skill(cx, skill);
@@ -291,18 +467,35 @@ impl App {
     fn unknown_command(&mut self, name: &str) {
         let word = format!("/{name}");
         let known = flashagent_tui::autocomplete::builtin_commands();
-        let guess = known
-            .iter()
-            .map(|c| c.trigger.as_str())
-            .filter(|t| !t.contains(' '))
-            .min_by_key(|t| flashagent_tui::autocomplete::edit_distance(t, &word))
-            .filter(|t| flashagent_tui::autocomplete::edit_distance(t, &word) <= 2);
+        let triggers: Vec<String> = known.iter().map(|c| c.trigger.clone()).collect();
+        let guess = flashagent_tui::autocomplete::closest_match(&word, triggers.iter().map(|t| t.as_str()));
         // The typo stays in the prompt; the placeholder only shows on an empty one.
         let said = match guess {
-            Some(g) => format!("Unknown command {word} · did you mean {g}?"),
-            None => format!("Unknown command {word} · /help lists them"),
+            Some(g) => tr_fill("Unknown command {word} · did you mean {g}?", &[("word", &word), ("g", g)]),
+            None => tr_fill("Unknown command {word} · /help lists them", &[("word", &word)]),
         };
-        self.background = Some(BackgroundNotice::fading(said, 6));
+        self.say(BackgroundNotice::fading(said, 6));
+    }
+
+    /// Remembers a switch for the first message that uses it. Picking a model
+    /// in a menu changes the next request, but writing the rule now would put
+    /// it above a chat nothing has been sent in yet.
+    pub(crate) fn remember_switch(&mut self, provider: Option<&str>, model: bool, effort: bool) {
+        if let Some(name) = provider {
+            self.pending_switch.provider = Some(name.to_string());
+        }
+        self.pending_switch.model |= model;
+        self.pending_switch.effort |= effort;
+    }
+
+    /// Writes the remembered switch above the message that is about to go out.
+    /// One rule even when the provider and its model changed together.
+    pub(crate) fn flush_switch_notice(&mut self) {
+        let pending = std::mem::take(&mut self.pending_switch);
+        let Some(label) = pending.label(&self.current_model, &self.current_effort) else { return };
+        if self.chat.push_model_notice(&label) {
+            self.renderer.request_reprint();
+        }
     }
 
     fn send_prompt(&mut self, cx: &LoopCtx<'_>) {
@@ -315,28 +508,34 @@ impl App {
         // Only a path typed out on its own attaches a picture; a file named in a
         // sentence is a mention, and the model has view_image for it. A dropped file
         // arrives as a paste on Unix and as typing on Windows; both land here.
-        let mut left = String::new();
-        for token in text.split_whitespace() {
-            let attached = (token.contains('/') || token.contains('\\'))
-                && self.attachments.len() < 8
-                && match Attachment::from_dropped_path(token) {
+        //
+        // The whole message has to be paths — one of them, or several. A path
+        // named in a sentence is a mention: attaching it would spend the
+        // traffic, the tokens and the money without anyone asking for a picture.
+        //
+        // Whether every path in the message became a picture. One that does not
+        // exist is not a picture, and its name stays in the text: the model is
+        // told about a file it cannot see otherwise.
+        let mut all_pictures = false;
+        if let Some(words) = standalone_paths(&text) {
+            all_pictures = true;
+            for word in words {
+                if self.attachments.len() >= 8 {
+                    all_pictures = false;
+                    continue;
+                }
+                match Attachment::from_dropped_path(word) {
                     Some(att) => {
                         if !self.attachments.iter().any(|a| a.data_url == att.data_url) {
                             self.attachments.push(att);
                         }
-                        true
                     }
-                    None => false,
-                };
-            if !attached {
-                if !left.is_empty() {
-                    left.push(' ');
+                    None => all_pictures = false,
                 }
-                left.push_str(token);
             }
         }
         // A message of only pictures: the dropped path is not text for the model.
-        let text = if left.trim().is_empty() && !self.attachments.is_empty() { String::new() } else { text };
+        let text = if all_pictures && !self.attachments.is_empty() { String::new() } else { text };
         let shown = if self.attachments.is_empty() {
             text.clone()
         } else {
@@ -348,32 +547,15 @@ impl App {
                 format!("{text}  [{}]", labels.join(", "))
             }
         };
+        self.flush_switch_notice();
         self.chat.push_user(&shown);
-        let content = self.with_memory_if_first(cx, text);
-        let mut user_msg = ChatMessage::user(content);
+        let mut user_msg = ChatMessage::user(text);
         if !self.attachments.is_empty() {
             user_msg.images = self.attachments.drain(..).map(|a| a.data_url).collect();
         }
         self.history.push(user_msg);
         self.begin_snapshot_turn(cx);
         self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
-    }
-
-    /// The memory block goes in front of the first user message, and again
-    /// after compaction took that message away: project instructions must not
-    /// silently leave the context.
-    fn with_memory_if_first(&self, cx: &LoopCtx<'_>, text: String) -> String {
-        let first = !self
-            .history
-            .iter()
-            .any(|m| m.role == flashagent_llm::Role::User && m.content.starts_with(cx.memory_block));
-        if !first || cx.memory_block.is_empty() {
-            text
-        } else if text.trim().is_empty() {
-            cx.memory_block.to_string()
-        } else {
-            format!("{}\n\n---\n\n{text}", cx.memory_block)
-        }
     }
 
     /// Before the message just pushed onto the history.
@@ -420,9 +602,14 @@ impl App {
         cx.perm.state().set_goal_active(true);
         self.current_effort = "high".to_string();
         cx.tools_arc.set_goal_mode(true);
+        self.goal_active = true;
+        self.apply_personality();
+        self.refresh_welcome_state(cx.source, cx.mascot_mood);
+        // A switch made before the goal belongs above the goal card, not inside it.
+        self.flush_switch_notice();
 
         let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
-        let card_w = (w as usize).saturating_sub(4).clamp(20, 110);
+        let card_w = (w as usize).saturating_sub(4).min(110);
         let inner_w = card_w.saturating_sub(2);
         let border_color = "\x1b[38;2;225;175;95m";
         let reset = "\x1b[0m";
@@ -433,7 +620,7 @@ impl App {
             LineKind::System,
             format!("{border_color}╭─\x1b[1;38;2;245;240;232m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)),
         );
-        let meta = "Accept All \u{b7} thinking high \u{b7} Esc stops the run";
+        let meta = flashagent_tui::i18n::tr("Accept All \u{b7} thinking high \u{b7} Esc stops the run");
         let budget = format!("Budget: {}", goal_budgets.summary());
         let rows: Vec<String> =
             [meta, budget.as_str()].iter().flat_map(|text| wrap_plain(text, inner_w.saturating_sub(2))).collect();
@@ -449,9 +636,11 @@ impl App {
         self.chat.push_user(&format!("/goal {task_desc}"));
 
         let budget_rule = if goal_budgets.is_unlimited() {
-            "This run has no budget: it ends when you finish or the user stops it. Say plainly \
-             what is left unfinished or unverified rather than claiming success."
-                .to_string()
+            flashagent_tui::i18n::tr(
+                "This run has no budget: it ends when you finish or the user stops it. Say plainly \
+                 what is left unfinished or unverified rather than claiming success.",
+            )
+            .to_string()
         } else {
             format!(
                 "Budget for this run: {}. When it runs out the run is stopped wherever it \
@@ -481,8 +670,7 @@ impl App {
             task_desc,
             flashagent_tui::goal::human_duration(flashagent_tools::GOAL_QUESTION_TIMEOUT),
         );
-        let content = self.with_memory_if_first(cx, autonomous_directive);
-        self.history.push(ChatMessage::user(content));
+        self.history.push(ChatMessage::user(autonomous_directive));
         self.begin_snapshot_turn(cx);
         self.start_turn(cx, goal_budgets);
     }
@@ -491,7 +679,7 @@ impl App {
         let skills = flashagent_tui::autocomplete::load_skills(std::path::Path::new("."));
         let listed: Vec<String> = skills.iter().map(|s| format!("  • {} — {}", s.trigger, s.description)).collect();
         if listed.is_empty() {
-            self.notice("No skills yet · add .agents/skills/<name>.md here, or ~/.flashagent/skills/<name>.md for every project");
+            self.notice(tr("No skills yet · add .agents/skills/<name>.md here, or ~/.flashagent/skills/<name>.md for every project"));
         } else {
             self.chat.push_system(&format!("Skills:\n{}", listed.join("\n")));
         }
@@ -500,9 +688,22 @@ impl App {
     fn run_skill(&mut self, cx: &LoopCtx<'_>, name: &str) {
         let name = name.trim();
         let Some(skill_content) = find_skill_file(name).and_then(|p| std::fs::read_to_string(p).ok()) else {
-            self.notice(format!("Unknown skill '{name}' · /skills lists them"));
+            // A name that is close to one of the skills is that one, said out
+            // loud: a typo should not need a search.
+            let skills = flashagent_tui::autocomplete::load_skills(std::path::Path::new("."));
+            let names: Vec<String> = skills.iter().map(|s| s.trigger.trim_start_matches("/skill:").to_string()).collect();
+            let guess = flashagent_tui::autocomplete::closest_match(name, names.iter().map(|n| n.as_str()));
+            let said = match guess {
+                Some(near) => tr_fill(
+                    "Unknown skill '{name}' · did you mean '{near}'?",
+                    &[("name", name), ("near", near)],
+                ),
+                None => tr_fill("Unknown skill '{name}' · /skills lists them", &[("name", name)]),
+            };
+            self.notice(said);
             return;
         };
+        self.flush_switch_notice();
         self.chat.push_user(&format!("/skill:{name}"));
         self.history.push(ChatMessage::user(format!("Execute skill: {name}\n\nSkill Instructions:\n{skill_content}")));
         self.begin_snapshot_turn(cx);
@@ -517,7 +718,7 @@ impl App {
             news = flashagent_tui::whatsnew::latest(3);
         }
         if news.is_empty() {
-            self.notice("No changelog is bundled with this build");
+            self.notice(tr("No changelog is bundled with this build"));
         } else {
             let mut deferred = Vec::new();
             flashagent_tui::whatsnew::run_channel(news, now, cx.rx, &mut deferred).await.ok();
@@ -540,29 +741,44 @@ impl App {
     fn show_cost(&mut self) {
         use flashagent_core::CostLedger;
         let Some(total) = self.cost.total() else {
-            self.chat.push_system(&format!(
-                "No backend in this session reported a price \u{b7} {} is running free on your own hardware, or its API does not say what a turn costs",
-                self.config.active_profile().name
+            self.chat.push_system(&tr_fill(
+                "No backend in this session reported a price \u{b7} {name} is running free on your own hardware, or its API does not say what a turn costs",
+                &[("name", &self.config.active_profile().name)],
             ));
             return;
         };
-        self.chat.push_system(&format!(
-            "This session: ${} over {}",
-            CostLedger::format_amount(total),
-            CostLedger::turns_phrase(self.cost.priced_turns())
+        self.chat.push_system(&tr_fill(
+            "This session: ${amount} over {turns}",
+            &[
+                ("amount", &CostLedger::format_amount(total)),
+                ("turns", &CostLedger::turns_phrase(self.cost.priced_turns())),
+            ],
         ));
+        // What the providers behind the gateways charged: the difference is
+        // what the gateway added for itself.
+        if let Some(upstream) = self.cost.upstream_total() {
+            self.chat.push_system(&tr_fill(
+                "  the providers themselves: ${amount} over {turns}",
+                &[
+                    ("amount", &CostLedger::format_amount(upstream)),
+                    ("turns", &CostLedger::turns_phrase(self.cost.upstream_turns())),
+                ],
+            ));
+        }
         for row in self.cost.by_provider() {
             // A model the backend prices at nothing has no bill to break down:
             // saying "$0.00 over 12 turns" reads as an empty account rather than
             // as one that does not exist.
             let line = if row.total == 0.0 {
-                format!("  {} \u{b7} free", row.name)
+                tr_fill("  {name} \u{b7} free", &[("name", &row.name)])
             } else {
-                format!(
-                    "  {} \u{b7} ${} over {}",
-                    row.name,
-                    CostLedger::format_amount(row.total),
-                    CostLedger::turns_phrase(row.turns)
+                tr_fill(
+                    "  {name} \u{b7} ${amount} over {turns}",
+                    &[
+                        ("name", &row.name),
+                        ("amount", &CostLedger::format_amount(row.total)),
+                        ("turns", &CostLedger::turns_phrase(row.turns)),
+                    ],
                 )
             };
             self.chat.push_system(&line);
@@ -576,13 +792,16 @@ impl App {
             known.extend(p.presets.iter().filter(|p| !known.contains(p)).cloned().collect::<Vec<_>>());
         }
         if !known.contains(&wanted) {
-            self.notice(format!("Unknown effort '{wanted}' · try {}", known.join(", ")));
+            self.notice(tr_fill("Unknown effort '{wanted}' · try {known}", &[("wanted", &wanted), ("known", &known.join(", "))]));
             return;
         }
+        let changed = self.current_effort != wanted;
         self.current_effort = wanted;
         self.save_live_effort();
-        self.refresh_welcome(cx.source, cx.mascot_mood);
-        self.notice(format!("Thinking effort set to: {}", self.current_effort));
+        self.refresh_welcome_state(cx.source, cx.mascot_mood);
+        if changed {
+            self.remember_effort_switch();
+        }
     }
 
     fn mode_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {
@@ -593,18 +812,18 @@ impl App {
             "acceptedits" | "accept_edits" | "edits" | "auto" | "default" => PermissionMode::AcceptEdits,
             "bypass" | "accept_all" | "all" => PermissionMode::Bypass,
             "autonomic" => {
-                self.notice("Autonomous mode runs only inside /goal <task>");
+                self.notice(tr("Autonomous mode runs only inside /goal <task>"));
                 return;
             }
             _ => {
-                self.notice("Usage: /mode planning | /mode manual | /mode edits | /mode all");
+                self.notice(tr("Usage: /mode planning | /mode manual | /mode edits | /mode all"));
                 return;
             }
         };
         cx.perm.state().set_mode(mode);
         self.remember_mode(mode);
         self.refresh_welcome(cx.source, cx.mascot_mood);
-        self.notice(format!("Permission mode set to: {}", mode.label()));
+        self.notice(format!("{} {}", tr("Permission mode set to:"), tr(mode.label())));
     }
 
     fn channel_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {
@@ -620,12 +839,12 @@ impl App {
             "stable" | "v" => UpdateChannel::Stable,
             "beta" | "b" => UpdateChannel::Beta,
             _ => {
-                self.notice("Unknown channel · /channel stable or /channel beta");
+                self.notice(tr("Unknown channel · /channel stable or /channel beta"));
                 return;
             }
         };
         if wanted == self.config.update_channel {
-            self.notice(format!("Already on the {} channel", wanted.label()));
+            self.notice(tr_fill("Already on the {channel} channel", &[("channel", wanted.label())]));
             return;
         }
         // Switching can install an older binary, so it always asks.
@@ -641,9 +860,11 @@ impl App {
             "" | "help" => self.open_mcp(cx, McpViewTab::Overview).await,
             "list" | "ls" => self.open_mcp(cx, McpViewTab::Servers).await,
             "market" | "marketplace" => self.open_mcp(cx, McpViewTab::Marketplace).await,
-            "test" if rest.is_empty() => self.chat.push_system("Usage: /mcp test <server_name>\nExample: /mcp test sqlite"),
+            "test" if rest.is_empty() => self.chat.push_system(flashagent_tui::i18n::tr(
+                "Usage: /mcp test <server_name>\nExample: /mcp test sqlite",
+            )),
             "test" => {
-                self.notice(format!("Testing MCP server '{rest}'…"));
+                self.notice(tr_fill("Testing MCP server '{name}'…", &[("name", rest)]));
                 // Drawn before the wait, which can take a while.
                 self.draw(cx, None);
                 match cx.tools_arc.mcp_manager().test_server(rest).await {
@@ -661,11 +882,13 @@ impl App {
                 }
             }
             "add" if rest.is_empty() => self.chat.push_system(
-                "Usage: /mcp add <marketplace_id>\nExample: /mcp add sqlite\nType /mcp market to browse extensions.",
+                flashagent_tui::i18n::tr(
+                    "Usage: /mcp add <marketplace_id>\nExample: /mcp add sqlite\nType /mcp market to browse extensions.",
+                ),
             ),
             "add" => {
                 let Some(item) = flashagent_tools::mcp::find_marketplace_item(rest) else {
-                    self.notice(format!("Unknown extension '{rest}' · /mcp market lists them"));
+                    self.notice(tr_fill("Unknown extension '{name}' · /mcp market lists them", &[("name", rest)]));
                     return;
                 };
                 let cfg = flashagent_tools::mcp::scaffold_config(item);
@@ -682,7 +905,7 @@ impl App {
                             let _ = mgr.start_server(&server_id).await;
                         });
                     }
-                    Err(e) => self.notice(format!("Failed to save the MCP configuration: {e}")),
+                    Err(e) => self.notice(tr_fill("Failed to save the MCP configuration: {e}", &[("e", &e.to_string())])),
                 }
             }
             "reload" => {
@@ -692,16 +915,24 @@ impl App {
                         let statuses = mgr.server_status_list().await;
                         let active = statuses.iter().filter(|s| s.state == flashagent_tools::mcp::ServerConnectionState::Active).count();
                         let tools: usize = statuses.iter().map(|s| s.tool_count).sum();
-                        self.notice(format!(
-                            "MCP reloaded · {} · {}",
-                            flashagent_tui::plural(active, "active server", "active servers"),
-                            flashagent_tui::plural(tools, "tool", "tools")
+                        self.notice(tr_fill(
+                            "MCP reloaded · {servers} · {tools}",
+                            &[
+                                (
+                                    "servers",
+                                    &flashagent_tui::text::plural(active, "active server", "active servers"),
+                                ),
+                                (
+                                    "tools",
+                                    &flashagent_tui::text::plural(tools, "tool", "tools"),
+                                ),
+                            ],
                         ));
                     }
-                    Err(e) => self.notice(format!("MCP reload failed: {e}")),
+                    Err(e) => self.notice(tr_fill("MCP reload failed: {e}", &[("e", &e.to_string())])),
                 }
             }
-            _ => self.notice("Usage: /mcp list | market | test <server> | add <id> | reload"),
+            _ => self.notice(tr("Usage: /mcp list | market | test <server> | add <id> | reload")),
         }
     }
 
@@ -711,21 +942,23 @@ impl App {
     /// the prompt says what is happening instead of the app looking frozen.
     fn compact_command(&mut self, cx: &LoopCtx<'_>, focus: &str) {
         if self.compacting {
-            self.notice("A compaction is already running");
+            self.notice(tr("A compaction is already running"));
             return;
         }
         if self.running {
             // The history belongs to the turn in flight: cutting it now would
             // orphan its tool calls and the turn could never finish.
-            self.notice("/compact waits for the turn to finish · Esc ends the turn first");
+            self.notice(tr("/compact waits for the turn to finish · Esc ends the turn first"));
             return;
         }
-        let Some(archive) = compaction_archive_path(cx.session_id) else {
+        let Some(archive) = session_path(cx.session_id) else {
             self.chat.push_system("Compaction failed or saved no space · conversation unchanged");
             return;
         };
-        let earlier_turns = self.history.iter().filter(|m| flashagent_core::is_prompt(m)).count() > 1;
-        if !earlier_turns {
+        // One exchange is enough: the person asked for a compaction, and the
+        // summary of a short conversation is still a summary.
+        let has_turn = self.history.iter().any(flashagent_core::is_prompt);
+        if !has_turn {
             self.chat.push_system("Nothing to compact yet");
             return;
         }
@@ -733,27 +966,48 @@ impl App {
         self.custom_placeholder = None;
         self.suggested_prompt = None;
         self.compacting = true;
-        // No deadline: the write can take minutes, and a line that ran out
-        // half-way through would be hiding the very thing it reports.
-        self.set_compact_status(
-            format!(
-                "Compacting context… {} of {} in the window · the model is writing the summary",
-                ContextUsage::format_tokens(self.context_usage.total_used()),
-                ContextUsage::format_tokens(self.context_usage.total_capacity)
-            ),
-            0,
-        );
+        self.chat.start_compaction_card();
+        self.renderer.request_reprint();
 
         // The task owns the history until it is done; there is nothing to send
         // a turn with in the meantime, and a turn would have nothing to keep.
         let mut history = std::mem::take(&mut self.history);
+        // What the window holds now: the number the summary is measured
+        // against, and what the card says it freed.
         let used = self.context_usage.total_used();
+        // The room one request may carry: the window minus the prompt, the
+        // memory and the schemas — once. What the conversation holds now is
+        // what gets summarized, so it is not subtracted here.
+        let room = crate::compact::room_for(
+            self.context_usage.total_capacity,
+            self.context_usage.system_tokens + self.context_usage.memory_tokens + self.context_usage.tools_tokens,
+        );
         let source = cx.source.clone();
         let focus = (!focus.is_empty()).then(|| focus.to_string());
+        // The model in use: what the conversation costs is counted with its
+        // own counter, and the compaction decides on the same numbers the bar
+        // shows.
+        let model = self.current_model.clone();
         let tx = cx.tx.clone();
         tokio::spawn(async move {
-            let saved = compact_context(source.as_ref(), &mut history, focus.as_deref(), &archive, Some(used)).await;
-            let _ = tx.send(UiEvent::Compacted { history, saved });
+            let sink = SummarySink::ui(tx.clone());
+            let result =
+                compact_context_with_sink(
+                source.as_ref(),
+                &mut history,
+                crate::compact::Compaction {
+                    focus_prompt: focus.as_deref(),
+                    archive_path: &archive,
+                    real_used: Some(used),
+                    room: Some(room),
+                    allow_growth: true,
+                    model: &model,
+                },
+                Some(&sink),
+            )
+            .await;
+            let saved = result.as_ref().map(|r| r.saved);
+            let _ = tx.send(UiEvent::Compacted { history, saved, card: result });
         });
     }
 
@@ -769,7 +1023,7 @@ impl App {
             "last" => (true, false),
             "off" | "none" | "collapse" => (false, false),
             _ => {
-                self.notice("Usage: /verbose all | /verbose last | /verbose off");
+                self.notice(tr("Usage: /verbose all | /verbose last | /verbose off"));
                 return;
             }
         };
@@ -785,7 +1039,7 @@ impl App {
         let (stat, patch, untracked) = match (git(&["diff", "--stat"]), git(&["diff", "--no-color", "-U2"]), git(&["ls-files", "--others", "--exclude-standard"])) {
             (Ok(stat), Ok(patch), Ok(untracked)) => (stat, patch, untracked),
             (Err(e), ..) | (_, Err(e), _) | (.., Err(e)) => {
-                self.notice(format!("Failed to run git diff: {e}"));
+                self.notice(tr_fill("Failed to run git diff: {e}", &[("e", &e.to_string())]));
                 return;
             }
         };
@@ -830,7 +1084,7 @@ impl App {
 
     fn rewind_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {
         let Some(store) = cx.perm.state().snapshots() else {
-            self.notice("Rewind is not available in this session");
+            self.notice(tr("Rewind is not available in this session"));
             return;
         };
         let prompts: Vec<String> =
@@ -838,15 +1092,17 @@ impl App {
         let prompt_refs: Vec<&str> = prompts.iter().map(String::as_str).collect();
         let turns = store.rewindable(&prompt_refs);
         if turns.is_empty() {
-            self.notice("Nothing to rewind to yet");
+            self.notice(tr("Nothing to rewind to yet"));
             return;
         }
         let Some(n) = arg.parse::<usize>().ok().filter(|n| (1..=turns.len()).contains(n)) else {
             if !arg.is_empty() {
-                self.notice(format!("No turn {arg} to rewind to: pick 1 to {}", turns.len()));
+                self.notice(tr_fill("No turn {arg} to rewind to: pick 1 to {count}", &[("arg", arg), ("count", &turns.len().to_string())]));
             }
             let mut text = String::from(
-                "Turns you can go back to. The files FlashAgent changed and the conversation return to how they were before the turn:\n",
+                flashagent_tui::i18n::tr(
+                    "Turns you can go back to. The files FlashAgent changed and the conversation return to how they were before the turn:\n",
+                ),
             );
             for (i, turn) in turns.iter().enumerate() {
                 let first_line = extract_user_prompt(&prompts[turn.user_index]).lines().next().unwrap_or("").to_string();
@@ -857,12 +1113,12 @@ impl App {
                 };
                 text.push_str(&format!("  {}. {} · {files}\n", i + 1, flashagent_tui::truncate_middle(&first_line, 60)));
             }
-            text.push_str("Type /rewind <number>. Changes made by shell commands are not undone.");
+            text.push_str(flashagent_tui::i18n::tr("Type /rewind <number>. Changes made by shell commands are not undone."));
             self.chat.push_system(&text);
             return;
         };
         if self.running {
-            self.notice("Wait for the turn to finish before rewinding");
+            self.notice(tr("Wait for the turn to finish before rewinding"));
             return;
         }
         let target = turns[n - 1].clone();
@@ -883,30 +1139,91 @@ impl App {
         };
         match std::process::Command::new("git").args(["commit", "-m", &commit_msg]).output() {
             Ok(out) if out.status.success() => {
-                self.chat.push_system(&format!("Git commit succeeded:\n{}", String::from_utf8_lossy(&out.stdout).trim_end()));
+                self.chat.push_system(&tr_fill(
+                    "Git commit succeeded:\n{out}",
+                    &[("out", String::from_utf8_lossy(&out.stdout).trim_end())],
+                ));
             }
             Ok(out) => {
                 let err = String::from_utf8_lossy(&out.stderr);
                 let s = String::from_utf8_lossy(&out.stdout);
-                self.chat.push_system(&format!("Git commit status:\n{s}{err}"));
+                self.chat.push_system(&tr_fill(
+                    "Git commit status:\n{out}",
+                    &[("out", &format!("{s}{err}"))],
+                ));
             }
-            Err(e) => self.notice(format!("Failed to run git commit: {e}")),
+            Err(e) => self.notice(tr_fill("Failed to run git commit: {e}", &[("e", &e.to_string())])),
         }
     }
 
-    fn export_conversation(&mut self, cx: &LoopCtx<'_>, format_arg: &str) {
+    /// `/export <format> [path]`: the format is the first word, the path is
+    /// what is left of it. A path with spaces is written in quotes.
+    /// `/safe`: the safe mode. Reading and editing inside the project, and
+    /// nothing else: no shell, no network, no subagents. It is a mode on top
+    /// of the permission mode, not instead of it.
+    fn safe_command(&mut self, cx: &LoopCtx<'_>) {
+        self.config.safe_mode = !self.config.safe_mode;
+        self.apply_disabled_tools(cx);
+        self.save_config();
+        let said = if self.config.safe_mode {
+            "Safe mode on · the shell, the web and the subagents are off; reading and editing inside the project are not"
+        } else {
+            "Safe mode off · every tool is back"
+        };
+        self.notice(said);
+    }
+
+    /// `/notices`: what the app said, newest first. A notice fades and is
+    /// gone; this is where it is read again.
+    fn notices_command(&mut self) {
+        let entries = self.notice_history();
+        self.open_overlay(Overlay::Notices(flashagent_tui::notice_log::NoticeLog::new(entries)));
+    }
+
+    /// `/rules`: the standing permissions the owner gave with "Always". They
+    /// are kept between the runs, and this is where they are seen and taken
+    /// back.
+    fn rules_command(&mut self, cx: &LoopCtx<'_>) {
+        let view = flashagent_tui::rules_view::RulesView::new(&cx.perm.rules());
+        self.open_overlay(Overlay::Rules(view));
+    }
+
+    /// `/tools`: the list of tools, and which of them the model may call. A
+    /// tool that is off is not in the schemas the model reads, and a call to
+    /// one is refused.
+    pub(crate) fn tools_command(&mut self, cx: &LoopCtx<'_>) {
+        use flashagent_tui::tools_view::{ToolRow, ToolsView};
+        let off = cx.perm.disabled_tools();
+        let core = true;
+        let web = self.config.web_tools;
+        let vision = cx.tools_arc.vision_supported();
+        let rows: Vec<ToolRow> = flashagent_core::registry::TOOLS
+            .iter()
+            .map(|def| ToolRow {
+                name: def.name.to_string(),
+                description: first_sentence(def.description),
+                on: !off.iter().any(|n| n == def.name),
+                available: flashagent_core::registry::offered(def, core, vision, web, true),
+            })
+            .collect();
+        self.open_overlay(Overlay::Tools(ToolsView::new(rows)));
+    }
+
+    fn export_conversation(&mut self, cx: &LoopCtx<'_>, arg: &str) {
         // A file with only a header, in the project folder, helps nobody.
         if !self.history.iter().any(flashagent_core::is_prompt) {
-            self.background = Some(BackgroundNotice::fading("Nothing to export yet".to_string(), 5));
+            self.say(BackgroundNotice::fading(tr("Nothing to export yet").to_string(), 5));
             self.renderer.request_reprint();
             return;
         }
+        let (format_arg, path_arg) = split_export_arg(arg);
         let format_arg = format_arg.to_lowercase();
         // The id already starts with "session_" (was session_session_1789.md).
         let stem = cx.session_id.strip_prefix("session_").unwrap_or(cx.session_id);
         let text_of = |m: &ChatMessage| {
             if m.content.trim().is_empty() && !m.images.is_empty() {
-                format!("[{} attached image{}]", m.images.len(), if m.images.len() == 1 { "" } else { "s" })
+                let images = flashagent_tui::text::plural(m.images.len(), "attached image", "attached images");
+                format!("[{images}]")
             } else {
                 m.content.clone()
             }
@@ -936,14 +1253,25 @@ impl App {
                 export::conversation_markdown(&self.history, cx.session_id, &self.current_model, cx.cwd_display),
             ),
         };
-        match std::fs::write(&filename, content) {
+        // Where it goes: the path the person named, or the project folder.
+        let target = match path_arg {
+            Some(p) => export_target(&p, &filename),
+            None => filename.clone(),
+        };
+        // The folders the person named are part of what they asked for.
+        if let Some(parent) = std::path::Path::new(&target).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        match std::fs::write(&target, content) {
             Ok(_) => {
-                let shown = std::fs::canonicalize(&filename).map_or(filename, |p| p.display().to_string());
+                let shown = std::fs::canonicalize(&target).map_or(target.clone(), |p| p.display().to_string());
                 // It fades: as the prompt's placeholder it came back every time the prompt was emptied.
-                self.background = Some(BackgroundNotice::fading(format!("Exported to {shown}"), 8));
+                self.say(BackgroundNotice::fading(tr_fill("Exported to {path}", &[("path", &shown)]), 8));
                 self.renderer.request_reprint();
             }
-            Err(e) => self.notice(format!("Failed to export conversation: {e}")),
+            Err(e) => self.notice(tr_fill("Failed to export conversation: {e}", &[("e", &e.to_string())])),
         }
     }
 
@@ -965,9 +1293,15 @@ impl App {
         let report = store.rewind(target.turn);
         if !report.failed.is_empty() {
             for (path, why) in &report.failed {
-                self.chat.push_line(LineKind::ToolError, format!("Not put back: {} — {why}", store.display_path(path)));
+                self.chat.push_line(
+                    LineKind::ToolError,
+                    tr_fill(
+                        "Not put back: {path} — {why}",
+                        &[("path", &store.display_path(path)), ("why", why)],
+                    ),
+                );
             }
-            self.notice("Rewind incomplete · history kept; fix the errors above and run /rewind again".to_string());
+            self.notice(tr("Rewind incomplete · history kept; fix the errors above and run /rewind again").to_string());
             self.renderer.request_reprint();
             return;
         }
@@ -984,7 +1318,7 @@ impl App {
         }
         self.chat.truncate_before_nth_last_user(taken_back);
         self.renderer.scroll_to_bottom();
-        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
         self.suggested_prompt = None;
         self.latest_suggestion = None;
         self.custom_placeholder = None;
@@ -1000,9 +1334,21 @@ impl App {
 mod tests {
     use super::*;
 
+    /// Every line of /help has a Russian version: the help is the one screen
+    /// a user reads when they do not know the app.
+    #[test]
+    fn every_help_line_is_translated() {
+        for (key, what) in HELP_COMMANDS.iter().chain(HELP_KEYS.iter()) {
+            assert!(
+                flashagent_tui::i18n::translate(flashagent_tui::i18n::Lang::Russian, what) != *what,
+                "the help line of {key} is not translated: {what}"
+            );
+        }
+    }
+
     #[test]
     fn a_command_typed_during_a_turn_runs_waits_or_is_refused_by_what_it_touches() {
-        for name in ["help", "verbose", "diff", "mode", "effort", "model", "memory", "context"] {
+        for name in ["help", "verbose", "diff", "mode", "effort", "model", "memory", "context", "cost"] {
             assert_eq!(while_running(name), WhileRunning::Now, "{name}");
         }
         // The conversation belongs to the turn until it ends.
@@ -1018,10 +1364,78 @@ mod tests {
         assert_eq!(while_running("hlep"), WhileRunning::Unknown);
     }
 
+    /// A picture is attached for a path typed out on its own. A file named in
+    /// a sentence is a mention: the model has view_image for it, and attaching
+    /// it spends the traffic and the tokens without anyone asking.
+    #[test]
+    fn only_a_message_that_is_nothing_but_paths_attaches_a_picture() {
+        assert_eq!(standalone_paths("/home/me/shot.png"), Some(vec!["/home/me/shot.png"]));
+        // Several paths are still only paths.
+        assert_eq!(standalone_paths("/home/me/a.png /home/me/b.png"), Some(vec!["/home/me/a.png", "/home/me/b.png"]));
+        // A path named in a sentence is a mention.
+        assert_eq!(standalone_paths("look at /home/me/shot.png"), None);
+        assert_eq!(standalone_paths("shot.png is at /home/me/shot.png"), None);
+        // And there is nothing to attach in an ordinary message.
+        assert_eq!(standalone_paths("hello"), None);
+        assert_eq!(standalone_paths(""), None);
+        assert_eq!(standalone_paths("   "), None);
+    }
+
     #[test]
     fn a_command_line_splits_into_name_and_argument() {
         assert_eq!(split_command("/compact keep the schema"), ("compact", "keep the schema"));
         assert_eq!(split_command("/help"), ("help", ""));
         assert_eq!(split_command("/tmp/shot.png"), ("tmp/shot.png", ""));
+    }
+
+    /// The slash is cut in one place. It used to be cut by hand where the
+    /// command was taken and again inside the splitter, so the two could
+    /// disagree about what a command is called.
+    #[test]
+    fn a_command_is_read_the_same_way_wherever_it_comes_from() {
+        for line in ["/compact keep the schema", "/help", "/tmp/shot.png"] {
+            let (name, arg) = split_command(line);
+            let rest = line.strip_prefix('/').expect("a command line starts with a slash");
+            assert_eq!(rest.split_whitespace().next(), Some(name), "{line}");
+            assert_eq!(split_command(&line[1..]), (name, arg), "{line}");
+        }
+    }
+
+    #[test]
+    fn an_export_takes_a_format_and_a_path() {
+        assert_eq!(split_export_arg("md"), ("md".to_string(), None));
+        assert_eq!(split_export_arg("md ~/notes/chat.md"), ("md".to_string(), Some(tr("~/notes/chat.md").to_string())));
+        assert_eq!(split_export_arg("  html  out.html "), ("html".to_string(), Some(tr("out.html").to_string())));
+        // A path with spaces in it is written in quotes.
+        assert_eq!(split_export_arg("\"~/my notes/chat.md\""), ("md".to_string(), Some(tr("~/my notes/chat.md").to_string())));
+    }
+
+    #[test]
+    fn the_path_of_an_export_keeps_the_format_when_the_person_left_it_out() {
+        assert_eq!(export_target("notes/chat", "session_1.md"), "notes/chat.md");
+        assert_eq!(export_target("notes/chat.md", "session_1.md"), "notes/chat.md");
+        assert_eq!(export_target("notes/chat.jsonl", "session_1.md"), "notes/chat.jsonl");
+        // A folder gets the default name inside it.
+        assert_eq!(export_target("notes/", "session_1.md"), "notes/session_1.md");
+    }
+
+    #[test]
+    fn only_a_turn_command_waits_for_compaction() {
+        assert!(starts_a_turn("goal", "ship it"));
+        assert!(!starts_a_turn("goal", ""));
+        assert!(starts_a_turn("regenerate", ""));
+        assert!(starts_a_turn("retry", ""));
+        assert!(starts_a_turn("skill:review", ""));
+        assert!(!starts_a_turn("compact", ""));
+        assert!(!starts_a_turn("help", ""));
+    }
+
+    #[test]
+    fn messages_queued_during_compaction_keep_their_order() {
+        assert!(take_compacted_messages().is_empty());
+        queue_compacted_message("first".into());
+        queue_compacted_message("second".into());
+        assert_eq!(take_compacted_messages(), ["first", "second"]);
+        assert!(take_compacted_messages().is_empty());
     }
 }

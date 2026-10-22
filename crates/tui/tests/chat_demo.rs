@@ -135,6 +135,8 @@ fn show_chat() {
             LineKind::ToolError => "E",
             LineKind::Diff => "D",
             LineKind::System => " ",
+            LineKind::Compaction => "C",
+            LineKind::Model => "M",
             LineKind::Subagent => "S",
         };
         println!("{mark}|{text}");

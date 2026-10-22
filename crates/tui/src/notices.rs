@@ -30,38 +30,49 @@ pub(crate) fn channel_switch_warning(
     let destination = match target {
         ChannelTarget::Version(v) => v.clone(),
         ChannelTarget::Empty => {
-            return format!(
-                "Nothing is published on the {channel} channel yet, so you would stay on \
-                 {current} until something is. Switch anyway?"
+            return flashagent_tui::i18n::tr_fill(
+                "Nothing is published on the {channel} channel yet, so you would stay on {current} until something is. Switch anyway?",
+                &[("channel", &channel), ("current", current)],
             )
         }
         // Name the channel rather than invent a version or guess the direction.
         ChannelTarget::Checking | ChannelTarget::Unknown => {
-            return format!(
-                "You will move from {current} to the newest {channel} release once it is found. \
-                 Whether that is an update or a downgrade is shown here as soon as it is known. Continue?"
+            return flashagent_tui::i18n::tr_fill(
+                "You will move from {current} to the newest {channel} release once it is found. Whether that is an update or a downgrade is shown here as soon as it is known. Continue?",
+                &[("current", current), ("channel", &channel)],
             )
         }
     };
     // Update or downgrade is decided by versions, the same rule as the updater,
     // not by which channel is picked.
     match (Version::parse(current), Version::parse(&destination)) {
-        (Some(from), Some(to_version)) if to_version < from => format!(
-            "Downgrade: {current} → {destination}. {destination} is older than what you run, so features \
-             added since may disappear or behave differently, and settings they introduced can be reset. Continue?"
+        (Some(from), Some(to_version)) if to_version < from => flashagent_tui::i18n::tr_fill(
+            "Downgrade: {current} → {destination}. {destination} is older than what you run, so features added since may disappear or behave differently, and settings they introduced can be reset. Continue?",
+            &[("current", current), ("destination", &destination)],
         ),
-        (Some(from), Some(to_version)) if to_version == from => format!(
-            "You already run {current}; the {channel} channel has the same release. Switch anyway?"
+        (Some(from), Some(to_version)) if to_version == from => flashagent_tui::i18n::tr_fill(
+            "You already run {current}; the {channel} channel has the same release. Switch anyway?",
+            &[("current", current), ("channel", &channel)],
         ),
-        (Some(_), Some(_)) => format!(
-            "Update: {current} → {destination}. You get everything added since {current}.{} Continue?",
-            if Version::parse(&destination).is_some_and(|v| v.is_beta()) {
-                " Beta builds land often and can regress; that is the point of them."
-            } else {
-                ""
-            }
+        (Some(_), Some(_)) => flashagent_tui::i18n::tr_fill(
+            "Update: {current} → {destination}. You get everything added since {current}.{beta} Continue?",
+            &[
+                ("current", current),
+                ("destination", &destination),
+                (
+                    "beta",
+                    if Version::parse(&destination).is_some_and(|v| v.is_beta()) {
+                        flashagent_tui::i18n::tr(" Beta builds land often and can regress; that is the point of them.")
+                    } else {
+                        ""
+                    },
+                ),
+            ],
         ),
-        _ => format!("You will move from {current} to {destination}. Continue?"),
+        _ => flashagent_tui::i18n::tr_fill(
+            "You will move from {current} to {destination}. Continue?",
+            &[("current", current), ("destination", &destination)],
+        ),
     }
 }
 
@@ -84,12 +95,12 @@ pub(crate) enum TurnPhase {
 impl TurnPhase {
     pub(crate) fn label(&self) -> String {
         match self {
-            Self::Waiting => "Waiting for the model".to_string(),
-            Self::Thinking => "Thinking".to_string(),
-            Self::Writing => "Writing the answer".to_string(),
-            Self::Tool => "Running a tool".to_string(),
-            Self::AfterTool => "Reading the result".to_string(),
-            Self::Stopping => "Stopping".to_string(),
+            Self::Waiting => flashagent_tui::i18n::tr("Waiting for the model").to_string(),
+            Self::Thinking => flashagent_tui::i18n::tr("Thinking").to_string(),
+            Self::Writing => flashagent_tui::i18n::tr("Writing the answer").to_string(),
+            Self::Tool => flashagent_tui::i18n::tr("Running a tool").to_string(),
+            Self::AfterTool => flashagent_tui::i18n::tr("Reading the result").to_string(),
+            Self::Stopping => flashagent_tui::i18n::tr("Stopping").to_string(),
         }
     }
 }
@@ -193,9 +204,56 @@ impl App {
     /// Under the cursor, not in the transcript: it is for the person at the
     /// keyboard, not the conversation. A suggestion in the same spot is cleared.
     pub(crate) fn notice(&mut self, text: impl Into<String>) {
-        self.custom_placeholder = Some(text.into());
+        let text = text.into();
+        self.remember_notice(&text, false);
+        self.custom_placeholder = Some(text);
         self.suggested_prompt = None;
         self.renderer.request_reprint();
+    }
+
+    /// The line under the composer, and a copy of it in the history: a notice
+    /// that fades is gone the moment it is gone.
+    pub(crate) fn say(&mut self, notice: BackgroundNotice) {
+        self.remember_notice(&notice.text, notice.warning);
+        self.background = Some(notice);
+    }
+
+    /// Keeps what the app said, so it can be read again.
+    pub(crate) fn remember_notice(&mut self, text: &str, warning: bool) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        self.notices.push(flashagent_tui::notice_log::NoticeEntry {
+            when: how_long_ago(std::time::Instant::now()),
+            text: text.to_string(),
+            warning,
+        });
+        // The history is a help, not an archive: the last hundred are enough
+        // to cover a session and do not grow without bound.
+        if self.notices.len() > 100 {
+            let drop = self.notices.len() - 100;
+            self.notices.drain(..drop);
+        }
+    }
+
+    /// The notices, newest first.
+    pub(crate) fn notice_history(&self) -> Vec<flashagent_tui::notice_log::NoticeEntry> {
+        self.notices.iter().rev().cloned().collect()
+    }
+}
+
+/// How long ago something happened, in words.
+fn how_long_ago(at: std::time::Instant) -> String {
+    let secs = at.elapsed().as_secs();
+    if secs < 5 {
+        flashagent_tui::i18n::tr("just now").to_string()
+    } else if secs < 60 {
+        flashagent_tui::i18n::tr_fill("{secs}s ago", &[("secs", &secs.to_string())])
+    } else if secs < 3600 {
+        flashagent_tui::i18n::tr_fill("{n} min ago", &[("n", &(secs / 60).to_string())])
+    } else {
+        flashagent_tui::i18n::tr_fill("{n} h ago", &[("n", &(secs / 3600).to_string())])
     }
 }
 
@@ -218,10 +276,10 @@ pub(crate) fn update_progress_line(version: &str, stage: flashagent_svc::updater
         }
         // Some mirrors send no content-length; show the bytes, not a fake bar.
         UpdateProgress::Downloading { received, .. } => {
-            format!("{:.1} MB downloaded", received as f64 / MB)
+            flashagent_tui::i18n::tr_fill("{size} MB downloaded", &[("size", &format!("{:.1}", received as f64 / MB))])
         }
-        UpdateProgress::Verifying => "verifying the checksum\u{2026}".to_string(),
-        UpdateProgress::Installing => "installing\u{2026}".to_string(),
+        UpdateProgress::Verifying => flashagent_tui::i18n::tr("verifying the checksum\u{2026}").to_string(),
+        UpdateProgress::Installing => flashagent_tui::i18n::tr("installing\u{2026}").to_string(),
     };
     format!("{UPDATE_LINE_PREFIX}{version} \u{b7} {detail}")
 }
@@ -269,5 +327,48 @@ mod update_key_tests {
         assert_eq!(update_key_action(false, false, false, true), UpdateKeyAction::InstallPending);
         assert_eq!(update_key_action(false, false, false, false), UpdateKeyAction::CheckAndInstall);
         assert_eq!(update_key_action(true, true, true, true), UpdateKeyAction::DevMode);
+    }
+}
+
+#[cfg(test)]
+mod phrase_tests {
+    use super::*;
+    use flashagent_core::config::UpdateChannel;
+
+    #[test]
+    fn a_phase_label_goes_through_the_translation_table() {
+        for (phase, english) in [
+            (TurnPhase::Waiting, "Waiting for the model"),
+            (TurnPhase::Thinking, "Thinking"),
+            (TurnPhase::Writing, "Writing the answer"),
+            (TurnPhase::Tool, "Running a tool"),
+            (TurnPhase::AfterTool, "Reading the result"),
+            (TurnPhase::Stopping, "Stopping"),
+        ] {
+            assert_eq!(phase.label(), flashagent_tui::i18n::tr(english), "{english}");
+            assert_ne!(
+                flashagent_tui::i18n::translate(flashagent_tui::i18n::Lang::Russian, english),
+                english,
+                "{english} is not in the table"
+            );
+        }
+    }
+
+    #[test]
+    fn the_channel_switch_warning_is_in_the_translation_table() {
+        let ru = flashagent_tui::i18n::Lang::Russian;
+        let warning = channel_switch_warning(UpdateChannel::Stable, "b287", &ChannelTarget::Version("v1.0.0".into()));
+        assert!(warning.starts_with("Update: b287"), "{warning}");
+        let sentence = "Update: {current} \u{2192} {destination}. You get everything added since {current}.{beta} Continue?";
+        assert_ne!(flashagent_tui::i18n::translate(ru, sentence), sentence, "the sentence is not in the table");
+    }
+
+    #[test]
+    fn how_long_ago_is_in_words_of_the_interface() {
+        let ru = flashagent_tui::i18n::Lang::Russian;
+        assert_ne!(flashagent_tui::i18n::translate(ru, "just now"), "just now");
+        assert_ne!(flashagent_tui::i18n::translate(ru, "{secs}s ago"), "{secs}s ago");
+        assert_ne!(flashagent_tui::i18n::translate(ru, "{n} min ago"), "{n} min ago");
+        assert_ne!(flashagent_tui::i18n::translate(ru, "{n} h ago"), "{n} h ago");
     }
 }

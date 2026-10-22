@@ -1,4 +1,6 @@
 use super::*;
+use crate::turns::OfferedTools;
+use flashagent_tui::i18n::{tr, tr_fill};
 
 /// Latin or Cyrillic.
 fn is_yes(code: KeyCode) -> bool {
@@ -74,6 +76,24 @@ impl App {
                 Overlay::Providers(view) => self.providers_key(cx, view, code, mods).await,
                 Overlay::Rewind(card) => self.rewind_key(cx, card, code),
                 Overlay::Effort(menu) => self.effort_menu_key(cx, menu, code),
+                Overlay::Tools(view) => self.tools_key(cx, view, code, mods),
+                Overlay::Notices(mut view) => {
+                    use flashagent_tui::notice_log::NoticeAction;
+                    if view.handle_key(code, mods) == NoticeAction::Close {
+                        return Flow::Continue;
+                    }
+                    self.overlay = Some(Overlay::Notices(view));
+                }
+                Overlay::Rules(mut view) => {
+                    use flashagent_tui::rules_view::RulesAction;
+                    match view.handle_key(code, mods) {
+                        RulesAction::Close => return Flow::Continue,
+                        RulesAction::Remove(idx) => self.remove_rule(cx, &mut view, idx),
+                        RulesAction::ClearAll => self.clear_rules(cx, &mut view),
+                        RulesAction::None => {}
+                    }
+                    self.overlay = Some(Overlay::Rules(view));
+                }
                 Overlay::Palette(menu) => {
                     let flow = self.palette_key(cx, menu, code, mods).await;
                     self.renderer.request_reprint();
@@ -124,7 +144,14 @@ impl App {
             return;
         }
         let (width, _) = crossterm::terminal::size().unwrap_or((100, 24));
-        self.chat.push_line(LineKind::System, format!("  \x1b[1;38;2;225;175;95mThe whole change\x1b[0m \x1b[38;2;135;130;125m· {}\x1b[0m", req.tool));
+        self.chat.push_line(
+            LineKind::System,
+            format!(
+                "  \x1b[1;38;2;225;175;95m{}\x1b[0m \x1b[38;2;135;130;125m· {}\x1b[0m",
+                tr("The whole change"),
+                req.tool
+            ),
+        );
         for row in crate::render::diff_rows(diff, (width as usize).saturating_sub(2)) {
             self.chat.push_line(LineKind::System, row);
         }
@@ -136,9 +163,15 @@ impl App {
         if let Some(req) = cx.gate.pending() {
             let rules = cx.perm.state().allow_always(&req);
             if rules.is_empty() {
-                self.notice("Allowed once · this command is too broad to allow always");
+                self.notice(tr("Allowed once · this command is too broad to allow always"));
             } else {
-                self.notice(format!("Always allowed this session: {}", rules.join(", ")));
+                // The rule is kept between the runs, not only until the app
+                // closes: a permission the owner gave was given on purpose,
+                // and making it again every morning is the price of a rule
+                // that lives in memory. `/rules` shows what there is and
+                // takes it back.
+                self.remember_rules(cx);
+                self.notice(tr_fill("Always allowed: {rules}", &[("rules", &rules.join(", "))]));
             }
         }
         cx.gate.respond(Decision::Allow);
@@ -155,16 +188,16 @@ impl App {
             if let Some(view) = self.settings_view_mut() {
                 view.config.update_channel = sw.to;
             }
-            self.background = Some(BackgroundNotice::sticky(format!(
-                "Release channel is now {} \u{b7} /update moves to it",
-                sw.to.label()
+            self.say(BackgroundNotice::sticky(tr_fill(
+                "Release channel is now {channel} \u{b7} /update moves to it",
+                &[("channel", sw.to.label())],
             )));
         } else {
             // Other changes stay applied; only this one is put back.
             if let Some(view) = self.settings_view_mut() {
                 view.config.update_channel = sw.from;
             }
-            self.background = Some(BackgroundNotice::fading(format!("Still on the {} channel", sw.from.label()), 5));
+            self.say(BackgroundNotice::fading(tr_fill("Still on the {channel} channel", &[("channel", sw.from.label())]), 5));
         }
     }
 
@@ -284,6 +317,11 @@ impl App {
         let shown_effort = self.goal_state.as_ref().map_or(self.current_effort.clone(), |g| g.effort.clone());
         match settings.handle_key(code, mods) {
             SettingsAction::Close => self.close_settings(cx, settings, shown_mode, &shown_effort),
+            SettingsAction::OpenTools => {
+                // The list of tools, with what is off in it already.
+                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
+                self.tools_command(cx);
+            }
             SettingsAction::OpenProviders => {
                 self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
                 self.open_providers_view();
@@ -316,9 +354,9 @@ impl App {
             }
             SettingsAction::CheckUpdatesNow => {
                 if flashagent_svc::updater::is_dev_mode() {
-                    settings.update_check_status = Some("Dev mode: updates disabled (source build)".into());
+                    settings.update_check_status = Some(flashagent_tui::i18n::tr("Dev mode: updates disabled (source build)").into());
                 } else {
-                    settings.update_check_status = Some("Checking GitHub releases…".into());
+                    settings.update_check_status = Some(flashagent_tui::i18n::tr("Checking GitHub releases…").into());
                     let ch = settings.config.update_channel;
                     let update_tx = cx.update_tx.clone();
                     tokio::spawn(async move {
@@ -386,9 +424,9 @@ impl App {
             changes.push(format!("thinking ({chosen_effort})"));
         }
         if changes.len() == 1 && chosen_mode != shown_mode {
-            self.custom_placeholder = Some(format!("Permission mode set to: {}", chosen_mode.label()));
+            self.custom_placeholder = Some(tr_fill("{label} {mode}", &[("label", tr("Permission mode set to:")), ("mode", tr(chosen_mode.label()))]));
         } else if !changes.is_empty() {
-            self.custom_placeholder = Some(format!("Settings updated: {}", changes.join(", ")));
+            self.custom_placeholder = Some(tr_fill("Settings updated: {changes}", &[("changes", &changes.join(", "))]));
         }
         self.suggested_prompt = None;
 
@@ -399,10 +437,10 @@ impl App {
         let personality_changed = applied.personality != self.config.personality;
         if personality_changed {
             changes.push(format!("style ({})", applied.personality.summary()));
-            self.custom_placeholder = Some(format!("Settings updated: {}", changes.join(", ")));
+            self.custom_placeholder = Some(tr_fill("Settings updated: {changes}", &[("changes", &changes.join(", "))]));
         }
         if changes.is_empty() && applied != self.config {
-            self.custom_placeholder = Some("Settings saved".to_string());
+            self.custom_placeholder = Some(tr("Settings saved").to_string());
         }
         if wanted_channel != self.config.update_channel {
             applied.update_channel = self.config.update_channel;
@@ -416,10 +454,15 @@ impl App {
         if personality_changed {
             self.apply_personality();
         }
+        // The safe mode and the tools the owner switched off: both are in the
+        // config now, and both have to reach the running conversation.
+        self.apply_disabled_tools(cx);
+        // The warm-up was just turned on: the prefix is cached now, not at the
+        // next server poll. Turned off, the running warm-up is dropped.
+        self.warm_prompt_cache(cx.source, cx.perm);
         // Also during /goal, where it is the mode the run hands back.
         self.config.permission_mode = chosen_mode;
         self.save_config();
-        cx.tools_arc.set_toolset_profile(self.config.toolset_profile);
         cx.tools_arc.set_web_enabled(self.config.web_tools);
         cx.source.0.set_max_retries(self.config.network_retries);
         cx.source.0.set_user_sampling(self.config.sampling_preset == flashagent_core::config::SamplingPreset::Custom);
@@ -437,12 +480,16 @@ impl App {
                 g.effort = chosen_effort;
             }
             None => {
+                let previous_effort = self.current_effort.clone();
                 cx.perm.state().set_mode(chosen_mode);
                 self.current_effort = chosen_effort;
                 self.save_live_effort();
+                if previous_effort != self.current_effort {
+                    self.remember_effort_switch();
+                }
             }
         }
-        self.refresh_welcome(cx.source, cx.mascot_mood);
+        self.refresh_welcome_state(cx.source, cx.mascot_mood);
     }
 
     /// Looks up what the channel would install while the card is up.
@@ -466,7 +513,7 @@ impl App {
             SamplingAction::SaveAndClose => {
                 view.apply_to_config(&mut self.config);
                 self.save_config();
-                self.notice("Sampling parameters updated");
+                self.notice(tr("Sampling parameters updated"));
             }
             SamplingAction::None => self.overlay = Some(Overlay::Sampling(view)),
         }
@@ -489,7 +536,11 @@ impl App {
                 let removed = flashagent_core::MemoryStore::for_scope(scope, &cwd)
                     .map(|store| store.remove(&name).unwrap_or(false))
                     .unwrap_or(false);
-                self.notice(if removed { format!("Forgot \"{name}\"") } else { format!("Could not forget \"{name}\"") });
+                self.notice(if removed {
+                    tr_fill("Forgot \"{name}\"", &[("name", &name)])
+                } else {
+                    tr_fill("Could not forget \"{name}\"", &[("name", &name)])
+                });
                 self.overlay = Some(Overlay::Memory(open_memory_modal()));
             }
             MemoryAction::Summarize { .. } => {
@@ -504,6 +555,106 @@ impl App {
         }
     }
 
+    /// The list of tools: Space turns one on or off, and the switch takes
+    /// effect in the conversation that is running.
+    fn tools_key(&mut self, cx: &LoopCtx<'_>, mut view: flashagent_tui::tools_view::ToolsView, code: KeyCode, mods: KeyModifiers) {
+        use flashagent_tui::tools_view::ToolsAction;
+        match view.handle_key(code, mods) {
+            ToolsAction::Close => return,
+            ToolsAction::Toggle(name, on) => {
+                self.set_tool_switched(cx, &name, on);
+                // The list says what is off, so it is read from the view.
+                let off = view.disabled();
+                self.save_disabled_tools(cx, off);
+            }
+            ToolsAction::None => {}
+        }
+        self.overlay = Some(Overlay::Tools(view));
+    }
+
+    /// One standing permission is taken back. The rule goes from the
+    /// permission layer, from the config and from the disk at once, and the
+    /// owner is told, because a rule that is gone should not be a surprise
+    /// the next time the call is asked about.
+    fn remove_rule(&mut self, cx: &LoopCtx<'_>, view: &mut flashagent_tui::rules_view::RulesView, idx: usize) {
+        let Some(row) = view.rows.get(idx).cloned() else { return };
+        if !cx.perm.remove_rule(row.kind, &row.text) {
+            return;
+        }
+        self.remember_rules(cx);
+        view.refresh(&cx.perm.rules());
+        self.notice(flashagent_tui::i18n::tr_fill("Rule taken back: {rule}", &[("rule", &row.text)]));
+    }
+
+    /// Every standing permission is taken back.
+    fn clear_rules(&mut self, cx: &LoopCtx<'_>, view: &mut flashagent_tui::rules_view::RulesView) {
+        if cx.perm.rules().all().is_empty() {
+            return;
+        }
+        cx.perm.clear_rules();
+        self.remember_rules(cx);
+        view.refresh(&cx.perm.rules());
+        self.notice(flashagent_tui::i18n::tr("Every standing permission is gone"));
+    }
+
+    /// The rules as they stand now go into the config and onto the disk, so
+    /// they are there in the next run.
+    pub(crate) fn remember_rules(&mut self, cx: &LoopCtx<'_>) {
+        self.config.always_rules = cx.perm.rules();
+        self.save_config();
+    }
+
+    /// One tool was turned on or off: the schemas the model reads and the
+    /// calls it may make both follow at once.
+    pub(crate) fn set_tool_switched(&mut self, cx: &LoopCtx<'_>, name: &str, on: bool) {
+        let mut off = cx.perm.disabled_tools();
+        off.retain(|n| n != name);
+        if !on {
+            off.push(name.to_string());
+        }
+        self.save_disabled_tools(cx, off);
+    }
+
+    /// The tools that are off, in the two places that keep them: the built-in
+    /// ones (which a subagent gets too) and the permission layer (which holds
+    /// the three only the top has). The config keeps them for the next run.
+    ///
+    /// The prompt goes with them: it describes the tools that are on offer, so
+    /// a tool the owner has just switched off must not be described as
+    /// something to call.
+    pub(crate) fn save_disabled_tools(&mut self, cx: &LoopCtx<'_>, off: Vec<String>) {
+        cx.tools_arc.set_disabled_tools(off.clone());
+        cx.perm.set_disabled_tools(off.clone());
+        self.config.disabled_tools = off;
+        self.save_config();
+        self.sync_system_prompt(OfferedTools::from_specs(&cx.perm.specs()));
+    }
+
+    /// The tools that are off right now: the ones the owner switched off, and
+    /// the ones the safe mode takes away.
+    pub(crate) fn effective_disabled_tools(&self) -> Vec<String> {
+        let mut off = self.config.disabled_tools.clone();
+        if self.config.safe_mode {
+            for name in flashagent_tui::tools_view::SAFE_MODE_TOOLS {
+                if !off.iter().any(|n| n == name) {
+                    off.push(name.to_string());
+                }
+            }
+        }
+        off
+    }
+
+    /// Puts the tools that are off into the two places that keep them.
+    pub(crate) fn apply_disabled_tools(&mut self, cx: &LoopCtx<'_>) {
+        let off = self.effective_disabled_tools();
+        cx.tools_arc.set_disabled_tools(off.clone());
+        cx.perm.set_disabled_tools(off);
+        // The prompt describes the tools that are on offer. A tool the owner
+        // has just switched off must go out of the prompt with it, or the
+        // model is told to call something it cannot call.
+        self.sync_system_prompt(OfferedTools::from_specs(&cx.perm.specs()));
+    }
+
     async fn mcp_key(&mut self, cx: &LoopCtx<'_>, mut modal: McpModal, code: KeyCode, mods: KeyModifiers) {
         match modal.handle_key(code, mods) {
             McpModalAction::Close => return,
@@ -511,7 +662,7 @@ impl App {
                 let mgr = cx.tools_arc.mcp_manager();
                 let _ = mgr.reload().await;
                 modal.servers = mgr.server_status_list().await;
-                modal.status_message = Some("Reloaded MCP configurations".to_string());
+                modal.status_message = Some(tr("Reloaded MCP configurations").to_string());
             }
             McpModalAction::TestServer(name) => {
                 let mgr = cx.tools_arc.mcp_manager();
@@ -519,9 +670,20 @@ impl App {
                     Ok(report) => {
                         let ver = report.server_version.as_deref().unwrap_or("1.0.0");
                         let lat = format!("{:.1}ms", report.latency.as_secs_f64() * 1000.0);
-                        format!("√ {name} connected (v{ver}, {lat}, {} tools)", report.tools.len())
+                        tr_fill(
+                            "√ {name} connected (v{version}, {latency}, {tools})",
+                            &[
+                                ("name", &name),
+                                ("version", ver),
+                                ("latency", &lat),
+                                (
+                                    "tools",
+                                    &flashagent_tui::text::plural(report.tools.len(), "tool", "tools"),
+                                ),
+                            ],
+                        )
                     }
-                    Err(e) => format!("× {name} failed: {e}"),
+                    Err(e) => tr_fill("× {name} failed: {e}", &[("name", &name), ("e", &e.to_string())]),
                 });
                 modal.servers = mgr.server_status_list().await;
             }
@@ -530,7 +692,10 @@ impl App {
                     let cfg = flashagent_tools::mcp::scaffold_config(item);
                     match flashagent_tools::mcp::save_server_to_project(std::path::Path::new("."), item.id, cfg) {
                         Ok(path) => {
-                            modal.status_message = Some(format!("√ Added {} to {}", item.name, path.display()));
+                            modal.status_message = Some(tr_fill(
+                                "√ Added {name} to {path}",
+                                &[("name", item.name), ("path", &path.display().to_string())],
+                            ));
                             let mgr = cx.tools_arc.mcp_manager();
                             let server_id = item.id.to_string();
                             tokio::spawn(async move {
@@ -538,9 +703,29 @@ impl App {
                                 let _ = mgr.start_server(&server_id).await;
                             });
                         }
-                        Err(e) => modal.status_message = Some(format!("× Failed to install {id}: {e}")),
+                        Err(e) => modal.status_message = Some(tr_fill(
+                            "× Failed to install {id}: {e}",
+                            &[("id", &id), ("e", &e.to_string())],
+                        )),
                     }
                 }
+            }
+            // The trust of the server is taken back. The server stays in its
+            // config file and asks again the next time it starts.
+            McpModalAction::ForgetServer(name) => {
+                let forgotten = self.config.forget_mcp_server(cx.cwd, &name);
+                if forgotten {
+                    self.save_config();
+                }
+                modal.trusted.retain(|t| t.name != name);
+                modal.status_message = Some(
+                    if forgotten {
+                        tr("The trust of this server is taken back")
+                    } else {
+                        tr("There was nothing to take back")
+                    }
+                    .to_string(),
+                );
             }
             McpModalAction::None => {}
         }
@@ -551,7 +736,18 @@ impl App {
     /// turn, which owns the session id and snapshot store.
     fn session_menu_key(&mut self, mut menu: SelectMenu<String>, code: KeyCode, mods: KeyModifiers) {
         match code {
-            KeyCode::Enter => self.pending_resume = menu.selected_value().cloned(),
+            KeyCode::Enter => {
+                // What the list shows is what Enter opens. A filter that matched
+                // nothing opens nothing: the row that was selected before the
+                // filter is still in the list, and opening it would hand the
+                // owner a session they did not pick.
+                let matches = menu.filtered_indices();
+                let Some(&idx) = matches.iter().find(|&&i| i == menu.selected).or_else(|| matches.first()) else {
+                    self.overlay = Some(Overlay::Sessions(menu));
+                    return;
+                };
+                self.pending_resume = menu.items.get(idx).map(|item| item.value.clone());
+            }
             KeyCode::Esc => {}
             _ => {
                 navigate_menu(&mut menu, code, mods);
@@ -565,6 +761,8 @@ impl App {
     /// 128K budget on an 8K model overflows the server. The new prefix is
     /// warmed while the user types.
     pub(crate) fn switch_model(&mut self, cx: &LoopCtx<'_>, model: &str) {
+        let previous_model = self.current_model.clone();
+        let previous_effort = self.current_effort.clone();
         self.current_model = model.to_string();
         cx.source.set_model(&self.current_model);
         cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
@@ -589,10 +787,21 @@ impl App {
             }
         }
         if !self.running {
-            self.sync_system_prompt();
+            self.sync_system_prompt(OfferedTools::from_specs(&cx.perm.specs()));
+            cx.tools_arc.set_model_name(&self.current_model);
+            cx.tools_arc.set_prompt_tokens(self.prompt_tokens);
         }
-        update_context_usage(&mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-        self.warm_prompt_cache(cx.source, cx.perm, cx.memory_block);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        self.warm_prompt_cache(cx.source, cx.perm);
+        // The rule waits for the message that first uses the new model: a menu
+        // pick alone must not write above a chat with nothing in it yet.
+        if previous_model != self.current_model && !self.current_model.is_empty() {
+            self.remember_switch(None, true, false);
+        } else if previous_effort != self.current_effort {
+            self.remember_switch(None, false, true);
+        }
+        // The card at the top says what runs now, not what ran at the start.
+        self.refresh_welcome_state(cx.source, cx.mascot_mood);
     }
 
     fn model_menu_key(&mut self, cx: &LoopCtx<'_>, mut menu: SelectMenu<String>, code: KeyCode, mods: KeyModifiers) {
@@ -613,7 +822,6 @@ impl App {
                 }
                 self.switch_model(cx, &val);
                 self.refresh_welcome(cx.source, cx.mascot_mood);
-                self.notice(format!("Model: {}", self.current_model));
             }
             KeyCode::Esc => {}
             _ => {
@@ -641,12 +849,15 @@ impl App {
             KeyCode::Down => menu.down(),
             KeyCode::Enter => {
                 if let Some(val) = menu.selected_value().cloned() {
+                    let changed = self.current_effort != val;
                     self.current_effort = val;
                     // Saved, not just held: a level chosen in F4 that died with
                     // the session was the one thing that made this feel broken.
                     self.save_live_effort();
                     self.refresh_welcome(cx.source, cx.mascot_mood);
-                    self.notice(format!("Thinking effort set to: {}", self.current_effort));
+                    if changed {
+                        self.remember_effort_switch();
+                    }
                 }
                 return;
             }
@@ -719,7 +930,10 @@ impl App {
     pub(crate) fn open_model_menu(&mut self, source: &BackendSource) {
         if let Some(switch) = &self.provider_switch {
             let name = switch.name.clone();
-            self.notice(format!("Still connecting to {name}; its models are listed once it answers"));
+            self.notice(tr_fill(
+                "Still connecting to {name}; its models are listed once it answers",
+                &[("name", &name)],
+            ));
             return;
         }
         let mut menu = build_model_menu(source, &self.config.active_profile().name);
@@ -737,7 +951,20 @@ impl App {
         let mgr = cx.tools_arc.mcp_manager();
         let paths = mgr.loaded_paths();
         let statuses = mgr.server_status_list().await;
-        self.open_overlay(Overlay::Mcp(McpModal::new(paths, statuses, tab)));
+        let trusted = self.trusted_mcp_servers(cx);
+        self.open_overlay(Overlay::Mcp(McpModal::new(paths, statuses, tab).with_trusted(trusted)));
+    }
+
+    /// The servers the owner allowed to run in this folder.
+    ///
+    /// The trust is what can be taken back: the server itself is written in a
+    /// config file, and the permission to run it is kept beside it.
+    pub(crate) fn trusted_mcp_servers(&self, cx: &LoopCtx<'_>) -> Vec<flashagent_tui::mcp_view::TrustedServer> {
+        self.config
+            .mcp_servers_trusted_in(cx.cwd)
+            .into_iter()
+            .map(|t| flashagent_tui::mcp_view::TrustedServer { name: t.name.clone(), command: t.command.clone() })
+            .collect()
     }
 }
 

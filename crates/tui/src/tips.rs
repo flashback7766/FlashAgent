@@ -25,7 +25,7 @@ pub static TIPS_POOL: &[&str] = &[
     "Put a skill in .agents/skills/<name>.md and run it with /skill:<name>.",
     "/mode planning keeps the agent read-only until you approve a plan.",
     "In Manual mode every edit and command waits for your approval card.",
-    "On an approval card, a allows this kind of call for the rest of the session.",
+    "On an approval card, a allows this kind of call and remembers it; /rules shows what stands.",
     "/clear empties the scrollback; the conversation itself is kept.",
     "/channel stable or /channel beta picks the release channel, with a warning first.",
     "Sessions are saved on exit and come back with flashagent --resume <id>.",
@@ -57,8 +57,18 @@ fn shuffle_deck(deck: &mut [usize], seed: &mut u64) {
 const HOLD_TICKS: usize = 125;
 /// How long a new tip takes to fade in, with motion on.
 const FADE_TICKS: usize = 5;
-/// "  Tip: " before the text, and the columns the footer leaves free on the right.
-const LABEL_COLS: usize = 7;
+/// "  Tip: " before the text, and the columns the footer leaves free on the
+/// right. The label is the interface's word, so its width is counted where it
+/// is written down: a Russian label is wider, and the room for the text moves
+/// with it.
+fn label() -> &'static str {
+    crate::i18n::tr("Tip:")
+}
+
+/// The columns the label takes: two spaces, the word, one space.
+fn label_cols() -> usize {
+    2 + label().chars().count() + 1
+}
 const RIGHT_MARGIN: usize = 2;
 const TEXT_RGB: (u8, u8, u8) = (175, 170, 160);
 /// Where the fade starts: close to the background, not black.
@@ -163,28 +173,32 @@ impl TipAnimator {
     pub fn render_lines(&self, width: usize, max_lines: usize) -> Vec<String> {
         let room = text_room(width);
         let color = self.text_color();
-        let label = "  \x1b[1;38;2;225;175;95mTip:\x1b[0m ";
+        // The deck holds the English tips; the row speaks the language of the
+        // interface.
+        let tip = crate::i18n::tr(self.tip_text);
+        let label = format!("  \x1b[1;38;2;225;175;95m{}\x1b[0m ", label());
         if !two_rows(width, max_lines) {
-            return vec![format!("{label}{color}{}\x1b[0m", shorten(self.tip_text, room))];
+            return vec![format!("{label}{color}{}\x1b[0m", shorten(tip, room))];
         }
-        let (line1, line2) = split_tip_at_word_boundary(self.tip_text, room);
-        let second = if line2.is_empty() { String::new() } else { format!("{}{color}{}\x1b[0m", " ".repeat(LABEL_COLS), shorten(line2, room)) };
+        let (line1, line2) = split_tip_at_word_boundary(tip, room);
+        let second = if line2.is_empty() { String::new() } else { format!("{}{color}{}\x1b[0m", " ".repeat(label_cols()), shorten(line2, room)) };
         vec![format!("{label}{color}{line1}\x1b[0m"), second]
     }
 }
 
 /// Characters of tip text a row holds.
 fn text_room(width: usize) -> usize {
-    width.saturating_sub(LABEL_COLS + RIGHT_MARGIN)
+    width.saturating_sub(label_cols() + RIGHT_MARGIN)
 }
 
 /// Two rows at this width if any tip needs them and the window has them.
 fn two_rows(width: usize, max_lines: usize) -> bool {
-    let longest = TIPS_POOL.iter().map(|t| t.chars().count()).max().unwrap_or(0);
+    let longest = TIPS_POOL.iter().map(|t| crate::i18n::tr(t).chars().count()).max().unwrap_or(0);
     max_lines >= 2 && width >= 30 && longest > text_room(width)
 }
 
 fn fits(tip: &str, width: usize, rows: usize) -> bool {
+    let tip = crate::i18n::tr(tip);
     let room = text_room(width);
     if !two_rows(width, rows) {
         return tip.chars().count() <= room;
@@ -235,6 +249,18 @@ pub fn split_tip_at_word_boundary(text: &str, budget1: usize) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every tip has a Russian version: a tip in English inside a Russian
+    /// interface is a gap the owner sees at once.
+    #[test]
+    fn every_tip_is_translated() {
+        for tip in TIPS_POOL {
+            assert!(
+                crate::i18n::translate(crate::i18n::Lang::Russian, tip) != *tip,
+                "the tip is not translated: {tip}"
+            );
+        }
+    }
 
     #[test]
     fn every_tip_is_about_something_that_exists() {

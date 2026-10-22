@@ -1,6 +1,7 @@
 //! The agent loop. It consumes [`LlmSource`] and [`ToolExec`], knows nothing
 //! about HTTP or UI, and reports everything as [`LoopEvent`]s.
 
+pub mod budget;
 pub mod config;
 pub mod context_usage;
 pub mod cost;
@@ -8,6 +9,7 @@ pub mod diff;
 pub mod effort_memory;
 pub mod loop_;
 pub mod memory;
+pub mod plan;
 pub mod memory_store;
 pub mod paths;
 pub mod permissions;
@@ -20,7 +22,8 @@ pub mod subagents;
 pub mod task_notices;
 pub mod toolcheck;
 
-pub use config::{AppConfig, BackendPreset, ColorTheme, SamplingPreset, ToolsetProfile, UpdateChannel};
+pub use budget::Budget;
+pub use config::{AppConfig, BackendPreset, ColorTheme, SamplingPreset, UpdateChannel};
 pub use cost::{CostLedger, ProviderCost};
 pub use context_usage::{
     default_compact_threshold, resolved_compact_threshold, should_compact, CompactionInput,

@@ -104,9 +104,16 @@ impl<T> SelectItem<T> {
         let text = self.search_text.as_deref()?;
         let lower = text.to_lowercase();
         let at = lower.find(query)?;
-        // Lower-casing keeps byte offsets for nearly every script; where it does not,
-        // the piece is shown lower-cased rather than cut wrongly.
-        let source = if lower.len() == text.len() { text } else { lower.as_str() };
+        // The piece is cut from the string the offset was found in. Lower-casing
+        // keeps the byte offsets for nearly every script; where it does not,
+        // the piece is shown lower-cased rather than cut wrongly. "İaẞ" is the
+        // case that got through: it lower-cases to the same number of bytes
+        // and a different number of characters, so the offset sat inside a
+        // character and the slice panicked.
+        let same_shape = lower.len() == text.len()
+            && lower.chars().count() == text.chars().count()
+            && text.is_char_boundary(at);
+        let source = if same_shape { text } else { lower.as_str() };
         let chars_before = source[..at].chars().count();
         let start = chars_before.saturating_sub(25);
         let piece: String = source.chars().skip(start).take(query.chars().count() + 50).collect();
@@ -115,11 +122,41 @@ impl<T> SelectItem<T> {
     }
 }
 
+/// The word the count and the empty states use.
+///
+/// The Russian forms live in the translation table, like every other word
+/// the user reads: the pair of English words is the key, the three Russian
+/// forms are the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Noun {
+    pub one: &'static str,
+    pub many: &'static str,
+}
+
+impl Noun {
+    pub const COMMANDS: Self = Self { one: "command", many: "commands" };
+    pub const PROVIDERS: Self = Self { one: "provider", many: "providers" };
+    pub const MODELS: Self = Self { one: "model", many: "models" };
+    pub const OPTIONS: Self = Self { one: "option", many: "options" };
+    pub const SESSIONS: Self = Self { one: "session", many: "sessions" };
+    pub const ITEMS: Self = Self { one: "item", many: "items" };
+
+    /// The word as the current language says it, in the singular.
+    pub fn one(&self) -> String {
+        crate::text::singular(self.one, self.many)
+    }
+
+    /// The word with the number in front of it, in the form the number wants.
+    pub fn counted(&self, n: u64) -> String {
+        crate::text::plural(n as usize, self.one, self.many)
+    }
+}
+
 /// Up / Down / Enter / Esc, a 10-item scrolling window, paging and live search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectMenu<T> {
     pub title: String,
-    pub noun: Option<String>,
+    pub noun: Option<Noun>,
     pub items: Vec<SelectItem<T>>,
     pub selected: usize,
     pub filter: String,
@@ -158,9 +195,9 @@ impl<T> SelectMenu<T> {
         (self.custom_entry && !typed.is_empty() && self.filtered_indices().is_empty()).then_some(typed)
     }
 
-    /// E.g. "options", "models".
-    pub fn with_noun(mut self, noun: impl Into<String>) -> Self {
-        self.noun = Some(noun.into());
+    /// E.g. the options or the models.
+    pub fn with_noun(mut self, noun: Noun) -> Self {
+        self.noun = Some(noun);
         self
     }
 
@@ -261,7 +298,7 @@ impl<T> SelectMenu<T> {
     /// In at most `max_rows` rows, so the title and the selected item stay on
     /// a short screen: at 80x24 ten two-row items did not fit.
     pub fn render_in(&self, width: usize, max_rows: usize) -> Vec<RenderLine> {
-        let card_w = width.clamp(24, 96);
+        let card_w = width.min(96);
         let inner_w = card_w.saturating_sub(2);
         let border_color = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
@@ -277,20 +314,19 @@ impl<T> SelectMenu<T> {
         let matches = self.filtered_indices();
         let total_matches = matches.len();
 
-        let item_noun = self.noun.as_deref().unwrap_or_else(|| {
+        let item_noun = self.noun.unwrap_or_else(|| {
             if self.title.to_lowercase().contains("model") {
-                "models"
+                Noun::MODELS
             } else if self.title.to_lowercase().contains("effort") {
-                "options"
+                Noun::OPTIONS
             } else {
-                "items"
+                Noun::ITEMS
             }
         });
 
         let counted = self.items.len().saturating_sub(self.uncounted);
         let count_str = if self.filter.is_empty() {
-            let noun = if counted == 1 { item_noun.strip_suffix('s').unwrap_or(item_noun) } else { item_noun };
-            format!("({counted} {noun})")
+            format!("({})", item_noun.counted(counted as u64))
         } else {
             format!("({}/{counted} · \"{}\")", matches.iter().filter(|&&i| i < counted).count(), self.filter)
         };
@@ -307,9 +343,22 @@ impl<T> SelectMenu<T> {
 
         if matches.is_empty() {
             let said = match (self.custom_entry, self.filter.trim()) {
-                (true, "") => format!("(No {item_noun} listed \u{b7} type an id and press Enter)"),
-                (true, typed) => format!("(Not listed \u{b7} Enter uses \"{typed}\")"),
-                (false, _) => format!("(No matching {item_noun} found)"),
+                (true, "") => crate::i18n::tr_with("(No {noun} listed \u{b7} type an id and press Enter)", &item_noun.one()),
+                (true, typed) => {
+                    // The name is not in the list: the closest one that is, so
+                    // a typo costs a keystroke instead of a search.
+                    let closest = crate::autocomplete::closest_match(
+                        typed,
+                        self.items.iter().map(|i| i.label.as_str()).filter(|l| !l.is_empty()),
+                    );
+                    match closest {
+                        Some(near) => crate::i18n::tr_with("(Not listed \u{b7} did you mean \"{near}\"? \u{b7} Enter uses \"{typed}\")", &item_noun.one())
+                            .replace("{near}", near)
+                            .replace("{typed}", typed),
+                        None => crate::i18n::tr_with("(Not listed \u{b7} Enter uses \"{typed}\")", &item_noun.one()).replace("{typed}", typed),
+                    }
+                }
+                (false, _) => crate::i18n::tr_with("(No matching {noun} found)", &item_noun.one()),
             };
             lines.push((LineKind::System, pad_row(&format!("  \x1b[38;2;135;130;125m{said}\x1b[0m"))));
         } else {
@@ -329,7 +378,10 @@ impl<T> SelectMenu<T> {
             if start > 0 {
                 lines.push((
                     LineKind::System,
-                    pad_row(&format!("  \x1b[38;2;135;130;125m▲ {start} more above\x1b[0m")),
+                    pad_row(&format!(
+                        "  \x1b[38;2;135;130;125m{}\x1b[0m",
+                        crate::i18n::tr_fill("▲ {n} more above", &[("n", &start.to_string())])
+                    )),
                 ));
             }
 
@@ -357,7 +409,10 @@ impl<T> SelectMenu<T> {
             if end < total_matches {
                 lines.push((
                     LineKind::System,
-                    pad_row(&format!("  \x1b[38;2;135;130;125m▼ {} more below\x1b[0m", total_matches - end)),
+                    pad_row(&format!(
+                        "  \x1b[38;2;135;130;125m{}\x1b[0m",
+                        crate::i18n::tr_fill("▼ {n} more below", &[("n", &(total_matches - end).to_string())])
+                    )),
                 ));
             }
         }
@@ -366,7 +421,11 @@ impl<T> SelectMenu<T> {
             LineKind::System,
             format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
         ));
-        let mut hints = vec![("↑/↓", "move"), ("Enter", "select"), ("type", if self.custom_entry { "to filter or enter an id" } else { "to filter" })];
+        let mut hints = vec![
+            ("↑/↓", "move"),
+            ("Enter", "select"),
+            ("type", if self.custom_entry { "to filter or enter an id" } else { "to filter" }),
+        ];
         if total_matches > self.page() {
             hints.push(("PgUp/PgDn", "page"));
         }
@@ -380,6 +439,21 @@ impl<T> SelectMenu<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hidden_match_is_cut_on_a_character_boundary() {
+        // "İaẞ" lower-cases to the same number of bytes and a different number
+        // of characters, so the offset found in the lower-cased text is not a
+        // boundary in the original: the slice panicked.
+        let mut item = SelectItem::new("session", 0usize);
+        item.search_text = Some("İaẞ".into());
+        assert!(item.hidden_match("ß").is_some(), "the hidden match was not found");
+        // The label must not hold the query itself: a visible match needs no
+        // hidden piece, and the piece is only cut for what the label hides.
+        let mut item = SelectItem::new("session", 0usize);
+        item.search_text = Some("İaẞ".into());
+        assert!(item.hidden_match("a").is_some(), "the hidden match was not found");
+    }
 
     #[test]
     fn a_search_of_several_words_finds_them_in_any_order() {
@@ -545,12 +619,5 @@ mod tests {
         );
         let effort_lines = effort_menu.render(80);
         assert!(effort_lines.iter().any(|(_, t)| t.contains("(2 options)")));
-
-        let custom_menu = SelectMenu::new(
-            "Select Server",
-            vec![SelectItem::new("local", "local")],
-        ).with_noun("servers");
-        let custom_lines = custom_menu.render(80);
-        assert!(custom_lines.iter().any(|(_, t)| t.contains("(1 server)")));
     }
 }

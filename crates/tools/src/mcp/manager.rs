@@ -1,6 +1,6 @@
 //! Server lifecycles, tool discovery and call routing for MCP.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use serde_json::Value;
 
 use super::client::McpClient;
-use super::config::{load_mcp_configs, McpServerConfig};
+use super::config::{load_mcp_configs_with_origin, McpServerConfig};
 use crate::ToolError;
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -55,18 +55,62 @@ pub struct McpManager {
     /// Shown instead of a misleading "Disabled" for enabled but broken servers.
     start_errors: RwLock<HashMap<String, String>>,
     loaded_paths: RwLock<Vec<PathBuf>>,
+    /// The servers a project's `.mcp.json` named. They are the ones that run a
+    /// program the owner did not put there, so they are the ones that need
+    /// saying yes to.
+    from_project: RwLock<HashSet<String>>,
+    /// The servers the owner allowed to start in this session. A server from
+    /// a project is not in it until the owner says yes.
+    allowed: RwLock<HashSet<String>>,
 }
 
 impl McpManager {
     pub fn new(cwd: PathBuf) -> Arc<Self> {
-        let (configs, loaded_paths) = load_mcp_configs(&cwd);
+        let (configs, loaded_paths, from_project) = load_mcp_configs_with_origin(&cwd);
         Arc::new(Self {
             cwd,
             configs: RwLock::new(configs),
             clients: RwLock::new(BTreeMap::new()),
             start_errors: RwLock::new(HashMap::new()),
             loaded_paths: RwLock::new(loaded_paths),
+            from_project: RwLock::new(from_project),
+            allowed: RwLock::new(HashSet::new()),
         })
+    }
+
+    /// The servers a project's config named: the ones that need saying yes to.
+    pub fn project_servers(&self) -> Vec<(String, McpServerConfig)> {
+        let from_project = self.from_project.read();
+        let configs = self.configs.read();
+        let mut out: Vec<(String, McpServerConfig)> = configs
+            .iter()
+            .filter(|(name, _)| from_project.contains(*name))
+            .map(|(name, cfg)| (name.clone(), cfg.clone()))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// The servers the owner allowed to start in this session.
+    pub fn set_allowed(&self, allowed: HashSet<String>) {
+        *self.allowed.write() = allowed;
+    }
+
+    /// Allows one server to start.
+    pub fn allow(&self, name: &str) {
+        self.allowed.write().insert(name.to_string());
+    }
+
+    /// Whether this server may start without a question.
+    ///
+    /// A server the owner put in their own global config is theirs. One that
+    /// came from a project's `.mcp.json` runs a program the owner may never
+    /// have seen, so it waits for a yes.
+    fn may_start(&self, name: &str) -> bool {
+        if !self.from_project.read().contains(name) {
+            return true;
+        }
+        self.allowed.read().contains(name)
     }
 
     pub fn loaded_paths(&self) -> Vec<PathBuf> {
@@ -83,6 +127,12 @@ impl McpManager {
     }
 
     pub async fn start_server(&self, name: &str) -> Result<Arc<McpClient>, String> {
+        // A server the owner has not allowed does not run: it may be a program
+        // from a repository somebody else wrote, and starting it would run
+        // that code before the person was asked anything.
+        if !self.may_start(name) {
+            return Err(format!("MCP server '{name}' was not allowed to run"));
+        }
         let res = self.try_start_server(name).await;
         match &res {
             Ok(_) => {
@@ -136,9 +186,10 @@ impl McpManager {
         }
 
         self.start_errors.write().clear();
-        let (configs, paths) = load_mcp_configs(&self.cwd);
+        let (configs, paths, from_project) = load_mcp_configs_with_origin(&self.cwd);
         *self.configs.write() = configs;
         *self.loaded_paths.write() = paths;
+        *self.from_project.write() = from_project;
 
         self.start_enabled_servers().await;
         Ok(())
@@ -307,6 +358,57 @@ impl McpManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server a project's config named does not run until the owner says
+    /// yes: a repository somebody else wrote could start a program.
+    #[tokio::test]
+    async fn a_server_from_a_project_does_not_run_without_a_yes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = McpManager::new(dir.path().to_path_buf());
+        let mut cfg = McpServerConfig::new("echo", vec![]);
+        cfg.description = Some("from the project".into());
+        *mgr.configs.write() = HashMap::from([("project_server".to_string(), cfg)]);
+        // As a project's config would leave it.
+        mgr.from_project.write().insert("project_server".to_string());
+
+        let err = match mgr.start_server("project_server").await {
+            Ok(_) => panic!("a server from a project started without a yes"),
+            Err(e) => e,
+        };
+        assert!(err.contains("not allowed"), "{err}");
+
+        // Said yes: it starts.
+        mgr.allow("project_server");
+        assert!(mgr.may_start("project_server"));
+    }
+
+    /// A server the owner put in their own global config is theirs: it starts
+    /// without a question.
+    #[tokio::test]
+    async fn a_server_from_the_owners_own_config_starts_without_a_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = McpManager::new(dir.path().to_path_buf());
+        let mut cfg = McpServerConfig::new("echo", vec![]);
+        cfg.description = Some("from the global config".into());
+        *mgr.configs.write() = HashMap::from([("own_server".to_string(), cfg)]);
+        // Not in from_project: it is the owner's own.
+        assert!(mgr.may_start("own_server"));
+    }
+
+    /// The servers to ask about are the ones a project named, and only those.
+    #[tokio::test]
+    async fn the_servers_to_ask_about_are_the_projects_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = McpManager::new(dir.path().to_path_buf());
+        *mgr.configs.write() = HashMap::from([
+            ("project_server".to_string(), McpServerConfig::new("echo", vec![])),
+            ("own_server".to_string(), McpServerConfig::new("echo", vec![])),
+        ]);
+        mgr.from_project.write().insert("project_server".to_string());
+
+        let asked: Vec<String> = mgr.project_servers().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(asked, vec!["project_server".to_string()]);
+    }
 
     #[tokio::test]
     async fn test_mcp_manager_tool_parsing_and_read_only() {

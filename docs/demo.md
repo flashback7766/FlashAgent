@@ -69,8 +69,8 @@ prompt is back in the input to edit.
 
 - Type a sentence, then move into its middle with **←** and fix a word.
   Show **Ctrl+W** deleting a word.
-- **Alt+Enter** for a second line. Paste a block of code; it keeps its
-  lines.
+- **Alt+Enter** or **Shift+Enter** for a second line. Paste a block of
+  code; it keeps its lines.
 - **Ctrl+F** and a few letters find a prompt sent earlier, even in an
   earlier session.
 
@@ -103,7 +103,11 @@ narrows to it and shows where the word was.
 ```
 
 Open the file: the conversation as a document, with tool results folded
-away.
+away. Name a path and it goes there instead:
+
+```
+/export md ~/notes/chat.md
+```
 
 ## 8. What holds it together (2 min)
 
@@ -111,7 +115,7 @@ away.
 cargo test -p flashagent-tui --test scenarios
 ```
 
-About a minute: 109 tests start the real binary in a pseudo-terminal,
+About a minute: 140 tests start the real binary in a pseudo-terminal,
 type into it and read the screen, against a scripted model server. Then
 open [numbers.md](numbers.md) for the figures: start-up, memory, and
 frame time on a 10,000-turn session.

@@ -19,10 +19,10 @@ async fn call(name: &str, args: serde_json::Value) -> ToolOutput {
         brave_api_key: std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.trim().is_empty()),
         question_gate: None,
         is_goal_mode: None,
-        toolset_profile: None,
         web_enabled: Some(true),
         context_window: Some(200_000),
         mcp_manager: None,
+        disabled_tools: None,
     })
     .unwrap();
     tools

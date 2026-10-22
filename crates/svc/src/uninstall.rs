@@ -152,6 +152,25 @@ pub fn human_size(bytes: u64) -> String {
     if unit == 0 { format!("{bytes} B") } else { format!("{value:.1} {}", UNITS[unit]) }
 }
 
+/// Entries a PATH line adds, one per folder.
+fn added_dirs(line: &str) -> Vec<&str> {
+    if let Some(rest) = line.strip_prefix("fish_add_path") {
+        return rest.split_whitespace().collect();
+    }
+    if let Some(rest) = line.strip_prefix("export PATH=") {
+        return rest.trim_matches('"').split(':').collect();
+    }
+    Vec::new()
+}
+
+/// Compared by path components, not by substring: `/home/u/.flashagent-old`
+/// is a different folder from `/home/u/.flashagent`, and a line for the first
+/// must not be removed when the second is uninstalled.
+fn same_dir(entry: &str, dir: &str) -> bool {
+    let entry = entry.trim().trim_matches(['"', '\'']);
+    Path::new(entry).components().eq(Path::new(dir).components())
+}
+
 /// Removes the marker, the PATH line after it for `dir`, and the blank line
 /// before the marker. `None` when nothing is ours; a line the user wrote is
 /// never touched, even one naming the same folder.
@@ -162,10 +181,7 @@ pub fn strip_path_lines(text: &str, dir: &str) -> Option<String> {
     let mut i = 0;
     while i < lines.len() {
         let is_ours = lines[i].trim() == PATH_MARKER
-            && lines.get(i + 1).is_some_and(|next| {
-                let next = next.trim();
-                next.contains(dir) && (next.starts_with("fish_add_path") || next.starts_with("export PATH="))
-            });
+            && lines.get(i + 1).is_some_and(|next| added_dirs(next.trim()).iter().any(|entry| same_dir(entry, dir)));
         if is_ours {
             if keep.last().is_some_and(|l| l.trim().is_empty()) {
                 keep.pop();
@@ -530,6 +546,19 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_that_only_starts_with_the_same_text_is_not_the_install_folder() {
+        let dir = "/home/u/.flashagent";
+        for line in [
+            format!("{PATH_MARKER}\nexport PATH=\"/home/u/.flashagent-old:$PATH\"\n"),
+            format!("{PATH_MARKER}\nfish_add_path /home/u/.flashagent-old\n"),
+        ] {
+            assert_eq!(strip_path_lines(&line, dir), None, "a neighbouring folder was taken for {dir}: {line:?}");
+        }
+        let ours = format!("{PATH_MARKER}\nexport PATH=\"{dir}:$PATH\"\n");
+        assert_eq!(strip_path_lines(&ours, dir).as_deref(), Some(""), "the exact folder is still ours");
+    }
+
+    #[test]
     fn a_windows_path_entry_is_removed_the_way_windows_compares_it() {
         let path = r"C:\Windows;C:\Users\me\AppData\Local\Programs\FlashAgent\;C:\tools";
         assert_eq!(
@@ -572,6 +601,11 @@ mod tests {
         assert!(data_parts(&home.path().join("missing")).is_empty());
     }
 
+    // The `.bashrc` PATH line and the `.local/bin` layout are POSIX only: the
+    // line's folders are read as a colon list, and on Windows that reading
+    // stops at the drive colon. The Windows PATH entry lives in the user
+    // environment and is edited apart.
+    #[cfg(unix)]
     #[test]
     fn an_uninstall_removes_the_program_its_path_line_and_only_the_chosen_data() {
         let home = home_with_everything();
@@ -595,6 +629,7 @@ mod tests {
         assert!(data.join("something-new.txt").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_path_line_stays_while_its_folder_still_holds_other_programs() {
         let home = home_with_everything();

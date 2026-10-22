@@ -70,5 +70,8 @@ fn main() {
         }
     }
 
-    println!("cargo:rustc-env=FLASHAGENT_VERSION=b286");
+    // Nothing names this build: leave FLASHAGENT_VERSION unset so
+    // `current_version` reports the workspace version from `Cargo.toml`.
+    // A hardcoded fallback (b286 once) made every such build claim to be a
+    // release it was not, and the "what's new" screen showed b286 forever.
 }

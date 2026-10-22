@@ -20,7 +20,10 @@ pub struct SamplingView {
     pub repeat_penalty_buf: String,
     pub presence_penalty_buf: String,
     pub min_p_buf: String,
-    pub is_dirty: bool,
+    /// How much the model may write. Empty: the server's own limit.
+    pub max_tokens_buf: String,
+    /// The seed of the sampling. Empty: the server picks one.
+    pub seed_buf: String,
 }
 
 impl SamplingView {
@@ -35,7 +38,8 @@ impl SamplingView {
             repeat_penalty_buf: format!("{:.2}", config.repeat_penalty.unwrap_or(1.00)),
             presence_penalty_buf: format!("{:.2}", config.presence_penalty.unwrap_or(0.00)),
             min_p_buf: format!("{:.2}", config.min_p.unwrap_or(0.00)),
-            is_dirty: false,
+            max_tokens_buf: config.max_tokens.map(|n| n.to_string()).unwrap_or_default(),
+            seed_buf: config.seed.map(|n| n.to_string()).unwrap_or_default(),
         };
         // A named preset overwrites the buffers with its values.
         if preset != SamplingPreset::Custom {
@@ -45,7 +49,9 @@ impl SamplingView {
     }
 
     pub fn total_items(&self) -> usize {
-        8 // 0: Preset, 1: Temp, 2: Top P, 3: Top K, 4: Repeat Penalty, 5: Presence Penalty, 6: Min P, 7: Apply
+        // 0: Preset, 1: Temp, 2: Top P, 3: Top K, 4: Repeat Penalty,
+        // 5: Presence Penalty, 6: Min P, 7: Max Tokens, 8: Seed, 9: Apply
+        10
     }
 
     fn sync_buffers_to_preset(&mut self, preset: SamplingPreset) {
@@ -79,6 +85,17 @@ impl SamplingView {
 
         let mp = self.min_p_buf.parse::<f32>().unwrap_or(0.00).clamp(0.0, 1.0);
         self.min_p_buf = format!("{:.2}", mp);
+
+        // An empty field means the server's own limit, and that is not a
+        // number: it is the absence of one.
+        self.max_tokens_buf = match self.max_tokens_buf.trim().parse::<u32>() {
+            Ok(n) => n.clamp(1, 1_000_000).to_string(),
+            Err(_) => String::new(),
+        };
+        self.seed_buf = match self.seed_buf.trim().parse::<u64>() {
+            Ok(n) => n.to_string(),
+            Err(_) => String::new(),
+        };
     }
 
     pub fn apply_to_config(&mut self, config: &mut AppConfig) {
@@ -90,6 +107,8 @@ impl SamplingView {
         config.repeat_penalty = Some(self.repeat_penalty_buf.parse::<f32>().unwrap_or(1.00));
         config.presence_penalty = Some(self.presence_penalty_buf.parse::<f32>().unwrap_or(0.00));
         config.min_p = Some(self.min_p_buf.parse::<f32>().unwrap_or(0.00));
+        config.max_tokens = self.max_tokens_buf.trim().parse::<u32>().ok();
+        config.seed = self.seed_buf.trim().parse::<u64>().ok();
     }
 
     pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> SamplingAction {
@@ -127,6 +146,7 @@ impl SamplingView {
                     4 => self.adjust_float(4, -0.05, 0.0, 2.0),
                     5 => self.adjust_float(5, -0.05, -2.0, 2.0),
                     6 => self.adjust_float(6, -0.05, 0.0, 1.0),
+                    7 => self.adjust_max_tokens(-100),
                     _ => {}
                 }
                 SamplingAction::None
@@ -142,16 +162,16 @@ impl SamplingView {
                     4 => self.adjust_float(4, 0.05, 0.0, 2.0),
                     5 => self.adjust_float(5, 0.05, -2.0, 2.0),
                     6 => self.adjust_float(6, 0.05, 0.0, 1.0),
+                    7 => self.adjust_max_tokens(100),
                     _ => {}
                 }
                 SamplingAction::None
             }
             KeyCode::Backspace => {
-                if self.selected_index >= 1 && self.selected_index <= 6 {
+                if (1..=8).contains(&self.selected_index) {
                     let buf = self.active_buffer_mut();
                     buf.pop();
                     self.preset = SamplingPreset::Custom;
-                    self.is_dirty = true;
                 }
                 SamplingAction::None
             }
@@ -162,14 +182,14 @@ impl SamplingView {
             KeyCode::Char(' ') => {
                 if self.selected_index == 0 {
                     self.cycle_preset(1);
-                } else if self.selected_index == 7 {
+                } else if self.selected_index == 9 {
                     self.clamp_buffers();
                     return SamplingAction::SaveAndClose;
                 }
                 SamplingAction::None
             }
             KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) => {
-                if (1..=6).contains(&self.selected_index) && (c.is_ascii_digit() || c == '.' || c == '-') {
+                if (1..=8).contains(&self.selected_index) && (c.is_ascii_digit() || c == '.' || c == '-') {
                     let buf = self.active_buffer_mut();
                     if c == '.' && buf.contains('.') {
                         // Ignore a second dot.
@@ -178,8 +198,7 @@ impl SamplingView {
                     } else {
                         buf.push(c);
                         self.preset = SamplingPreset::Custom;
-                        self.is_dirty = true;
-                    }
+                        }
                 }
                 SamplingAction::None
             }
@@ -195,8 +214,19 @@ impl SamplingView {
             4 => &mut self.repeat_penalty_buf,
             5 => &mut self.presence_penalty_buf,
             6 => &mut self.min_p_buf,
+            7 => &mut self.max_tokens_buf,
+            8 => &mut self.seed_buf,
             _ => &mut self.temp_buf,
         }
+    }
+
+    /// The limit of the answer, in steps of a hundred. An empty field is the
+    /// server's own limit, and the first step puts a number there.
+    fn adjust_max_tokens(&mut self, delta: i32) {
+        let current = self.max_tokens_buf.trim().parse::<i64>().unwrap_or(0);
+        let updated = (current + delta as i64).clamp(0, 1_000_000);
+        self.max_tokens_buf = if updated == 0 { String::new() } else { updated.to_string() };
+        self.preset = SamplingPreset::Custom;
     }
 
     fn cycle_preset(&mut self, delta: i32) {
@@ -209,7 +239,6 @@ impl SamplingView {
         };
         let new_preset = all[next_idx];
         self.sync_buffers_to_preset(new_preset);
-        self.is_dirty = true;
     }
 
     fn adjust_float(&mut self, idx: usize, delta: f32, min_val: f32, max_val: f32) {
@@ -225,7 +254,6 @@ impl SamplingView {
         let updated = (cur + delta).clamp(min_val, max_val);
         *buf = format!("{:.2}", updated);
         self.preset = SamplingPreset::Custom;
-        self.is_dirty = true;
     }
 
     fn adjust_int(&mut self, idx: usize, delta: i32, min_val: u32, max_val: u32) {
@@ -236,16 +264,15 @@ impl SamplingView {
         let updated = (cur + delta).clamp(min_val as i32, max_val as i32) as u32;
         self.top_k_buf = format!("{}", updated);
         self.preset = SamplingPreset::Custom;
-        self.is_dirty = true;
     }
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
         let mut lines = Vec::new();
         let border_color = "\x1b[38;2;100;95;90m";
         let reset = "\x1b[0m";
-        let inner_w = width.saturating_sub(6).clamp(20, 110);
+        let inner_w = width.saturating_sub(6).min(110);
 
-        let title = " Sampling parameters ";
+        let title = format!(" {} ", crate::i18n::tr("Sampling parameters"));
         let dash_count = inner_w.saturating_sub(title.chars().count() + 1);
         lines.push((
             LineKind::System,
@@ -260,12 +287,15 @@ impl SamplingView {
             format!("  {border_color}│{reset} {clipped}{pad} {border_color}│{reset}")
         };
 
-        lines.push((LineKind::System, pad_row("\x1b[38;2;135;130;125mConfigure LLM temperature, top-p/k, penalty, and min-p sampling\x1b[0m")));
+        lines.push((LineKind::System, pad_row(&format!(
+            "\x1b[38;2;135;130;125m{}\x1b[0m",
+            crate::i18n::tr("Configure LLM temperature, top-p/k, penalty, and min-p sampling")
+        )))) ;
         lines.push((LineKind::System, pad_row("")));
 
         let is_preset_sel = self.selected_index == 0;
         let ptr0 = if is_preset_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
-        let preset_val = format!("[ {} ]", self.preset.label());
+        let preset_val = format!("[ {} ]", crate::i18n::tr(self.preset.label()));
         let (label0, val0) = if is_preset_sel {
             (
                 format!("\x1b[1;38;2;240;235;225m{:<18}\x1b[0m", "Preset"),
@@ -280,12 +310,14 @@ impl SamplingView {
         lines.push((LineKind::System, pad_row(&format!("{ptr0} {label0} {val0}"))));
 
         let fields = [
-            (1, "Temperature", &self.temp_buf, "0.00..2.00 (coding: 0.60, mtp: 0.30, chat: 0.80, precise: 0.10)"),
-            (2, "Top P", &self.top_p_buf, "0.00..1.00 (coding: 0.95, mtp: 0.90, precise: 0.75)"),
-            (3, "Top K", &self.top_k_buf, "0..500     (coding: 20, mtp: 40, chat: 50, precise: 10)"),
-            (4, "Repeat penalty", &self.repeat_penalty_buf, "0.00..2.00 (coding: 1.00, mtp: 1.02, gemma: 1.08, chat: 1.10)"),
-            (5, "Presence penalty", &self.presence_penalty_buf, "-2.00..2.00 (chat: 0.10, mtp-chat: 0.05, default: 0.00)"),
-            (6, "Min P", &self.min_p_buf, "0.00..1.00 (mtp-code: 0.05, mtp: 0.03, default: 0.00)"),
+            (1, crate::i18n::tr("Temperature"), &self.temp_buf, crate::i18n::tr("0.00..2.00 (coding: 0.60, mtp: 0.30, chat: 0.80, precise: 0.10)")),
+            (2, crate::i18n::tr("Top P"), &self.top_p_buf, crate::i18n::tr("0.00..1.00 (coding: 0.95, mtp: 0.90, precise: 0.75)")),
+            (3, crate::i18n::tr("Top K"), &self.top_k_buf, crate::i18n::tr("0..500     (coding: 20, mtp: 40, chat: 50, precise: 10)")),
+            (4, crate::i18n::tr("Repeat penalty"), &self.repeat_penalty_buf, crate::i18n::tr("0.00..2.00 (coding: 1.00, mtp: 1.02, gemma: 1.08, chat: 1.10)")),
+            (5, crate::i18n::tr("Presence penalty"), &self.presence_penalty_buf, crate::i18n::tr("-2.00..2.00 (chat: 0.10, mtp-chat: 0.05, by default: 0.00)")),
+            (6, crate::i18n::tr("Min P"), &self.min_p_buf, crate::i18n::tr("0.00..1.00 (mtp-code: 0.05, mtp: 0.03, by default: 0.00)")),
+            (7, crate::i18n::tr("Max tokens"), &self.max_tokens_buf, crate::i18n::tr("empty = the server's own limit")),
+            (8, crate::i18n::tr("Seed"), &self.seed_buf, crate::i18n::tr("empty = the server picks one")),
         ];
 
         for (idx, label, buf, range_hint) in fields {
@@ -306,12 +338,13 @@ impl SamplingView {
             lines.push((LineKind::System, pad_row(&format!("{ptr} {label_styled} {val_styled}"))));
         }
 
-        let is_apply_sel = self.selected_index == 7;
+        let is_apply_sel = self.selected_index == 9;
         let ptr7 = if is_apply_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+        let apply_label = crate::i18n::tr("[ Apply and return to chat ]");
         let apply_styled = if is_apply_sel {
-            "\x1b[1;38;2;225;175;95m[ Apply and return to chat ]\x1b[0m"
+            format!("\x1b[1;38;2;225;175;95m{apply_label}\x1b[0m")
         } else {
-            "\x1b[38;2;160;155;145m[ Apply and return to chat ]\x1b[0m"
+            format!("\x1b[38;2;160;155;145m{apply_label}\x1b[0m")
         };
         lines.push((LineKind::System, pad_row("")));
         lines.push((LineKind::System, pad_row(&format!("{ptr7} {apply_styled}"))));
@@ -399,6 +432,52 @@ mod tests {
             assert!(rows[0].trim_start().starts_with('╭') && rows[rows.len() - 1].trim_start().starts_with('╰'));
             assert!(rows[rows.len() - 2].trim_end_matches(['│', ' ']).ends_with("Esc cancel"), "{width}: {rows:#?}");
         }
+    }
+
+    /// The limit of the answer and the seed of the sampling: what the owner
+    /// sets, and what the request carries.
+    #[test]
+    fn the_limit_of_the_answer_and_the_seed_are_saved() {
+        let cfg = AppConfig::default();
+        let mut view = SamplingView::new(&cfg);
+        // Empty at first: the server's own limit and its own choice.
+        assert_eq!(view.max_tokens_buf, "");
+        assert_eq!(view.seed_buf, "");
+
+        view.selected_index = 7;
+        for c in "4096".chars() {
+            view.handle_key(KeyCode::Char(c), KeyModifiers::empty());
+        }
+        view.selected_index = 8;
+        for c in "42".chars() {
+            view.handle_key(KeyCode::Char(c), KeyModifiers::empty());
+        }
+        assert_eq!(view.max_tokens_buf, "4096");
+        assert_eq!(view.seed_buf, "42");
+
+        let mut out = cfg.clone();
+        view.apply_to_config(&mut out);
+        assert_eq!(out.max_tokens, Some(4096));
+        assert_eq!(out.seed, Some(42));
+    }
+
+    /// An empty field is not a zero: it is the absence of a limit.
+    #[test]
+    fn an_empty_field_leaves_the_server_its_own_choice() {
+        let cfg = AppConfig { max_tokens: Some(2048), seed: Some(7), ..AppConfig::default() };
+        let mut view = SamplingView::new(&cfg);
+        assert_eq!(view.max_tokens_buf, "2048");
+        assert_eq!(view.seed_buf, "7");
+
+        // The owner clears the field.
+        view.selected_index = 7;
+        for _ in 0..4 {
+            view.handle_key(KeyCode::Backspace, KeyModifiers::empty());
+        }
+        let mut out = cfg.clone();
+        view.apply_to_config(&mut out);
+        assert_eq!(out.max_tokens, None, "an empty field is the server's own limit");
+        assert_eq!(out.seed, Some(7), "the seed was not touched");
     }
 
     #[test]

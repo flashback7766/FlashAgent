@@ -2,9 +2,9 @@ use super::*;
 
 /// Titled with the provider, so a switch shows whose models these are.
 pub(crate) fn build_model_menu(source: &BackendSource, provider: &str) -> SelectMenu<String> {
-    let title = format!("Select model \u{b7} {provider}");
+    let title = flashagent_tui::i18n::tr("Select model · {provider}").replace("{provider}", provider);
     let Some(disc) = source.discovery().filter(|d| !d.models.is_empty()) else {
-        return SelectMenu::new(title, Vec::new()).with_noun("models").with_custom_entry();
+        return SelectMenu::new(title, Vec::new()).with_noun(flashagent_tui::select::Noun::MODELS).with_custom_entry();
     };
     let is_lm_studio = disc.kind == flashagent_llm::thinking::ServerKind::LmStudio;
     let has_loaded = disc.models.iter().any(|m| m.is_loaded);
@@ -17,11 +17,11 @@ pub(crate) fn build_model_menu(source: &BackendSource, provider: &str) -> Select
     let mut items = Vec::new();
     for m in models {
         let summary = m.capabilities_summary();
-        let load_tag = if m.is_loaded { "● loaded" } else { "○ available" };
+        let load_tag = if m.is_loaded { "● loaded" } else { flashagent_tui::i18n::tr("○ available") };
         let desc = format!("{load_tag} · {summary}");
         items.push(SelectItem::with_description(m.id.clone(), desc, m.id.clone()));
     }
-    SelectMenu::new(title, items).with_noun("models").with_custom_entry()
+    SelectMenu::new(title, items).with_noun(flashagent_tui::select::Noun::MODELS).with_custom_entry()
 }
 
 /// Every effort worth choosing from for the model in use, in the order the
@@ -82,11 +82,11 @@ pub(crate) fn build_effort_menu(
     };
     let auto_desc = if !can_think {
         // The setting is kept, but it is not in force.
-        "Auto (this model does not reason; kept for the next one)".to_string()
+        flashagent_tui::i18n::tr("Auto (this model does not reason; kept for the next one)").to_string()
     } else {
         match memory.explain(model) {
-            Some(learned) => format!("Auto (per turn; learned {learned})"),
-            None => "Auto (dynamically adjusts thinking per turn)".to_string(),
+            Some(learned) => flashagent_tui::i18n::tr("Auto (per turn; learned {learned})").replace("{learned}", &learned),
+            None => flashagent_tui::i18n::tr("Auto (dynamically adjusts thinking per turn)").to_string(),
         }
     };
     items.push(SelectItem::with_description(
@@ -98,30 +98,34 @@ pub(crate) fn build_effort_menu(
         if prof.supported && !prof.presets.is_empty() {
             for p in &prof.presets {
                 let desc = match p.to_lowercase().as_str() {
-                    "off" | "disabled" | "none" | "false" | "0" => "Disable internal reasoning",
-                    "low" | "minimal" | "min" | "fast" => "Fast response, low thinking budget",
-                    "medium" | "standard" => "Balanced reasoning depth and speed",
-                    "high" | "deep" => "Full reasoning exploration",
-                    "xhigh" | "extra-high" => "Maximum thinking budget for difficult tasks",
-                    "on" | "enabled" | "true" | "1" => "Enable internal reasoning",
-                    _ => "API model preset",
+                    "off" | "disabled" | "none" | "false" | "0" => flashagent_tui::i18n::tr("Disable internal reasoning"),
+                    "low" | "minimal" | "min" | "fast" => flashagent_tui::i18n::tr("Fast response, low thinking budget"),
+                    "medium" | "standard" => flashagent_tui::i18n::tr("Balanced reasoning depth and speed"),
+                    "high" | "deep" => flashagent_tui::i18n::tr("Full reasoning exploration"),
+                    "xhigh" | "extra-high" => flashagent_tui::i18n::tr("Maximum thinking budget for difficult tasks"),
+                    "max" => flashagent_tui::i18n::tr("The most thinking the model will do"),
+                    "on" | "enabled" | "true" | "1" => flashagent_tui::i18n::tr("Enable internal reasoning"),
+                    _ => flashagent_tui::i18n::tr("API model preset"),
                 };
                 items.push(SelectItem::with_description(p.clone(), desc, p.clone()));
             }
         } else if prof.is_unreported() {
             // The server lists no settings: off is the only honest option besides default.
-            items.push(SelectItem::with_description("off", "Disable reasoning (the server lists no other settings)", "off".to_string()));
+            items.push(SelectItem::with_description("off", flashagent_tui::i18n::tr("Disable reasoning (the server lists no other settings)"), "off".to_string()));
         } else if !prof.supported {
-            items.push(SelectItem::with_description("off", "Reasoning unsupported by this endpoint", "off".to_string()));
+            items.push(SelectItem::with_description("off", flashagent_tui::i18n::tr("Reasoning unsupported by this endpoint"), "off".to_string()));
         }
     }
     if items.len() == 1 {
-        items.push(SelectItem::with_description("off", "Disable reasoning", "off".to_string()));
-        items.push(SelectItem::with_description("low", "Minimal reasoning budget", "low".to_string()));
-        items.push(SelectItem::with_description("medium", "Balanced reasoning depth", "medium".to_string()));
-        items.push(SelectItem::with_description("high", "Deep reasoning exploration", "high".to_string()));
+        items.push(SelectItem::with_description("off", flashagent_tui::i18n::tr("Disable reasoning"), "off".to_string()));
+        items.push(SelectItem::with_description("low", flashagent_tui::i18n::tr("Minimal reasoning budget"), "low".to_string()));
+        items.push(SelectItem::with_description("medium", flashagent_tui::i18n::tr("Balanced reasoning depth"), "medium".to_string()));
+        items.push(SelectItem::with_description("high", flashagent_tui::i18n::tr("Deep reasoning exploration"), "high".to_string()));
+        // The two levels above high: the models with an effort ladder have them.
+        items.push(SelectItem::with_description("xhigh", flashagent_tui::i18n::tr("Maximum thinking budget for difficult tasks"), "xhigh".to_string()));
+        items.push(SelectItem::with_description("max", flashagent_tui::i18n::tr("The most thinking the model will do"), "max".to_string()));
     }
-    SelectMenu::new("Thinking effort", items).with_noun("options")
+    SelectMenu::new(flashagent_tui::i18n::tr("Thinking effort"), items).with_noun(flashagent_tui::select::Noun::OPTIONS)
 }
 
 pub(crate) fn thinking_summary_str(source: &BackendSource, current_effort: &str) -> String {
@@ -129,7 +133,7 @@ pub(crate) fn thinking_summary_str(source: &BackendSource, current_effort: &str)
         if p.supported && !p.presets.is_empty() {
             format!("{} [{}]", current_effort, p.presets.join(", "))
         } else if !p.supported && !p.is_unreported() {
-            "disabled (unsupported)".to_string()
+            flashagent_tui::i18n::tr("disabled (unsupported)").to_string()
         } else {
             current_effort.to_string()
         }
@@ -224,8 +228,8 @@ impl RewindConfirm {
         };
 
         let mut lines = Vec::new();
-        let title_styled = " \x1b[1;38;2;225;175;95mConfirm Rewind\x1b[0m ";
-        let title_vis = visible_width(title_styled);
+        let title_styled = format!(" \x1b[1;38;2;225;175;95m{}\x1b[0m ", flashagent_tui::i18n::tr("Confirm Rewind"));
+        let title_vis = visible_width(&title_styled);
         let border_dashes = inner_w.saturating_sub(title_vis);
         lines.push((
             LineKind::System,
@@ -235,8 +239,8 @@ impl RewindConfirm {
         lines.push((
             LineKind::System,
             pad_row(&format!(
-                "  \x1b[38;2;160;155;145mRewinding to before: \"{}\"\x1b[0m",
-                self.prompt_label
+                "  \x1b[38;2;160;155;145m{}\x1b[0m",
+                flashagent_tui::i18n::tr("Rewinding to before: \"{}\"").replace("{}", &self.prompt_label)
             )),
         ));
         lines.push((LineKind::System, pad_row("")));
@@ -244,7 +248,7 @@ impl RewindConfirm {
         if self.files.is_empty() {
             lines.push((
                 LineKind::System,
-                pad_row("  \x1b[38;2;135;130;125mThis will not change any files.\x1b[0m"),
+                pad_row(&format!("  \x1b[38;2;135;130;125m{}\x1b[0m", flashagent_tui::i18n::tr("This will not change any files."))),
             ));
         } else {
             for f in &self.files {
@@ -263,7 +267,7 @@ impl RewindConfirm {
         }
         lines.push((LineKind::System, pad_row("")));
 
-        for (label, is_yes) in [("Yes, rewind", true), ("No, cancel", false)] {
+        for (label, is_yes) in [(flashagent_tui::i18n::tr("Yes, rewind"), true), (flashagent_tui::i18n::tr("No, cancel"), false)] {
             let is_cur = self.confirm == is_yes;
             let (cursor, label_styled) = if is_cur {
                 (" \x1b[1;38;2;225;175;95m›\x1b[0m", format!("\x1b[1;38;2;245;240;232m{label}\x1b[0m"))
@@ -276,7 +280,7 @@ impl RewindConfirm {
         lines.push((LineKind::System, format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w))));
         lines.push((
             LineKind::System,
-            "  \x1b[38;2;135;130;125m↑/↓ — choose · enter — confirm · esc — cancel\x1b[0m".to_string(),
+            format!("  \x1b[38;2;135;130;125m{}\x1b[0m", flashagent_tui::i18n::tr("↑/↓ — choose · enter — confirm · esc — cancel")),
         ));
         lines
     }

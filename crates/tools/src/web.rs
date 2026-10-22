@@ -138,15 +138,21 @@ const MAX_REDIRECTS: usize = 5;
 ///
 /// A local address (this machine, the LAN, cloud metadata) is fetched only if
 /// the URL names it outright, since only then did the permission layer ask the
-/// user. A DNS name resolving locally, an odd IP spelling (`127.1`) or a
-/// redirect to a local address is refused. The checked address is the one
-/// connected to, and every redirect is checked before it is followed.
+/// user — host and port both, because `127.0.0.1:8080` and `127.0.0.1:9090`
+/// are two different programs. A DNS name resolving locally, an odd IP
+/// spelling (`127.1`) or a redirect to a local address is refused. The
+/// checked address is the one connected to, and every redirect is checked
+/// before it is followed. A redirect that takes the fetch down from https to
+/// http is refused too: what was approved was a secure address.
 pub async fn fetch_text(url: &str) -> Result<String, ToolError> {
-    let approved_local_host =
-        flashagent_core::url_host(url).filter(|host| flashagent_core::is_local_host(host));
+    let approved_local = approved_local(url);
     let mut current =
         reqwest::Url::parse(url).map_err(|e| ToolError::Other(format!("fetch: bad URL {url}: {e}")))?;
-    for _ in 0..=MAX_REDIRECTS {
+    // The scheme the fetch started with. A redirect that takes it down to
+    // plain http is refused: the owner approved a secure address.
+    let mut scheme = current.scheme().to_string();
+    let mut redirects = 0usize;
+    loop {
         if !matches!(current.scheme(), "http" | "https") {
             return Err(ToolError::Other(format!("fetch: only http and https URLs can be fetched, not {}", current.scheme())));
         }
@@ -164,8 +170,10 @@ pub async fn fetch_text(url: &str) -> Result<String, ToolError> {
         let Some(first) = addrs.first().copied() else {
             return Err(ToolError::Other(format!("fetch: {bare} has no address")));
         };
-        let same_approved_local_host = approved_local_host.as_deref() == Some(bare.as_str());
-        if !same_approved_local_host && addrs.iter().any(|a| flashagent_core::is_local_ip(a.ip())) {
+        let same_approved_local = approved_local
+            .as_ref()
+            .is_some_and(|approved| approved.host == bare && approved.port == port);
+        if !same_approved_local && addrs.iter().any(|a| flashagent_core::is_local_ip(a.ip())) {
             return Err(ToolError::Other(format!(
                 "fetch: {host} leads to a local address ({}); a local address is fetched only when the URL names it, so it can be approved",
                 first.ip()
@@ -185,12 +193,47 @@ pub async fn fetch_text(url: &str) -> Result<String, ToolError> {
                 .get(reqwest::header::LOCATION)
                 .and_then(|v| v.to_str().ok())
                 .ok_or_else(|| ToolError::Other(format!("fetch: HTTP {} without a location", resp.status())))?;
-            current = current.join(location).map_err(|e| ToolError::Other(format!("fetch: bad redirect {location}: {e}")))?;
+            let next = current.join(location).map_err(|e| ToolError::Other(format!("fetch: bad redirect {location}: {e}")))?;
+            // A redirect that takes the fetch down from https to http is
+            // refused: what was approved was a secure address.
+            if downgrades(&scheme, &next) {
+                return Err(ToolError::Other(format!(
+                    "fetch: refusing to follow a redirect from https to http ({next})"
+                )));
+            }
+            redirects += 1;
+            if redirects > MAX_REDIRECTS {
+                return Err(ToolError::Other(format!("fetch: more than {MAX_REDIRECTS} redirects")));
+            }
+            scheme = next.scheme().to_string();
+            current = next;
             continue;
         }
         return read_fetched(resp).await;
     }
-    Err(ToolError::Other(format!("fetch: more than {MAX_REDIRECTS} redirects")))
+}
+
+/// The local address the permission layer approved: the host and the port.
+///
+/// The port is part of it: `http://127.0.0.1:8080` is the program on port
+/// 8080, and `http://127.0.0.1:9090` is another one.
+struct ApprovedLocal {
+    host: String,
+    port: u16,
+}
+
+/// The local address the URL named outright, if it named one.
+fn approved_local(url: &str) -> Option<ApprovedLocal> {
+    let host = flashagent_core::url_host(url).filter(|host| flashagent_core::is_local_host(host))?;
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    Some(ApprovedLocal { host, port })
+}
+
+/// Whether a redirect takes the fetch down from a secure address to a plain
+/// one. What was approved was a secure address, so it is not followed.
+fn downgrades(scheme: &str, next: &reqwest::Url) -> bool {
+    scheme == "https" && next.scheme() == "http"
 }
 
 /// The text is cut to 32,000 characters anyway; a multi-gigabyte file must
@@ -541,6 +584,92 @@ mod tests {
 
         let err = fetch_text(&format!("http://127.0.0.1:{port}/start")).await.unwrap_err().to_string();
         assert!(err.contains("local address"), "got: {err}");
+    }
+
+    /// The port is part of what was approved: the same host on another port is
+    /// another program, and it was not approved.
+    #[tokio::test]
+    async fn approval_for_one_local_port_does_not_cover_another() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Another local port, with nothing listening on it.
+        let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other_port = other.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            sock.write_all(
+                format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{other_port}/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        });
+
+        let err = fetch_text(&format!("http://127.0.0.1:{port}/start")).await.unwrap_err().to_string();
+        assert!(err.contains("local address"), "the other port was fetched unapproved: {err}");
+    }
+
+    /// The redirect count is the number of redirects that are followed: five
+    /// of them, and the sixth one is refused.
+    #[tokio::test]
+    async fn a_redirect_loop_is_stopped_at_the_declared_number() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                sock.write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: /again\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            }
+        });
+
+        let err = fetch_text(&format!("http://127.0.0.1:{port}/start")).await.unwrap_err().to_string();
+        assert!(err.contains("more than 5 redirects"), "{err}");
+        assert_eq!(requests.load(std::sync::atomic::Ordering::Relaxed), 6, "the number of requests must match the limit");
+    }
+
+    /// A redirect that takes the fetch down from https to http is refused; one
+    /// that goes the other way is not.
+    #[test]
+    fn a_scheme_is_never_lowered_by_a_redirect() {
+        let https = reqwest::Url::parse("https://example.com/a").unwrap();
+        let http = reqwest::Url::parse("http://example.com/a").unwrap();
+        assert!(downgrades("https", &http));
+        assert!(!downgrades("https", &https));
+        assert!(!downgrades("http", &http));
+        assert!(!downgrades("http", &https), "http to https is an upgrade, not a downgrade");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_that_goes_to_https_is_not_a_downgrade() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            sock.write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: https://example.com/secure\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        });
+
+        let err = fetch_text(&format!("http://127.0.0.1:{port}/start")).await.unwrap_err().to_string();
+        assert!(!err.contains("refusing to follow a redirect"), "{err}");
     }
 
     #[test]
