@@ -167,7 +167,7 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           # Beta builds (bNNN) publish to the rolling `beta` pre-release,
           # stable versions (vX.Y.Z) to the rolling `stable` release.
-          # Tags: betas are bN, stables are vX.Y.Z+bN.
+          # See VERSIONING.md: betas are bN, stables vX.Y.Z+bN.
           if [[ "${VERSION}" =~ ^b[0-9]+$ ]]; then
             echo "tag=beta" >> "$GITHUB_OUTPUT"
             echo "flags=--prerelease --latest=false" >> "$GITHUB_OUTPUT"

@@ -15,7 +15,7 @@
 
 </div>
 
-> **Status:** Beta b602 — non-actively developed by a solo maintainer, and developed with itself: the maintainer uses FlashAgent (Occamy 1.0) to change its own code, alongside other coding agents. See the [changelog](CHANGELOG.md).
+> **Status:** Beta b602 — non-actively developed by a solo maintainer, and developed with itself: the maintainer uses FlashAgent (Occamy 1.0) to change its own code, alongside other coding agents. See the [changelog](CHANGELOG.md) and the [roadmap](ROADMAP.md).
 
 ## Quick start
 
@@ -31,7 +31,7 @@
    irm https://raw.githubusercontent.com/flashback7766/FlashAgent/main/install.ps1 | iex
    ```
 
-2. **Start a model server**: [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com) or [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server --jinja`), with a model that calls tools. Qwen3.6 and Gemma 4 models scored 6/8 to 8/8 on the tool-calling test that ships with the app (`flashagent --tool-test`). No machine for it? A cloud API works too: Anthropic, OpenAI, Gemini, OpenRouter and [more](#connecting-a-model).
+2. **Start a model server**: [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com) or [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server --jinja`), with a model that calls tools. Qwen3.6 and Gemma 4 models scored 6/8 to 8/8 on the tool-calling test that ships with the app (`flashagent --tool-test`); the method and the raw results are in [docs/tool-calling.md](docs/tool-calling.md). No machine for it? A cloud API works too: Anthropic, OpenAI, Gemini, OpenRouter and [more](#connecting-a-model).
 
 3. **Run it in your project:**
 
@@ -157,7 +157,7 @@ their commonest argument mistakes and reminds them once of a step left
 undone. On a CPU with Ollama, `qwen3:1.7b` and `qwen2.5:1.5b` went from 5/8 to
 8/8 and `gemma4:e2b` from 7/8 to 8/8; 1B models are still chat models.
 
-[Method and how to run it on your own models: `flashagent --tool-test` →](#will-your-model-actually-drive-tools)
+[Method, raw results, and how to run it on your own models →](docs/tool-calling.md)
 
 ---
 
@@ -368,7 +368,7 @@ crates/tui     crossterm terminal UI (the product today)
 crates/svc     self-updater
 ```
 
-Everything runs in one process: no Node, no Python, no Electron. On Linux the binary links only the system C libraries (libc, libm, libgcc_s): a usable prompt goes out in about 120 ms and the app holds about 58 MB of memory when idle, about 47 MB of that the tokenizer table.
+Everything runs in one process: no Node, no Python, no Electron. On Linux the binary links only the system C libraries (libc, libm, libgcc_s). See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit, and [docs/numbers.md](docs/numbers.md) for what it costs: a usable prompt in about 120 ms, about 58 MB of memory when idle.
 
 ```bash
 cargo test --workspace
@@ -379,7 +379,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Contributing
 
-FlashAgent has one maintainer, so bug reports help a lot. Open an issue, or start a discussion.
+FlashAgent has one maintainer, so bug reports help a lot.
+
+1. Read [PHILOSOPHY.md](PHILOSOPHY.md) for the design principles.
+2. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow.
+3. Pick something from [ROADMAP.md](ROADMAP.md) or open an issue.
 
 Questions, and models that work well for you, go to [Discussions](https://github.com/flashback7766/FlashAgent/discussions).
 

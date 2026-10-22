@@ -1,0 +1,422 @@
+[
+  {
+    "model": "gemma4:e2b",
+    "needed_nudge": true,
+    "needed_recovery": false,
+    "passed": 8,
+    "scenarios": [
+      {
+        "detail": "native, 11.9s",
+        "key": "single_call",
+        "pass": true,
+        "seconds": 11.887481689453125
+      },
+      {
+        "detail": "native, 4.5s",
+        "key": "arguments",
+        "pass": true,
+        "seconds": 4.539279460906982
+      },
+      {
+        "detail": "native, 4.5s",
+        "key": "no_spurious_call",
+        "pass": true,
+        "seconds": 4.50790548324585
+      },
+      {
+        "detail": "native, 4.0s",
+        "key": "uses_result",
+        "pass": true,
+        "seconds": 4.0184502601623535
+      },
+      {
+        "detail": "native, 3.9s",
+        "key": "second_step",
+        "pass": true,
+        "seconds": 3.932189464569092
+      },
+      {
+        "detail": "native, 5.1s",
+        "key": "exact_content",
+        "pass": true,
+        "seconds": 5.111700057983398
+      },
+      {
+        "detail": "after a nudge, 12.8s",
+        "key": "after_error",
+        "pass": true,
+        "seconds": 12.848447799682617
+      },
+      {
+        "detail": "native, 5.8s",
+        "key": "two_calls",
+        "pass": true,
+        "seconds": 5.752486228942871
+      }
+    ],
+    "seconds": 52.59794616699219,
+    "total": 8,
+    "untested": 0,
+    "verdict": "drives tools reliably"
+  },
+  {
+    "model": "qwen3:1.7b",
+    "needed_nudge": true,
+    "needed_recovery": false,
+    "passed": 8,
+    "scenarios": [
+      {
+        "detail": "native, 3.1s",
+        "key": "single_call",
+        "pass": true,
+        "seconds": 3.0824737548828125
+      },
+      {
+        "detail": "native, 3.7s",
+        "key": "arguments",
+        "pass": true,
+        "seconds": 3.6715402603149414
+      },
+      {
+        "detail": "native, 2.7s",
+        "key": "no_spurious_call",
+        "pass": true,
+        "seconds": 2.74778413772583
+      },
+      {
+        "detail": "native, 1.4s",
+        "key": "uses_result",
+        "pass": true,
+        "seconds": 1.382924199104309
+      },
+      {
+        "detail": "after a nudge, 2.6s",
+        "key": "second_step",
+        "pass": true,
+        "seconds": 2.644291639328003
+      },
+      {
+        "detail": "native, 2.2s",
+        "key": "exact_content",
+        "pass": true,
+        "seconds": 2.159482955932617
+      },
+      {
+        "detail": "native, 4.4s",
+        "key": "after_error",
+        "pass": true,
+        "seconds": 4.350433349609375
+      },
+      {
+        "detail": "native, 5.1s",
+        "key": "two_calls",
+        "pass": true,
+        "seconds": 5.129217147827148
+      }
+    ],
+    "seconds": 25.168148040771484,
+    "total": 8,
+    "untested": 0,
+    "verdict": "drives tools reliably"
+  },
+  {
+    "model": "qwen2.5:1.5b",
+    "needed_nudge": true,
+    "needed_recovery": false,
+    "passed": 8,
+    "scenarios": [
+      {
+        "detail": "native, 2.5s",
+        "key": "single_call",
+        "pass": true,
+        "seconds": 2.5465173721313477
+      },
+      {
+        "detail": "native, 3.0s",
+        "key": "arguments",
+        "pass": true,
+        "seconds": 2.9823696613311768
+      },
+      {
+        "detail": "native, 2.5s",
+        "key": "no_spurious_call",
+        "pass": true,
+        "seconds": 2.4517314434051514
+      },
+      {
+        "detail": "native, 0.9s",
+        "key": "uses_result",
+        "pass": true,
+        "seconds": 0.9203815460205078
+      },
+      {
+        "detail": "after a nudge, 2.1s",
+        "key": "second_step",
+        "pass": true,
+        "seconds": 2.1365609169006348
+      },
+      {
+        "detail": "native, 1.7s",
+        "key": "exact_content",
+        "pass": true,
+        "seconds": 1.7434849739074707
+      },
+      {
+        "detail": "native, 2.4s",
+        "key": "after_error",
+        "pass": true,
+        "seconds": 2.356876850128174
+      },
+      {
+        "detail": "native, 4.2s",
+        "key": "two_calls",
+        "pass": true,
+        "seconds": 4.234443664550781
+      }
+    ],
+    "seconds": 19.372365951538086,
+    "total": 8,
+    "untested": 0,
+    "verdict": "drives tools reliably"
+  },
+  {
+    "model": "llama3.2:3b",
+    "needed_nudge": false,
+    "needed_recovery": false,
+    "passed": 6,
+    "scenarios": [
+      {
+        "detail": "native, 5.1s",
+        "key": "single_call",
+        "pass": true,
+        "seconds": 5.142666816711426
+      },
+      {
+        "detail": "native, 5.1s",
+        "key": "arguments",
+        "pass": true,
+        "seconds": 5.115715980529785
+      },
+      {
+        "detail": "called report_status on a question that needed no tool",
+        "key": "no_spurious_call",
+        "pass": false,
+        "seconds": 4.665077209472656
+      },
+      {
+        "detail": "native, 1.8s",
+        "key": "uses_result",
+        "pass": true,
+        "seconds": 1.7580711841583252
+      },
+      {
+        "detail": "native, 2.2s",
+        "key": "second_step",
+        "pass": true,
+        "seconds": 2.1568410396575928
+      },
+      {
+        "detail": "content came through as \"line one\\nquoted\\\\nend\"",
+        "key": "exact_content",
+        "pass": false,
+        "seconds": 5.197931289672852
+      },
+      {
+        "detail": "native, 2.8s",
+        "key": "after_error",
+        "pass": true,
+        "seconds": 2.8492062091827393
+      },
+      {
+        "detail": "native, 7.4s",
+        "key": "two_calls",
+        "pass": true,
+        "seconds": 7.442546367645264
+      }
+    ],
+    "seconds": 34.32805633544922,
+    "total": 8,
+    "untested": 0,
+    "verdict": "unreliable \u2014 expect to babysit it"
+  },
+  {
+    "model": "qwen3:0.6b",
+    "needed_nudge": true,
+    "needed_recovery": false,
+    "passed": 6,
+    "scenarios": [
+      {
+        "detail": "native, 1.3s",
+        "key": "single_call",
+        "pass": true,
+        "seconds": 1.3483458757400513
+      },
+      {
+        "detail": "native, 1.5s",
+        "key": "arguments",
+        "pass": true,
+        "seconds": 1.5406283140182495
+      },
+      {
+        "detail": "native, 1.2s",
+        "key": "no_spurious_call",
+        "pass": true,
+        "seconds": 1.1920757293701172
+      },
+      {
+        "detail": "native, 0.6s",
+        "key": "uses_result",
+        "pass": true,
+        "seconds": 0.5973175168037415
+      },
+      {
+        "detail": "after a nudge, 1.2s",
+        "key": "second_step",
+        "pass": true,
+        "seconds": 1.2362573146820068
+      },
+      {
+        "detail": "content came through as \"line one\\\"quoted\\\"end\"",
+        "key": "exact_content",
+        "pass": false,
+        "seconds": 0.9023409485816956
+      },
+      {
+        "detail": "replied with text, no tool call: I apologize for the confusion. If you meant to read the first 5 lines  (asked twice)",
+        "key": "after_error",
+        "pass": false,
+        "seconds": 3.096242904663086
+      },
+      {
+        "detail": "native, 2.1s",
+        "key": "two_calls",
+        "pass": true,
+        "seconds": 2.1131973266601562
+      }
+    ],
+    "seconds": 12.026406288146973,
+    "total": 8,
+    "untested": 0,
+    "verdict": "unreliable \u2014 expect to babysit it"
+  },
+  {
+    "model": "llama3.2:1b",
+    "needed_nudge": false,
+    "needed_recovery": true,
+    "passed": 2,
+    "scenarios": [
+      {
+        "detail": "native, 2.4s",
+        "key": "single_call",
+        "pass": true,
+        "seconds": 2.355081081390381
+      },
+      {
+        "detail": "path was \"\", expected src/main.rs",
+        "key": "arguments",
+        "pass": false,
+        "seconds": 35.20500183105469
+      },
+      {
+        "detail": "called report_status on a question that needed no tool",
+        "key": "no_spurious_call",
+        "pass": false,
+        "seconds": 2.1624741554260254
+      },
+      {
+        "detail": "called write_lines again instead of answering from the result",
+        "key": "uses_result",
+        "pass": false,
+        "seconds": 1.5500869750976562
+      },
+      {
+        "detail": "code was None, expected 7 from the file",
+        "key": "second_step",
+        "pass": false,
+        "seconds": 1.1069555282592773
+      },
+      {
+        "detail": "content came through as \"quoted\"",
+        "key": "exact_content",
+        "pass": false,
+        "seconds": 34.45657730102539
+      },
+      {
+        "detail": "recovered, 4.8s",
+        "key": "after_error",
+        "pass": true,
+        "seconds": 4.761242866516113
+      },
+      {
+        "detail": "replied with text, no tool call: {\"type\":\"function\",\"function\":{\"name\":\"read_lines\",\"parameters\":{\"type",
+        "key": "two_calls",
+        "pass": false,
+        "seconds": 34.53657150268555
+      }
+    ],
+    "seconds": 116.13400268554688,
+    "total": 8,
+    "untested": 0,
+    "verdict": "mostly fails to drive tools"
+  },
+  {
+    "model": "gemma3:1b",
+    "needed_nudge": false,
+    "needed_recovery": true,
+    "passed": 2,
+    "scenarios": [
+      {
+        "detail": "replied with text, no tool call: ```tool_call\n{\"properties\":{\"code\":{\"description\":\"Status code 42\",\"ty",
+        "key": "single_call",
+        "pass": false,
+        "seconds": 3.706505298614502
+      },
+      {
+        "detail": "replied with text, no tool call: I'm sorry, but I cannot fulfill this request. I do not have the abilit",
+        "key": "arguments",
+        "pass": false,
+        "seconds": 5.021489143371582
+      },
+      {
+        "detail": "native, 2.8s",
+        "key": "no_spurious_call",
+        "pass": true,
+        "seconds": 2.8367929458618164
+      },
+      {
+        "detail": "answered without the version: (no output)",
+        "key": "uses_result",
+        "pass": false,
+        "seconds": 2.9132089614868164
+      },
+      {
+        "detail": "replied with text, no tool call: (no output)",
+        "key": "second_step",
+        "pass": false,
+        "seconds": 2.753129482269287
+      },
+      {
+        "detail": "replied with text, no tool call: quoted\n\"quoted\"\nend",
+        "key": "exact_content",
+        "pass": false,
+        "seconds": 2.5838277339935303
+      },
+      {
+        "detail": "recovered, 4.1s",
+        "key": "after_error",
+        "pass": true,
+        "seconds": 4.100639343261719
+      },
+      {
+        "detail": "one call for two files \u2014 the loop will need a second turn",
+        "key": "two_calls",
+        "pass": false,
+        "seconds": 4.323690414428711
+      }
+    ],
+    "seconds": 28.23928451538086,
+    "total": 8,
+    "untested": 0,
+    "verdict": "mostly fails to drive tools"
+  }
+]

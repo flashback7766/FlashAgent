@@ -103,6 +103,7 @@ case "${OS}" in
         echo "Error: there is no prebuilt FlashAgent for Linux on ${ARCH} yet (only x86_64)."
         echo "Build it from source instead: install Rust from https://rustup.rs, then run"
         echo "  cargo install --git https://github.com/${REPO} flashagent-tui"
+        echo "(or follow the build steps in https://github.com/${REPO}/blob/main/CONTRIBUTING.md)."
         exit 1
         ;;
     esac
