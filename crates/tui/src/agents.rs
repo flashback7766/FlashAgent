@@ -200,7 +200,7 @@ impl AgentTree {
         let room = width.saturating_sub(icon_w + 1);
         let mut parts = vec![child.role.clone()];
         if child.usage.steps > 0 {
-            parts.push(crate::i18n::plural(child.usage.steps as usize, "step", "steps", "шаг", "шага", "шагов"));
+            parts.push(crate::text::plural(child.usage.steps as usize, "step", "steps"));
         }
         if child.usage.total_tokens() > 0 {
             parts.push(format!("{} {}", k(child.usage.total_tokens()), crate::i18n::tr("tokens")));

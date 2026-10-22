@@ -85,37 +85,6 @@ pub fn translate(lang: Lang, input: &str) -> &str {
     table.iter().find(|(en, _)| *en == input).map_or(input, |(_, ru)| *ru)
 }
 
-/// The count with its word: "3 retries" or "3 повтора". English has two
-/// forms, Russian three, and the word follows the number in both.
-pub fn count(n: u64, en: (&str, &str), ru: (&str, &str, &str)) -> String {
-    let word = match current() {
-        Lang::English => {
-            if n == 1 {
-                en.0
-            } else {
-                en.1
-            }
-        }
-        Lang::Russian => {
-            let n10 = n % 10;
-            let n100 = n % 100;
-            if n10 == 1 && n100 != 11 {
-                ru.0
-            } else if (2..=4).contains(&n10) && !(12..=14).contains(&n100) {
-                ru.1
-            } else {
-                ru.2
-            }
-        }
-    };
-    format!("{n} {word}")
-}
-
-/// The count with its word, in the forms each language needs.
-pub fn plural(n: usize, en_one: &str, en_many: &str, ru_one: &str, ru_few: &str, ru_many: &str) -> String {
-    count(n as u64, (en_one, en_many), (ru_one, ru_few, ru_many))
-}
-
 /// A phrase with holes in it: the table holds the English with `{x}` and the
 /// Russian with the same holes, and what goes in is put in after.
 pub fn tr_fill(text: &str, holes: &[(&str, &str)]) -> String {
@@ -498,6 +467,18 @@ static RU: &[(&str, &str)] = &[
     ("{n} more below", "ниже ещё {n}"),
     ("What's new in FlashAgent {}", "Что нового в FlashAgent {}"),
     ("What's new \u{b7} {}", "Что нового \u{b7} {}"),
+    // --- The hints under the sampling parameters ---
+    // The English side is what the code spells, and the Russian side keeps
+    // the same spacing: the hint sits in a column of its own.
+    (
+        "0.00..2.00 (coding: 0.60, mtp: 0.30, chat: 0.80, precise: 0.10)",
+        "0.00..2.00 (кодинг: 0.60, mtp: 0.30, чат: 0.80, точный: 0.10)",
+    ),
+    ("0.00..1.00 (coding: 0.95, mtp: 0.90, precise: 0.75)", "0.00..1.00 (кодинг: 0.95, mtp: 0.90, точный: 0.75)"),
+    ("0..500     (coding: 20, mtp: 40, chat: 50, precise: 10)", "0..500     (кодинг: 20, mtp: 40, чат: 50, точный: 10)"),
+    ("0.00..2.00 (coding: 1.00, mtp: 1.02, gemma: 1.08, chat: 1.10)", "0.00..2.00 (кодинг: 1.00, mtp: 1.02, gemma: 1.08, чат: 1.10)"),
+    ("-2.00..2.00 (chat: 0.10, mtp-chat: 0.05, by default: 0.00)", "-2.00..2.00 (чат: 0.10, mtp-чат: 0.05, по умолчанию: 0.00)"),
+    ("0.00..1.00 (mtp-code: 0.05, mtp: 0.03, by default: 0.00)", "0.00..1.00 (mtp-код: 0.05, mtp: 0.03, по умолчанию: 0.00)"),
     // --- The turns and the compaction card ---
     ("The turn ended before your message reached it \u{b7} Enter sends it now", "Ход кончился, раньше чем дошло ваше сообщение \u{b7} Enter отправит его сейчас"),
     ("Request interrupted by user", "Запрос прерван"),
@@ -1107,15 +1088,35 @@ static RU: &[(&str, &str)] = &[
     ("just now", "только что"),
     ("ago", "назад"),
     // --- The counted words: the three Russian forms, separated by a bar ---
+    // The key is the pair of English words the code counts, and the value is
+    // the three forms Russian needs: one, few, many.
     ("plural: task/tasks", "задача|задачи|задач"),
     ("plural: step/steps", "шаг|шага|шагов"),
     ("plural: row/rows", "строка|строки|строк"),
+    ("plural: line/lines", "строка|строки|строк"),
     ("plural: file/files", "файл|файла|файлов"),
+    ("plural: search/searches", "поиск|поиска|поисков"),
+    ("plural: retry/retries", "повтор|повтора|повторов"),
     ("plural: tool/tools", "инструмент|инструмента|инструментов"),
     ("plural: message/messages", "сообщение|сообщения|сообщений"),
     ("plural: character/characters", "знак|знака|знаков"),
+    ("plural: image/images", "картинка|картинки|картинок"),
+    ("plural: attached image/attached images", "картинка|картинки|картинок"),
+    ("plural: background task/background tasks", "фоновая задача|фоновые задачи|фоновых задач"),
     ("plural: more line/more lines", "ещё строка|ещё строки|ещё строк"),
+    ("plural: more entry/more entries", "ещё запись|ещё записи|ещё записей"),
+    ("plural: more match/more matches", "ещё совпадение|ещё совпадения|ещё совпадений"),
+    ("plural: more character/more characters", "ещё знак|ещё знака|ещё знаков"),
     ("plural: active server/active servers", "активный сервер|активных сервера|активных серверов"),
+    ("plural: command/commands", "команда|команды|команд"),
+    ("plural: provider/providers", "провайдер|провайдера|провайдеров"),
+    ("plural: model/models", "модель|модели|моделей"),
+    ("plural: option/options", "вариант|варианта|вариантов"),
+    ("plural: session/sessions", "сессия|сессии|сессий"),
+    ("plural: item/items", "пункт|пункта|пунктов"),
+    ("plural: minute/minutes", "минуту|минуты|минут"),
+    ("plural: hour/hours", "час|часа|часов"),
+    ("plural: day/days", "день|дня|дней"),
     // --- The MCP panel ---
     ("1 Overview", "1 Обзор"),
     ("2 Servers", "2 Серверы"),

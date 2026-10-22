@@ -39,7 +39,7 @@ pub mod i18n;
 pub mod memory_view;
 pub mod whatsnew;
 pub mod wizard;
-mod text;
+pub mod text;
 mod stages;
 mod welcome;
 mod markdown;
@@ -317,14 +317,14 @@ pub fn format_explore(is_running: bool, files: usize, searches: usize, last_targ
     // In the same column as every other tool line's mark.
     let mark = format!("\x1b[38;2;120;125;140m{}\x1b[0m", tool_cards::TOOL_MARK);
     if files > 0 && searches > 0 {
-        let f_str = crate::i18n::plural(files, "file", "files", "файл", "файла", "файлов");
-        let s_str = crate::i18n::plural(searches, "search", "searches", "поиск", "поиска", "поисков");
+        let f_str = crate::text::plural(files, "file", "files");
+        let s_str = crate::text::plural(searches, "search", "searches");
         format!("  {mark} \x1b[38;2;160;165;180m{verb} {f_str}, {s_str}\x1b[0m {chevron}")
     } else if files > 1 {
-        let f_str = crate::i18n::plural(files, "file", "files", "файл", "файла", "файлов");
+        let f_str = crate::text::plural(files, "file", "files");
         format!("  {mark} \x1b[38;2;160;165;180m{verb} {f_str}\x1b[0m {chevron}")
     } else if searches > 1 {
-        let s_str = crate::i18n::plural(searches, "search", "searches", "поиск", "поиска", "поисков");
+        let s_str = crate::text::plural(searches, "search", "searches");
         format!("  {mark} \x1b[38;2;160;165;180m{verb} {s_str}\x1b[0m {chevron}")
     } else if files == 1 {
         let v = if is_running { crate::i18n::tr("Reading") } else { crate::i18n::tr("Read") };
@@ -912,7 +912,7 @@ impl ChatView {
         let head = format!(
             "{role} {} {said} \u{b7} {} \u{b7} {} {} \u{b7} {secs}s",
             finished.id,
-            crate::i18n::plural(finished.usage.steps as usize, "step", "steps", "шаг", "шага", "шагов"),
+            crate::text::plural(finished.usage.steps as usize, "step", "steps"),
             goal::human_count(finished.usage.total_tokens() as i64),
             crate::i18n::tr("tokens"),
         );

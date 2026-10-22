@@ -920,25 +920,11 @@ impl App {
                             &[
                                 (
                                     "servers",
-                                    &flashagent_tui::i18n::plural(
-                                        active,
-                                        "active server",
-                                        "active servers",
-                                        "активный сервер",
-                                        "активных сервера",
-                                        "активных серверов",
-                                    ),
+                                    &flashagent_tui::text::plural(active, "active server", "active servers"),
                                 ),
                                 (
                                     "tools",
-                                    &flashagent_tui::i18n::plural(
-                                        tools,
-                                        "tool",
-                                        "tools",
-                                        "инструмент",
-                                        "инструмента",
-                                        "инструментов",
-                                    ),
+                                    &flashagent_tui::text::plural(tools, "tool", "tools"),
                                 ),
                             ],
                         ));
@@ -1236,14 +1222,7 @@ impl App {
         let stem = cx.session_id.strip_prefix("session_").unwrap_or(cx.session_id);
         let text_of = |m: &ChatMessage| {
             if m.content.trim().is_empty() && !m.images.is_empty() {
-                let images = flashagent_tui::i18n::plural(
-                    m.images.len(),
-                    "attached image",
-                    "attached images",
-                    "картинка",
-                    "картинки",
-                    "картинок",
-                );
+                let images = flashagent_tui::text::plural(m.images.len(), "attached image", "attached images");
                 format!("[{images}]")
             } else {
                 m.content.clone()

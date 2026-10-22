@@ -346,7 +346,7 @@ impl McpModal {
                             ServerConnectionState::Stopped => "\x1b[38;2;225;175;95m○ stopped\x1b[0m",
                             ServerConnectionState::Error(_) => "\x1b[38;2;245;120;120m× error\x1b[0m",
                         };
-                        let tools = crate::i18n::plural(s.tool_count, "tool", "tools", "инструмент", "инструмента", "инструментов");
+                        let tools = crate::text::plural(s.tool_count, "tool", "tools");
                         let row = if is_sel {
                             format!("{ptr} \x1b[1;38;2;240;235;225m{:<18}\x1b[0m {st_badge}  \x1b[1;38;2;225;175;95m{tools}\x1b[0m", s.name)
                         } else {
