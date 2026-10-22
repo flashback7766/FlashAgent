@@ -307,7 +307,7 @@ impl MemoryModal {
         let text = "\x1b[38;2;200;195;185m";
         let bright = "\x1b[1;38;2;240;235;225m";
         let accent = "\x1b[1;38;2;225;175;95m";
-        let inner_w = width.saturating_sub(6).clamp(24, 96);
+        let inner_w = width.saturating_sub(6).min(96);
 
         let mut lines: Vec<RenderLine> = Vec::new();
         // The heading shrinks first; a sheared box is worse than a shorter name.
@@ -396,7 +396,7 @@ impl MemoryModal {
         let heading = "\x1b[1;38;2;240;235;225m";
         let accent = "\x1b[1;38;2;225;175;95m";
         let link = "\x1b[4;38;2;168;199;250m";
-        let inner_w = width.saturating_sub(6).clamp(24, 96);
+        let inner_w = width.saturating_sub(6).min(96);
         let t = crate::anim::now_ms();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
 

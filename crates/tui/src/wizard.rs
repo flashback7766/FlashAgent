@@ -804,7 +804,7 @@ impl SetupWizard {
         let mut lines = Vec::new();
         let border_color = "\x1b[38;2;100;95;90m";
         let reset = "\x1b[0m";
-        let inner_w = width.saturating_sub(6).clamp(20, 110);
+        let inner_w = width.saturating_sub(6).min(110);
 
         let what = if self.provider_only { crate::i18n::tr("Add a provider") } else { crate::i18n::tr("FlashAgent setup") };
         let title = format!(" {what} \u{b7} {}", crate::i18n::tr("step {} of {}").replace("{}", &self.step_number(self.step).to_string()).replace("{}", &self.total_steps().to_string()));
@@ -876,9 +876,9 @@ impl SetupWizard {
                 let placeholder_text = crate::i18n::tr("type its URL");
                 let custom_row = if self.custom_url.is_empty() {
                     if is_custom_sel {
-                        format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<name_w$}\x1b[0m \x1b[7m \x1b[27m{placeholder_color}{placeholder_text}\x1b[0m", "Custom")
+                        format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<name_w$}\x1b[0m \x1b[7m \x1b[27m{placeholder_color}{placeholder_text}\x1b[0m", crate::i18n::tr("Custom"))
                     } else {
-                        format!("{ptr} \x1b[38;2;160;155;145mc. {:<name_w$}\x1b[0m {placeholder_color}{placeholder_text}\x1b[0m", "Custom")
+                        format!("{ptr} \x1b[38;2;160;155;145mc. {:<name_w$}\x1b[0m {placeholder_color}{placeholder_text}\x1b[0m", crate::i18n::tr("Custom"))
                     }
                 } else if is_custom_sel {
                     let (before, at_and_after) = if self.custom_cursor < self.custom_url.len() {
@@ -890,9 +890,9 @@ impl SetupWizard {
                     } else {
                         (&self.custom_url[..], "\x1b[7m \x1b[27m".to_string())
                     };
-                    format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<name_w$}\x1b[0m \x1b[1;38;2;225;175;95m{before}{at_and_after}\x1b[0m", "Custom")
+                    format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<name_w$}\x1b[0m \x1b[1;38;2;225;175;95m{before}{at_and_after}\x1b[0m", crate::i18n::tr("Custom"))
                 } else {
-                    format!("{ptr} \x1b[38;2;160;155;145mc. {:<name_w$}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", "Custom", self.custom_url)
+                    format!("{ptr} \x1b[38;2;160;155;145mc. {:<name_w$}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", crate::i18n::tr("Custom"), self.custom_url)
                 };
                 lines.push(pad_row(&custom_row));
                 lines.push(pad_row(""));
@@ -915,7 +915,7 @@ impl SetupWizard {
                 lines.push(pad_row(&heading(1, crate::i18n::tr("API key"))));
                 let env_key = self.env_key();
                 if let Some(var) = env_key {
-                    lines.push(pad_row(&format!("\x1b[38;2;145;205;140mFound {var} in your environment.\x1b[0m")));
+                    lines.push(pad_row(&format!("\x1b[38;2;145;205;140m{}\x1b[0m", crate::i18n::tr_fill("Found {var} in your environment.", &[("var", var)]))));
                     lines.push(pad_row(""));
                     prose(&mut lines, "  ", "\x1b[38;2;160;155;145m", crate::i18n::tr("Press Enter to use it, or paste a key to save one for this provider."));
                 } else if self.key_required() {
@@ -982,7 +982,10 @@ impl SetupWizard {
                 } else {
                     format!("({total_matches}/{total_models} · filter: \"{}\")", self.model_search)
                 };
-                lines.push(pad_row(&format!("\x1b[38;2;160;155;145mChoose model \x1b[38;2;175;170;225m{count_info}\x1b[0m:\x1b[0m")));
+                lines.push(pad_row(&format!(
+                    "\x1b[38;2;160;155;145m{} \x1b[38;2;175;170;225m{count_info}\x1b[0m:\x1b[0m",
+                    crate::i18n::tr("Choose model")
+                )));
                 lines.push(pad_row(""));
 
                 if self.available_models.is_empty() {
@@ -1038,11 +1041,14 @@ impl SetupWizard {
                         lines.push(pad_row(&styled));
 
                         if let Some(dm) = self.discovered_models.iter().find(|d| d.id == *m_raw) {
-                            let summary = dm.capabilities_summary();
+                            // The name the server gave the model comes first:
+                            // it is what the server calls the model, and the
+                            // list of models is where the owner sees it.
+                            let summary = crate::providers::model_detail(dm);
                             let load_tag = if dm.is_loaded {
-                                "\x1b[1;38;2;145;205;140m● loaded\x1b[0m"
+                                format!("\x1b[1;38;2;145;205;140m{}\x1b[0m", crate::i18n::tr("● loaded"))
                             } else {
-                                "\x1b[38;2;135;130;125m○ available\x1b[0m"
+                                format!("\x1b[38;2;135;130;125m{}\x1b[0m", crate::i18n::tr("○ available"))
                             };
                             let meta_line = format!("    {load_tag} \x1b[38;2;135;130;125m·\x1b[0m \x1b[38;2;165;175;190m{summary}\x1b[0m");
                             lines.push(pad_row(&meta_line));
@@ -1055,7 +1061,7 @@ impl SetupWizard {
                 }
             }
             3 => {
-                lines.push(pad_row(&heading(3, "Permissions")));
+                lines.push(pad_row(&heading(3, crate::i18n::tr("Permissions"))));
                 prose(&mut lines, "", "\x1b[38;2;160;155;145m", crate::i18n::tr("What may the agent do without asking? Shift+Tab changes it any time."));
                 lines.push(pad_row(""));
                 let modes = [
@@ -1082,8 +1088,9 @@ impl SetupWizard {
 
                 let preset_val = format!("[ {} ]", self.sampling.preset.label());
                 lines.push(pad_row(&format!(
-                    "\x1b[1;38;2;225;175;95m▸\x1b[0m \x1b[1;38;2;240;235;225m{:<18}\x1b[0m \x1b[1;38;2;225;175;95m{:<22}\x1b[0m",
-                    "Preset", preset_val
+                    "\x1b[1;38;2;225;175;95m\u{25b8}\x1b[0m \x1b[1;38;2;240;235;225m{:<18}\x1b[0m \x1b[1;38;2;225;175;95m{:<22}\x1b[0m",
+                    crate::i18n::tr("Preset"),
+                    preset_val
                 )));
 
                 lines.push(pad_row(""));
@@ -1733,8 +1740,34 @@ mod tests {
     }
 
     #[test]
-    fn test_wizard_handle_paste_instantly_updates_fields() {
-        let mut wizard = SetupWizard::new(AppConfig::default());
+    fn the_model_list_shows_the_name_the_server_gave_the_model() {
+        let mut wizard = SetupWizard::new(with_provider("http://127.0.0.1:1234/v1"));
+        wizard.apply_discovered_models(flashagent_llm::ServerDiscovery {
+            base_url: wizard.profile.url.clone(),
+            models: vec![flashagent_llm::DiscoveredModel {
+                id: "models/gemini-3-flash".to_string(),
+                display_name: Some("Gemini 3 Flash".to_string()),
+                is_loaded: true,
+                context_length: Some(1_048_576),
+                max_context_length: None,
+                thinking: flashagent_llm::ThinkingProfile::unsupported(),
+                supports_tools: true,
+                supports_vision: false,
+            }],
+            active_model: None,
+            kind: flashagent_llm::thinking::ServerKind::LmStudio,
+            reachable_without_listing: false,
+        });
+
+        wizard.step = 2;
+        let rendered = wizard.render(80).join("\n");
+        assert!(rendered.contains("Gemini 3 Flash"), "the name the server gave is shown: {rendered}");
+        assert!(rendered.contains("models/gemini-3-flash"), "the id is shown as well: {rendered}");
+        assert_eq!(rendered.matches("Gemini 3 Flash").count(), 1, "the name is said once: {rendered}");
+    }
+
+    #[test]
+    fn test_wizard_handle_paste_instantly_updates_fields() {        let mut wizard = SetupWizard::new(AppConfig::default());
         wizard.select_row(SetupWizard::custom_idx());
 
         wizard.handle_paste("http://192.168.1.50:8000/v1\r\n");

@@ -116,26 +116,21 @@ pub(crate) async fn generate_llm_recap_and_suggestion(
 }
 
 pub(crate) fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Option<String>)> {
-    let mut storage;
-    let mut text = raw.trim();
-
-    // Reasoning emitted in the text stream.
-    if let Some(start_think) = text.find("<thought>") {
-        if let Some(end_think) = text.find("</thought>") {
-            let after = &text[end_think + "</thought>".len()..];
-            let before = &text[..start_think];
-            storage = format!("{before} {after}");
-            text = storage.trim();
+    // The reasoning that came in the text stream is cut out. The text is
+    // owned, so no borrow can outlive the buffer it points at: the old code
+    // pointed at a buffer it overwrote a line later, and it worked only
+    // because the borrow was dead by then.
+    let mut owned = raw.trim().to_string();
+    for (open, close) in [("<thought>", "</thought>"), ("<think>", "</think>")] {
+        if let (Some(start), Some(end)) = (owned.find(open), owned.find(close)) {
+            if end > start {
+                let before = owned[..start].to_string();
+                let after = owned[end + close.len()..].to_string();
+                owned = format!("{before} {after}").trim().to_string();
+            }
         }
     }
-    if let Some(start_think) = text.find("<think>") {
-        if let Some(end_think) = text.find("</think>") {
-            let after = &text[end_think + "</think>".len()..];
-            let before = &text[..start_think];
-            storage = format!("{before} {after}");
-            text = storage.trim();
-        }
-    }
+    let text = owned.as_str();
 
     let candidate = if let Some(code_start) = text.find("```") {
         let after_fence = &text[code_start + 3..];
@@ -195,7 +190,11 @@ pub(crate) fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Opti
 }
 
 /// Takes the text between the quotes after `"field":` up to the first
-/// unescaped quote or the end. An unclosed value is dropped, not guessed.
+/// unescaped quote or the end.
+///
+/// An unclosed value is dropped, not guessed — unless it is long enough and
+/// ends like a whole sentence: that is an answer that was cut off at the end,
+/// and the words that arrived are complete.
 pub(crate) fn salvage_json_string_field(raw: &str, field: &str) -> Option<String> {
     let key = format!("\"{field}\"");
     let after_key = &raw[raw.find(&key)? + key.len()..];

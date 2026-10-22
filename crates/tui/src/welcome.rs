@@ -403,7 +403,7 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         let w1: usize = if card_w >= 76 {
             ((card_w * 44) / 100).clamp(36, 46)
         } else {
-            ((card_w * 40) / 100).clamp(24, 32)
+            ((card_w * 40) / 100).clamp(24, 32).min(card_w)
         };
         let w2: usize = card_w.saturating_sub(w1 + 3);
 

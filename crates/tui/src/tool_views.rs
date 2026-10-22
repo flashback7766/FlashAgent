@@ -2,8 +2,6 @@
 //! reads, boxed shell commands, directory listings, grep results grouped by
 //! file, subagents, memory, git, web and MCP tools.
 
-use unicode_width::UnicodeWidthChar;
-
 use crate::{visible_width, LineKind, RenderLine};
 
 const RESET: &str = "\x1b[0m";
@@ -24,43 +22,39 @@ const TEXT_READ: &str = "\x1b[38;2;145;195;255m";
 /// Clipped to `width` cells, with `…` where it was cut. Styles are kept, as
 /// `clip_ansi` keeps them; tabs and any other escape in a file or command
 /// output are made safe first, so the width measured is the width drawn.
+///
+/// Cut by grapheme cluster: a joined emoji is one symbol, and half of one is
+/// not text.
 pub(crate) fn clip_ellipsis(text: &str, width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
     let text = &crate::terminal_safe(text);
     if visible_width(text) <= width {
         return text.to_string();
     }
     let room = width.saturating_sub(1);
     let mut out = String::with_capacity(text.len());
-    let mut cells = 0;
+    let mut cells = 0usize;
     let mut cut = false;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            out.push(c);
-            if chars.peek() == Some(&'[') {
-                out.extend(chars.next());
-                for n in chars.by_ref() {
-                    out.push(n);
-                    if ('@'..='~').contains(&n) {
-                        break;
-                    }
+    for (escape, piece) in crate::text::ansi_pieces(text) {
+        if escape {
+            out.push_str(piece);
+            continue;
+        }
+        for g in piece.graphemes(true) {
+            if cut {
+                continue;
+            }
+            let w = unicode_width::UnicodeWidthStr::width(g);
+            if cells + w > room {
+                if width > 0 {
+                    out.push('…');
                 }
+                cut = true;
+                continue;
             }
-            continue;
+            cells += w;
+            out.push_str(g);
         }
-        if cut {
-            continue;
-        }
-        let w = c.width().unwrap_or(0);
-        if cells + w > room {
-            if width > 0 {
-                out.push('…');
-            }
-            cut = true;
-            continue;
-        }
-        cells += w;
-        out.push(c);
     }
     out
 }
@@ -95,7 +89,7 @@ pub fn render_fold_line(text: &str, width: usize) -> String {
 
 /// Outer width of a boxed card.
 fn box_width(width: usize) -> usize {
-    width.saturating_sub(4).clamp(16, 100)
+    width.saturating_sub(4).min(100)
 }
 
 /// `╭─ ~/FlashAgent ──────────────────╮`; an empty title leaves the edge plain.
@@ -502,7 +496,7 @@ pub fn render_grep_card(
     let mut lines = Vec::new();
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
-    let header = format!("  {TEXT_MUTED}Searched{RESET} {TEXT_YELLOW}\"{pattern}\"{RESET} {chevron}");
+    let header = format!("  {TEXT_MUTED}{}{RESET} {TEXT_YELLOW}\"{pattern}\"{RESET} {chevron}", crate::i18n::tr("Searched"));
     lines.push((LineKind::Tool, header));
 
     if let Some(text) = output {
@@ -545,13 +539,18 @@ pub fn render_subagent_card(
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     let header = if is_running {
-        format!("  {TEXT_LAVENDER}Subagent{RESET} {TEXT_MUTED}executing task…{RESET} {}", crate::anim::spinner(crate::anim::now_ms()))
+        format!(
+            "  {TEXT_LAVENDER}{}{RESET} {TEXT_MUTED}{}{RESET} {}",
+            crate::i18n::tr("Subagent"),
+            crate::i18n::tr("executing task…"),
+            crate::anim::spinner(crate::anim::now_ms())
+        )
     } else {
-        format!("  {TEXT_LAVENDER}Subagent{RESET} {TEXT_MUTED}finished task{RESET} {chevron}")
+        format!("  {TEXT_LAVENDER}{}{RESET} {TEXT_MUTED}{}{RESET} {chevron}", crate::i18n::tr("Subagent"), crate::i18n::tr("finished task"))
     };
     lines.push((LineKind::Tool, header));
 
-    lines.push((LineKind::Tool, render_card_top("Task", width)));
+    lines.push((LineKind::Tool, render_card_top(crate::i18n::tr("Task"), width)));
     let inner_w = box_width(width).saturating_sub(6);
     lines.push(box_row(&box_text(task.lines().next().unwrap_or_default()), TEXT_BRIGHT, inner_w));
 
@@ -584,7 +583,10 @@ pub fn render_memory_card(
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
     let scope_tag = scopes.join(", ");
 
-    let header = format!("  {TEXT_LAVENDER}Memory{RESET} {TEXT_MUTED}{action}{RESET} {TEXT_BRIGHT}[{scope_tag}]{RESET} {chevron}");
+    let header = format!(
+        "  {TEXT_LAVENDER}{}{RESET} {TEXT_MUTED}{action}{RESET} {TEXT_BRIGHT}[{scope_tag}]{RESET} {chevron}",
+        crate::i18n::tr("Memory")
+    );
     lines.push((LineKind::Tool, header));
 
     if let Some(text) = details {
@@ -610,13 +612,13 @@ pub fn render_git_card(
     let chevron = "\x1b[38;2;120;125;140m▾\x1b[0m";
 
     if is_diff {
-        let header = format!("  {TEXT_MUTED}Git diff{RESET} {chevron}");
+        let header = format!("  {TEXT_MUTED}{}{RESET} {chevron}", crate::i18n::tr("Git diff"));
         lines.push((LineKind::Tool, header));
         if let Some(text) = output {
             lines.extend(render_edit_card(&EditChange { path: "git-diff", added: 0, deleted: 0, body: Some(text), is_write: false }, CallState::Done, None, width));
         }
     } else {
-        let header = format!("  {TEXT_MUTED}Git status{RESET} {chevron}");
+        let header = format!("  {TEXT_MUTED}{}{RESET} {chevron}", crate::i18n::tr("Git status"));
         lines.push((LineKind::Tool, header));
         if let Some(text) = output {
             const MAX_LINES: usize = 15;
@@ -655,9 +657,9 @@ pub fn render_generic_card(
 
     let verb = match state {
         CallState::Waiting => crate::i18n::tr("Waiting on"),
-        CallState::Running => "Running",
-        CallState::Done => "Ran",
-        CallState::Failed => "Failed",
+        CallState::Running => crate::i18n::tr("Running"),
+        CallState::Done => crate::i18n::tr("Ran"),
+        CallState::Failed => crate::i18n::tr("Failed"),
     };
     let color = if state == CallState::Failed { TEXT_RED } else { TEXT_MUTED };
     let header = format!("  {color}{verb}{RESET} {TEXT_BRIGHT}{name}{RESET} {chevron}");
@@ -866,6 +868,29 @@ mod tests {
         let text_dump = lines.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
         assert!(text_dump.contains("Searched") && text_dump.contains("\"let val\""));
         assert!(text_dump.contains("\x1b[1;38;2;240;210;115mlet val"), "Query match must be bold gold");
+    }
+
+    #[test]
+    fn a_clip_keeps_a_joined_emoji_whole() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let cut = clip_ellipsis(&format!("a{family}b"), 4);
+        assert!(cut.contains(family), "the family is one symbol and must not be split: {cut:?}");
+        assert!(crate::visible_width(&cut) <= 4, "{cut:?}");
+    }
+
+    #[test]
+    fn the_headers_of_the_cards_are_in_the_language_of_the_interface() {
+        let grep = crate::strip_ansi(&render_grep_card("needle", None, 60)[0].1);
+        assert!(grep.contains(crate::i18n::tr("Searched")), "{grep}");
+        let subagent = crate::strip_ansi(&render_subagent_card("do it", None, false, 60)[0].1);
+        assert!(subagent.contains(crate::i18n::tr("Subagent")), "{subagent}");
+        assert!(subagent.contains(crate::i18n::tr("finished task")), "{subagent}");
+        let memory = crate::strip_ansi(&render_memory_card(crate::i18n::tr("Reading"), &["project".into()], None, 60)[0].1);
+        assert!(memory.contains(crate::i18n::tr("Memory")), "{memory}");
+        let git = crate::strip_ansi(&render_git_card(true, None, 60)[0].1);
+        assert!(git.contains(crate::i18n::tr("Git diff")), "{git}");
+        let status = crate::strip_ansi(&render_git_card(false, None, 60)[0].1);
+        assert!(status.contains(crate::i18n::tr("Git status")), "{status}");
     }
 }
 

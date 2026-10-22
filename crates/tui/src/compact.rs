@@ -382,7 +382,7 @@ fn finish_summary(
         if !allow_growth {
             return None;
         }
-        summary.push_str(GROWTH_NOTE);
+        summary.push_str(&growth_note());
     }
 
     let mut new_history = Vec::with_capacity(history.len() - split_idx + 2);
@@ -546,7 +546,7 @@ async fn summarize_before(
         if answer.cut_off {
             // Said out loud, because a summary that stops mid-section reads
             // like a summary of everything.
-            text.push_str(CUT_OFF_NOTE);
+            text.push_str(&cut_off_note());
         }
         let candidate = (text, answer.usage);
         if shaped {
@@ -674,7 +674,11 @@ async fn summarize_in_parts(
     // the next compaction read the same sections.
     let msgs = reduce_request(&parts, prior_summary, focus_prompt, detail);
     let answer = ask_for_summary(source, msgs, opts, sink).await?;
-    Some((answer.text.trim().to_string(), answer.usage))
+    // Every call counts: the parts and the reduction that put them together.
+    // The card says what the compaction cost, and it cost all of them — the
+    // reduction alone is a fraction of the price.
+    let usage = Some(add_usage(usage.take(), answer.usage));
+    Some((answer.text.trim().to_string(), usage))
 }
 
 /// Which part of the conversation this is.
@@ -789,13 +793,21 @@ const SUMMARY_SUBHEADINGS: [&str; 3] = ["Completed", "Active", "Blocked"];
 
 /// Said out loud, because a summary that stops mid-section reads like a
 /// summary of everything.
-const CUT_OFF_NOTE: &str = "\n\n[This summary was cut off at the output limit. What it reached is complete; \
-     later detail is missing. Re-read the archive above for anything you need that is not here.]";
+fn cut_off_note() -> String {
+    format!(
+        "\n\n{}",
+        flashagent_tui::i18n::tr("[This summary was cut off at the output limit. What it reached is complete; later detail is missing. Re-read the archive above for anything you need that is not here.]")
+    )
+}
 
 /// Said out loud too: a compaction that did not make the window smaller is
 /// not a compaction the person can feel.
-const GROWTH_NOTE: &str = "\n\n[The summary is longer than the conversation it replaces, so the window \
-     did not get smaller. The transcript is in the archive above.]";
+fn growth_note() -> String {
+    format!(
+        "\n\n{}",
+        flashagent_tui::i18n::tr("[The summary is longer than the conversation it replaces, so the window did not get smaller. The transcript is in the archive above.]")
+    )
+}
 
 /// What a summary that did not take the usual shape is missing, by name. The
 /// text is kept anyway: the window is full either way, and what the model
@@ -810,10 +822,15 @@ fn missing_shape_note(summary: &str) -> String {
     if missing.is_empty() {
         return String::new();
     }
+    // The headings the model was asked for are named in English; the note
+    // names them the way the person reads them.
+    let names: Vec<String> = missing.iter().map(|heading| flashagent_tui::i18n::tr(heading).to_string()).collect();
     format!(
-        "\n\n[This summary did not take the usual shape: {} is missing. What is written here is what the \
-         model wrote; read the archive above for anything it left out.]",
-        missing.join(", ")
+        "\n\n{}",
+        flashagent_tui::i18n::tr_fill(
+            "[This summary did not take the usual shape: missing {headings}. What is written here is what the model wrote; read the archive above for anything it left out.]",
+            &[("headings", &names.join(", "))],
+        )
     )
 }
 
@@ -1067,4 +1084,5 @@ mod tests {
         let conversation = vec![ChatMessage::user("a".repeat(4_000))];
         assert!(split_into_chunks(&conversation, 0, "test-model").is_none());
     }
+
 }

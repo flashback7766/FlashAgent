@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyModifiers};
 use flashagent_tools::mcp::{MarketplaceItem, McpTestReport, ServerConnectionState, ServerStatus};
 use crate::tool_views::clip_ellipsis;
-use crate::{plural, visible_width, LineKind, RenderLine};
+use crate::{visible_width, LineKind, RenderLine};
 
 const RESET: &str = "\x1b[0m";
 const BORDER_GOLD: &str = "\x1b[38;2;225;175;95m";
@@ -59,15 +59,34 @@ pub enum McpModalAction {
     Reload,
     TestServer(String),
     InstallMarketplace(String),
+    /// The trust the owner gave this server is taken back. The server stays
+    /// configured and asks again the next time it starts.
+    ForgetServer(String),
+}
+
+/// A server the owner allowed to run in this folder.
+///
+/// The trust is the permission to run, not the server itself: the server is
+/// written in a config file, and the permission is kept beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedServer {
+    pub name: String,
+    /// What it runs, as it was when it was allowed.
+    pub command: String,
 }
 
 /// Overview, servers and the curated marketplace.
 pub struct McpModal {
     pub loaded_paths: Vec<PathBuf>,
     pub servers: Vec<ServerStatus>,
+    /// The servers the owner allowed in this folder.
+    pub trusted: Vec<TrustedServer>,
     pub active_tab: McpViewTab,
     pub selected_index: usize,
     pub status_message: Option<String>,
+    /// The owner asked for the trust of this server to be taken back and has
+    /// not confirmed it yet. One press arms it, the next one does it.
+    pub confirm_forget: Option<String>,
 }
 
 impl McpModal {
@@ -75,49 +94,71 @@ impl McpModal {
         Self {
             loaded_paths,
             servers,
+            trusted: Vec::new(),
             active_tab: initial_tab,
             selected_index: 0,
             status_message: None,
+            confirm_forget: None,
         }
+    }
+
+    /// The trusted servers, as the panel shows them.
+    pub fn with_trusted(mut self, trusted: Vec<TrustedServer>) -> Self {
+        self.trusted = trusted;
+        self
     }
 
     pub fn total_items(&self) -> usize {
         match self.active_tab {
             McpViewTab::Overview => 3,
-            McpViewTab::Servers => self.servers.len().max(1),
+            McpViewTab::Servers => self.servers.len() + self.trusted.len(),
             McpViewTab::Marketplace => flashagent_tools::mcp::get_marketplace().len(),
         }
     }
 
+    /// The trusted server under the cursor, if the cursor is on one.
+    fn trusted_at(&self, index: usize) -> Option<&TrustedServer> {
+        index.checked_sub(self.servers.len()).and_then(|i| self.trusted.get(i))
+    }
+
     pub fn handle_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) -> McpModalAction {
         match code {
-            KeyCode::Esc => McpModalAction::Close,
+            KeyCode::Esc => {
+                self.confirm_forget = None;
+                McpModalAction::Close
+            }
             KeyCode::Tab => {
                 self.active_tab = self.active_tab.next();
                 self.selected_index = 0;
+                self.confirm_forget = None;
                 McpModalAction::None
             }
             KeyCode::BackTab => {
                 self.active_tab = self.active_tab.prev();
                 self.selected_index = 0;
+                self.confirm_forget = None;
                 McpModalAction::None
             }
             KeyCode::Char('1') => {
                 self.active_tab = McpViewTab::Overview;
                 self.selected_index = 0;
+                self.confirm_forget = None;
                 McpModalAction::None
             }
             KeyCode::Char('2') => {
                 self.active_tab = McpViewTab::Servers;
                 self.selected_index = 0;
+                self.confirm_forget = None;
                 McpModalAction::None
             }
             KeyCode::Char('3') => {
                 self.active_tab = McpViewTab::Marketplace;
                 self.selected_index = 0;
+                self.confirm_forget = None;
                 McpModalAction::None
             }
             KeyCode::Up => {
+                self.confirm_forget = None;
                 if self.selected_index > 0 {
                     self.selected_index -= 1;
                 } else {
@@ -126,6 +167,7 @@ impl McpModal {
                 McpModalAction::None
             }
             KeyCode::Down => {
+                self.confirm_forget = None;
                 let max = self.total_items().saturating_sub(1);
                 if self.selected_index < max {
                     self.selected_index += 1;
@@ -133,6 +175,21 @@ impl McpModal {
                     self.selected_index = 0;
                 }
                 McpModalAction::None
+            }
+            // The trust of the server under the cursor is taken back. The
+            // first press only arms it and says so: a stray `d` in this panel
+            // would take away the permission the owner had given.
+            KeyCode::Char('d') | KeyCode::Delete => {
+                let Some(name) = self.trusted_at(self.selected_index).map(|t| t.name.clone()) else {
+                    return McpModalAction::None;
+                };
+                if self.confirm_forget.as_deref() == Some(name.as_str()) {
+                    self.confirm_forget = None;
+                    McpModalAction::ForgetServer(name)
+                } else {
+                    self.confirm_forget = Some(name);
+                    McpModalAction::None
+                }
             }
             KeyCode::Enter => {
                 match self.active_tab {
@@ -167,7 +224,10 @@ impl McpModal {
                     }
                 }
             }
-            _ => McpModalAction::None,
+            _ => {
+                self.confirm_forget = None;
+                McpModalAction::None
+            }
         }
     }
 
@@ -272,7 +332,7 @@ impl McpModal {
                 }
             }
             McpViewTab::Servers => {
-                if self.servers.is_empty() {
+                if self.servers.is_empty() && self.trusted.is_empty() {
                     lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}{}{RESET}", crate::i18n::tr("No MCP servers configured yet in .mcp.json or ~/.flashagent/mcp.json")))));
                     lines.push((LineKind::System, pad_row("")));
                     lines.push((LineKind::System, pad_row(&format!("{TEXT_CYAN}{}{RESET}", crate::i18n::tr("Press Tab or 3 to browse the marketplace")))));
@@ -286,13 +346,31 @@ impl McpModal {
                             ServerConnectionState::Stopped => "\x1b[38;2;225;175;95m○ stopped\x1b[0m",
                             ServerConnectionState::Error(_) => "\x1b[38;2;245;120;120m× error\x1b[0m",
                         };
-                        let tools = plural(s.tool_count, "tool", "tools");
+                        let tools = crate::i18n::plural(s.tool_count, "tool", "tools", "инструмент", "инструмента", "инструментов");
                         let row = if is_sel {
                             format!("{ptr} \x1b[1;38;2;240;235;225m{:<18}\x1b[0m {st_badge}  \x1b[1;38;2;225;175;95m{tools}\x1b[0m", s.name)
                         } else {
                             format!("{ptr} \x1b[38;2;160;155;145m{:<18}\x1b[0m {st_badge}  \x1b[38;2;135;130;125m{tools}\x1b[0m", s.name)
                         };
                         lines.push((LineKind::System, pad_row(&row)));
+                    }
+                    // The servers the owner allowed to run in this folder. The
+                    // trust is the only thing here that can be taken back.
+                    if !self.trusted.is_empty() {
+                        lines.push((LineKind::System, pad_row("")));
+                        lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}{}{RESET}", crate::i18n::tr("Allowed in this folder:")))));
+                        for (idx, t) in self.trusted.iter().enumerate() {
+                            let is_sel = self.servers.len() + idx == self.selected_index;
+                            let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+                            let name = crate::truncate_middle(&t.name, 18);
+                            let command = crate::truncate_middle(&t.command, inner_text_w.saturating_sub(22));
+                            let row = if is_sel {
+                                format!("{ptr} \x1b[1;38;2;240;235;225m{:<18}\x1b[0m \x1b[38;2;135;130;125m{command}\x1b[0m", name)
+                            } else {
+                                format!("{ptr} \x1b[38;2;160;155;145m{:<18}\x1b[0m \x1b[38;2;135;130;125m{command}\x1b[0m", name)
+                            };
+                            lines.push((LineKind::System, pad_row(&row)));
+                        }
                     }
                 }
             }
@@ -301,13 +379,17 @@ impl McpModal {
                 for (idx, item) in items.iter().enumerate() {
                     let is_sel = idx == self.selected_index;
                     let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
-                    let desc = crate::truncate_middle(item.description, inner_text_w.saturating_sub(22));
-                    let row = if is_sel {
-                        format!("{ptr} \x1b[1;38;2;240;235;225m{:<14}\x1b[0m \x1b[1;38;2;225;175;95m{desc}\x1b[0m", item.id)
+                    // The publisher is what tells two extensions with the same
+                    // name apart, so it is shown with the name.
+                    let title = crate::truncate_middle(&item.display_line(), inner_text_w.saturating_sub(16));
+                    let desc = crate::truncate_middle(item.description, inner_text_w.saturating_sub(16));
+                    let head = if is_sel {
+                        format!("{ptr} \x1b[1;38;2;240;235;225m{:<14}\x1b[0m \x1b[1;38;2;225;175;95m{title}\x1b[0m", item.id)
                     } else {
-                        format!("{ptr} \x1b[38;2;110;175;230m{:<14}\x1b[0m \x1b[38;2;160;155;145m{desc}\x1b[0m", item.id)
+                        format!("{ptr} \x1b[38;2;110;175;230m{:<14}\x1b[0m \x1b[38;2;160;155;145m{title}\x1b[0m", item.id)
                     };
-                    lines.push((LineKind::System, pad_row(&row)));
+                    lines.push((LineKind::System, pad_row(&head)));
+                    lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}{desc}{RESET}"))));
                 }
             }
         }
@@ -318,10 +400,38 @@ impl McpModal {
             lines.push((LineKind::System, pad_row("")));
         }
 
-        let hints = crate::key_hints(
-            &[("Tab/1-3", "switch tab"), ("↑/↓", "move"), ("Enter", "select"), ("Esc", "close")],
-            inner_text_w.saturating_sub(1),
-        );
+        if let Some(name) = self.confirm_forget.as_deref() {
+            lines.push((
+                LineKind::System,
+                pad_row(&format!(
+                    "{}\x1b[0m",
+                    crate::i18n::tr_fill(
+                        "Press d again to forget the trust of {name}",
+                        &[("name", name)],
+                    )
+                )),
+            ));
+        }
+
+        let hints = if self.confirm_forget.is_some() {
+            crate::key_hints(&[("d", "press again"), ("Esc", "close")], inner_text_w.saturating_sub(1))
+        } else if self.active_tab == McpViewTab::Servers && !self.trusted.is_empty() {
+            crate::key_hints(
+                &[
+                    ("Tab/1-3", "switch tab"),
+                    ("↑/↓", "move"),
+                    ("Enter", "select"),
+                    ("d", "forget the trust"),
+                    ("Esc", "close"),
+                ],
+                inner_text_w.saturating_sub(1),
+            )
+        } else {
+            crate::key_hints(
+                &[("Tab/1-3", "switch tab"), ("↑/↓", "move"), ("Enter", "select"), ("Esc", "close")],
+                inner_text_w.saturating_sub(1),
+            )
+        };
         lines.push((LineKind::System, pad_row(&hints)));
 
         lines.push((
@@ -353,7 +463,7 @@ fn box_bottom(inner_w: usize, border: &str) -> String {
 
 /// Outer width of the report cards.
 fn report_width(width: usize) -> usize {
-    width.saturating_sub(4).clamp(20, 110)
+    width.saturating_sub(4).min(110)
 }
 
 /// `/mcp test <server>`
@@ -364,30 +474,38 @@ pub fn render_mcp_test_report(report: &McpTestReport, width: usize) -> Vec<Strin
     let title = crate::i18n::tr_fill("MCP test report: {name}", &[("name", &report.name)]);
     lines.push(box_top(&title, inner_w, BORDER_GOLD));
 
-    let mut status = format!("{TEXT_GREEN}● Handshake successful{RESET}");
+    let mut status = format!("{TEXT_GREEN}{}{RESET}", crate::i18n::tr("● Handshake successful"));
     // Only what the server said: a made-up version reads as a fact.
     if let Some(ver) = report.server_version.as_deref().filter(|v| !v.trim().is_empty()) {
-        status.push_str(&format!("  ·  {TEXT_MUTED}Version:{RESET} {ver}"));
+        status.push_str(&format!("  ·  {TEXT_MUTED}{}{RESET} {ver}", crate::i18n::tr("Version:")));
     }
     status.push_str(&format!(
-        "  ·  {TEXT_CYAN}Latency:{RESET} {:.2}ms",
+        "  ·  {TEXT_CYAN}{}{RESET} {:.2}ms",
+        crate::i18n::tr("Latency:"),
         report.latency.as_secs_f64() * 1000.0
     ));
     lines.push(box_line(&status, inner_w, BORDER_GOLD));
-    lines.push(box_line(&format!("{TEXT_MUTED}Command: {}{RESET}", report.command), inner_w, BORDER_GOLD));
+    lines.push(box_line(
+        &format!("{TEXT_MUTED}{}{RESET}", crate::i18n::tr_fill("Command: {command}", &[("command", &report.command)])),
+        inner_w,
+        BORDER_GOLD,
+    ));
     lines.push(box_line("", inner_w, BORDER_GOLD));
 
     lines.push(box_line(
-        &format!("{TEXT_BRIGHT}Discovered tools ({}):{RESET}", report.tools.len()),
+        &format!(
+            "{TEXT_BRIGHT}{}{RESET}",
+            crate::i18n::tr_fill("Discovered tools ({n}):", &[("n", &report.tools.len().to_string())])
+        ),
         inner_w,
         BORDER_GOLD,
     ));
 
     for (name, desc, read_only) in &report.tools {
         let tag = if *read_only {
-            format!("{TEXT_GREEN}[Read-only: auto-approved]{RESET}")
+            format!("{TEXT_GREEN}{}{RESET}", crate::i18n::tr("[Read-only: auto-approved]"))
         } else {
-            format!("{TEXT_YELLOW}[Asks for approval]{RESET}")
+            format!("{TEXT_YELLOW}{}{RESET}", crate::i18n::tr("[Asks for approval]"))
         };
         let tool_head = format!("  • {TEXT_CYAN}{name}{RESET}  {tag}");
         lines.push(box_line(&tool_head, inner_w, BORDER_GOLD));
@@ -420,7 +538,10 @@ pub fn render_mcp_add_success(item: &MarketplaceItem, target_path: &Path, width:
     lines.push(box_top(&title, inner_w, BORDER_GOLD));
 
     lines.push(box_line(
-        &format!("{TEXT_GREEN}√ Scaffolding saved to {}{RESET}", target_path.display()),
+        &format!(
+            "{TEXT_GREEN}√ {}{RESET}",
+            crate::i18n::tr_fill("Scaffolding saved to {path}", &[("path", &target_path.display().to_string())])
+        ),
         inner_w,
         BORDER_GOLD,
     ));
@@ -429,7 +550,11 @@ pub fn render_mcp_add_success(item: &MarketplaceItem, target_path: &Path, width:
     if !item.env_vars.is_empty() {
         lines.push(box_line("", inner_w, BORDER_GOLD));
         lines.push(box_line(
-            &format!("{TEXT_YELLOW}Notice:{RESET} This server requires environment variables:"),
+            &format!(
+                "{TEXT_YELLOW}{}{RESET} {}",
+                crate::i18n::tr("Notice:"),
+                crate::i18n::tr("This server requires environment variables:")
+            ),
             inner_w,
             BORDER_GOLD,
         ));
@@ -440,7 +565,7 @@ pub fn render_mcp_add_success(item: &MarketplaceItem, target_path: &Path, width:
 
     lines.push(box_line("", inner_w, BORDER_GOLD));
     lines.push(box_line(
-        &format!("Run {TEXT_CYAN}/mcp test {}{RESET} to check the connection.", item.id),
+        &crate::i18n::tr_fill("Run /mcp test {name} to check the connection.", &[("name", item.id)]),
         inner_w,
         BORDER_GOLD,
     ));
@@ -509,6 +634,63 @@ mod tests {
         let modal = McpModal::new(Vec::new(), vec![server(1), server(3)], McpViewTab::Servers);
         let text = crate::strip_ansi(&modal.render(80).iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join("\n"));
         assert!(text.contains("1 tool ") && text.contains("3 tools") && !text.contains("(s)"), "{text}");
+    }
+
+    /// The trust the owner gave can be taken back: the panel lists the servers
+    /// allowed in this folder, and `d` takes the trust of the one under the
+    /// cursor.
+    #[test]
+    fn the_trust_of_a_server_can_be_taken_back() {
+        let mut modal = McpModal::new(Vec::new(), Vec::new(), McpViewTab::Servers).with_trusted(vec![TrustedServer {
+            name: "sqlite".into(),
+            command: "uvx mcp-server-sqlite".into(),
+        }]);
+        // The first press only arms it: a stray `d` in this panel would take
+        // away the permission the owner had given.
+        assert_eq!(modal.handle_key(KeyCode::Char('d'), KeyModifiers::empty()), McpModalAction::None);
+        assert_eq!(modal.confirm_forget.as_deref(), Some("sqlite"));
+        assert_eq!(
+            modal.handle_key(KeyCode::Char('d'), KeyModifiers::empty()),
+            McpModalAction::ForgetServer("sqlite".into())
+        );
+        assert!(modal.confirm_forget.is_none());
+    }
+
+    /// Another key cancels the taking back: the owner may have meant to move
+    /// the cursor.
+    #[test]
+    fn another_key_cancels_the_taking_back_of_the_trust() {
+        let mut modal = McpModal::new(Vec::new(), Vec::new(), McpViewTab::Servers).with_trusted(vec![TrustedServer {
+            name: "sqlite".into(),
+            command: "uvx mcp-server-sqlite".into(),
+        }]);
+        modal.handle_key(KeyCode::Char('d'), KeyModifiers::empty());
+        modal.handle_key(KeyCode::Up, KeyModifiers::empty());
+        assert!(modal.confirm_forget.is_none());
+        assert_eq!(modal.handle_key(KeyCode::Char('d'), KeyModifiers::empty()), McpModalAction::None);
+    }
+
+    /// The servers allowed in this folder are named, with what they run.
+    #[test]
+    fn the_servers_allowed_in_this_folder_are_listed() {
+        let modal = McpModal::new(Vec::new(), Vec::new(), McpViewTab::Servers).with_trusted(vec![TrustedServer {
+            name: "sqlite".into(),
+            command: "uvx mcp-server-sqlite".into(),
+        }]);
+        let text = crate::strip_ansi(&modal.render(100).iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join("\n"));
+        assert!(text.contains("sqlite"), "{text}");
+        assert!(text.contains("uvx mcp-server-sqlite"), "{text}");
+    }
+
+    /// The publisher is shown with the extension: it is what tells two
+    /// extensions with the same name apart.
+    #[test]
+    fn the_marketplace_shows_who_publishes_the_extension() {
+        let modal = McpModal::new(Vec::new(), Vec::new(), McpViewTab::Marketplace);
+        let text = crate::strip_ansi(&modal.render(110).iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join("\n"));
+        let item = &flashagent_tools::mcp::get_marketplace()[0];
+        assert!(text.contains(item.vendor), "{text}");
+        assert!(text.contains(item.name), "{text}");
     }
 
     #[test]

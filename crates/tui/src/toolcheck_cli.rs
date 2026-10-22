@@ -47,10 +47,14 @@ pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
     println!("\nChecking whether {model} can drive tools…");
     let source = client_for(&endpoint, model).await;
     println!("  running the scenarios, each is one small task for the model…");
-    let report = flashagent_core::toolcheck::check_model(
+    // Every scenario, delegation included: the check exists to say what the
+    // model can do, and the five delegation scenarios were listed but never
+    // run.
+    let report = flashagent_core::toolcheck::check_scenarios(
         &source,
         model,
         std::time::Duration::from_secs(60),
+        &[],
     )
     .await;
     for line in report.lines() {
@@ -115,10 +119,13 @@ pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool, onl
         // and 9. Repeats are what turn a coin into a measurement.
         let mut runs = Vec::new();
         for _ in 0..repeat {
-            let full = flashagent_core::toolcheck::check_model(&source, model, timeout).await;
-            // Narrowed after the run, so a check that names no scenario still costs
-            // the same as one that names several: the work is the model's, not ours.
-            runs.push(if only.is_empty() { full } else { full.only(&only) });
+            // The scenarios that were asked for, delegation included: a name
+            // that is not in the list is a name nothing runs.
+            let full = flashagent_core::toolcheck::check_scenarios(&source, model, timeout, &only).await;
+            // Narrowed inside the check, so a check that names no scenario
+            // still costs the same as one that names several: the work is the
+            // model's, not ours.
+            runs.push(full);
         }
         let report = runs.last().cloned().expect("at least one run");
         for line in report.lines() {
@@ -152,6 +159,8 @@ pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool, onl
             println!("{}", r.markdown_row());
         }
     }
+    // A last line, so that a reader of a long report knows where it ends.
+    println!("\nThe tool-calling check is done.");
     let payload: Vec<_> = reports.iter().map(|r| r.to_json()).collect();
     // The environment variable still works; the flag is how it is done now.
     let path = json.or_else(|| std::env::var("FLASHAGENT_TOOL_TEST_JSON").ok());

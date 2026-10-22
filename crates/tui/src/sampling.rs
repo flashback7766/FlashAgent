@@ -24,7 +24,6 @@ pub struct SamplingView {
     pub max_tokens_buf: String,
     /// The seed of the sampling. Empty: the server picks one.
     pub seed_buf: String,
-    pub is_dirty: bool,
 }
 
 impl SamplingView {
@@ -41,7 +40,6 @@ impl SamplingView {
             min_p_buf: format!("{:.2}", config.min_p.unwrap_or(0.00)),
             max_tokens_buf: config.max_tokens.map(|n| n.to_string()).unwrap_or_default(),
             seed_buf: config.seed.map(|n| n.to_string()).unwrap_or_default(),
-            is_dirty: false,
         };
         // A named preset overwrites the buffers with its values.
         if preset != SamplingPreset::Custom {
@@ -174,7 +172,6 @@ impl SamplingView {
                     let buf = self.active_buffer_mut();
                     buf.pop();
                     self.preset = SamplingPreset::Custom;
-                    self.is_dirty = true;
                 }
                 SamplingAction::None
             }
@@ -201,8 +198,7 @@ impl SamplingView {
                     } else {
                         buf.push(c);
                         self.preset = SamplingPreset::Custom;
-                        self.is_dirty = true;
-                    }
+                        }
                 }
                 SamplingAction::None
             }
@@ -231,7 +227,6 @@ impl SamplingView {
         let updated = (current + delta as i64).clamp(0, 1_000_000);
         self.max_tokens_buf = if updated == 0 { String::new() } else { updated.to_string() };
         self.preset = SamplingPreset::Custom;
-        self.is_dirty = true;
     }
 
     fn cycle_preset(&mut self, delta: i32) {
@@ -244,7 +239,6 @@ impl SamplingView {
         };
         let new_preset = all[next_idx];
         self.sync_buffers_to_preset(new_preset);
-        self.is_dirty = true;
     }
 
     fn adjust_float(&mut self, idx: usize, delta: f32, min_val: f32, max_val: f32) {
@@ -260,7 +254,6 @@ impl SamplingView {
         let updated = (cur + delta).clamp(min_val, max_val);
         *buf = format!("{:.2}", updated);
         self.preset = SamplingPreset::Custom;
-        self.is_dirty = true;
     }
 
     fn adjust_int(&mut self, idx: usize, delta: i32, min_val: u32, max_val: u32) {
@@ -271,14 +264,13 @@ impl SamplingView {
         let updated = (cur + delta).clamp(min_val as i32, max_val as i32) as u32;
         self.top_k_buf = format!("{}", updated);
         self.preset = SamplingPreset::Custom;
-        self.is_dirty = true;
     }
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
         let mut lines = Vec::new();
         let border_color = "\x1b[38;2;100;95;90m";
         let reset = "\x1b[0m";
-        let inner_w = width.saturating_sub(6).clamp(20, 110);
+        let inner_w = width.saturating_sub(6).min(110);
 
         let title = format!(" {} ", crate::i18n::tr("Sampling parameters"));
         let dash_count = inner_w.saturating_sub(title.chars().count() + 1);
@@ -318,12 +310,12 @@ impl SamplingView {
         lines.push((LineKind::System, pad_row(&format!("{ptr0} {label0} {val0}"))));
 
         let fields = [
-            (1, crate::i18n::tr("Temperature"), &self.temp_buf, "0.00..2.00 (coding: 0.60, mtp: 0.30, chat: 0.80, precise: 0.10)"),
-            (2, crate::i18n::tr("Top P"), &self.top_p_buf, "0.00..1.00 (coding: 0.95, mtp: 0.90, precise: 0.75)"),
-            (3, crate::i18n::tr("Top K"), &self.top_k_buf, "0..500     (coding: 20, mtp: 40, chat: 50, precise: 10)"),
-            (4, crate::i18n::tr("Repeat penalty"), &self.repeat_penalty_buf, "0.00..2.00 (coding: 1.00, mtp: 1.02, gemma: 1.08, chat: 1.10)"),
-            (5, crate::i18n::tr("Presence penalty"), &self.presence_penalty_buf, "-2.00..2.00 (chat: 0.10, mtp-chat: 0.05, default: 0.00)"),
-            (6, crate::i18n::tr("Min P"), &self.min_p_buf, "0.00..1.00 (mtp-code: 0.05, mtp: 0.03, default: 0.00)"),
+            (1, crate::i18n::tr("Temperature"), &self.temp_buf, "0.00..2.00 (кодинг: 0.60, mtp: 0.30, чат: 0.80, точный: 0.10)"),
+            (2, crate::i18n::tr("Top P"), &self.top_p_buf, "0.00..1.00 (кодинг: 0.95, mtp: 0.90, точный: 0.75)"),
+            (3, crate::i18n::tr("Top K"), &self.top_k_buf, "0..500     (кодинг: 20, mtp: 40, чат: 50, точный: 10)"),
+            (4, crate::i18n::tr("Repeat penalty"), &self.repeat_penalty_buf, "0.00..2.00 (кодинг: 1.00, mtp: 1.02, gemma: 1.08, чат: 1.10)"),
+            (5, crate::i18n::tr("Presence penalty"), &self.presence_penalty_buf, "-2.00..2.00 (чат: 0.10, mtp-чат: 0.05, по умолчанию: 0.00)"),
+            (6, crate::i18n::tr("Min P"), &self.min_p_buf, "0.00..1.00 (mtp-код: 0.05, mtp: 0.03, по умолчанию: 0.00)"),
             (7, crate::i18n::tr("Max tokens"), &self.max_tokens_buf, crate::i18n::tr("empty = the server's own limit")),
             (8, crate::i18n::tr("Seed"), &self.seed_buf, crate::i18n::tr("empty = the server picks one")),
         ];

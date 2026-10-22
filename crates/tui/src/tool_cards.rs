@@ -96,7 +96,7 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
     let text = |key: &str| parsed.get(key).and_then(|v| v.as_str());
     match name {
         "memory_create" | "memory_update" | "memory_remove" => {
-            let scope = format!("[{}]", text("scope").unwrap_or("project"));
+            let scope = format!("[{}]", text("scope").unwrap_or(crate::i18n::tr("project")));
             let verbs = match name {
                 "memory_create" => (tr("Creating memory"), tr("Created memory"), tr("Failed to create memory")),
                 "memory_update" => (tr("Updating memory"), tr("Updated memory"), tr("Failed to update memory")),
@@ -105,7 +105,7 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
             Labels::new(verbs, Some(&scope))
         }
         "outline_file" => {
-            let path = format_cmd(text("path").unwrap_or("file"));
+            let path = format_cmd(text("path").unwrap_or(crate::i18n::tr("file")));
             Labels::new((tr("Outlining"), tr("Outlined"), tr("Failed to outline")), Some(&path))
         }
         "web_search" => {
@@ -113,7 +113,7 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
             Labels::new((tr("Searching web:"), tr("Searched web:"), tr("Web search failed:")), Some(&query))
         }
         "web_fetch" => {
-            let url = format_cmd(text("url").unwrap_or("url"));
+            let url = format_cmd(text("url").unwrap_or(crate::i18n::tr("url")));
             Labels::new((tr("Fetching"), tr("Fetched"), tr("Failed to fetch")), Some(&url))
         }
         "git_status" => Labels::new(
@@ -122,7 +122,7 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
         ),
         "git_diff" => {
             let staged = parsed.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
-            let what = if staged { "staged git diff" } else { "git diff" };
+            let what = if staged { tr("staged git diff") } else { "git diff" };
             Labels {
                 run: card_line(&tr("Checking {what}").replace("{what}", what), None),
                 done: card_line(&tr("Checked {what}").replace("{what}", what), None),
@@ -141,7 +141,7 @@ fn fixed_labels(name: &str, parsed: &serde_json::Value) -> Labels {
                 .and_then(|q| q.get("question"))
                 .and_then(|v| v.as_str());
             let mut question =
-                format_cmd(first.or_else(|| text("question")).or_else(|| text("prompt")).unwrap_or("a question"));
+                format_cmd(first.or_else(|| text("question")).or_else(|| text("prompt")).unwrap_or_else(|| tr("a question")));
             let more = questions.map_or(0, |q| q.len().saturating_sub(1));
             if more > 0 {
                 question.push_str(&tr(" (+{more} more)").replace("{more}", &more.to_string()));
@@ -292,7 +292,7 @@ impl ChatView {
         let labels = Labels {
             done: run.clone(),
             // What it would have changed did not happen, so its size is left out.
-            fail: format!("  {FAILED}{TOOL_MARK}{OFF} {MUTED}{header}{OFF} {FAINT}\u{b7}{OFF} {FAILED}failed{OFF} {}", chevron()),
+            fail: format!("  {FAILED}{TOOL_MARK}{OFF} {MUTED}{header}{OFF} {FAINT}\u{b7}{OFF} {FAILED}{}{OFF} {}", tr("failed"), chevron()),
             run,
         };
         self.push_card(name, args_json, labels);
@@ -300,7 +300,7 @@ impl ChatView {
 
     /// In a row they become "Ran 3 commands".
     fn shell_card(&mut self, args_json: &str, parsed: &serde_json::Value) {
-        let cmd = parsed.get("command").and_then(|s| s.as_str()).unwrap_or("command").to_string();
+        let cmd = parsed.get("command").and_then(|s| s.as_str()).map(str::to_string).unwrap_or_else(|| tr("command").to_string());
         let folded = {
             let cmd = cmd.clone();
             self.fold_into_previous(args_json, |line| {
@@ -316,7 +316,7 @@ impl ChatView {
             })
         };
         if !folded {
-            let text = card_line("Running", Some(&format_cmd(&cmd)));
+            let text = card_line(tr("Running"), Some(&format_cmd(&cmd)));
             let mut line = ChatLine::with_details(LineKind::Tool, text, args_json.to_string());
             line.tool_name = Some("run_shell".to_string());
             line.tool_group = Some(ToolGroupKind::Command { count: 1, last_cmd: cmd, is_running: true });
@@ -334,7 +334,7 @@ impl ChatView {
         let batch_label: String;
         let target = if is_file {
             match read_paths.len() {
-                0 => "file",
+                0 => crate::i18n::tr("file"),
                 1 => read_paths[0].as_str(),
                 _ => {
                     batch_label = paths_label(&read_paths, false);
@@ -422,7 +422,7 @@ impl ChatView {
             }
         };
 
-        let text = format!("  {FAINT}{TOOL_MARK}{OFF} {MUTED}Editing{OFF} \x1b[1;38;2;225;230;240m{basename}{OFF} {}", chevron());
+        let text = format!("  {FAINT}{TOOL_MARK}{OFF} {MUTED}{}{OFF} \x1b[1;38;2;225;230;240m{basename}{OFF} {}", tr("Editing"), chevron());
         let mut line = ChatLine::with_details(LineKind::Tool, text, args_json.to_string());
         line.tool_name = Some(name.to_string());
         line.tool_group = Some(ToolGroupKind::Edit { path, added, deleted, is_running: true });
@@ -431,7 +431,7 @@ impl ChatView {
     }
 
     fn subagent_card(&mut self, args_json: &str, parsed: &serde_json::Value) {
-        let task = parsed.get("task").and_then(|s| s.as_str()).unwrap_or("task").to_string();
+        let task = parsed.get("task").and_then(|s| s.as_str()).map(str::to_string).unwrap_or_else(|| tr("task").to_string());
         let folded = {
             let task = task.clone();
             self.fold_into_previous(args_json, |line| {
@@ -459,7 +459,7 @@ impl ChatView {
 
     /// Names the scopes read rather than a count.
     fn memory_read_card(&mut self, args_json: &str, parsed: &serde_json::Value) {
-        let scope = parsed.get("scope").and_then(|s| s.as_str()).unwrap_or("project").to_string();
+        let scope = parsed.get("scope").and_then(|s| s.as_str()).map(str::to_string).unwrap_or_else(|| tr("project").to_string());
         let folded = {
             let scope = scope.clone();
             self.fold_into_previous(args_json, |line| {
@@ -547,7 +547,7 @@ fn not_run_note(result: &str) -> Option<&'static str> {
     } else if result.starts_with(flashagent_core::permissions::DENIED) {
         Some(crate::i18n::tr("not allowed"))
     } else if flashagent_core::stopped_by_user(result) {
-        Some("stopped")
+        Some(crate::i18n::tr("stopped"))
     } else if result.contains(flashagent_core::permissions::QUESTION_CLOSED) {
         Some(crate::i18n::tr("not answered"))
     } else {
@@ -562,8 +562,9 @@ fn failure_reason(result: &str) -> Option<String> {
     while let Some(rest) = ["error:", "Error:", "edit:", "write:", crate::i18n::tr("run_shell:")].iter().find_map(|p| line.strip_prefix(p)) {
         line = rest.trim_start();
     }
-    let shown: String = line.chars().take(72).collect();
-    Some(if line.chars().count() > 72 { format!("{}\u{2026}", shown.trim_end()) } else { shown })
+    // By cells: a CJK reason takes two columns a character, and a count of
+    // characters cut it in half while the ellipsis went over the edge.
+    Some(crate::tool_views::clip_ellipsis(line.trim_end(), 72))
 }
 
 /// ` · 1 failed`, in red, after a group some of whose calls failed.
@@ -571,7 +572,8 @@ fn failed_suffix(failed: usize, total: usize) -> String {
     if failed == 0 || failed >= total {
         return String::new();
     }
-    format!(" {FAINT}\u{b7}{OFF} {FAILED}{failed} failed{OFF}")
+    let said = tr("{failed} failed").replace("{failed}", &failed.to_string());
+    format!(" {FAINT}\u{b7}{OFF} {FAILED}{said}{OFF}")
 }
 
 fn finished_text(group: &mut ToolGroupKind, is_error: bool, failed: usize, total: usize) -> String {
@@ -587,7 +589,13 @@ fn finished_text(group: &mut ToolGroupKind, is_error: bool, failed: usize, total
         }
         ToolGroupKind::Explore { files, searches, last_target, is_running } => {
             *is_running = false;
-            format!("{}{}", format_explore(false, *files, *searches, last_target), failed_suffix(failed, *files + *searches))
+            let total = *files + *searches;
+            if failed > 0 && failed >= total {
+                // "Explored 1 file · failed" would say both that it happened
+                // and that it did not: a line that all failed is a failure.
+                return failed_line(tr("Failed to explore"), Some(&format_cmd(last_target)));
+            }
+            format!("{}{}", format_explore(false, *files, *searches, last_target), failed_suffix(failed, total))
         }
         ToolGroupKind::Edit { path, added, deleted, is_running } => {
             *is_running = false;
@@ -597,7 +605,8 @@ fn finished_text(group: &mut ToolGroupKind, is_error: bool, failed: usize, total
                 return failed_line(tr("Failed to edit"), Some(basename));
             }
             format!(
-                "  {FAINT}{TOOL_MARK}{OFF} {MUTED}Edited{OFF} \x1b[1;38;2;225;230;240m{basename}{OFF} \x1b[38;2;145;205;140m+{added}{OFF} {FAILED}-{deleted}{OFF} {}{}",
+                "  {FAINT}{TOOL_MARK}{OFF} {MUTED}{}{OFF} \x1b[1;38;2;225;230;240m{basename}{OFF} \x1b[38;2;145;205;140m+{added}{OFF} {FAILED}-{deleted}{OFF} {}{}",
+                tr("Edited"),
                 chevron(),
                 failed_suffix(failed, total)
             )
@@ -742,7 +751,38 @@ mod tests {
         assert_eq!(failure_reason("\n\n  boom\n").as_deref(), Some("boom"));
         assert_eq!(failure_reason("   "), None);
         let long = failure_reason(&"x".repeat(200)).unwrap();
-        assert_eq!(long.chars().count(), 73, "72 characters and an ellipsis");
+        assert_eq!(visible_width(&long), 72, "72 cells, the ellipsis included");
+        // CJK takes two cells a character: counted in characters, the reason
+        // was twice as wide as the row it is printed on.
+        let wide = failure_reason(&"日".repeat(80)).unwrap();
+        assert!(visible_width(&wide) <= 72, "{wide:?}");
+        assert!(wide.ends_with('…'), "{wide:?}");
+    }
+
+    #[test]
+    fn an_explore_line_that_fails_says_so_once_and_in_the_common_way() {
+        let mut chat = started("read_file", r#"{"path":"a.rs"}"#);
+        chat.tool_finished(true, 5, Some("error: no such file"));
+        let line = text_of(&chat);
+        assert!(line.starts_with("  ▸ Failed to explore a.rs"), "the title is the failure, not also 'Explored': {line}");
+        assert!(!line.contains("Explored"), "{line}");
+        assert_eq!(chat.lines.last().unwrap().kind, LineKind::ToolError);
+
+        // A partial failure keeps the group line and adds a translated tail.
+        let mut chat = started("read_file", r#"{"paths":["a.rs","b.rs"]}"#);
+        chat.tool_finished(false, 5, Some("a"));
+        chat.tool_started("read_file", r#"{"path":"c.rs"}"#, None);
+        chat.tool_finished(true, 5, Some("error: no such file"));
+        let line = text_of(&chat);
+        assert!(line.contains("Explored") && line.contains("1 failed"), "{line}");
+        assert!(
+            crate::i18n::translate(crate::i18n::Lang::Russian, "{failed} failed") != "{failed} failed",
+            "the tail has a translation"
+        );
+        assert!(
+            crate::i18n::translate(crate::i18n::Lang::Russian, "Failed to explore") != "Failed to explore",
+            "the title has a translation"
+        );
     }
 
     #[test]

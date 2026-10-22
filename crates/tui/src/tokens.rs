@@ -327,7 +327,7 @@ mod tests {
         let mut t = TokenTracker::new("m".into());
         t.on_turn_start("m".into(), 0);
         assert_eq!(t.draft_display(), None, "a server without a draft model says nothing");
-        let mtp = flashagent_llm::MtpStats { total_draft_tokens: 16, accepted_draft_tokens: 13, rejected_draft_tokens: 3 };
+        let mtp = flashagent_llm::MtpStats { total_draft_tokens: 16, accepted_draft_tokens: 13 };
         t.on_usage(&flashagent_llm::Usage { mtp: Some(mtp), ..Default::default() });
         assert!(t.draft_display().is_some_and(|d| d.contains("draft 81%")), "{:?}", t.draft_display());
         t.on_finished();

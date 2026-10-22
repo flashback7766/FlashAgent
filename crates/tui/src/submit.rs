@@ -74,7 +74,7 @@ fn help_text(width: usize) -> String {
     const WHAT: &str = "\x1b[38;2;165;160;150m";
     const OFF: &str = "\x1b[0m";
     let width = width.max(30);
-    let key_w = (width / 3).clamp(12, 26);
+    let key_w = (width / 3).clamp(12, 26).min(width);
     let what_w = width.saturating_sub(key_w + 4).max(16);
     let mut out = Vec::new();
     for (title, rows) in [
@@ -111,12 +111,30 @@ fn help_text(width: usize) -> String {
 }
 
 /// `/name arg` as (name, arg); the line starts with a slash.
+///
+/// The one place that reads a command line: the slash is cut here and
+/// nowhere else, so the name and the argument mean the same thing in every
+/// path that takes a command.
 fn split_command(line: &str) -> (&str, &str) {
     let rest = line.strip_prefix('/').unwrap_or(line);
     match rest.split_once(char::is_whitespace) {
         Some((name, arg)) => (name, arg.trim()),
         None => (rest, ""),
     }
+}
+
+/// The paths in a message that attach a picture, and nothing else.
+///
+/// Only a message that is nothing but paths attaches them: a file named in a
+/// sentence is a mention, and the model has `view_image` for it. Attaching it
+/// anyway spends the traffic, the tokens and the money without anyone asking
+/// for a picture.
+fn standalone_paths(text: &str) -> Option<Vec<&str>> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() || !words.iter().all(|word| word.contains('/') || word.contains('\\')) {
+        return None;
+    }
+    Some(words)
 }
 
 /// What a command does when it is typed while a turn runs.
@@ -137,7 +155,9 @@ fn while_running(name: &str) -> WhileRunning {
     match name {
         "help" | "?" | "whatsnew" | "changelog" | "memory" | "memories" | "context" | "verbose" | "expand" | "think"
         | "o" | "diff" | "commit" | "settings" | "config" | "sampling" | "params" | "effort" | "thinking" | "t"
-        | "model" | "models" | "m" | "mode" | "skills" | "tools" | "notices" | "log" | "safe" | "rules" => WhileRunning::Now,
+        | "model" | "models" | "m" | "mode" | "skills" | "tools" | "notices" | "log" | "safe" | "rules" | "cost" => {
+            WhileRunning::Now
+        }
         "compact" | "clear" | "export" | "rewind" => WhileRunning::AfterTurn,
         "goal" | "resume" | "regenerate" | "retry" | "update" | "channel" | "mcp" | "editor" | "exit" | "quit" | "q"
         | "uninstall" => WhileRunning::Refuse,
@@ -210,7 +230,7 @@ fn starts_a_turn(name: &str, arg: &str) -> bool {
 fn untracked_list(files: &[&str]) -> String {
     let mut rows: Vec<String> = files.iter().take(8).map(|f| format!("  {f}")).collect();
     if files.len() > 8 {
-        rows.push(format!("  \u{2026} and {} more", files.len() - 8));
+        rows.push(tr_fill("  \u{2026} and {n} more", &[("n", &(files.len() - 8).to_string())]));
     }
     rows.join("\n")
 }
@@ -219,11 +239,8 @@ impl App {
     /// Enter on a non-empty prompt with no turn running.
     pub(crate) async fn submit_input(&mut self, cx: &mut LoopCtx<'_>) -> Flow {
         let line = self.input.trim().to_string();
-        if let Some(rest) = line.strip_prefix('/') {
-            let (name, arg) = match rest.split_once(char::is_whitespace) {
-                Some((name, arg)) => (name, arg.trim()),
-                None => (rest, ""),
-            };
+        if line.starts_with('/') {
+            let (name, arg) = split_command(&line);
             // The history is with the compaction task: a command that starts a
             // turn would begin from nothing, so it waits with a message.
             if self.compacting && starts_a_turn(name, arg) {
@@ -299,10 +316,26 @@ impl App {
                     self.queued_commands.push(line.clone());
                     // A queued command that says nothing looks like the app
                     // swallowed it, and that reads the same as a hang.
-                    self.say(BackgroundNotice::fading(format!("/{name} will run when this turn finishes \u{b7} Esc ends the turn now instead"), 6).warning());
+                    self.say(BackgroundNotice::fading(
+                        tr_fill(
+                            "/{name} will run when this turn finishes \u{b7} Esc ends the turn now instead",
+                            &[("name", name)],
+                        ),
+                        6,
+                    )
+                    .warning());
                 }
             }
-            WhileRunning::Refuse => self.say(BackgroundNotice::fading(format!("/{name} does not run while the model works \u{b7} Esc interrupts the turn first"), 6).warning()),
+            WhileRunning::Refuse => self.say(
+                BackgroundNotice::fading(
+                    tr_fill(
+                        "/{name} does not run while the model works \u{b7} Esc interrupts the turn first",
+                        &[("name", name)],
+                    ),
+                    6,
+                )
+                .warning(),
+            ),
             WhileRunning::Unknown => self.unknown_command(name),
         }
         self.renderer.request_reprint();
@@ -399,7 +432,7 @@ impl App {
             "editor" => {
                 match open_in_external_editor("", &self.config.external_editor) {
                     Ok(edited) => self.input.set(edited),
-                    Err(err) => self.notice(format!("Failed to launch external editor: {err}")),
+                    Err(err) => self.notice(tr_fill("Failed to launch external editor: {err}", &[("err", &err.to_string())])),
                 }
                 // Coming back to the alternate screen found it blank.
                 self.renderer.request_reprint();
@@ -438,8 +471,8 @@ impl App {
         let guess = flashagent_tui::autocomplete::closest_match(&word, triggers.iter().map(|t| t.as_str()));
         // The typo stays in the prompt; the placeholder only shows on an empty one.
         let said = match guess {
-            Some(g) => format!("Unknown command {word} · did you mean {g}?"),
-            None => format!("Unknown command {word} · /help lists them"),
+            Some(g) => tr_fill("Unknown command {word} · did you mean {g}?", &[("word", &word), ("g", g)]),
+            None => tr_fill("Unknown command {word} · /help lists them", &[("word", &word)]),
         };
         self.say(BackgroundNotice::fading(said, 6));
     }
@@ -475,28 +508,34 @@ impl App {
         // Only a path typed out on its own attaches a picture; a file named in a
         // sentence is a mention, and the model has view_image for it. A dropped file
         // arrives as a paste on Unix and as typing on Windows; both land here.
-        let mut left = String::new();
-        for token in text.split_whitespace() {
-            let attached = (token.contains('/') || token.contains('\\'))
-                && self.attachments.len() < 8
-                && match Attachment::from_dropped_path(token) {
+        //
+        // The whole message has to be paths — one of them, or several. A path
+        // named in a sentence is a mention: attaching it would spend the
+        // traffic, the tokens and the money without anyone asking for a picture.
+        //
+        // Whether every path in the message became a picture. One that does not
+        // exist is not a picture, and its name stays in the text: the model is
+        // told about a file it cannot see otherwise.
+        let mut all_pictures = false;
+        if let Some(words) = standalone_paths(&text) {
+            all_pictures = true;
+            for word in words {
+                if self.attachments.len() >= 8 {
+                    all_pictures = false;
+                    continue;
+                }
+                match Attachment::from_dropped_path(word) {
                     Some(att) => {
                         if !self.attachments.iter().any(|a| a.data_url == att.data_url) {
                             self.attachments.push(att);
                         }
-                        true
                     }
-                    None => false,
-                };
-            if !attached {
-                if !left.is_empty() {
-                    left.push(' ');
+                    None => all_pictures = false,
                 }
-                left.push_str(token);
             }
         }
         // A message of only pictures: the dropped path is not text for the model.
-        let text = if left.trim().is_empty() && !self.attachments.is_empty() { String::new() } else { text };
+        let text = if all_pictures && !self.attachments.is_empty() { String::new() } else { text };
         let shown = if self.attachments.is_empty() {
             text.clone()
         } else {
@@ -570,7 +609,7 @@ impl App {
         self.flush_switch_notice();
 
         let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
-        let card_w = (w as usize).saturating_sub(4).clamp(20, 110);
+        let card_w = (w as usize).saturating_sub(4).min(110);
         let inner_w = card_w.saturating_sub(2);
         let border_color = "\x1b[38;2;225;175;95m";
         let reset = "\x1b[0m";
@@ -655,8 +694,11 @@ impl App {
             let names: Vec<String> = skills.iter().map(|s| s.trigger.trim_start_matches("/skill:").to_string()).collect();
             let guess = flashagent_tui::autocomplete::closest_match(name, names.iter().map(|n| n.as_str()));
             let said = match guess {
-                Some(near) => format!("Unknown skill '{name}' · did you mean '{near}'?"),
-                None => format!("Unknown skill '{name}' · /skills lists them"),
+                Some(near) => tr_fill(
+                    "Unknown skill '{name}' · did you mean '{near}'?",
+                    &[("name", name), ("near", near)],
+                ),
+                None => tr_fill("Unknown skill '{name}' · /skills lists them", &[("name", name)]),
             };
             self.notice(said);
             return;
@@ -699,24 +741,28 @@ impl App {
     fn show_cost(&mut self) {
         use flashagent_core::CostLedger;
         let Some(total) = self.cost.total() else {
-            self.chat.push_system(&format!(
-                "No backend in this session reported a price \u{b7} {} is running free on your own hardware, or its API does not say what a turn costs",
-                self.config.active_profile().name
+            self.chat.push_system(&tr_fill(
+                "No backend in this session reported a price \u{b7} {name} is running free on your own hardware, or its API does not say what a turn costs",
+                &[("name", &self.config.active_profile().name)],
             ));
             return;
         };
-        self.chat.push_system(&format!(
-            "This session: ${} over {}",
-            CostLedger::format_amount(total),
-            CostLedger::turns_phrase(self.cost.priced_turns())
+        self.chat.push_system(&tr_fill(
+            "This session: ${amount} over {turns}",
+            &[
+                ("amount", &CostLedger::format_amount(total)),
+                ("turns", &CostLedger::turns_phrase(self.cost.priced_turns())),
+            ],
         ));
         // What the providers behind the gateways charged: the difference is
         // what the gateway added for itself.
         if let Some(upstream) = self.cost.upstream_total() {
-            self.chat.push_system(&format!(
-                "  the providers themselves: ${} over {}",
-                CostLedger::format_amount(upstream),
-                CostLedger::turns_phrase(self.cost.upstream_turns())
+            self.chat.push_system(&tr_fill(
+                "  the providers themselves: ${amount} over {turns}",
+                &[
+                    ("amount", &CostLedger::format_amount(upstream)),
+                    ("turns", &CostLedger::turns_phrase(self.cost.upstream_turns())),
+                ],
             ));
         }
         for row in self.cost.by_provider() {
@@ -724,13 +770,15 @@ impl App {
             // saying "$0.00 over 12 turns" reads as an empty account rather than
             // as one that does not exist.
             let line = if row.total == 0.0 {
-                format!("  {} \u{b7} free", row.name)
+                tr_fill("  {name} \u{b7} free", &[("name", &row.name)])
             } else {
-                format!(
-                    "  {} \u{b7} ${} over {}",
-                    row.name,
-                    CostLedger::format_amount(row.total),
-                    CostLedger::turns_phrase(row.turns)
+                tr_fill(
+                    "  {name} \u{b7} ${amount} over {turns}",
+                    &[
+                        ("name", &row.name),
+                        ("amount", &CostLedger::format_amount(row.total)),
+                        ("turns", &CostLedger::turns_phrase(row.turns)),
+                    ],
                 )
             };
             self.chat.push_system(&line);
@@ -816,7 +864,7 @@ impl App {
                 "Usage: /mcp test <server_name>\nExample: /mcp test sqlite",
             )),
             "test" => {
-                self.notice(format!("Testing MCP server '{rest}'…"));
+                self.notice(tr_fill("Testing MCP server '{name}'…", &[("name", rest)]));
                 // Drawn before the wait, which can take a while.
                 self.draw(cx, None);
                 match cx.tools_arc.mcp_manager().test_server(rest).await {
@@ -840,7 +888,7 @@ impl App {
             ),
             "add" => {
                 let Some(item) = flashagent_tools::mcp::find_marketplace_item(rest) else {
-                    self.notice(format!("Unknown extension '{rest}' · /mcp market lists them"));
+                    self.notice(tr_fill("Unknown extension '{name}' · /mcp market lists them", &[("name", rest)]));
                     return;
                 };
                 let cfg = flashagent_tools::mcp::scaffold_config(item);
@@ -857,7 +905,7 @@ impl App {
                             let _ = mgr.start_server(&server_id).await;
                         });
                     }
-                    Err(e) => self.notice(format!("Failed to save the MCP configuration: {e}")),
+                    Err(e) => self.notice(tr_fill("Failed to save the MCP configuration: {e}", &[("e", &e.to_string())])),
                 }
             }
             "reload" => {
@@ -867,13 +915,35 @@ impl App {
                         let statuses = mgr.server_status_list().await;
                         let active = statuses.iter().filter(|s| s.state == flashagent_tools::mcp::ServerConnectionState::Active).count();
                         let tools: usize = statuses.iter().map(|s| s.tool_count).sum();
-                        self.notice(format!(
-                            "MCP reloaded · {} · {}",
-                            flashagent_tui::plural(active, "active server", "active servers"),
-                            flashagent_tui::plural(tools, "tool", "tools")
+                        self.notice(tr_fill(
+                            "MCP reloaded · {servers} · {tools}",
+                            &[
+                                (
+                                    "servers",
+                                    &flashagent_tui::i18n::plural(
+                                        active,
+                                        "active server",
+                                        "active servers",
+                                        "активный сервер",
+                                        "активных сервера",
+                                        "активных серверов",
+                                    ),
+                                ),
+                                (
+                                    "tools",
+                                    &flashagent_tui::i18n::plural(
+                                        tools,
+                                        "tool",
+                                        "tools",
+                                        "инструмент",
+                                        "инструмента",
+                                        "инструментов",
+                                    ),
+                                ),
+                            ],
                         ));
                     }
-                    Err(e) => self.notice(format!("MCP reload failed: {e}")),
+                    Err(e) => self.notice(tr_fill("MCP reload failed: {e}", &[("e", &e.to_string())])),
                 }
             }
             _ => self.notice(tr("Usage: /mcp list | market | test <server> | add <id> | reload")),
@@ -983,7 +1053,7 @@ impl App {
         let (stat, patch, untracked) = match (git(&["diff", "--stat"]), git(&["diff", "--no-color", "-U2"]), git(&["ls-files", "--others", "--exclude-standard"])) {
             (Ok(stat), Ok(patch), Ok(untracked)) => (stat, patch, untracked),
             (Err(e), ..) | (_, Err(e), _) | (.., Err(e)) => {
-                self.notice(format!("Failed to run git diff: {e}"));
+                self.notice(tr_fill("Failed to run git diff: {e}", &[("e", &e.to_string())]));
                 return;
             }
         };
@@ -1083,14 +1153,20 @@ impl App {
         };
         match std::process::Command::new("git").args(["commit", "-m", &commit_msg]).output() {
             Ok(out) if out.status.success() => {
-                self.chat.push_system(&format!("Git commit succeeded:\n{}", String::from_utf8_lossy(&out.stdout).trim_end()));
+                self.chat.push_system(&tr_fill(
+                    "Git commit succeeded:\n{out}",
+                    &[("out", String::from_utf8_lossy(&out.stdout).trim_end())],
+                ));
             }
             Ok(out) => {
                 let err = String::from_utf8_lossy(&out.stderr);
                 let s = String::from_utf8_lossy(&out.stdout);
-                self.chat.push_system(&format!("Git commit status:\n{s}{err}"));
+                self.chat.push_system(&tr_fill(
+                    "Git commit status:\n{out}",
+                    &[("out", &format!("{s}{err}"))],
+                ));
             }
-            Err(e) => self.notice(format!("Failed to run git commit: {e}")),
+            Err(e) => self.notice(tr_fill("Failed to run git commit: {e}", &[("e", &e.to_string())])),
         }
     }
 
@@ -1160,7 +1236,15 @@ impl App {
         let stem = cx.session_id.strip_prefix("session_").unwrap_or(cx.session_id);
         let text_of = |m: &ChatMessage| {
             if m.content.trim().is_empty() && !m.images.is_empty() {
-                format!("[{} attached image{}]", m.images.len(), if m.images.len() == 1 { "" } else { "s" })
+                let images = flashagent_tui::i18n::plural(
+                    m.images.len(),
+                    "attached image",
+                    "attached images",
+                    "картинка",
+                    "картинки",
+                    "картинок",
+                );
+                format!("[{images}]")
             } else {
                 m.content.clone()
             }
@@ -1205,10 +1289,10 @@ impl App {
             Ok(_) => {
                 let shown = std::fs::canonicalize(&target).map_or(target.clone(), |p| p.display().to_string());
                 // It fades: as the prompt's placeholder it came back every time the prompt was emptied.
-                self.say(BackgroundNotice::fading(format!("Exported to {shown}"), 8));
+                self.say(BackgroundNotice::fading(tr_fill("Exported to {path}", &[("path", &shown)]), 8));
                 self.renderer.request_reprint();
             }
-            Err(e) => self.notice(format!("Failed to export conversation: {e}")),
+            Err(e) => self.notice(tr_fill("Failed to export conversation: {e}", &[("e", &e.to_string())])),
         }
     }
 
@@ -1230,7 +1314,13 @@ impl App {
         let report = store.rewind(target.turn);
         if !report.failed.is_empty() {
             for (path, why) in &report.failed {
-                self.chat.push_line(LineKind::ToolError, format!("Not put back: {} — {why}", store.display_path(path)));
+                self.chat.push_line(
+                    LineKind::ToolError,
+                    tr_fill(
+                        "Not put back: {path} — {why}",
+                        &[("path", &store.display_path(path)), ("why", why)],
+                    ),
+                );
             }
             self.notice(tr("Rewind incomplete · history kept; fix the errors above and run /rewind again").to_string());
             self.renderer.request_reprint();
@@ -1279,7 +1369,7 @@ mod tests {
 
     #[test]
     fn a_command_typed_during_a_turn_runs_waits_or_is_refused_by_what_it_touches() {
-        for name in ["help", "verbose", "diff", "mode", "effort", "model", "memory", "context"] {
+        for name in ["help", "verbose", "diff", "mode", "effort", "model", "memory", "context", "cost"] {
             assert_eq!(while_running(name), WhileRunning::Now, "{name}");
         }
         // The conversation belongs to the turn until it ends.
@@ -1295,11 +1385,41 @@ mod tests {
         assert_eq!(while_running("hlep"), WhileRunning::Unknown);
     }
 
+    /// A picture is attached for a path typed out on its own. A file named in
+    /// a sentence is a mention: the model has view_image for it, and attaching
+    /// it spends the traffic and the tokens without anyone asking.
+    #[test]
+    fn only_a_message_that_is_nothing_but_paths_attaches_a_picture() {
+        assert_eq!(standalone_paths("/home/me/shot.png"), Some(vec!["/home/me/shot.png"]));
+        // Several paths are still only paths.
+        assert_eq!(standalone_paths("/home/me/a.png /home/me/b.png"), Some(vec!["/home/me/a.png", "/home/me/b.png"]));
+        // A path named in a sentence is a mention.
+        assert_eq!(standalone_paths("look at /home/me/shot.png"), None);
+        assert_eq!(standalone_paths("shot.png is at /home/me/shot.png"), None);
+        // And there is nothing to attach in an ordinary message.
+        assert_eq!(standalone_paths("hello"), None);
+        assert_eq!(standalone_paths(""), None);
+        assert_eq!(standalone_paths("   "), None);
+    }
+
     #[test]
     fn a_command_line_splits_into_name_and_argument() {
         assert_eq!(split_command("/compact keep the schema"), ("compact", "keep the schema"));
         assert_eq!(split_command("/help"), ("help", ""));
         assert_eq!(split_command("/tmp/shot.png"), ("tmp/shot.png", ""));
+    }
+
+    /// The slash is cut in one place. It used to be cut by hand where the
+    /// command was taken and again inside the splitter, so the two could
+    /// disagree about what a command is called.
+    #[test]
+    fn a_command_is_read_the_same_way_wherever_it_comes_from() {
+        for line in ["/compact keep the schema", "/help", "/tmp/shot.png"] {
+            let (name, arg) = split_command(line);
+            let rest = line.strip_prefix('/').expect("a command line starts with a slash");
+            assert_eq!(rest.split_whitespace().next(), Some(name), "{line}");
+            assert_eq!(split_command(&line[1..]), (name, arg), "{line}");
+        }
     }
 
     #[test]

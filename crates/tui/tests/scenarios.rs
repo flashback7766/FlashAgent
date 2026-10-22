@@ -662,7 +662,10 @@ fn the_tool_test_asks_the_server_about_the_model_first_as_the_app_does() {
     let home = Home::new();
     home.set_up(&server.url);
     let term = Term::start(&home, &["--tool-test"], COLS, ROWS);
-    term.wait_for("makes a tool call at all", WAIT);
+    // The report is longer than the screen now that every scenario says what
+    // it proves, so the first line of it has scrolled away by the time the
+    // check is done. The last line is the one that is still there.
+    term.wait_for("The tool-calling check is done.", WAIT);
     let requests = server.requests();
     let first_turn = requests.iter().position(|r| r.is_turn()).expect("the check sent a turn");
     assert!(
@@ -2529,9 +2532,13 @@ fn sending_only_an_image_submits_the_turn_with_image_part_and_no_text() {
 }
 
 
+/// A file named in a sentence is a mention, not a picture: the model has
+/// view_image for it, and attaching it spends the traffic, the tokens and the
+/// money without anyone asking for a picture. A path typed out on its own is
+/// a picture, and the path itself is not said to the model.
 #[test]
-fn a_picture_sent_with_words_carries_both() {
-    let server = MockServer::start(vec![Reply::Text("Both received.".into())]);
+fn a_picture_named_in_a_sentence_stays_a_mention() {
+    let server = MockServer::start(vec![Reply::Text("Both received.".into()), Reply::Text("Seen.".into())]);
     let home = Home::new();
     let image_path = home.work().join("shot.png");
     std::fs::write(&image_path, png_bytes(800, 600)).unwrap();
@@ -2543,11 +2550,27 @@ fn a_picture_sent_with_words_carries_both() {
 
     let turns = server.turns();
     let user_msg = turns[0].body["messages"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap();
+    let content = &user_msg["content"];
+    // No picture went with it: the message is plain text, the mention and all.
+    assert!(content.is_string(), "a picture was attached to a mention: {content}");
+    let text = content.as_str().unwrap();
+    assert!(text.contains("what is wrong here") && text.contains("shot.png"), "{text}");
+
+    // The same path on its own is a picture, and the path is not text.
+    term.type_text(&image_path.display().to_string());
+    term.send(ENTER);
+    term.wait_for("Seen.", WAIT);
+    let turns = server.turns();
+    let user_msg = turns[1].body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "user")
+        .expect("the user message of the second turn");
     let parts = user_msg["content"].as_array().expect("content parts array");
-    assert_eq!(parts.len(), 2, "the words and the picture both go: {parts:?}");
-    assert_eq!(parts[0]["type"], "text");
-    assert!(parts[0]["text"].as_str().unwrap().contains("what is wrong here"), "{parts:?}");
-    assert_eq!(parts[1]["type"], "image_url");
+    assert_eq!(parts.len(), 1, "only the picture went: {parts:?}");
+    assert_eq!(parts[0]["type"], "image_url");
 }
 
 #[test]
@@ -4114,4 +4137,238 @@ fn the_interface_language_can_be_turned_in_settings() {
     let config: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
     assert_eq!(config["interface_language"], "ru", "{config}");
+}
+
+/// A goal run that ends must not leave its rules in the prompt. The prompt
+/// says "AN AUTONOMOUS RUN IS UNDER WAY: there is no user to answer between
+/// now and the end", and the flag that puts it there was left on for the rest
+/// of the session: the model read it long after the goal was over.
+#[test]
+fn a_goal_that_finished_leaves_no_autonomous_prompt_behind() {
+    let server = MockServer::start(vec![
+        Reply::Text("The greeting is written.".into()),
+        Reply::Text("An ordinary answer.".into()),
+    ]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("/goal write a greeting file");
+    term.send(ENTER);
+    term.wait_for("The greeting is written.", WAIT);
+    term.wait_for("Goal report:", WAIT);
+
+    ask(&term, "and now?", "An ordinary answer.");
+    let history = sent(server.turns().last().unwrap());
+    assert!(
+        !history.contains("AN AUTONOMOUS RUN IS UNDER WAY"),
+        "the prompt still says an autonomous run is under way:\n{history}"
+    );
+}
+
+/// A goal whose turn failed is a goal that ended: the mode, the effort and
+/// the step limit go back to what they were, and the prompt stops saying an
+/// autonomous run is under way. The app stayed in Accept All with the goal's
+/// limits otherwise, and the connection that dropped was the end of a run.
+#[test]
+fn a_goal_whose_turn_failed_hands_the_mode_back() {
+    let live = MockServer::start(vec![Reply::Text("An ordinary answer.".into())]);
+    let home = Home::new();
+    // The first provider answers nothing: the goal's turn fails there.
+    home.write_config(serde_json::json!({
+        "setup_completed": true,
+        "last_seen_version": version(),
+        "auto_check_updates": false,
+        "network_retries": 0,
+        "providers": [
+            { "name": "Desk", "protocol": "openai", "url": "http://127.0.0.1:9/v1", "model": MODEL },
+            { "name": "Lab", "protocol": "openai", "url": live.url, "model": MODEL }
+        ],
+        "active_provider": "Desk"
+    }));
+    let term = Term::start(&home, &["-y"], COLS, ROWS);
+    term.wait_for(PROMPT, WAIT);
+
+    term.type_text("/goal write a greeting file");
+    term.send(ENTER);
+    // The run ended: the report says so, and the mode is back.
+    term.wait_for("Goal report:", WAIT);
+    term.wait_gone("[Goal: Autonomous]", WAIT);
+    let screen = term.screen();
+    assert!(screen.contains("[Accept Edits]"), "the mode was not handed back:\n{screen}");
+
+    // The other server answers, so the next turn shows what the model is told.
+    term.type_text("/provider lab");
+    term.send(ENTER);
+    ask(&term, "and now?", "An ordinary answer.");
+    let history = sent(live.turns().last().unwrap());
+    assert!(
+        !history.contains("AN AUTONOMOUS RUN IS UNDER WAY"),
+        "the prompt still says an autonomous run is under way:\n{history}"
+    );
+}
+
+/// `/cost` is a command like any other: it reads nothing the running turn
+/// holds, so it runs while the model works. It used to be answered with
+/// "Unknown command /cost · did you mean /cost?".
+#[test]
+fn the_cost_of_the_session_can_be_asked_while_the_model_works() {
+    let server = MockServer::start(vec![Reply::Slow { text: "thinking about it".into(), per_word: Duration::from_millis(300) }]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("a long question");
+    term.send(ENTER);
+    term.wait_for(RUNNING_HINT, WAIT);
+
+    term.type_text("/cost");
+    term.send(ENTER);
+    let screen = term.wait_for("in this session reported a price", WAIT);
+    assert!(
+        !screen.contains("Unknown command"),
+        "the command was not run while the model worked:\n{screen}"
+    );
+}
+
+
+/// The count in the list of sessions has a word of its own: "1 message", not
+/// "1 messages", and in Russian the form the number asks for. The count was
+/// a bare number and the same word for every one of them.
+#[test]
+fn the_list_of_sessions_counts_its_messages_with_a_word() {
+    let server = MockServer::start(vec![Reply::Text("never sent".into())]);
+    server.delay_turns(Duration::from_secs(600));
+    let home = Home::new();
+    {
+        let term = ready(&home, &server);
+        paste(&term, "a question the server will not answer");
+        term.send(ENTER);
+        term.wait_for(RUNNING_HINT, WAIT);
+        // The session is written when the turn starts: the prompt is on the
+        // disk and nothing else, so the count is one.
+        std::thread::sleep(Duration::from_millis(600));
+    }
+
+    let term = Term::start(&home, &["-y", "--resume"], COLS, ROWS);
+    term.wait_for("Resume a session", WAIT);
+    std::thread::sleep(Duration::from_millis(800));
+    let screen = term.screen();
+    assert!(screen.contains("1 message"), "the count has no word of its own:\n{screen}");
+    assert!(!screen.contains("1 messages"), "the count has no word of its own:\n{screen}");
+
+    // The Russian interface asks for the form the number wants: one is
+    // "сообщение", two are "сообщения", five are "сообщений".
+    let mut config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
+    config["interface_language"] = serde_json::json!("ru");
+    home.write_config(config);
+    let term = Term::start(&home, &["-y", "--resume"], COLS, ROWS);
+    term.wait_for("Продолжить сессию", WAIT);
+    std::thread::sleep(Duration::from_millis(800));
+    let screen = term.screen();
+    assert!(screen.contains("1 сообщение"), "the count has no word of its own:\n{screen}");
+}
+
+/// Enter in the list of sessions opens what the filter shows. A filter that
+/// matched nothing used to open the session that was selected before it, and
+/// nobody was told.
+#[test]
+fn a_filter_that_matches_nothing_opens_no_session() {
+    let server = MockServer::start(vec![
+        Reply::Text("First answer.".into()),
+        Reply::Text("Second answer.".into()),
+    ]);
+    let home = Home::new();
+    {
+        let mut term = ready(&home, &server);
+        ask(&term, "the first question", "First answer.");
+        quit(&mut term);
+    }
+    std::thread::sleep(Duration::from_millis(1100));
+    {
+        let mut term = ready(&home, &server);
+        ask(&term, "the second question", "Second answer.");
+        quit(&mut term);
+    }
+
+    let term = Term::start(&home, &["-y", "--resume"], COLS, ROWS);
+    term.wait_for("Resume a session", WAIT);
+    term.type_text("nothing matches this");
+    term.wait_for("No matching", WAIT);
+    term.send(ENTER);
+    // Nothing was opened: the list is still there.
+    std::thread::sleep(Duration::from_millis(700));
+    let screen = term.screen();
+    assert!(
+        !screen.contains("Resumed session"),
+        "a session was opened that the filter did not show:\n{screen}"
+    );
+    assert!(screen.contains("Resume a session"), "the list was closed anyway:\n{screen}");
+}
+
+/// The card owns the keyboard while it waits for an answer: Tab moves the
+/// choice, Enter gives it. The keys are answered in one place only, so a
+/// change to the card reaches every key that answers it.
+#[test]
+fn the_approval_card_answers_the_keys_that_choose_for_it() {
+    let server = MockServer::start(vec![shell_call("touch marker.txt"), Reply::Text("The marker is there.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("leave a marker");
+    term.send(ENTER);
+    term.wait_for(APPROVAL, WAIT);
+    // Tab moves the choice from Allow to Always, and Enter gives it: the
+    // notice only the "Always" branch says is what proves it.
+    term.send("\t");
+    term.send(ENTER);
+    term.wait_for("Always allowed", WAIT);
+    term.wait_for("The marker is there.", WAIT);
+    assert!(home.work().join("marker.txt").exists(), "the allowed command did not run");
+}
+
+/// A resumed session carries the summary into the prompt and nothing else.
+/// The archive marker, the path to the archive and the card's token counts
+/// are the reader's: the model read them as instructions of its own.
+#[test]
+fn a_resumed_session_carries_the_summary_and_not_the_markers() {
+    let server = MockServer::start(vec![
+        Reply::Text("First answer.".into()),
+        Reply::Text("Second answer.".into()),
+        Reply::Text("Third answer.".into()),
+    ]);
+    server.answer_side_requests("Summarize the conversation above", "## Objective\nanswer the questions.\n\n## Requirements\n- none\n\n## Decisions\n- none\n\n## Work State\n### Completed\n- answered\n### Active\n- none\n### Blocked\n- none\n\n## Next Move\n1. continue\n\n## Relevant Files\n- none\n\n## Important Context\n- none");
+    let home = Home::new();
+    {
+        let mut term = ready(&home, &server);
+        ask(&term, "the first question", "First answer.");
+        ask(&term, "the second question", "Second answer.");
+        term.type_text("/compact");
+        term.send(ENTER);
+        term.wait_for("Session compacted", WAIT);
+        quit(&mut term);
+    }
+    let session = home
+        .sessions()
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "json"))
+        .expect("the conversation was saved");
+    let id = session.file_stem().unwrap().to_string_lossy().to_string();
+
+    let term = Term::start(&home, &["-y", "--resume", &id], COLS, ROWS);
+    term.wait_for(&format!("Resumed session {id}"), WAIT);
+    ask(&term, "and now?", "Third answer.");
+
+    let history = sent(server.turns().last().unwrap());
+    assert!(
+        history.contains("Compacted Conversation History"),
+        "the summary did not reach the model:\n{history}"
+    );
+    assert!(
+        !history.contains("Compaction Stats"),
+        "the card's token counts went into the prompt:\n{history}"
+    );
+    assert!(
+        !history.contains("Full Earlier Transcript Archive"),
+        "the archive marker went into the prompt:\n{history}"
+    );
 }
