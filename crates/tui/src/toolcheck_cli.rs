@@ -84,12 +84,13 @@ pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
 pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool, only: Vec<String>, json: Option<String>, repeat: usize) -> i32 {
     let timeout = std::time::Duration::from_secs(120);
     let endpoint = config.endpoint();
-    if let Some(want) = only.first() {
-        if !flashagent_core::toolcheck::scenarios().iter().any(|s| s.key == *want) {
-            let known: Vec<&str> = flashagent_core::toolcheck::scenarios().iter().map(|s| s.key).collect();
-            eprintln!("No scenario called {want}. The ones there are: {}", known.join(", "));
-            return 2;
-        }
+    // Every key is checked, not the first: an unknown one among good ones used
+    // to pass, then quietly widen the run to every scenario before the report
+    // dropped it — minutes of model time for a check that showed nothing.
+    if let Some(bad) = only.iter().find(|want| !flashagent_core::toolcheck::scenarios().iter().any(|s| s.key == **want)) {
+        let known: Vec<&str> = flashagent_core::toolcheck::scenarios().iter().map(|s| s.key).collect();
+        eprintln!("No scenario called {bad}. The ones there are: {}", known.join(", "));
+        return 2;
     }
     let mut models = vec![config.active_profile().model.clone()];
     if all_models {

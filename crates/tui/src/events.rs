@@ -20,7 +20,15 @@ impl App {
     /// One event from the terminal, the agent loop or a background task.
     pub(crate) async fn on_ui_event(&mut self, cx: &mut LoopCtx<'_>, ev: UiEvent) -> Flow {
         match ev {
-            UiEvent::BackgroundRecap { turn_id, recap, suggestion, title } => self.on_recap(turn_id, &recap, suggestion, title),
+            UiEvent::BackgroundRecap { turn_id, session, recap, suggestion, title } => {
+                // A recap asked about one session must not arrive in another:
+                // the switch aborts the task, but an answer already sent is
+                // already on its way. Compared by the id, not by turn counts,
+                // which mean something in every session.
+                if session == cx.session_id.as_str() {
+                    self.on_recap(turn_id, &recap, suggestion, title);
+                }
+            }
             UiEvent::MemorySummary(result) => self.on_memory_summary(result),
             UiEvent::ImageCost { model, per_pixel, fixed } => {
                 self.image_costs.set(&model, flashagent_tui::image_cost::ImageCost { per_pixel, fixed });
@@ -462,10 +470,10 @@ impl App {
         // make turn_counter drift.
         let current_turn = self.chat.user_turn_count() as u64;
         // The session takes its name from the first recap that offers one. A later
-        // one would rename work the picker already shows under this name; and the
-        // recap of an older turn still names this session, so the stale branch
-        // keeps it too.
-        if self.session_title.is_none() {
+        // one would rename work the picker already shows under this name. A recap
+        // of a turn the screen no longer holds (`/clear`, `/rewind` shrank the
+        // count) names a conversation the file will not keep.
+        if self.session_title.is_none() && turn_id <= current_turn {
             self.session_title = title;
         }
         if turn_id == current_turn {
@@ -620,7 +628,14 @@ impl App {
                     .as_ref()
                     .and_then(|slot| slot.lock().ok().and_then(|mut slot| slot.take()));
                 match report {
-                    Some(result) => self.chat.finish_compaction_card(&result),
+                    Some(result) => {
+                        // The words the summary replaced: the session file is
+                        // the one place they are kept, and the summary points
+                        // the model back at them. Only the card was filled in;
+                        // the archive itself was dropped.
+                        self.archive.extend(result.archive.iter().cloned());
+                        self.chat.finish_compaction_card(&result);
+                    }
                     None => self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the summary was not kept")),
                 }
                 self.renderer.request_reprint();

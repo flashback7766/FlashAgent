@@ -274,7 +274,7 @@ fn shell_command(cmd: &str, cwd: &std::path::Path) -> tokio::process::Command {
 }
 
 /// A process group, or on Windows the process and its children.
-fn kill_pid_tree(pid: u32) {
+pub(crate) fn kill_pid_tree(pid: u32) {
     #[cfg(unix)]
     // SAFETY: plain syscall on a pid we spawned; a stale pid only yields ESRCH.
     unsafe {
