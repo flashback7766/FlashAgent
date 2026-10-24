@@ -195,11 +195,27 @@ pub(crate) fn write_atomic(file: &Path, content: &str) -> std::io::Result<()> {
     use std::io::Write;
 
     // A symlink is written through, not replaced: the file it points at is
-    // the one the caller means.
+    // the one the caller means. A link to a file that does not exist yet
+    // cannot be resolved, and writing over the link's own name would destroy
+    // it and drop a regular file in its place — refused instead: where the
+    // link points is the owner's setup, and a message says what happened.
+    if std::fs::canonicalize(file).is_err() && std::fs::symlink_metadata(file).is_ok_and(|m| m.is_symlink()) {
+        return Err(std::io::Error::other(format!(
+            "{path:?} is a symlink to a file that does not exist; write the file it points at instead",
+            path = file.display()
+        )));
+    }
     let target = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
     let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let temp = dir.join(format!(".{name}.flashagent-{}-{}.tmp", std::process::id(), next_temp_id()));
+    // The temporary name must fit NAME_MAX beside the file it stands in for:
+    // uniqueness comes from the process and the counter, so a long name is
+    // only a hint and is cut short — on a character boundary.
+    let mut cut = name.len().min(96);
+    while cut > 0 && !name.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let temp = dir.join(format!(".{}.flashagent-{}-{}.tmp", &name[..cut], std::process::id(), next_temp_id()));
 
     let result = (|| -> std::io::Result<()> {
         // The file's own permissions decide whether it may be written: a
@@ -1221,6 +1237,38 @@ mod tests {
         write_atomic(&file, "two\n").unwrap();
         let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755, "the file lost its permissions");
+    }
+
+    /// A link to a file that does not exist yet must not be quietly replaced
+    /// by a regular file: the link is the owner's setup, and where it points
+    /// is not this call's to decide.
+    #[test]
+    #[cfg(unix)]
+    fn a_dangling_symlink_is_refused_not_replaced() {
+        let dir = tempdir();
+        let link = dir.join("latest");
+        std::os::unix::fs::symlink("releases/gone", &link).unwrap();
+        let err = write_atomic(&link, "x").unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{err}");
+        // The link itself is untouched, and nothing was dropped in its place.
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link was replaced");
+        assert!(!std::fs::metadata(&link).is_ok(), "a regular file appeared where the link stood");
+    }
+
+    /// A name long enough that the temporary sibling's name would not fit
+    /// NAME_MAX: the write still happens, cut to a hint.
+    #[test]
+    fn a_file_with_a_very_long_name_is_still_written() {
+        let dir = tempdir();
+        // Legal on the filesystem (under NAME_MAX), but a temporary sibling
+        // carrying the whole name would not be.
+        let name = format!("{}.txt", "n".repeat(240));
+        let file = dir.join(&name);
+        std::fs::write(&file, "one\n").unwrap();
+        write_atomic(&file, "two\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "two\n");
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(files.len(), 1, "a temporary file was left behind: {files:?}");
     }
 
     /// Nothing of a failed batch is left changed: not the files written

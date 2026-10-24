@@ -458,8 +458,12 @@ impl App {
         self.chat.clear();
         // The name comes with the session: the one being opened is listed under
         // the name it had, or under none — never under the name the session
-        // just left carried.
+        // just left carried. The archive of the conversation the summary
+        // replaced travels the same way: what session A compacted away is not
+        // session B's past, and extending without clearing wrote it into B's
+        // file.
         self.session_title = saved.title.clone().filter(|t| !t.trim().is_empty());
+        self.archive.clear();
         let restored = restore_session(saved, &mut self.chat, &mut self.history, &mut self.archive);
         strip_legacy_memory(&mut self.history, memory_block);
         self.latest_suggestion = None;

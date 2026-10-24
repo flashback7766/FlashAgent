@@ -112,6 +112,11 @@ pub enum UiEvent {
     MemorySummary(Result<memory_view::MemorySummary, String>),
     BackgroundRecap {
         turn_id: u64,
+        /// The session the recap was asked about. Aborting the task cannot
+        /// recall an event already sent, and a recap that lands after a
+        /// switch of sessions would otherwise name and annotate the one on
+        /// screen, which is not the one it describes.
+        session: String,
         recap: String,
         suggestion: Option<String>,
         /// A name for the session, from the same call. `None` when the model

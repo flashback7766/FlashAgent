@@ -194,22 +194,41 @@ impl ProviderProfile {
 
     /// The same server, however the address is written.
     ///
-    /// By host, not by the whole address, the way a preset is found: an
-    /// address says what speaks there, so `http://localhost:11434` and
-    /// `http://localhost:11434/v1` are one Ollama — the first its own
+    /// By scheme and host, not by the whole address, the way a preset is
+    /// found: an address says what speaks there, so `http://localhost:11434`
+    /// and `http://localhost:11434/v1` are one Ollama — the first its own
     /// dialect, the second the OpenAI-compatible side — and saving it twice
-    /// must not leave two providers behind.
+    /// must not leave two providers behind. Everything after the host must
+    /// then match too, apart from that pair: a gateway that routes by path
+    /// (`/v1/team-a`, `/v1/team-b`) is several providers on one host, and a
+    /// server that moved behind TLS is a different address to save.
     ///
     /// A profile whose protocol is not what its address speaks is a choice the
     /// owner made, and that makes it a provider of its own.
     pub fn same_server(&self, other: &ProviderProfile) -> bool {
-        let same_host = match (host_of(&self.url), host_of(&other.url)) {
-            (Some(a), Some(b)) => a == b,
-            _ => normalize_url(&self.url) == normalize_url(&other.url),
+        let parts = |p: &ProviderProfile| -> Option<(String, String, String)> {
+            let url = normalize_url(&p.url);
+            let (scheme, rest) = url.split_once("://")?;
+            let (host, path) = match rest.split_once('/') {
+                Some((h, tail)) => (h, format!("/{tail}")),
+                None => (rest, String::new()),
+            };
+            (!host.is_empty()).then(|| (scheme.to_ascii_lowercase(), host.to_ascii_lowercase(), path))
         };
-        same_host
-            && (self.protocol == other.protocol
-                || (self.speaks_its_own_dialect() && other.speaks_its_own_dialect()))
+        let speaks_two_dialects = |a: &str, b: &str| {
+            let root = |p: &str| p.is_empty() || p == "/";
+            (root(a) && b == "/v1") || (root(b) && a == "/v1")
+        };
+        match (parts(self), parts(other)) {
+            (Some((scheme_a, host_a, path_a)), Some((scheme_b, host_b, path_b))) => {
+                scheme_a == scheme_b
+                    && host_a == host_b
+                    && (path_a == path_b || speaks_two_dialects(&path_a, &path_b))
+                    && (self.protocol == other.protocol
+                        || (self.speaks_its_own_dialect() && other.speaks_its_own_dialect()))
+            }
+            _ => normalize_url(&self.url) == normalize_url(&other.url),
+        }
     }
 
     /// Whether the address says what this profile says speaks there.
@@ -1524,6 +1543,28 @@ mod tests {
         let anthropic = ProviderProfile::new("Anthropic", ApiProtocol::Anthropic, "https://api.anthropic.com");
         let as_openai = ProviderProfile::new("Anthropic", ApiProtocol::OpenAi, "https://api.anthropic.com");
         assert!(!anthropic.same_server(&as_openai));
+    }
+
+    /// A server that moved behind TLS is a different address: saving it again
+    /// must keep the https one, not quietly keep talking to the http one.
+    #[test]
+    fn a_server_that_moved_behind_tls_is_not_the_saved_http_one() {
+        let http = ProviderProfile::new("Box", ApiProtocol::OpenAi, "http://192.168.1.10:8000/v1");
+        let https = ProviderProfile::new("Box", ApiProtocol::OpenAi, "https://192.168.1.10:8000/v1");
+        assert!(!http.same_server(&https), "the same host on another scheme is another address to save");
+        assert!(!https.same_server(&http));
+    }
+
+    /// A gateway that routes by path serves several providers on one host:
+    /// saving the second must not overwrite the first one's key and model.
+    #[test]
+    fn a_gateway_that_routes_by_path_is_providers_of_its_own() {
+        let team_a = ProviderProfile::new("GW", ApiProtocol::OpenAi, "https://gw.example.com/v1/team-a/openai");
+        let team_b = ProviderProfile::new("GW", ApiProtocol::OpenAi, "https://gw.example.com/v1/team-b/openai");
+        assert!(!team_a.same_server(&team_b), "one host, two endpoints");
+        // The same path still is the same provider, however it is spelled.
+        let again = ProviderProfile::new("GW", ApiProtocol::OpenAi, "https://gw.example.com/v1/team-a/openai/");
+        assert!(team_a.same_server(&again));
     }
 
     /// The provider that is saved over another one is the one for the same

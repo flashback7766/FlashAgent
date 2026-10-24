@@ -1,5 +1,60 @@
 # Changelog
 
+## b606 — nine quiet failures found by a fresh audit, each closed with a test
+
+Everything since the b600 audit was re-read against it — five zones by fresh
+review, the delta of the rest in one pass. What follows is what that found.
+
+- **Two tool calls without an index are two calls again.** A server that
+  numbers nothing and sends the first call with empty arguments (or none)
+  had it swallowed by the second: one call ran, the other vanished without
+  an error. A call that never received arguments is done, not being written
+  — a different name after it begins its own call, the same name is still
+  the fragment repeat it always was.
+- **A recap that lands after a switch of sessions no longer names the one on
+  screen.** Aborting the task cannot recall an answer already sent; it
+  carried the other session's name into the file of whatever was opened.
+  The event now says which session it was asked about, and one that is not
+  the session on screen is dropped. `/clear` and `/rewind` no longer take a
+  name from a conversation the file will not keep.
+- **Switching sessions no longer carries the old conversation's archive
+  into the new session's file.** What session A compacted away is not
+  session B's past; it was written into B's file and the summary pointed
+  the model at words that were never B's.
+- **A compaction mid-turn keeps its archive too.** The card was filled in
+  and the words the summary replaced were dropped: they were in neither the
+  saved history nor the saved archive, while the summary pointed the model
+  at the session file for them.
+- **A provider is the same server only where the address really agrees.** A
+  host match used to merge providers whatever the scheme and the path said:
+  a server that moved behind TLS silently kept its http address, and a
+  gateway routing by path (`/v1/team-a`, `/v1/team-b`) had one provider's
+  key saved over another's. The scheme and the path must both match, apart
+  from the root-and-`/v1` pair of one server speaking two dialects.
+- **`--tool-test --scenario` checks every key it is given.** A typo in the
+  second key passed, widened the run to every scenario, and the report then
+  dropped it — minutes of model time for a check that showed nothing.
+- **A git command that times out stops the whole tree.** Git spawns what
+  the repository configures (textconv, external diff); the timeout killed
+  only git and left the driver running as an orphan while the error said
+  everything was stopped.
+- **The atomic write refuses a dangling symlink instead of replacing it.**
+  A link to a file that does not exist yet was quietly overwritten with a
+  regular file — the link itself is the owner's setup. And a file with a
+  very long name is writable again: the temporary sibling's name is cut to
+  a hint, since the process and the counter already make it unique.
+- **Memory: a block that was opened and never closed is the model's, not
+  the user's.** A torn write or a hand edit used to send the index the
+  model wrote as standing instructions. And the note naming the files that
+  did not fit survives a tight budget instead of being the first thing
+  dropped.
+- **A report reminder the compaction ate is owed again.** The once-per-turn
+  reminder was counted as sent and then cleared without ever reaching the
+  model; the counter is re-armed so the turn still gets its one reminder.
+- **The README grows a comparison table** — the structural differences
+  against the other terminal agents, checked and dated — and the test
+  counts in `docs/numbers.md` are re-counted (1,673 tests, 141 scenarios).
+
 ## b605 — the session list shows what the conversation was about
 
 - **A session gets its name from the model.** The picker listed every

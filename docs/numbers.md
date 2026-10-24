@@ -103,15 +103,15 @@ question. At 10,000 turns that is a fifth of a 60 Hz frame.
 
 ## Tests
 
-Counted 2026-10-22 on the b600 tree, release build.
+Counted 2026-10-24 on the post-b605 tree, release build.
 
-| What | 2026-10-22 | 2026-10-20 | 2026-10-01 |
-|---|---:|---:|---:|
-| Tests in the workspace (`cargo test --workspace`) | 1,658 | 1,485 | 1,267 |
-| Of those, the real binary in a pseudo-terminal (`crates/tui/tests/scenarios.rs`) | 140 | 132 | 105 |
-| Every built-in tool called for real (`crates/tools/tests/every_tool.rs`) | 20 | 24 | 15 |
-| Built-in tools the model can call | 24 | 24 | 24 |
-| Ignored: diagnostics that print screens, measurements, tests that need the internet | 12 | 12 | 11 |
+| What | 2026-10-24 | 2026-10-22 | 2026-10-20 | 2026-10-01 |
+|---|---:|---:|---:|---:|
+| Tests in the workspace (`cargo test --workspace`) | 1,673 | 1,658 | 1,485 | 1,267 |
+| Of those, the real binary in a pseudo-terminal (`crates/tui/tests/scenarios.rs`) | 141 | 140 | 132 | 105 |
+| Every built-in tool called for real (`crates/tools/tests/every_tool.rs`) | 20 | 20 | 24 | 15 |
+| Built-in tools the model can call | 24 | 24 | 24 | 24 |
+| Ignored: diagnostics that print screens, measurements, tests that need the internet | 12 | 12 | 12 | 11 |
 
 ```bash
 cargo test --workspace
