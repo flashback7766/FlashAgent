@@ -516,6 +516,43 @@ fn the_recap_waits_until_the_user_has_gone_quiet() {
     }
 }
 
+/// The name comes with the recap, the request already made when the user goes
+/// quiet, and the picker lists the session under it instead of the first
+/// prompt. The first prompt stays the fallback for a session the model never
+/// named.
+#[test]
+fn the_session_is_listed_under_the_name_the_model_gave_it() {
+    let server = MockServer::start(vec![Reply::Text("First answer.".into())]);
+    server.answer_side_requests(
+        "conversation analyzer",
+        r#"{"recap":"The parser in store.py was fixed.","suggestion":"","title":"Fixing the store parser"}"#,
+    );
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+
+    ask(&term, "first question", "First answer.");
+    // The recap is the call that carries the name. Once its line is on the
+    // screen the app holds the name; the file takes it on the way out.
+    let deadline = std::time::Instant::now() + WAIT;
+    while !server.requests().iter().any(|r| !r.is_turn() && r.body.to_string().contains("conversation analyzer")) {
+        assert!(std::time::Instant::now() < deadline, "no recap was asked for");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    term.wait_for("recap:", WAIT);
+
+    quit(&mut term);
+    term.wait_for("Session saved", WAIT);
+    let saved = std::fs::read_to_string(&home.sessions()[0]).unwrap();
+    assert!(saved.contains("Fixing the store parser"), "the name did not reach the session file:\n{saved}");
+
+    // And the picker lists the conversation under its name, not under the
+    // prompt that started it. The test ends with the list open; the terminal's
+    // drop stops the app.
+    let term = Term::start(&home, &["-y", "--resume"], COLS, ROWS);
+    term.wait_for("Resume a session", WAIT);
+    term.wait_for("Fixing the store parser", WAIT);
+}
+
 #[test]
 fn ctrl_k_finds_a_command_by_what_it_is_called_or_its_key() {
     let server = MockServer::start(Vec::new());

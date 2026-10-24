@@ -114,6 +114,9 @@ pub enum UiEvent {
         turn_id: u64,
         recap: String,
         suggestion: Option<String>,
+        /// A name for the session, from the same call. `None` when the model
+        /// did not offer one; the first prompt stays what the picker shows.
+        title: Option<String>,
     },
     /// A background command of this session ended.
     TaskEnded(flashagent_tools::TaskNotice),

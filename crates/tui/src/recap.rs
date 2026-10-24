@@ -30,10 +30,15 @@ pub(crate) fn script_language(text: &str) -> Option<&'static str> {
     }
 }
 
+/// What one background call is asked for and brings back. The title names the
+/// session for the picker; it is the last field in the schema, so an answer cut
+/// off at the token limit loses the title and keeps the recap.
+pub(crate) type RecapAndTitle = (String, Option<String>, Option<String>);
+
 pub(crate) async fn generate_llm_recap_and_suggestion(
     source: &BackendSource,
     history: &[ChatMessage],
-) -> Option<(String, Option<String>)> {
+) -> Option<RecapAndTitle> {
     let last_user_idx = history.iter().rposition(flashagent_core::is_prompt)?;
     let user_msg = history.get(last_user_idx)?;
     let raw_prompt = extract_user_prompt(&user_msg.content);
@@ -57,7 +62,8 @@ pub(crate) async fn generate_llm_recap_and_suggestion(
         "You are a conversation analyzer. Return strictly JSON with the following fields:\n\
         {\n  \
           \"recap\": \"one concise past-tense sentence of what was explained or done\",\n  \
-          \"suggestion\": \"the next message the USER will send to the assistant, in imperative mood, about the work just done (e.g. 'Show Swift code examples', 'Explain how safety works', 'Run the tests and fix what fails'). It must name a concrete subject that already came up, and the assistant must be able to act on it without asking the user anything back. A message that asks the user to choose, specify or describe what they want is the assistant talking, not the user - never write one. If there is no concrete subject yet (a greeting, small talk), return an empty string. Write it in the language of the conversation. Do not repeat the existing query!\"\n\
+          \"suggestion\": \"the next message the USER will send to the assistant, in imperative mood, about the work just done (e.g. 'Show Swift code examples', 'Explain how safety works', 'Run the tests and fix what fails'). It must name a concrete subject that already came up, and the assistant must be able to act on it without asking the user anything back. A message that asks the user to choose, specify or describe what they want is the assistant talking, not the user - never write one. If there is no concrete subject yet (a greeting, small talk), return an empty string. Write it in the language of the conversation. Do not repeat the existing query!\",\n  \
+          \"title\": \"a name for this conversation: 3 to 7 words naming its concrete subject, in the language of the conversation. Not a sentence, no quotes around it\"\n\
         }\n\
         Do NOT generate any internal thinking or explanations. Start immediately with { and return only valid JSON.";
 
@@ -115,7 +121,7 @@ pub(crate) async fn generate_llm_recap_and_suggestion(
     tokio::time::timeout(std::time::Duration::from_secs(90), overall_task).await.ok()?
 }
 
-pub(crate) fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Option<String>)> {
+pub(crate) fn parse_recap_and_suggestion_json(raw: &str) -> Option<RecapAndTitle> {
     // The reasoning that came in the text stream is cut out. The text is
     // owned, so no borrow can outlive the buffer it points at: the old code
     // pointed at a buffer it overwrote a line later, and it worked only
@@ -186,7 +192,28 @@ pub(crate) fn parse_recap_and_suggestion_json(raw: &str) -> Option<(String, Opti
         .or_else(|| salvage_json_string_field(json_str, "suggestion"))
         .and_then(|s| sanitize_user_suggestion(&s));
 
-    Some((recap, suggestion))
+    let title = parsed
+        .get("title")
+        .and_then(|s| s.as_str())
+        .map(str::to_string)
+        .or_else(|| salvage_json_string_field(json_str, "title"))
+        .and_then(|s| sanitize_session_title(&s));
+
+    Some((recap, suggestion, title))
+}
+
+/// The picker shows the name on one line beside a time and a count: the
+/// newlines a model puts in the middle become spaces, the quote marks it likes
+/// to wrap answers in come off, and a name that runs on is cut. The display
+/// cuts it shorter still.
+pub(crate) fn sanitize_session_title(s: &str) -> Option<String> {
+    let text = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = text.trim_matches(['"', '\'', '«', '»']).trim();
+    if text.is_empty() || is_generic_recap(text) {
+        return None;
+    }
+    let text = flashagent_tui::truncate_middle(text, 80);
+    (!text.is_empty()).then_some(text)
 }
 
 /// Takes the text between the quotes after `"field":` up to the first

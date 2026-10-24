@@ -20,7 +20,7 @@ impl App {
     /// One event from the terminal, the agent loop or a background task.
     pub(crate) async fn on_ui_event(&mut self, cx: &mut LoopCtx<'_>, ev: UiEvent) -> Flow {
         match ev {
-            UiEvent::BackgroundRecap { turn_id, recap, suggestion } => self.on_recap(turn_id, &recap, suggestion),
+            UiEvent::BackgroundRecap { turn_id, recap, suggestion, title } => self.on_recap(turn_id, &recap, suggestion, title),
             UiEvent::MemorySummary(result) => self.on_memory_summary(result),
             UiEvent::ImageCost { model, per_pixel, fixed } => {
                 self.image_costs.set(&model, flashagent_tui::image_cost::ImageCost { per_pixel, fixed });
@@ -456,11 +456,18 @@ impl App {
         self.warm_prompt_cache(cx.source, cx.perm);
     }
 
-    fn on_recap(&mut self, turn_id: u64, recap: &str, suggestion: Option<String>) {
+    fn on_recap(&mut self, turn_id: u64, recap: &str, suggestion: Option<String>, title: Option<String>) {
         let formatted = format!("  \x1b[38;2;155;165;180mrecap:\x1b[0m \x1b[38;2;225;230;240m{recap}\x1b[0m");
         // The ordinal of the user message the recap is about; regenerate and steering
         // make turn_counter drift.
         let current_turn = self.chat.user_turn_count() as u64;
+        // The session takes its name from the first recap that offers one. A later
+        // one would rename work the picker already shows under this name; and the
+        // recap of an older turn still names this session, so the stale branch
+        // keeps it too.
+        if self.session_title.is_none() {
+            self.session_title = title;
+        }
         if turn_id == current_turn {
             self.chat.update_or_push_turn_system("recap:", &formatted);
             self.latest_suggestion = suggestion.clone();
