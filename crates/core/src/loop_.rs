@@ -525,6 +525,12 @@ impl AgentLoop {
                         history.sync();
                         // The old figure describes a history that is gone.
                         last_prompt_tokens = None;
+                        // A reminder that was waiting for the next request died
+                        // with the clear below, and the counter already spent
+                        // it. The turn still owes the model its one reminder.
+                        if !transient.is_empty() {
+                            report_nudges = 0;
+                        }
                         transient.clear();
                         compact_not_before = step + 1;
                     }

@@ -83,10 +83,14 @@ impl App {
         let tx_bg = cx.tx.clone();
         let history_bg = self.history.clone();
         let turn_id = self.chat.user_turn_count() as u64;
+        // The answer may land after the user has switched to another session;
+        // without the id it would name and annotate whatever is on screen then.
+        let session = cx.session_id.clone();
         self.recap_task = Some(tokio::spawn(async move {
             if let Some((llm_recap, llm_suggestion, llm_title)) = generate_llm_recap_and_suggestion(&source_bg, &history_bg).await {
                 let _ = tx_bg.send(UiEvent::BackgroundRecap {
                     turn_id,
+                    session,
                     recap: llm_recap,
                     suggestion: llm_suggestion,
                     title: llm_title,

@@ -28,21 +28,60 @@ async fn run_with_timeout(
     cwd: &Path,
     timeout: Duration,
 ) -> Result<std::process::Output, ToolError> {
+    use tokio::io::AsyncReadExt;
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // The child dies with the future that waits for it.
-        .kill_on_drop(true);
-    let child = cmd.spawn().map_err(|e| ToolError::Other(format!("failed to execute {program}: {e}")))?;
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(result) => result.map_err(|e| ToolError::Other(format!("{program} failed: {e}"))),
-        Err(_) => Err(ToolError::Other(format!(
-            "{program} did not finish within {} seconds and was stopped; the repository may be locked or unusually large",
-            timeout.as_secs().max(1)
-        ))),
+        .stderr(Stdio::piped());
+    // Git spawns what the repository configures (textconv, external diff): a
+    // group, so a timeout takes the whole tree instead of leaving the driver
+    // running as an orphan while the error says everything was stopped.
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd.spawn().map_err(|e| ToolError::Other(format!("failed to execute {program}: {e}")))?;
+    let pid = child.id();
+    // The pipes are read while it runs, so a command that writes a lot does
+    // not block on a full pipe.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let read_stdout = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stdout_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+    let read_stderr = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stderr_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(status) => {
+            let status = status.map_err(|e| ToolError::Other(format!("{program} failed: {e}")))?;
+            let stdout = read_stdout.await.unwrap_or_default();
+            let stderr = read_stderr.await.unwrap_or_default();
+            Ok(std::process::Output { status, stdout, stderr })
+        }
+        Err(_) => {
+            // While git still lives: on Windows the children are found through
+            // their parent.
+            if let Some(pid) = pid {
+                crate::shell::kill_pid_tree(pid);
+            }
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            let _ = read_stdout.await;
+            let _ = read_stderr.await;
+            Err(ToolError::Other(format!(
+                "{program} did not finish within {} seconds and was stopped; the repository may be locked or unusually large",
+                timeout.as_secs().max(1)
+            )))
+        }
     }
 }
 

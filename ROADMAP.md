@@ -56,7 +56,7 @@ Decided 2026-09-11: v1 ships the terminal app only, and B1–B10 resume after v1
 - [ ] **C1. Telemetry.** Moved to v1.x. None exists: the app sends no telemetry.
 - [ ] **C2. Documentation site.** Moved to v1.x; the README and `docs/` are the documentation for v1.0.
 - [~] **C3. Packaging.** Shipping: deb, pacman, AppImage and Void packages, macOS tarballs for Apple Silicon and Intel, a Windows zip, the install scripts and the icon, with `SHA256SUMS` on every release. Moved to v1.x: MSIX or NSIS installers, a dmg, code signing, macOS notarization.
-- [~] **C4. Public launch.** Done: GIFs of real sessions, a quick start in the README, Discussions. Open: a feature comparison table and labelled good-first-issues.
+- [~] **C4. Public launch.** Done: GIFs of real sessions, a quick start in the README, a feature comparison table (b606, structural rows, dated October 2026), Discussions. Open: labelled good-first-issues.
 - [~] **C5. From the old app.** Ideas carried over from the Electron flashgent. The ones not done move to v1.x.
   - Tolerant argument names (`filePath`/`path`, `oldString`/`TargetContent`, `cmd`/`command`). *Done (b268), in `effective_args`, so the approval card, the rules and the tool see the same call; MCP tools keep their own names.*
   - A project outline (types and functions) in the system prompt. *Done (b600): a short plan of the project rides in the prompt, marked as a plan and not as the truth of the project.*

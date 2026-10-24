@@ -480,15 +480,22 @@ impl ChunkParser {
             // Gemini leaves `index` out. A call begins with its name: under a new id,
             // or without one after a call that already has its name. A call whose
             // arguments are still being written is the same call, however often the
-            // server repeats its name.
+            // server repeats its name. A call that never received arguments is not
+            // one being written: a fragment repeats the name it carries, so a
+            // different name with nothing to append to is the next call.
             None => match self.tool_ids.len().checked_sub(1) {
                 None => 0,
                 Some(last) => {
                     let same_id = fresh_id.is_some() && self.tool_ids[last] == fresh_id;
+                    let settled = if self.tool_args[last].trim().is_empty() {
+                        fresh_name.as_deref() != self.tool_names[last].as_deref()
+                    } else {
+                        is_whole_json(&self.tool_args[last])
+                    };
                     let begins = fresh_name.is_some()
                         && !same_id
                         && (fresh_id.is_some() || self.tool_names[last].is_some())
-                        && is_whole_json(&self.tool_args[last]);
+                        && settled;
                     last + usize::from(begins)
                 }
             },
@@ -1451,6 +1458,51 @@ mod tests {
         let calls = calls_of(&events);
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert_eq!(calls[0].3, r#"{"path":"a"}"#);
+    }
+
+    #[test]
+    fn a_call_with_no_arguments_at_all_does_not_swallow_the_next_call() {
+        // Two calls in one reply, the first with empty arguments (or none:
+        // `arguments: null` lands the same way): the first call is done, not
+        // being written, so the second begins its own. They used to merge and
+        // the first was lost, silently.
+        let events = events_of(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"id":"c1","function":{"name":"list_dir","arguments":""}},{"id":"c2","function":{"name":"read_file","arguments":"{\"path\":\"a.rs\"}"}}]}}]}"#,
+        ]);
+        let calls = calls_of(&events);
+        assert_eq!(
+            calls.iter().map(|c| (c.0, c.2.clone().unwrap())).collect::<Vec<_>>(),
+            vec![(0, "list_dir".into()), (1, "read_file".into())],
+            "one of the two calls was lost: {calls:?}"
+        );
+
+        // Streaming, no ids: a name-only frame, then a different name with its
+        // arguments. Two calls, not one called by the second name.
+        let events = events_of(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"list_dir"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"grep","arguments":"{}"}}]}}]}"#,
+        ]);
+        let calls = calls_of(&events);
+        assert_eq!(
+            calls.iter().map(|c| (c.0, c.2.clone().unwrap())).collect::<Vec<_>>(),
+            vec![(0, "list_dir".into()), (1, "grep".into())],
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn a_name_repeated_with_no_arguments_is_still_one_call() {
+        // A server that repeats the name in every fragment, before any
+        // arguments arrive: the same name with nothing to append is that
+        // fragment repeat, not a second call.
+        let events = events_of(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"read_file"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"read_file"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\"path\":\"a.rs\"}"}}]}}]}"#,
+        ]);
+        let calls = calls_of(&events);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].3, r#"{"path":"a.rs"}"#);
     }
 
     #[test]

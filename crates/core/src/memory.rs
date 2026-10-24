@@ -142,7 +142,14 @@ pub fn split_generated(content: &str) -> (String, Option<String>) {
         return (content.to_string(), None);
     };
     let Some(rel_end) = content[start..].find(GENERATED_END) else {
-        return (content.to_string(), None);
+        // A block that was opened and never closed: from the marker on, the
+        // text is the model's writing, whatever a torn write or a hand edit
+        // did to the closing marker. Read as "nothing to split", that index
+        // came back as the user's own instructions — the door this function
+        // exists to keep shut.
+        let own = content[..start].trim().to_string();
+        let generated = content[start..].trim().to_string();
+        return (own, Some(generated));
     };
     let end = start + rel_end + GENERATED_END.len();
     let own = format!("{}\n{}", &content[..start], &content[end..]).trim().to_string();
@@ -219,6 +226,7 @@ pub fn injection_block(model: &str, docs: &[MemoryDoc], max_tokens: usize) -> St
         (SHORT_PREAMBLE, max_tokens - short)
     };
     let mut parts: Vec<String> = Vec::with_capacity(docs.len());
+    let mut part_paths: Vec<String> = Vec::with_capacity(docs.len());
     let mut left_out: Vec<String> = Vec::new();
     let mut degraded = false;
     for doc in docs {
@@ -236,31 +244,47 @@ pub fn injection_block(model: &str, docs: &[MemoryDoc], max_tokens: usize) -> St
         budget -= spent;
         degraded |= !whole;
         parts.push(block);
+        part_paths.push(doc.path.display().to_string());
     }
-    if !left_out.is_empty() {
-        let note = format!(
+    let note_of = |left_out: &[String]| {
+        format!(
             "[{} more memory file(s) did not fit in the budget: {}. Read one with read_file if you need it.]",
             left_out.len(),
             left_out.join(", ")
-        );
-        if token_count(model, &note) <= budget {
-            parts.push(note);
+        )
+    };
+    let assemble = |parts: &[String], note: Option<&str>| {
+        let mut all: Vec<&str> = parts.iter().map(String::as_str).collect();
+        if let Some(note) = note {
+            all.push(note);
         }
-    }
-    let assemble = |parts: &[String]| {
-        if parts.is_empty() {
+        if all.is_empty() {
             preamble.to_string()
         } else {
-            format!("{preamble}\n\n{}", parts.join("\n"))
+            format!("{preamble}\n\n{}", all.join("\n"))
         }
     };
-    let mut block = assemble(&parts);
     // The joins cost a little as well: what was measured is what was there.
-    while !parts.is_empty() && token_count(model, &block) > max_tokens {
-        parts.pop();
-        block = assemble(&parts);
+    // When the assembled block is over, the last documents come out and join
+    // the ones the selection left out. The note that names them stays as long
+    // as anything does — it is short, and it is the only place the files are
+    // named — and it is dropped only when nothing else is left and even it
+    // does not fit: a block over its budget is the thing this function is
+    // here to prevent.
+    let mut note = (!left_out.is_empty()).then(|| note_of(&left_out));
+    loop {
+        let block = assemble(&parts, note.as_deref());
+        if token_count(model, &block) <= max_tokens {
+            return block;
+        }
+        if !parts.is_empty() {
+            left_out.insert(0, part_paths.pop().unwrap());
+            parts.pop();
+            note = (!left_out.is_empty()).then(|| note_of(&left_out));
+            continue;
+        }
+        return assemble(&[], None);
     }
-    block
 }
 
 #[cfg(test)]
@@ -314,6 +338,19 @@ mod tests {
         let (own, generated) = split_generated("# Only the user's text\nnothing else\n");
         assert!(own.contains("nothing else"));
         assert!(generated.is_none(), "there was nothing to split: {generated:?}");
+    }
+
+    #[test]
+    fn a_block_that_was_opened_but_never_closed_is_still_the_model_s() {
+        // A torn write or a hand edit took the closing marker away: reading it
+        // as "nothing to split" sent the index back as the user's own
+        // instructions — the exact mixing this function exists to prevent.
+        let torn = "# My rules\nuse tabs\n<!-- flashagent:memory -->\n- [a](b.md) — recorded by the model";
+        let (own, generated) = split_generated(torn);
+        assert_eq!(own, "# My rules\nuse tabs", "the user's own text is exact: {own:?}");
+        let index = generated.expect("the unclosed block is the model's writing");
+        assert!(index.contains("recorded by the model"), "{index:?}");
+        assert!(!index.contains("use tabs"), "the user's rules are not the model's: {index:?}");
     }
 
     #[test]
