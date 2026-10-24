@@ -54,6 +54,11 @@ review, the delta of the rest in one pass. What follows is what that found.
 - **The README grows a comparison table** — the structural differences
   against the other terminal agents, checked and dated — and the test
   counts in `docs/numbers.md` are re-counted (1,673 tests, 141 scenarios).
+- **A11 is closed** (owner decision): the OpenAI-compatible presets are one
+  client and are checked as one — re-confirmed live on OpenRouter's free
+  model, 17/20 on the twenty-scenario tool-calling check — and a preset
+  that turns out broken is fixed when reported. Every Track A milestone is
+  done.
 
 ## b605 — the session list shows what the conversation was about
 
