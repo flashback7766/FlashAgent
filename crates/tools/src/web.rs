@@ -509,7 +509,21 @@ fn says_there_is_nothing(body: &str) -> bool {
 /// Usually a bot check; otherwise markup the parser does not expect.
 fn describe_unusable_page(body: &str) -> String {
     let text = html_to_text(body).to_lowercase();
-    if text.contains("anomaly") || text.contains("unusual traffic") || text.contains("are you a robot") {
+    // The wordings DuckDuckGo's own pages use, checked against the pages it
+    // sends: a challenge page is the common case, and calling it "a page with
+    // no results" hides the one fact the person can act on (try again, or set
+    // BRAVE_API_KEY).
+    let bot_check = [
+        "anomaly",
+        "unusual traffic",
+        "are you a robot",
+        "bots use duckduckgo too",
+        "complete the following challenge",
+        "confirm this search was made by a human",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle));
+    if bot_check {
         "it asked for a bot check instead".to_string()
     } else {
         format!("the page it sent holds no results ({} characters)", body.len())
@@ -757,6 +771,13 @@ mod tests {
         assert!(!says_there_is_nothing("<div>Our servers are busy</div>"));
         assert!(describe_unusable_page("<p>If this error persists, please let us know: this error was reported as an anomaly.</p>")
             .contains("bot check"));
+        // The page DuckDuckGo sent on 2026-10-24, word for word in its parts
+        // that matter: a challenge is a challenge, not a page with no results.
+        assert!(describe_unusable_page(
+            "<p>Unfortunately, bots use DuckDuckGo too. Please complete the following challenge \
+             to confirm this search was made by a human. Select all squares containing a duck:</p>"
+        )
+        .contains("bot check"));
         assert!(describe_unusable_page("<p>Something new</p>").contains("no results"));
     }
 
