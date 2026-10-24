@@ -246,7 +246,41 @@ pub fn coerced_args(args_json: &str, tool: &str, schema: &serde_json::Value) -> 
     let before = effective_args(args_json, tool)?;
     let mut after = before.clone();
     coerce_to_schema(&mut after, schema);
+    fix_windows_paths(&mut after);
     (after != before).then(|| after.to_string())
+}
+
+/// Undoes the one corruption a valid JSON parse commits on its own. A model
+/// writing a Windows path unescaped puts `\t`, `\f`, `\b`, `\n` and `\r`
+/// where a backslash and a letter were meant — all of them legal escapes, so
+/// the JSON parses and `C:\temp` arrives as `C:` + a tab + `emp`. Only a
+/// value that starts like a drive path is touched, and only when it holds one
+/// of those controls: prose with real tabs in it does not begin `C:`.
+fn fix_windows_paths(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) => {
+            let looks_like_drive = s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                && s.chars().nth(1) == Some(':')
+                && s.chars().count() > 2;
+            if looks_like_drive && s.contains(['\u{08}', '\u{0c}', '\n', '\r', '\t']) {
+                let mut fixed = String::with_capacity(s.len() + 4);
+                for c in s.chars() {
+                    match c {
+                        '\u{08}' => fixed.push_str("\\b"),
+                        '\u{0c}' => fixed.push_str("\\f"),
+                        '\n' => fixed.push_str("\\n"),
+                        '\r' => fixed.push_str("\\r"),
+                        '\t' => fixed.push_str("\\t"),
+                        other => fixed.push(other),
+                    }
+                }
+                *s = fixed;
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(fix_windows_paths),
+        serde_json::Value::Object(map) => map.values_mut().for_each(fix_windows_paths),
+        _ => {}
+    }
 }
 
 /// External tools keep their names: those belong to the server.
@@ -753,6 +787,29 @@ mod tests {
 
         assert_eq!(coerced_args(r#"{"count":"20"}"#, "read_lines", &schema).as_deref(), Some(r#"{"count":20}"#));
         assert_eq!(coerced_args(r#"{"count":20}"#, "read_lines", &schema), None, "nothing to change, nothing rewritten");
+    }
+
+    #[test]
+    fn a_windows_path_whose_escapes_were_valid_json_is_decoded_back() {
+        use serde_json::json;
+        let schema = json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]});
+        // `\t` and `\f` are legal JSON escapes, so this parses clean and the
+        // value arrives as `C:` + a tab + `emp` + a form feed + `older`.
+        // The repair on invalid JSON never runs: this has to be caught after
+        // the parse, or not at all.
+        assert_eq!(
+            coerced_args(r#"{"path":"C:\temp\folder"}"#, "read_file", &schema).as_deref(),
+            Some(r#"{"path":"C:\\temp\\folder"}"#)
+        );
+        // Half-escaped — the doubled backslash survived, the single one did not.
+        assert_eq!(
+            coerced_args(r#"{"path":"C:\\tools\run"}"#, "read_file", &schema).as_deref(),
+            Some(r#"{"path":"C:\\tools\\run"}"#)
+        );
+        // A value that is not a drive path keeps its real controls, whatever
+        // they are: prose is not rewritten.
+        assert_eq!(coerced_args(r#"{"path":"a tab\tand a fold\nin the text"}"#, "read_file", &schema), None);
+        assert_eq!(coerced_args(r#"{"path":"src\tmain.rs"}"#, "read_file", &schema), None);
     }
 
     #[test]

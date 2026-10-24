@@ -1,5 +1,32 @@
 # Changelog
 
+## b609 — the turn keeps what the screen showed, and paths survive their own escapes
+
+The four holes left open by the b606 audit, closed.
+
+- **A steer, a cancellation or a compaction no longer loses the answer a
+  nudge was holding back.** The "answer with a call, not an apology" nudges
+  hide the model's bad answer from the next request by holding it out of the
+  history; when the turn ended or turned before that request was answered,
+  the held answer went with it — the screen had shown words that reached
+  neither the model nor the session file. It goes back on every such exit:
+  before the steer that answers it, into the summary a compaction keeps, and
+  into whatever a cancelled or failed turn hands back.
+- **Rewriting the memory index no longer appends a second block to a mangled
+  one.** An END marker in the owner's own text above the block — a paste from
+  these docs, say — was taken for the block's own, and every later write left
+  two blocks, the older of which read as the owner's instructions. The writer
+  now reads the file the way the reader does: from BEGIN to the END after it,
+  or to the end of the file when the closing marker never arrived.
+- **A Windows path whose escapes happened to be valid JSON reaches the tool
+  as the path it is.** A model writing `C:\temp` unescaped puts `\t` and `\f`
+  where a backslash and a letter were meant; both are legal escapes, so the
+  JSON parsed clean and the tool was handed `C:` + a tab + `emp`. After the
+  parse, a value that starts like a drive path and holds one of those
+  controls gets its backslashes back; prose keeps its real tabs.
+- **The broken-index slot table says what it does.** Two broken indices a
+  whole cap apart share a slot; the comment no longer promises otherwise.
+
 ## b606 — nine quiet failures found by a fresh audit, each closed with a test
 
 Everything since the b600 audit was re-read against it — five zones by fresh

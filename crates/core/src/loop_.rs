@@ -377,6 +377,30 @@ fn try_recv_steer(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<Steer>>) 
     }
 }
 
+/// Puts back the answer a nudge was holding out of the history.
+///
+/// The pop-nudges hide the model's bad answer from the next request by
+/// holding it in `transient`; when that request is answered, the bound path
+/// stores it again. A steer, the step limit, a cancellation, a compaction or
+/// a failed request can end or divert the turn before that: the held answer
+/// then has to go back, or the screen showed words that reached neither the
+/// model nor the session file. The nudge itself is not rescued — it was
+/// advice to the model, not part of the conversation, and each of these
+/// paths either replaces it or ends the turn.
+fn held_answer_back(transient: &mut Vec<ChatMessage>, history: &mut GrowingHistory) {
+    let mut kept = Vec::new();
+    let mut held = Vec::new();
+    for message in std::mem::take(transient) {
+        if message.role == Role::Assistant {
+            held.push(message);
+        } else {
+            kept.push(message);
+        }
+    }
+    *transient = kept;
+    history.extend(held);
+}
+
 impl AgentLoop {
     pub fn new(config: LoopConfig, cancel: Arc<AtomicBool>) -> Self {
         Self {
@@ -470,6 +494,7 @@ impl AgentLoop {
                     if self.config.wrap_up_at_step_limit && !wrapped_up {
                         wrapped_up = true;
                         grace = 1;
+                        held_answer_back(&mut transient, &mut history);
                         history.push(ChatMessage::user(format!(
                             "{APP_NOTICE_OPENING} the step budget of {limit} is spent. This is your \
                              last step: do not call another tool. Say what you found, what you \
@@ -479,12 +504,14 @@ impl AgentLoop {
                         transient.clear();
                         events(LoopEvent::SteeringInjected(WRAP_UP_NOTE.to_string()));
                     } else {
+                        held_answer_back(&mut transient, &mut history);
                         events(LoopEvent::Done(DoneReason::StepLimit));
                         return Ok((history.into_shared(), DoneReason::StepLimit));
                     }
                 }
             }
             if self.config.time_budget.is_some_and(|b| started.elapsed() >= b) {
+                held_answer_back(&mut transient, &mut history);
                 events(LoopEvent::Done(DoneReason::TimeLimit));
                 return Ok((history.into_shared(), DoneReason::TimeLimit));
             }
@@ -492,11 +519,15 @@ impl AgentLoop {
             events(LoopEvent::StepStarted { step, max_steps: self.config.max_steps });
 
             if self.cancel.load(Ordering::Relaxed) {
+                held_answer_back(&mut transient, &mut history);
                 events(LoopEvent::Done(DoneReason::Cancelled));
                 return Ok((history.into_shared(), DoneReason::Cancelled));
             }
 
             while let Some(steer) = try_recv_steer(&mut steer_rx) {
+                // The steer answers the held-out message; the message goes
+                // back first, so the conversation reads answer, then steer.
+                held_answer_back(&mut transient, &mut history);
                 events(LoopEvent::SteeringInjected(steer.text.clone()));
                 history.push(steer_as_message(steer));
                 transient.clear();
@@ -513,6 +544,7 @@ impl AgentLoop {
                 let done = tokio::select! {
                     done = compactor.compact(&mut history, last_prompt_tokens) => done,
                     _ = wait_cancel(&self.cancel) => {
+                        held_answer_back(&mut transient, &mut history);
                         events(LoopEvent::Done(DoneReason::Cancelled));
                         return Ok((history.into_shared(), DoneReason::Cancelled));
                     }
@@ -520,6 +552,10 @@ impl AgentLoop {
                 match done {
                     Compaction::Saved(saved) => {
                         events(LoopEvent::Compacted { saved });
+                        // The answer a nudge held out goes back before the two
+                        // copies are reconciled: it is conversation, and the
+                        // summary that just ran could not have included it.
+                        held_answer_back(&mut transient, &mut history);
                         // The shortened history is the conversation now, so the
                         // shared copy must lose the messages that are gone.
                         history.sync();
@@ -562,13 +598,17 @@ impl AgentLoop {
             let opened = tokio::select! {
                 res = llm.turn_with_options(request, &specs, &turn_opts) => res,
                 _ = wait_cancel(&self.cancel) => {
+                    held_answer_back(&mut transient, &mut history);
                     events(LoopEvent::Done(DoneReason::Cancelled));
                     return Ok((history.into_shared(), DoneReason::Cancelled));
                 }
             };
             let mut stream = match opened {
                 Ok(stream) => stream,
-                Err(source) => return Err(LoopError::Llm { source, history: history.into_shared().snapshot() }),
+                Err(source) => {
+                    held_answer_back(&mut transient, &mut history);
+                    return Err(LoopError::Llm { source, history: history.into_shared().snapshot() });
+                }
             };
             turn_opts = self.config.base_turn_options.clone();
             let mut assistant_text = String::new();
@@ -607,6 +647,7 @@ impl AgentLoop {
                             // The words held back to spot a repeated start are part of
                         // what the user is told was cut short.
                         drain_held(&mut held, &prefix, &known_tools, &mut scanner, &mut assistant_text, &mut text_calls, &mut events);
+                        held_answer_back(&mut transient, &mut history);
                         keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
                             history.sync();
                             let source = LlmError::Stream("the server closed the connection in the middle of a tool call, which was not run".into());
@@ -617,6 +658,7 @@ impl AgentLoop {
                     _ = &mut cancelled => {
                         // Keep what the user already saw; half-streamed tool calls are dropped unrun.
                         drain_held(&mut held, &prefix, &known_tools, &mut scanner, &mut assistant_text, &mut text_calls, &mut events);
+                        held_answer_back(&mut transient, &mut history);
                         keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
                         history.sync();
                         events(LoopEvent::Done(DoneReason::Cancelled));
@@ -627,6 +669,7 @@ impl AgentLoop {
                     Ok(item) => item,
                     Err(source) => {
                         drain_held(&mut held, &prefix, &known_tools, &mut scanner, &mut assistant_text, &mut text_calls, &mut events);
+                        held_answer_back(&mut transient, &mut history);
                         keep_partial(&mut history, assistant_text, assistant_reasoning, continuing);
                         history.sync();
                         return Err(LoopError::Llm { source, history: history.into_shared().snapshot() });
@@ -3401,6 +3444,93 @@ mod tests {
         assert_eq!(
             extract_draft_from_steps(reasoning),
             Some("Turn it over. Then the sealed top becomes the bottom.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_steer_that_arrives_on_a_pending_nudge_puts_the_held_answer_back() {
+        // The error nudge holds the apology out of the history so the next
+        // request does not show it. A steer arriving in that window used to
+        // take the apology with it: the screen had shown words that reached
+        // neither the model nor the session file.
+        let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+        let steer_tx_clone = steer_tx.clone();
+        let sent_steer = Arc::new(AtomicBool::new(false));
+        let llm = RecordingLlm::new(vec![
+            tool_turn("read_file", "c1"),
+            text_turn("I apologize, but I cannot read a file that does not exist."),
+            tool_turn("read_file", "c2"),
+            text_turn("Done."),
+        ]);
+        let tools = ScriptedTools::new(vec![
+            (true, "error: no such file: src/confg.rs"),
+            (false, "the contents of src/config.rs"),
+        ]);
+        let l = AgentLoop::with_steering(LoopConfig::default(), Arc::new(AtomicBool::new(false)), steer_rx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(async {
+            l.run(
+                &llm,
+                &tools,
+                SharedHistory::new(vec![ChatMessage::user("read src/config.rs")]),
+                |e| {
+                    // After the apology's step, so the nudge is already
+                    // pending and the steer meets it at the top of the next.
+                    if matches!(e, LoopEvent::StepStarted { step: 3, .. }) && !sent_steer.swap(true, Ordering::Relaxed) {
+                        let _ = steer_tx_clone.send("the file is src/config.rs".into());
+                    }
+                },
+            )
+            .await
+        });
+        let (history, done) = result.unwrap();
+        let history = history.snapshot();
+        assert!(matches!(done, DoneReason::Completed));
+
+        let apology_at = history.iter().position(|m| m.content.contains("I apologize"));
+        let steer_at = history.iter().position(|m| m.content.contains("the file is src/config.rs") && m.content.contains(STEER_QUEUE_NOTE));
+        assert!(apology_at.is_some(), "the held-out apology was lost:\n{history:#?}");
+        let (apology_at, steer_at) = (apology_at.unwrap(), steer_at.expect("the steer itself was lost"));
+        assert!(apology_at < steer_at, "the steer must answer the apology, not precede it:\n{history:#?}");
+        assert!(history.iter().all(|m| m.content != ERROR_NUDGE), "the steer replaced the nudge, not the answer");
+        // And the model saw the same conversation the file keeps: the third
+        // request carries the apology and the steer, and no nudge.
+        let requests = llm.requests.lock().unwrap();
+        let third = requests.last().unwrap();
+        assert!(third.iter().any(|m| m.content.contains("I apologize")), "the request hid the apology");
+        assert!(third.iter().any(|m| m.content.contains(STEER_QUEUE_NOTE)), "the request missed the steer");
+        assert!(third.iter().all(|m| m.content != ERROR_NUDGE), "the nudge rode along after the steer");
+    }
+
+    #[test]
+    fn cancelling_while_a_nudge_is_pending_keeps_the_answer_it_held() {
+        let llm = RecordingLlm::new(vec![
+            tool_turn("read_file", "c1"),
+            text_turn("I apologize, but I cannot read a file that does not exist."),
+        ]);
+        let tools = ScriptedTools::new(vec![(true, "error: no such file")]);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let l = AgentLoop::new(LoopConfig::default(), cancel.clone());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(async {
+            l.run(
+                &llm,
+                &tools,
+                SharedHistory::new(vec![ChatMessage::user("read it")]),
+                |e| {
+                    if matches!(e, LoopEvent::TurnDelta(t) if t.contains("apologize")) {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                },
+            )
+            .await
+        });
+        let (history, done) = result.unwrap();
+        let history = history.snapshot();
+        assert!(matches!(done, DoneReason::Cancelled));
+        assert!(
+            history.iter().any(|m| m.role == Role::Assistant && m.content.contains("I apologize")),
+            "the interrupted turn lost the answer the user had watched it write:\n{history:#?}"
         );
     }
 
