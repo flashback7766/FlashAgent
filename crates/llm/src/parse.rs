@@ -467,8 +467,12 @@ impl ChunkParser {
             //
             // An index below the cap is the slot of its call. An index above
             // it is broken, and gets one of the slots above the cap, chosen
-            // by its low bits: two different broken indices do not land on
-            // top of each other, and the table stops at twice the cap.
+            // by its low bits: the same broken index always meets itself,
+            // and the table stops at twice the cap. Two broken indices a
+            // whole cap apart (100 and 164, say) do share a slot — a
+            // collision that needs a server numbering two calls sixty-four
+            // apart and both wrongly, which no smaller table can avoid
+            // while keeping the bound.
             Some(i) => {
                 let i = i as usize;
                 if i < MAX_TOOL_INDEX {

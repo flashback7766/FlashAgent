@@ -280,11 +280,22 @@ impl Store {
 
         let path = self.index_path();
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
-        let updated = match (existing.find(BEGIN), existing.find(END)) {
-            (Some(start), Some(end)) if end > start => {
-                format!("{}{}{}", &existing[..start], block, &existing[end + END.len()..])
+        let updated = match existing.find(BEGIN) {
+            // The block runs from BEGIN to the END after it, or to the end of
+            // the file when the closing marker never arrived. The reader reads
+            // it the same way, so the two cannot disagree; and an END in the
+            // owner's own text before the block closes nothing — searching
+            // from the start used to take it for the block's own and append a
+            // second block beside the first.
+            Some(start) => {
+                let after_begin = start + BEGIN.len();
+                let tail = existing[after_begin..]
+                    .find(END)
+                    .map(|rel_end| &existing[after_begin + rel_end + END.len()..])
+                    .unwrap_or("");
+                format!("{}{}{}", &existing[..start], block, tail)
             }
-            _ => {
+            None => {
                 let mut out = existing.trim_end().to_string();
                 if out.is_empty() {
                     out.push_str("# Memory\n\nWhat FlashAgent remembers here. Each line links to one fact.\n");
@@ -335,6 +346,39 @@ mod tests {
         let e = entry("tests-run-with-nextest", "the suite is run with cargo nextest, not cargo test");
         store.save(&e).unwrap();
         assert_eq!(store.get("tests-run-with-nextest").as_ref(), Some(&e));
+    }
+
+    #[test]
+    fn rewriting_does_not_append_a_second_block_to_a_mangled_index() {
+        // The owner's own text can hold the closing marker — a paste from
+        // these docs, say — before the block begins. The writer used to take
+        // that for the block's own end and append a whole second block beside
+        // the first; its entries then read as the owner's instructions.
+        let (store, _d) = temp_store();
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(
+            store.index_path(),
+            format!("# Memory\n\nsee {END} in the docs\n\n{BEGIN}\n- [old](old.md) — the old index\n"),
+        )
+        .unwrap();
+        store.rewrite_index().unwrap();
+        let written = std::fs::read_to_string(store.index_path()).unwrap();
+        assert_eq!(written.matches(BEGIN).count(), 1, "a second block was appended:\n{written}");
+        assert!(written.contains(&format!("see {END} in the docs")), "the owner's own text was touched:\n{written}");
+        assert!(!written.contains("the old index"), "the old block was kept beside the new:\n{written}");
+
+        // A block whose closing marker never arrived is rewritten whole, the
+        // way the reader already reads it: from BEGIN to the end of the file.
+        std::fs::write(
+            store.index_path(),
+            format!("# Memory\n\n{BEGIN}\n- [old](old.md) — the old index\n"),
+        )
+        .unwrap();
+        store.rewrite_index().unwrap();
+        let written = std::fs::read_to_string(store.index_path()).unwrap();
+        assert_eq!(written.matches(BEGIN).count(), 1, "{written}");
+        assert!(written.contains(END), "the rewritten block is left unclosed:\n{written}");
+        assert!(!written.contains("the old index"), "{written}");
     }
 
     #[test]
