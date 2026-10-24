@@ -1,5 +1,21 @@
 # Changelog
 
+## b605 — the session list shows what the conversation was about
+
+- **A session gets its name from the model.** The picker listed every
+  conversation under its first prompt, which is often "hi", a pasted error or
+  a greeting that says nothing about the work that followed. The recap
+  request — the one already made when the user goes quiet after a turn — now
+  also asks for a short name, and the session file keeps it. The picker lists
+  the conversation under the name, and a resumed one keeps it. The first
+  prompt stays the fallback, for a session that ended before the question was
+  asked or a model that answered without the field, and an unnamed session is
+  written without the field at all, so the file stays what it was.
+- **Switching sessions no longer lets a late recap through.** A recap still
+  being written belonged to the session being left; its suggestion could land
+  in the one being opened. It is stopped with the switch, the way a new turn
+  already stopped it.
+
 ## b604 — a directory that was deleted stops killing the app
 
 - **A deleted folder no longer stops the start.** FlashAgent reads the folder

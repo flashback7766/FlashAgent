@@ -128,6 +128,10 @@ pub(crate) struct SavedSession {
     /// and are read as complete, which is what they were.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) turn_in_flight: bool,
+    /// The name the model gave this conversation, for the picker. Older files
+    /// have none and are listed under their first prompt, as they always were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -155,8 +159,9 @@ pub(crate) fn save_session_file(
     cwd: &str,
     history: &[ChatMessage],
     archive: &[ChatMessage],
+    title: Option<&str>,
 ) -> Result<std::path::PathBuf, String> {
-    save_session_file_marked(session_id, model, cwd, history, archive, false)
+    save_session_file_marked(session_id, model, cwd, history, archive, false, title)
 }
 
 /// As [`save_session_file`], but records that the history ends inside a running
@@ -168,9 +173,10 @@ pub(crate) fn save_session_file_marked(
     history: &[ChatMessage],
     archive: &[ChatMessage],
     turn_in_flight: bool,
+    title: Option<&str>,
 ) -> Result<std::path::PathBuf, String> {
     let base_dir = sessions_dir().ok_or(flashagent_tui::i18n::tr("no home directory to save sessions in"))?;
-    save_session_in(&base_dir, session_id, model, cwd, history, archive, turn_in_flight)
+    save_session_in(&base_dir, session_id, model, cwd, history, archive, turn_in_flight, title)
 }
 
 /// Earlier turns are removed from the model's live context after compaction.
@@ -188,6 +194,7 @@ pub(crate) fn session_path(session_id: &str) -> Option<std::path::PathBuf> {
 
 /// `turn_in_flight` says the history ends in the middle of a turn, which is
 /// recorded in the file so a reader can tell a finished answer from half of one.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn save_session_in(
     base_dir: &std::path::Path,
     session_id: &str,
@@ -196,6 +203,7 @@ pub(crate) fn save_session_in(
     history: &[ChatMessage],
     archive: &[ChatMessage],
     turn_in_flight: bool,
+    title: Option<&str>,
 ) -> Result<std::path::PathBuf, String> {
     std::fs::create_dir_all(base_dir).map_err(|e| {
         tr_fill("cannot create {path}: {e}", &[("path", &base_dir.display().to_string()), ("e", &e.to_string())])
@@ -218,6 +226,7 @@ pub(crate) fn save_session_in(
         messages: history.iter().map(SavedMessage::from).collect(),
         archive: archive.iter().map(SavedMessage::from).collect(),
         turn_in_flight,
+        title: title.map(str::to_string).filter(|t| !t.trim().is_empty()),
     };
     let data = serde_json::to_string_pretty(&saved)
         .map_err(|e| tr_fill("cannot encode the session: {e}", &[("e", &e.to_string())]))?;
@@ -252,13 +261,19 @@ fn sync_dir(_dir: &std::path::Path) {}
 
 /// Nothing retries after it, so an unwritable sessions folder falls back to
 /// the system temp folder, and the message names both.
-pub(crate) fn save_on_exit(session_id: &str, model: &str, cwd: &str, history: &[ChatMessage]) -> Result<String, String> {
-    let why = match save_session_file(session_id, model, cwd, history, &[]) {
+pub(crate) fn save_on_exit(
+    session_id: &str,
+    model: &str,
+    cwd: &str,
+    history: &[ChatMessage],
+    title: Option<&str>,
+) -> Result<String, String> {
+    let why = match save_session_file(session_id, model, cwd, history, &[], title) {
         Ok(_) => return Ok(session_id.to_string()),
         Err(why) => why,
     };
     let spare = std::env::temp_dir().join("flashagent-unsaved");
-    match save_session_in(&spare, session_id, model, cwd, history, &[], false) {
+    match save_session_in(&spare, session_id, model, cwd, history, &[], false, title) {
         Ok(path) => Err(tr_fill(
             "{why}.\nA copy was written to {path} — move it into ~/.flashagent/sessions/ to resume it.",
             &[("why", &why), ("path", &path.display().to_string())],
@@ -331,7 +346,7 @@ impl App {
             return;
         }
         let model = self.current_model.clone();
-        let err = save_session_file(session_id, &model, cwd_display, &self.history, &self.archive).err();
+        let err = save_session_file(session_id, &model, cwd_display, &self.history, &self.archive, self.session_title.as_deref()).err();
         if let Some(why) = err {
             self.notice(tr_fill(
                 "Session not saved: {why} · retrying after the next turn and on exit",
@@ -366,7 +381,7 @@ impl App {
         // The turn has not ended, so whatever the last message holds is a
         // snapshot of an unfinished answer. Written into the file, so a resume
         // knows not to read it as the conclusion.
-        let err = save_session_file_marked(cx.session_id, &model, cx.cwd_display, &snapshot, &self.archive, true).err();
+        let err = save_session_file_marked(cx.session_id, &model, cx.cwd_display, &snapshot, &self.archive, true, self.session_title.as_deref()).err();
         if let Some(why) = err {
             self.notice(tr_fill(
                 "Session not saved: {why} · retrying after the next turn and on exit",
@@ -384,6 +399,10 @@ impl App {
             .and_then(|dir| read_session(&dir, id))
         {
             Ok(saved) => {
+                // The name travels with the conversation: a resumed session is
+                // listed under the name it already had, not under its first
+                // prompt again.
+                self.session_title = saved.title.clone().filter(|t| !t.trim().is_empty());
                 let restored = restore_session(saved, &mut self.chat, &mut self.history, &mut self.archive);
                 strip_legacy_memory(&mut self.history, memory_block);
                 update_context_usage(&self.current_model, &mut self.context_usage, &self.history, memory_block, &self.chat, perm);
@@ -400,8 +419,13 @@ impl App {
     /// A session picked from the list replaces the open one on screen and in
     /// the history, which is saved first. False if nothing was switched.
     pub(crate) fn switch_session(&mut self, current: &str, id: &str, memory_block: &str, perm: &PermissionedTools) -> bool {
+        // A recap still being written belongs to the session being left: its
+        // suggestion and its name must not land in the one being opened.
+        self.cancel_recap();
         if self.config.auto_save_sessions && worth_saving(&self.history) {
-            if let Err(why) = save_session_file(current, &self.current_model, &self.cwd_display, &self.history, &self.archive) {
+            if let Err(why) =
+                save_session_file(current, &self.current_model, &self.cwd_display, &self.history, &self.archive, self.session_title.as_deref())
+            {
                 // Switching away would drop the only copy, the one in memory.
                 self.notice(tr_fill(
                     "Not switching: this session could not be saved ({why})",
@@ -432,6 +456,10 @@ impl App {
         );
         self.history = vec![ChatMessage::system(base_system)];
         self.chat.clear();
+        // The name comes with the session: the one being opened is listed under
+        // the name it had, or under none — never under the name the session
+        // just left carried.
+        self.session_title = saved.title.clone().filter(|t| !t.trim().is_empty());
         let restored = restore_session(saved, &mut self.chat, &mut self.history, &mut self.archive);
         strip_legacy_memory(&mut self.history, memory_block);
         self.latest_suggestion = None;
@@ -486,19 +514,28 @@ pub(crate) fn sessions_in(dir: &std::path::Path, cwd: &str) -> Vec<SessionSummar
         .filter_map(|content| serde_json::from_str::<SavedSession>(&content).ok())
         .filter(|s| s.cwd == cwd)
         .map(|s| {
+            // The name the model gave the conversation; the first prompt is
+            // what older files and sessions the model never named fall back to.
             let title = s
-                .messages
-                .iter()
-                .find(|m| m.role == "user")
-                .map(|m| {
-                    let prompt = extract_user_prompt(&m.content).lines().next().unwrap_or("").trim();
-                    if prompt.is_empty() && !m.images.is_empty() {
-                        "[image]".to_string()
-                    } else {
-                        prompt.to_string()
-                    }
-                })
-                .unwrap_or_default();
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    s.messages
+                        .iter()
+                        .find(|m| m.role == "user")
+                        .map(|m| {
+                            let prompt = extract_user_prompt(&m.content).lines().next().unwrap_or("").trim();
+                            if prompt.is_empty() && !m.images.is_empty() {
+                                "[image]".to_string()
+                            } else {
+                                prompt.to_string()
+                            }
+                        })
+                        .unwrap_or_default()
+                });
             let text = s
                 .messages
                 .iter()
@@ -738,6 +775,7 @@ mod session_tests {
             &[ChatMessage::user("private conversation")],
             &[ChatMessage::user("archived words")],
             false,
+            None,
         )
         .unwrap();
         assert_eq!(std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
@@ -777,6 +815,7 @@ mod session_tests {
                 SavedMessage::from(&ChatMessage::assistant("answer")),
             ],
             turn_in_flight: false,
+            title: None,
         };
         std::fs::write(dir.join(format!("{id}.json")), serde_json::to_string(&saved).unwrap()).unwrap();
     }
@@ -810,6 +849,48 @@ mod session_tests {
     }
 
     #[test]
+    fn the_name_travels_through_a_save_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = vec![ChatMessage::system("sys"), ChatMessage::user("fix it"), ChatMessage::assistant("done")];
+        save_session_in(dir.path(), "s", "m", "~/p", &history, &[], false, Some("Fixing the store parser")).unwrap();
+        let saved = read_session(dir.path(), "s").unwrap();
+        assert_eq!(saved.title.as_deref(), Some("Fixing the store parser"));
+
+        // A name that is only spaces is not a name: the file is written without
+        // the field at all, so the picker falls back to the first prompt.
+        save_session_in(dir.path(), "s2", "m", "~/p", &history, &[], false, Some("   ")).unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("s2.json")).unwrap();
+        assert!(!raw.contains("title"), "an empty name is noise in a file a user may read: {raw}");
+        assert_eq!(read_session(dir.path(), "s2").unwrap().title, None);
+
+        // And a save without a name stays without one.
+        save_session_in(dir.path(), "s3", "m", "~/p", &history, &[], false, None).unwrap();
+        assert_eq!(read_session(dir.path(), "s3").unwrap().title, None);
+    }
+
+    #[test]
+    fn the_picker_prefers_the_name_the_model_gave() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "session_100", 100, "~/proj", "fix the login bug");
+        let path = dir.path().join("session_100.json");
+
+        let listed = sessions_in(dir.path(), "~/proj");
+        assert_eq!(listed[0].title, "fix the login bug", "an unnamed session is listed under its first prompt");
+
+        let mut saved: SavedSession = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        saved.title = Some("Fixing the store parser".into());
+        std::fs::write(&path, serde_json::to_string(&saved).unwrap()).unwrap();
+        let listed = sessions_in(dir.path(), "~/proj");
+        assert_eq!(listed[0].title, "Fixing the store parser", "the model's name, not the first prompt");
+
+        // A name that is only spaces is not a name either.
+        saved.title = Some("   ".into());
+        std::fs::write(&path, serde_json::to_string(&saved).unwrap()).unwrap();
+        let listed = sessions_in(dir.path(), "~/proj");
+        assert_eq!(listed[0].title, "fix the login bug");
+    }
+
+    #[test]
     fn two_instances_started_in_the_same_second_get_different_ids() {
         // Neither has saved yet, so only the pid tells them apart.
         let dir = tempfile::tempdir().unwrap();
@@ -820,10 +901,10 @@ mod session_tests {
     fn saving_replaces_the_file_whole_and_leaves_nothing_behind() {
         let dir = tempfile::tempdir().unwrap();
         let history = vec![ChatMessage::system("sys"), ChatMessage::user("first"), ChatMessage::assistant("one")];
-        let path = save_session_in(dir.path(), "s", "m", "~/p", &history, &[], false).unwrap();
+        let path = save_session_in(dir.path(), "s", "m", "~/p", &history, &[], false, None).unwrap();
         let mut longer = history.clone();
         longer.push(ChatMessage::user("second"));
-        save_session_in(dir.path(), "s", "m", "~/p", &longer, &[], false).unwrap();
+        save_session_in(dir.path(), "s", "m", "~/p", &longer, &[], false, None).unwrap();
 
         let saved: SavedSession = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved.messages.len(), 4);
@@ -837,7 +918,7 @@ mod session_tests {
         // A file where the folder should be.
         let blocked = dir.path().join("sessions");
         std::fs::write(&blocked, "").unwrap();
-        let err = save_session_in(&blocked, "s", "m", "~/p", &[ChatMessage::user("hi")], &[], false).unwrap_err();
+        let err = save_session_in(&blocked, "s", "m", "~/p", &[ChatMessage::user("hi")], &[], false, None).unwrap_err();
         assert!(err.contains("sessions"), "{err}");
     }
 
@@ -850,7 +931,7 @@ mod session_tests {
             ChatMessage::user("write the parser"),
             ChatMessage::assistant("Sure. First I will open the fi"),
         ];
-        let path = save_session_in(dir.path(), "s", "m", "~/p", &history, &[], true).unwrap();
+        let path = save_session_in(dir.path(), "s", "m", "~/p", &history, &[], true, None).unwrap();
         let saved: SavedSession = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(saved.turn_in_flight, "the file does not say the answer is unfinished");
 
@@ -868,7 +949,7 @@ mod session_tests {
     #[test]
     fn a_finished_turn_says_nothing_about_being_cut_off() {
         let dir = tempfile::tempdir().unwrap();
-        let path = save_session_in(dir.path(), "s", "m", "~/p", &[ChatMessage::user("hi"), ChatMessage::assistant("done")], &[], false).unwrap();
+        let path = save_session_in(dir.path(), "s", "m", "~/p", &[ChatMessage::user("hi"), ChatMessage::assistant("done")], &[], false, None).unwrap();
         let saved: SavedSession = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(!saved.turn_in_flight);
         assert!(!std::fs::read_to_string(&path).unwrap().contains("turn_in_flight"), "a whole session needs no marker: it is not noise in the file a user may read");
@@ -923,7 +1004,7 @@ mod session_tests {
         let path = dir.path().join("s.json");
         std::fs::write(&path, "old").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        save_session_in(dir.path(), "s", "m", "~/p", &[ChatMessage::user("hi")], &[], false).unwrap();
+        save_session_in(dir.path(), "s", "m", "~/p", &[ChatMessage::user("hi")], &[], false, None).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
@@ -934,7 +1015,7 @@ mod session_tests {
         // back as a tool result and is kept in the transcript.
         let tool = ChatMessage::tool_result("c1", "ANTHROPIC_API_KEY=sk-ant-api03-AAAABBBBCCCCDDDDEEEE1234\n");
         let user = ChatMessage::user("my key is sk-ant-api03-9999888877776666555544443333, keep it safe");
-        let path = save_session_in(dir.path(), "s", "m", "~/p", &[user, tool], &[], false).unwrap();
+        let path = save_session_in(dir.path(), "s", "m", "~/p", &[user, tool], &[], false, None).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("sk-ant-api03-AAAABBBB"), "the tool result kept the key:\n{text}");
         assert!(!text.contains("sk-ant-api03-99998888"), "the prompt kept the key:\n{text}");
@@ -1000,6 +1081,7 @@ mod session_tests {
                 SavedMessage::from(&ChatMessage::assistant("4")),
             ],
             turn_in_flight: false,
+            title: None,
         };
         let mut chat = ChatView::default();
         let mut history = vec![ChatMessage::system("new prompt")];
@@ -1030,6 +1112,7 @@ mod session_tests {
                 SavedMessage::from(&ChatMessage::assistant("carrying on")),
             ],
             turn_in_flight: false,
+            title: None,
         };
         let mut chat = ChatView::default();
         let mut history = vec![ChatMessage::system("new prompt\n\n[Context] 100 of 1,000 tokens used, 900 left.")];
@@ -1062,6 +1145,7 @@ mod session_tests {
                 SavedMessage::from(&ChatMessage::assistant("carrying on")),
             ],
             turn_in_flight: false,
+            title: None,
         };
         let mut chat = ChatView::default();
         let mut history = vec![ChatMessage::system("new prompt")];
@@ -1103,6 +1187,7 @@ mod session_tests {
                 SavedMessage::from(&ChatMessage::assistant("Any time.")),
             ],
             turn_in_flight: false,
+            title: None,
         };
         let mut chat = ChatView::default();
         let mut history = vec![ChatMessage::system("new prompt")];
@@ -1137,6 +1222,7 @@ mod session_tests {
                 SavedMessage::from(&ChatMessage::assistant("I see an image")),
             ],
             turn_in_flight: false,
+            title: None,
         };
         let mut chat = ChatView::default();
         let mut history = vec![ChatMessage::system("new prompt")];

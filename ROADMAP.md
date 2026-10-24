@@ -65,7 +65,7 @@ Decided 2026-09-11: v1 ships the terminal app only, and B1–B10 resume after v1
   - Continuing a cut-off answer. *Done (b269): a reply cut off at the output limit is continued up to three times in the same message, with a repeated tail trimmed; a cut-off tool call is not run.*
   - Stronger prompt-injection defences: a per-session nonce, neutralised template control tokens, detection of hijack attempts.
   - Editing several files at once. *Done (b270): `edit_file` takes `files: [{path, edits}]` and applies all or none; `read_file` reads up to 20 files; the diff card, `/rewind` and the `/goal` report cover every file.*
-  - A title for each session, asked of the model after the first turn.
+  - A title for each session, asked of the model after the first turn. *Done (b605): the recap request, the one already made when the user goes quiet, asks for the name too; it lives in the session file, the picker lists the conversation under it, and the first prompt stays the fallback.*
   - Status line extras. *Done: generation speed over the last 3 seconds, and the Ctrl+K command palette (b340).*
 
 ## v1.x: after the first stable release

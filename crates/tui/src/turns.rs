@@ -84,11 +84,12 @@ impl App {
         let history_bg = self.history.clone();
         let turn_id = self.chat.user_turn_count() as u64;
         self.recap_task = Some(tokio::spawn(async move {
-            if let Some((llm_recap, llm_suggestion)) = generate_llm_recap_and_suggestion(&source_bg, &history_bg).await {
+            if let Some((llm_recap, llm_suggestion, llm_title)) = generate_llm_recap_and_suggestion(&source_bg, &history_bg).await {
                 let _ = tx_bg.send(UiEvent::BackgroundRecap {
                     turn_id,
                     recap: llm_recap,
                     suggestion: llm_suggestion,
+                    title: llm_title,
                 });
             }
         }));
