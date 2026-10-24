@@ -843,6 +843,10 @@ struct App {
     custom_placeholder: Option<String>,
     suggested_prompt: Option<String>,
     latest_suggestion: Option<String>,
+    /// The name the model gave this session, taken from the first recap that
+    /// offered one. What the picker lists instead of the first prompt, and
+    /// what the session file keeps; a resumed session brings its own.
+    session_title: Option<String>,
     tip_animator: flashagent_tui::tips::TipAnimator,
     input_history: Vec<String>,
     history_index: Option<usize>,
@@ -1471,6 +1475,7 @@ fn initial_app(init: InitialApp) -> App {
         custom_placeholder: None,
         suggested_prompt: None,
         latest_suggestion: None,
+        session_title: None,
         tip_animator: flashagent_tui::tips::TipAnimator::new(),
         input_history: prompt_history::load(),
         history_index: None,
@@ -1764,7 +1769,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
 
     w.tools_arc.shells().stop_all();
     let saved = app.config.auto_save_sessions && worth_saving(&app.history);
-    Ok(saved.then(|| save_on_exit(&session_id, &app.current_model, &w.cwd_display, &app.history)))
+    Ok(saved.then(|| save_on_exit(&session_id, &app.current_model, &w.cwd_display, &app.history, app.session_title.as_deref())))
 }
 
 /// Draws, waits for the next event and hands it to its handler, until one
@@ -3154,9 +3159,10 @@ mod tests {
     fn a_recap_cut_off_by_the_token_limit_is_still_shown() {
         // Observed: the thinking used the whole budget and the JSON never closed.
         let truncated = "{\"recap\": \"Ассистент осмотрел проект и описал его структуру.\", \"suggestion\": \"Покажи код игро";
-        let (recap, suggestion) = parse_recap_and_suggestion_json(truncated).expect("recap salvaged");
+        let (recap, suggestion, title) = parse_recap_and_suggestion_json(truncated).expect("recap salvaged");
         assert_eq!(recap, "Ассистент осмотрел проект и описал его структуру.");
         assert_eq!(suggestion, None, "half a suggestion is not a suggestion");
+        assert_eq!(title, None, "the title is the last field, so a cut-off answer has none");
     }
 
     #[test]
@@ -3168,21 +3174,46 @@ mod tests {
     #[test]
     fn escapes_survive_the_salvage() {
         let truncated = "{\"recap\": \"Read \\\"main.rs\\\" and fixed the loop.\", \"sugg";
-        let (recap, _) = parse_recap_and_suggestion_json(truncated).expect("recap salvaged");
+        let (recap, _, _) = parse_recap_and_suggestion_json(truncated).expect("recap salvaged");
         assert_eq!(recap, "Read \"main.rs\" and fixed the loop.");
     }
 
     #[test]
     fn test_parse_recap_and_suggestion_json() {
-        let raw = "```json\n{\"recap\": \"Explained Swift concepts\", \"suggestion\": \"Show mascot code\"}\n```";
+        let raw = "```json\n{\"recap\": \"Explained Swift concepts\", \"suggestion\": \"Show mascot code\", \"title\": \"Swift concepts\"}\n```";
         let parsed = parse_recap_and_suggestion_json(raw);
         assert_eq!(
             parsed,
-            Some(("Explained Swift concepts".to_string(), Some(tr("Show mascot code").to_string())))
+            Some((
+                "Explained Swift concepts".to_string(),
+                Some(tr("Show mascot code").to_string()),
+                Some("Swift concepts".to_string())
+            ))
         );
 
         let generic = "{\"recap\": \"Response generated\", \"suggestion\": \"What's next?\"}";
         assert_eq!(parse_recap_and_suggestion_json(generic), None);
+    }
+
+    #[test]
+    fn a_title_the_model_wrapped_in_newlines_or_quotes_is_a_name_again() {
+        for (raw, want) in [
+            (r#"{"recap": "Did the work.", "title": "Fixing the\nparser loop"}"#, "Fixing the parser loop"),
+            (r#"{"recap": "Did the work.", "title": "\"Fixing the parser\""}"#, "Fixing the parser"),
+            (r#"{"recap": "Did the work.", "title": "«Починка парсера»"}"#, "Починка парсера"),
+            (r#"{"recap": "Did the work.", "title": ""}"#, ""),
+        ] {
+            let (_, _, title) = parse_recap_and_suggestion_json(raw).expect("the recap is valid");
+            assert_eq!(title.as_deref(), if want.is_empty() { None } else { Some(want) }, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_recap_without_a_title_field_keeps_the_recap_and_names_nothing() {
+        // Models that learned the two-field shape still answer usefully.
+        let (_, _, title) = parse_recap_and_suggestion_json(r#"{"recap": "Explained the loop.", "suggestion": ""}"#)
+            .expect("the recap is valid");
+        assert_eq!(title, None);
     }
 
     #[test]
@@ -3235,7 +3266,7 @@ mod tests {
     #[test]
     fn an_empty_suggestion_after_small_talk_keeps_the_recap_and_shows_no_suggestion() {
         // An empty suggestion must not cost the recap.
-        let (recap, suggestion) = parse_recap_and_suggestion_json(
+        let (recap, suggestion, _) = parse_recap_and_suggestion_json(
             r#"{"recap": "The user said hello.", "suggestion": ""}"#,
         )
         .expect("the recap is still valid");
