@@ -55,6 +55,40 @@ pub(crate) struct Renderer {
     screen: flashagent_tui::screen::Screen,
     /// The card on screen last frame and when it opened.
     card: (CardKey, u64),
+    /// Screen row of the first line the open overlay rendered, so a click can
+    /// tell which row of the card it landed on. `None` when nothing is open or
+    /// the card's top was pushed off the screen by its own height.
+    pub(crate) overlay_row: Option<usize>,
+    /// The transcript rows on screen. They start at the top: everything else
+    /// (work box, card, footer) is pinned under them. The scrollbar's track
+    /// is exactly these rows, and a click above them never means the chat.
+    pub(crate) chat_rows_on_screen: usize,
+    /// The screen's width, as last painted: the scrollbar lives in the last
+    /// column, and a press is told by its column.
+    pub(crate) screen_width: usize,
+    /// A thumb under the mouse: where it was grabbed and what the scroll
+    /// looked like then. Moving the mouse maps the row difference back
+    /// through the proportion the track stood at when the drag began.
+    pub(crate) scrollbar_drag: Option<ScrollbarDrag>,
+}
+
+/// Where the scrollbar thumb sits while it is being dragged.
+pub(crate) struct ScrollbarDrag {
+    grab_row: u16,
+    grab_offset: usize,
+    thumb_len: usize,
+    track_len: usize,
+    max_scroll: usize,
+}
+
+/// The scrollbar's geometry on screen. `top` and `len` are screen rows of the
+/// thumb, `track_len` the transcript rows it moves across, `column` the cell
+/// it is drawn in.
+pub(crate) struct Scrollbar {
+    pub(crate) column: usize,
+    pub(crate) top: usize,
+    pub(crate) len: usize,
+    pub(crate) track_len: usize,
 }
 
 pub(crate) struct FrameState<'a> {
@@ -128,6 +162,13 @@ pub(crate) struct FrameState<'a> {
     pub(crate) shell_running: bool,
     /// The colour of how the last turn ended, and how far (0..=1) it has faded.
     pub(crate) composer_flash: Option<(Rgb, f32)>,
+    /// Both ends of the selection being dragged, in screen coordinates.
+    pub(crate) selection: Option<((u16, u16), (u16, u16))>,
+    /// Where the pointer sits on the open overlay's card: the line counted
+    /// from the card's first row, and the column from the screen's left edge.
+    pub(crate) overlay_hover: Option<(usize, u16)>,
+    /// The card line a click just landed on: the row keeps a pressed look.
+    pub(crate) overlay_flash: Option<usize>,
 }
 
 /// To know when a new card opens and should unfold.
@@ -483,7 +524,70 @@ impl Renderer {
     agent_open: Vec::new(),
             screen: flashagent_tui::screen::Screen::new(),
             card: (CardKey::Composer, 0),
+            overlay_row: None,
+            chat_rows_on_screen: 0,
+            screen_width: 0,
+            scrollbar_drag: None,
         }
+    }
+
+    /// The scrollbar's geometry, when there is anything to scroll. The thumb
+    /// is the share of the conversation the screen shows, sitting where the
+    /// view is: at the top of the track while the view is scrolled all the
+    /// way back, at its end while anchored.
+    pub(crate) fn scrollbar(&self) -> Option<Scrollbar> {
+        let track = self.chat_rows_on_screen;
+        if self.max_scroll == 0 || track == 0 || self.total_lines == 0 {
+            return None;
+        }
+        let visible = self.chat_view.1.max(1);
+        let len = (((visible * track) / self.total_lines).max(2)).min(track);
+        let room = track - len;
+        let span = self.max_scroll.max(1);
+        let top = ((self.max_scroll - self.scroll_offset.min(self.max_scroll)) * room) / span;
+        Some(Scrollbar { column: self.screen_width.saturating_sub(1), top, len, track_len: track })
+    }
+
+    /// A press in the scrollbar's column: page toward the press when it
+    /// landed on the track past the thumb, then take a hold of the thumb
+    /// either way, so a drag can start from anywhere on the track. A press
+    /// in any other column is not the scrollbar's, whatever else it lands on.
+    pub(crate) fn scrollbar_press(&mut self, row: u16, column: u16) -> bool {
+        let Some(sb) = self.scrollbar() else { return false };
+        if column as usize != sb.column {
+            return false;
+        }
+        let hit = row as usize;
+        if hit >= sb.track_len {
+            return false;
+        }
+        if hit < sb.top {
+            self.scroll_up(self.chat_view.1.max(1));
+        } else if hit >= sb.top + sb.len {
+            self.scroll_down(self.chat_view.1.max(1));
+        }
+        let sb = self.scrollbar().unwrap_or(sb);
+        self.scrollbar_drag = Some(ScrollbarDrag {
+            grab_row: row,
+            grab_offset: self.scroll_offset,
+            thumb_len: sb.len,
+            track_len: sb.track_len,
+            max_scroll: self.max_scroll,
+        });
+        true
+    }
+
+    /// The thumb follows the mouse: a row of track moves the view by its
+    /// share of the scroll. Dragging down moves toward the bottom of the
+    /// conversation, which is what the offset counts away from.
+    pub(crate) fn scrollbar_follow(&mut self, row: u16) -> bool {
+        let Some(drag) = &self.scrollbar_drag else { return false };
+        let rows = row as isize - drag.grab_row as isize;
+        let slider = drag.track_len.saturating_sub(drag.thumb_len).max(1) as f64;
+        let shift = rows as f64 / slider * drag.max_scroll as f64;
+        let want = drag.grab_offset as f64 - shift;
+        self.scroll_offset = (want.round().clamp(0.0, drag.max_scroll as f64)) as usize;
+        true
     }
 
     /// While true, frames come faster than the idle tick.
@@ -1270,6 +1374,8 @@ struct LayoutInputs<'a> {
     input_line_idx: usize,
     text_cursor: Option<u16>,
     border_color: &'a str,
+    /// Both ends of the selection being dragged, in screen coordinates.
+    selection: Option<((u16, u16), (u16, u16))>,
 }
 
 impl Renderer {
@@ -1395,7 +1501,7 @@ impl Renderer {
             input_line_idx = append_question_card(&mut tail, question_gate, &st, width, inner_w, &border_color, joined);
         } else if let Some(overlay) = overlay {
             // The composer turns into the open menu or screen.
-            tail.extend(overlay.render(width, height as usize));
+            tail.extend(overlay.render(width, height as usize, st.overlay_hover, st.overlay_flash));
             input_line_idx = tail.len().saturating_sub(1);
         } else {
             let composer = append_composer(&mut tail, &st, width, height, t, &border_color, joined);
@@ -1445,11 +1551,11 @@ impl Renderer {
         self.agent_plan = st.agent_rows.to_vec();
         self.agent_open = st.agent_rows.iter().map(|(id, _)| id.clone()).filter(|id| open(id)).collect();
         self.paint_layout(&settled, &mut tail, LayoutInputs {
-            width, height, card_key, card_start, paint_start, input_line_idx, text_cursor, border_color: &border_color,
+            width, height, card_key, card_start, paint_start, input_line_idx, text_cursor, border_color: &border_color, selection: st.selection,
         });
     }
     fn paint_layout(&mut self, settled: &[RenderLine], tail: &mut Vec<RenderLine>, layout: LayoutInputs<'_>) {
-        let LayoutInputs { width, height, card_key, card_start, paint_start, mut input_line_idx, text_cursor, border_color } = layout;
+        let LayoutInputs { width, height, card_key, card_start, paint_start, mut input_line_idx, text_cursor, border_color, selection } = layout;
     // The conversation scrolls; the composer and the footer under it stay where
     // they are, so a reply can be written while reading back.
     let height = height as usize;
@@ -1532,6 +1638,49 @@ impl Renderer {
     rows.drain(..cut);
     let scrolled_marker = usize::from(self.scroll_offset > 0);
     self.chat_view = (first_chat_row + cut, chat_rows.saturating_sub(scrolled_marker).saturating_sub(cut));
+    self.chat_rows_on_screen = chat_rows.saturating_sub(cut);
+    self.screen_width = width;
+    // Where the open overlay's card begins on screen, for clicks: the bottom
+    // block starts where the transcript ends, and the card is its first rows
+    // once the work box above it has had its own.
+    self.overlay_row = if matches!(card_key, CardKey::Overlay(_)) {
+        chat_rows
+            .checked_sub(cut)
+            .and_then(|top| top.checked_sub(card_start))
+            .and_then(|base| base.checked_add(paint_start - card_start))
+    } else {
+        None
+    };
+    // The drag selection, while the button is held: reverse video over the
+    // cells it covers, the way a terminal paints its own. It covers the
+    // transcript's rows only — the card and the footer are not selectable.
+    if let Some(((ar, ac), (hr, hc))) = selection {
+        let (top, left, bottom, right) = if (ar, ac) <= (hr, hc) { (ar, ac, hr, hc) } else { (hr, hc, ar, ac) };
+        let last = self.chat_rows_on_screen.saturating_sub(1);
+        for r in (top as usize)..=(bottom as usize).min(last) {
+            if r >= rows.len() {
+                break;
+            }
+            let (from, to) = if top == bottom {
+                ((left.min(right)) as usize, ((right.max(left)) as usize + 1).min(width))
+            } else if r == top as usize {
+                (left as usize, width)
+            } else if r == bottom as usize {
+                (0, (right as usize + 1).min(width))
+            } else {
+                (0, width)
+            };
+            rows[r] = flashagent_tui::style_span(&rows[r], from, to, "\x1b[7m", "\x1b[27m");
+        }
+    }
+    // The thumb rides the transcript's last column, wherever the view sits in
+    // the conversation. Nothing is drawn while every line already fits.
+    if let Some(sb) = self.scrollbar() {
+        let thumb = "\x1b[1;38;2;225;175;95m█\x1b[0m";
+        for r in sb.top..(sb.top + sb.len).min(rows.len()) {
+            rows[r] = with_right_cell(&rows[r], width, thumb);
+        }
+    }
     self.agent_screen.clear();
     // Where the pinned rows landed, for a click to find: inside the work box,
     // under its top edge, one row per child plus a detail row for one the mouse
@@ -1643,7 +1792,29 @@ impl App {
             self.overlay.as_ref(),
             autocomplete,
             &self.context_usage,
-            FrameState {
+            {
+                // What the pointer would reach on the open card, and what a
+                // press just reached: the hover line is counted from the row
+                // the card's first line took last frame, close enough while
+                // the mouse glides over a card that is not moving.
+                let overlay_hover = match (self.mouse_at, self.renderer.overlay_row) {
+                    (Some((row, col)), Some(top)) if self.overlay.is_some() && (row as usize) >= top => {
+                        Some((row as usize - top, col))
+                    }
+                    _ => None,
+                };
+                let now_ms = anim::now_ms();
+                if self.click_flash.is_some_and(|(_, at)| now_ms.saturating_sub(at) >= CLICK_FLASH_MS) {
+                    self.click_flash = None;
+                }
+                let selection = match (self.selection_anchor, self.selection_head) {
+                    (Some(a), Some(h)) => Some((a, h)),
+                    _ => None,
+                };
+                FrameState {
+                    selection,
+                    overlay_hover,
+                    overlay_flash: self.click_flash.map(|(line, _)| line),
                 cost_display: cost_display.as_deref(),
                 input: &self.input,
                 provider: (self.config.active_profile().name.as_str(), self.current_model.as_str()),
@@ -1688,6 +1859,7 @@ impl App {
                 background_tasks: cx.tools_arc.shells().running_count(),
                 shell_running: self.running && cx.tools_arc.shells().foreground_running(),
                 composer_flash,
+                }
             },
         );
     }
@@ -1762,6 +1934,115 @@ fn key_hints(pairs: &[(&str, &str)], width: usize) -> String {
 /// user can neither see nor scroll back from.
 fn scroll_max(chat_len: usize, chat_room: usize) -> usize {
     if chat_room > 1 { chat_len.saturating_sub(chat_room - 1) } else { 0 }
+}
+
+/// Overwrites the last cell of a row with `cell`, whatever the row holds: the
+/// row is clipped one column short and padded, and the cell goes where the
+/// clipping made room. The scrollbar never widens a line — a wider line would
+/// wrap and push everything under it down.
+fn with_right_cell(line: &str, width: usize, cell: &str) -> String {
+    let room = width.saturating_sub(1).max(1);
+    let clipped = clip_ansi(line, room);
+    let pad = " ".repeat(room.saturating_sub(visible_width(&clipped)));
+    format!("{clipped}{pad}{cell}\x1b[0m")
+}
+
+/// How long a clicked card row keeps its pressed look.
+const CLICK_FLASH_MS: u64 = 220;
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use super::*;
+
+    /// A renderer with a conversation of 1000 lines behind a screen of 40
+    /// transcript rows — enough to scroll, small enough to do the sums by.
+    fn scrolled_renderer() -> Renderer {
+        let mut r = Renderer::new();
+        r.total_lines = 1000;
+        r.chat_rows_on_screen = 40;
+        r.chat_view = (960, 40);
+        r.max_scroll = 960;
+        r.screen_width = 80;
+        r
+    }
+
+    #[test]
+    fn a_conversation_that_fits_draws_no_thumb() {
+        let mut r = Renderer::new();
+        r.total_lines = 10;
+        r.chat_rows_on_screen = 40;
+        r.chat_view = (0, 10);
+        r.max_scroll = 0;
+        assert!(r.scrollbar().is_none(), "nothing to scroll, nothing to draw");
+    }
+
+    #[test]
+    fn the_thumb_reflects_where_the_view_sits() {
+        let mut r = scrolled_renderer();
+        // Anchored at the bottom: the thumb sits at the end of the track.
+        r.scroll_offset = 0;
+        let sb = r.scrollbar().expect("something to scroll");
+        assert_eq!(sb.len, 2, "the screen's share of the conversation, never shorter than two");
+        assert_eq!(sb.top + sb.len, 40, "anchored is the end of the track");
+        assert_eq!(sb.column, 79, "the last cell of the screen");
+        // Scrolled all the way back: the top of the track.
+        r.scroll_offset = r.max_scroll;
+        assert_eq!(r.scrollbar().unwrap().top, 0);
+        // Halfway back: halfway along the room the thumb has to travel.
+        r.scroll_offset = r.max_scroll / 2;
+        let sb = r.scrollbar().unwrap();
+        assert_eq!(sb.top, (40 - sb.len) / 2);
+    }
+
+    #[test]
+    fn a_drag_moves_the_view_by_its_share_of_the_track() {
+        let mut r = scrolled_renderer();
+        // The view is anchored; the thumb is at the track's end. Grabbing it
+        // and dragging to the top of the track reads the top of the
+        // conversation.
+        let bottom = r.scrollbar().unwrap();
+        assert!(r.scrollbar_press(bottom.top as u16, 79), "the press took the thumb");
+        r.scrollbar_follow(0);
+        assert_eq!(r.scroll_offset, 960, "the top of the track is the top of the conversation");
+        // And back down: the view returns to where it was.
+        r.scrollbar_follow(bottom.top as u16);
+        assert_eq!(r.scroll_offset, 0, "the end of the track is the live end");
+    }
+
+    #[test]
+    fn a_press_on_the_track_past_the_thumb_pages_toward_it() {
+        let mut r = scrolled_renderer();
+        let sb = r.scrollbar().unwrap();
+        // The thumb is at the end (anchored); a press above it pages back a
+        // screenful and takes a hold for a drag from there.
+        assert!(r.scrollbar_press(0, 79));
+        assert_eq!(r.scroll_offset, 40, "one page up, the size of what the screen shows");
+        assert!(r.scrollbar_drag.is_some(), "the press keeps the thumb, so the drag can go on");
+        let _ = sb;
+    }
+
+    #[test]
+    fn a_press_outside_the_transcript_is_not_the_scrollbars() {
+        let mut r = scrolled_renderer();
+        assert!(!r.scrollbar_press(45, 79), "the work box and the card under the transcript are no track");
+        assert!(!r.scrollbar_press(0, 10), "a press in any other column selects text, not the thumb");
+        assert!(r.scrollbar_drag.is_none());
+    }
+
+    #[test]
+    fn the_thumb_takes_the_last_cell_without_widening_the_line() {
+        let out = with_right_cell("hello", 10, "█");
+        assert_eq!(visible_width(&out), 10, "five of text, four of pad, one of thumb");
+        let wide = "x".repeat(30);
+        let out = with_right_cell(&wide, 10, "█");
+        assert_eq!(visible_width(&out), 10, "clipped one short, and the thumb goes in its place");
+        // A styled row keeps its styles: the cell carries its own colour and
+        // closes it, whatever the clipped row left open.
+        let styled = "\x1b[38;2;200;195;185mжёлтая строка\x1b[0m";
+        let out = with_right_cell(styled, 12, "█");
+        assert_eq!(visible_width(&out), 12);
+        assert!(out.ends_with("\x1b[0m"), "the row closes what it opened");
+    }
 }
 
 #[cfg(test)]

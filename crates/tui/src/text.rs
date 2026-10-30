@@ -340,6 +340,35 @@ pub fn clip_ansi(text: &str, width: usize) -> String {
     out
 }
 
+/// Wraps the visible cells in `from..to` with `on`…`off`, leaving escapes and
+/// every other cell as they are: a highlight laid over a line that already
+/// carries styles of its own. Reverse video (`\x1b[7m`) reads as a selection
+/// over any colour the line was drawn in.
+pub fn style_span(line: &str, from: usize, to: usize, on: &str, off: &str) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    let to = to.max(from);
+    let mut out = String::with_capacity(line.len());
+    let mut used = 0usize;
+    for (escape, piece) in ansi_pieces(line) {
+        if escape {
+            out.push_str(piece);
+            continue;
+        }
+        for g in piece.graphemes(true) {
+            let start = used;
+            used += cells(g);
+            if used > from && start < to {
+                out.push_str(on);
+                out.push_str(g);
+                out.push_str(off);
+            } else {
+                out.push_str(g);
+            }
+        }
+    }
+    out
+}
+
 /// Rows of at most `width` cells, split anywhere: for a column narrower than
 /// `wrap_styled` will work with. Escapes travel with their piece.
 pub(crate) fn split_cells_styled(text: &str, width: usize) -> Vec<String> {
@@ -645,5 +674,37 @@ mod tests {
         }
         let plain: Vec<String> = rows.iter().map(|r| strip_ansi(r)).collect();
         assert_eq!(plain.join(" "), "alpha beta gamma delta epsilon zeta eta theta", "no word lost or doubled");
+    }
+}
+
+#[cfg(test)]
+mod style_span_tests {
+    use super::*;
+
+    #[test]
+    fn the_highlight_covers_its_cells_and_nothing_else() {
+        let out = style_span("hello world", 2, 7, "\x1b[7m", "\x1b[27m");
+        assert_eq!(visible_width(&out), 11, "the line keeps its width");
+        // The two highlighted cells sit where they were.
+        let plain = strip_ansi(&out);
+        assert_eq!(plain, "hello world");
+        assert_eq!(out.matches("\x1b[7m").count(), 5, "each of the five covered cells");
+    }
+
+    #[test]
+    fn a_highlight_over_styled_text_keeps_both() {
+        let line = "\x1b[38;2;200;195;185mслово и ещё\x1b[0m";
+        let out = style_span(line, 0, 5, "\x1b[7m", "\x1b[27m");
+        assert_eq!(strip_ansi(&out), "слово и ещё", "the text is untouched");
+        assert!(out.contains("\x1b[38;2;200;195;185m"), "the line's own colour survives");
+        assert!(out.contains("\x1b[7m"), "the highlight rides on top");
+    }
+
+    #[test]
+    fn a_span_past_the_line_is_clamped() {
+        let out = style_span("hi", 5, 100, "\x1b[7m", "\x1b[27m");
+        assert_eq!(strip_ansi(&out), "hi", "nothing to cover past the end");
+        let out = style_span("hi", 1, 0, "\x1b[7m", "\x1b[27m");
+        assert_eq!(strip_ansi(&out), "hi", "an empty span covers nothing");
     }
 }

@@ -14,6 +14,7 @@ const TEXT_BRIGHT: &str = "\x1b[1;38;2;245;240;235m";
 const TEXT_MUTED: &str = "\x1b[38;2;145;150;160m";
 const TEXT_GREEN: &str = "\x1b[38;2;135;220;145m";
 const TEXT_OFF: &str = "\x1b[38;2;130;135;145m";
+const TEXT_AMBER: &str = "\x1b[38;2;225;175;95m";
 
 /// The tools a safe session does not have: the shell, the web and the
 /// subagents. Reading and editing inside the project stay, so the agent can
@@ -76,6 +77,37 @@ impl ToolsView {
         let next = (self.selected as isize + delta).clamp(0, last) as usize;
         self.selected = next;
         self.keep_visible();
+    }
+
+    /// The wheel moves the cursor with its window, a notch at a time. True
+    /// when there was a row to move to.
+    pub fn wheel(&mut self, dir: i32) -> bool {
+        if self.rows.is_empty() {
+            return false;
+        }
+        let was = self.selected;
+        self.move_by(dir as isize);
+        self.selected != was
+    }
+
+    /// A click on the card. `line` counts from the title row. A row selects
+    /// its tool; the tool already under the cursor turns on or off, as Space
+    /// would — a click is a focus first, an action second.
+    pub fn click(&mut self, line: usize) -> ToolsAction {
+        // The title and the separator under it belong to the box.
+        const FIRST_ROW_LINE: usize = 2;
+        let Some(in_window) = line.checked_sub(FIRST_ROW_LINE) else { return ToolsAction::None };
+        let idx = in_window + self.scroll;
+        if idx >= self.rows.len() {
+            return ToolsAction::None;
+        }
+        if idx != self.selected {
+            self.selected = idx;
+            self.keep_visible();
+            ToolsAction::None
+        } else {
+            self.toggle()
+        }
     }
 
     /// The row the cursor is on, if there is one.
@@ -142,7 +174,7 @@ impl ToolsView {
     }
 
     /// The list, as it is drawn.
-    pub fn render(&self, width: usize) -> Vec<RenderLine> {
+    pub fn render(&self, width: usize, hover: Option<(usize, u16)>, flash: Option<usize>) -> Vec<RenderLine> {
         let mut lines = Vec::new();
         let box_w = width.saturating_sub(6).min(100);
         let inner_w = box_w.saturating_sub(2);
@@ -168,16 +200,29 @@ impl ToolsView {
         let height = self.height.max(1);
         let end = (self.scroll + height).min(self.rows.len());
         for (idx, row) in self.rows[self.scroll.min(self.rows.len())..end].iter().enumerate() {
+            let card_line = 2 + idx;
             let is_sel = self.scroll + idx == self.selected;
+            let is_hover = hover.map(|(l, _)| l) == Some(card_line) && !is_sel && flash != Some(card_line);
+            let is_press = flash == Some(card_line);
             // The same mark the plan steps use: a glyph both Windows console
             // fonts have, or it shows as a box on half the terminals.
             let mark = if row.on { "√" } else { "·" };
-            let (mark_styled, name_styled) = if row.on {
+            let (mark_styled, name_styled) = if is_press {
+                (format!("{TEXT_AMBER}{mark}{RESET}"), format!("{TEXT_AMBER}{}{RESET}", row.name))
+            } else if row.on {
                 (format!("{TEXT_GREEN}{mark}{RESET}"), format!("{TEXT_BRIGHT}{}{RESET}", row.name))
+            } else if is_hover {
+                (format!("{TEXT_OFF}{mark}{RESET}"), format!("{TEXT_MUTED}{}{RESET}", row.name))
             } else {
                 (format!("{TEXT_OFF}{mark}{RESET}"), format!("{TEXT_OFF}{}{RESET}", row.name))
             };
-            let pointer = if is_sel { format!("{TEXT_BRIGHT}▸{RESET}") } else { " ".to_string() };
+            let pointer = if is_sel || is_press {
+                format!("{TEXT_BRIGHT}▸{RESET}")
+            } else if is_hover {
+                format!("{TEXT_MUTED}·{RESET}")
+            } else {
+                " ".to_string()
+            };
             // The description the model gets stays English; the person reads
             // it in their own language.
             let description = crate::i18n::tr(&row.description);
@@ -250,9 +295,44 @@ mod tests {
     #[test]
     fn the_list_is_drawn_with_what_is_on() {
         let v = ToolsView::new(rows());
-        let screen: Vec<String> = v.render(80).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
+        let screen: Vec<String> = v.render(80, None, None).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
         assert!(screen.iter().any(|l| l.contains("read_file")), "{screen:#?}");
         assert!(screen.iter().any(|l| l.contains("2 of 3 on")), "{screen:#?}");
         assert!(screen.iter().any(|l| l.contains("not offered here")), "{screen:#?}");
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+
+    fn view() -> ToolsView {
+        ToolsView::new(vec![
+            ToolRow { name: "read_file".into(), description: "reads".into(), on: true, available: true },
+            ToolRow { name: "run_shell".into(), description: "runs".into(), on: false, available: true },
+        ])
+    }
+
+    #[test]
+    fn a_click_selects_a_tool_and_the_selected_one_toggles() {
+        let mut v = view();
+        assert_eq!(v.click(3), ToolsAction::None, "line 3 is the second row: the first click only focuses");
+        assert_eq!(v.selected, 1);
+        assert_eq!(v.click(3), ToolsAction::Toggle("run_shell".into(), true), "the focused row toggles, as Space would");
+        assert!(v.rows[1].on);
+        assert_eq!(v.click(0), ToolsAction::None, "the title is not a row");
+    }
+
+    #[test]
+    fn the_wheel_walks_the_rows_and_stops_at_the_ends() {
+        let mut v = view();
+        assert!(v.wheel(1));
+        assert_eq!(v.selected, 1);
+        assert!(!v.wheel(1), "already at the last row: no move, no reaction");
+        assert_eq!(v.selected, 1, "no wrap");
+        assert!(v.wheel(-1));
+        assert_eq!(v.selected, 0);
+        assert!(!v.wheel(-1), "the first row holds: no move, no reaction");
+        assert_eq!(v.selected, 0);
     }
 }

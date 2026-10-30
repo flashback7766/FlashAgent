@@ -122,6 +122,9 @@ fn goal_tokens_label(tokens: Option<i64>) -> String {
     }
 }
 
+/// The first item row of the card: title, tabs line and separator before it.
+const FIRST_ITEM_LINE: usize = 3;
+
 pub struct SettingsView {
     pub config: AppConfig,
     pub active_tab: SettingsTab,
@@ -662,7 +665,97 @@ impl SettingsView {
         self.config.network_retries = retries[next_idx];
     }
 
-    pub fn render(&self, width: usize) -> Vec<RenderLine> {
+    /// The wheel moves the selection the way the arrows do, but stops at the
+    /// ends instead of wrapping: a list run through with a hand should not
+    /// jump back to its start. True when it moved.
+    pub fn wheel(&mut self, dir: i32) -> bool {
+        let total = self.total_items();
+        if total == 0 {
+            return false;
+        }
+        let was = self.selected_index;
+        self.selected_index = (self.selected_index as isize + dir as isize).clamp(0, total as isize - 1) as usize;
+        self.selected_index != was
+    }
+
+    /// A click on the card. `line` counts from the card's first row on screen
+    /// (the title), `column` from the screen's left edge, `width` is the width
+    /// the tabs line was fitted to. A row selects its item; the row already
+    /// selected acts, as Enter would — a click is a focus first, an action
+    /// second, so a stray press on the way to another row changes nothing.
+    pub fn click(&mut self, line: usize, column: usize, width: usize) -> SettingsAction {
+        if line == 1 {
+            if let Some(tab) = Self::tab_at(width, column, self.active_tab) {
+                if tab != self.active_tab {
+                    self.active_tab = tab;
+                    self.selected_index = 0;
+                }
+            }
+            return SettingsAction::None;
+        }
+        // The title, the tabs and the separator under them belong to the box;
+        // the first item is the fourth row of the card.
+        let Some(idx) = line.checked_sub(FIRST_ITEM_LINE) else { return SettingsAction::None };
+        if idx >= self.items().len() {
+            // The note, the hints and the border: part of the card, not of a row.
+            return SettingsAction::None;
+        }
+        if idx != self.selected_index {
+            self.selected_index = idx;
+            return SettingsAction::None;
+        }
+        self.trigger_action()
+    }
+
+    /// Which tab a click on the tabs line landed on, if one. The line is
+    /// fitted and the labels measured the way `render` fits and measures
+    /// them, so a click means what the screen shows.
+    fn tab_at(width: usize, column: usize, active: SettingsTab) -> Option<SettingsTab> {
+        let box_w = width.saturating_sub(6).min(100);
+        let inner_text_w = box_w.saturating_sub(2);
+        let label_of = |tab: &SettingsTab, numbers_only: bool| -> (String, usize) {
+            let label = tab.label();
+            let shown = if numbers_only { label.split(' ').next().unwrap_or(label).to_string() } else { label.to_string() };
+            let cells = if *tab == active {
+                // The one in use sits in brackets, full label even when the
+                // others are their numbers.
+                label.chars().count() + 2
+            } else {
+                shown.chars().count() + 2
+            };
+            (shown, cells)
+        };
+        let fits = |gap: usize, numbers_only: bool| -> bool {
+            let gap_line = " ".repeat(gap);
+            let width = SettingsTab::all()
+                .iter()
+                .map(|tab| label_of(tab, numbers_only).1)
+                .sum::<usize>()
+                + gap_line.len() * (SettingsTab::all().len() - 1)
+                + 1;
+            width <= inner_text_w
+        };
+        let (gap, numbers_only) = [(2usize, false), (1, false), (0, false)]
+            .into_iter()
+            .find(|(gap, numbers_only)| fits(*gap, *numbers_only))
+            .unwrap_or((0, true));
+        // pad_row puts the content four cells in; the joined labels carry a
+        // leading space of their own.
+        let mut col = 5usize;
+        for (i, tab) in SettingsTab::all().iter().enumerate() {
+            let (_, cells) = label_of(tab, numbers_only);
+            if column >= col && column < col + cells {
+                return Some(*tab);
+            }
+            col += cells;
+            if i + 1 < SettingsTab::all().len() {
+                col += gap;
+            }
+        }
+        None
+    }
+
+    pub fn render(&self, width: usize, hover: Option<(usize, u16)>, flash: Option<usize>) -> Vec<RenderLine> {
         let mut lines = Vec::new();
         let box_w = width.saturating_sub(6).min(100);
         let inner_text_w = box_w.saturating_sub(2);
@@ -694,7 +787,16 @@ impl SettingsView {
                         format!("\x1b[1;38;2;225;175;95m[{tab_lbl}]\x1b[0m")
                     } else {
                         let shown = if numbers_only { tab_lbl.split(' ').next().unwrap_or(tab_lbl) } else { tab_lbl };
-                        format!("\x1b[38;2;135;130;125m {shown} \x1b[0m")
+                        // The tab the pointer is over takes the colour of the
+                        // one in use, without its brackets: a hover says a
+                        // press would go there, not that it is there.
+                        let hovered =
+                            hover.is_some_and(|(line, col)| line == 1 && Self::tab_at(width, col as usize, self.active_tab) == Some(*tab));
+                        if hovered {
+                            format!("\x1b[38;2;185;150;90m {shown} \x1b[0m")
+                        } else {
+                            format!("\x1b[38;2;135;130;125m {shown} \x1b[0m")
+                        }
                     }
                 })
                 .collect();
@@ -717,14 +819,37 @@ impl SettingsView {
         let label_w = if inner_text_w < 60 { (longest + 1).min(24) } else { 24 };
         let max_val_w = inner_text_w.saturating_sub(label_w + 4);
 
+        let hover_line = hover.map(|(l, _)| l);
         for (idx, (label, val_raw)) in items.iter().enumerate() {
+            let card_line = FIRST_ITEM_LINE + idx;
             let is_sel = idx == self.selected_index;
-            let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+            // The pointer is what a hover shows where nothing else moves; a
+            // click just made lights the whole row amber for a moment, so a
+            // press answers even where the state it changed does not show.
+            let is_hover = hover_line == Some(card_line) && !is_sel && flash != Some(card_line);
+            let is_press = flash == Some(card_line);
+            let ptr = if is_sel || is_press {
+                "\x1b[1;38;2;225;175;95m▸\x1b[0m"
+            } else if is_hover {
+                "\x1b[38;2;135;130;125m·\x1b[0m"
+            } else {
+                " "
+            };
             let val = crate::truncate_middle(val_raw, max_val_w);
-            let (label_styled, val_styled) = if is_sel {
+            let (label_styled, val_styled) = if is_press {
+                (
+                    format!("\x1b[1;38;2;225;175;95m{:<label_w$}\x1b[0m", label),
+                    format!("\x1b[1;38;2;225;175;95m{val}\x1b[0m"),
+                )
+            } else if is_sel {
                 (
                     format!("\x1b[1;38;2;240;235;225m{:<label_w$}\x1b[0m", label),
                     format!("\x1b[1;38;2;225;175;95m{val}\x1b[0m"),
+                )
+            } else if is_hover {
+                (
+                    format!("\x1b[38;2;200;195;185m{:<label_w$}\x1b[0m", label),
+                    format!("\x1b[38;2;220;215;205m{val}\x1b[0m"),
                 )
             } else {
                 (
@@ -903,7 +1028,7 @@ mod tests {
         let mut view = SettingsView::new(AppConfig::default(), Vec::new());
         view.handle_key(KeyCode::Char('5'), KeyModifiers::empty());
         assert_eq!(view.active_tab, SettingsTab::Goal);
-        let shown = |v: &SettingsView| v.render(100).iter().map(|(_, t)| t.clone()).collect::<Vec<_>>().join("\n");
+        let shown = |v: &SettingsView| v.render(100, None, None).iter().map(|(_, t)| t.clone()).collect::<Vec<_>>().join("\n");
         assert!(shown(&view).contains("Unlimited"), "{}", shown(&view));
 
         view.handle_key(KeyCode::Enter, KeyModifiers::empty());
@@ -932,7 +1057,7 @@ mod tests {
         let view = SettingsView::new(cfg, vec!["model-a".into()]);
 
         for width in [44, 50, 60, 80, 100, 120] {
-            let rendered = view.render(width);
+            let rendered = view.render(width, None, None);
             let tabs = crate::strip_ansi(&rendered[1].1);
             assert!(tabs.contains("[1 General]") && tabs.contains(" 7") && !tabs.contains('…'), "{width}: {tabs:?}");
             assert!(!rendered.is_empty());
@@ -961,7 +1086,7 @@ mod tests {
     fn the_hints_end_with_the_way_out() {
         let mut view = SettingsView::new(AppConfig::default(), Vec::new());
         let last_hint = |v: &SettingsView| {
-            let rows = v.render(100);
+            let rows = v.render(100, None, None);
             crate::strip_ansi(&rows[rows.len() - 2].1)
         };
         assert!(last_hint(&view).contains("Tab/1-7 switch tab"), "{}", last_hint(&view));
@@ -1041,7 +1166,7 @@ mod tests {
     #[test]
     fn the_provider_row_shows_the_one_in_use_and_the_arrows_go_through_the_saved_ones() {
         let mut view = SettingsView::new(with_providers(), vec!["model-a".into(), "model-b".into()]);
-        let shown = |v: &SettingsView| v.render(120).iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        let shown = |v: &SettingsView| v.render(120, None, None).iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
         assert!(shown(&view).contains("Home · http://localhost:1234/v1"), "{}", shown(&view));
         assert!(!shown(&view).contains("restart"), "a provider applies at once: {}", shown(&view));
         view.handle_key(KeyCode::Right, KeyModifiers::empty());
@@ -1078,9 +1203,65 @@ mod tests {
         }
         view.handle_key(KeyCode::Left, KeyModifiers::empty());
         assert_eq!(view.config.personality.emoji, flashagent_core::TraitLevel::Less);
-        let shown = view.render(100).iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        let shown = view.render(100, None, None).iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
         assert!(shown.contains("Friendly — Warm and chatty"), "{shown}");
         assert!(shown.contains("Less — Don't use as many emoji"), "{shown}");
         assert!(shown.lines().all(|l| crate::visible_width(l) <= 100), "{shown}");
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+
+    #[test]
+    fn the_wheel_stops_at_the_ends_instead_of_wrapping() {
+        let mut view = SettingsView::new(AppConfig::default(), Vec::new());
+        let total = view.total_items();
+        view.wheel(-1);
+        assert_eq!(view.selected_index, 0, "already at the top: the wheel does nothing");
+        for _ in 0..total + 3 {
+            view.wheel(1);
+        }
+        assert_eq!(view.selected_index, total - 1, "the end holds, however far the hand spins");
+    }
+
+    #[test]
+    fn a_click_selects_its_row_and_the_selected_row_acts() {
+        let mut view = SettingsView::new(AppConfig::default(), Vec::new());
+        // General tab: 0 provider, 1 model, 2 mode, 3 safe mode.
+        assert_eq!(view.click(FIRST_ITEM_LINE + 3, 10, 100), SettingsAction::None);
+        assert_eq!(view.selected_index, 3, "the first click only focuses the row");
+        let before = view.config.safe_mode;
+        assert_eq!(view.click(FIRST_ITEM_LINE + 3, 10, 100), SettingsAction::None);
+        assert_eq!(view.config.safe_mode, !before, "the focused row acts, as Enter would");
+        // The note, the hints and the border belong to the card, not to a row.
+        assert_eq!(view.click(FIRST_ITEM_LINE + 40, 10, 100), SettingsAction::None);
+        assert_eq!(view.selected_index, 3, "nothing below the rows moved the selection");
+    }
+
+    #[test]
+    fn a_click_on_the_tabs_line_switches_to_the_label_it_landed_on() {
+        let mut view = SettingsView::new(AppConfig::default(), Vec::new());
+        // The span the Updates label takes, laid out the way render lays it out.
+        let mut first = None;
+        let mut last = None;
+        for column in 0..120 {
+            if SettingsView::tab_at(100, column, SettingsTab::General) == Some(SettingsTab::Updates) {
+                first.get_or_insert(column);
+                last = Some(column);
+            }
+        }
+        let first = first.expect("the Updates label sits somewhere on the tabs line");
+        let last = last.expect("and it ends");
+        for column in first..=last {
+            assert_eq!(SettingsView::tab_at(100, column, SettingsTab::General), Some(SettingsTab::Updates), "column {column}");
+        }
+        // The click does what the label says: the tab changes, its rows start over.
+        assert_eq!(view.click(1, first, 100), SettingsAction::None);
+        assert_eq!(view.active_tab, SettingsTab::Updates);
+        assert_eq!(view.selected_index, 0);
+        // Past the box's right border there is no label at all.
+        assert_eq!(SettingsView::tab_at(100, 130, SettingsTab::General), None);
     }
 }

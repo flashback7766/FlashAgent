@@ -889,6 +889,18 @@ struct App {
     /// Where a mouse selection started, in (row, column). A drag from here is
     /// copied as it is made.
     selection_anchor: Option<(u16, u16)>,
+    /// Where the drag has reached: the other end of the selection the screen
+    /// paints while the button is held. Both ends go when it ends.
+    selection_head: Option<(u16, u16)>,
+    /// Where the mouse is, as the last event said. A screen under the pointer
+    /// marks what a press would reach.
+    mouse_at: Option<(u16, u16)>,
+    /// The card line the pointer last hovered, so a movement that crosses no
+    /// row boundary draws no frame.
+    hovered_card: Option<(usize, u16)>,
+    /// The card line a click just landed on, and when: the row keeps a
+    /// pressed look for a moment, so a click answers even where nothing moves.
+    click_flash: Option<(usize, u64)>,
     /// What a wheel throw still has left to spend: a trackpad's flick arrives as
     /// a burst of small events and would otherwise stop dead at the end of it.
     wheel_momentum: i32,
@@ -1497,6 +1509,10 @@ fn initial_app(init: InitialApp) -> App {
         agents: flashagent_tui::agents::AgentTree::default(),
         expanded_agents: std::collections::HashSet::new(),
         selection_anchor: None,
+        selection_head: None,
+        mouse_at: None,
+        hovered_card: None,
+        click_flash: None,
         wheel_momentum: 0,
         task_lines: Vec::new(),
         tasks_refreshed: std::time::Instant::now(),
