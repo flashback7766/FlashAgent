@@ -65,7 +65,7 @@ impl App {
                 }
                 self.renderer.request_reprint();
             }
-            UiEvent::Mouse(m) => self.on_mouse(m),
+            UiEvent::Mouse(m) => self.on_mouse(cx, m).await,
             UiEvent::Paste(pasted) => {
                 self.postpone_recap();
                 self.on_paste(cx, &pasted);
@@ -689,31 +689,43 @@ impl App {
         }
     }
 
-    fn on_mouse(&mut self, m: crossterm::event::MouseEvent) {
-        if let Some(menu) = self.overlay.as_mut().and_then(Overlay::select_menu_mut) {
-            match m.kind {
-                MouseEventKind::ScrollUp => menu.up(),
-                MouseEventKind::ScrollDown => menu.down(),
-                _ => {}
-            }
-            self.renderer.request_reprint();
+    async fn on_mouse(&mut self, cx: &mut LoopCtx<'_>, m: crossterm::event::MouseEvent) {
+        // Shift belongs to the terminal: with the app holding the mouse, the
+        // one modifier every terminal keeps for itself is the way to select
+        // what the screen shows over what the app would do with the press.
+        if m.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
             return;
         }
-        // A screen that is not a list: the wheel must not scroll the transcript behind it.
-        if self.overlay.is_some() {
-            return;
-        }
+        self.mouse_at = Some((m.row, m.column));
         match m.kind {
-            // A trackpad sends many small wheel events where a wheel sends one
-            // per notch; three lines apiece made a two-finger flick jump down the
-            // transcript. One line per event, and the rest of the throw is spent
-            // out over the following frames instead of being cut off at the end.
-            MouseEventKind::ScrollUp => self.wheel(-1),
-            MouseEventKind::ScrollDown => self.wheel(1),
-            // A selection made with a finger or a trackpad is copied as it is
-            // made. Nothing else will copy it: a TUI has no Ctrl+C for text the
-            // terminal itself never held.
+            // The pointer crossing a card marks what a press would reach. A
+            // frame is drawn only when it crosses a row's boundary: a motion
+            // inside one row changed nothing worth a repaint.
+            MouseEventKind::Moved => {
+                let want = self
+                    .renderer
+                    .overlay_row
+                    .filter(|_| self.overlay.is_some())
+                    .filter(|top| (m.row as usize) >= *top)
+                    .map(|top| (m.row as usize - top, m.column));
+                if want != self.hovered_card {
+                    self.hovered_card = want;
+                    self.renderer.request_reprint();
+                }
+            }
+            MouseEventKind::ScrollUp => self.wheel_at(-1),
+            MouseEventKind::ScrollDown => self.wheel_at(1),
+            // A thumb under the hand follows the mouse, and that is all it
+            // does until the button comes back up.
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                if self.renderer.scrollbar_follow(m.row) {
+                    self.renderer.request_reprint();
+                    return;
+                }
+                self.selection_head = Some((m.row, m.column));
+                // A selection made with a finger or a trackpad is copied as it is
+                // made. Nothing else will copy it: a TUI has no Ctrl+C for text the
+                // terminal itself never held.
                 if let Some((top, left)) = self.selection_anchor {
                     let picked = self.renderer.text_in(top, m.row, left, m.column);
                     if picked.chars().count() > 1 && flashagent_tui::clipboard::set_clipboard_text(&picked) {
@@ -724,23 +736,81 @@ impl App {
                 }
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                self.selection_anchor = Some((m.row, m.column));
-                // A click on a thought or a tool call opens or folds that one alone.
-                // A subagent row opens its own detail too, and only the mouse does:
-                // F2 is for the transcript and never touches the rows above the composer.
-                if let Some(id) = self.renderer.agent_row_at(m.row).map(str::to_string) {
-                    if !self.expanded_agents.remove(&id) {
-                        self.expanded_agents.insert(id);
-                    }
-                    self.renderer.request_reprint();
-                    return;
-                }
-                let expansion = ReasoningExpansion { all: self.all_expanded, last: self.last_expanded };
-                if let Some(row) = self.renderer.chat_row_at(m.row) {
-                    self.chat.toggle_row(row, expansion);
-                }
+                self.press_at(cx, m).await;
+            }
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                self.renderer.scrollbar_drag = None;
+                // The selection was copied as it was made; what is left of it
+                // on screen goes with the button.
+                self.selection_anchor = None;
+                self.selection_head = None;
             }
             _ => {}
+        }
+    }
+
+    /// The wheel goes to what is on the screen: an open overlay's own list,
+    /// or the transcript under it. A screen that does not scroll does not
+    /// pass the wheel through to the conversation behind it.
+    fn wheel_at(&mut self, dir: i32) {
+        if self.renderer.scrollbar_drag.is_some() {
+            return;
+        }
+        if let Some(menu) = self.overlay.as_mut().and_then(Overlay::select_menu_mut) {
+            if dir < 0 {
+                menu.up();
+            } else {
+                menu.down();
+            }
+            self.renderer.request_reprint();
+            return;
+        }
+        if self.overlay.is_some() {
+            if self.overlay.as_mut().is_some_and(|o| o.wheel(dir)) {
+                self.renderer.request_reprint();
+            }
+            return;
+        }
+        self.wheel(dir);
+    }
+
+    /// Where a press lands decides what it does: the scrollbar's thumb, a
+    /// pinned subagent row, the open overlay's card, or the transcript.
+    async fn press_at(&mut self, cx: &mut LoopCtx<'_>, m: crossterm::event::MouseEvent) {
+        // The scrollbar's column is the transcript's own widget; a press
+        // there never selects text or folds a row.
+        if self.renderer.scrollbar_press(m.row, m.column) {
+            self.renderer.request_reprint();
+            return;
+        }
+        self.selection_anchor = Some((m.row, m.column));
+        // A click on a thought or a tool call opens or folds that one alone.
+        // A subagent row opens its own detail too, and only the mouse does:
+        // F2 is for the transcript and never touches the rows above the composer.
+        if let Some(id) = self.renderer.agent_row_at(m.row).map(str::to_string) {
+            if !self.expanded_agents.remove(&id) {
+                self.expanded_agents.insert(id);
+            }
+            self.renderer.request_reprint();
+            return;
+        }
+        // The open overlay's card, once the press is on the card itself; a
+        // press in the transcript above it reads the transcript as before.
+        if let Some(top) = self.renderer.overlay_row {
+            if (m.row as usize) >= top {
+                let line = m.row as usize - top;
+                // The row answers for a moment even where nothing else moves:
+                // a click that toggled something one row down would otherwise
+                // read as lost.
+                self.click_flash = Some((line, flashagent_tui::anim::now_ms()));
+                self.overlay_click(cx, line, m.column as usize).await;
+                self.renderer.request_reprint();
+                return;
+            }
+        }
+        let expansion = ReasoningExpansion { all: self.all_expanded, last: self.last_expanded };
+        if let Some(row) = self.renderer.chat_row_at(m.row) {
+            self.chat.toggle_row(row, expansion);
         }
     }
 

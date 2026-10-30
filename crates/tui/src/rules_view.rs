@@ -139,6 +139,36 @@ impl RulesView {
         }
     }
 
+    /// The wheel moves the selection with its window, stopping at the ends.
+    /// A wheel over the confirm state clears it, as any other move does.
+    pub fn wheel(&mut self, dir: i32) -> bool {
+        if self.rows.is_empty() {
+            return false;
+        }
+        let was = self.selected;
+        self.confirm_clear = false;
+        let last = self.rows.len() as isize - 1;
+        self.selected = (self.selected as isize + dir as isize).clamp(0, last) as usize;
+        self.keep_visible();
+        self.selected != was
+    }
+
+    /// A click selects the row it landed on. Taking a rule back stays with
+    /// the keys: a click is a poor place for a destructive surprise.
+    pub fn click_select(&mut self, line: usize) -> bool {
+        // Title, what the list is, a blank — then the rows.
+        const FIRST_ROW_LINE: usize = 3;
+        let Some(in_window) = line.checked_sub(FIRST_ROW_LINE) else { return false };
+        let idx = in_window + self.scroll;
+        if idx >= self.rows.len() || idx == self.selected {
+            return false;
+        }
+        self.confirm_clear = false;
+        self.selected = idx;
+        self.keep_visible();
+        true
+    }
+
     /// What a rule of this kind is called.
     fn kind_label(kind: RuleKind) -> &'static str {
         match kind {
@@ -148,7 +178,7 @@ impl RulesView {
         }
     }
 
-    pub fn render(&self, width: usize) -> Vec<RenderLine> {
+    pub fn render(&self, width: usize, hover: Option<(usize, u16)>, flash: Option<usize>) -> Vec<RenderLine> {
         let mut lines = Vec::new();
         let box_w = width.saturating_sub(6).min(100);
         let inner_w = box_w.saturating_sub(2);
@@ -183,14 +213,20 @@ impl RulesView {
         let height = self.height.max(1);
         let end = (self.scroll + height).min(self.rows.len());
         for (idx, row) in self.rows[self.scroll.min(self.rows.len())..end].iter().enumerate() {
+            let card_line = 3 + idx;
             let is_sel = self.scroll + idx == self.selected;
-            let pointer = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+            let is_hover = hover.map(|(l, _)| l) == Some(card_line) && !is_sel && flash != Some(card_line);
+            let is_press = flash == Some(card_line);
+            let pointer = if is_sel || is_press {
+                "\x1b[1;38;2;225;175;95m▸\x1b[0m"
+            } else if is_hover {
+                "\x1b[38;2;135;130;125m·\x1b[0m"
+            } else {
+                " "
+            };
             let kind = crate::i18n::tr(Self::kind_label(row.kind));
-            let body = format!(
-                "{pointer} \x1b[38;2;160;155;145m{:<10}\x1b[0m \x1b[38;2;235;230;220m{}\x1b[0m",
-                kind,
-                row.text
-            );
+            let text_color = if is_press { "\x1b[38;2;225;175;95m" } else { "\x1b[38;2;235;230;220m" };
+            let body = format!("{pointer} \x1b[38;2;160;155;145m{:<10}\x1b[0m {text_color}{}\x1b[0m", kind, row.text);
             lines.push((LineKind::System, pad_row(&body)));
         }
 
@@ -284,7 +320,7 @@ mod tests {
     #[test]
     fn the_panel_says_what_to_do() {
         let v = view();
-        let rows: Vec<String> = v.render(80).iter().map(|(_, l)| crate::strip_ansi(l)).collect();
+        let rows: Vec<String> = v.render(80, None, None).iter().map(|(_, l)| crate::strip_ansi(l)).collect();
         let text = rows.join("\n");
         assert!(text.contains("Standing permissions"), "{text}");
         assert!(text.contains("d"), "the keys are not named: {text}");
@@ -315,5 +351,49 @@ mod tests {
                 "{phrase:?} has no Russian version"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+    use flashagent_core::permissions::RuleKind;
+
+    fn view() -> RulesView {
+        RulesView {
+            rows: vec![
+                RuleRow { kind: RuleKind::Tool, text: "read_file".into() },
+                RuleRow { kind: RuleKind::ShellPrefix, text: "git ".into() },
+            ],
+            selected: 0,
+            scroll: 0,
+            height: 10,
+            confirm_clear: false,
+        }
+    }
+
+    #[test]
+    fn a_click_selects_its_row_and_takes_no_rule_back() {
+        let mut v = view();
+        assert!(v.click_select(4), "line 4 is the second row");
+        assert_eq!(v.selected, 1);
+        assert!(!v.click_select(4), "the row under the cursor is already the selected one");
+        assert!(v.click_select(3));
+        assert_eq!(v.selected, 0);
+        assert!(!v.click_select(1), "the title is not a row");
+        assert!(!v.confirm_clear, "a click never arms the clear-everything state");
+    }
+
+    #[test]
+    fn the_wheel_moves_the_selection_and_stops_at_the_ends() {
+        let mut v = view();
+        assert!(v.wheel(1));
+        assert_eq!(v.selected, 1);
+        assert!(!v.wheel(1), "the last row holds: no move, no reaction");
+        assert_eq!(v.selected, 1, "no wrap");
+        assert!(v.wheel(-1));
+        assert_eq!(v.selected, 0);
+        assert!(!v.wheel(-1), "the first row holds: no move, no reaction");
+        assert_eq!(v.selected, 0);
     }
 }

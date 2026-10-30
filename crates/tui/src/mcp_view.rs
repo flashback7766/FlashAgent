@@ -116,6 +116,18 @@ impl McpModal {
         }
     }
 
+    /// The wheel moves the cursor within the tab it is on, stopping at the
+    /// ends. A confirmation waiting for its answer is left as it is.
+    pub fn wheel(&mut self, dir: i32) -> bool {
+        let total = self.total_items();
+        if total == 0 {
+            return false;
+        }
+        let was = self.selected_index;
+        self.selected_index = (self.selected_index as isize + dir as isize).clamp(0, total as isize - 1) as usize;
+        self.selected_index != was
+    }
+
     /// The trusted server under the cursor, if the cursor is on one.
     fn trusted_at(&self, index: usize) -> Option<&TrustedServer> {
         index.checked_sub(self.servers.len()).and_then(|i| self.trusted.get(i))

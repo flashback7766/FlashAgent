@@ -315,15 +315,30 @@ impl App {
         // Live session values.
         let shown_mode = self.goal_state.as_ref().map_or(cx.perm.state().mode(), |g| g.mode);
         let shown_effort = self.goal_state.as_ref().map_or(self.current_effort.clone(), |g| g.effort.clone());
-        match settings.handle_key(code, mods) {
-            SettingsAction::Close => self.close_settings(cx, settings, shown_mode, &shown_effort),
+        let action = settings.handle_key(code, mods);
+        self.process_settings_action(cx, settings, action, shown_mode, &shown_effort).await;
+    }
+
+    /// What a settings action starts. The mouse sends its clicks here as the
+    /// keys send theirs: one path, so a row clicked and a row keyed cannot
+    /// grow into two different apps.
+    pub(crate) async fn process_settings_action(
+        &mut self,
+        cx: &mut LoopCtx<'_>,
+        mut settings: Box<SettingsView>,
+        action: SettingsAction,
+        shown_mode: PermissionMode,
+        shown_effort: &str,
+    ) {
+        match action {
+            SettingsAction::Close => self.close_settings(cx, settings, shown_mode, shown_effort),
             SettingsAction::OpenTools => {
                 // The list of tools, with what is off in it already.
-                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
+                self.keep_settings(cx, &settings.config, shown_mode, shown_effort);
                 self.tools_command(cx);
             }
             SettingsAction::OpenProviders => {
-                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
+                self.keep_settings(cx, &settings.config, shown_mode, shown_effort);
                 self.open_providers_view();
             }
             SettingsAction::RunToolTest => {
@@ -337,19 +352,19 @@ impl App {
                 self.overlay = Some(Overlay::Settings(settings));
             }
             SettingsAction::OpenModelMenu => {
-                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
+                self.keep_settings(cx, &settings.config, shown_mode, shown_effort);
                 self.open_model_menu(cx.source);
             }
             SettingsAction::OpenEffortMenu => {
-                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
+                self.keep_settings(cx, &settings.config, shown_mode, shown_effort);
                 self.open_effort_menu(cx.source);
             }
             SettingsAction::OpenWizard => {
-                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
+                self.keep_settings(cx, &settings.config, shown_mode, shown_effort);
                 self.run_setup_in_app(cx, false).await;
             }
             SettingsAction::OpenSamplingMenu => {
-                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
+                self.keep_settings(cx, &settings.config, shown_mode, shown_effort);
                 self.overlay = Some(Overlay::Sampling(SamplingView::new(&self.config)));
             }
             SettingsAction::CheckUpdatesNow => {
@@ -374,7 +389,7 @@ impl App {
                 self.overlay = Some(Overlay::Settings(settings));
             }
             SettingsAction::OpenMcpMenu => {
-                self.keep_settings(cx, &settings.config, shown_mode, &shown_effort);
+                self.keep_settings(cx, &settings.config, shown_mode, shown_effort);
                 self.open_mcp(cx, McpViewTab::Overview).await;
             }
             SettingsAction::None => self.overlay = Some(Overlay::Settings(settings)),
@@ -558,8 +573,14 @@ impl App {
     /// The list of tools: Space turns one on or off, and the switch takes
     /// effect in the conversation that is running.
     fn tools_key(&mut self, cx: &LoopCtx<'_>, mut view: flashagent_tui::tools_view::ToolsView, code: KeyCode, mods: KeyModifiers) {
+        let action = view.handle_key(code, mods);
+        self.tools_action(cx, view, action);
+    }
+
+    /// What a tools action starts — the keys' and the clicks' one path.
+    pub(crate) fn tools_action(&mut self, cx: &LoopCtx<'_>, view: flashagent_tui::tools_view::ToolsView, action: flashagent_tui::tools_view::ToolsAction) {
         use flashagent_tui::tools_view::ToolsAction;
-        match view.handle_key(code, mods) {
+        match action {
             ToolsAction::Close => return,
             ToolsAction::Toggle(name, on) => {
                 self.set_tool_switched(cx, &name, on);

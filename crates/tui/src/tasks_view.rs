@@ -74,6 +74,17 @@ impl TasksModal {
         self.tasks.get(self.selected).map(|t| t.id)
     }
 
+    /// The wheel moves the selection, stopping at the ends. Only the list:
+    /// a detail pane being read takes no wheel.
+    pub fn wheel(&mut self, dir: i32) -> bool {
+        if self.tasks.is_empty() || self.detail.is_some() {
+            return false;
+        }
+        let was = self.selected;
+        self.selected = (self.selected as isize + dir as isize).clamp(0, self.tasks.len() as isize - 1) as usize;
+        self.selected != was
+    }
+
     fn selected_running(&self) -> Option<u32> {
         self.tasks.get(self.selected).filter(|t| t.state == TaskState::Running).map(|t| t.id)
     }
@@ -242,5 +253,33 @@ mod tests {
             modal.detail = None;
         }
         assert!(text(&TasksModal::new(Vec::new()).render(80)).contains("No background tasks"));
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+    use flashagent_tools::shell::{TaskInfo, TaskState};
+    use std::time::Duration;
+
+    fn view() -> TasksModal {
+        TasksModal::new(vec![
+            TaskInfo { id: 1, command: "sleep 1".into(), state: TaskState::Exited(Some(0)), elapsed: Duration::from_secs(1), last_line: String::new(), detached: false },
+            TaskInfo { id: 2, command: "sleep 2".into(), state: TaskState::Running, elapsed: Duration::from_secs(1), last_line: String::new(), detached: false },
+        ])
+    }
+
+    #[test]
+    fn the_wheel_moves_the_selection_and_stops_at_the_ends() {
+        let mut v = view();
+        v.selected = 0;
+        assert!(v.wheel(1));
+        assert_eq!(v.selected, 1);
+        assert!(!v.wheel(1), "the last row holds: no move, no reaction");
+        assert_eq!(v.selected, 1, "no wrap");
+        assert!(v.wheel(-1));
+        assert_eq!(v.selected, 0);
+        assert!(!v.wheel(-1), "the first row holds: no move, no reaction");
+        assert_eq!(v.selected, 0);
     }
 }

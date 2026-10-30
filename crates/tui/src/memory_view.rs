@@ -217,11 +217,22 @@ impl MemoryModal {
         }
     }
 
+    /// The wheel moves the list's selection, stopping at the ends. Only
+    /// while the list is what is on the screen: a word being typed or a
+    /// summary being written takes no wheel.
+    pub fn wheel(&mut self, dir: i32) -> bool {
+        if self.tab != MemoryTab::List || self.note.is_some() || self.rows.is_empty() {
+            return false;
+        }
+        let was = self.selected;
+        self.selected = (self.selected as isize + dir as isize).clamp(0, self.rows.len() as isize - 1) as usize;
+        self.selected != was
+    }
+
     pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> MemoryAction {
         if self.tab == MemoryTab::Summary && self.note.is_none() {
             return self.summary_key(code, mods);
-        }
-        // While a note is typed, keys belong to it.
+        }        // While a note is typed, keys belong to it.
         if let Some(note) = self.note.as_mut() {
             return match code {
                 KeyCode::Esc => {

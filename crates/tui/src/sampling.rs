@@ -54,6 +54,19 @@ impl SamplingView {
         10
     }
 
+    /// The wheel moves the selection, stopping at the ends instead of
+    /// wrapping. True when it moved.
+    pub fn wheel(&mut self, dir: i32) -> bool {
+        let total = self.total_items();
+        if total == 0 {
+            return false;
+        }
+        self.clamp_buffers();
+        let was = self.selected_index;
+        self.selected_index = (self.selected_index as isize + dir as isize).clamp(0, total as isize - 1) as usize;
+        self.selected_index != was
+    }
+
     fn sync_buffers_to_preset(&mut self, preset: SamplingPreset) {
         self.preset = preset;
         if preset != SamplingPreset::Custom {
@@ -498,5 +511,24 @@ mod tests {
         view.apply_to_config(&mut out_cfg);
         assert_eq!(out_cfg.sampling_preset, SamplingPreset::Custom);
         assert!((out_cfg.temperature - 0.45).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+
+    #[test]
+    fn the_wheel_moves_the_selection_and_stops_at_the_ends() {
+        let mut v = SamplingView::new(&AppConfig::default());
+        let total = v.total_items();
+        assert!(v.wheel(1));
+        assert_eq!(v.selected_index, 1);
+        for _ in 0..total + 2 {
+            v.wheel(1);
+        }
+        assert_eq!(v.selected_index, total - 1, "the last row holds");
+        assert!(v.wheel(-1));
+        assert_eq!(v.selected_index, total - 2);
     }
 }

@@ -1,5 +1,29 @@
 # Changelog
 
+## b612 — the mouse, everywhere it can reach
+
+The first phase of the interface rework. The mouse used to work on the
+transcript alone; now it works on everything the screen shows.
+
+- **The wheel scrolls every screen.** Menus, settings, tools, rules,
+  notices, providers, sampling, memory, MCP, tasks — each moves its own
+  list, and stops at its ends instead of wrapping. A screen that cannot
+  scroll leaves the wheel unspent rather than passing it to the
+  conversation behind it.
+- **Clicks do what the keys do.** A settings row is focused by the first
+  click and acts on the second, as Enter would; the tabs line switches
+  tabs by where the label sits. A tool row focuses, then toggles. Rules
+  and notices select — taking one back stays with the keys, because a
+  click is a poor place for a destructive surprise.
+- **A scrollbar for the transcript.** A thumb at the right edge shows
+  where the view sits and follows the hand as it is dragged; a press on
+  the track pages toward the press.
+- **The screen answers the mouse.** A drag selection is painted in
+  reverse video while it is made (it was copied invisibly before); the
+  row the pointer is over marks what a press would reach; a clicked row
+  keeps a pressed look for a moment. Shift belongs to the terminal, so
+  its own selection works as it always has.
+
 ## b611 — the token counts stop drifting, and the bar sees what the server sees
 
 - **The learned token counts no longer walk off with every regeneration.**
