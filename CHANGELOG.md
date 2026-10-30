@@ -1,5 +1,26 @@
 # Changelog
 
+## b610 — every written file survives a crash, and the session keeps its own history
+
+- **Memory notes, snapshots and session files are written atomically.** A
+  save now goes through a temporary beside the final name and renames into
+  place, so a crash, a full disk or a read-only folder leaves the previous
+  file instead of half of the new one — the note, the session or the
+  snapshot manifest that was on disk stays usable. Permissions survive the
+  rename: a deliberately private note does not suddenly become world-
+  readable.
+- **A rewind no longer deletes the copies it might still need.** The saved
+  file blobs are removed only after the manifest that stops naming them is
+  safely on disk; if that write fails, the old manifest keeps pointing at
+  copies that exist, so rewinding again still works.
+- **Snapshot manifests are now private (0700 dirs, 0600 files).** They hold
+  copies of project files, which can hold secrets; they were created with
+  the default umask before.
+- **A clean quit no longer erases the turns a compaction took out of the
+  history.** The autosave always wrote the archive of the earlier turns,
+  but the last save on exit passed an empty one — a session you left
+  cleanly came back with its oldest messages gone.
+
 ## b609 — the turn keeps what the screen showed, and paths survive their own escapes
 
 The four holes left open by the b606 audit, closed.
