@@ -727,7 +727,9 @@ mod tests {
         // write over the rollback — or fail, once the cleanup takes it. The
         // install lives where the last update placed it: beside the copy.
         let parked = std::path::Path::new("/opt/bin/.flashagent-old.123.bak");
-        assert_eq!(installed_beside_parked(parked).as_deref(), Some(std::path::Path::new("/opt/bin/flashagent")));
+        let sibling = if cfg!(windows) { "flashagent.exe" } else { "flashagent" };
+        let expected = std::path::Path::new("/opt/bin").join(sibling);
+        assert_eq!(installed_beside_parked(parked).as_deref(), Some(expected.as_path()));
         // A binary under its own name is no parked copy.
         assert_eq!(installed_beside_parked(std::path::Path::new("/opt/bin/flashagent")), None);
         // Nor is another file that merely starts the same way.
