@@ -61,6 +61,49 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     f.sync_all()
 }
 
+/// Writes through a temporary beside the final path and renames it into
+/// place, so a crash or a full disk leaves the previous file instead of half
+/// of the new one. An existing file keeps its mode.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+    let wrote = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)
+        .and_then(|mut f| {
+            f.write_all(bytes)?;
+            f.sync_all()
+        })
+        .and_then(|()| {
+            // A rename makes a new file; without this an executable bit or a
+            // deliberately private note would be lost on every save.
+            if let Ok(meta) = std::fs::metadata(path) {
+                let _ = std::fs::set_permissions(&tmp, meta.permissions());
+            }
+            std::fs::rename(&tmp, path)
+        });
+    if let Err(e) = wrote {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    sync_dir(parent);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_dir(dir: &Path) {
+    if let Ok(f) = std::fs::File::open(dir) {
+        let _ = f.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,6 +139,34 @@ mod tests {
         if let Some(home) = home() {
             assert_eq!(resolve_path(root, "~/notes.txt"), home.join("notes.txt"));
         }
+    }
+
+    #[test]
+    fn an_atomic_write_keeps_the_previous_file_when_it_cannot_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("MEMORY.md");
+        std::fs::write(&path, "the text that was already there").unwrap();
+        // A directory where the temporary file would go makes the write fail,
+        // as a full disk or a read-only folder would.
+        let blocker = dir.path().join(format!(".MEMORY.md.{}.tmp", std::process::id()));
+        std::fs::create_dir(&blocker).unwrap();
+
+        assert!(write_atomic(&path, b"the new text").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "the text that was already there");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_atomic_write_keeps_the_mode_of_the_file_it_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.sh");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o755);
     }
 
     #[test]
