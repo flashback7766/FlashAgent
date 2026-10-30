@@ -8,6 +8,14 @@ pub struct ContextUsage {
     pub reasoning_tokens: usize,
     pub tool_output_tokens: usize,
     pub total_capacity: usize,
+    /// What the server last said it read for a whole request. It is bigger
+    /// than the sum of the components whenever something stands in front of
+    /// the conversation that the app cannot see — a proxy's own system prompt,
+    /// tools and memory, the chat template around them. `total_used` takes it
+    /// as a floor: the window holds what the model read, not what the app can
+    /// count. It describes the request it was reported for, so it is cleared
+    /// when a turn starts and when another session takes the screen.
+    pub server_seen: Option<usize>,
 }
 
 impl ContextUsage {
@@ -19,13 +27,14 @@ impl ContextUsage {
     }
 
     pub fn total_used(&self) -> usize {
-        self.system_tokens
+        let local = self.system_tokens
             + self.memory_tokens
             + self.tools_tokens
             + self.user_tokens
             + self.assistant_tokens
             + self.reasoning_tokens
-            + self.tool_output_tokens
+            + self.tool_output_tokens;
+        local.max(self.server_seen.unwrap_or(0))
     }
 
     pub fn remaining(&self) -> usize {
@@ -124,6 +133,26 @@ mod tests {
         assert!(gauge.contains("23%"));
         assert!(gauge.contains("30.0K"));
         assert!(gauge.contains("128K"));
+    }
+
+    #[test]
+    fn what_the_server_read_is_the_floor_of_the_bar() {
+        // A bare "yo" behind a proxy that prepends its own system, tools and
+        // memory: the app counts 2.7k of what it can see, the server read 9755
+        // tokens of the prompt it was given. The bar is about the window, so
+        // the server's figure wins; a server that read less than the local sum
+        // says does not lower it.
+        let mut usage = ContextUsage::new(65_536);
+        usage.system_tokens = 1_500;
+        usage.tools_tokens = 1_200;
+        usage.user_tokens = 5;
+        assert_eq!(usage.total_used(), 2_705);
+        usage.server_seen = Some(9_755);
+        assert_eq!(usage.total_used(), 9_755);
+        usage.server_seen = Some(1_000);
+        assert_eq!(usage.total_used(), 2_705, "a smaller server count does not lower the bar");
+        usage.server_seen = None;
+        assert_eq!(usage.total_used(), 2_705, "without a report the local count rules");
     }
 
     #[test]

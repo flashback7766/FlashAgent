@@ -219,6 +219,11 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         self.cancel_warm_prompt_cache();
         self.turn_phase = TurnPhase::Waiting;
         self.turn_started = Some(std::time::Instant::now());
+        // The last server count described the request before this one. A turn
+        // that regenerates has just cut the history, so carrying it over would
+        // show a window fuller than the prompt about to be sent; the first
+        // usage of this turn puts the fresh figure in.
+        self.context_usage.server_seen = None;
         self.token_tracker.on_turn_start(self.current_model.clone(), self.context_usage.total_used());
         cx.source.set_model(&self.current_model);
         cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
