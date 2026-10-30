@@ -7,7 +7,8 @@ releases closed nineteen quiet failures, each with a test that fails without
 it — b606's audit, b609's four data-loss holes, b610's crash-safe writes —
 and every one of them went through CI on Linux, macOS and Windows. Sessions,
 memory and snapshots now survive what used to eat them: half-written files,
-full disks, clean quits. From here the releases slow down and grow up.
+full disks, clean quits — and the welcome header fits its column whatever a
+version tag says. From here the releases slow down and grow up.
 
 ## b610 — every written file survives a crash, and the session keeps its own history
 
