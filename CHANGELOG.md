@@ -1,5 +1,24 @@
 # Changelog
 
+## b613 — the selection answers the hand that makes it
+
+Three live failures of b612's mouse, seen against a real terminal:
+
+- **The copy happens when the button comes up, not on every motion.** The
+  drag used to write the clipboard on each event it was given — a new
+  connection to the clipboard manager per movement — and the highlight
+  crawled screens behind the hand. The drag paints; the release copies,
+  once.
+- **A press on a card no longer starts an invisible selection.** The
+  anchor was taken before the card had its say, so a drag that began on a
+  screen copied its text on release while painting nothing. Only a press
+  that reaches the transcript starts a selection now.
+- **The card answers the row the pointer is on, not the row beneath.**
+  The screen row where an open card begins was computed one line low —
+  the blank separator between conversation and card was counted twice —
+  so every hover, click and flash landed one row below the pointer, and
+  the card was driven with the mouse held a line too high.
+
 ## b612 — the mouse, everywhere it can reach
 
 The first phase of the interface rework. The mouse used to work on the
