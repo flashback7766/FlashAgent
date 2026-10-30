@@ -308,6 +308,19 @@ impl Shape {
     ];
 }
 
+/// A stable tag carries build metadata (v1.0.0+b610), and the release builds
+/// compile the test suite with the same version in the environment — the
+/// header must fit its column whatever the tag says. The metadata goes
+/// first; whatever is still too long is cut the way a long path would be.
+pub(crate) fn fit_version(ver: &str, budget: usize) -> String {
+    let base = ver.split('+').next().unwrap_or(ver);
+    if base.chars().count() <= budget {
+        base.to_string()
+    } else {
+        truncate_middle(base, budget.max(3))
+    }
+}
+
 pub fn welcome_card(card: &WelcomeCard<'_>) -> Vec<RenderLine> {
     let budget = card.height.saturating_sub(CHROME_ROWS);
     for shape in Shape::ALL {
@@ -407,9 +420,10 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         };
         let w2: usize = card_w.saturating_sub(w1 + 3);
 
-        let t_left_vis = format!(">_ FlashAgent {ver_disp}");
+        let ver_shown = fit_version(&ver_disp, w1.saturating_sub(16));
+        let t_left_vis = format!(">_ FlashAgent {ver_shown}");
         let d1 = w1.saturating_sub(t_left_vis.chars().count() + 3);
-        let t_left_colored = format!("{M3_PRI_B}>_ FlashAgent{RESET} {M3_LGT}{ver_disp}{RESET}");
+        let t_left_colored = format!("{M3_PRI_B}>_ FlashAgent{RESET} {M3_LGT}{ver_shown}{RESET}");
 
         let t_r1_vis = crate::i18n::tr("System & Context");
         let d2 = w2.saturating_sub(t_r1_vis.chars().count() + 3);
@@ -507,9 +521,10 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
     } else {
         // Narrow or short screens (< 56 cols or < 18 rows).
         let inner_w = width.saturating_sub(2).min(74);
-        let t_left_vis = format!(">_ FlashAgent {ver_disp}");
+        let ver_shown = fit_version(&ver_disp, inner_w.saturating_sub(16));
+        let t_left_vis = format!(">_ FlashAgent {ver_shown}");
         let d1 = inner_w.saturating_sub(t_left_vis.chars().count() + 3);
-        let t_left_colored = format!("{M3_PRI_B}>_ FlashAgent{RESET} {M3_LGT}{ver_disp}{RESET}");
+        let t_left_colored = format!("{M3_PRI_B}>_ FlashAgent{RESET} {M3_LGT}{ver_shown}{RESET}");
         let top = format!("{M3_BRD}╭─{RESET} {t_left_colored} {M3_BRD}{}╮{RESET}", "─".repeat(d1));
         let bot = format!("{M3_BRD}╰{}╯{RESET}", "─".repeat(inner_w));
 
@@ -636,5 +651,26 @@ mod hint_tests {
 
         let tiny = strip_ansi(&fit_hints(&hints, " · ", 12));
         assert_eq!(tiny, "esc — close");
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn a_long_stable_tag_does_not_push_the_header_past_its_column() {
+        // The release workflow runs the test suite with
+        // FLASHAGENT_VERSION=v1.0.0+b610 in the environment — 4 columns
+        // longer than the b610 the beta showed, which burst the frame at
+        // 56 cols. The metadata goes, the rest fits.
+        assert_eq!(fit_version("v1.0.0+b610", 6), "v1.0.0");
+        assert_eq!(fit_version("b610", 16), "b610");
+        assert_eq!(fit_version("v1.0.0", 16), "v1.0.0");
+        // The metadata goes whatever the budget: the header shows the bare
+        // version, the full tag lives in --version.
+        assert_eq!(fit_version("v1.0.0+b610", 16), "v1.0.0");
+        let cut = fit_version("v123.456.789+build.999", 6);
+        assert_eq!(cut.chars().count(), 6, "{cut}");
     }
 }
