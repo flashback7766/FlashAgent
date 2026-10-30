@@ -584,16 +584,28 @@ impl App {
                 }
                 self.turn_phase = TurnPhase::AfterTool;
             }
-            LoopEvent::StepStarted { step, .. } if *step > 1 => {
+            LoopEvent::StepStarted { step, .. } => {
                 // Each step is one request to the server, and the server counts
                 // per request: the running estimate starts again so this
                 // request's figure is added rather than read as a correction of
-                // the last one's.
+                // the last one's. The first step is a request like any other,
+                // and its buffer must start empty too — it used to inherit the
+                // answer of the turn before, which is what made a regenerate
+                // measure its text against the answer it replaced.
                 self.token_tracker.on_request_start();
-                self.turn_phase = TurnPhase::AfterTool;
+                if *step > 1 {
+                    self.turn_phase = TurnPhase::AfterTool;
+                }
             }
             LoopEvent::Usage(u) => {
                 self.token_tracker.on_usage(u);
+                // What the server read is the one honest size of the prompt: it
+                // holds what stands in front of the conversation that the app
+                // cannot count — a proxy's own system, tools and memory, the
+                // chat template. The bar stands on it until the turn ends.
+                if let Some(p) = u.prompt.filter(|p| *p > 0) {
+                    self.context_usage.server_seen = Some(p as usize);
+                }
                 // Only what the server priced. A local backend reports nothing,
                 // and the ledger stays silent rather than inventing a bill.
                 self.cost.record_with_details(

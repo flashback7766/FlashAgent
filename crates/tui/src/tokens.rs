@@ -40,6 +40,13 @@ pub(crate) struct TokenTracker {
     pub(crate) turn_start_time: Option<std::time::Instant>,
     pub(crate) first_token_time: Option<std::time::Instant>,
     pub(crate) prompt_tokens: Option<usize>,
+    /// What the server last said it read for a whole request. It is the one
+    /// honest size of the prompt: a proxy in front of the model (flashmodeld)
+    /// prepends a system prompt, tools and memory of its own, and the chat
+    /// template wraps what both wrote — none of it visible to the app's own
+    /// counting. The context bar takes this as a floor; it describes the
+    /// request it was reported for, so a new turn starts without it.
+    pub(crate) server_prompt: Option<usize>,
     pub(crate) last_ttft: Option<std::time::Duration>,
     pub(crate) last_prefill_speed: Option<f64>,
     pub(crate) prefill_tracker: PrefillTracker,
@@ -65,6 +72,7 @@ impl TokenTracker {
             turn_start_time: None,
             first_token_time: None,
             prompt_tokens: None,
+            server_prompt: None,
             last_ttft: None,
             last_prefill_speed: None,
             prefill_tracker: PrefillTracker::load_or_default(),
@@ -89,6 +97,15 @@ impl TokenTracker {
         self.turn_start_time = Some(std::time::Instant::now());
         self.draft_acceptance = None;
         self.first_token_time = None;
+        // The text of the answer before has nothing to do with this turn's
+        // request, and a measurement built on both is a measurement of
+        // nothing. The first request of a turn used to inherit it: only the
+        // second step on cleared the buffer, so a regenerate measured its
+        // answer against the answer it replaced and the ratio came out
+        // impossible — which is what walked the learned counts off.
+        self.request_text.clear();
+        self.request_had_tool = false;
+        self.server_prompt = None;
         self.prompt_tokens = if estimated_prompt_tokens > 0 {
             Some(estimated_prompt_tokens)
         } else {
@@ -161,6 +178,7 @@ impl TokenTracker {
         if let Some(p) = usage.prompt {
             if p > 0 {
                 self.prompt_tokens = Some(p as usize);
+                self.server_prompt = Some(p as usize);
             }
         }
         // The server's count corrects what the deltas estimated, for this
@@ -603,6 +621,39 @@ mod tests {
         t.on_subagent_usage(500_000);
         t.on_turn_start("m".into(), 0);
         assert_eq!(t.turn_output(), 0, "a new prompt starts its own count");
+    }
+
+    #[test]
+    fn a_new_turn_does_not_inherit_the_answer_it_replaces() {
+        // The first request of a turn never used to clear the text buffer:
+        // only the second step on did. A regenerate therefore measured its
+        // answer against a text that still held the answer it was replacing —
+        // the ratio came out impossible, and the learned correction moved the
+        // count with every retry.
+        let mut t = TokenTracker::new("m".into());
+        t.on_turn_start("m".into(), 0);
+        t.on_delta("an answer the user will ask to see again");
+        t.on_usage(&usage(30));
+        assert!(!t.request_text.is_empty(), "the measurement needs the text while the turn lives");
+        t.on_turn_start("m".into(), 0);
+        assert!(t.request_text.is_empty(), "the discarded answer is not this turn's text");
+        assert!(!t.request_had_tool, "the last turn's tool call is not this turn's either");
+        t.on_delta("fresh answer");
+        assert_eq!(t.request_text, "fresh answer", "only this turn's words are measured");
+    }
+
+    #[test]
+    fn the_server_s_prompt_count_stands_until_the_next_turn() {
+        // The floor the context bar stands on is the prompt of the request it
+        // was reported for: a new turn — a regenerate above all, which just
+        // cut the history — estimates fresh until the server speaks again.
+        let mut t = TokenTracker::new("m".into());
+        t.on_turn_start("m".into(), 0);
+        assert_eq!(t.server_prompt, None);
+        t.on_usage(&flashagent_llm::Usage { prompt: Some(9_755), completion: Some(4), ..Default::default() });
+        assert_eq!(t.server_prompt, Some(9_755));
+        t.on_turn_start("m".into(), 0);
+        assert_eq!(t.server_prompt, None, "the old request's prompt says nothing about this one");
     }
 
     #[test]

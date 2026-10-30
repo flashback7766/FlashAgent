@@ -1,5 +1,28 @@
 # Changelog
 
+## b611 — the token counts stop drifting, and the bar sees what the server sees
+
+- **The learned token counts no longer walk off with every regeneration.**
+  The app measures each model against its answers: the server says how many
+  tokens it wrote, the app has the text, and the two are a correction the
+  count is scaled by. The first request of a turn never cleared the text it
+  measures with — only the second step on did — so a regenerate measured its
+  answer against a buffer that still held the answer it was replacing, and
+  the ratio came out impossible. Each request then moved the correction half
+  way to an impossible figure, and the saved factors show where that went:
+  one model's Cyrillic factor at 4.1, another's Latin at 0.24. A sample no
+  real tokenizer could be the cause of is now refused whole, and factors
+  saved outside the credible band are not loaded back — the file's poison
+  does not outlive the fix.
+- **The context bar stands on what the server actually read.** A "yo" behind
+  flashmodeld read as 9755 tokens on the server and 2.7k on the bar: the
+  proxy prepends a system prompt, tools and memory of its own, and the chat
+  template wraps what both wrote, none of it visible to the app's counting.
+  The server's own prompt count is now the floor of the bar — it describes
+  the request it was reported for, so it clears when a turn starts and when
+  another session takes the screen, and a smaller report never lowers the
+  bar.
+
 ## v1.0.0+b610 — the first stable
 
 The same build as b610, cut stable: the rolling beta held up. The last three
