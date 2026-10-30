@@ -831,6 +831,16 @@ impl PendingSwitch {
     }
 }
 
+/// What the pointer is over, as the last mouse move said: a row of the open
+/// card, or a transcript row a click would reach.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HoverTarget {
+    /// Line from the card's first row, column from the screen's edge.
+    Card(usize, u16),
+    /// Screen row of the transcript.
+    Chat(u16),
+}
+
 struct App {
     question_ui_state: QuestionUiState,
     history: Vec<ChatMessage>,
@@ -895,9 +905,9 @@ struct App {
     /// Where the mouse is, as the last event said. A screen under the pointer
     /// marks what a press would reach.
     mouse_at: Option<(u16, u16)>,
-    /// The card line the pointer last hovered, so a movement that crosses no
-    /// row boundary draws no frame.
-    hovered_card: Option<(usize, u16)>,
+    /// What the pointer last hovered, so a movement that crosses no row
+    /// boundary draws no frame.
+    hovered: Option<HoverTarget>,
     /// The card line a click just landed on, and when: the row keeps a
     /// pressed look for a moment, so a click answers even where nothing moves.
     click_flash: Option<(usize, u64)>,
@@ -1511,7 +1521,7 @@ fn initial_app(init: InitialApp) -> App {
         selection_anchor: None,
         selection_head: None,
         mouse_at: None,
-        hovered_card: None,
+        hovered: None,
         click_flash: None,
         wheel_momentum: 0,
         task_lines: Vec::new(),
