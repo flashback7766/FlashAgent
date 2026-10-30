@@ -424,6 +424,9 @@ impl App {
                 self.session_title = saved.title.clone().filter(|t| !t.trim().is_empty());
                 let restored = restore_session(saved, &mut self.chat, &mut self.history, &mut self.archive);
                 strip_legacy_memory(&mut self.history, memory_block);
+                // The server count the last turn reported belongs to the
+                // conversation that was on the screen.
+                self.context_usage.server_seen = None;
                 update_context_usage(&self.current_model, &mut self.context_usage, &self.history, memory_block, &self.chat, perm);
                 self.notice(tr_fill("Resumed session {id} · {messages}", &[("id", id), ("messages", &flashagent_tui::plural(restored, "message", "messages"))]));
                 true
@@ -491,6 +494,9 @@ impl App {
         // one charged a conversation for work it never did.
         self.cost = flashagent_core::CostLedger::default();
         self.token_tracker = TokenTracker::new(self.current_model.clone());
+        // As with the bill: the last server count belongs to the conversation
+        // just left, not to the one taking the screen.
+        self.context_usage.server_seen = None;
         update_context_usage(&self.current_model, &mut self.context_usage, &self.history, memory_block, &self.chat, perm);
         self.notice(tr_fill("Resumed session {id} · {messages}", &[("id", id), ("messages", &flashagent_tui::plural(restored, "message", "messages"))]));
         true

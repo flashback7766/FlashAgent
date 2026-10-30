@@ -271,6 +271,26 @@ pub fn set_measurement(model: &str, m: Measurement) {
 /// framing is a small share and the measurement is about the text.
 const SHORTEST_MEASURED: usize = 24;
 
+/// The ratio a sample may credibly sit at, to be learned from.
+///
+/// The pair a sample is built from can be broken: reasoning the stream never
+/// showed as deltas, a retry whose first attempt is still in the text, the
+/// answer of the request before still in the buffer. Every one of those reads
+/// as a tokenizer several times off the table, and no tokenizer is — `o200k`,
+/// the table every stranger is counted with, was measured within 30% of a real
+/// model's own on every text tried. A sample outside this band is a broken
+/// pair, and learning from it is what walked one factor to 4.1 and another to
+/// 0.24: each request moved the count half way to an impossible figure, and a
+/// regeneration, which measures against whatever the buffer still held, made
+/// one on every try.
+const OBSERVED_FLOOR: f64 = 0.5;
+const OBSERVED_CEILING: f64 = 2.0;
+
+/// Whether a factor is one an honest measurement could have written.
+fn credible(factor: f64) -> bool {
+    (OBSERVED_FLOOR..=OBSERVED_CEILING).contains(&factor)
+}
+
 /// Learns the model from what the server said about what it wrote.
 ///
 /// The server counts the tokens of the text it generated, and the app has
@@ -292,6 +312,12 @@ pub fn note_measured(model: &str, text: &str, tokens: usize) {
     if !(observed.is_finite() && observed > 0.0) {
         return;
     }
+    // An impossible ratio says the text and the count are not a pair; it says
+    // nothing about the tokenizer. Learning from it moved the correction
+    // towards a figure no tokenizer has.
+    if !credible(observed) {
+        return;
+    }
     let (ascii, other, punct) = classes(text);
     let total = (ascii + other + punct) as f64;
     if total <= 0.0 {
@@ -306,11 +332,12 @@ pub fn note_measured(model: &str, text: &str, tokens: usize) {
     m.ascii += diff * (ascii as f64 / total) * rate;
     m.other += diff * (other as f64 / total) * rate;
     m.punct += diff * (punct as f64 / total) * rate;
-    // A correction that runs away is worse than none: the table is never
-    // off by a factor of ten, and a measurement that says so is a mistake.
-    m.ascii = m.ascii.clamp(0.2, 5.0);
-    m.other = m.other.clamp(0.2, 5.0);
-    m.punct = m.punct.clamp(0.2, 5.0);
+    // A correction that runs away is worse than none: the band above already
+    // refuses the samples that would take it there, and this holds the line
+    // should a factor ever drift past what a sample can reach on its own.
+    m.ascii = m.ascii.clamp(OBSERVED_FLOOR, OBSERVED_CEILING);
+    m.other = m.other.clamp(OBSERVED_FLOOR, OBSERVED_CEILING);
+    m.punct = m.punct.clamp(OBSERVED_FLOOR, OBSERVED_CEILING);
     m.samples += 1;
     set_measurement(model, m);
     // The counts that were kept were counted with the old measurement, and
@@ -330,12 +357,15 @@ pub fn measurements_path() -> Option<std::path::PathBuf> {
 }
 
 /// Reads the measurements that were saved. A missing or broken file means
-/// nothing has been measured yet.
+/// nothing has been measured yet. A factor outside the credible band was
+/// written when broken pairs were still learned from; loading it would carry
+/// the poison past the fix, so it is left on the disk and the model is
+/// measured again.
 pub fn load_measurements(path: &Path) {
     let Ok(content) = std::fs::read_to_string(path) else { return };
     let Ok(saved) = serde_json::from_str::<HashMap<String, Measurement>>(&content) else { return };
     for (model, m) in saved {
-        if m.samples > 0 {
+        if m.samples > 0 && credible(m.ascii) && credible(m.other) && credible(m.punct) {
             set_measurement(&model, m);
         }
     }
@@ -387,13 +417,14 @@ mod tests {
         let model = "measured-model-for-test";
         let text = "Русский текст, который сервер посчитал, и довольно длинный, чтобы конц��вка сервера была малой долей ответа.";
         let before = count_tokens(model, text);
-        // The server says the text is half of what the table says.
+        // The server says the text is a bit over half of what the table says —
+        // inside the band an honest sample may sit in.
         let table = table_count(model, text);
-        note_measured(model, text, (table / 2).max(1));
+        let target = (table * 3 / 5).max(1);
+        note_measured(model, text, target);
         let after = count_tokens(model, text);
         assert!(after < before, "the measurement did not move the count: {before} -> {after}");
         // And it moved towards the number the server gave.
-        let target = (table / 2).max(1);
         assert!(
             (after as i64 - target as i64).abs() <= (before as i64 - target as i64).abs(),
             "the count moved away from the server's number: {before} -> {after}, wanted {target}"
@@ -408,19 +439,51 @@ mod tests {
         let russian_before = count_tokens(model, russian);
         let english_before = count_tokens(model, english);
         let table = table_count(model, russian);
-        note_measured(model, russian, (table / 2).max(1));
+        note_measured(model, russian, (table * 3 / 5).max(1));
         assert!(count_tokens(model, russian) < russian_before, "the Russian count did not move");
         assert_eq!(count_tokens(model, english), english_before, "the English count moved too");
     }
 
     #[test]
-    fn a_measurement_that_runs_away_is_not_taken() {
+    fn a_sample_no_tokenizer_could_have_written_is_not_learned_from() {
+        // Broken pairs — reasoning the stream never showed, a retry's text
+        // counted once while sitting in the buffer twice — read as a tokenizer
+        // several times off the table. None is: these are refused whole, not
+        // clamped, or the count drifts with every request.
         let model = "measured-model-three-for-test";
         let text = "some text that is long enough to be measured at all, and then some more, and even more after that, so that the measurement is not skipped for being short";
-        note_measured(model, text, 1);
-        let m = measurement_of(model).expect("the measurement was kept");
-        assert!(m.ascii >= 0.2 && m.ascii <= 5.0, "{m:?}");
-        assert!(m.other >= 0.2 && m.other <= 5.0, "{m:?}");
+        let table = table_count(model, text);
+        note_measured(model, text, table * 3);
+        assert!(measurement_of(model).is_none(), "three times the table is a broken pair, not a tokenizer");
+        note_measured(model, text, table / 10);
+        assert!(measurement_of(model).is_none(), "a tenth is the count of a shorter text, not a tokenizer");
+        // A quarter off is what real tokenizers do against the table; that is
+        // the measurement working as meant.
+        note_measured(model, text, table + table / 4);
+        let m = measurement_of(model).expect("an honest sample is still learned from");
+        assert!(credible(m.ascii) && credible(m.other) && credible(m.punct), "{m:?}");
+    }
+
+    #[test]
+    fn a_measurement_saved_by_the_broken_pair_bug_does_not_load() {
+        // What the file on disk really held: one model's Cyrillic factor at the
+        // old clamp's ceiling, another's Latin at the floor. Loading them would
+        // keep the drift alive on every count.
+        let path = std::env::temp_dir().join(format!("fa-poison-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{
+  "poisoned-high": {"ascii": 1.0, "other": 4.1, "punct": 1.0, "samples": 37},
+  "poisoned-low": {"ascii": 0.238, "other": 1.0, "punct": 1.0, "samples": 4},
+  "honest-model": {"ascii": 1.2, "other": 0.9, "punct": 1.0, "samples": 6}
+}"#,
+        )
+        .unwrap();
+        load_measurements(&path);
+        assert!(measurement_of("poisoned-high").is_none(), "4.1 was learned from broken pairs");
+        assert!(measurement_of("poisoned-low").is_none(), "0.238 was learned from broken pairs");
+        assert!(measurement_of("honest-model").is_some(), "an honest factor is kept");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -470,17 +533,14 @@ mod tests {
     #[test]
     fn the_measurements_survive_a_save_and_a_load() {
         let model = "measured-model-four-for-test";
-        let text = "текст для измерения, достаточно длинный, чтобы измерение состоялось, и ещё длиннее, чтобы правило о коротких ответах не сработало";
-        note_measured(model, text, 5);
-        let m = measurement_of(model).expect("measured");
-        let path = std::env::temp_dir().join(format!("fa-tokens-{}.json", std::process::id()));
+        let m = Measurement { ascii: 1.2, other: 0.9, punct: 1.0, samples: 6 };
         set_measurement(model, m);
+        let path = std::env::temp_dir().join(format!("fa-tokens-{}.json", std::process::id()));
         save_measurements(&path);
-        // A fresh registry: the file is what carries the measurement over.
-        let mut fresh = HashMap::new();
-        fresh.insert(model.to_string(), m);
-        let json = serde_json::to_string(&fresh).unwrap();
-        std::fs::write(&path, json).unwrap();
+        let saved: HashMap<String, Measurement> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.get(model), Some(&m), "the measurement was written down");
+        // And what was written comes back: this is the read a run starts with.
         load_measurements(&path);
         assert_eq!(measurement_of(model), Some(m), "the measurement did not come back");
         let _ = std::fs::remove_file(&path);
