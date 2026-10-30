@@ -1887,20 +1887,24 @@ impl ChatView {
     /// neither.
     pub fn toggle_row(&mut self, row: usize, expansion: impl Into<ReasoningExpansion>) -> bool {
         let expansion = expansion.into();
-        let owner = {
-            let owners = self.row_owners.lock();
-            match row.checked_sub(owners.settled.len()) {
-                None => owners.settled.get(row).copied().flatten(),
-                Some(live_row) => owners.live.get(live_row).copied().flatten(),
-            }
-        };
-        let Some(i) = owner else { return false };
+        let Some(i) = self.owner_at(row) else { return false };
         let last_user_idx = self.lines.iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0);
         let Some(line) = self.lines.get_mut(i) else { return false };
         let shown = line.is_expanded.unwrap_or(expansion.all || (expansion.last && i >= last_user_idx));
         line.is_expanded = Some(!shown);
         *self.settled_cache.lock() = SettledRenderCache::default();
         true
+    }
+
+    /// The message a rendered row belongs to, when a click on it would reach
+    /// one — the same map the fold reads. A row of a thought or a tool call
+    /// has an owner; an answer beside them does not.
+    pub fn owner_at(&self, row: usize) -> Option<usize> {
+        let owners = self.row_owners.lock();
+        match row.checked_sub(owners.settled.len()) {
+            None => owners.settled.get(row).copied().flatten(),
+            Some(live_row) => owners.live.get(live_row).copied().flatten(),
+        }
     }
 
     /// `›` prefix on user lines.
@@ -3388,6 +3392,25 @@ hm".into()));
         chat.push_user("Followup question");
         chat.push_line(LineKind::Assistant, "Followup answer");
         assert_eq!(chat.last_assistant_text(), Some("Followup answer".into()));
+    }
+
+    #[test]
+    fn a_thought_row_has_an_owner_and_an_answer_row_does_not() {
+        // The hover marks the rows a click would reach — the thought, the tool
+        // call — and leaves the answer beside them alone.
+        let mut chat = ChatView::default();
+        chat.push_user("hi");
+        chat.push_line(LineKind::Reasoning, "the thought the model had");
+        chat.push_line(LineKind::Assistant, "the answer");
+        let _ = chat.render_split(100, ReasoningExpansion { all: false, last: false });
+        let thought_row = chat.render(100).iter().position(|(k, _)| *k == LineKind::Reasoning).expect("the thought is rendered");
+        assert!(chat.owner_at(thought_row).is_some(), "the thought answers a click");
+        let answer_row = chat
+            .render(100)
+            .iter()
+            .rposition(|(k, _)| *k == LineKind::Assistant)
+            .expect("the answer is rendered");
+        assert!(chat.owner_at(answer_row).is_none(), "the answer is not a fold");
     }
 
     #[test]
