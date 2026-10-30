@@ -266,14 +266,33 @@ pub(crate) fn save_on_exit(
     model: &str,
     cwd: &str,
     history: &[ChatMessage],
+    archive: &[ChatMessage],
     title: Option<&str>,
 ) -> Result<String, String> {
-    let why = match save_session_file(session_id, model, cwd, history, &[], title) {
-        Ok(_) => return Ok(session_id.to_string()),
-        Err(why) => why,
+    let dir = sessions_dir();
+    save_on_exit_with(dir.as_deref(), session_id, model, cwd, history, archive, title)
+}
+
+/// The exit save, with the folder named rather than looked up, so a test can
+/// check that it keeps the archive the same way the autosave does.
+fn save_on_exit_with(
+    dir: Option<&std::path::Path>,
+    session_id: &str,
+    model: &str,
+    cwd: &str,
+    history: &[ChatMessage],
+    archive: &[ChatMessage],
+    title: Option<&str>,
+) -> Result<String, String> {
+    let why = match dir {
+        Some(dir) => match save_session_in(dir, session_id, model, cwd, history, archive, false, title) {
+            Ok(_) => return Ok(session_id.to_string()),
+            Err(why) => why,
+        },
+        None => tr("no home directory to save sessions in").to_string(),
     };
     let spare = std::env::temp_dir().join("flashagent-unsaved");
-    match save_session_in(&spare, session_id, model, cwd, history, &[], false, title) {
+    match save_session_in(&spare, session_id, model, cwd, history, archive, false, title) {
         Ok(path) => Err(tr_fill(
             "{why}.\nA copy was written to {path} — move it into ~/.flashagent/sessions/ to resume it.",
             &[("why", &why), ("path", &path.display().to_string())],
@@ -765,6 +784,20 @@ fn strip_legacy_memory(history: &mut [ChatMessage], memory_block: &str) {
 #[cfg(test)]
 mod session_tests {
     use super::*;
+
+    #[test]
+    fn a_session_saved_on_exit_keeps_the_archive_compaction_left() {
+        // The autosave writes the archive; the last write on exit used to pass
+        // an empty one, so a clean quit erased the turns a compaction had
+        // already taken out of the live history.
+        let dir = tempfile::tempdir().unwrap();
+        let history = vec![ChatMessage::system("sys"), ChatMessage::user("the latest question")];
+        let archive = vec![ChatMessage::user("words the summary replaced")];
+        save_on_exit_with(Some(dir.path()), "s", "m", "~/p", &history, &archive, None).unwrap();
+        let saved = read_session(dir.path(), "s").unwrap();
+        assert_eq!(saved.archive.len(), 1, "the archive of the earlier turns is gone");
+        assert!(saved.archive[0].content.contains("words the summary replaced"));
+    }
 
     #[cfg(unix)]
     #[test]

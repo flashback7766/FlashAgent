@@ -1769,7 +1769,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
 
     w.tools_arc.shells().stop_all();
     let saved = app.config.auto_save_sessions && worth_saving(&app.history);
-    Ok(saved.then(|| save_on_exit(&session_id, &app.current_model, &w.cwd_display, &app.history, app.session_title.as_deref())))
+    Ok(saved.then(|| save_on_exit(&session_id, &app.current_model, &w.cwd_display, &app.history, &app.archive, app.session_title.as_deref())))
 }
 
 /// Draws, waits for the next event and hands it to its handler, until one

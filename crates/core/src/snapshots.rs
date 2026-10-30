@@ -116,7 +116,7 @@ impl SnapshotStore {
         let seq = st.manifest.turns.last().map_or(1, |t| t.seq + 1);
         st.manifest.turns.push(TurnSnapshot { seq, prompt_hash: prompt_hash(prompt), files: Vec::new() });
         st.current = Some(st.manifest.turns.len() - 1);
-        self.save(&st.manifest);
+        let _ = self.save(&st.manifest);
     }
 
     /// Regenerate keeps recording against the same turn, so rewinding reaches
@@ -185,7 +185,7 @@ impl SnapshotStore {
                 };
                 let name = format!("{}.bin", st.manifest.next_blob);
                 let blobs = self.dir.join("blobs");
-                if std::fs::create_dir_all(&blobs).is_err() || std::fs::write(blobs.join(&name), bytes).is_err() {
+                if private_dir(&blobs).is_err() || crate::paths::write_private(&blobs.join(&name), &bytes).is_err() {
                     return;
                 }
                 st.manifest.next_blob += 1;
@@ -193,7 +193,7 @@ impl SnapshotStore {
             }
         };
         st.manifest.turns[current].files.push(FileBefore { path, before });
-        self.save(&st.manifest);
+        let _ = self.save(&st.manifest);
     }
 
     /// Oldest first. Messages without a turn (steering) are skipped, and so are
@@ -256,6 +256,7 @@ impl SnapshotStore {
         let failed: HashSet<&PathBuf> = report.failed.iter().map(|(path, _)| path).collect();
         let mut pending = Vec::new();
         let mut retained = HashSet::new();
+        let mut doomed = Vec::new();
         for file in taken_back.iter().flat_map(|t| &t.files) {
             // Keep the earliest copy of each failed path: the state being restored.
             if failed.contains(&file.path) && retained.insert(file.path.clone()) {
@@ -263,7 +264,7 @@ impl SnapshotStore {
                 continue;
             }
             if let Before::Blob(name) = &file.before {
-                let _ = std::fs::remove_file(self.dir.join("blobs").join(name));
+                doomed.push(name.clone());
             }
         }
         if !pending.is_empty() {
@@ -272,7 +273,14 @@ impl SnapshotStore {
             st.manifest.turns.push(retry);
         }
         st.current = None;
-        self.save(&st.manifest);
+        // Only forget the saved copies once the manifest that no longer names
+        // them is safely on disk: a failed save must not leave the old record
+        // pointing at blobs that are already gone.
+        if self.save(&st.manifest).is_ok() {
+            for name in doomed {
+                let _ = std::fs::remove_file(self.dir.join("blobs").join(name));
+            }
+        }
         report
     }
 
@@ -355,14 +363,43 @@ impl SnapshotStore {
         out
     }
 
-    fn save(&self, manifest: &Manifest) {
-        if std::fs::create_dir_all(&self.dir).is_ok() {
-            if let Ok(text) = serde_json::to_string(manifest) {
-                let _ = std::fs::write(self.dir.join("manifest.json"), text);
-            }
+    fn save(&self, manifest: &Manifest) -> std::io::Result<()> {
+        private_dir(&self.dir)?;
+        let text = serde_json::to_string(manifest)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let path = self.dir.join("manifest.json");
+        // Written beside the final name and renamed, so a crash or a full disk
+        // leaves the last good manifest in place instead of half a file.
+        let tmp = self.dir.join(format!("manifest.json.{}.tmp", std::process::id()));
+        if let Err(e) = crate::paths::write_private(&tmp, text.as_bytes()).and_then(|_| std::fs::rename(&tmp, &path)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
         }
+        sync_dir(&self.dir);
+        Ok(())
     }
 }
+
+/// Snapshots hold copies of project files, which can hold secrets.
+fn private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_dir(dir: &Path) {
+    if let Ok(f) = std::fs::File::open(dir) {
+        let _ = f.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) {}
 
 #[cfg(test)]
 mod tests {
@@ -716,6 +753,66 @@ mod tests {
         assert_eq!(std::fs::read_to_string(a).unwrap(), "user change after partial rewind");
         assert_eq!(std::fs::read_to_string(b).unwrap(), "old b");
         assert!(reopened.rewindable(&["change both"]).is_empty());
+    }
+
+    #[test]
+    fn a_save_that_cannot_finish_leaves_the_previous_manifest_whole() {
+        let (project, snaps, store) = store();
+        store.begin_turn("first");
+        // A directory where the temporary file would go makes the next save
+        // fail, as a full disk or a read-only folder would.
+        let blocker = snaps.path().join(format!("manifest.json.{}.tmp", std::process::id()));
+        std::fs::create_dir(&blocker).unwrap();
+        store.begin_turn("second");
+
+        let written = std::fs::read_to_string(snaps.path().join("manifest.json")).unwrap();
+        serde_json::from_str::<Manifest>(&written).expect("half a manifest");
+        let reopened = SnapshotStore::open(snaps.path(), project.path());
+        assert_eq!(reopened.rewindable(&["first"]).len(), 1, "the last good manifest was lost");
+        assert!(reopened.rewindable(&["second"]).is_empty(), "a save that failed was taken for saved");
+    }
+
+    #[test]
+    fn a_rewind_whose_record_cannot_be_saved_keeps_the_copies_needed_to_retry() {
+        let (project, snaps, store) = store();
+        let a = project.path().join("a.txt");
+        std::fs::write(&a, "original").unwrap();
+        store.begin_turn("p");
+        store.before_write("write_file", &args("a.txt"));
+        std::fs::write(&a, "changed").unwrap();
+        let blocker = snaps.path().join(format!("manifest.json.{}.tmp", std::process::id()));
+        std::fs::create_dir(&blocker).unwrap();
+
+        let report = store.rewind(0);
+        assert!(report.failed.is_empty());
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "original");
+        // The record on disk still names the copy. Deleting the blob before the
+        // record is saved would leave it pointing at nothing on the next start.
+        std::fs::remove_dir(&blocker).unwrap();
+        let reopened = SnapshotStore::open(snaps.path(), project.path());
+        let report = reopened.rewind(0);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(reopened.rewindable(&["p"]).is_empty());
+        assert_eq!(std::fs::read_dir(snaps.path().join("blobs")).unwrap().count(), 0, "a blob nobody names was left behind");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_snapshot_copies_are_private_to_the_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let project = tempfile::tempdir().unwrap();
+        let snaps = tempfile::tempdir().unwrap();
+        let dir = snaps.path().join("session");
+        let store = SnapshotStore::open(&dir, project.path());
+        std::fs::write(project.path().join("a.txt"), "secret").unwrap();
+        store.begin_turn("p");
+        store.before_write("write_file", &args("a.txt"));
+
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("blobs")), 0o700);
+        assert_eq!(mode(&dir.join("manifest.json")), 0o600);
+        assert_eq!(mode(&dir.join("blobs").join("0.bin")), 0o600);
     }
 
     #[test]

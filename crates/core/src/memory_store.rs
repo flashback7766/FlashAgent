@@ -234,7 +234,7 @@ impl Store {
     pub fn save(&self, entry: &Entry) -> std::io::Result<PathBuf> {
         std::fs::create_dir_all(self.dir())?;
         let path = self.dir().join(format!("{}.md", entry.name));
-        std::fs::write(&path, entry.to_markdown())?;
+        crate::paths::write_atomic(&path, entry.to_markdown().as_bytes())?;
         self.rewrite_index()?;
         Ok(path)
     }
@@ -309,7 +309,7 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, updated)
+        crate::paths::write_atomic(&path, updated.as_bytes())
     }
 }
 
@@ -379,6 +379,21 @@ mod tests {
         assert_eq!(written.matches(BEGIN).count(), 1, "{written}");
         assert!(written.contains(END), "the rewritten block is left unclosed:\n{written}");
         assert!(!written.contains("the old index"), "{written}");
+    }
+
+    #[test]
+    fn a_save_that_cannot_finish_leaves_the_previous_note_in_place() {
+        let (store, _d) = temp_store();
+        store.save(&entry("a-fact", "the first wording")).unwrap();
+        let note = store.dir().join("a-fact.md");
+        let old_note = std::fs::read_to_string(&note).unwrap();
+        let old_index = std::fs::read_to_string(store.index_path()).unwrap();
+        let blocker = store.dir().join(format!(".a-fact.md.{}.tmp", std::process::id()));
+        std::fs::create_dir(&blocker).unwrap();
+
+        assert!(store.save(&entry("a-fact", "the second wording")).is_err());
+        assert_eq!(std::fs::read_to_string(&note).unwrap(), old_note, "a half-written note replaced the old one");
+        assert_eq!(std::fs::read_to_string(store.index_path()).unwrap(), old_index);
     }
 
     #[test]
