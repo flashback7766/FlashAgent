@@ -300,6 +300,19 @@ impl ProvidersView {
         }
     }
 
+    /// The wheel moves the list's selection, stopping at the ends. Only in
+    /// the list: a form being filled takes no wheel, and a confirmation
+    /// waiting for its answer is left as it is.
+    pub fn wheel(&mut self, dir: i32) -> bool {
+        if self.form.is_some() || self.profiles.is_empty() {
+            return false;
+        }
+        let rows = self.profiles.len() + 1;
+        let was = self.selected;
+        self.selected = (self.selected as isize + dir as isize).clamp(0, rows as isize - 1) as usize;
+        self.selected != was
+    }
+
     pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> ProvidersAction {
         if self.form.is_some() {
             return self.form_key(code, mods);

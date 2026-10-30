@@ -104,8 +104,32 @@ impl NoticeLog {
         self.scroll = self.scroll.min(max_scroll);
     }
 
+    /// The wheel moves the selection with its window, stopping at the ends.
+    pub fn wheel(&mut self, dir: i32) -> bool {
+        if self.entries.is_empty() {
+            return false;
+        }
+        let was = self.selected;
+        self.move_by(dir as isize);
+        self.selected != was
+    }
+
+    /// A click selects the notice it landed on. The title and the separator
+    /// under it belong to the box; the rows begin at the third line.
+    pub fn click_select(&mut self, line: usize) -> bool {
+        const FIRST_ROW_LINE: usize = 2;
+        let Some(in_window) = line.checked_sub(FIRST_ROW_LINE) else { return false };
+        let idx = in_window + self.scroll;
+        if idx >= self.entries.len() || idx == self.selected {
+            return false;
+        }
+        self.selected = idx;
+        self.keep_visible();
+        true
+    }
+
     /// The list, as it is drawn.
-    pub fn render(&self, width: usize) -> Vec<RenderLine> {
+    pub fn render(&self, width: usize, hover: Option<(usize, u16)>, flash: Option<usize>) -> Vec<RenderLine> {
         let mut lines = Vec::new();
         let box_w = width.saturating_sub(6).min(100);
         let inner_w = box_w.saturating_sub(2);
@@ -128,10 +152,23 @@ impl NoticeLog {
         let height = self.height.max(1);
         let end = (self.scroll + height).min(self.entries.len());
         for (idx, entry) in self.entries[self.scroll.min(self.entries.len())..end].iter().enumerate() {
+            let card_line = 2 + idx;
             let is_sel = self.scroll + idx == self.selected;
-            let pointer = if is_sel { format!("{TEXT_BRIGHT}▸{RESET}") } else { " ".to_string() };
-            let (when_styled, text_styled) = if entry.warning {
+            let is_hover = hover.map(|(l, _)| l) == Some(card_line) && !is_sel && flash != Some(card_line);
+            let is_press = flash == Some(card_line);
+            let pointer = if is_sel || is_press {
+                format!("{TEXT_BRIGHT}▸{RESET}")
+            } else if is_hover {
+                format!("{TEXT_MUTED}·{RESET}")
+            } else {
+                " ".to_string()
+            };
+            let (when_styled, text_styled) = if is_press {
+                (format!("{TEXT_AMBER}{}{RESET}", entry.when), format!("{TEXT_AMBER}{}{RESET}", entry.text))
+            } else if entry.warning {
                 (format!("{TEXT_AMBER}{}{RESET}", entry.when), format!("{TEXT_BRIGHT}{}{RESET}", entry.text))
+            } else if is_hover {
+                (format!("{TEXT_GREEN}{}{RESET}", entry.when), format!("{TEXT_BRIGHT}{}{RESET}", entry.text))
             } else {
                 (format!("{TEXT_GREEN}{}{RESET}", entry.when), format!("{TEXT_MUTED}{}{RESET}", entry.text))
             };
@@ -173,7 +210,7 @@ mod tests {
     #[test]
     fn the_list_is_drawn_with_what_was_said() {
         let v = NoticeLog::new(entries());
-        let screen: Vec<String> = v.render(80).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
+        let screen: Vec<String> = v.render(80, None, None).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
         assert!(screen.iter().any(|l| l.contains("Exported to")), "{screen:#?}");
         assert!(screen.iter().any(|l| l.contains("did not answer")), "{screen:#?}");
         assert!(screen.iter().any(|l| l.contains("2 kept")), "{screen:#?}");
@@ -182,15 +219,40 @@ mod tests {
     #[test]
     fn an_empty_history_says_so() {
         let v = NoticeLog::new(Vec::new());
-        let screen: Vec<String> = v.render(80).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
+        let screen: Vec<String> = v.render(80, None, None).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
         assert!(screen.iter().any(|l| l.contains("Nothing has been said yet")), "{screen:#?}");
     }
 
     #[test]
     fn the_title_of_the_list_is_in_the_language_of_the_interface() {
         let v = NoticeLog::new(entries());
-        let screen: Vec<String> = v.render(80).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
+        let screen: Vec<String> = v.render(80, None, None).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
         assert!(screen[0].contains(crate::i18n::tr("Notices")), "{screen:#?}");
         assert!(screen[0].contains(&crate::i18n::tr_fill("{n} kept", &[("n", "2")])), "{screen:#?}");
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+
+    fn view() -> NoticeLog {
+        NoticeLog::new(vec![
+            NoticeEntry { when: "now".into(), text: "first".into(), warning: false },
+            NoticeEntry { when: "then".into(), text: "second".into(), warning: true },
+        ])
+    }
+
+    #[test]
+    fn the_wheel_and_a_click_walk_the_entries() {
+        let mut v = view();
+        assert!(v.wheel(1));
+        assert_eq!(v.selected, 1);
+        assert!(!v.wheel(1), "the last row holds: no move, no reaction");
+        assert_eq!(v.selected, 1, "no wrap");
+        assert!(v.click_select(2), "line 2 is the first row");
+        assert_eq!(v.selected, 0);
+        assert!(!v.click_select(2), "already the selected one");
+        assert!(!v.click_select(0), "the title is not a row");
     }
 }
