@@ -2068,7 +2068,10 @@ mod tests {
             ..Default::default()
         });
         let cur_ver = flashagent_svc::updater::current_version();
-        assert!(card.iter().any(|(_, t)| t.contains(">_ FlashAgent") && (t.contains(cur_ver) || t.contains("v0.1.0"))));
+        // The header shows the bare version: a stable tag's build metadata
+        // (v1.0.0+b610) is dropped so the line fits its column.
+        let shown = cur_ver.split('+').next().unwrap_or(cur_ver);
+        assert!(card.iter().any(|(_, t)| t.contains(">_ FlashAgent") && (t.contains(shown) || t.contains("v0.1.0"))));
 
         let card80 = welcome_card(&WelcomeCard {
             model: "qwen3.6-35b-a3b-mtp",
