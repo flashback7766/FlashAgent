@@ -1,5 +1,25 @@
 # Changelog
 
+## b615 — the second update in one sitting no longer shoots itself
+
+Seen live: an update that had already installed once failed its successor
+with "could not move the current binary aside: No such file or directory".
+
+- **A process that has updated once installs beside its parked copy, not
+  into it.** After an in-app update the running process lives under the
+  parked backup name — `/proc/self/exe` follows the rename — so the next
+  update resolved its target to that backup and aimed at the copy the
+  rollback exists for. The install now lands where the last update
+  placed it, beside the parked copy.
+- **Parking the running binary can no longer remove it first.** The
+  backup name carries the process id, so a second install removed the
+  old backup and then failed to move what it had just removed. On unix
+  the rename replaces the name and a target that vanished in the race is
+  nothing to park, not an error.
+- **One install per process.** The disk already holds what this process
+  downloaded; a second attempt is answered with "restart FlashAgent to
+  run it" instead of a download aimed at the parked copy.
+
 ## b614 — the transcript answers the hover too
 
 The cards marked the row the pointer was on; the transcript's own

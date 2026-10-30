@@ -367,6 +367,21 @@ fn is_writable(path: &Path) -> bool {
     }
 }
 
+/// Where the install lives, when the running executable is its own parked
+/// copy. A process that has updated once runs from the backup name —
+/// `/proc/self/exe` follows the rename that parked it — and installing to
+/// that name writes over the copy the rollback exists for, or fails outright
+/// once the cleanup has taken it. The binary the owner starts is the one the
+/// last update placed beside it.
+fn installed_beside_parked(exe: &Path) -> Option<PathBuf> {
+    let name = exe.file_name()?.to_string_lossy();
+    if !(name.starts_with(".flashagent-old.") && name.ends_with(".bak")) {
+        return None;
+    }
+    let sibling = if cfg!(windows) { "flashagent.exe" } else { "flashagent" };
+    exe.parent().map(|dir| dir.join(sibling))
+}
+
 /// The running binary when it is replaceable; otherwise the per-user
 /// install location: `~/.local/bin/flashagent`, or on Windows where
 /// install.ps1 puts it. Never a bare name, which would land in whatever
@@ -374,6 +389,7 @@ fn is_writable(path: &Path) -> bool {
 fn resolve_install_target() -> anyhow::Result<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         let real_path = std::fs::canonicalize(&exe).unwrap_or(exe);
+        let real_path = installed_beside_parked(&real_path).unwrap_or(real_path);
         if is_writable(&real_path) {
             return Ok(real_path);
         }
@@ -439,6 +455,27 @@ fn replace_executable(
     result
 }
 
+/// Moves the running binary to the backup name. Windows cannot rename over
+/// a name another copy holds and needs the removal first; unix replaces
+/// atomically, and a `NotFound` means the target was parked away by another
+/// update between the check and this rename — the place step still puts our
+/// build where the owner runs it from.
+#[cfg(windows)]
+fn park_running_binary(target: &Path, old_backup: &Path) -> anyhow::Result<()> {
+    let _ = std::fs::remove_file(old_backup);
+    std::fs::rename(target, old_backup)
+        .map_err(|e| anyhow::anyhow!("could not move the current binary {} aside: {e}", target.display()))
+}
+
+#[cfg(not(windows))]
+fn park_running_binary(target: &Path, old_backup: &Path) -> anyhow::Result<()> {
+    match std::fs::rename(target, old_backup) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("could not move the current binary {} aside: {e}", target.display())),
+    }
+}
+
 fn install_executable(
     target: &Path,
     temp_file: &Path,
@@ -452,10 +489,7 @@ fn install_executable(
     // same move keeps the current build available for a rollback.
     let parked = target.is_file();
     if parked {
-        let _ = std::fs::remove_file(old_backup);
-        std::fs::rename(target, old_backup).map_err(|e| {
-            anyhow::anyhow!("could not move the current binary {} aside: {e}", target.display())
-        })?;
+        park_running_binary(target, old_backup)?;
     }
 
     match place(temp_file, target) {
@@ -531,6 +565,13 @@ pub async fn download_and_apply(download_url: &str, asset_name: &str, checksums_
     download_and_apply_with_progress(download_url, asset_name, checksums_url, |_| {}).await
 }
 
+/// The build this process has already put on the disk, if it did. A process
+/// that has updated once runs from its parked copy — `/proc/self/exe`
+/// follows the rename — and a second install from it aims at the parked
+/// name, where the last thing it should do is write. One install per
+/// process; the restart applies what landed.
+static INSTALLED_THIS_RUN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 pub async fn download_and_apply_with_progress(
     download_url: &str,
     asset_name: &str,
@@ -539,6 +580,9 @@ pub async fn download_and_apply_with_progress(
 ) -> anyhow::Result<PathBuf> {
     if is_dev_mode() {
         anyhow::bail!("In-app updater is disabled in development mode (running from source repository or cargo target build).");
+    }
+    if let Some(version) = INSTALLED_THIS_RUN.lock().ok().and_then(|g| g.clone()) {
+        anyhow::bail!("an update to {version} is already on the disk; restart FlashAgent to run it");
     }
 
     // Idle timeout, not total: a slow download may take minutes but must not stall.
@@ -557,13 +601,17 @@ pub async fn download_and_apply_with_progress(
 
     on_progress(UpdateProgress::Installing);
     let asset = asset_name.to_string();
-    off_runtime(move || {
+    let target_path = off_runtime(move || {
         let binary_bytes = extract_binary_bytes(&asset, &payload)?;
         let target_path = resolve_install_target()?;
         atomic_replace_executable(&target_path, &binary_bytes)?;
         Ok(target_path)
     })
-    .await
+    .await?;
+    if let Ok(mut installed) = INSTALLED_THIS_RUN.lock() {
+        *installed = Some(current_version().to_string());
+    }
+    Ok(target_path)
 }
 
 /// The size a server declares reserves memory only up to this: a wrong
@@ -670,6 +718,53 @@ mod tests {
         assert!(!in_source_tree(&elsewhere.join("flashagent")));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_parked_process_installs_beside_its_parked_copy() {
+        // A process that has already updated once runs from its parked name:
+        // /proc/self/exe follows the rename. Installing to that name would
+        // write over the rollback — or fail, once the cleanup takes it. The
+        // install lives where the last update placed it: beside the copy.
+        let parked = std::path::Path::new("/opt/bin/.flashagent-old.123.bak");
+        assert_eq!(installed_beside_parked(parked).as_deref(), Some(std::path::Path::new("/opt/bin/flashagent")));
+        // A binary under its own name is no parked copy.
+        assert_eq!(installed_beside_parked(std::path::Path::new("/opt/bin/flashagent")), None);
+        // Nor is another file that merely starts the same way.
+        assert_eq!(installed_beside_parked(std::path::Path::new("/opt/bin/.flashagent-old-README")), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn nothing_to_park_is_not_an_error() {
+        // Two updates at once: the other one parked the binary away between
+        // our check and our rename. The place step still puts our build
+        // where the owner runs it from; the failed move is not a failure.
+        let dir = std::env::temp_dir().join(format!("fa-park-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("flashagent");
+        let backup = dir.join(".flashagent-old.1.bak");
+        park_running_binary(&target, &backup).expect("a target that is already gone parks nothing");
+        assert!(!backup.exists(), "nothing was written for a target that is not there");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_park_replaces_what_stands_at_the_backup_name() {
+        // The second update of a running process reuses the same {pid} backup
+        // name; the park must replace the name, not die on it — the running
+        // binary it parked before is this process's own inode.
+        let dir = std::env::temp_dir().join(format!("fa-park2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("flashagent");
+        let backup = dir.join(".flashagent-old.1.bak");
+        std::fs::write(&target, b"the running build").unwrap();
+        std::fs::write(&backup, b"a stale backup").unwrap();
+        park_running_binary(&target, &backup).expect("the park replaces the backup name");
+        assert!(!target.exists(), "the running binary moved aside");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"the running build", "the backup holds what was parked");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
