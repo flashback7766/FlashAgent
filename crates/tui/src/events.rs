@@ -716,23 +716,18 @@ impl App {
             MouseEventKind::ScrollUp => self.wheel_at(-1),
             MouseEventKind::ScrollDown => self.wheel_at(1),
             // A thumb under the hand follows the mouse, and that is all it
-            // does until the button comes back up.
+            // does until the button comes back up. A selection being made
+            // only paints: the clipboard is written once, when the button
+            // comes up — writing it on every motion was what made the
+            // highlight crawl behind the hand.
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                 if self.renderer.scrollbar_follow(m.row) {
                     self.renderer.request_reprint();
                     return;
                 }
                 self.selection_head = Some((m.row, m.column));
-                // A selection made with a finger or a trackpad is copied as it is
-                // made. Nothing else will copy it: a TUI has no Ctrl+C for text the
-                // terminal itself never held.
-                if let Some((top, left)) = self.selection_anchor {
-                    let picked = self.renderer.text_in(top, m.row, left, m.column);
-                    if picked.chars().count() > 1 && flashagent_tui::clipboard::set_clipboard_text(&picked) {
-                        self.background =
-                            Some(BackgroundNotice::fading(flashagent_tui::i18n::tr_fill("Copied {n} characters", &[("n", &picked.chars().count().to_string())]), 4));
-                        self.renderer.request_reprint();
-                    }
+                if self.selection_anchor.is_some() {
+                    self.renderer.request_reprint();
                 }
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
@@ -740,8 +735,19 @@ impl App {
             }
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                 self.renderer.scrollbar_drag = None;
-                // The selection was copied as it was made; what is left of it
-                // on screen goes with the button.
+                // The drag decided what to copy; the release is when it is
+                // decided. A TUI has no Ctrl+C for text the terminal itself
+                // never held, so the copy is the one thing the release does.
+                if let (Some((top, left)), Some((bottom, right))) = (self.selection_anchor, self.selection_head) {
+                    let picked = self.renderer.text_in(top, bottom, left, right);
+                    if picked.chars().count() > 1 {
+                        if flashagent_tui::clipboard::set_clipboard_text(&picked) {
+                            self.background =
+                                Some(BackgroundNotice::fading(flashagent_tui::i18n::tr_fill("Copied {n} characters", &[("n", &picked.chars().count().to_string())]), 4));
+                        }
+                        self.renderer.request_reprint();
+                    }
+                }
                 self.selection_anchor = None;
                 self.selection_head = None;
             }
@@ -783,7 +789,6 @@ impl App {
             self.renderer.request_reprint();
             return;
         }
-        self.selection_anchor = Some((m.row, m.column));
         // A click on a thought or a tool call opens or folds that one alone.
         // A subagent row opens its own detail too, and only the mouse does:
         // F2 is for the transcript and never touches the rows above the composer.
@@ -808,6 +813,10 @@ impl App {
                 return;
             }
         }
+        // What the scrollbar, a subagent row and the card left behind is the
+        // transcript's: a selection starts here and nowhere else, so a drag
+        // that begins on a card copies nothing on its release.
+        self.selection_anchor = Some((m.row, m.column));
         let expansion = ReasoningExpansion { all: self.all_expanded, last: self.last_expanded };
         if let Some(row) = self.renderer.chat_row_at(m.row) {
             self.chat.toggle_row(row, expansion);
