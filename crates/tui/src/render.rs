@@ -167,6 +167,9 @@ pub(crate) struct FrameState<'a> {
     /// Where the pointer sits on the open overlay's card: the line counted
     /// from the card's first row, and the column from the screen's left edge.
     pub(crate) overlay_hover: Option<(usize, u16)>,
+    /// The screen row the pointer is on, when it is over the transcript: the
+    /// rows a click can reach mark themselves.
+    pub(crate) hover_chat: Option<u16>,
     /// The card line a click just landed on: the row keeps a pressed look.
     pub(crate) overlay_flash: Option<usize>,
 }
@@ -1376,6 +1379,11 @@ struct LayoutInputs<'a> {
     border_color: &'a str,
     /// Both ends of the selection being dragged, in screen coordinates.
     selection: Option<((u16, u16), (u16, u16))>,
+    /// The message a chat row belongs to, when a click on it would reach one.
+    /// The hover asks it once per transcript row on the screen.
+    owner_at: &'a dyn Fn(usize) -> Option<usize>,
+    /// The screen row the pointer is on, when it is over the transcript.
+    hover_chat: Option<u16>,
 }
 
 impl Renderer {
@@ -1552,10 +1560,12 @@ impl Renderer {
         self.agent_open = st.agent_rows.iter().map(|(id, _)| id.clone()).filter(|id| open(id)).collect();
         self.paint_layout(&settled, &mut tail, LayoutInputs {
             width, height, card_key, card_start, paint_start, input_line_idx, text_cursor, border_color: &border_color, selection: st.selection,
+            owner_at: &|i| chat.owner_at(i),
+            hover_chat: st.hover_chat,
         });
     }
     fn paint_layout(&mut self, settled: &[RenderLine], tail: &mut Vec<RenderLine>, layout: LayoutInputs<'_>) {
-        let LayoutInputs { width, height, card_key, card_start, paint_start, mut input_line_idx, text_cursor, border_color, selection } = layout;
+        let LayoutInputs { width, height, card_key, card_start, paint_start, mut input_line_idx, text_cursor, border_color, selection, owner_at, hover_chat } = layout;
     // The conversation scrolls; the composer and the footer under it stay where
     // they are, so a reply can be written while reading back.
     let height = height as usize;
@@ -1655,6 +1665,15 @@ impl Renderer {
     } else {
         None
     };
+    // The transcript's own hover: the row under the pointer, when a click
+    // there would reach a thought or a tool call, takes a quiet background —
+    // the same hint the card rows give theirs.
+    if let Some(row) = hover_chat {
+        let r = row as usize;
+        if r < self.chat_rows_on_screen && r < rows.len() && (owner_at)(self.chat_view.0 + r).is_some() {
+            rows[r] = flashagent_tui::style_span(&rows[r], 0, width, "\x1b[48;2;44;50;62m", "\x1b[49m");
+        }
+    }
     // The drag selection, while the button is held: reverse video over the
     // cells it covers, the way a terminal paints its own. It covers the
     // transcript's rows only — the card and the footer are not selectable.
@@ -1815,8 +1834,13 @@ impl App {
                     (Some(a), Some(h)) => Some((a, h)),
                     _ => None,
                 };
+                let hover_chat = self
+                    .mouse_at
+                    .map(|(row, _)| row)
+                    .filter(|row| (*row as usize) < self.renderer.chat_rows_on_screen);
                 FrameState {
                     selection,
+                    hover_chat,
                     overlay_hover,
                     overlay_flash: self.click_flash.map(|(line, _)| line),
                 cost_display: cost_display.as_deref(),

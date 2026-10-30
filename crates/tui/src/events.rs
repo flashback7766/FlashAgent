@@ -698,18 +698,14 @@ impl App {
         }
         self.mouse_at = Some((m.row, m.column));
         match m.kind {
-            // The pointer crossing a card marks what a press would reach. A
-            // frame is drawn only when it crosses a row's boundary: a motion
-            // inside one row changed nothing worth a repaint.
+            // The pointer crossing anything a press could reach — a card's
+            // row, or a thought or tool call in the transcript — marks it. A
+            // frame is drawn only when the pointer crosses a row's boundary:
+            // a motion inside one row changed nothing worth a repaint.
             MouseEventKind::Moved => {
-                let want = self
-                    .renderer
-                    .overlay_row
-                    .filter(|_| self.overlay.is_some())
-                    .filter(|top| (m.row as usize) >= *top)
-                    .map(|top| (m.row as usize - top, m.column));
-                if want != self.hovered_card {
-                    self.hovered_card = want;
+                let want = self.hover_target(&m);
+                if want != self.hovered {
+                    self.hovered = want;
                     self.renderer.request_reprint();
                 }
             }
@@ -753,6 +749,28 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// What a press would reach at this position: a card's row, a thought or
+    /// tool call in the transcript, or nothing. The hover paints from the
+    /// screen itself each frame; this only decides whether the crossing of a
+    /// row's boundary is worth a frame.
+    fn hover_target(&self, m: &crossterm::event::MouseEvent) -> Option<HoverTarget> {
+        if let Some(top) = self.renderer.overlay_row {
+            if self.overlay.is_some() && (m.row as usize) >= top {
+                return Some(HoverTarget::Card(m.row as usize - top, m.column));
+            }
+        }
+        if (m.row as usize) < self.renderer.chat_rows_on_screen
+            && self
+                .renderer
+                .chat_row_at(m.row)
+                .and_then(|row| self.chat.owner_at(row))
+                .is_some()
+        {
+            return Some(HoverTarget::Chat(m.row));
+        }
+        None
     }
 
     /// The wheel goes to what is on the screen: an open overlay's own list,

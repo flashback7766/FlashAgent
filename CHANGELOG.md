@@ -1,5 +1,13 @@
 # Changelog
 
+## b614 — the transcript answers the hover too
+
+The cards marked the row the pointer was on; the transcript's own
+clickable rows — the thoughts, the tool calls — stayed silent under the
+mouse, though a click there folds them. They take the same quiet
+background now, and only those: an answer beside a thought gives no hint,
+because a click on it has nothing to do.
+
 ## b613 — the selection answers the hand that makes it
 
 Three live failures of b612's mouse, seen against a real terminal:
