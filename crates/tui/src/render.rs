@@ -1640,14 +1640,18 @@ impl Renderer {
     self.chat_view = (first_chat_row + cut, chat_rows.saturating_sub(scrolled_marker).saturating_sub(cut));
     self.chat_rows_on_screen = chat_rows.saturating_sub(cut);
     self.screen_width = width;
-    // Where the open overlay's card begins on screen, for clicks: the bottom
-    // block starts where the transcript ends, and the card is its first rows
-    // once the work box above it has had its own.
+    // Where the open overlay's card begins on screen, for clicks. The rows
+    // on screen are the chat first — which already holds everything of the
+    // tail up to `card_start`, the blank separator included — and the bottom
+    // block after it, so the card's first line sits at the chat's end, moved
+    // down by whatever the work box above it took, and up by whatever the
+    // screen cut from the top. Measured against a real screen, a row that
+    // counts the tail before the card twice lands one line low, and every
+    // click and hover on the card answers one row beneath the pointer.
     self.overlay_row = if matches!(card_key, CardKey::Overlay(_)) {
         chat_rows
             .checked_sub(cut)
-            .and_then(|top| top.checked_sub(card_start))
-            .and_then(|base| base.checked_add(paint_start - card_start))
+            .and_then(|top| top.checked_add(paint_start - card_start))
     } else {
         None
     };
