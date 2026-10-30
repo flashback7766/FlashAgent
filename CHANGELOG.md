@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.0+b610 — the first stable
+
+The same build as b610, cut stable: the rolling beta held up. The last three
+releases closed nineteen quiet failures, each with a test that fails without
+it — b606's audit, b609's four data-loss holes, b610's crash-safe writes —
+and every one of them went through CI on Linux, macOS and Windows. Sessions,
+memory and snapshots now survive what used to eat them: half-written files,
+full disks, clean quits. From here the releases slow down and grow up.
+
 ## b610 — every written file survives a crash, and the session keeps its own history
 
 - **Memory notes, snapshots and session files are written atomically.** A
