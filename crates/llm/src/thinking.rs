@@ -932,6 +932,32 @@ pub fn parse_gemini_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
         .collect()
 }
 
+/// AgentRouter's listing names models but omits their limits and effort
+/// levels. Exact ids only, from the public OpenCode inference catalog checked
+/// on 2026-11-01; anything the connected server reports takes precedence.
+pub(crate) fn fill_agentrouter_metadata(models: &mut [DiscoveredModel]) {
+    for model in models {
+        let efforts: &[&str] = match model.id.as_str() {
+            "gpt-6.1-sol" | "gpt-6-astra" => &["low", "medium", "high", "xhigh", "max"],
+            "gpt-5.6-sol" => &["none", "low", "medium", "high", "xhigh", "max"],
+            _ => continue,
+        };
+        if model.context_length.is_none() && model.max_context_length.is_none() {
+            model.context_length = Some(1_050_000);
+        }
+        if model.thinking.is_unreported() {
+            model.thinking = ThinkingProfile {
+                presets: efforts.iter().map(|s| s.to_string()).collect(),
+                protocol: ThinkingProtocol::ReasoningEffort,
+                supported: true,
+                default_preset: None,
+            };
+        }
+        model.supports_tools = true;
+        model.supports_vision = true;
+    }
+}
+
 /// LM Studio `/api/v1/models`, `/api/v0/models`, or OpenAI `/v1/models`.
 pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
     let mut discovered = Vec::new();
@@ -1192,7 +1218,7 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
             .pointer("/architecture/input_modalities")
             .or_else(|| m.pointer("/modalities/input"))
             .and_then(|v| v.as_array())
-            .is_some_and(|inputs| inputs.iter().any(|i| i.as_str() == Some("image")));
+            .is_some_and(|inputs| inputs.iter().any(|i| i.as_str().is_some_and(|s| s == "image" || s.starts_with("image/"))));
 
         discovered.push(DiscoveredModel {
             id: id.to_string(),
@@ -1212,6 +1238,24 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agentrouters_sparse_list_gets_exact_model_defaults_without_overwriting_the_server() {
+        let mut models = parse_server_models(&serde_json::json!({"data":[
+            {"id":"gpt-6.1-sol", "owned_by":"custom", "supported_endpoint_types":["openai"]},
+            {"id":"gpt-6-astra", "context_length":64000,"capabilities":{"reasoning_effort_levels":["high"]}},
+            {"id":"gpt-5.6-sol"}, {"id":"gpt-6.1-sol-custom-alias"}
+        ]}));
+        fill_agentrouter_metadata(&mut models);
+        assert_eq!(models[0].context_length,Some(1_050_000));
+        assert_eq!(models[0].thinking.presets,["low","medium","high","xhigh","max"]);
+        assert!(models[0].supports_tools && models[0].supports_vision);
+        assert_eq!(models[1].context_length,Some(64000),"a gateway can serve a smaller window");
+        assert_eq!(models[1].thinking.presets,["high"],"reported efforts beat reference metadata");
+        assert_eq!(models[2].thinking.presets.first().map(String::as_str),Some("none"));
+        assert_eq!(models[3].context_length,None,"an alias is not the same exact model");
+        assert!(models[3].thinking.is_unreported());
+    }
 
     #[test]
     fn openrouters_own_list_of_efforts_is_read_rather_than_guessed_at() {

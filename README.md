@@ -15,7 +15,7 @@
 
 </div>
 
-> **Status:** Stable v1.0.0 · Beta b618 — small changes roll out on the beta first and ride into the next stable release.
+> **Status:** Stable v1.0.0 · Beta b634 — small changes roll out on the beta first and ride into the next stable release.
 
 ## Quick start
 
@@ -265,6 +265,10 @@ FlashAgent follows the Go API's rules for outside agents: it names itself `flash
 **Providers.** Each saved provider has a name, a protocol, an address, a key (optional) and the model to start with there. `/provider` lists them, the one in use marked, and switches to another without a restart: FlashAgent asks the new server what it runs, takes up the model you last used there (or the one it has loaded), and the conversation carries on where it was. `/provider <name>` switches straight to one. The same menu adds a provider (the wizard's steps, without the rest of the setup) and edits them: name, protocol, address, key and model, or deletes one. <kbd>Tab</kbd> → General → Provider does the same from Settings. A switch waits until the model has finished answering. Changing the model with <kbd>F3</kbd> saves it for the provider in use.
 
 **User-Agent.** Some gateways (AgentRouter among them) serve only the coding agents they know and refuse every other client before even reading the key. The AgentRouter preset already presents itself as a client they accept; for anything typed by hand, `FLASHAGENT_USER_AGENT` names the agent for every provider, and a provider's own **User-Agent** field (in the provider editor) names it for that one alone.
+
+**Responses API.** An OpenAI-compatible provider stays on Chat Completions unless the server explicitly refuses that endpoint and asks for `/responses`. FlashAgent then switches that model to Responses for the rest of the session, including tool calls, image input, reasoning replay and usage. A switch of model or provider resets the learned choice; a Custom address ending in `/v1/responses` selects Responses immediately. Requests use `store: false` and carry the conversation locally.
+
+AgentRouter currently omits context and effort metadata from `/models`. For the exact `gpt-6.1-sol`, `gpt-5.6-sol` and `gpt-6-astra` ids, FlashAgent supplies reference limits and effort levels checked against the [public OpenCode model catalog](https://opencode.ai/inference/v1/models). Any limits or effort levels the connected server reports override these defaults; aliases remain unknown.
 
 **Keys.** A key typed in the wizard or the provider editor is saved with that provider in the config file and shown masked. A provider without a saved key uses its usual environment variable (the Key column), then `FLASHAGENT_API_KEY`; the wizard says when it has found one.
 

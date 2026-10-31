@@ -219,6 +219,32 @@ fn two_providers(home: &Home, first: &MockServer, second: &MockServer) -> Term {
 }
 
 #[test]
+fn a_provider_without_a_model_list_keeps_only_the_next_turn_separator() {
+    let first = MockServer::start(vec![]);
+    let second = MockServer::start_with_model("saved-model", vec![Reply::Text("The saved model answered.".into())]);
+    second.without_model_listing();
+    let home = Home::new();
+    home.write_config(serde_json::json!({
+        "setup_completed": true, "last_seen_version": version(), "auto_check_updates": false,
+        "providers": [
+            {"name":"Desk","protocol":"openai","url":first.url,"model":first.model},
+            {"name":"Gateway","protocol":"openai","url":second.url,"model":"saved-model"}
+        ], "active_provider":"Desk"
+    }));
+    let mut term = Term::start(&home, &["-y"], COLS, ROWS);
+    term.wait_for(PROMPT, WAIT);
+    term.type_text("/provider Gateway");
+    term.send(ENTER);
+    term.wait_for("Gateway · saved-model", WAIT);
+    ask(&term, "hello", "The saved model answered.");
+    let screen = term.wait_for("Provider: Gateway · saved-model · thinking effort:", WAIT);
+    assert!(!screen.contains("lists no models yet"), "a yellow duplicate remained:\n{screen}");
+    assert!(!screen.contains("did not answer; its models"), "an unavailable list is not a failed chat:\n{screen}");
+    assert_eq!(screen.lines().filter(|l| l.contains("Provider: Gateway")).count(), 1, "{screen}");
+    quit(&mut term);
+}
+
+#[test]
 fn switching_provider_mid_session_sends_the_next_turn_to_the_other_server() {
     let first = MockServer::start(vec![
         Reply::Text("Answer from the desk server.".into()),
@@ -2830,7 +2856,7 @@ fn typing_in_a_question_card_answers_in_ones_own_words() {
 fn slash_channel_asks_before_switching() {
     let server = MockServer::start(Vec::new());
     let home = Home::new();
-    let term = ready(&home, &server);
+    let term = ready_with(&home, &server, serde_json::json!({"update_channel":"stable"}));
 
     term.type_text("/channel beta");
     term.send(ENTER);

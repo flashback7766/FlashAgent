@@ -239,6 +239,10 @@ impl Client {
         self.user_sampling.store(by_hand, Ordering::Relaxed);
     }
 
+    pub(crate) fn sampling_is_custom(&self) -> bool {
+        self.user_sampling.load(Ordering::Relaxed)
+    }
+
     /// What goes out with a request: the caller's options, without sampling
     /// the provider should choose itself.
     pub(crate) fn sampling_for_protocol(&self, options: &TurnOptions) -> TurnOptions {
