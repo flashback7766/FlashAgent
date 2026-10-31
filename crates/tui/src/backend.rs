@@ -27,6 +27,13 @@ impl BackendSource {
         self.0.set_model(model);
     }
 
+    /// Names the conversation for the gateway that routes by it (OpenCode's).
+    /// Survives a provider switch: the endpoint moves, the conversation and
+    /// its id do not.
+    pub(crate) fn set_session_id(&self, id: &str) {
+        self.0.set_session_id(id);
+    }
+
     pub(crate) fn set_effort_bias(&self, steps: i8) {
         self.0.set_effort_bias(steps);
     }

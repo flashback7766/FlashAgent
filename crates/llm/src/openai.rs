@@ -161,6 +161,9 @@ pub(crate) fn headers(client: &Client) -> reqwest::header::HeaderMap {
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
     }
+    if let Some(session) = client.opencode_session_header() {
+        headers.insert("x-opencode-session", session);
+    }
     headers
 }
 

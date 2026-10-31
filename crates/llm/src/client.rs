@@ -48,6 +48,11 @@ pub struct Client {
     /// What this server rejected, kept for the model: without it every turn
     /// on a strict cloud API paid for a refused request first.
     pub(crate) learned: RwLock<crate::openai::Learned>,
+    /// The conversation id OpenCode's gateway routes and caches by. Generated
+    /// per client, so the wizard's probes beside the chat never share one; the
+    /// app replaces it with the session's own id, so a resumed conversation
+    /// keeps its route and its prompt cache.
+    session: RwLock<String>,
 }
 
 /// Counts a request as running until dropped; a stream holds it to its last byte.
@@ -119,8 +124,11 @@ impl Client {
             model: RwLock::new(model.into()),
             // No total timeout here: a slow local model can stream for many
             // minutes. This one is idle-only, and the stream pump carries the
-            // deadline for the response as a whole.
+            // deadline for the response as a whole. The agent name is not
+            // decoration: OpenCode's gateway refuses traffic that does not say
+            // who is speaking, and reqwest sends no User-Agent by itself.
             http: reqwest::Client::builder()
+                .user_agent(user_agent())
                 .connect_timeout(Duration::from_secs(3))
                 .read_timeout(Duration::from_secs(300))
                 .build()
@@ -133,6 +141,7 @@ impl Client {
             effort_bias: AtomicI8::new(0),
             in_flight: Arc::new(AtomicUsize::new(0)),
             learned: RwLock::default(),
+            session: RwLock::new(generated_session_id()),
         }
     }
 
@@ -150,6 +159,30 @@ impl Client {
 
     pub fn api_key(&self) -> Option<String> {
         self.endpoint.read().api_key.clone()
+    }
+
+    /// The id OpenCode's gateway routes and caches the conversation by.
+    pub fn session_id(&self) -> String {
+        self.session.read().clone()
+    }
+
+    /// Names the conversation: OpenCode's Go routes refuse to route a request
+    /// that does not carry one, and a stable id across the turns of one
+    /// conversation is what their prompt cache keys on. One id per
+    /// conversation, not per turn.
+    pub fn set_session_id(&self, id: impl AsRef<str>) {
+        *self.session.write() = id.as_ref().trim().to_string();
+    }
+
+    /// The session header, but only for the host that asked for it: an
+    /// OpenCode-shaped id says nothing to any other server and says it in
+    /// every request. None where the endpoint is elsewhere.
+    pub(crate) fn opencode_session_header(&self) -> Option<reqwest::header::HeaderValue> {
+        if !is_opencode_host(&self.base_url()) {
+            return None;
+        }
+        let id = self.session_id();
+        (!id.is_empty()).then(|| reqwest::header::HeaderValue::from_str(&id).ok()).flatten()
     }
 
     /// Another server, or the same one under another key or protocol. What
@@ -486,6 +519,41 @@ impl Client {
     }
 }
 
+/// OpenCode's gateway asks third-party agents to name themselves, and reqwest
+/// sends no User-Agent of its own. The version is the release's when the
+/// release build pins one (`FLASHAGENT_VERSION`), the crate's otherwise.
+fn user_agent() -> String {
+    format!("flashagent/{}", option_env!("FLASHAGENT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))
+}
+
+/// `opencode.ai` itself or a subdomain — the host whose Go routes refuse a
+/// request that carries no `x-opencode-session`.
+fn is_opencode_host(url: &str) -> bool {
+    let host = url
+        .trim()
+        .split_once("://")
+        .map_or(url.trim(), |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    host == "opencode.ai" || host.ends_with(".opencode.ai")
+}
+
+/// A conversation id for the session header, for when the app has not named
+/// one: the wizard's probe clients beside the chat are conversations of their
+/// own as far as the gateway is concerned, and two of them must not share an
+/// id any more than two launches must.
+fn generated_session_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    let mut x =
+        nanos ^ ((std::process::id() as u64) << 32) ^ COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    x ^= x >> 33;
+    format!("fa-{x:016x}")
+}
+
 /// The wait before retry number `attempt`, which is at least 1 in every
 /// caller. Doubling from there, a third of it taken off at random, and never
 /// past half a minute: several agents pointed at one gateway otherwise take
@@ -631,6 +699,45 @@ mod tests {
 
     fn client(model: &str) -> Client {
         Client::new(Endpoint::new(ApiProtocol::OpenAi, "http://localhost:1234/v1", None), model)
+    }
+
+    #[test]
+    fn an_opencode_endpoint_carries_the_session_header_and_others_do_not() {
+        let opencode = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://opencode.ai/inference/go/v1", Some("k".into())), "m");
+        // Generated, not empty: a probe client names itself out of the box.
+        assert!(opencode.session_id().starts_with("fa-"), "{}", opencode.session_id());
+        let headers = crate::openai::headers(&opencode);
+        assert!(
+            headers.get("x-opencode-session").is_some_and(|v| v.as_bytes() == opencode.session_id().as_bytes()),
+            "the gateway refuses to route a request without it"
+        );
+
+        opencode.set_session_id("session_1793555555_4021");
+        let headers = crate::openai::headers(&opencode);
+        assert_eq!(headers.get("x-opencode-session").unwrap(), "session_1793555555_4021");
+        // The same id goes out whatever the protocol module builds the rest.
+        assert_eq!(crate::gemini::headers(&opencode).get("x-opencode-session").unwrap(), "session_1793555555_4021");
+        assert_eq!(crate::anthropic::headers(&opencode).get("x-opencode-session").unwrap(), "session_1793555555_4021");
+
+        let local = client("m");
+        assert!(crate::openai::headers(&local).get("x-opencode-session").is_none(), "a localhost server was never asked for it");
+        let cloud = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://api.openai.com/v1", Some("k".into())), "m");
+        assert!(crate::openai::headers(&cloud).get("x-opencode-session").is_none(), "an id of ours says nothing to another cloud");
+        // A subdomain is the same gateway.
+        let sub = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://staging.opencode.ai/inference/go/v1", None), "m");
+        assert!(crate::openai::headers(&sub).get("x-opencode-session").is_some());
+        // A lookalike path on another host is not.
+        let lookalike = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://example.com/opencode.ai/v1", None), "m");
+        assert!(crate::openai::headers(&lookalike).get("x-opencode-session").is_none());
+    }
+
+    #[test]
+    fn two_clients_do_not_share_a_generated_session_id() {
+        let a = client("m");
+        let b = client("m");
+        assert_ne!(a.session_id(), b.session_id(), "the wizard's probe and the chat are separate conversations");
+        a.set_session_id(" one with spaces  ");
+        assert_eq!(a.session_id(), "one with spaces", "trimmed, so the header value is what was meant");
     }
 
     #[test]
