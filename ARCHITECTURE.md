@@ -40,18 +40,18 @@ graph TD
 sequenceDiagram
     actor User
     participant TUI as tui (App)
-    participant Loop as core::AgentLoop
+    participant Turn as core::AgentLoop
     participant Model as llm::Client
     participant Gate as core::PermissionedTools
     participant Tools as tools::BuiltinTools
 
     User->>TUI: Enter
-    TUI->>Loop: spawn the turn (history, budgets, cancel token)
+    TUI->>Turn: spawn the turn (history, budgets, cancel token)
     loop until the model answers without a tool call
-        Loop->>Model: stream the history
-        Model-->>Loop: text, reasoning, tool calls
-        Loop-->>TUI: LoopEvent per delta
-        Loop->>Gate: each tool call
+        Turn->>Model: stream the history
+        Model-->>Turn: text, reasoning, tool calls
+        Turn-->>TUI: LoopEvent per delta
+        Turn->>Gate: each tool call
         alt the mode allows it
             Gate->>Tools: run
         else it needs a person
@@ -60,9 +60,9 @@ sequenceDiagram
             TUI->>Gate: the answer
             Gate->>Tools: run, or refuse
         end
-        Tools-->>Loop: result, fed back to the model
+        Tools-->>Turn: result, fed back to the model
     end
-    Loop-->>TUI: Done
+    Turn-->>TUI: Done
     TUI->>TUI: save the session
 ```
 
