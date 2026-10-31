@@ -70,6 +70,18 @@ pub(crate) struct Renderer {
     /// looked like then. Moving the mouse maps the row difference back
     /// through the proportion the track stood at when the drag began.
     pub(crate) scrollbar_drag: Option<ScrollbarDrag>,
+    /// The context gauge's columns at the end of the status row, when the
+    /// row shows one. `frame` measures it, `paint_layout` says which screen
+    /// row the status landed on.
+    status_gauge_cols: Option<(u16, u16)>,
+    /// (row, from column, to column) of the gauge on screen, for a click.
+    status_gauge: Option<(u16, u16, u16)>,
+    /// Where the pointer was last seen: the scrollbar shows itself only to a
+    /// hand near the right edge of the transcript.
+    pub(crate) mouse_at: Option<(u16, u16)>,
+    /// Screen row of the "more lines below" marker, when one is painted: a
+    /// click there returns to the bottom, the way End does.
+    scroll_marker: Option<usize>,
 }
 
 /// Where the scrollbar thumb sits while it is being dragged.
@@ -531,14 +543,24 @@ impl Renderer {
             chat_rows_on_screen: 0,
             screen_width: 0,
             scrollbar_drag: None,
+            status_gauge_cols: None,
+            status_gauge: None,
+            mouse_at: None,
+            scroll_marker: None,
         }
     }
 
     /// The scrollbar's geometry, when there is anything to scroll. The thumb
     /// is the share of the conversation the screen shows, sitting where the
     /// view is: at the top of the track while the view is scrolled all the
-    /// way back, at its end while anchored.
+    /// way back, at its end while anchored. It shows itself only to a hand
+    /// near the right edge of the transcript, or one already holding the
+    /// thumb — bolted over the last column, always on, it was furniture
+    /// nobody asked for.
     pub(crate) fn scrollbar(&self) -> Option<Scrollbar> {
+        if !self.scrollbar_visible() {
+            return None;
+        }
         let track = self.chat_rows_on_screen;
         if self.max_scroll == 0 || track == 0 || self.total_lines == 0 {
             return None;
@@ -844,7 +866,9 @@ fn context_gauges(context_usage: &ContextUsage, reported: bool, warn_threshold: 
     ]
 }
 
-fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>, awaiting_user: bool) -> String {
+/// The status row, and how many cells its gauge takes at the end (0: the row
+/// shows no gauge this frame).
+fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>, awaiting_user: bool) -> (String, usize) {
     // The safe mode is said where the permission mode is: both say what the
     // session may do, and one of them can change what the other allows.
     // The mode and the safe marker are the interface's own words.
@@ -890,7 +914,9 @@ fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>
     fit_status_row(width, &left_telemetry, &format_provider(st.provider.0, st.provider.1), &gauge_str)
 }
 
-fn fit_status_row(width: usize, left: &str, provider: &str, gauge_str: &str) -> String {
+/// The row, right-aligned gauge last, and the gauge's width: the cells a click
+/// on the status row's end lands in.
+fn fit_status_row(width: usize, left: &str, provider: &str, gauge_str: &str) -> (String, usize) {
     let left = format!("{left}{provider}");
     let gauge_vis = visible_width(gauge_str);
     let left_vis = visible_width(&left);
@@ -911,7 +937,7 @@ fn fit_status_row(width: usize, left: &str, provider: &str, gauge_str: &str) -> 
         let pad = " ".repeat(width.saturating_sub(visible_width(&clipped_left) + gauge_vis + 1));
         format!("{clipped_left}{pad}{gauge_str}")
     };
-    status_row
+    (status_row, gauge_vis)
 }
 
 /// The change an approval card asks about, one styled row per diff line.
@@ -1566,7 +1592,11 @@ impl Renderer {
         tail.push((LineKind::System, footer_hint(shown, &st, width, t)));
         append_tip_rows(&mut tail, &st, width);
         let awaiting_user = gate.pending().is_some() || question_gate.pending().is_some();
-        tail.push((LineKind::System, footer_status(width, context_usage, &st, awaiting_user)));
+        let (status_row, gauge_vis) = footer_status(width, context_usage, &st, awaiting_user);
+        tail.push((LineKind::System, status_row));
+        // The gauge is the status row's last cells; which screen row that is
+        // paint_layout knows, after the frame has been cut to the terminal.
+        self.status_gauge_cols = (gauge_vis > 0).then(|| (width.saturating_sub(gauge_vis + 1) as u16, width as u16));
 
 
         let open = |id: &str| st.agent_expanded.contains(&id) && st.agent_details.contains_key(id);
@@ -1660,6 +1690,9 @@ impl Renderer {
     // A composer taller than the screen keeps its end, where the typing is.
     let cut = rows.len().saturating_sub(height);
     rows.drain(..cut);
+    // The "more lines below" marker is the conversation's last painted row;
+    // whatever the screen cut from the top, that is where a click finds it.
+    self.scroll_marker = (self.scroll_offset > 0).then(|| chat_rows.saturating_sub(1).saturating_sub(cut));
     let scrolled_marker = usize::from(self.scroll_offset > 0);
     self.chat_view = (first_chat_row + cut, chat_rows.saturating_sub(scrolled_marker).saturating_sub(cut));
     self.chat_rows_on_screen = chat_rows.saturating_sub(cut);
@@ -1743,7 +1776,34 @@ impl Renderer {
         let row = (chat_rows + input_line_idx.checked_sub(card_start)?).checked_sub(cut)?;
         Some((row as u16, col))
     });
+    // The status row is the last one painted, however much the screen cut from
+    // the top; the gauge's columns were measured when the frame was built.
+    self.status_gauge = self.status_gauge_cols.map(|(from, to)| (rows.len().saturating_sub(1) as u16, from, to));
     self.screen.paint(&rows, cursor);
+    }
+
+    /// A press on the context gauge at the end of the status line — the bar
+    /// and the numbers beside it. It opens what F1 opens.
+    pub(crate) fn gauge_press(&self, row: u16, column: u16) -> bool {
+        match self.status_gauge {
+            Some((gauge_row, from, to)) => row == gauge_row && (from..to).contains(&column),
+            None => false,
+        }
+    }
+
+    /// Whether the scrollbar is on screen this frame: the hand is at the right
+    /// edge, or already holding the thumb.
+    pub(crate) fn scrollbar_visible(&self) -> bool {
+        self.scrollbar_drag.is_some()
+            || self
+                .mouse_at
+                .is_some_and(|(_, col)| self.screen_width > 0 && (col as usize) + 2 >= self.screen_width)
+    }
+
+    /// A press on the "more lines below" marker: it returns to the bottom,
+    /// the way End does.
+    pub(crate) fn scroll_marker_press(&self, row: u16) -> bool {
+        self.scroll_marker == Some(row as usize)
     }
 }
 
@@ -2005,6 +2065,9 @@ mod scrollbar_tests {
         r.chat_view = (960, 40);
         r.max_scroll = 960;
         r.screen_width = 80;
+        // The scrollbar shows itself to a hand at the right edge; these tests
+        // are about its geometry, so the hand is there.
+        r.mouse_at = Some((0, 79));
         r
     }
 
@@ -2167,7 +2230,7 @@ mod footer_tests {
         let left = format_status_left(false, false, false, None, "Manual", "");
         let provider = format_provider("Anthropic", "claude-opus-5-5");
         for width in 1..120 {
-            let row = fit_status_row(width, &left, &provider, "");
+            let (row, _) = fit_status_row(width, &left, &provider, "");
             assert!(visible_width(&row) <= width, "width {width}: {row:?}");
         }
     }
@@ -2177,14 +2240,32 @@ mod footer_tests {
         let left = format_status_left(false, false, false, None, "Manual", "");
         let provider_only = format_provider("Anthropic", "");
         let provider = format_provider("Anthropic", "claude-opus-5-5");
-        let with_provider = fit_status_row(visible_width(&left) + visible_width(&provider_only) + 4, &left, &provider, "");
+        let (with_provider, _) = fit_status_row(visible_width(&left) + visible_width(&provider_only) + 4, &left, &provider, "");
         let with_provider = flashagent_tui::strip_ansi(&with_provider);
         assert!(with_provider.contains("Anthropic"));
         assert!(!with_provider.contains("claude-opus-5-5"));
 
-        let without_provider = fit_status_row(visible_width(&left) + 4, &left, &provider, "");
+        let (without_provider, _) = fit_status_row(visible_width(&left) + 4, &left, &provider, "");
         let without_provider = flashagent_tui::strip_ansi(&without_provider);
         assert!(without_provider.contains("[Manual]"));
         assert!(!without_provider.contains("Anthropic"));
+    }
+
+    #[test]
+    fn the_gauges_columns_are_the_ones_a_click_on_the_status_end_hits() {
+        let left = format_status_left(false, false, false, None, "Manual", "");
+        let provider = format_provider("OpenCode Go", "deepseek-v4.1-flash");
+        let width = 100;
+        let (row, gauge_vis) = fit_status_row(width, &left, &provider, "1% · 9.5K/1M");
+        assert!(gauge_vis > 0, "a gauge that fits is reported");
+        let plain = flashagent_tui::strip_ansi(&row);
+        // The reported width is the row's tail: exactly the gauge's cells.
+        let tail: String = plain.chars().skip(plain.chars().count() - gauge_vis).collect();
+        assert_eq!(tail, "1% · 9.5K/1M", "{plain:?}");
+        // Too narrow for both: the left side gives way first — the gauge is
+        // what stops a turn from fitting — but the gauge itself stays.
+        let (narrow, gauge_vis) = fit_status_row(20, &left, &provider, "1% · 9.5K/1M");
+        assert_eq!(gauge_vis, 12);
+        assert!(flashagent_tui::strip_ansi(&narrow).ends_with("1% · 9.5K/1M"));
     }
 }

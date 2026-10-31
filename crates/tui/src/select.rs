@@ -262,6 +262,74 @@ impl<T> SelectMenu<T> {
         self.shown.get().clamp(1, self.page_size.max(1))
     }
 
+    /// The wheel moves the selection the way the arrows do, but stopping at
+    /// the ends rather than wrapping: a list spun past its end reads as a
+    /// wheel the menu ignored. True when the selection moved.
+    pub fn wheel(&mut self, dir: i32) -> bool {
+        let matches = self.filtered_indices();
+        if matches.is_empty() {
+            return false;
+        }
+        let pos = matches.iter().position(|&idx| idx == self.selected).unwrap_or(0);
+        let new_pos = if dir > 0 {
+            (pos + 1).min(matches.len() - 1)
+        } else if dir < 0 {
+            pos.saturating_sub(1)
+        } else {
+            pos
+        };
+        if new_pos == pos {
+            return false;
+        }
+        self.selected = matches[new_pos];
+        true
+    }
+
+    /// The card row a click landed on, counted from the card's first row as
+    /// `render_in` lays it out. A click on an item selects it — the caller
+    /// confirms, the way Enter does; the "more" rows page. True when the
+    /// click moved anything.
+    pub fn click(&mut self, line: usize) -> bool {
+        // Line 0 is the title; below the items the border and hints sit.
+        if line == 0 {
+            return false;
+        }
+        let matches = self.filtered_indices();
+        if matches.is_empty() {
+            return false;
+        }
+        let cur_pos = matches.iter().position(|&idx| idx == self.selected).unwrap_or(0);
+        let page_size = self.page();
+        let start = if cur_pos < page_size { 0 } else { (cur_pos + 1).saturating_sub(page_size) };
+        let end = (start + page_size).min(matches.len());
+        let filter = self.filter.to_lowercase();
+
+        let mut row = 1;
+        if start > 0 {
+            if line == row {
+                self.page_up();
+                return true;
+            }
+            row += 1;
+        }
+        for &idx in &matches[start..end] {
+            let item = &self.items[idx];
+            let rows = 1 + usize::from(item.description.is_some()) + usize::from(item.hidden_match(&filter).is_some());
+            if (row..row + rows).contains(&line) {
+                // The row under the pointer is the pick — the already-selected
+                // one included, so the second click confirms as Enter would.
+                self.selected = idx;
+                return true;
+            }
+            row += rows;
+        }
+        if end < matches.len() && line == row {
+            self.page_down();
+            return true;
+        }
+        false
+    }
+
     pub fn push_filter_char(&mut self, c: char) {
         self.filter.push(c);
         let matches = self.filtered_indices();
@@ -619,5 +687,62 @@ mod tests {
         );
         let effort_lines = effort_menu.render(80);
         assert!(effort_lines.iter().any(|(_, t)| t.contains("(2 options)")));
+    }
+
+    #[test]
+    fn a_click_selects_the_row_under_the_pointer_and_the_row_is_where_it_was_drawn() {
+        let menu: SelectMenu<usize> = SelectMenu::new(
+            "Pick",
+            ["first", "second", "third"].iter().enumerate().map(|(i, s)| SelectItem::new((*s).to_string(), i)).collect(),
+        );
+        // The rows the menu paints: item `i` sits on card row 1 + i here (a
+        // title, then one line per item -- no descriptions, no filter).
+        let lines = menu.render(80);
+        assert_eq!(lines.len(), 6, "title, three items, border, hints: {lines:?}");
+
+        let mut menu = menu;
+        // The second row of the card is the second item's line.
+        assert!(menu.click(2), "a click on a drawn row lands");
+        assert_eq!(menu.items[menu.selected].label, "second");
+        // The title row belongs to the card, not to an item.
+        assert!(!menu.click(0));
+        // Below the items (border, hints) nothing answers either.
+        assert!(!menu.click(lines.len() + 3));
+
+        // A click on the selected row still reports a hit: confirming is the
+        // caller's half of the same gesture.
+        assert!(menu.click(2));
+        assert_eq!(menu.items[menu.selected].label, "second");
+    }
+
+    #[test]
+    fn the_wheel_stops_at_the_ends_of_a_menu_instead_of_wrapping() {
+        let mut menu: SelectMenu<usize> = SelectMenu::new(
+            "Pick",
+            ["first", "second", "third"].iter().enumerate().map(|(i, s)| SelectItem::new((*s).to_string(), i)).collect(),
+        );
+        assert_eq!(menu.items[menu.selected].label, "first");
+        assert!(!menu.wheel(-1), "spun up at the top: nothing moved");
+        assert!(menu.wheel(1));
+        assert_eq!(menu.items[menu.selected].label, "second");
+        for _ in 0..10 {
+            menu.wheel(1);
+        }
+        assert_eq!(menu.items[menu.selected].label, "third", "the end holds, however far the hand spins");
+        assert!(menu.wheel(-1));
+        assert_eq!(menu.items[menu.selected].label, "second");
+    }
+
+    #[test]
+    fn a_click_on_a_more_row_pages_the_menu() {
+        let items: Vec<SelectItem<usize>> = (0..30).map(|i| SelectItem::new(format!("item {i}"), i)).collect();
+        let mut menu = SelectMenu::<usize>::new("Pick", items);
+        let _ = menu.render(80);
+        // The ▼ more row: below it the list continues. Its card row is 1 (no
+        // more-above row while the top is shown) + the page of items.
+        let page = menu.page();
+        let more_row = 1 + page;
+        assert!(menu.click(more_row), "the more-below row answers a click");
+        assert_eq!(menu.items[menu.selected].label, format!("item {}", page.min(29)));
     }
 }

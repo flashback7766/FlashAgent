@@ -177,11 +177,14 @@ impl TipAnimator {
         // interface.
         let tip = crate::i18n::tr(self.tip_text);
         let label = format!("  \x1b[1;38;2;225;175;95m{}\x1b[0m ", label());
-        if !two_rows(width, max_lines) {
-            return vec![format!("{label}{color}{}\x1b[0m", shorten(tip, room))];
-        }
         let (line1, line2) = split_tip_at_word_boundary(tip, room);
-        let second = if line2.is_empty() { String::new() } else { format!("{}{color}{}\x1b[0m", " ".repeat(label_cols()), shorten(line2, room)) };
+        // The second row exists only while this tip's words reach it. A row
+        // reserved against a longer tip that is not on screen read as a line
+        // the app forgot to draw.
+        if !two_rows(width, max_lines) || line2.is_empty() {
+            return vec![format!("{label}{color}{}\x1b[0m", shorten(line1, room))];
+        }
+        let second = format!("{}{color}{}\x1b[0m", " ".repeat(label_cols()), shorten(line2, room));
         vec![format!("{label}{color}{line1}\x1b[0m"), second]
     }
 }
@@ -419,17 +422,42 @@ mod tests {
     }
 
     #[test]
-    fn every_tip_takes_the_same_rows_at_one_width() {
+    fn a_tip_that_fits_one_row_leaves_the_second_row_out() {
+        // The second row used to be reserved at any width where some longer
+        // tip in the pool would take it, so a short tip sat over a permanent
+        // blank line between it and the status row.
         let mut anim = TipAnimator::new();
-        for width in [40, 70, 100, 200] {
-            let rows: std::collections::HashSet<usize> = TIPS_POOL
-                .iter()
-                .map(|tip| {
-                    anim.tip_text = tip;
-                    anim.render_lines(width, 2).len()
-                })
-                .collect();
-            assert_eq!(rows.len(), 1, "at {width} columns the footer changes height: {rows:?}");
+        let (width, tip) = (30..250)
+            .find_map(|w| {
+                if !two_rows(w, 2) {
+                    return None;
+                }
+                TIPS_POOL
+                    .iter()
+                    .find(|t| split_tip_at_word_boundary(crate::i18n::tr(t), text_room(w)).1.is_empty())
+                    .map(|t| (w, *t))
+            })
+            .expect("some width has both a two-row tip and a one-row tip");
+        anim.tip_text = tip;
+        let rows = anim.render_lines(width, 2);
+        assert_eq!(rows.len(), 1, "no blank row is reserved: {:?}", rows.iter().map(|r| visible(r)).collect::<Vec<_>>());
+        assert!(visible(&rows[0]).starts_with("  Tip: "));
+    }
+
+    #[test]
+    fn no_tip_writes_an_empty_row_or_overflows_the_room() {
+        let mut anim = TipAnimator::new();
+        for width in [30, 40, 70, 100, 200] {
+            for tip in TIPS_POOL {
+                anim.tip_text = tip;
+                let rows = anim.render_lines(width, 2);
+                assert!(rows.len() <= 2, "at {width} columns a tip took {} rows", rows.len());
+                assert!(
+                    rows.iter().all(|r| !visible(r).trim().is_empty()),
+                    "at {width} columns {:?} rendered a blank row",
+                    tip
+                );
+            }
         }
     }
 }

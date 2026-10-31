@@ -321,15 +321,53 @@ pub(crate) fn fit_version(ver: &str, budget: usize) -> String {
     }
 }
 
-pub fn welcome_card(card: &WelcomeCard<'_>) -> Vec<RenderLine> {
+/// What a click on the welcome card's own buttons does: the mascot, the model
+/// and effort values, and the keys listed under Quick Commands. Ctrl+D quit is
+/// deliberately absent — quitting is not a thing a stray click should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WelcomeButton {
+    Mascot,
+    Model,
+    Effort,
+    Goal,
+    Palette,
+    Context,
+    Verbose,
+    ModelKey,
+    Settings,
+    PasteImage,
+    Regen,
+    Help,
+}
+
+/// The card's lines and where its buttons sit: (card row, from column, to
+/// column, what a click there does), columns counting visible cells of the row
+/// as painted.
+pub struct WelcomeRender {
+    pub lines: Vec<RenderLine>,
+    pub zones: Vec<(usize, usize, usize, WelcomeButton)>,
+}
+
+/// Where a styled token sits in a row, in visible columns.
+fn span_of(line: &str, needle: &str) -> Option<(usize, usize)> {
+    let at = line.find(needle)?;
+    let from = visible_width(&line[..at]);
+    Some((from, from + visible_width(needle)))
+}
+
+pub fn welcome_card(card: &WelcomeCard<'_>) -> WelcomeRender {
     let budget = card.height.saturating_sub(CHROME_ROWS);
     for shape in Shape::ALL {
         if shape.two_column && card.width < 56 {
             continue;
         }
-        let lines = build_card(card, shape);
-        if lines.len() <= budget {
-            return with_gap(lines, budget);
+        let rendered = build_card(card, shape);
+        if rendered.lines.len() <= budget {
+            let mut rendered = rendered;
+            if rendered.lines.len() < budget {
+                rendered.lines.push((LineKind::System, String::new()));
+            }
+            return rendered;
         }
     }
     // Nothing fits: one line saying what this is and where it runs.
@@ -338,21 +376,36 @@ pub fn welcome_card(card: &WelcomeCard<'_>) -> Vec<RenderLine> {
         truncate_middle(card.cwd, card.width.saturating_sub(16).max(8))
     );
     if budget == 0 {
-        Vec::new()
+        WelcomeRender { lines: Vec::new(), zones: Vec::new() }
     } else {
-        vec![(LineKind::System, single)]
+        WelcomeRender { lines: vec![(LineKind::System, single)], zones: Vec::new() }
     }
 }
 
-/// When there is room for it.
-fn with_gap(mut lines: Vec<RenderLine>, budget: usize) -> Vec<RenderLine> {
-    if lines.len() < budget {
-        lines.push((LineKind::System, String::new()));
+/// The keys each Quick Commands row offers, in the order they are laid out.
+/// Each is styled the same way wherever it is drawn, so its position in the
+/// finished row is found by looking for the styled token.
+fn quick_buttons(row: usize) -> &'static [(&'static str, WelcomeButton)] {
+    match row {
+        0 => &[("/goal <task>", WelcomeButton::Goal)],
+        1 => &[("Ctrl+K", WelcomeButton::Palette)],
+        2 => &[("F1", WelcomeButton::Context), ("F2", WelcomeButton::Verbose), ("F3", WelcomeButton::ModelKey)],
+        3 => &[("F4", WelcomeButton::Effort), ("Tab", WelcomeButton::Settings), ("Ctrl+V", WelcomeButton::PasteImage)],
+        _ => &[("Ctrl+R", WelcomeButton::Regen), ("/help", WelcomeButton::Help)],
     }
-    lines
 }
 
-fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
+/// A key's styled form as the card paints it.
+fn styled_key(key: &str) -> String {
+    if key.starts_with('/') {
+        format!("{M3_PRI_B}{key}{RESET}")
+    } else {
+        format!("{M3_ICE}{key}{RESET}")
+    }
+}
+
+fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> WelcomeRender {
+    let mut zones: Vec<(usize, usize, usize, WelcomeButton)> = Vec::new();
     let &WelcomeCard {
         model,
         provider,
@@ -506,16 +559,43 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         for i in 0..5 {
             let l = pad_cell(&left_lines[i], w1);
             let r = pad_cell(&right_top[i], w2);
+            let row = lines.len();
             lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{l}{M3_BRD}│{RESET}{r}{M3_BRD}│{RESET}")));
+            // The mascot occupies the left column of its rows; the model and
+            // the effort speak for the menus that change them.
+            if (2..5).contains(&i) {
+                zones.push((row, 1, w1 + 1, WelcomeButton::Mascot));
+            }
+            if i == 0 {
+                if let Some((from, to)) = span_of(&r, &format!("{M3_TXT_B}{model_val}{RESET}")) {
+                    zones.push((row, w1 + 2 + from, w1 + 2 + to, WelcomeButton::Model));
+                }
+            }
+            if i == 3 {
+                if let Some((from, to)) = span_of(&r, &format!("{M3_LGT}{th_short}{RESET} {M3_MUT}(F4){RESET}")) {
+                    zones.push((row, w1 + 2 + from, w1 + 2 + to, WelcomeButton::Effort));
+                }
+            }
         }
 
         let l5 = pad_cell(&left_lines[5], w1);
+        let mid_row = lines.len();
         lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{l5}{mid_div}")));
+        zones.push((mid_row, 1, w1 + 1, WelcomeButton::Mascot));
 
         for i in 6..11 {
             let l = pad_cell(&left_lines[i], w1);
             let r = pad_cell(&right_bot[i - 6], w2);
+            let row = lines.len();
             lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{l}{M3_BRD}│{RESET}{r}{M3_BRD}│{RESET}")));
+            if (6..8).contains(&i) {
+                zones.push((row, 1, w1 + 1, WelcomeButton::Mascot));
+            }
+            for (key, button) in quick_buttons(i - 6) {
+                if let Some((from, to)) = span_of(&r, &styled_key(key)) {
+                    zones.push((row, w1 + 2 + from, w1 + 2 + to, *button));
+                }
+            }
         }
         lines.push((LineKind::System, bot));
     } else {
@@ -554,7 +634,9 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         // species when the window got short.
         if show_mascot {
             for m in mascot.iter().take(shape.mascot_rows) {
+                let row = lines.len();
                 lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(m, inner_w))));
+                zones.push((row, 1, inner_w + 1, WelcomeButton::Mascot));
             }
         }
 
@@ -564,7 +646,12 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
         if shape.quick_commands {
             let div_cmd = format!("{M3_BRD}├─{RESET} {M3_LGT_B}{}{RESET} {M3_BRD}{}┤{RESET}", crate::i18n::tr("Quick Commands"), "─".repeat(inner_w.saturating_sub(17)));
             lines.push((LineKind::System, div_cmd));
-            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}{}{RESET}", crate::i18n::tr("for autonomy")), inner_w))));
+            let goal_row = lines.len();
+            let goal_cell = pad_cell(&format!(" {M3_PRI_B}/goal <task>{RESET} {M3_MUT}{}{RESET}", crate::i18n::tr("for autonomy")), inner_w);
+            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{goal_cell}{M3_BRD}│{RESET}")));
+            if let Some((from, to)) = span_of(&goal_cell, &styled_key("/goal <task>")) {
+                zones.push((goal_row, 1 + from, 1 + to, WelcomeButton::Goal));
+            }
             let hints = fit_parts(
                 &[
                     (format!("Tab {}", crate::i18n::tr("settings")), format!("{M3_ICE}Tab{RESET} {M3_MUT}{}{RESET}", crate::i18n::tr("settings"))),
@@ -574,19 +661,33 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> Vec<RenderLine> {
                 &format!(" {M3_MUT}\u{b7}{RESET} "),
                 inner_w.saturating_sub(2),
             );
-            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&format!(" {hints}"), inner_w))));
+            let hints_row = lines.len();
+            let hints_cell = pad_cell(&format!(" {hints}"), inner_w);
+            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{hints_cell}{M3_BRD}│{RESET}")));
+            for (key, button) in [("Tab", WelcomeButton::Settings), ("Ctrl+K", WelcomeButton::Palette)] {
+                if let Some((from, to)) = span_of(&hints_cell, &styled_key(key)) {
+                    zones.push((hints_row, 1 + from, 1 + to, button));
+                }
+            }
         } else {
             let line = format!(
                 " {M3_PRI_B}/goal{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+K{RESET} {M3_MUT}{}{RESET} {M3_MUT}·{RESET} {M3_ICE}Ctrl+D{RESET} {M3_MUT}{}{RESET}",
                 crate::i18n::tr("commands"),
                 crate::i18n::tr("quit")
             );
-            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", pad_cell(&line, inner_w))));
+            let one_line_row = lines.len();
+            let one_line_cell = pad_cell(&line, inner_w);
+            lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{one_line_cell}{M3_BRD}│{RESET}")));
+            for (key, button) in [("/goal", WelcomeButton::Goal), ("Ctrl+K", WelcomeButton::Palette)] {
+                if let Some((from, to)) = span_of(&one_line_cell, &styled_key(key)) {
+                    zones.push((one_line_row, 1 + from, 1 + to, button));
+                }
+            }
         }
         lines.push((LineKind::System, bot));
     }
 
-    lines
+    WelcomeRender { lines, zones }
 }
 
 pub fn render_session_saved_card(session_id: &str, width: usize) -> Vec<String> {
