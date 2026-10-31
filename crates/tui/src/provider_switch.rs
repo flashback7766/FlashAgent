@@ -124,21 +124,10 @@ impl App {
         cx.tools_arc.set_context_window(Some(UNKNOWN_CONTEXT));
         cx.tools_arc.set_model_name(&model);
 
-        // A working switch is one rule with the provider, its model and the
-        // effort, written when the next message uses them. A failure or an
-        // empty listing is said at once: there is no model to wait for.
-        if discovery.is_some() && !model.is_empty() {
-            self.remember_switch(Some(&switch.name), false, false);
-        } else {
-            let profile = self.config.active_profile();
-            let how = format!("{} \u{b7} {}", profile.protocol.label(), profile.url);
-            let line = if discovery.is_some() {
-                format!("Provider: {} ({how}) lists no models yet", switch.name)
-            } else {
-                format!("Provider: {} ({how}) did not answer; its models are listed once it does", switch.name)
-            };
-            self.chat.push_system(&line);
-        }
+        // The next turn's separator carries provider, model and effort. An
+        // unavailable model list is not a failed connection: do not append a
+        // second yellow announcement when a saved model can still answer.
+        self.remember_switch(Some(&switch.name), false, false);
 
         self.switch_model(cx, &model);
         if !model.is_empty() && model != saved {

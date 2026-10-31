@@ -15,6 +15,7 @@ mod client;
 mod gemini;
 mod ollama;
 mod openai;
+mod responses;
 mod parse;
 mod text_tools;
 

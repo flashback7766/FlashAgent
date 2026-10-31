@@ -75,6 +75,7 @@ struct SideRequests {
     answer_delay: Mutex<Option<Duration>>,
     listing_delay: Mutex<Option<Duration>>,
     cloud: std::sync::atomic::AtomicBool,
+    no_listing: std::sync::atomic::AtomicBool,
     released: std::sync::atomic::AtomicBool,
 }
 
@@ -147,6 +148,11 @@ impl MockServer {
     /// Only the OpenAI model list, as a cloud API answers: no loaded model.
     pub fn serve_as_cloud(&self) {
         self.side.cloud.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// A reachable chat endpoint whose model-list routes do not exist.
+    pub fn without_model_listing(&self) {
+        self.side.no_listing.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Lets a [`Reply::Held`] answer finish.
@@ -230,6 +236,9 @@ fn serve(
 
     let mut out = stream;
     if method == "GET" {
+        if side.no_listing.load(std::sync::atomic::Ordering::SeqCst) {
+            return out.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+        }
         if let Some(delay) = *side.listing_delay.lock().unwrap() {
             std::thread::sleep(delay);
         }
