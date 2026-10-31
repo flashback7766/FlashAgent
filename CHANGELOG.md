@@ -22,6 +22,10 @@ wizard and the provider table, with its set-up steps written out in the README.
   the effort levels the model accepts (`capabilities.reasoning.effort`) all
   landed in the picker; before, every model on the list looked tool-less and
   blind to its own context.
+- **The wizard still fits a short terminal with one preset more.** With both
+  lists at their floor of one row and the page still taller than the
+  terminal, the blank separators give their rows up next; the hints, the
+  border and the selected row were never on the table.
 - **Verified against the live API** with `--tool-test` in an isolated home:
   requests reach the Go routes and are routed (no session complaint); with a
   key the score is the model's.
