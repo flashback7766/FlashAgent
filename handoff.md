@@ -67,6 +67,9 @@ features mid-flight, and expects you to keep up.
 
 Recent builds, newest first:
 
+- **b628** — `FLASHAGENT_USER_AGENT` and a per-provider User-Agent field:
+  some gateways (AgentRouter — a preset now) whitelist known coding agents'
+  User-Agents and refuse the rest before the key.
 - **b627** — a compaction's standing line ("…about 0 tokens freed") is
   earned, not owed: it appears only when the compaction freed ≥ 256 tokens;
   the summary card alone is the result of a small one.
