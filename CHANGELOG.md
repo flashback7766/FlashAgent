@@ -1,5 +1,31 @@
 # Changelog
 
+## b618 — OpenCode Go, first among the cloud APIs
+
+OpenCode's Go plan ([opencode.ai/go](https://opencode.ai/go)) — a $10/month
+subscription for a curated set of coding models: Kimi, GLM, DeepSeek, MiniMax,
+Claude Haiku and more behind one key — is now the first cloud preset in the
+wizard and the provider table, with its set-up steps written out in the README.
+
+- **The preset speaks the gateway's language.** Its Go routes refuse a request
+  that carries no `x-opencode-session` header — the id their routing and
+  prompt caching key on. FlashAgent now sends one: a fresh id per
+  conversation, the session's own id on resume (a resumed conversation keeps
+  its route and its cache), and it survives a provider switch, because the
+  endpoint moves while the conversation does not. The header goes to
+  `opencode.ai` hosts only.
+- **The agent names itself.** Requests carry `User-Agent: flashagent/<version>`
+  — the Go API asks outside agents to say who is speaking, and reqwest sends
+  no User-Agent of its own.
+- **Their model list is read whole.** The window (`limit.context`), tool
+  support (`capabilities.tools.supported`), vision (`modalities.input`) and
+  the effort levels the model accepts (`capabilities.reasoning.effort`) all
+  landed in the picker; before, every model on the list looked tool-less and
+  blind to its own context.
+- **Verified against the live API** with `--tool-test` in an isolated home:
+  requests reach the Go routes and are routed (no session complaint); with a
+  key the score is the model's.
+
 ## b617 — the border keeps its own colour past a title
 
 The dashes of a titled card's top border — the model menu, the effort
