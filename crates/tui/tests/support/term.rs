@@ -148,6 +148,33 @@ impl Term {
         self.parser.lock().unwrap().screen().contents()
     }
 
+    /// The first cell of a marker, not a colour that happened to appear elsewhere.
+    pub fn foreground_of(&self, needle: &str) -> Option<vt100::Color> {
+        if needle.is_empty() {
+            return None;
+        }
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        let (rows, cols) = screen.size();
+        for row in 0..rows {
+            let mut line = String::new();
+            let mut columns = Vec::new();
+            for col in 0..cols {
+                let text = screen.cell(row, col).map(|c| c.contents()).unwrap_or(" ");
+                // A wide character's continuation has no text, but still owns a cell.
+                if !text.is_empty() {
+                    columns.push((line.len(), col));
+                    line.push_str(text);
+                }
+            }
+            if let Some(byte) = line.find(needle) {
+                let col = columns.iter().find(|(offset, _)| *offset == byte)?.1;
+                return screen.cell(row, col).map(|c| c.fgcolor());
+            }
+        }
+        None
+    }
+
     /// The 1-based (row, column) of `needle` on screen, for a synthetic mouse
     /// click on it.
     pub fn find_on_screen(&self, needle: &str) -> Option<(u16, u16)> {

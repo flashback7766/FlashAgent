@@ -533,6 +533,7 @@ mod tests {
             cached: None,
             mtp: None,
             cost: None, cost_details: None,
+            ..Default::default()
         }));
 
         let report = l.report(DoneReason::Completed).join("\n");

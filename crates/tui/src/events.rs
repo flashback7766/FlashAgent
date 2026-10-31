@@ -818,8 +818,8 @@ impl App {
                     self.renderer.request_reprint();
                 }
             }
-            MouseEventKind::ScrollUp => self.wheel_at(-1),
-            MouseEventKind::ScrollDown => self.wheel_at(1),
+            MouseEventKind::ScrollUp => self.wheel_at(cx, -1),
+            MouseEventKind::ScrollDown => self.wheel_at(cx, 1),
             // A thumb under the hand follows the mouse, and that is all it
             // does until the button comes back up. A selection being made
             // only paints: the clipboard is written once, when the button
@@ -891,17 +891,15 @@ impl App {
     /// The wheel goes to what is on the screen: an open overlay's own list,
     /// or the transcript under it. A screen that does not scroll does not
     /// pass the wheel through to the conversation behind it.
-    fn wheel_at(&mut self, dir: i32) {
+    fn wheel_at(&mut self, cx: &LoopCtx<'_>, dir: i32) {
         if self.renderer.scrollbar_drag.is_some() {
             return;
         }
-        if let Some(menu) = self.overlay.as_mut().and_then(Overlay::select_menu_mut) {
-            if dir < 0 {
-                menu.up();
-            } else {
-                menu.down();
-            }
-            self.renderer.request_reprint();
+        // Safety cards own input even when a picker remains underneath.
+        if cx.gate.pending().is_some() || cx.question_gate.pending().is_some()
+            || self.uninstall_confirm || self.channel_switch.is_some()
+        {
+            self.wheel(dir);
             return;
         }
         if self.overlay.is_some() {
@@ -969,8 +967,7 @@ impl App {
                 let line = m.row as usize - top;
                 // The card's own ✕ closes what Esc closes.
                 if self.renderer.overlay_close_hit(m.row, m.column) {
-                    self.overlay = None;
-                    self.renderer.request_reprint();
+                    self.dismiss_overlay();
                     return;
                 }
                 // The row answers for a moment even where nothing else moves:
@@ -1045,6 +1042,9 @@ impl App {
     /// A paste goes to whatever has the keyboard first: a path pasted as a
     /// question's answer must not become an attachment.
     fn on_paste(&mut self, cx: &LoopCtx<'_>, pasted: &str) {
+        if cx.gate.pending().is_some() || self.uninstall_confirm || self.channel_switch.is_some() {
+            return;
+        }
         let one_line = || pasted.replace("\r\n", " ").replace(['\n', '\r'], " ");
         if let Some(req) = cx.question_gate.pending() {
             // As typing does: the card turns to the answer of one's own.
@@ -1065,6 +1065,9 @@ impl App {
             // A menu's filter (F3, Ctrl+K) takes the paste as typing.
             for ch in one_line().chars() {
                 menu.push_filter_char(ch);
+            }
+            if let Some(Overlay::Theme(picker)) = self.overlay.as_mut() {
+                picker.refresh_preview();
             }
         } else if self.history_search.is_some() {
             // Ctrl+F: into the search, not the hidden prompt under it.

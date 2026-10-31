@@ -2,13 +2,13 @@
 //! conversation stays local: every request carries its own input and signed
 //! reasoning, never a server-side conversation id.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
 use crate::client::{pump, Client, EventStream, Malformed, WireDecoder};
 use crate::parse::SseDecoder;
-use crate::types::{ChatMessage, CostDetails, FinishReason, LlmError, LlmEvent, Role, ToolSpec, TurnOptions, Usage};
+use crate::types::{ChatMessage, CompletionMeasurement, CostDetails, FinishReason, LlmError, LlmEvent, Role, ToolSpec, TurnOptions, Usage};
 
 pub(crate) fn required_by(error: &str) -> bool {
     let lower = error.to_lowercase();
@@ -38,7 +38,8 @@ pub(crate) async fn stream(client: &Client, messages: &[ChatMessage], tools: &[T
                 if !learned.responses_dropped.contains(&key) { learned.responses_dropped.push(key); }
             }
             drop(learned);
-            return Ok(pump(response, busy, Decoder::default()));
+            let model = request["model"].as_str().unwrap_or_default().to_string();
+            return Ok(pump(response, busy, Decoder { model, ..Default::default() }));
         }
         let status = response.status().as_u16();
         let text = response.text().await.unwrap_or_default();
@@ -119,13 +120,17 @@ struct Call {
 
 #[derive(Default)]
 struct Decoder {
+    model: String,
+    emitted_text: String,
     sse: SseDecoder,
     whole: Option<bool>,
     reply: Vec<u8>,
     calls: BTreeMap<usize, Call>,
-    texts: HashSet<(usize, usize)>,
-    thoughts: HashSet<(usize, usize)>,
+    texts: BTreeMap<(usize, usize), String>,
+    thoughts: BTreeMap<(usize, usize, bool), String>,
     reasoning: BTreeMap<usize, Value>,
+    saw_reasoning: bool,
+    measurement_unavailable: bool,
     terminal: bool,
     failed: bool,
     malformed: Malformed,
@@ -133,6 +138,7 @@ struct Decoder {
 
 impl Decoder {
     fn call(&mut self, index: usize, item: &Value, out: &mut Vec<Result<LlmEvent, LlmError>>) {
+        self.measurement_unavailable = true;
         let call = self.calls.entry(index).or_default();
         let id = item["call_id"].as_str().map(str::to_string);
         let name = item["name"].as_str().map(str::to_string);
@@ -149,14 +155,69 @@ impl Decoder {
         }
     }
 
+    fn text(&mut self, index: usize, part: usize, text: &str, out: &mut Vec<Result<LlmEvent, LlmError>>) {
+        let accumulated = self.texts.entry((index, part)).or_default();
+        // A completed part can fill a streamed prefix, but cannot replace text
+        // already shown. A conflicting copy is no longer a training sample.
+        if let Some(suffix) = text.strip_prefix(accumulated.as_str()) {
+            if !suffix.is_empty() {
+                accumulated.push_str(suffix);
+                self.emitted_text.push_str(suffix);
+                out.push(Ok(LlmEvent::TextDelta(suffix.into())));
+            }
+        } else {
+            self.measurement_unavailable = true;
+        }
+    }
+
+    fn thought(&mut self, key: (usize, usize, bool), text: &str, delta: bool, out: &mut Vec<Result<LlmEvent, LlmError>>) {
+        self.saw_reasoning = true;
+        if text.is_empty() { return; }
+        let accumulated = self.thoughts.entry(key).or_default();
+        let suffix = if delta { text } else { text.strip_prefix(accumulated.as_str()).unwrap_or("") };
+        if !suffix.is_empty() {
+            accumulated.push_str(suffix);
+            out.push(Ok(LlmEvent::ReasoningDelta(suffix.into())));
+        }
+    }
+
+    fn completion_measurement(&self, usage: &Value) -> CompletionMeasurement {
+        use CompletionMeasurement::{Text, Unavailable};
+        let Some(total) = usage["output_tokens"].as_i64().filter(|n| *n >= 0) else { return Unavailable; };
+        if self.measurement_unavailable || !self.calls.is_empty() { return Unavailable; }
+        let reasoning = match usage.get("output_tokens_details") {
+            Some(details) if details.is_object() => details.get("reasoning_tokens"),
+            Some(_) => return Unavailable,
+            None => None,
+        };
+        // Summary text is not the hidden reasoning that output_tokens bills.
+        // Without a trustworthy breakdown, only a pure text answer is paired.
+        match reasoning {
+            Some(count) => match count.as_i64().filter(|n| *n >= 0 && *n <= total) {
+                Some(count) => Text(total - count),
+                None => Unavailable,
+            },
+            None if !self.saw_reasoning && !self.texts.is_empty() => Text(total),
+            None => Unavailable,
+        }
+    }
+
     fn item(&mut self, index: usize, item: &Value, out: &mut Vec<Result<LlmEvent, LlmError>>) {
         match item["type"].as_str() {
             Some("function_call") => self.call(index, item, out),
             Some("reasoning") => {
+                self.saw_reasoning = true;
                 if let Some(summary) = item["summary"].as_array() {
                     for (part, text) in summary.iter().enumerate() {
                         if let Some(text) = text["text"].as_str().filter(|s| !s.is_empty()) {
-                            if self.thoughts.insert((index, part)) { out.push(Ok(LlmEvent::ReasoningDelta(text.into()))); }
+                            self.thought((index, part, true), text, false, out);
+                        }
+                    }
+                }
+                if let Some(content) = item["content"].as_array() {
+                    for (part, text) in content.iter().enumerate() {
+                        if text["type"] == "reasoning_text" {
+                            if let Some(text) = text["text"].as_str() { self.thought((index, part, false), text, false, out); }
                         }
                     }
                 }
@@ -165,23 +226,42 @@ impl Decoder {
             Some("message") => {
                 if let Some(content) = item["content"].as_array() {
                     for (part, text) in content.iter().enumerate() {
+                        if text["type"] != "output_text" { self.measurement_unavailable = true; }
                         if text["type"] == "refusal" {
                             self.failed = true;
                             out.push(Err(LlmError::Forbidden(text["refusal"].as_str().unwrap_or("The provider withheld the answer").into())));
-                        } else if let Some(text) = text["text"].as_str().filter(|s| !s.is_empty()) {
-                            if self.texts.insert((index, part)) { out.push(Ok(LlmEvent::TextDelta(text.into()))); }
+                        } else if let Some(text) = text["text"].as_str() {
+                            self.text(index, part, text, out);
+                        } else {
+                            self.measurement_unavailable = true;
                         }
                     }
+                } else {
+                    self.measurement_unavailable = true;
                 }
             }
-            _ => {}
+            _ => self.measurement_unavailable = true,
         }
     }
 
     fn complete(&mut self, response: &Value, incomplete: bool, out: &mut Vec<Result<LlmEvent, LlmError>>) {
         if let Some(items) = response["output"].as_array() {
             for (index, item) in items.iter().enumerate() { self.item(index, item, out); }
-        };
+            // A matching part elsewhere does not confirm a streamed part that
+            // disappeared or changed modality in the completed output.
+            if self.texts.iter().any(|(&(index, part), text)| {
+                items.get(index).filter(|item| item["type"] == "message")
+                    .and_then(|item| item["content"].as_array()).and_then(|content| content.get(part))
+                    .filter(|part| part["type"] == "output_text").and_then(|part| part["text"].as_str()) != Some(text.as_str())
+            }) { self.measurement_unavailable = true; }
+            let final_text: String = items.iter().filter(|item| item["type"] == "message")
+                .filter_map(|item| item["content"].as_array()).flatten()
+                .filter(|part| part["type"] == "output_text").filter_map(|part| part["text"].as_str()).collect();
+            if final_text != self.emitted_text { self.measurement_unavailable = true; }
+        } else {
+            // Without completed items, unseen reasoning or modalities cannot be ruled out.
+            self.measurement_unavailable = true;
+        }
         if self.failed { return; }
         if let Some(error) = crate::openai::stream_error(response) {
             self.failed = true;
@@ -194,8 +274,15 @@ impl Decoder {
             return;
         }
         if let Some(usage) = response.get("usage").filter(|u| u.is_object()) {
+            let completion_measurement = self.completion_measurement(usage);
+            if let CompletionMeasurement::Text(tokens) = completion_measurement {
+                if !self.model.is_empty() {
+                    crate::tokenizer::note_measured(&self.model, &self.emitted_text, tokens as usize);
+                }
+            }
             out.push(Ok(LlmEvent::Usage(Usage {
                 prompt: usage["input_tokens"].as_i64(), completion: usage["output_tokens"].as_i64(),
+                completion_measurement,
                 cached: usage.pointer("/input_tokens_details/cached_tokens").and_then(Value::as_i64),
                 cost: usage["cost"].as_f64(),
                 cost_details: usage.pointer("/cost_details/upstream_inference_cost").and_then(Value::as_f64)
@@ -214,17 +301,47 @@ impl Decoder {
         let mut out = Vec::new();
         if self.failed || self.terminal { return out; }
         let index = value["output_index"].as_u64().unwrap_or(0) as usize;
-        match value["type"].as_str() {
+        let kind = value["type"].as_str().or_else(|| (value["object"] == "response").then_some("response"));
+        match kind {
             Some("response.output_text.delta") => {
-                self.texts.insert((index, value["content_index"].as_u64().unwrap_or(0) as usize));
-                if let Some(text) = value["delta"].as_str() { out.push(Ok(LlmEvent::TextDelta(text.into()))); }
+                if let Some(text) = value["delta"].as_str() {
+                    self.texts.entry((index, value["content_index"].as_u64().unwrap_or(0) as usize)).or_default().push_str(text);
+                    self.emitted_text.push_str(text);
+                    out.push(Ok(LlmEvent::TextDelta(text.into())));
+                } else {
+                    self.measurement_unavailable = true;
+                }
             }
-            Some("response.reasoning_summary_text.delta" | "response.reasoning_text.delta") => {
-                self.thoughts.insert((index, value["summary_index"].as_u64().unwrap_or(0) as usize));
-                if let Some(text) = value["delta"].as_str() { out.push(Ok(LlmEvent::ReasoningDelta(text.into()))); }
+            Some("response.output_text.done") => {
+                if let Some(text) = value["text"].as_str() {
+                    self.text(index, value["content_index"].as_u64().unwrap_or(0) as usize, text, &mut out);
+                } else {
+                    self.measurement_unavailable = true;
+                }
+            }
+            Some("response.content_part.added" | "response.content_part.done") => {
+                if value["part"]["type"] != "output_text" { self.measurement_unavailable = true; }
+            }
+            Some("response.reasoning_summary_text.delta" | "response.reasoning_text.delta"
+                | "response.reasoning_summary_text.done" | "response.reasoning_text.done") => {
+                self.saw_reasoning = true;
+                let summary = kind.is_some_and(|kind| kind.starts_with("response.reasoning_summary_"));
+                let part = value[if summary { "summary_index" } else { "content_index" }].as_u64().unwrap_or(0) as usize;
+                let delta = kind.is_some_and(|kind| kind.ends_with(".delta"));
+                if let Some(text) = value[if delta { "delta" } else { "text" }].as_str() {
+                    self.thought((index, part, summary), text, delta, &mut out);
+                }
+            }
+            Some("response.reasoning_summary_part.added" | "response.reasoning_summary_part.done") => {
+                self.saw_reasoning = true;
+                if let Some(text) = value["part"]["text"].as_str() {
+                    let part = value["summary_index"].as_u64().unwrap_or(0) as usize;
+                    self.thought((index, part, true), text, false, &mut out);
+                }
             }
             Some("response.output_item.added" | "response.output_item.done") => self.item(index, &value["item"], &mut out),
             Some("response.function_call_arguments.delta") => {
+                self.measurement_unavailable = true;
                 let call = self.calls.entry(index).or_default();
                 if let Some(args) = value["delta"].as_str() {
                     call.arguments.push_str(args);
@@ -244,6 +361,11 @@ impl Decoder {
                 _ => {}
             },
             _ => {
+                // New output events may bill content that never becomes a TextDelta.
+                if value["type"].as_str().is_some_and(|kind| kind.starts_with("response.")
+                    && !matches!(kind, "response.created" | "response.queued" | "response.in_progress" | "response.output_text.annotation.added")) {
+                    self.measurement_unavailable = true;
+                }
                 if let Some(error) = crate::openai::stream_error(&value) { self.failed = true; out.push(Err(LlmError::Stream(error))); }
             }
         }
@@ -306,6 +428,380 @@ mod tests {
 
     fn text_reply(text: &str) -> Value {
         completed(json!([{"type": "message", "content": [{"type": "output_text", "text": text}]}]))
+    }
+
+    fn thought(events: &[LlmEvent]) -> String {
+        events.iter().filter_map(|event| if let LlmEvent::ReasoningDelta(text) = event { Some(text.as_str()) } else { None }).collect()
+    }
+
+    #[test]
+    fn standard_response_objects_preserve_reasoning_text_usage_and_stop() {
+        let response = json!({"object":"response","status":"completed","output":[
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"plan"}],"encrypted_content":"opaque"},
+            {"type":"message","content":[{"type":"output_text","text":"answer"}]}
+        ],"usage":{"input_tokens":50,"output_tokens":120,"output_tokens_details":{"reasoning_tokens":80}}});
+        for chunk in [1, 7, response.to_string().len()] {
+            let events = decode(&response.to_string(), chunk);
+            assert_eq!(thought(&events), "plan");
+            assert_eq!(answer(&events), "answer");
+            assert_eq!(reported_usage(&events).completion_measurement, CompletionMeasurement::Text(40));
+            assert!(events.contains(&LlmEvent::Done(FinishReason::Stop)));
+        }
+    }
+
+    #[test]
+    fn reasoning_done_events_are_read_without_delta_or_final_copies() {
+        let wire = sse(&[
+            json!({"type":"response.reasoning_summary_text.done","output_index":0,"summary_index":0,"text":"summary"}),
+            json!({"type":"response.reasoning_summary_part.done","output_index":0,"summary_index":1,"part":{"type":"summary_text","text":"part"}}),
+            json!({"type":"response.reasoning_text.done","output_index":0,"content_index":0,"text":"full reasoning"}),
+            completed(json!([{"type":"reasoning","summary":[]},{"type":"message","content":[{"type":"output_text","text":"answer"}]}])),
+        ]);
+        let events = decode(&wire, 1);
+        assert_eq!(thought(&events), "summarypartfull reasoning");
+        assert_eq!(answer(&events), "answer");
+    }
+
+    #[test]
+    fn reasoning_prefixes_are_completed_once_and_missing_deltas_do_not_hide_final_text() {
+        let reason = json!({"type":"reasoning","summary":[{"type":"summary_text","text":"plan"}]});
+        let wire = sse(&[
+            json!({"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"pl"}),
+            json!({"type":"response.reasoning_summary_text.done","output_index":0,"summary_index":0,"text":"plan"}),
+            json!({"type":"response.reasoning_summary_part.done","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"plan"}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":reason}),
+            completed(json!([reason])),
+        ]);
+        assert_eq!(thought(&decode(&wire, 1)), "plan");
+        let missing = sse(&[
+            json!({"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0}),
+            completed(json!([{"type":"reasoning","summary":[{"type":"summary_text","text":"plan"}]}])),
+        ]);
+        assert_eq!(thought(&decode(&missing, 7)), "plan");
+    }
+
+    #[test]
+    fn readable_reasoning_content_is_not_confused_with_summary_parts() {
+        let reason = json!({"type":"reasoning","summary":[],"content":[
+            {"type":"reasoning_text","text":"first"},{"type":"reasoning_text","text":"second"}
+        ],"encrypted_content":"opaque"});
+        let reply = completed(json!([reason]));
+        for wire in [sse(std::slice::from_ref(&reply)), whole_json(&reply)] {
+            assert_eq!(thought(&decode(&wire, 1)), "firstsecond");
+        }
+        let wire = sse(&[
+            json!({"type":"response.reasoning_text.delta","output_index":0,"content_index":0,"delta":"fir"}),
+            json!({"type":"response.reasoning_text.done","output_index":0,"content_index":0,"text":"first"}),
+            json!({"type":"response.reasoning_text.delta","output_index":0,"content_index":1,"delta":"second"}),
+            reply,
+        ]);
+        assert_eq!(thought(&decode(&wire, 7)), "firstsecond");
+    }
+
+    #[test]
+    fn a_late_suffix_of_an_earlier_part_is_not_a_calibration_pair() {
+        let mut decoder = Decoder::default();
+        let mut events = decoder.event(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"First par"}));
+        events.extend(decoder.event(json!({"type":"response.output_text.delta","output_index":0,"content_index":1,"delta":"Second part."})));
+        events.extend(decoder.event(completed(json!([{"type":"message","content":[
+            {"type":"output_text","text":"First part."},{"type":"output_text","text":"Second part."}
+        ]}]))));
+        assert!(events.iter().any(|event| matches!(event, Ok(LlmEvent::Usage(usage))
+            if usage.completion_measurement == CompletionMeasurement::Unavailable)));
+    }
+
+    #[test]
+    fn completed_without_final_output_cannot_prove_a_calibration_pair() {
+        for details in [json!({}), json!({"reasoning_tokens": 80})] {
+            let mut decoder = Decoder::default();
+            decoder.event(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"visible answer"}));
+            let events = decoder.event(json!({"type":"response.completed","response":{
+                "status":"completed","usage":{"output_tokens":120,"output_tokens_details":details}
+            }}));
+            assert!(events.iter().any(|event| matches!(event, Ok(LlmEvent::Usage(usage))
+                if usage.completion == Some(120) && usage.completion_measurement == CompletionMeasurement::Unavailable)));
+            assert!(events.iter().any(|event| matches!(event, Ok(LlmEvent::Done(FinishReason::Stop)))));
+        }
+    }
+
+    fn measured_reply(output: Value, reasoning_tokens: Value) -> Value {
+        let mut reply = completed(output);
+        reply["response"]["usage"]["output_tokens"] = json!(120);
+        reply["response"]["usage"]["output_tokens_details"] = json!({"reasoning_tokens": reasoning_tokens});
+        reply
+    }
+
+    fn whole_json(reply: &Value) -> String {
+        let mut response = reply["response"].clone();
+        response["object"] = json!("response");
+        response.to_string()
+    }
+
+    fn decode(wire: &str, chunk_size: usize) -> Vec<LlmEvent> {
+        let mut decoder = Decoder::default();
+        let mut events = Vec::new();
+        for bytes in wire.as_bytes().chunks(chunk_size) { events.extend(decoder.feed(bytes)); }
+        events.extend(decoder.finish());
+        events.into_iter().map(Result::unwrap).collect()
+    }
+
+    fn answer(events: &[LlmEvent]) -> String {
+        events.iter().filter_map(|e| if let LlmEvent::TextDelta(s) = e { Some(s.as_str()) } else { None }).collect()
+    }
+
+    fn reported_usage(events: &[LlmEvent]) -> Usage {
+        let mut usages = events.iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(*u) } else { None });
+        let usage = usages.next().expect("Responses usage");
+        assert!(usages.next().is_none(), "usage must not be repeated");
+        usage
+    }
+
+    #[test]
+    fn summaries_and_answers_measure_only_text_in_sse_and_whole_json() {
+        let reason = json!({"type":"reasoning", "id":"rs_1", "summary":[{"type":"summary_text", "text":"plan"}], "encrypted_content":"opaque"});
+        let message = json!({"type":"message", "content":[{"type":"output_text", "text":"answer"}]});
+        let mut reply = measured_reply(json!([reason, message]), json!(80));
+        reply["response"]["usage"]["cost"] = json!(0.125);
+        reply["response"]["usage"]["cost_details"] = json!({"upstream_inference_cost":0.0625});
+        let streamed = sse(&[
+            json!({"type":"response.created", "response":{"status":"in_progress", "output":[]}}),
+            json!({"type":"response.output_item.added", "output_index":0, "item":{"type":"reasoning", "summary":[]}}),
+            json!({"type":"response.reasoning_summary_text.delta", "output_index":0, "summary_index":0, "delta":"plan"}),
+            json!({"type":"response.output_item.done", "output_index":0, "item":reason}),
+            json!({"type":"response.content_part.added", "output_index":1, "content_index":0, "part":{"type":"output_text", "text":""}}),
+            json!({"type":"response.output_text.delta", "output_index":1, "content_index":0, "delta":"answer"}),
+            reply.clone(),
+        ]);
+        for wire in [streamed, whole_json(&reply)] {
+            for chunk_size in [1, 7, 512, wire.len()] {
+                let events = decode(&wire, chunk_size);
+                let thought: String = events.iter().filter_map(|e| if let LlmEvent::ReasoningDelta(s) = e { Some(s.as_str()) } else { None }).collect();
+                assert_eq!(answer(&events), "answer");
+                assert_eq!(thought, "plan");
+                let usage = reported_usage(&events);
+                assert_eq!(usage.completion_measurement, CompletionMeasurement::Text(40));
+                assert_eq!(usage.completion, Some(120));
+                assert_eq!(usage.prompt, Some(50));
+                assert_eq!(usage.cached, Some(40));
+                assert_eq!(usage.cost, Some(0.125));
+                assert_eq!(usage.cost_details, Some(CostDetails { upstream_cost: Some(0.0625) }));
+                assert!(events.iter().any(|e| matches!(e, LlmEvent::Replay(v) if v["reasoning"][0] == reason)));
+                assert!(events.contains(&LlmEvent::Done(FinishReason::Stop)));
+                assert_eq!(events.iter().filter(|e| matches!(e, LlmEvent::Done(_))).count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn hidden_or_empty_reasoning_without_a_count_is_unavailable() {
+        let message = json!({"type":"message", "content":[{"type":"output_text", "text":"answer"}]});
+        for summary in [None, Some(json!([])), Some(json!([{"type":"summary_text", "text":""}]))] {
+            let mut reason = json!({"type":"reasoning", "encrypted_content":"opaque"});
+            if let Some(summary) = summary { reason["summary"] = summary; }
+            let reply = completed(json!([reason, message]));
+            for wire in [sse(std::slice::from_ref(&reply)), whole_json(&reply)] {
+                let events = decode(&wire, 7);
+                assert_eq!(answer(&events), "answer");
+                assert!(!events.iter().any(|e| matches!(e, LlmEvent::ReasoningDelta(_))));
+                let usage = reported_usage(&events);
+                assert_eq!(usage.completion_measurement, CompletionMeasurement::Unavailable);
+                assert_eq!(usage.completion, Some(9));
+                assert_eq!(usage.cached, Some(40));
+            }
+        }
+        for kind in ["response.reasoning_summary_text.delta", "response.reasoning_text.delta"] {
+            let wire = sse(&[
+                json!({"type":kind, "output_index":1, "summary_index":0, "delta":""}),
+                text_reply("answer"),
+            ]);
+            assert_eq!(reported_usage(&decode(&wire, 7)).completion_measurement, CompletionMeasurement::Unavailable);
+        }
+    }
+
+    #[test]
+    fn reasoning_breakdowns_require_bounded_nonnegative_i64_counts() {
+        let output = json!([{"type":"message", "content":[{"type":"output_text", "text":"answer"}]}]);
+        for count in [json!(-1), json!(121), json!(u64::MAX), json!("80"), json!(80.0), Value::Null, json!(true)] {
+            let reply = measured_reply(output.clone(), count.clone());
+            for wire in [sse(std::slice::from_ref(&reply)), whole_json(&reply)] {
+                let usage = reported_usage(&decode(&wire, 7));
+                assert_eq!(usage.completion_measurement, CompletionMeasurement::Unavailable, "count {count}");
+                assert_eq!(usage.completion, Some(120));
+                assert_eq!(usage.cached, Some(40));
+            }
+        }
+        for details in [Value::Null, json!([]), json!("bad"), json!(80)] {
+            let mut reply = measured_reply(output.clone(), json!(80));
+            reply["response"]["usage"]["output_tokens_details"] = details.clone();
+            let usage = reported_usage(&decode(&sse(&[reply]), 7));
+            assert_eq!(usage.completion_measurement, CompletionMeasurement::Unavailable, "details {details}");
+            assert_eq!(usage.completion, Some(120));
+        }
+        for total in [json!(-1), json!(u64::MAX), json!("120"), json!(120.0), Value::Null] {
+            let mut reply = measured_reply(output.clone(), json!(0));
+            reply["response"]["usage"]["output_tokens"] = total.clone();
+            let usage = reported_usage(&decode(&sse(&[reply]), 7));
+            assert_eq!(usage.completion_measurement, CompletionMeasurement::Unavailable, "total {total}");
+            assert_eq!(usage.completion, total.as_i64());
+        }
+        for (total, count, expected) in [(120, 0, 120), (120, 120, 0), (0, 0, 0), (i64::MAX, i64::MAX, 0), (i64::MAX, 0, i64::MAX)] {
+            let mut reply = measured_reply(output.clone(), json!(count));
+            reply["response"]["usage"]["output_tokens"] = json!(total);
+            let usage = reported_usage(&decode(&sse(&[reply]), 7));
+            assert_eq!(usage.completion_measurement, CompletionMeasurement::Text(expected));
+            assert_eq!(usage.completion, Some(total));
+        }
+    }
+
+    #[test]
+    fn pure_output_text_without_a_reasoning_count_uses_the_total() {
+        for details in [None, Some(json!({})), Some(json!({"accepted_prediction_tokens":0}))] {
+            let mut reply = text_reply("answer");
+            if let Some(details) = details { reply["response"]["usage"]["output_tokens_details"] = details; }
+            let streamed = sse(&[
+                json!({"type":"response.output_text.delta", "output_index":0, "content_index":0, "delta":"answer"}),
+                reply.clone(),
+            ]);
+            for wire in [streamed, whole_json(&reply)] {
+                let events = decode(&wire, 7);
+                assert_eq!(answer(&events), "answer");
+                let usage = reported_usage(&events);
+                assert_eq!(usage.completion_measurement, CompletionMeasurement::Text(9));
+                assert_eq!(usage.completion, Some(9));
+                assert_eq!(usage.cached, Some(40));
+            }
+        }
+    }
+
+    #[test]
+    fn tool_framing_is_unavailable_even_with_a_valid_reasoning_count() {
+        let message = json!({"type":"message", "content":[{"type":"output_text", "text":"answer"}]});
+        let call = json!({"type":"function_call", "call_id":"call_1", "name":"read_file", "arguments":"{}"});
+        let reply = measured_reply(json!([message, call]), json!(80));
+        for wire in [sse(std::slice::from_ref(&reply)), whole_json(&reply)] {
+            let events = decode(&wire, 7);
+            let usage = reported_usage(&events);
+            assert_eq!(usage.completion_measurement, CompletionMeasurement::Unavailable);
+            assert_eq!(usage.completion, Some(120));
+            assert_eq!(usage.cached, Some(40));
+            assert!(events.iter().any(|e| matches!(e, LlmEvent::ToolCallDelta { id: Some(id), args_delta, .. } if id == "call_1" && args_delta == "{}")));
+            assert!(events.contains(&LlmEvent::Done(FinishReason::ToolUse)));
+        }
+        let wire = sse(&[
+            json!({"type":"response.function_call_arguments.delta", "output_index":1, "delta":"{}"}),
+            measured_reply(json!([message]), json!(80)),
+        ]);
+        assert_eq!(reported_usage(&decode(&wire, 7)).completion_measurement, CompletionMeasurement::Unavailable);
+    }
+
+    #[test]
+    fn unknown_items_and_other_modalities_cannot_measure_text() {
+        let text = json!({"type":"output_text", "text":"answer"});
+        let message = json!({"type":"message", "content":[text]});
+        for item in [json!({"type":"image_generation_call", "result":"opaque"}), json!({"type":"future_item"}), json!({})] {
+            let reply = measured_reply(json!([message, item]), json!(80));
+            for wire in [sse(std::slice::from_ref(&reply)), whole_json(&reply)] {
+                let usage = reported_usage(&decode(&wire, 7));
+                assert_eq!(usage.completion_measurement, CompletionMeasurement::Unavailable);
+                assert_eq!(usage.completion, Some(120));
+            }
+        }
+        for part in [json!({"type":"output_audio", "data":"opaque"}), json!({"type":"future_text", "text":"extra"}), json!({"text":"extra"})] {
+            let reply = measured_reply(json!([{"type":"message", "content":[text, part]}]), json!(80));
+            for wire in [sse(std::slice::from_ref(&reply)), whole_json(&reply)] {
+                let usage = reported_usage(&decode(&wire, 7));
+                assert_eq!(usage.completion_measurement, CompletionMeasurement::Unavailable);
+                assert_eq!(usage.completion, Some(120));
+            }
+        }
+        for frame in [
+            json!({"type":"response.output_item.added", "output_index":1, "item":{"type":"future_item"}}),
+            json!({"type":"response.content_part.added", "output_index":1, "content_index":0, "part":{"type":"output_audio"}}),
+            json!({"type":"response.content_part.done", "output_index":1, "content_index":0, "part":{"type":"future_text", "text":"extra"}}),
+            json!({"type":"response.audio.delta", "output_index":1, "delta":"opaque"}),
+        ] {
+            let wire = sse(&[frame, measured_reply(json!([message]), json!(80))]);
+            assert_eq!(reported_usage(&decode(&wire, 7)).completion_measurement, CompletionMeasurement::Unavailable);
+        }
+    }
+
+    #[test]
+    fn streamed_prefixes_are_completed_once_by_item_done_and_final_output() {
+        let reason = json!({"type":"reasoning", "summary":[], "encrypted_content":"opaque"});
+        let message = json!({"type":"message", "content":[{"type":"output_text", "text":"Привет, мир!"}]});
+        for done_text in [None, Some("Привет, "), Some("Привет, мир!")] {
+            let mut frames = vec![
+                json!({"type":"response.output_item.added", "output_index":0, "item":{"type":"reasoning", "summary":[]}}),
+                json!({"type":"response.output_text.delta", "output_index":1, "content_index":0, "delta":"При"}),
+                json!({"type":"response.output_text.delta", "output_index":1, "content_index":0, "delta":"вет"}),
+            ];
+            if let Some(text) = done_text {
+                let done = json!({"type":"response.output_item.done", "output_index":1, "item":{"type":"message", "content":[{"type":"output_text", "text":text}]}});
+                frames.push(done.clone());
+                frames.push(done);
+            }
+            let reply = measured_reply(json!([reason, message]), json!(80));
+            frames.push(reply.clone());
+            frames.push(reply);
+            let wire = sse(&frames);
+            for chunk_size in [1, 7, 512, wire.len()] {
+                let events = decode(&wire, chunk_size);
+                assert_eq!(answer(&events), "Привет, мир!");
+                let expected_deltas = if done_text == Some("Привет, ") { 4 } else { 3 };
+                assert_eq!(events.iter().filter(|e| matches!(e, LlmEvent::TextDelta(_))).count(), expected_deltas);
+                let usage = reported_usage(&events);
+                assert_eq!(usage.completion_measurement, CompletionMeasurement::Text(40));
+                assert_eq!(usage.completion, Some(120));
+                assert_eq!(usage.cached, Some(40));
+                assert_eq!(events.iter().filter(|e| matches!(e, LlmEvent::Done(_))).count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn incompatible_final_text_is_not_repeated_or_measured() {
+        for final_text in ["different", "show", ""] {
+            for item_done in [false, true] {
+                let mut frames = vec![json!({"type":"response.output_text.delta", "output_index":0, "content_index":0, "delta":"shown"})];
+                let message = json!({"type":"message", "content":[{"type":"output_text", "text":final_text}]});
+                if item_done { frames.push(json!({"type":"response.output_item.done", "output_index":0, "item":message})); }
+                frames.push(measured_reply(json!([message]), json!(80)));
+                let events = decode(&sse(&frames), 7);
+                assert_eq!(answer(&events), "shown");
+                let usage = reported_usage(&events);
+                assert_eq!(usage.completion_measurement, CompletionMeasurement::Unavailable);
+                assert_eq!(usage.completion, Some(120));
+                assert!(events.contains(&LlmEvent::Done(FinishReason::Stop)));
+            }
+        }
+        let wire = sse(&[
+            json!({"type":"response.output_text.delta", "output_index":0, "content_index":0, "delta":"shown"}),
+            json!({"type":"response.output_item.done", "output_index":0, "item":{"type":"message", "content":[{"type":"output_text", "text":"different"}]}}),
+            measured_reply(json!([{"type":"message", "content":[{"type":"output_text", "text":"shown suffix"}]}]), json!(80)),
+        ]);
+        let events = decode(&wire, 7);
+        assert_eq!(answer(&events), "shown suffix");
+        assert_eq!(reported_usage(&events).completion_measurement, CompletionMeasurement::Unavailable);
+    }
+
+    #[test]
+    fn every_streamed_text_part_must_be_confirmed_by_present_final_output() {
+        let message = json!({"type":"message", "content":[{"type":"output_text", "text":"answer"}]});
+        for (index, part, output) in [
+            (0, 0, json!([])),
+            (0, 0, json!([{"type":"message", "content":[]}])),
+            (1, 0, json!([message])),
+            (0, 1, json!([message])),
+            (0, 0, Value::Null),
+        ] {
+            let wire = sse(&[
+                json!({"type":"response.output_text.delta", "output_index":index, "content_index":part, "delta":"streamed"}),
+                measured_reply(output, json!(80)),
+            ]);
+            let usage = reported_usage(&decode(&wire, 7));
+            assert_eq!(usage.completion_measurement, CompletionMeasurement::Unavailable, "part ({index}, {part})");
+            assert_eq!(usage.completion, Some(120));
+        }
     }
 
     #[test]

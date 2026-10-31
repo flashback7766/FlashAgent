@@ -498,6 +498,7 @@ mod tests {
                 cached: Some(300),
                 mtp: None,
                 cost: None, cost_details: None,
+                ..Default::default()
             })));
         }
         tree.apply(&ev("sub1", "coder", LoopEvent::StepStarted { step: 2, max_steps: Some(20) }));
@@ -610,6 +611,7 @@ mod tests {
             cached: Some(1000),
             mtp: None,
             cost: None, cost_details: None,
+            ..Default::default()
         })));
         tree.apply(&ev("sub1", "researcher", LoopEvent::StepStarted { step: 3, max_steps: Some(20) }));
         tree.apply(&ev("sub1", "researcher", LoopEvent::TurnDelta(

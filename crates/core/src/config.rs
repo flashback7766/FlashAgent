@@ -1,5 +1,6 @@
 //! Stored in `~/.flashagent/config.json`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use flashagent_llm::{ApiProtocol, Endpoint};
 use serde::{Deserialize, Serialize};
@@ -559,8 +560,13 @@ pub struct AppConfig {
     /// Off keeps spinners but nothing decorative.
     #[serde(default = "default_true")]
     pub animations: bool,
+    /// Kept beside the custom selection so older builds can use its base theme.
     #[serde(default)]
     pub color_theme: ColorTheme,
+    #[serde(default)]
+    pub theme_palettes: BTreeMap<String, ThemePalette>,
+    #[serde(default)]
+    pub active_theme_palette: Option<String>,
     #[serde(default = "default_true")]
     pub auto_compact_context: bool,
     /// Warms the prompt cache before the first message, so the first request
@@ -654,6 +660,22 @@ impl ColorTheme {
         ]
     }
 
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Midnight => "midnight",
+            Self::HighContrast => "high_contrast",
+            Self::Monochrome => "monochrome",
+            Self::Ansi16 => "ansi16",
+            Self::Light => "light",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        let d = serde::de::value::StrDeserializer::<serde::de::value::Error>::new(name);
+        Self::deserialize(d).ok()
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Dark => "Dark",
@@ -670,6 +692,60 @@ impl ColorTheme {
         let i = all.iter().position(|t| *t == self).unwrap_or(0);
         all[(i + 1) % all.len()]
     }
+}
+
+/// A terminal-independent colour; config files use only `#RRGGBB` strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RgbColor(pub u8, pub u8, pub u8);
+
+impl Serialize for RgbColor {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!("#{:02x}{:02x}{:02x}", self.0, self.1, self.2))
+    }
+}
+
+impl<'de> Deserialize<'de> for RgbColor {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        let bytes = raw.as_bytes();
+        if bytes.len() != 7 || bytes[0] != b'#' || !bytes[1..].iter().all(u8::is_ascii_hexdigit) {
+            return Err(serde::de::Error::custom("expected a colour in #RRGGBB format"));
+        }
+        // Check ASCII before slicing: a hand-edited Unicode string must not panic.
+        let channel = |start| u8::from_str_radix(&raw[start..start + 2], 16).unwrap();
+        Ok(Self(channel(1), channel(3), channel(5)))
+    }
+}
+
+/// Missing roles inherit the corresponding colour from the built-in base.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ThemeColors {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<RgbColor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub muted: Option<RgbColor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border: Option<RgbColor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surface: Option<RgbColor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accent: Option<RgbColor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub info: Option<RgbColor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success: Option<RgbColor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<RgbColor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<RgbColor>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ThemePalette {
+    pub base: ColorTheme,
+    pub colors: ThemeColors,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
@@ -739,6 +815,8 @@ impl Default for AppConfig {
             run_provider: None,
             personality: Default::default(),
             color_theme: ColorTheme::default(),
+            theme_palettes: BTreeMap::new(),
+            active_theme_palette: None,
             auto_compact_context: true,
             auto_warm_prompt_cache: false,
             context_warn_threshold: 70,
@@ -771,7 +849,71 @@ fn migrate_single_backend(user: &mut serde_json::Map<String, serde_json::Value>)
     }
 }
 
+fn valid_theme_palette_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+}
+
+/// Validate siblings separately before the field-level loader sees the map.
+fn check_theme_palettes(user: &mut serde_json::Map<String, serde_json::Value>, rejected: &mut Vec<String>) {
+    let Some(serde_json::Value::Object(palettes)) = user.get_mut("theme_palettes") else {
+        return;
+    };
+    // BTreeMap order also makes the winner of a case-insensitive collision stable.
+    let entries: BTreeMap<_, _> = std::mem::take(palettes).into_iter().collect();
+    let mut names = BTreeSet::new();
+    for (name, value) in entries {
+        if !valid_theme_palette_name(&name)
+            || ColorTheme::from_name(&name).is_some()
+            || !value.is_object()
+            || value.get("colors").is_some_and(|colors| !colors.is_object())
+            || serde_json::from_value::<ThemePalette>(value.clone()).is_err()
+            || !names.insert(name.to_ascii_lowercase())
+        {
+            rejected.push(format!("theme_palettes.{name}"));
+            continue;
+        }
+        palettes.insert(name, value);
+    }
+}
+
 impl AppConfig {
+    pub fn active_palette(&self) -> Option<&ThemePalette> {
+        self.active_theme_palette.as_ref().and_then(|name| self.theme_palettes.get(name))
+    }
+
+    pub fn theme_name(&self) -> &str {
+        self.active_theme_palette.as_deref()
+            .filter(|name| self.theme_palettes.contains_key(*name))
+            .unwrap_or_else(|| self.color_theme.id())
+    }
+
+    /// Unknown names leave both the current selection and its fallback untouched.
+    pub fn select_theme(&mut self, name: &str) -> bool {
+        if let Some(theme) = ColorTheme::from_name(name) {
+            self.color_theme = theme;
+            self.active_theme_palette = None;
+            return true;
+        }
+        let Some((name, palette)) = self.theme_palettes.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)) else {
+            return false;
+        };
+        self.color_theme = palette.base;
+        self.active_theme_palette = Some(name.clone());
+        true
+    }
+
+    /// Settings cycles built-ins first, then the saved palettes in name order.
+    pub fn next_theme(&mut self) {
+        let names = ColorTheme::all().iter().map(|theme| theme.id())
+            .chain(self.theme_palettes.keys().map(String::as_str));
+        let next = names.skip_while(|name| *name != self.theme_name())
+            .nth(1).unwrap_or(ColorTheme::Dark.id()).to_string();
+        self.select_theme(&next);
+    }
+
     /// The provider turns go to: the one `--url` gave this run, else the
     /// saved active one, else LM Studio's default.
     pub fn active_profile(&self) -> &ProviderProfile {
@@ -959,8 +1101,10 @@ impl AppConfig {
             return (Self::default(), vec!["the file (it is not valid JSON)".to_string()]);
         };
         migrate_single_backend(&mut user);
+        let mut rejected = Vec::new();
+        check_theme_palettes(&mut user, &mut rejected);
         if let Ok(cfg) = serde_json::from_value::<Self>(serde_json::Value::Object(user.clone())) {
-            return (cfg.normalised(), Vec::new());
+            return (cfg.normalised(), rejected);
         }
 
         // Put fields back one at a time onto the defaults; whatever does not survive
@@ -969,7 +1113,6 @@ impl AppConfig {
             Ok(serde_json::Value::Object(map)) => map,
             _ => return (Self::default(), vec!["the file".to_string()]),
         };
-        let mut rejected = Vec::new();
         for (key, value) in user {
             // Unknown keys are dropped by serde; only known ones are worth reporting.
             if !base.contains_key(&key) {
@@ -1009,6 +1152,12 @@ impl AppConfig {
         }
         if self.profile(&self.active_provider).is_none() {
             self.active_provider = self.providers.first().map(|p| p.name.clone()).unwrap_or_default();
+        }
+        if let Some(name) = self.active_theme_palette.take() {
+            if let Some((name, palette)) = self.theme_palettes.iter().find(|(key, _)| key.eq_ignore_ascii_case(&name)) {
+                self.color_theme = palette.base;
+                self.active_theme_palette = Some(name.clone());
+            }
         }
         self
     }
@@ -1868,6 +2017,311 @@ mod tests {
     }
 
     #[test]
+    fn old_configs_and_builtin_theme_spellings_stay_compatible() {
+        let (fresh, rejected) = AppConfig::from_json_str("{}");
+        assert!(rejected.is_empty());
+        assert!(fresh.theme_palettes.is_empty());
+        assert_eq!(fresh.active_theme_palette, None);
+        assert_eq!(fresh.active_palette(), None);
+        assert_eq!(fresh.theme_name(), "dark");
+
+        assert_eq!(ColorTheme::all().iter().map(|theme| theme.id()).collect::<Vec<_>>(),
+            ["dark", "midnight", "high_contrast", "monochrome", "ansi16", "light"]);
+        for &theme in ColorTheme::all() {
+            assert_eq!(serde_json::to_value(theme).unwrap(), theme.id());
+            for name in [theme.id().to_string(), theme.label().to_string(), theme.id().to_ascii_uppercase()] {
+                let json = serde_json::json!({ "color_theme": name, "model": "kept" });
+                let (cfg, rejected) = AppConfig::from_json_str(&json.to_string());
+                assert!(rejected.is_empty(), "{name}: {rejected:?}");
+                assert_eq!(cfg.color_theme, theme);
+                assert_eq!(cfg.theme_name(), theme.id());
+                assert_eq!(cfg.active_profile().model, "kept");
+                assert!(cfg.theme_palettes.is_empty());
+            }
+        }
+        for (name, expected) in [
+            ("Default", ColorTheme::Dark),
+            ("High-Contrast", ColorTheme::HighContrast),
+            ("contrast", ColorTheme::HighContrast),
+            ("mono", ColorTheme::Monochrome),
+            ("ANSI", ColorTheme::Ansi16),
+            ("Monokai", ColorTheme::Midnight),
+        ] {
+            let json = serde_json::json!({ "color_theme": name });
+            let (cfg, rejected) = AppConfig::from_json_str(&json.to_string());
+            assert!(rejected.is_empty(), "{name}: {rejected:?}");
+            assert_eq!(cfg.color_theme, expected);
+            let mut selected = AppConfig::default();
+            assert!(selected.select_theme(name));
+            assert_eq!(selected.color_theme, expected);
+        }
+    }
+
+    #[test]
+    fn rgb_colors_use_strict_hex_strings_and_save_canonical_hex() {
+        for (raw, expected, canonical) in [
+            ("#000000", RgbColor(0, 0, 0), "#000000"),
+            ("#FFFFFF", RgbColor(255, 255, 255), "#ffffff"),
+            ("#AbCdEf", RgbColor(171, 205, 239), "#abcdef"),
+            ("#01020F", RgbColor(1, 2, 15), "#01020f"),
+        ] {
+            let color: RgbColor = serde_json::from_value(serde_json::json!(raw)).unwrap();
+            assert_eq!(color, expected);
+            assert_eq!(serde_json::to_value(color).unwrap(), canonical);
+        }
+        for raw in [
+            "", "abcdef", "#abc", "#1234567", "#12345g", " #123456", "#123456 ",
+            "#112233ff", "#é1234", "#🦀ab", "#١1234", "＃123456", "#12\n456",
+        ] {
+            assert!(serde_json::from_value::<RgbColor>(serde_json::json!(raw)).is_err(), "{raw:?}");
+        }
+        for value in [
+            serde_json::json!(null), serde_json::json!(true), serde_json::json!(123456),
+            serde_json::json!([1, 2, 3]), serde_json::json!({ "r": 1, "g": 2, "b": 3 }),
+        ] {
+            assert!(serde_json::from_value::<RgbColor>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn palette_defaults_inherit_dark_and_typos_are_not_accepted() {
+        let default = ThemePalette::default();
+        assert_eq!(default.base, ColorTheme::Dark);
+        assert_eq!(default.colors, ThemeColors::default());
+        assert_eq!(serde_json::to_value(&default).unwrap(), serde_json::json!({ "base": "dark", "colors": {} }));
+        assert_eq!(serde_json::from_str::<ThemePalette>("{}").unwrap(), default);
+        let inherited: ThemePalette = serde_json::from_str(r#"{"base":"light"}"#).unwrap();
+        assert_eq!(inherited.base, ColorTheme::Light);
+        assert_eq!(inherited.colors, ThemeColors::default());
+        assert!(serde_json::from_str::<ThemePalette>(r#"{"colours":{}}"#).is_err());
+        assert!(serde_json::from_str::<ThemeColors>(r##"{"accnet":"#112233"}"##).is_err());
+    }
+
+    #[test]
+    fn multiple_custom_palettes_and_the_active_name_survive_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = two_providers();
+        cfg.interface_language = "ru".into();
+        cfg.theme_palettes = serde_json::from_value(serde_json::json!({
+            "Aurora": { "base": "midnight", "colors": {
+                "text": "#010203", "muted": "#111213", "border": "#212223",
+                "surface": "#313233", "accent": "#414243", "info": "#515253",
+                "success": "#616263", "warning": "#717273", "error": "#818283"
+            } },
+            "paper_2": { "base": "light", "colors": { "accent": "#ABCDEF", "muted": null } },
+            "plain": {}
+        })).unwrap();
+        assert!(cfg.select_theme("PAPER_2"));
+        cfg.save_to(&path).unwrap();
+        let loaded = AppConfig::load_from(&path).unwrap();
+        assert_eq!(loaded, cfg);
+        assert_eq!(loaded.theme_name(), "paper_2");
+        assert_eq!(loaded.active_palette(), loaded.theme_palettes.get("paper_2"));
+        assert_eq!(loaded.active_palette().unwrap().colors.accent, Some(RgbColor(171, 205, 239)));
+        assert_eq!(loaded.active_palette().unwrap().colors.text, None);
+        assert_eq!(loaded.theme_palettes["plain"], ThemePalette::default());
+        assert_eq!(loaded.theme_palettes["Aurora"].colors, ThemeColors {
+            text: Some(RgbColor(1, 2, 3)), muted: Some(RgbColor(17, 18, 19)),
+            border: Some(RgbColor(33, 34, 35)), surface: Some(RgbColor(49, 50, 51)),
+            accent: Some(RgbColor(65, 66, 67)), info: Some(RgbColor(81, 82, 83)),
+            success: Some(RgbColor(97, 98, 99)), warning: Some(RgbColor(113, 114, 115)),
+            error: Some(RgbColor(129, 130, 131)),
+        });
+        #[derive(Deserialize)]
+        struct OldThemeConfig { color_theme: ColorTheme }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let old: OldThemeConfig = serde_json::from_str(&text).unwrap();
+        assert_eq!(old.color_theme, ColorTheme::Light, "older builds use the custom palette's base");
+        let saved: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(saved["theme_palettes"]["paper_2"]["colors"]["accent"], "#abcdef");
+    }
+
+    #[test]
+    fn one_malformed_palette_keeps_its_siblings_and_other_settings() {
+        for bad in [
+            serde_json::json!({ "base": "light", "colours": {} }),
+            serde_json::json!({ "colors": { "accent": "#112233", "accnet": "#445566" } }),
+            serde_json::json!({ "base": "not-a-theme" }),
+            serde_json::json!({ "base": 7 }),
+            serde_json::json!({ "colors": { "accent": "private-invalid-value", "info": "#112233" } }),
+            serde_json::json!({ "colors": { "accent": [1, 2, 3] } }),
+            serde_json::json!({ "colors": [null, null, null, null, null, null, null, null, null] }),
+            serde_json::json!(["dark", {}]),
+            serde_json::json!(null), serde_json::json!(false), serde_json::json!("not-a-palette"),
+        ] {
+            let json = serde_json::json!({
+                "backend_url": "http://kept/v1", "model": "kept-model", "temperature": 0.25,
+                "interface_language": "ru", "color_theme": "light", "active_theme_palette": "Z_good",
+                "theme_palettes": {
+                    "A_good": { "base": "midnight", "colors": { "accent": "#123456" } },
+                    "Broken": bad,
+                    "Z_good": { "colors": { "warning": "#fedcba" } }
+                }
+            });
+            let (cfg, rejected) = AppConfig::from_json_str(&json.to_string());
+            assert_eq!(rejected, ["theme_palettes.Broken"]);
+            assert_eq!(cfg.theme_palettes.keys().map(String::as_str).collect::<Vec<_>>(), ["A_good", "Z_good"]);
+            assert_eq!(cfg.theme_palettes["A_good"].colors.accent, Some(RgbColor(18, 52, 86)));
+            assert_eq!(cfg.theme_palettes["Z_good"].colors.warning, Some(RgbColor(254, 220, 186)));
+            assert_eq!(cfg.theme_name(), "Z_good");
+            assert_eq!(cfg.color_theme, ColorTheme::Dark);
+            assert_eq!(cfg.temperature, 0.25);
+            assert_eq!(cfg.interface_language, "ru");
+            assert_eq!(cfg.active_profile().url, "http://kept/v1");
+            assert_eq!(cfg.active_profile().model, "kept-model");
+        }
+    }
+
+    #[test]
+    fn palette_rejections_survive_the_existing_field_level_recovery() {
+        let json = serde_json::json!({
+            "theme_palettes": { "Good": {}, "Broken": { "colors": { "accent": false } } },
+            "active_theme_palette": "good", "network_retries": "many", "temperature": 0.25
+        });
+        let (cfg, rejected) = AppConfig::from_json_str(&json.to_string());
+        assert_eq!(rejected, ["theme_palettes.Broken", "network_retries"]);
+        assert_eq!(cfg.theme_palettes.len(), 1);
+        assert_eq!(cfg.theme_name(), "Good");
+        assert_eq!(cfg.temperature, 0.25);
+        assert_eq!(cfg.network_retries, AppConfig::default().network_retries);
+    }
+
+    #[test]
+    fn custom_names_are_bounded_ascii_and_cannot_shadow_builtins() {
+        let mut invalid = ["", "_bad", "-bad", "bad name", "bad.name", "bad/name", "éclair", "🦀",
+            "DEFAULT", "contrast", "mono", "ansi", "Monokai"].map(str::to_string).to_vec();
+        invalid.push("x".repeat(65));
+        for &theme in ColorTheme::all() {
+            invalid.push(theme.id().to_ascii_uppercase());
+            invalid.push(theme.label().replace(' ', "_"));
+            invalid.push(theme.label().replace(' ', "-"));
+        }
+        for name in invalid {
+            let mut palettes = serde_json::Map::new();
+            palettes.insert("Good".into(), serde_json::json!({}));
+            palettes.insert(name.clone(), serde_json::json!({}));
+            let json = serde_json::json!({ "theme_palettes": palettes, "temperature": 0.25 });
+            let (cfg, rejected) = AppConfig::from_json_str(&json.to_string());
+            assert_eq!(rejected, [format!("theme_palettes.{name}")]);
+            assert_eq!(cfg.theme_palettes.keys().map(String::as_str).collect::<Vec<_>>(), ["Good"]);
+            assert_eq!(cfg.temperature, 0.25);
+        }
+        for name in ["A".to_string(), "0".to_string(), "my-theme_2".to_string(), "x".repeat(64)] {
+            let mut palettes = serde_json::Map::new();
+            palettes.insert(name.clone(), serde_json::json!({}));
+            let json = serde_json::json!({ "theme_palettes": palettes });
+            let (cfg, rejected) = AppConfig::from_json_str(&json.to_string());
+            assert!(rejected.is_empty(), "{name}: {rejected:?}");
+            assert!(cfg.theme_palettes.contains_key(&name));
+        }
+    }
+
+    #[test]
+    fn case_insensitive_collisions_keep_the_first_valid_palette_in_name_order() {
+        let json = serde_json::json!({ "theme_palettes": {
+            "solar": { "base": "light" }, "Solar": { "base": "midnight" }, "Other": {},
+            "Bad": { "colors": { "typo": "#112233" } }, "bad": {}
+        } });
+        let (cfg, rejected) = AppConfig::from_json_str(&json.to_string());
+        assert_eq!(rejected, ["theme_palettes.Bad", "theme_palettes.solar"]);
+        assert_eq!(cfg.theme_palettes.keys().map(String::as_str).collect::<Vec<_>>(), ["Other", "Solar", "bad"]);
+        assert_eq!(cfg.theme_palettes["Solar"].base, ColorTheme::Midnight);
+    }
+
+    #[test]
+    fn an_unknown_active_palette_uses_the_saved_builtin_fallback() {
+        for name in ["missing", "Broken"] {
+            let json = serde_json::json!({
+                "color_theme": "midnight", "active_theme_palette": name,
+                "theme_palettes": { "Known": { "base": "light" }, "Broken": { "base": false } }
+            });
+            let (cfg, rejected) = AppConfig::from_json_str(&json.to_string());
+            assert_eq!(rejected, ["theme_palettes.Broken"]);
+            assert_eq!(cfg.active_theme_palette, None);
+            assert_eq!(cfg.active_palette(), None);
+            assert_eq!(cfg.theme_name(), "midnight");
+            assert_eq!(cfg.color_theme, ColorTheme::Midnight);
+        }
+        let (cfg, rejected) = AppConfig::from_json_str(r#"{
+            "color_theme":"ansi16", "theme_palettes":{"Known":{"base":"light"}}, "active_theme_palette":7
+        }"#);
+        assert_eq!(rejected, ["active_theme_palette"]);
+        assert_eq!(cfg.theme_palettes.len(), 1);
+        assert_eq!(cfg.theme_name(), "ansi16");
+        for value in [serde_json::json!(null), serde_json::json!([]), serde_json::json!("not-a-map")] {
+            let json = serde_json::json!({ "theme_palettes": value, "color_theme": "light", "temperature": 0.25 });
+            let (cfg, rejected) = AppConfig::from_json_str(&json.to_string());
+            assert_eq!(rejected, ["theme_palettes"]);
+            assert!(cfg.theme_palettes.is_empty());
+            assert_eq!(cfg.theme_name(), "light");
+            assert_eq!(cfg.temperature, 0.25);
+        }
+    }
+
+    fn custom_theme_config() -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.theme_palettes.insert("amber_2".into(), ThemePalette { base: ColorTheme::Midnight, ..Default::default() });
+        cfg.theme_palettes.insert("Zoo".into(), ThemePalette { base: ColorTheme::Light, ..Default::default() });
+        cfg
+    }
+
+    #[test]
+    fn selecting_builtin_or_custom_themes_is_case_insensitive_and_unknown_is_atomic() {
+        let mut cfg = custom_theme_config();
+        for &theme in ColorTheme::all() {
+            for name in [theme.id().to_ascii_uppercase(), theme.label().replace(' ', "_")] {
+                assert!(cfg.select_theme("AMBER_2"));
+                assert!(cfg.select_theme(&name));
+                assert_eq!(cfg.color_theme, theme);
+                assert_eq!(cfg.active_theme_palette, None);
+                assert_eq!(cfg.active_palette(), None);
+                assert_eq!(cfg.theme_name(), theme.id());
+            }
+        }
+        assert!(cfg.select_theme("AmBeR_2"));
+        assert_eq!(cfg.active_theme_palette.as_deref(), Some("amber_2"));
+        assert_eq!(cfg.active_palette(), cfg.theme_palettes.get("amber_2"));
+        assert_eq!(cfg.color_theme, ColorTheme::Midnight);
+        assert_eq!(cfg.theme_name(), "amber_2");
+        let before = cfg.clone();
+        for unknown in ["missing", "", "amber-2", " amber_2 "] {
+            assert!(!cfg.select_theme(unknown));
+            assert_eq!(cfg, before);
+        }
+    }
+
+    #[test]
+    fn next_theme_cycles_builtins_then_custom_palettes_in_btree_order() {
+        let mut cfg = custom_theme_config();
+        for _ in 0..2 {
+            for name in ["dark", "midnight", "high_contrast", "monochrome", "ansi16", "light", "Zoo", "amber_2"] {
+                assert_eq!(cfg.theme_name(), name);
+                if let Some(palette) = cfg.active_palette() {
+                    assert_eq!(cfg.color_theme, palette.base);
+                } else {
+                    assert_eq!(cfg.active_theme_palette, None);
+                }
+                cfg.next_theme();
+            }
+        }
+        assert_eq!(cfg.theme_name(), "dark");
+        let mut builtin_only = AppConfig::default();
+        for &theme in ColorTheme::all() {
+            assert_eq!(builtin_only.color_theme, theme);
+            builtin_only.next_theme();
+            assert_eq!(builtin_only.color_theme, theme.next());
+            assert_eq!(builtin_only.active_theme_palette, None);
+        }
+        cfg.active_theme_palette = Some("removed".into());
+        cfg.color_theme = ColorTheme::Ansi16;
+        assert_eq!(cfg.theme_name(), "ansi16");
+        cfg.next_theme();
+        assert_eq!(cfg.theme_name(), "light");
+        assert_eq!(cfg.active_theme_palette, None);
+    }
+
+    #[test]
     fn test_backend_presets_exist() {
         let presets = BackendPreset::all();
         assert!(presets.iter().any(|p| p.name == "LM Studio"));
@@ -1897,7 +2351,9 @@ lenient_enum!(ColorTheme, "colour theme", {
     "mono" => ColorTheme::Monochrome,
     "ansi16" => ColorTheme::Ansi16,
     "ansi" => ColorTheme::Ansi16,
+    "terminal16colors" => ColorTheme::Ansi16,
     "light" => ColorTheme::Light,
+    "lightbackground" => ColorTheme::Light,
     // Named by an older build that never used them.
     "monokai" => ColorTheme::Midnight,
 });

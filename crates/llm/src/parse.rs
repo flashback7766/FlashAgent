@@ -358,6 +358,7 @@ impl ChunkParser {
                 mtp,
                 cost,
                 cost_details,
+                ..Default::default()
             }));
         } else if let Some((prompt, cached)) = timings {
             events.push(LlmEvent::Usage(crate::types::Usage {
@@ -366,6 +367,7 @@ impl ChunkParser {
                 cached: Some(cached),
                 mtp,
                 cost: None, cost_details: None,
+                ..Default::default()
             }));
         } else if let Some(m) = mtp {
             events.push(LlmEvent::Usage(crate::types::Usage {
@@ -374,6 +376,7 @@ impl ChunkParser {
                 cached: None,
                 mtp: Some(m),
                 cost: None, cost_details: None,
+                ..Default::default()
             }));
         }
 

@@ -117,11 +117,24 @@ impl MtpStats {
     }
 }
 
+/// Which generated text has a matching server token count for calibration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CompletionMeasurement {
+    #[default]
+    Full,
+    /// Visible output calibrated by the adapter before any loop/UI rewriting.
+    Text(i64),
+    /// The reported output includes content whose exact text is not available.
+    Unavailable,
+}
+
 /// `None` when the backend did not report.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Usage {
     pub prompt: Option<i64>,
     pub completion: Option<i64>,
+    /// Calibration never changes the full completion charged to the turn.
+    pub completion_measurement: CompletionMeasurement,
     /// Prefix cache reuse (f_keep).
     pub cached: Option<i64>,
     pub mtp: Option<MtpStats>,

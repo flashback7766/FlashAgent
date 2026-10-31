@@ -200,7 +200,7 @@ let mut tool_test_repeat: usize = 1;
 async fn startup_screens(config: &mut AppConfig, force_setup: bool) -> Option<bool> {
     // The screens before the chat (setup, release notes, trust) wear the chosen
     // look too.
-    flashagent_tui::theme::set(config.color_theme);
+    flashagent_tui::theme::set_config(config);
     flashagent_tui::anim::set_enabled(config.animations);
     // Carried into the first conversation: the screen it was printed on is about
     // to be cleared.
@@ -347,6 +347,7 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
     let backend = flashagent_llm::Client::new(endpoint, &model);
     backend.set_max_retries(config.network_retries);
     flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(config));
+    flashagent_tui::autocomplete::set_theme_names(config);
     backend.set_user_sampling(config.sampling_preset == flashagent_core::config::SamplingPreset::Custom);
 
     // How long startup waits for the server to say what it runs. Half a second is

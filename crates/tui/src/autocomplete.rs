@@ -94,6 +94,7 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
     vec![
         AutocompleteItem::new("/help", tr("Show command reference and keybindings"), AutocompleteCategory::Command),
         AutocompleteItem::new("/settings", tr("Open interactive settings tab (or press Tab on empty prompt)"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/theme", tr("Preview a color theme or switch with /theme <name>"), AutocompleteCategory::Command),
         AutocompleteItem::new("/sampling", tr("Sampling parameters, for those who tune them"), AutocompleteCategory::Command),
         AutocompleteItem::new("/memory", tr("See what FlashAgent remembers; forget or correct a fact"), AutocompleteCategory::Command),
         AutocompleteItem::new("/whatsnew", tr("Show what changed in the latest releases"), AutocompleteCategory::Command),
@@ -136,8 +137,33 @@ pub fn set_provider_names(providers: Vec<(String, String)>) {
     *PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()) = providers;
 }
 
+/// Values are config identifiers; labels follow the interface language.
+pub fn theme_entries(config: &flashagent_core::AppConfig) -> Vec<(String, String)> {
+    let mut entries: Vec<_> = flashagent_core::ColorTheme::all().iter()
+        .map(|theme| (theme.id().to_string(), tr(theme.label()).to_string())).collect();
+    entries.extend(config.theme_palettes.keys().map(|name| (name.clone(), name.clone())));
+    entries
+}
+
+// Store identifiers, not translated labels: language can change after startup.
+static THEMES: std::sync::Mutex<Vec<(String, Option<flashagent_core::ColorTheme>)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_theme_names(config: &flashagent_core::AppConfig) {
+    let mut entries: Vec<_> = flashagent_core::ColorTheme::all().iter()
+        .map(|theme| (theme.id().to_string(), Some(*theme))).collect();
+    entries.extend(config.theme_palettes.keys().map(|name| (name.clone(), None)));
+    *THEMES.lock().unwrap_or_else(|e| e.into_inner()) = entries;
+}
+
 pub fn sub_commands(input: &str) -> Option<Vec<AutocompleteItem>> {
     let lower = input.to_lowercase();
+    if lower.starts_with("/theme ") {
+        let themes = THEMES.lock().unwrap_or_else(|e| e.into_inner());
+        return Some(themes.iter().map(|(name, theme)| {
+            let label = theme.map_or_else(|| name.clone(), |theme| tr(theme.label()).to_string());
+            AutocompleteItem::new(format!("/theme {name}"), label, AutocompleteCategory::Command)
+        }).collect());
+    }
     if lower.starts_with("/provider ") {
         let providers = PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
         return Some(
@@ -533,6 +559,18 @@ mod tests {
     }
 
     #[test]
+    fn configured_themes_complete_by_name_without_reading_the_config() {
+        let (config, _) = flashagent_core::AppConfig::from_json_str(r#"{
+            "theme_palettes":{"aurora":{"base":"dark"}}
+        }"#);
+        set_theme_names(&config);
+        let found: Vec<_> = find_matches("/theme au", Path::new(".")).into_iter().map(|i| i.trigger).collect();
+        assert_eq!(found, vec!["/theme aurora"]);
+        assert!(find_matches("/theme aurora", Path::new(".")).is_empty());
+        assert_eq!(sub_commands("/theme ").unwrap().len(), flashagent_core::ColorTheme::all().len() + 1);
+    }
+
+    #[test]
     fn a_command_typed_in_full_is_not_swapped_for_a_longer_one() {
         let found = find_matches("/mode", std::path::Path::new("."));
         assert_eq!(found.first().map(|i| i.trigger.as_str()), Some("/mode"));
@@ -545,6 +583,9 @@ mod tests {
     #[test]
     fn test_builtin_commands_exist() {
         let cmds = builtin_commands();
+        assert!(cmds.iter().any(|c| c.trigger == "/theme"));
+        assert!(is_exact_command("/theme"));
+        assert!(!needs_argument("/theme"));
         assert!(cmds.iter().any(|c| c.trigger == "/help"));
         assert!(cmds.iter().any(|c| c.trigger == "/verbose"));
         // Aliases still run, but are not listed twice.
