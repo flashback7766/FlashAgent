@@ -623,6 +623,20 @@ impl Renderer {
         self.scroll_offset = 0;
     }
 
+    /// A fold or an open of a block moved the transcript by the pointer's own
+    /// hand; the view follows it, so the header the pointer is on stays where
+    /// it was — pinned or not. The frame's own rule for new rows under a
+    /// scrolled view is told the change is already counted, so the two do not
+    /// add up.
+    pub(crate) fn anchor_block(&mut self, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+        self.scroll_offset = (self.scroll_offset as isize + delta).max(0) as usize;
+        self.total_lines = (self.total_lines as isize + delta).max(0) as usize;
+        self.request_reprint();
+    }
+
     /// The conversation row drawn on screen row `y`, if one is.
     pub(crate) fn chat_row_at(&self, y: u16) -> Option<usize> {
         let (first, count) = self.chat_view;
@@ -1379,9 +1393,9 @@ struct LayoutInputs<'a> {
     border_color: &'a str,
     /// Both ends of the selection being dragged, in screen coordinates.
     selection: Option<((u16, u16), (u16, u16))>,
-    /// The message a chat row belongs to, when a click on it would reach one.
-    /// The hover asks it once per transcript row on the screen.
-    owner_at: &'a dyn Fn(usize) -> Option<usize>,
+    /// What a click on a chat row reaches, when anything. The hover asks it
+    /// once per transcript row on the screen.
+    owner_at: &'a dyn Fn(usize) -> Option<flashagent_tui::Click>,
     /// The screen row the pointer is on, when it is over the transcript.
     hover_chat: Option<u16>,
 }
