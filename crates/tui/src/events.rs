@@ -16,6 +16,22 @@ pub(crate) fn server_mood(switching: bool, answered: bool, silent: bool, since_s
     }
 }
 
+/// Below this, a compaction's standing line says nothing worth a line: the
+/// summary card is the result, and "about 0 tokens freed" read as a bug
+/// report.
+const MIN_SAVED_WORTH_A_LINE: usize = 256;
+
+/// The standing line a finished compaction earns, if any: what went, what it
+/// freed and where the exact words are kept.
+fn compaction_standing_line(replaced: usize, saved: usize) -> Option<String> {
+    (saved >= MIN_SAVED_WORTH_A_LINE).then(|| {
+        flashagent_tui::i18n::tr_fill(
+            "Context compacted: {replaced} messages became a summary, about {saved} tokens freed. The full transcript is in the session file.",
+            &[("replaced", &replaced.to_string()), ("saved", &saved.to_string())],
+        )
+    })
+}
+
 impl App {
     /// One event from the terminal, the agent loop or a background task.
     pub(crate) async fn on_ui_event(&mut self, cx: &mut LoopCtx<'_>, ev: UiEvent) -> Flow {
@@ -341,14 +357,12 @@ impl App {
                 self.chat.finish_compaction_card(&result);
                 // A standing line about the compaction itself: what went, what
                 // it freed and where the exact words are kept. The card holds
-                // the summary; this holds the facts about it.
-                self.chat.push_system(&flashagent_tui::i18n::tr_fill(
-                    "Context compacted: {replaced} messages became a summary, about {saved} tokens freed. The full transcript is in the session file.",
-                    &[
-                        ("replaced", &replaced.to_string()),
-                        ("saved", &result.saved.to_string()),
-                    ],
-                ));
+                // the summary; this holds the facts about it. A compaction
+                // that freed next to nothing has the card and needs no line
+                // saying so -- "about 0 tokens freed" read as a bug report.
+                if let Some(line) = compaction_standing_line(replaced, result.saved) {
+                    self.chat.push_system(&line);
+                }
             }
             None => self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the conversation is unchanged")),
         }
@@ -1090,6 +1104,16 @@ fn decayed(momentum: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_compaction_that_freed_nothing_earns_no_standing_line() {
+        // The card carries the summary; the line is for the facts, and
+        // "about 0 tokens freed" read as a bug report.
+        assert_eq!(compaction_standing_line(2, 3), None);
+        assert_eq!(compaction_standing_line(2, 255), None);
+        let line = compaction_standing_line(9, 5000).expect("a real compaction says what it freed");
+        assert!(line.contains("9 messages") && line.contains("5000 tokens"), "{line}");
+    }
 
     #[test]
     fn a_cloud_listing_still_fixes_the_window_for_the_model_in_use() {

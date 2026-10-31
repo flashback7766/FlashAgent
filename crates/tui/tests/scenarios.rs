@@ -1475,10 +1475,11 @@ fn a_single_exchange_can_be_compacted_too() {
     term.send(ENTER);
     let screen = term.wait_for("Session compacted", WAIT);
     assert!(screen.contains("Session compact"), "the card is not in the chat: {screen}");
-    // A standing line about the compaction itself: what went and what it freed.
+    // A compaction this small freed next to nothing, so there is no standing
+    // line saying "about 0 tokens freed" -- the card is the whole result.
     assert!(
-        screen.contains("Context compacted:") && screen.contains("tokens freed"),
-        "the compaction left no line of its own: {screen}"
+        !screen.contains("Context compacted:"),
+        "a compaction that freed nothing kept its line: {screen}"
     );
 
     ask(&term, "the next question", "After the summary.");
