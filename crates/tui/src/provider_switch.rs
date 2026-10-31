@@ -195,7 +195,15 @@ impl App {
         let in_use = self.config.run_provider.is_none() && self.config.active_profile().name == original;
         let before = self.config.profile(original).cloned();
         let reconnect = in_use
-            && before.is_some_and(|b| b.url != profile.url || b.protocol != profile.protocol || b.api_key != profile.api_key || b.model != profile.model);
+            && before.is_some_and(|b| {
+                b.url != profile.url
+                    || b.protocol != profile.protocol
+                    || b.api_key != profile.api_key
+                    || b.model != profile.model
+                    // A changed User-Agent is a changed client: the gateway
+                    // reads it before the key.
+                    || b.user_agent != profile.user_agent
+            });
         if reconnect && self.running {
             view.refused(providers::busy());
             return;

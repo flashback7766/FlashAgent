@@ -15,33 +15,37 @@ pub struct BackendPreset {
     /// Where a key is looked for when the provider has none saved, in order.
     /// Empty for a server on this computer, which needs none.
     pub key_env: &'static [&'static str],
+    /// The User-Agent the preset presents, when the gateway behind it serves
+    /// only the coding agents it knows and refuses the rest before the key.
+    /// The provider editor can change it afterwards.
+    pub user_agent: Option<&'static str>,
 }
 
 /// Local servers first: FlashAgent is built for them. Two local servers can
 /// share a default port (llama.cpp and LocalAI both take 8080). OpenCode Go
 /// leads the cloud ones.
 const PRESETS: &[BackendPreset] = &[
-    BackendPreset { name: "LM Studio", protocol: ApiProtocol::OpenAi, url: "http://localhost:1234/v1", description: "LM Studio's server; it reports the loaded model, its context and reasoning settings", key_env: &[] },
-    BackendPreset { name: "Ollama", protocol: ApiProtocol::Ollama, url: "http://localhost:11434", description: "Local Ollama (native API: sets the context window)", key_env: &[] },
-    BackendPreset { name: "llama.cpp", protocol: ApiProtocol::OpenAi, url: "http://localhost:8080/v1", description: "llama-server; start it with --jinja for tool calls", key_env: &[] },
-    BackendPreset { name: "vLLM", protocol: ApiProtocol::OpenAi, url: "http://localhost:8000/v1", description: "vLLM's OpenAI-compatible server", key_env: &[] },
-    BackendPreset { name: "Jan", protocol: ApiProtocol::OpenAi, url: "http://localhost:1337/v1", description: "Jan's local API server", key_env: &[] },
-    BackendPreset { name: "KoboldCpp", protocol: ApiProtocol::OpenAi, url: "http://localhost:5001/v1", description: "KoboldCpp's OpenAI-compatible API", key_env: &[] },
-    BackendPreset { name: "text-generation-webui", protocol: ApiProtocol::OpenAi, url: "http://localhost:5000/v1", description: "The oobabooga web UI, started with --api", key_env: &[] },
-    BackendPreset { name: "LocalAI", protocol: ApiProtocol::OpenAi, url: "http://localhost:8080/v1", description: "LocalAI's OpenAI-compatible API", key_env: &[] },
-    BackendPreset { name: "OpenCode Go", protocol: ApiProtocol::OpenAi, url: "https://opencode.ai/inference/go/v1", description: "OpenCode's coding-model subscription: Kimi, GLM, DeepSeek, MiniMax and Claude Haiku behind one key; the session header it routes by is sent on its own", key_env: &["OPENCODE_API_KEY"] },
-    BackendPreset { name: "AgentRouter", protocol: ApiProtocol::OpenAi, url: "https://agentrouter.org/v1", description: "an LLM gateway that serves known coding agents and refuses the rest before the key; set FLASHAGENT_USER_AGENT or the provider's User-Agent to one it accepts", key_env: &["AGENTROUTER_API_KEY"] },
-    BackendPreset { name: "Anthropic", protocol: ApiProtocol::Anthropic, url: "https://api.anthropic.com", description: "Claude models through Anthropic's own API", key_env: &["ANTHROPIC_API_KEY"] },
-    BackendPreset { name: "OpenAI", protocol: ApiProtocol::OpenAi, url: "https://api.openai.com/v1", description: "OpenAI's API", key_env: &["OPENAI_API_KEY"] },
-    BackendPreset { name: "Gemini", protocol: ApiProtocol::Gemini, url: "https://generativelanguage.googleapis.com/v1beta", description: "Google Gemini through Google's own API", key_env: &["GEMINI_API_KEY", "GOOGLE_API_KEY"] },
-    BackendPreset { name: "OpenRouter", protocol: ApiProtocol::OpenAi, url: "https://openrouter.ai/api/v1", description: "Open and proprietary models behind one key", key_env: &["OPENROUTER_API_KEY"] },
-    BackendPreset { name: "DeepSeek", protocol: ApiProtocol::OpenAi, url: "https://api.deepseek.com/v1", description: "DeepSeek's API", key_env: &["DEEPSEEK_API_KEY"] },
-    BackendPreset { name: "Mistral", protocol: ApiProtocol::OpenAi, url: "https://api.mistral.ai/v1", description: "Mistral's API", key_env: &["MISTRAL_API_KEY"] },
-    BackendPreset { name: "Groq", protocol: ApiProtocol::OpenAi, url: "https://api.groq.com/openai/v1", description: "Groq's API", key_env: &["GROQ_API_KEY"] },
-    BackendPreset { name: "xAI", protocol: ApiProtocol::OpenAi, url: "https://api.x.ai/v1", description: "Grok models through xAI's API", key_env: &["XAI_API_KEY"] },
-    BackendPreset { name: "Together", protocol: ApiProtocol::OpenAi, url: "https://api.together.xyz/v1", description: "Open models on Together AI", key_env: &["TOGETHER_API_KEY"] },
-    BackendPreset { name: "Fireworks", protocol: ApiProtocol::OpenAi, url: "https://api.fireworks.ai/inference/v1", description: "Open models on Fireworks AI", key_env: &["FIREWORKS_API_KEY"] },
-    BackendPreset { name: "Cerebras", protocol: ApiProtocol::OpenAi, url: "https://api.cerebras.ai/v1", description: "Cerebras' API", key_env: &["CEREBRAS_API_KEY"] },
+    BackendPreset { name: "LM Studio", protocol: ApiProtocol::OpenAi, url: "http://localhost:1234/v1", description: "LM Studio's server; it reports the loaded model, its context and reasoning settings", key_env: &[], user_agent: None },
+    BackendPreset { name: "Ollama", protocol: ApiProtocol::Ollama, url: "http://localhost:11434", description: "Local Ollama (native API: sets the context window)", key_env: &[], user_agent: None },
+    BackendPreset { name: "llama.cpp", protocol: ApiProtocol::OpenAi, url: "http://localhost:8080/v1", description: "llama-server; start it with --jinja for tool calls", key_env: &[], user_agent: None },
+    BackendPreset { name: "vLLM", protocol: ApiProtocol::OpenAi, url: "http://localhost:8000/v1", description: "vLLM's OpenAI-compatible server", key_env: &[], user_agent: None },
+    BackendPreset { name: "Jan", protocol: ApiProtocol::OpenAi, url: "http://localhost:1337/v1", description: "Jan's local API server", key_env: &[], user_agent: None },
+    BackendPreset { name: "KoboldCpp", protocol: ApiProtocol::OpenAi, url: "http://localhost:5001/v1", description: "KoboldCpp's OpenAI-compatible API", key_env: &[], user_agent: None },
+    BackendPreset { name: "text-generation-webui", protocol: ApiProtocol::OpenAi, url: "http://localhost:5000/v1", description: "The oobabooga web UI, started with --api", key_env: &[], user_agent: None },
+    BackendPreset { name: "LocalAI", protocol: ApiProtocol::OpenAi, url: "http://localhost:8080/v1", description: "LocalAI's OpenAI-compatible API", key_env: &[], user_agent: None },
+    BackendPreset { name: "OpenCode Go", protocol: ApiProtocol::OpenAi, url: "https://opencode.ai/inference/go/v1", description: "OpenCode's coding-model subscription: Kimi, GLM, DeepSeek, MiniMax and Claude Haiku behind one key; the session header it routes by is sent on its own", key_env: &["OPENCODE_API_KEY"], user_agent: None },
+    BackendPreset { name: "AgentRouter", protocol: ApiProtocol::OpenAi, url: "https://agentrouter.org/v1", description: "an LLM gateway for known coding agents; the preset presents itself as one it accepts", key_env: &["AGENTROUTER_API_KEY"], user_agent: Some("opencode/1.0.0") },
+    BackendPreset { name: "Anthropic", protocol: ApiProtocol::Anthropic, url: "https://api.anthropic.com", description: "Claude models through Anthropic's own API", key_env: &["ANTHROPIC_API_KEY"], user_agent: None },
+    BackendPreset { name: "OpenAI", protocol: ApiProtocol::OpenAi, url: "https://api.openai.com/v1", description: "OpenAI's API", key_env: &["OPENAI_API_KEY"], user_agent: None },
+    BackendPreset { name: "Gemini", protocol: ApiProtocol::Gemini, url: "https://generativelanguage.googleapis.com/v1beta", description: "Google Gemini through Google's own API", key_env: &["GEMINI_API_KEY", "GOOGLE_API_KEY"], user_agent: None },
+    BackendPreset { name: "OpenRouter", protocol: ApiProtocol::OpenAi, url: "https://openrouter.ai/api/v1", description: "Open and proprietary models behind one key", key_env: &["OPENROUTER_API_KEY"], user_agent: None },
+    BackendPreset { name: "DeepSeek", protocol: ApiProtocol::OpenAi, url: "https://api.deepseek.com/v1", description: "DeepSeek's API", key_env: &["DEEPSEEK_API_KEY"], user_agent: None },
+    BackendPreset { name: "Mistral", protocol: ApiProtocol::OpenAi, url: "https://api.mistral.ai/v1", description: "Mistral's API", key_env: &["MISTRAL_API_KEY"], user_agent: None },
+    BackendPreset { name: "Groq", protocol: ApiProtocol::OpenAi, url: "https://api.groq.com/openai/v1", description: "Groq's API", key_env: &["GROQ_API_KEY"], user_agent: None },
+    BackendPreset { name: "xAI", protocol: ApiProtocol::OpenAi, url: "https://api.x.ai/v1", description: "Grok models through xAI's API", key_env: &["XAI_API_KEY"], user_agent: None },
+    BackendPreset { name: "Together", protocol: ApiProtocol::OpenAi, url: "https://api.together.xyz/v1", description: "Open models on Together AI", key_env: &["TOGETHER_API_KEY"], user_agent: None },
+    BackendPreset { name: "Fireworks", protocol: ApiProtocol::OpenAi, url: "https://api.fireworks.ai/inference/v1", description: "Open models on Fireworks AI", key_env: &["FIREWORKS_API_KEY"], user_agent: None },
+    BackendPreset { name: "Cerebras", protocol: ApiProtocol::OpenAi, url: "https://api.cerebras.ai/v1", description: "Cerebras' API", key_env: &["CEREBRAS_API_KEY"], user_agent: None },
 ];
 
 /// Wherever a key is missing, the last place it is looked for.
@@ -156,7 +160,9 @@ impl ProviderProfile {
     }
 
     pub fn from_preset(preset: &BackendPreset) -> Self {
-        Self::new(preset.name, preset.protocol, preset.url)
+        let mut profile = Self::new(preset.name, preset.protocol, preset.url);
+        profile.user_agent = preset.user_agent.map(String::from);
+        profile
     }
 
     /// An address typed by hand: named after the server it belongs to, else
@@ -1211,6 +1217,17 @@ mod tests {
         cfg.save_provider(cloud);
         cfg.activate("Home");
         cfg
+    }
+
+    #[test]
+    fn the_agent_router_preset_presents_itself_as_a_client_the_gateway_accepts() {
+        // The gateway refuses every client it does not know, before the key;
+        // the preset carries the name of one it does.
+        let preset = BackendPreset::all().iter().find(|p| p.name == "AgentRouter").unwrap();
+        assert_eq!(preset.user_agent, Some("opencode/1.0.0"));
+        let profile = ProviderProfile::from_preset(preset);
+        assert_eq!(profile.user_agent.as_deref(), Some("opencode/1.0.0"));
+        assert_eq!(profile.endpoint().user_agent.as_deref(), Some("opencode/1.0.0"));
     }
 
     #[test]
