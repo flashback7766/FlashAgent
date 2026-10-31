@@ -1,5 +1,44 @@
 # Changelog
 
+## b649 — Custom themes, and Responses reasoning you can see
+
+- **Named JSON palettes inherit a built-in theme.** `theme_palettes` in
+  `config.json` overrides text, muted text, borders, surfaces, accents, info,
+  success, warning and error colors with `#RRGGBB`. Missing colors inherit the
+  base. A malformed palette is skipped without losing valid siblings or other
+  settings; the existing `color_theme` remains an older-build fallback.
+- **`/theme` previews before saving.** Arrows, filtering, paging and the mouse
+  wheel preview the selected palette; Enter or a theme-row click saves it,
+  while Esc and the close button restore the previous choice. `/theme <name>`
+  switches directly, even during a turn. The Settings picker returns to the
+  same view and saves only the theme, not unrelated pending edits.
+- **A palette change repaints old transcript rows.** Switching two palettes
+  with the same base no longer leaves cached rows in the old colors. ANSI16
+  palettes remain in the terminal's own sixteen colors.
+- **Responses teaches the tokenizer from an honest pair.** Calibration uses
+  the raw visible output and its reported count minus reasoning tokens,
+  before the loop extracts text tool calls or removes continuation overlaps.
+  Hidden reasoning is not measured against its summary. Native calls,
+  unsupported output, invalid counts and unconfirmed or reordered final text
+  do not teach a correction; full reported usage still counts toward budgets.
+- **Readable reasoning is no longer lost at completion.** Summary and
+  reasoning-text done events, completed parts and readable reasoning content
+  are handled alongside deltas. Final copies fill a streamed prefix without
+  duplicating it, and standard whole JSON with `object: "response"` is read.
+  Encrypted replay remains opaque state, not a readable thought.
+- **A long thought opened from the keyboard can open fully.** Clicking the
+  preview's “show all” works after F2 or `/verbose all`, not only after opening
+  the block's header with the mouse. Thoughts still start folded.
+- **Menu paging is not confirmation.** More-above/below clicks only page;
+  wheels stop at the ends. Built-in theme identifiers stay searchable in
+  either language, hidden-match rows fit short screens, and safety cards
+  prevent wheel or paste input from changing a picker underneath them.
+
+Verified live on AgentRouter with `gpt-6.1-sol`: a small high-effort request
+returned a readable reasoning summary. Local regression coverage includes
+real terminal preview, cancellation, persistence, mouse, safety and reasoning
+expansion paths, plus Responses-to-tokenizer HTTP fixtures.
+
 ## b634 — Responses models answer, and AgentRouter keeps its settings
 
 - **An explicit Chat Completions refusal switches to Responses.** AgentRouter's
