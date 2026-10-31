@@ -1,5 +1,14 @@
 # Changelog
 
+## b617 — the border keeps its own colour past a title
+
+The dashes of a titled card's top border — the model menu, the effort
+menu, settings, tools, notices, the narrow welcome — carried no colour of
+their own and inherited the row's after the title's reset: on an amber
+theme the border turned amber from the title to the corner while the
+walls stayed grey. The border colour now runs the whole top rail,
+exactly as it already did on the memory, MCP and approval cards.
+
 ## b616 — a thought answers its header, and a long one opens to a glance
 
 - **A block folds from its header alone.** Every row of an open thought
