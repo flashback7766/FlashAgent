@@ -1,5 +1,26 @@
 # Changelog
 
+## b619 — the voice example is no longer a turn the model goes on about
+
+Seen live: every model, on the first message of a fresh conversation, offered
+to continue about `git stash` — a topic nobody had raised. The cause was the
+voice system itself: to teach a chosen personality, FlashAgent sent a fake
+earlier exchange in that voice (user: "what does `git stash` do?"; assistant:
+a sample answer) ahead of the real history, and never showed it anywhere. The
+model read it as its own previous turn, and a greeting — a message with
+nothing else to hold on to — got an answer acknowledging "the previous
+topic".
+
+- **The sample reply is quoted inside the system prompt now, not sent as
+  turns.** "For scale, a reply in this voice" introduces the same sample
+  answer, quoted, with a line saying its subject is not part of the
+  conversation and never comes up on its own. The voice still has its
+  example; there is no longer a fake exchange to continue.
+- The fake-exchange plumbing is gone with it: the loop no longer carries a
+  hidden prelude, and the cache warm-up sends exactly what a turn sends.
+- Verified against the same provider and model the bug was seen on: the
+  first message gets a plain greeting again.
+
 ## b618 — OpenCode Go, first among the cloud APIs
 
 OpenCode's Go plan ([opencode.ai/go](https://opencode.ai/go)) — a $10/month

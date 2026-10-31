@@ -10,16 +10,11 @@
 use super::*;
 use std::hash::{Hash, Hasher};
 
-/// System prompt, voice example, history, and a one-token opening user message.
-/// Memory is already inside the system prompt, so it is not repeated here.
-pub(crate) fn warm_messages(history: &[ChatMessage], prelude: &[ChatMessage]) -> Vec<ChatMessage> {
-    let after_system = usize::from(history.first().is_some_and(|m| m.role == flashagent_llm::Role::System));
-    let mut messages: Vec<ChatMessage> = history[..after_system]
-        .iter()
-        .chain(prelude)
-        .chain(&history[after_system..])
-        .cloned()
-        .collect();
+/// System prompt (the voice example is quoted in it), history, and a one-token
+/// opening user message. Memory is already inside the system prompt, so it is
+/// not repeated here.
+pub(crate) fn warm_messages(history: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut messages: Vec<ChatMessage> = history.to_vec();
     messages.push(ChatMessage::user("hi"));
     messages
 }
@@ -72,7 +67,7 @@ fn abort_warm_task(warm: &mut Option<(u64, tokio::task::JoinHandle<bool>)>) {
 
 impl App {
     fn warm_key(&self, server: &str, perm: &'static PermissionedTools) -> (u64, Vec<ChatMessage>, Vec<flashagent_llm::ToolSpec>) {
-        let messages = warm_messages(&self.history, &self.config.personality.voice_prelude());
+        let messages = warm_messages(&self.history);
         let specs = perm.specs();
         (prefix_key(server, &self.current_model, &messages, &specs), messages, specs)
     }
@@ -184,30 +179,26 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_session_warms_the_system_prompt_voice_and_memory_in_it() {
-        let history = vec![ChatMessage::system("SYSTEM\n\nMEMORY")];
-        let prelude = vec![ChatMessage::user("q"), ChatMessage::assistant("a")];
-        let m = warm_messages(&history, &prelude);
+    fn a_fresh_session_warms_the_system_prompt_with_the_voice_in_it() {
+        let history = vec![ChatMessage::system("SYSTEM\n\nVOICE EXAMPLE")];
+        let m = warm_messages(&history);
         let contents: Vec<&str> = m.iter().map(|m| m.content.as_str()).collect();
-        assert_eq!(contents, ["SYSTEM\n\nMEMORY", "q", "a", "hi"]);
+        assert_eq!(contents, ["SYSTEM\n\nVOICE EXAMPLE", "hi"]);
     }
 
     #[test]
     fn memory_is_not_repeated_as_a_user_turn_when_warming() {
         let history = vec![ChatMessage::system("SYSTEM\n\nMEMORY")];
-        let warmed = warm_messages(&history, &[]);
+        let warmed = warm_messages(&history);
         assert_eq!(warmed[0].content, "SYSTEM\n\nMEMORY");
         assert_eq!(warmed.last().unwrap().content, "hi");
-        assert!(
-            warmed.iter().skip(1).all(|m| !m.content.contains("MEMORY")),
-            "memory was sent again as a user turn: {warmed:?}"
-        );
+        assert_eq!(warmed.len(), 2, "nothing between the system prompt and the opener: {warmed:?}");
     }
 
     #[test]
     fn a_resumed_session_warms_all_of_it() {
         let history = vec![ChatMessage::system("S\n\nMEMORY"), ChatMessage::user("hello"), ChatMessage::assistant("hi there")];
-        let m = warm_messages(&history, &[]);
+        let m = warm_messages(&history);
         assert_eq!(m.len(), 4);
         assert_eq!(m[1].content, "hello");
         assert_eq!(m[2].content, "hi there");
@@ -217,13 +208,16 @@ mod tests {
     #[test]
     fn a_change_of_model_voice_or_history_is_a_new_prefix() {
         let h = vec![ChatMessage::system("S")];
-        let base = prefix_key("s", "m", &warm_messages(&h, &[]), &[]);
-        assert_eq!(base, prefix_key("s", "m", &warm_messages(&h, &[]), &[]));
-        assert_ne!(base, prefix_key("s", "other", &warm_messages(&h, &[]), &[]));
-        assert_ne!(base, prefix_key("another server", "m", &warm_messages(&h, &[]), &[]), "a provider switch warms the new server");
-        assert_ne!(base, prefix_key("s", "m", &warm_messages(&h, &[ChatMessage::user("q")]), &[]));
+        let base = prefix_key("s", "m", &warm_messages(&h), &[]);
+        assert_eq!(base, prefix_key("s", "m", &warm_messages(&h), &[]));
+        assert_ne!(base, prefix_key("s", "other", &warm_messages(&h), &[]));
+        assert_ne!(base, prefix_key("another server", "m", &warm_messages(&h), &[]), "a provider switch warms the new server");
+        // The voice lives in the system prompt now: a change of voice changes
+        // the warmed prefix through its content.
+        let voiced = vec![ChatMessage::system("S\n\nYOUR VOICE:\nfriendly")];
+        assert_ne!(base, prefix_key("s", "m", &warm_messages(&voiced), &[]));
         let mut longer = h.clone();
         longer.push(ChatMessage::user("x"));
-        assert_ne!(base, prefix_key("s", "m", &warm_messages(&longer, &[]), &[]));
+        assert_ne!(base, prefix_key("s", "m", &warm_messages(&longer), &[]));
     }
 }

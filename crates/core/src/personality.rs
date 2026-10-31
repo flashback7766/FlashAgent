@@ -1,11 +1,11 @@
 //! Voice: a base style plus adjustable traits, tone only. It reaches the model
-//! two ways: a system-prompt section written as who the assistant is (told
-//! "the user chose a friendly tone", a model announces it), and
-//! [`Personality::voice_prelude`], one earlier exchange in that voice, which
-//! models follow more closely than any description. Behaviour is the same in
-//! every style, and all-default adds nothing to the prompt.
-
-use flashagent_llm::ChatMessage;
+//! as a system-prompt section written as who the assistant is, with one quoted
+//! sample reply for scale: a model follows an example more closely than any
+//! description, and a sample quoted in the instructions is not a turn of the
+//! conversation it would go on to continue — sent as a fake earlier exchange,
+//! every model greeted the user by offering to say more about git stash.
+//! Behaviour is the same in every style, and all-default adds nothing to the
+//! prompt.
 
 use serde::{Deserialize, Serialize};
 
@@ -260,24 +260,25 @@ impl Personality {
         }
         Some(format!(
             "YOUR VOICE:\n{}\n\
+             For scale, a reply in this voice:\n{}\n\
              This is how you talk in replies, and nothing more: tools, code, commit messages, files and honesty \
              about what failed are the same whatever your voice. It is simply how you are, so never describe or \
-             mention your own tone.",
-            lines.join(" ")
+             mention your own tone. The sample above shows the shape and length of a reply and nothing else: its \
+             subject is not part of this conversation and never comes up on its own.",
+            lines.join(" "),
+            self.quoted_sample(),
         ))
+    }
+
+    /// The sample answer as a quoted block. Inside the instructions it teaches
+    /// the voice; as a turn of the conversation it taught the voice and became
+    /// the topic the model went on about.
+    fn quoted_sample(&self) -> String {
+        self.sample_answer().lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")
     }
 
     pub fn uses_emoji(&self) -> bool {
         self.emoji == Level::More
-    }
-
-    /// Carried right after the system prompt. The question is unrelated to any
-    /// project, so the model has nothing in it to refer back to.
-    pub fn voice_prelude(&self) -> Vec<ChatMessage> {
-        if *self == Personality::default() {
-            return Vec::new();
-        }
-        vec![ChatMessage::user("Quick one: what does `git stash` do?"), ChatMessage::assistant(self.sample_answer())]
     }
 
     fn sample_answer(&self) -> String {
@@ -349,32 +350,35 @@ mod tests {
 
     #[test]
     fn the_default_voice_adds_no_example() {
-        assert!(Personality::default().voice_prelude().is_empty());
+        assert!(Personality::default().prompt_section().is_none());
     }
 
     #[test]
     fn the_example_is_written_in_the_chosen_voice() {
-        let answer = |p: Personality| p.voice_prelude()[1].content.clone();
-        let quirky = answer(Personality { base: BaseStyle::Quirky, ..Default::default() });
+        let section = |p: Personality| p.prompt_section().unwrap();
+        let quirky = section(Personality { base: BaseStyle::Quirky, ..Default::default() });
         assert!(quirky.contains("coat check"), "{quirky}");
-        assert!(!quirky.contains("- "), "a playful voice talks in sentences: {quirky}");
+        assert!(!quirky.contains("> - "), "a playful voice talks in sentences: {quirky}");
 
-        let listed = answer(Personality { base: BaseStyle::Quirky, headers_lists: Level::More, ..Default::default() });
-        assert!(listed.contains("**git stash**") && listed.contains("\n- "), "{listed}");
+        let listed = section(Personality { base: BaseStyle::Quirky, headers_lists: Level::More, ..Default::default() });
+        assert!(listed.contains("**git stash**") && listed.contains("> - "), "{listed}");
 
-        let emoji = answer(Personality { base: BaseStyle::Efficient, emoji: Level::More, ..Default::default() });
+        let emoji = section(Personality { base: BaseStyle::Efficient, emoji: Level::More, ..Default::default() });
         assert!(emoji.contains('📦'), "{emoji}");
 
-        let calm = answer(Personality { base: BaseStyle::Friendly, enthusiastic: Level::Less, ..Default::default() });
+        let calm = section(Personality { base: BaseStyle::Friendly, enthusiastic: Level::Less, ..Default::default() });
         assert!(!calm.contains('!'), "{calm}");
 
-        let cold = answer(Personality { base: BaseStyle::Friendly, warm: Level::Less, ..Default::default() });
+        let cold = section(Personality { base: BaseStyle::Friendly, warm: Level::Less, ..Default::default() });
         assert!(!cold.contains("Happy to help"), "{cold}");
 
-        let prelude = Personality { base: BaseStyle::Candid, ..Default::default() }.voice_prelude();
-        assert_eq!(prelude.len(), 2);
-        assert_eq!(prelude[0].role, flashagent_llm::Role::User);
-        assert_eq!(prelude[1].role, flashagent_llm::Role::Assistant);
+        // Quoted, not sent as turns of the conversation: a model that reads the
+        // sample as its own earlier reply goes on about its subject.
+        for line in section(Personality { base: BaseStyle::Candid, ..Default::default() }).lines() {
+            if line.contains("git stash") && !line.contains("never comes up") {
+                assert!(line.starts_with("> "), "an unquoted sample line: {line}");
+            }
+        }
     }
 
     #[test]

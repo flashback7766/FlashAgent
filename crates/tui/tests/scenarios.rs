@@ -3393,13 +3393,27 @@ fn a_chosen_voice_reaches_the_model_as_an_example_and_nowhere_else() {
     let system = messages[0]["content"].to_string();
     assert!(system.contains("playful streak"), "the voice is not in the system prompt");
     assert!(!system.contains("user's choice"), "the voice is described as a setting: {system}");
-    assert!(messages[2]["content"].to_string().contains("coat check"), "no example in the chosen voice: {messages:?}");
+    // Quoted in the instructions, not a turn of the conversation a model would
+    // go on to continue: greeting the user then offered to say more about git.
+    assert!(system.contains("For scale, a reply in this voice"), "no sample in the system prompt: {system}");
+    assert!(system.contains("> `git stash` is a coat check"), "the sample is not quoted: {system}");
+    assert_eq!(messages.len(), 2, "a fake exchange still rides the request: {messages:?}");
     assert!(messages.last().unwrap()["content"].to_string().contains("hello there"));
 
     assert!(!term.screen().contains("git stash"), "the example was shown:\n{}", term.screen());
     quit(&mut term);
-    let saved: String = home.sessions().iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
-    assert!(!saved.contains("git stash"), "the example was saved with the session");
+    // The sample lives in the system prompt, which is saved with the session;
+    // what must never be saved is a turn of the conversation in its words.
+    for path in home.sessions() {
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        for message in json["messages"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+            if message["role"] == "system" {
+                continue;
+            }
+            let text = message["content"].as_str().unwrap_or("");
+            assert!(!text.contains("git stash"), "the example was saved as a turn: {message}");
+        }
+    }
 }
 
 #[test]
