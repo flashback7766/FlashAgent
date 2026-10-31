@@ -1067,7 +1067,7 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
         // llama-server: `meta` has both the running and the trained context.
         // vLLM serves exactly `max_model_len`; Groq calls it `context_window`.
         let meta = m.get("meta");
-        let context_length = m.get("loaded_context_length")
+        let mut context_length = m.get("loaded_context_length")
             .or_else(|| m.get("context_length"))
             .or_else(|| m.get("max_model_len"))
             .or_else(|| m.get("context_window"))
@@ -1078,6 +1078,8 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
             .or_else(|| meta.and_then(|x| x.get("n_ctx_train")))
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
+        // Only OpenCode's listing carries a human name beside the id.
+        let mut display_name = None;
 
         let mut supports_tools = false;
         // LM Studio marks vision by type "vlm", not always in capabilities.
@@ -1151,14 +1153,50 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 };
             }
         }
+
+        // OpenCode's gateway (opencode.ai/inference): the window under `limit`,
+        // tool and reasoning support under `capabilities`, and the effort names
+        // the request's `reasoning_effort` may take under
+        // `capabilities.reasoning.effort`. A reasoning model that names no
+        // levels thinks on its own and is left unreported, like any server that
+        // stays silent about how to ask it.
+        let opencode_shape = m.get("limit").is_some_and(|l| l.is_object());
+        if opencode_shape {
+            if let Some(context) = m.pointer("/limit/context").and_then(|v| v.as_u64()) {
+                context_length = Some(context as usize);
+            }
+            display_name = m.get("name").and_then(|v| v.as_str()).map(String::from);
+        }
+        if let Some(tools) = m.pointer("/capabilities/tools/supported").and_then(|v| v.as_bool()) {
+            supports_tools |= tools;
+        }
+        if let Some(reasoning) = m.get("capabilities").and_then(|c| c.get("reasoning")).filter(|r| r.is_object()) {
+            let levels: Vec<String> = reasoning
+                .get("effort")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_lowercase())).collect())
+                .unwrap_or_default();
+            if !levels.is_empty() {
+                thinking = ThinkingProfile {
+                    presets: levels,
+                    protocol: ThinkingProtocol::ReasoningEffort,
+                    supported: true,
+                    default_preset: None,
+                };
+            } else if reasoning.get("supported").and_then(|v| v.as_bool()) == Some(false) {
+                thinking = ThinkingProfile::unsupported();
+            }
+        }
+
         supports_vision |= m
             .pointer("/architecture/input_modalities")
+            .or_else(|| m.pointer("/modalities/input"))
             .and_then(|v| v.as_array())
             .is_some_and(|inputs| inputs.iter().any(|i| i.as_str() == Some("image")));
 
         discovered.push(DiscoveredModel {
             id: id.to_string(),
-            display_name: None,
+            display_name,
             is_loaded,
             context_length,
             max_context_length,
@@ -1202,6 +1240,71 @@ mod tests {
         for level in ["max", "xhigh", "high", "medium", "low"] {
             assert!(m.thinking.presets.iter().any(|p| p == level), "{level} was dropped");
         }
+    }
+
+    #[test]
+    fn opencodes_listing_is_read_whole() {
+        // The shape opencode.ai/inference actually sends: the window under
+        // `limit`, tool and reasoning support under `capabilities`, the vision
+        // flag under `modalities`. Before this, every model on it looked
+        // tool-less (nothing read `capabilities.tools.supported`), blind to its
+        // context (`limit.context`) and mute about its effort levels.
+        let listing = serde_json::json!({ "data": [
+            {
+                "id": "kimi-k3.1-pro",
+                "name": "Kimi K3.1 Pro",
+                "owned_by": "opencode",
+                "type": "chat",
+                "limit": { "context": 262144, "input": 200000, "output": 65536 },
+                "modalities": { "input": ["text"], "output": ["text"] },
+                "capabilities": {
+                    "tools": { "supported": true },
+                    "reasoning": { "supported": true, "effort": ["low", "high", "max"] }
+                }
+            },
+            {
+                "id": "claude-sonnet-4-5",
+                "type": "chat",
+                "limit": { "context": 1000000, "output": 64000 },
+                "capabilities": { "tools": { "supported": true }, "reasoning": { "supported": false } }
+            },
+            {
+                "id": "big-pickle",
+                "type": "chat",
+                "limit": { "context": 200000, "output": 32000 },
+                "capabilities": { "tools": { "supported": true }, "reasoning": { "supported": true } }
+            },
+            {
+                "id": "nemotron-3.5-super-vl-free",
+                "type": "chat",
+                "limit": { "context": 1048576, "output": 131072 },
+                "modalities": { "input": ["text", "image"], "output": ["text"] },
+                "capabilities": { "tools": { "supported": true }, "reasoning": { "supported": true, "effort": ["none", "minimal", "low", "medium", "high", "xhigh"] } }
+            }
+        ]});
+        let disc = parse_server_models(&listing);
+        assert_eq!(disc.len(), 4, "a chat type is no embedding, whatever `type` says");
+
+        let kimi = &disc[0];
+        assert_eq!(kimi.context_length, Some(262144));
+        assert_eq!(kimi.display_name.as_deref(), Some("Kimi K3.1 Pro"));
+        assert!(kimi.supports_tools);
+        assert!(!kimi.supports_vision);
+        assert!(kimi.thinking.supported);
+        assert_eq!(kimi.thinking.presets, vec!["low", "high", "max"]);
+        assert_eq!(kimi.thinking.protocol, ThinkingProtocol::ReasoningEffort, "the levels go into reasoning_effort");
+
+        let sonnet = &disc[1];
+        assert!(!sonnet.thinking.supported, "the server said this model cannot reason");
+        assert!(sonnet.supports_tools);
+
+        let pickle = &disc[2];
+        assert!(!pickle.thinking.supported, "reasoning it does, but it named no levels to ask with");
+        assert!(pickle.thinking.presets.is_empty());
+
+        let nemotron = &disc[3];
+        assert!(nemotron.supports_vision, "the image in modalities.input is the vision flag");
+        assert_eq!(nemotron.thinking.presets, vec!["none", "minimal", "low", "medium", "high", "xhigh"]);
     }
 
     #[test]

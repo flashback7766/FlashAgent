@@ -309,8 +309,12 @@ fn auth(key: Option<&str>, bearer: bool) -> HeaderMap {
     headers
 }
 
-fn headers(client: &Client) -> HeaderMap {
-    auth(client.api_key().as_deref(), BEARER.lock().contains(&client.base_url()))
+pub(crate) fn headers(client: &Client) -> HeaderMap {
+    let mut headers = auth(client.api_key().as_deref(), BEARER.lock().contains(&client.base_url()));
+    if let Some(session) = client.opencode_session_header() {
+        headers.insert("x-opencode-session", session);
+    }
+    headers
 }
 
 pub(crate) async fn stream(

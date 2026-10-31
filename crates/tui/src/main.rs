@@ -1735,6 +1735,9 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     let (resume_session_id, open_session_picker, session_note) = resolve_session_start(ctx.session_start, &w.cwd_display);
     let mut session_id = resume_session_id.clone().unwrap_or_else(new_session_id);
     open_snapshots(w.perm, &session_id, &w.cwd);
+    // OpenCode's gateway routes and prompt-caches the whole conversation by
+    // this id; a resumed session keeps its id and so keeps its cache.
+    w.source.set_session_id(&session_id);
 
     let effort_memory = flashagent_core::EffortMemory::load();
     w.source.set_effort_bias(effort_memory.steps(&ctx.model));
@@ -1780,6 +1783,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
             app.tell_of_lost_tasks(&w.tools_arc.shells().tasks());
         } else {
             session_id = new_session_id();
+            w.source.set_session_id(&session_id);
             open_snapshots(w.perm, &session_id, &w.cwd);
         }
     }
@@ -1814,6 +1818,7 @@ async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mu
             if app.switch_session(session_id, &id, &w.memory_block, w.perm) {
                 app.tell_of_lost_tasks(&w.tools_arc.shells().tasks());
                 *session_id = id;
+                w.source.set_session_id(session_id);
                 open_snapshots(w.perm, session_id, &w.cwd);
                 app.warm_prompt_cache(&w.source, w.perm);
             }
