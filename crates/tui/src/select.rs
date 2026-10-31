@@ -360,12 +360,12 @@ impl<T> SelectMenu<T> {
     }
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
-        self.render_in(width, usize::MAX)
+        self.render_in(width, usize::MAX, None, None)
     }
 
     /// In at most `max_rows` rows, so the title and the selected item stay on
     /// a short screen: at 80x24 ten two-row items did not fit.
-    pub fn render_in(&self, width: usize, max_rows: usize) -> Vec<RenderLine> {
+    pub fn render_in(&self, width: usize, max_rows: usize, hover: Option<usize>, flash: Option<usize>) -> Vec<RenderLine> {
         let card_w = width.min(96);
         let inner_w = card_w.saturating_sub(2);
         let border_color = "\x1b[38;2;95;90;85m";
@@ -456,8 +456,21 @@ impl<T> SelectMenu<T> {
             for &idx in &matches[start..end] {
                 let item = &self.items[idx];
                 let is_cur = idx == self.selected;
-                let (cursor, label_styled) = if is_cur {
+                // The whole item answers its hover -- label, description and
+                // the hidden-match row are one row to the click, so they are
+                // one row to the pointer.
+                let item_line = lines.len();
+                let item_rows = 1
+                    + usize::from(item.description.is_some())
+                    + usize::from(item.hidden_match(&self.filter.to_lowercase()).is_some());
+                let is_hover = !is_cur && hover.is_some_and(|line| (item_line..item_line + item_rows).contains(&line)) && flash != Some(item_line);
+                let is_press = flash == Some(item_line);
+                let (cursor, label_styled) = if is_press {
+                    (" \x1b[1;38;2;225;175;95m›\x1b[0m", format!("\x1b[38;2;225;175;95m{}\x1b[0m", item.label))
+                } else if is_cur {
                     (" \x1b[1;38;2;225;175;95m›\x1b[0m", format!("\x1b[1;38;2;245;240;232m{}\x1b[0m", item.label))
+                } else if is_hover {
+                    (" \x1b[38;2;135;130;125m·\x1b[0m", format!("\x1b[38;2;235;230;220m{}\x1b[0m", item.label))
                 } else {
                     ("  ", format!("\x1b[38;2;160;155;145m{}\x1b[0m", item.label))
                 };
@@ -545,17 +558,17 @@ mod tests {
     fn a_menu_keeps_its_title_and_selection_on_a_short_screen() {
         let items: Vec<SelectItem<usize>> = (0..28).map(|i| SelectItem::with_description(format!("/cmd{i}"), "what it does", i)).collect();
         let mut menu = SelectMenu::new("Command palette", items);
-        let rows = menu.render_in(80, 19);
+        let rows = menu.render_in(80, 19, None, None);
         assert!(rows.len() <= 19, "{} rows", rows.len());
         assert!(crate::strip_ansi(&rows[0].1).contains("Command palette"));
         assert!(rows.iter().any(|(_, r)| crate::strip_ansi(r).contains("› /cmd0")));
         // A page is what was on screen.
         menu.page_down();
-        let rows = menu.render_in(80, 19);
+        let rows = menu.render_in(80, 19, None, None);
         assert!(rows.len() <= 19);
         assert!(rows.iter().any(|(_, r)| crate::strip_ansi(r).contains("› /cmd7")), "{:?}", rows.iter().map(|r| crate::strip_ansi(&r.1)).collect::<Vec<_>>());
         // With room, the page stays ten items.
-        assert!(menu.render_in(80, 100).len() > 20);
+        assert!(menu.render_in(80, 100, None, None).len() > 20);
     }
 
     #[test]
@@ -731,6 +744,28 @@ mod tests {
         assert_eq!(menu.items[menu.selected].label, "third", "the end holds, however far the hand spins");
         assert!(menu.wheel(-1));
         assert_eq!(menu.items[menu.selected].label, "second");
+    }
+
+    #[test]
+    fn a_hovered_item_points_at_itself_and_a_pressed_one_glows() {
+        let menu: SelectMenu<usize> = SelectMenu::new(
+            "Pick",
+            ["first", "second", "third"].iter().enumerate().map(|(i, s)| SelectItem::new((*s).to_string(), i)).collect(),
+        );
+        let plain = menu.render(80);
+        // The second item sits on card row 2 (title above it).
+        let hovered = menu.render_in(80, 100, Some(2), None);
+        let pressed = menu.render_in(80, 100, Some(2), Some(2));
+        let strip = |rows: &Vec<RenderLine>| rows.iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>();
+        let (plain, hovered, pressed) = (strip(&plain), strip(&hovered), strip(&pressed));
+        assert!(!plain[2].contains('·'), "nothing points at an unhovered row: {}", plain[2]);
+        assert!(hovered[2].contains("· second"), "the hover points at its row: {}", hovered[2]);
+        assert!(pressed[2].contains("› second"), "the press keeps the selection's pointer: {}", pressed[2]);
+        // The pressed row is the amber the other screens' presses wear.
+        assert!(menu.render_in(80, 100, Some(2), Some(2))[2].1.contains("225;175;95"));
+        // The selected row never loses its own pointer to a hover.
+        let hovered_selected = menu.render_in(80, 100, Some(1), None);
+        assert!(strip(&vec![hovered_selected[1].clone()])[0].contains("› first"));
     }
 
     #[test]
