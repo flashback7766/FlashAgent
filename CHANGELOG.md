@@ -1,5 +1,21 @@
 # Changelog
 
+## b616 — a thought answers its header, and a long one opens to a glance
+
+- **A block folds from its header alone.** Every row of an open thought
+  or tool call used to be a click target — a stray press in the middle of
+  a page of thinking folded it away. The body of an open block is text to
+  read now; the header is the control, and the hover marks exactly what a
+  click reaches.
+- **A long block opens to a preview, not a landslide.** A thought or a
+  tool card running to hundreds of rows poured all of them into the
+  transcript and pushed the conversation off the screen. Twenty rows show,
+  and the cut answers a click with the whole block; folding forgets the
+  request, so a fresh open is a glance again.
+- **The header holds still while a block opens or folds.** The rows the
+  block gained or lost shift the view by the same amount, so the thing the
+  pointer is on stays under it — the box grows downward, not into space.
+
 ## b615 — the second update in one sitting no longer shoots itself
 
 Seen live: an update that had already installed once failed its successor

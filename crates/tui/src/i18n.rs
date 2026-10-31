@@ -466,6 +466,7 @@ static RU: &[(&str, &str)] = &[
     ("{n} tokens", "{n} токенов"),
     ("{n} more above", "выше ещё {n}"),
     ("{n} more below", "ниже ещё {n}"),
+    ("… {n} more lines · click to show all", "… ещё {n} · клик — показать все"),
     ("What's new in FlashAgent {}", "Что нового в FlashAgent {}"),
     ("What's new \u{b7} {}", "Что нового \u{b7} {}"),
     // --- The hints under the sampling parameters ---

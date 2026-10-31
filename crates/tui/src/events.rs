@@ -837,8 +837,40 @@ impl App {
         self.selection_anchor = Some((m.row, m.column));
         let expansion = ReasoningExpansion { all: self.all_expanded, last: self.last_expanded };
         if let Some(row) = self.renderer.chat_row_at(m.row) {
-            self.chat.toggle_row(row, expansion);
+            match self.chat.owner_at(row) {
+                Some(flashagent_tui::Click::Fold(i)) => {
+                    let before = self.count_chat_rows();
+                    if self.chat.toggle_line(i, expansion) {
+                        self.settle_block(before);
+                    }
+                }
+                Some(flashagent_tui::Click::Expand(i)) => {
+                    let before = self.count_chat_rows();
+                    if self.chat.show_full(i) {
+                        self.settle_block(before);
+                    }
+                }
+                None => {}
+            }
         }
+    }
+
+    /// The transcript as the frame draws it — with the expansion the user
+    /// actually runs, not every block forced open. A count taken with every
+    /// block open would see a fold of a never-opened block as no change at
+    /// all, and the header the pointer is on would drift off the screen.
+    fn count_chat_rows(&self) -> usize {
+        let expansion = ReasoningExpansion { all: self.all_expanded, last: self.last_expanded };
+        let (settled, live) = self.chat.render_split(self.last_term_size.0 as usize, expansion);
+        settled.len() + live.len()
+    }
+
+    /// A click opened or folded a block: the rows it gained or lost shift the
+    /// view by the same amount, so the header the pointer is on holds still.
+    fn settle_block(&mut self, before: usize) {
+        let after = self.count_chat_rows();
+        self.renderer.anchor_block(after as isize - before as isize);
+        self.renderer.request_reprint();
     }
 
     /// A wheel notch moves one line, not three. `dir` is negative for up.
