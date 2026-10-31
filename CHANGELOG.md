@@ -1,5 +1,29 @@
 # Changelog
 
+## b634 — Responses models answer, and AgentRouter keeps its settings
+
+- **An explicit Chat Completions refusal switches to Responses.** AgentRouter's
+  `gpt-6.1-sol` refuses `/v1/chat/completions` and asks for `/v1/responses`.
+  FlashAgent now handles the different input and event formats: text, reasoning,
+  parallel function calls, tool results, images, cached-token usage and encrypted
+  reasoning replay. The choice is remembered for the current model, not carried
+  to another model or provider. An explicit `/v1/responses` URL works too.
+- **No retry after an accepted stream.** Only an explicit endpoint refusal can
+  switch protocols. A stream cut during a tool call remains an error, not a
+  second invocation. Requests keep `store: false` and full local history.
+- **User-Agent survives saving and reloading.** The custom provider reader
+  omitted the field, so a saved AgentRouter identity vanished at restart.
+- **The context window and effort menu no longer stay empty.** AgentRouter's
+  sparse list carries no limits or reasoning settings. Exact reference metadata
+  for `gpt-6.1-sol`, `gpt-5.6-sol` and `gpt-6-astra` supplies the 1,050,000-token
+  window and their supported efforts; server-reported values take precedence.
+  Image MIME types in model catalogs now count as vision support too.
+- **Only the provider separator remains.** A missing model list no longer adds
+  a yellow provider announcement above the separator on the next turn.
+
+Verified against AgentRouter with `gpt-6.1-sol`: a harmless echo tool call,
+its result on the next Responses request, and the final `responses-ok` answer.
+
 ## b629 — the AgentRouter preset works, and its protocol can change
 
 - **The preset presents itself.** The AgentRouter gateway refuses every
