@@ -142,6 +142,11 @@ impl SetupWizard {
     /// key and model, or a new one.
     fn select_row(&mut self, row: usize) {
         self.preset_idx = row.min(Self::custom_idx());
+        // A preset starts at its own protocol; a Tab forced on another preset
+        // says nothing about this one.
+        if !self.is_custom() {
+            self.custom_protocol = None;
+        }
         let fresh = match self.preset() {
             Some(p) => ProviderProfile::from_preset(p),
             None => {
@@ -510,6 +515,18 @@ impl SetupWizard {
             }
         }
 
+        // Step 0 with a preset selected: Tab rewires which protocol it speaks
+        // (AgentRouter speaks Anthropic's shape to Claude models as well).
+        if self.step == 0 && !self.is_custom() {
+            if let KeyCode::Tab | KeyCode::BackTab = code {
+                let all = ApiProtocol::ALL;
+                let current = all.iter().position(|p| *p == self.profile.protocol).unwrap_or(0);
+                let next = if code == KeyCode::Tab { (current + 1) % all.len() } else { (current + all.len() - 1) % all.len() };
+                self.custom_protocol = Some(all[next]);
+                self.profile.protocol = all[next];
+                return None;
+            }
+        }
         // Step 0 with Custom selected: typing edits the URL, Tab the protocol.
         if self.step == 0 && self.is_custom() {
             match code {
@@ -907,7 +924,8 @@ impl SetupWizard {
                 lines.push(pad_row(""));
                 // What the chosen row is, and how it will be spoken to.
                 let about = match self.preset() {
-                    Some(p) => format!("{} \u{b7} {}", crate::i18n::tr(p.description), p.protocol.label()),
+                    // The protocol the preset speaks now: Tab rewires it.
+                    Some(p) => format!("{} \u{b7} {}", crate::i18n::tr(p.description), self.profile.protocol.label()),
                     None if self.custom_url.is_empty() => crate::i18n::tr("Any server's address, e.g. http://localhost:8080/v1").to_string(),
                     None => crate::i18n::tr("Spoken to as {protocol} \u{b7} Tab changes it").replace("{protocol}", self.profile.protocol.label()),
                 };
@@ -1113,7 +1131,7 @@ impl SetupWizard {
         let model_enter = if self.provider_only { "save" } else { "choose" };
         let hints: Vec<(&str, &str)> = match self.step {
             0 if self.is_custom() => vec![("type", "the URL"), ("Tab", "protocol"), ("\u{2191}/\u{2193}", "presets"), ("Enter", "next"), ("Esc", if self.provider_only { "clear or close" } else { "clear or quit" })],
-            0 => vec![("\u{2191}/\u{2193}", "move"), ("0-9 c", "pick"), ("Enter", "next"), ("Esc", if self.provider_only { "close" } else { "quit" })],
+            0 => vec![("\u{2191}/\u{2193}", "move"), ("0-9 c", "pick"), ("Tab", "protocol"), ("Enter", "next"), ("Esc", if self.provider_only { "close" } else { "quit" })],
             1 if self.key_required() => vec![("paste", "the key"), ("Enter", "check it"), ("Esc", "clear or back")],
             1 => vec![("Enter", "skip"), ("Esc", "back")],
             2 => vec![("\u{2191}/\u{2193}", "move"), ("type", "to filter"), ("Enter", model_enter), ("Esc", "clear or back")],
@@ -1511,6 +1529,26 @@ mod tests {
         wizard.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
         wizard.handle_paste("http://192.168.1.50:8000/v1");
         assert!(!wizard.is_cloud_backend(), "plain http is a server on the network");
+    }
+
+    #[test]
+    fn a_preset_s_protocol_changes_with_tab_and_the_next_preset_starts_fresh() {
+        // AgentRouter speaks Anthropic's shape to Claude models as well as
+        // OpenAI's, and there is no way to say which from a preset alone.
+        let mut wizard = SetupWizard::new(AppConfig::default());
+        wizard.select_row(preset_row("AgentRouter"));
+        assert_eq!(wizard.profile.protocol, ApiProtocol::OpenAi);
+        assert_eq!(wizard.profile.user_agent.as_deref(), Some("opencode/1.0.0"), "the preset presents itself");
+        wizard.handle_key(KeyCode::Tab, KeyModifiers::empty());
+        assert_eq!(wizard.profile.protocol, ApiProtocol::Anthropic);
+        // The shown protocol follows.
+        let shown = crate::strip_ansi(&wizard.render(100).join("\n"));
+        assert!(shown.contains("Anthropic"), "{shown}");
+        // Another preset starts at its own protocol again.
+        wizard.select_row(preset_row("Anthropic"));
+        assert_eq!(wizard.profile.protocol, ApiProtocol::Anthropic);
+        wizard.select_row(preset_row("OpenCode Go"));
+        assert_eq!(wizard.profile.protocol, ApiProtocol::OpenAi, "no forced protocol carries over");
     }
 
     #[test]

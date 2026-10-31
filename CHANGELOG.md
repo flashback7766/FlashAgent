@@ -1,5 +1,20 @@
 # Changelog
 
+## b629 — the AgentRouter preset works, and its protocol can change
+
+- **The preset presents itself.** The AgentRouter gateway refuses every
+  client it does not know before reading a key — but the preset now carries
+  the User-Agent of a client it does, so picking it in the wizard lists
+  models and talks. The editor's User-Agent field changes it.
+- **Editing only the User-Agent reconnects.** The save path compared the
+  address, protocol, key and model to decide whether the client must move;
+  a changed User-Agent is a changed client, and the gateway reads it before
+  the key.
+- **Tab rewires a preset's protocol.** AgentRouter speaks Anthropic's shape
+  to Claude models as well as OpenAI's; Tab on the server step cycles the
+  protocol the selected preset speaks (and the next preset starts at its
+  own again). The line under the list shows the protocol as it stands.
+
 ## b628 — the agent can name itself what the gateway accepts
 
 Seen live: AgentRouter ([agentrouter.org](https://agentrouter.org)) refused

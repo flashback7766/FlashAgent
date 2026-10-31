@@ -1311,7 +1311,7 @@ static RU: &[(&str, &str)] = &[
     ("Playful and imaginative", "Игриво и выдумчиво"),
     ("Concise and plain", "Кратко и просто"),
     ("Critical and sarcastic", "Критично и едко"),
-    ("an LLM gateway that serves known coding agents and refuses the rest before the key; set FLASHAGENT_USER_AGENT or the provider's User-Agent to one it accepts", "LLM-шлюз, который обслуживает известных кодинг-агентов и остальных не пускает ещё до ключа; задай FLASHAGENT_USER_AGENT или User-Agent провайдера на один из принятых"),
+    ("an LLM gateway for known coding agents; the preset presents itself as one it accepts", "LLM-шлюз для известных кодинг-агентов; пресет представляется одним из принятых"),
     ("Threat-first and exact", "Сначала угрозы, точно и по делу"),
     ("Sharp outside, warm underneath", "Колючий снаружи, тёплый внутри"),
     ("Less", "Меньше"),
