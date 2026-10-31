@@ -1,5 +1,18 @@
 # Changelog
 
+## b627 — a compaction that freed nothing says nothing
+
+Seen live: "/compact" on a two-message conversation answered with "Context
+compacted: 2 messages became a summary, about 0 tokens freed" — a line that
+read as a bug report about a compaction that never had anything to chew.
+
+- **The standing line is earned, not owed.** The summary card is the result;
+  the line about what went and what it freed appears only when the
+  compaction actually freed something worth naming (256 tokens). A small
+  one leaves the card and nothing else.
+- A single exchange can still be compacted by hand — that stands. Only the
+  line that said nothing went.
+
 ## b626 — every clickable thing answers, and every card closes
 
 - **Menus light their rows.** The command palette and the model, effort,
