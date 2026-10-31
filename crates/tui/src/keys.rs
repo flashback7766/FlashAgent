@@ -271,17 +271,7 @@ impl App {
 
             // F2 cycles none -> last -> all.
             KeyCode::F(2) => {
-                if !self.last_expanded && !self.all_expanded {
-                    self.last_expanded = true;
-                    self.all_expanded = false;
-                } else if self.last_expanded && !self.all_expanded {
-                    self.last_expanded = false;
-                    self.all_expanded = true;
-                } else {
-                    self.last_expanded = false;
-                    self.all_expanded = false;
-                }
-                self.renderer.request_reprint();
+                self.cycle_verbose();
             }
 
             // Alt+O: all thinking blocks.
@@ -362,43 +352,7 @@ impl App {
             KeyCode::Char('v') | KeyCode::Char('V') | KeyCode::Char('\u{043c}') | KeyCode::Char('\u{041c}')
                 if mods.contains(KeyModifiers::CONTROL) =>
             {
-                // A screenshot on the clipboard is meant far more often than a path, so it
-                // is looked for first.
-                if let Some(image) = flashagent_tui::clipboard::get_clipboard_image() {
-                    maybe_measure_image_cost(
-                        &self.image_costs,
-                        &mut self.image_cost_probe,
-                        &self.current_model,
-                        cx.source,
-                        cx.tx,
-                    );
-                    let att = Attachment::from_clipboard(image);
-                    let label = att.label();
-                    self.attachments.push(att);
-                    self.suggested_prompt = None;
-                    if !model_sees_images(cx.source, &self.current_model) {
-                        self.say(
-                            BackgroundNotice::sticky(flashagent_tui::i18n::tr_fill(
-                                "{label} attached · {model} cannot see images — press F3 for one that can",
-                                &[("label", &label), ("model", &self.current_model)]
-                            ))
-                            .warning(),
-                        );
-                    } else {
-                        self.say(BackgroundNotice::fading(
-                            flashagent_tui::i18n::tr_fill("{label} attached · Ctrl+Z removes it", &[("label", &label)]),
-                            8,
-                        ));
-                    }
-                    self.renderer.request_reprint();
-                } else if let Some(text) = flashagent_tui::clipboard::get_clipboard_text() {
-                    if !text.is_empty() {
-                        self.input.insert_str(&text);
-                        self.history_index = None;
-                        self.autocomplete_idx = 0;
-                        self.renderer.request_reprint();
-                    }
-                }
+                self.paste_clipboard(cx);
             }
 
             // Ctrl+Z: remove the last attached picture.

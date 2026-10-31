@@ -3476,11 +3476,11 @@ mod tests {
             height: 30,
             ..Default::default()
         });
-        assert!(card.len() > 1);
+        assert!(card.lines.len() > 1);
         // A resumed session passes no reveal rows and gets the card as it is.
-        let opening = revealed(card.clone(), 1);
-        assert_eq!(opening.len(), card.len(), "the card holds its height while it appears");
-        assert_eq!(opening[0], card[0], "a fresh start animates it in from the top");
+        let opening = revealed(card.lines.clone(), 1);
+        assert_eq!(opening.len(), card.lines.len(), "the card holds its height while it appears");
+        assert_eq!(opening[0], card.lines[0], "a fresh start animates it in from the top");
         assert!(opening[1..].iter().all(|(_, text)| text.trim().is_empty()));
     }
 

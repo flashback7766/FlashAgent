@@ -20,7 +20,7 @@ impl App {
     }
 
     /// The card as it stands now: model, provider, level and the rest.
-    fn welcome_lines(&self, source: &BackendSource, mood: MascotMood, width: Option<usize>) -> Vec<RenderLine> {
+    fn welcome_lines(&self, source: &BackendSource, mood: MascotMood, width: Option<usize>) -> flashagent_tui::WelcomeRender {
         let (w, h) = crossterm::terminal::size().unwrap_or((100, 24));
         let th_sum = thinking_summary_str(source, &self.current_effort);
         welcome_card(&WelcomeCard {
@@ -51,12 +51,12 @@ impl App {
             return;
         }
         let card = self.welcome_lines(source, mood, width);
-        let card = match reveal_rows {
-            Some(rows) => revealed(card, rows),
-            None => card,
+        let lines = match reveal_rows {
+            Some(rows) => revealed(card.lines, rows),
+            None => card.lines,
         };
         // Only the rows that changed are drawn; nothing to ask for.
-        self.chat.update_welcome_card(card);
+        self.chat.update_welcome_card(flashagent_tui::WelcomeRender { lines, zones: card.zones });
     }
 }
 

@@ -20,10 +20,12 @@ pub enum BaseStyle {
     Quirky,
     Efficient,
     Cynical,
+    Cybersecurity,
+    Tsundere,
 }
 
 impl BaseStyle {
-    pub const ALL: [BaseStyle; 7] = [
+    pub const ALL: [BaseStyle; 9] = [
         BaseStyle::Default,
         BaseStyle::Professional,
         BaseStyle::Friendly,
@@ -31,6 +33,8 @@ impl BaseStyle {
         BaseStyle::Quirky,
         BaseStyle::Efficient,
         BaseStyle::Cynical,
+        BaseStyle::Cybersecurity,
+        BaseStyle::Tsundere,
     ];
 
     pub fn label(self) -> &'static str {
@@ -42,6 +46,8 @@ impl BaseStyle {
             Self::Quirky => "Quirky",
             Self::Efficient => "Efficient",
             Self::Cynical => "Cynical",
+            Self::Cybersecurity => "Cybersecurity",
+            Self::Tsundere => "Tsundere",
         }
     }
 
@@ -54,6 +60,8 @@ impl BaseStyle {
             Self::Quirky => "Playful and imaginative",
             Self::Efficient => "Concise and plain",
             Self::Cynical => "Critical and sarcastic",
+            Self::Cybersecurity => "Threat-first and exact",
+            Self::Tsundere => "Sharp outside, warm underneath",
         }
     }
 
@@ -76,6 +84,12 @@ impl BaseStyle {
             Self::Efficient => "You use the fewest words that carry the answer: no greetings, no pleasantries, no recap.",
             Self::Cynical => {
                 "You are dry and a little sarcastic about bad ideas and fragile code, never about the person, and the sarcasm never replaces a clear answer."
+            }
+            Self::Cybersecurity => {
+                "You review like a security engineer: the attack surface and the worst realistic outcome come before anything else, conditions and proof stand in for reassurance, and after naming what is unsafe you give the smallest change that closes it."
+            }
+            Self::Tsundere => {
+                "You act like the request is a bother while answering it thoroughly and well: gruff on the surface, openly invested in the result underneath, and never actually cold and never at the cost of the answer."
             }
         })
     }
@@ -129,6 +143,22 @@ impl BaseStyle {
                     "`git stash` hides your uncommitted changes and gives you a clean working tree: the place half-finished work goes to be forgotten.",
                     "`git stash pop` brings it back, conflicts included.",
                     "`git stash list` shows how much you have abandoned so far.",
+                ],
+            ),
+            Self::Cybersecurity => (
+                "",
+                [
+                    "`git stash` parks uncommitted changes and hands you a clean tree — tracked changes only unless `-u` is passed, and nothing in there is encrypted.",
+                    "`git stash pop` reapplies the top entry and drops it; on conflict the entry stays, which is the failure mode to check before you rely on it.",
+                    "`git stash list` is how you find what is still parked \u{2014} including, sometimes, changes someone forgot a month ago.",
+                ],
+            ),
+            Self::Tsundere => (
+                "I-it's not like I'm going to explain it twice.",
+                [
+                    "`git stash` stuffs your uncommitted changes away and gives you a clean tree. I-it's not like I cleaned up after you or anything.",
+                    "`git stash pop` brings them back when you finally get around to it \u{2014} don't leave them in there for a week, dummy.",
+                    "`git stash list` shows what you have abandoned. N-not that I was keeping track for you!",
                 ],
             ),
         }
@@ -300,7 +330,7 @@ impl Personality {
         let as_list = match self.headers_lists {
             Level::More => true,
             Level::Less => false,
-            Level::Default => matches!(self.base, BaseStyle::Default | BaseStyle::Professional | BaseStyle::Efficient),
+            Level::Default => matches!(self.base, BaseStyle::Default | BaseStyle::Professional | BaseStyle::Efficient | BaseStyle::Cybersecurity),
         };
         let body = if as_list {
             let list = points.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n");
@@ -386,8 +416,10 @@ mod tests {
         assert_eq!(Level::Default.cycle(true), Level::More);
         assert_eq!(Level::More.cycle(true), Level::Less);
         assert_eq!(Level::Less.cycle(false), Level::More);
-        assert_eq!(BaseStyle::Default.cycle(false), BaseStyle::Cynical);
-        assert_eq!(BaseStyle::Cynical.cycle(true), BaseStyle::Default);
+        assert_eq!(BaseStyle::Default.cycle(false), BaseStyle::Tsundere, "the last style wraps round");
+        assert_eq!(BaseStyle::Cynical.cycle(true), BaseStyle::Cybersecurity);
+        assert_eq!(BaseStyle::Tsundere.cycle(true), BaseStyle::Default);
+        assert_eq!(BaseStyle::Default.cycle(true), BaseStyle::Professional);
     }
 
     #[test]
