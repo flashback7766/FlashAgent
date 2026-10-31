@@ -1,5 +1,20 @@
 # Changelog
 
+## b628 — the agent can name itself what the gateway accepts
+
+Seen live: AgentRouter ([agentrouter.org](https://agentrouter.org)) refused
+every request with "unauthorized client detected" — it serves the coding
+agents it knows (Claude Code, Codex, OpenCode) and reads no key from any
+other client, so the provider looked dead before a key was ever sent.
+
+- **The agent's User-Agent can be named.** `FLASHAGENT_USER_AGENT` names it
+  for every provider; a provider's own **User-Agent** field in the editor
+  names it for that one alone, and rides every request as a header. Without
+  either, the agent keeps its own honest name.
+- **AgentRouter is a preset** — `https://agentrouter.org/v1`,
+  `AGENTROUTER_API_KEY` — second in the cloud list, with the README saying
+  what its gate demands.
+
 ## b627 — a compaction that freed nothing says nothing
 
 Seen live: "/compact" on a two-message conversation answered with "Context

@@ -248,6 +248,7 @@ FlashAgent follows the Go API's rules for outside agents: it names itself `flash
 | **text-generation-webui** | `http://localhost:5000/v1` | OpenAI-compatible | none; start it with `--api` |
 | **LocalAI** | `http://localhost:8080/v1` | OpenAI-compatible | none |
 | **OpenCode Go** | `https://opencode.ai/inference/go/v1` | OpenAI-compatible | `OPENCODE_API_KEY`; [subscription](https://opencode.ai/go), key from the [console](https://opencode.ai/console) — set-up steps above |
+| **AgentRouter** | `https://agentrouter.org/v1` | OpenAI-compatible | `AGENTROUTER_API_KEY`; serves known coding agents and refuses the rest before the key — set the User-Agent below |
 | **Anthropic** | `https://api.anthropic.com` | Anthropic | `ANTHROPIC_API_KEY` |
 | **OpenAI** | `https://api.openai.com/v1` | OpenAI-compatible | `OPENAI_API_KEY` |
 | **Gemini** | `https://generativelanguage.googleapis.com/v1beta` | Gemini | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
@@ -262,6 +263,8 @@ FlashAgent follows the Go API's rules for outside agents: it names itself `flash
 | **Custom** | any address | read from the address; <kbd>Tab</kbd> in the wizard changes it | optional |
 
 **Providers.** Each saved provider has a name, a protocol, an address, a key (optional) and the model to start with there. `/provider` lists them, the one in use marked, and switches to another without a restart: FlashAgent asks the new server what it runs, takes up the model you last used there (or the one it has loaded), and the conversation carries on where it was. `/provider <name>` switches straight to one. The same menu adds a provider (the wizard's steps, without the rest of the setup) and edits them: name, protocol, address, key and model, or deletes one. <kbd>Tab</kbd> → General → Provider does the same from Settings. A switch waits until the model has finished answering. Changing the model with <kbd>F3</kbd> saves it for the provider in use.
+
+**User-Agent.** Some gateways (AgentRouter among them) serve only the coding agents they know and refuse every other client before even reading the key. `FLASHAGENT_USER_AGENT` names the agent for every provider, and a provider's own **User-Agent** field (in the provider editor) names it for that one alone — set either to a client the gateway accepts.
 
 **Keys.** A key typed in the wizard or the provider editor is saved with that provider in the config file and shown masked. A provider without a saved key uses its usual environment variable (the Key column), then `FLASHAGENT_API_KEY`; the wizard says when it has found one.
 

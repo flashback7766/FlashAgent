@@ -30,6 +30,7 @@ const PRESETS: &[BackendPreset] = &[
     BackendPreset { name: "text-generation-webui", protocol: ApiProtocol::OpenAi, url: "http://localhost:5000/v1", description: "The oobabooga web UI, started with --api", key_env: &[] },
     BackendPreset { name: "LocalAI", protocol: ApiProtocol::OpenAi, url: "http://localhost:8080/v1", description: "LocalAI's OpenAI-compatible API", key_env: &[] },
     BackendPreset { name: "OpenCode Go", protocol: ApiProtocol::OpenAi, url: "https://opencode.ai/inference/go/v1", description: "OpenCode's coding-model subscription: Kimi, GLM, DeepSeek, MiniMax and Claude Haiku behind one key; the session header it routes by is sent on its own", key_env: &["OPENCODE_API_KEY"] },
+    BackendPreset { name: "AgentRouter", protocol: ApiProtocol::OpenAi, url: "https://agentrouter.org/v1", description: "an LLM gateway that serves known coding agents and refuses the rest before the key; set FLASHAGENT_USER_AGENT or the provider's User-Agent to one it accepts", key_env: &["AGENTROUTER_API_KEY"] },
     BackendPreset { name: "Anthropic", protocol: ApiProtocol::Anthropic, url: "https://api.anthropic.com", description: "Claude models through Anthropic's own API", key_env: &["ANTHROPIC_API_KEY"] },
     BackendPreset { name: "OpenAI", protocol: ApiProtocol::OpenAi, url: "https://api.openai.com/v1", description: "OpenAI's API", key_env: &["OPENAI_API_KEY"] },
     BackendPreset { name: "Gemini", protocol: ApiProtocol::Gemini, url: "https://generativelanguage.googleapis.com/v1beta", description: "Google Gemini through Google's own API", key_env: &["GEMINI_API_KEY", "GOOGLE_API_KEY"] },
@@ -134,12 +135,24 @@ pub struct ProviderProfile {
     /// client choose (Ollama). `None`: FlashAgent's own choice.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<usize>,
+    /// A User-Agent of the provider's own choosing: some gateways serve only
+    /// the clients they know and refuse the rest before the key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
 }
 
 impl ProviderProfile {
     pub fn new(name: impl Into<String>, protocol: ApiProtocol, url: impl Into<String>) -> Self {
         let url: String = url.into();
-        Self { name: name.into(), protocol, url: url.trim().trim_end_matches('/').to_string(), api_key: None, model: String::new(), context_window: None }
+        Self {
+            name: name.into(),
+            protocol,
+            url: url.trim().trim_end_matches('/').to_string(),
+            api_key: None,
+            model: String::new(),
+            context_window: None,
+            user_agent: None,
+        }
     }
 
     pub fn from_preset(preset: &BackendPreset) -> Self {
@@ -191,7 +204,9 @@ impl ProviderProfile {
     /// Where requests go and with which key.
     pub fn endpoint(&self) -> Endpoint {
         let (key, _) = self.resolve_key(|var| std::env::var(var).ok());
-        Endpoint::new(self.protocol, &self.url, key).with_context_window(self.context_window)
+        Endpoint::new(self.protocol, &self.url, key)
+            .with_context_window(self.context_window)
+            .with_user_agent(self.user_agent.clone())
     }
 
     /// The same server, however the address is written.
@@ -1213,9 +1228,12 @@ mod tests {
                 api_key: None,
                 model: model.into(),
                 context_window: None,
+                user_agent: Some("opencode/1.0.0".into()),
             }],
             ..AppConfig::default()
         };
+        // The provider's User-Agent rides its endpoint, wherever the key came from.
+        assert_eq!(with("http://x", "m").endpoint().user_agent.as_deref(), Some("opencode/1.0.0"));
         let cfg = with("", "");
         assert!(!cfg.is_ready_to_run(none), "nothing is known yet: the wizard has a job");
 

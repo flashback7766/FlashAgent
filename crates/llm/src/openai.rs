@@ -164,6 +164,9 @@ pub(crate) fn headers(client: &Client) -> reqwest::header::HeaderMap {
     if let Some(session) = client.opencode_session_header() {
         headers.insert("x-opencode-session", session);
     }
+    if let Some(ua) = client.provider_user_agent() {
+        headers.insert(reqwest::header::USER_AGENT, ua);
+    }
     headers
 }
 
