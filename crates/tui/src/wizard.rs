@@ -797,6 +797,15 @@ impl SetupWizard {
             models = models.saturating_sub(1).max(1);
             lines = self.render_page(width, presets, models);
         }
+        // Both windows are at their floor of one and the page still does not
+        // fit: one more preset on the list pushed the floor itself past the
+        // terminal. The blank separators give their rows up next — the hints,
+        // the border and the selected row were never on the table.
+        let blank = |row: &str| crate::strip_ansi(row).chars().all(|c| c.is_whitespace() || c == '│');
+        while lines.len() > room {
+            let Some(at) = lines.iter().rposition(|row| blank(row)) else { break };
+            lines.remove(at);
+        }
         lines
     }
 
