@@ -159,7 +159,10 @@ impl Term {
             for col in 0..cols {
                 line.push_str(screen.cell(row, col).map(|c| c.contents()).unwrap_or(" "));
             }
-            if let Some(col) = line.find(needle) {
+            // Cells are one character each; the match is a byte offset into
+            // the collected string, and the click wants the cell number.
+            if let Some(byte) = line.find(needle) {
+                let col = line[..byte].chars().count();
                 return Some((row + 1, col as u16 + 1));
             }
         }

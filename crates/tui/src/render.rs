@@ -82,6 +82,12 @@ pub(crate) struct Renderer {
     /// Screen row of the "more lines below" marker, when one is painted: a
     /// click there returns to the bottom, the way End does.
     scroll_marker: Option<usize>,
+    /// The close button's column in the open card's top row, when the card
+    /// drew one. `frame` measures it, `paint_layout` says which screen row
+    /// the card's top landed on.
+    overlay_close_col: Option<u16>,
+    /// (row, column) of the ✕ on screen, for a click.
+    overlay_close: Option<(usize, u16)>,
 }
 
 /// Where the scrollbar thumb sits while it is being dragged.
@@ -179,11 +185,18 @@ pub(crate) struct FrameState<'a> {
     /// Where the pointer sits on the open overlay's card: the line counted
     /// from the card's first row, and the column from the screen's left edge.
     pub(crate) overlay_hover: Option<(usize, u16)>,
-    /// The screen row the pointer is on, when it is over the transcript: the
-    /// rows a click can reach mark themselves.
-    pub(crate) hover_chat: Option<u16>,
+    /// The screen row and column the pointer is on, when it is over the
+    /// transcript: the rows and buttons a click can reach mark themselves.
+    pub(crate) hover_chat: Option<(u16, u16)>,
     /// The card line a click just landed on: the row keeps a pressed look.
     pub(crate) overlay_flash: Option<usize>,
+    /// The pointer is on the status line's context gauge.
+    pub(crate) hover_gauge: bool,
+    /// The pointer is on the "more lines below" marker.
+    pub(crate) hover_marker: bool,
+    /// A click on a welcome-card button, the gauge or the marker: those cells
+    /// keep a pressed look for a moment.
+    pub(crate) zone_flash: Option<(u16, usize, usize)>,
 }
 
 /// To know when a new card opens and should unfold.
@@ -547,6 +560,8 @@ impl Renderer {
             status_gauge: None,
             mouse_at: None,
             scroll_marker: None,
+            overlay_close_col: None,
+            overlay_close: None,
         }
     }
 
@@ -663,6 +678,12 @@ impl Renderer {
     pub(crate) fn chat_row_at(&self, y: u16) -> Option<usize> {
         let (first, count) = self.chat_view;
         ((y as usize) < count).then_some(first + y as usize)
+    }
+
+    /// The screen row a chat line is painted on, when it is on screen.
+    pub(crate) fn chat_screen_row(&self, line: usize) -> Option<u16> {
+        let (first, count) = self.chat_view;
+        (line >= first && line - first < count).then_some((line - first) as u16)
     }
 
     /// The subagent row on screen row `y`, if one is there.
@@ -1422,8 +1443,17 @@ struct LayoutInputs<'a> {
     /// What a click on a chat row reaches, when anything. The hover asks it
     /// once per transcript row on the screen.
     owner_at: &'a dyn Fn(usize) -> Option<flashagent_tui::Click>,
+    /// The cells a welcome-card button occupies, when the row and column land
+    /// on one. The hover lights exactly them.
+    zone_at: &'a dyn Fn(usize, usize) -> Option<(usize, usize)>,
     /// The screen row the pointer is on, when it is over the transcript.
-    hover_chat: Option<u16>,
+    hover_chat: Option<(u16, u16)>,
+    /// The pointer is on the status line's context gauge / the marker row.
+    hover_gauge: bool,
+    hover_marker: bool,
+    /// The cells a just-clicked welcome button, the gauge or the marker keeps
+    /// a pressed look on, for a moment.
+    zone_flash: Option<(u16, usize, usize)>,
 }
 
 impl Renderer {
@@ -1549,7 +1579,14 @@ impl Renderer {
             input_line_idx = append_question_card(&mut tail, question_gate, &st, width, inner_w, &border_color, joined);
         } else if let Some(overlay) = overlay {
             // The composer turns into the open menu or screen.
+            // The composer turns into the open menu or screen.
+            let first_overlay_line = tail.len();
             tail.extend(overlay.render(width, height as usize, st.overlay_hover, st.overlay_flash));
+            // Every card closes from its own corner: the top row's last dash
+            // becomes the ✕, and its cell is what a click there hits.
+            if let Some(first) = tail.get_mut(first_overlay_line) {
+                self.overlay_close_col = with_close_button(&mut first.1);
+            }
             input_line_idx = tail.len().saturating_sub(1);
         } else {
             let composer = append_composer(&mut tail, &st, width, height, t, &border_color, joined);
@@ -1605,11 +1642,18 @@ impl Renderer {
         self.paint_layout(&settled, &mut tail, LayoutInputs {
             width, height, card_key, card_start, paint_start, input_line_idx, text_cursor, border_color: &border_color, selection: st.selection,
             owner_at: &|i| chat.owner_at(i),
+            zone_at: &|row, col| chat.welcome_zone_at(row, col),
             hover_chat: st.hover_chat,
+            hover_gauge: st.hover_gauge,
+            hover_marker: st.hover_marker,
+            zone_flash: st.zone_flash,
         });
     }
     fn paint_layout(&mut self, settled: &[RenderLine], tail: &mut Vec<RenderLine>, layout: LayoutInputs<'_>) {
-        let LayoutInputs { width, height, card_key, card_start, paint_start, mut input_line_idx, text_cursor, border_color, selection, owner_at, hover_chat } = layout;
+        let LayoutInputs {
+            width, height, card_key, card_start, paint_start, mut input_line_idx, text_cursor, border_color, selection, owner_at, zone_at, hover_chat,
+            hover_gauge, hover_marker, zone_flash,
+        } = layout;
     // The conversation scrolls; the composer and the footer under it stay where
     // they are, so a reply can be written while reading back.
     let height = height as usize;
@@ -1712,13 +1756,46 @@ impl Renderer {
     } else {
         None
     };
+    self.overlay_close = self
+        .overlay_close_col
+        .zip(self.overlay_row)
+        .map(|(col, row)| (row, col));
     // The transcript's own hover: the row under the pointer, when a click
     // there would reach a thought or a tool call, takes a quiet background —
     // the same hint the card rows give theirs.
-    if let Some(row) = hover_chat {
+    if let Some((row, col)) = hover_chat {
         let r = row as usize;
-        if r < self.chat_rows_on_screen && r < rows.len() && (owner_at)(self.chat_view.0 + r).is_some() {
-            rows[r] = flashagent_tui::style_span(&rows[r], 0, width, "\x1b[48;2;44;50;62m", "\x1b[49m");
+        if r < self.chat_rows_on_screen && r < rows.len() {
+            // A welcome-card button lights exactly its own cells; a thought
+            // or tool call lights its whole row.
+            if let Some((from, to)) = (zone_at)(self.chat_view.0 + r, col as usize) {
+                rows[r] = flashagent_tui::style_span(&rows[r], from, to, "\x1b[48;2;44;50;62m", "\x1b[49m");
+            } else if (owner_at)(self.chat_view.0 + r).is_some() {
+                rows[r] = flashagent_tui::style_span(&rows[r], 0, width, "\x1b[48;2;44;50;62m", "\x1b[49m");
+            }
+        }
+    }
+    // The gauge and the marker carry the same quiet light while the pointer
+    // is on them.
+    if hover_gauge {
+        if let Some((row, from, to)) = self.status_gauge {
+            if (row as usize) < rows.len() {
+                rows[row as usize] = flashagent_tui::style_span(&rows[row as usize], from as usize, to as usize, "\x1b[48;2;44;50;62m", "\x1b[49m");
+            }
+        }
+    }
+    if hover_marker {
+        if let Some(row) = self.scroll_marker {
+            if row < rows.len() {
+                rows[row] = flashagent_tui::style_span(&rows[row], 0, width, "\x1b[48;2;44;50;62m", "\x1b[49m");
+            }
+        }
+    }
+    // A click's pressed look on the same cells: a welcome button, the gauge,
+    // the marker.
+    if let Some((row, from, to)) = zone_flash {
+        if (row as usize) < rows.len() {
+            rows[row as usize] = flashagent_tui::style_span(&rows[row as usize], from, to, "\x1b[48;2;110;82;32m", "\x1b[49m");
         }
     }
     // The drag selection, while the button is held: reverse video over the
@@ -1805,6 +1882,38 @@ impl Renderer {
     pub(crate) fn scroll_marker_press(&self, row: u16) -> bool {
         self.scroll_marker == Some(row as usize)
     }
+
+    /// The gauge's cells on screen, for the press look to land on them.
+    pub(crate) fn gauge_zone(&self) -> Option<(u16, usize, usize)> {
+        self.status_gauge.map(|(row, from, to)| (row, from as usize, to as usize))
+    }
+
+    /// A press on the open card's ✕: it closes what Esc closes.
+    pub(crate) fn overlay_close_hit(&self, row: u16, column: u16) -> bool {
+        match self.overlay_close {
+            Some((close_row, close_col)) => row as usize == close_row && (close_col..close_col + 2).contains(&column),
+            None => false,
+        }
+    }
+}
+
+/// The card's top border gives its last dash to a ✕: same width, one cell of
+/// the run now says click-here-to-close. Returns the ✕'s visible column.
+fn with_close_button(line: &mut String) -> Option<u16> {
+    let corner = ['╮', '╯', '┤'].iter().filter_map(|c| line.rfind(*c)).max()?;
+    let dash = line[..corner].rfind('─')?;
+    let close_col = visible_width(&line[..dash]) as u16;
+    // The dash sits inside a colour escape; the ✕ keeps it for what follows.
+    let border = line[..dash].rfind("\x1b[").map(|at| {
+        let rest = &line[at..];
+        rest.split_once('m').map_or(String::new(), |(seq, _)| format!("{seq}m"))
+    });
+    let styled = match border {
+        Some(border) => format!("\x1b[1;38;2;225;175;95m✕\x1b[0m{border}"),
+        None => "\x1b[1;38;2;225;175;95m✕\x1b[0m".to_string(),
+    };
+    line.replace_range(dash..dash + '─'.len_utf8(), &styled);
+    Some(close_col)
 }
 
 impl App {
@@ -1904,17 +2013,22 @@ impl App {
                 if self.click_flash.is_some_and(|(_, at)| now_ms.saturating_sub(at) >= CLICK_FLASH_MS) {
                     self.click_flash = None;
                 }
+                if self.zone_flash.is_some_and(|(_, _, _, at)| now_ms.saturating_sub(at) >= CLICK_FLASH_MS) {
+                    self.zone_flash = None;
+                }
                 let selection = match (self.selection_anchor, self.selection_head) {
                     (Some(a), Some(h)) => Some((a, h)),
                     _ => None,
                 };
                 let hover_chat = self
                     .mouse_at
-                    .map(|(row, _)| row)
-                    .filter(|row| (*row as usize) < self.renderer.chat_rows_on_screen);
+                    .filter(|(row, _)| (*row as usize) < self.renderer.chat_rows_on_screen);
                 FrameState {
                     selection,
                     hover_chat,
+                    hover_gauge: self.hovered.as_ref().is_some_and(|h| matches!(h, HoverTarget::Gauge)),
+                    hover_marker: self.hovered.as_ref().is_some_and(|h| matches!(h, HoverTarget::Marker)),
+                    zone_flash: self.zone_flash.map(|(row, from, to, _)| (row, from, to)),
                     overlay_hover,
                     overlay_flash: self.click_flash.map(|(line, _)| line),
                 cost_display: cost_display.as_deref(),
@@ -2124,6 +2238,22 @@ mod scrollbar_tests {
         assert_eq!(r.scroll_offset, 40, "one page up, the size of what the screen shows");
         assert!(r.scrollbar_drag.is_some(), "the press keeps the thumb, so the drag can go on");
         let _ = sb;
+    }
+
+    #[test]
+    fn the_close_button_takes_the_last_dash_of_the_top_border() {
+        let border = "\x1b[38;2;95;90;85m";
+        let mut line = format!("{border}╭─ \x1b[1;38;2;225;175;95mPick\x1b[0m {border}{}╮\x1b[0m", "─".repeat(20));
+        let width = visible_width(&line);
+        let col = with_close_button(&mut line);
+        assert_eq!(col, Some(width as u16 - 2), "the cell before the corner");
+        assert_eq!(visible_width(&line), width, "the corner keeps the card's width");
+        assert!(line.contains('✕'), "{line:?}");
+        assert!(line.contains("95;90;85m╮"), "the corner keeps its border colour: {line:?}");
+        // A card whose top row is not a border gains nothing.
+        let mut text = "no card here".to_string();
+        assert_eq!(with_close_button(&mut text), None);
+        assert_eq!(text, "no card here");
     }
 
     #[test]

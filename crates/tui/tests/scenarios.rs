@@ -3399,6 +3399,21 @@ fn the_command_palette_answers_a_click_on_its_rows() {
 }
 
 #[test]
+fn the_palette_s_own_close_button_closes_it() {
+    let server = MockServer::start(vec![Reply::Text("Sure.".into())]);
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+    term.send("\x0b");
+    term.wait_for("Command palette", WAIT);
+    // Every card carries a ✕ in its top-right corner; clicking it closes
+    // what Esc closes.
+    let (row, col) = term.find_on_screen("✕").expect("the card carries a close button");
+    term.click(row, col);
+    term.wait_for("Ask FlashAgent", WAIT);
+    quit(&mut term);
+}
+
+#[test]
 fn the_welcome_card_s_own_buttons_do_what_they_say() {
     let server = MockServer::start(vec![Reply::Text("Sure.".into())]);
     let home = Home::new();

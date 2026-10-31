@@ -71,7 +71,7 @@ impl Overlay {
     pub(crate) fn render(&self, width: usize, height: usize, hover: Option<(usize, u16)>, flash: Option<usize>) -> Vec<RenderLine> {
         match self {
             Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Provider(menu) | Overlay::Sessions(menu) | Overlay::Palette(menu) => {
-                menu.render_in(width, height.saturating_sub(MENU_FOOTER_ROWS))
+                menu.render_in(width, height.saturating_sub(MENU_FOOTER_ROWS), hover.map(|(line, _)| line), flash)
             }
             Overlay::Providers(view) => view.render(width),
             Overlay::Rewind(card) => card.render(width),

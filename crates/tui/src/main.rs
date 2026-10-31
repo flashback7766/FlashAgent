@@ -837,8 +837,12 @@ impl PendingSwitch {
 pub(crate) enum HoverTarget {
     /// Line from the card's first row, column from the screen's edge.
     Card(usize, u16),
-    /// Screen row of the transcript.
-    Chat(u16),
+    /// Screen row and column of the transcript.
+    Chat(u16, u16),
+    /// The context gauge at the end of the status line.
+    Gauge,
+    /// The "more lines below" marker.
+    Marker,
 }
 
 struct App {
@@ -910,8 +914,11 @@ struct App {
     hovered: Option<HoverTarget>,
     /// The card line a click just landed on, and when: the row keeps a
     /// pressed look for a moment, so a click answers even where nothing moves.
-    click_flash: Option<(usize, u64)>,
-    /// What a wheel throw still has left to spend: a trackpad's flick arrives as
+        click_flash: Option<(usize, u64)>,
+    /// A click on a welcome-card button, the gauge or the marker: the cells
+    /// keep a pressed look for a moment, then it fades.
+    zone_flash: Option<(u16, usize, usize, u64)>,
+/// What a wheel throw still has left to spend: a trackpad's flick arrives as
     /// a burst of small events and would otherwise stop dead at the end of it.
     wheel_momentum: i32,
     /// A quit refused because background tasks run; another soon after quits.
@@ -1523,6 +1530,8 @@ fn initial_app(init: InitialApp) -> App {
         mouse_at: None,
         hovered: None,
         click_flash: None,
+            zone_flash: None,
+            
         wheel_momentum: 0,
         task_lines: Vec::new(),
         tasks_refreshed: std::time::Instant::now(),

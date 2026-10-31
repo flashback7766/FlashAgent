@@ -1,5 +1,22 @@
 # Changelog
 
+## b626 — every clickable thing answers, and every card closes
+
+- **Menus light their rows.** The command palette and the model, effort,
+  provider and session menus mark the row under the pointer — a quiet ·
+  where the selection's › would be — and a clicked row keeps a pressed look
+  for a moment, the same treatment the other screens' rows already had. The
+  whole item answers its hover: label, description and the hidden-match row
+  are one row to the pointer.
+- **Every card closes from its own corner.** The top border's last dash
+  becomes an amber ✕ — the card keeps its width, one cell of the run now
+  says close — and a click there closes what Esc closes, on every menu,
+  screen and modal.
+- **The welcome card's buttons light exactly their own cells** under the
+  pointer, and flash where they were clicked; the context gauge and the
+  "more lines below" marker carry the same quiet light and the same pressed
+  look.
+
 ## b625 — the mouse reaches everything on the screen
 
 The mouse had the transcript and the settings screen; everything else —

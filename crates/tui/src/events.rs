@@ -856,14 +856,20 @@ impl App {
                 return Some(HoverTarget::Card(m.row as usize - top, m.column));
             }
         }
-        if (m.row as usize) < self.renderer.chat_rows_on_screen
-            && self
-                .renderer
-                .chat_row_at(m.row)
-                .and_then(|row| self.chat.owner_at(row))
-                .is_some()
-        {
-            return Some(HoverTarget::Chat(m.row));
+        if self.renderer.gauge_press(m.row, m.column) {
+            return Some(HoverTarget::Gauge);
+        }
+        if self.renderer.scroll_marker_press(m.row) {
+            return Some(HoverTarget::Marker);
+        }
+        if (m.row as usize) < self.renderer.chat_rows_on_screen {
+            if let Some(row) = self.renderer.chat_row_at(m.row) {
+                // A thought or tool call lights its row; a welcome-card
+                // button lights its own cells.
+                if self.chat.owner_at(row).is_some() || self.chat.welcome_button_at(row, m.column as usize).is_some() {
+                    return Some(HoverTarget::Chat(m.row, m.column));
+                }
+            }
         }
         None
     }
@@ -905,12 +911,14 @@ impl App {
         // The context gauge at the end of the status line is a widget of its
         // own the same way: a press there opens what F1 opens.
         if self.renderer.gauge_press(m.row, m.column) {
+            self.zone_flash = self.renderer.gauge_zone().map(|(row, from, to)| (row, from, to, flashagent_tui::anim::now_ms()));
             self.open_overlay(Overlay::Context(ContextModal::new(self.context_usage.clone())));
             self.renderer.request_reprint();
             return;
         }
         // The "more lines below" marker returns to the bottom, as End does.
         if self.renderer.scroll_marker_press(m.row) {
+            self.zone_flash = Some((m.row, 0, self.last_term_size.0 as usize, flashagent_tui::anim::now_ms()));
             self.renderer.scroll_offset = 0;
             self.renderer.request_reprint();
             return;
@@ -920,6 +928,11 @@ impl App {
         if self.overlay.is_none() {
             if let Some(row) = self.renderer.chat_row_at(m.row) {
                 if let Some(button) = self.chat.welcome_button_at(row, m.column as usize) {
+                    if let Some((from, to)) = self.chat.welcome_zone_at(row, m.column as usize) {
+                        if let Some(screen_row) = self.renderer.chat_screen_row(row) {
+                            self.zone_flash = Some((screen_row, from, to, flashagent_tui::anim::now_ms()));
+                        }
+                    }
                     self.welcome_button(cx, button);
                     return;
                 }
@@ -940,6 +953,12 @@ impl App {
         if let Some(top) = self.renderer.overlay_row {
             if (m.row as usize) >= top {
                 let line = m.row as usize - top;
+                // The card's own ✕ closes what Esc closes.
+                if self.renderer.overlay_close_hit(m.row, m.column) {
+                    self.overlay = None;
+                    self.renderer.request_reprint();
+                    return;
+                }
                 // The row answers for a moment even where nothing else moves:
                 // a click that toggled something one row down would otherwise
                 // read as lost.
