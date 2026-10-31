@@ -230,6 +230,9 @@ pub struct ChatLine {
     pub tool_result: Option<String>,
     /// Per-card expansion override.
     pub is_expanded: Option<bool>,
+    /// A preview was cut short and the owner asked for the whole block. Back
+    /// to `false` when the block folds again: a fresh open shows the glance.
+    pub full: bool,
     pub tool_calls: Vec<ToolCallRecord>,
     /// Which running subagent this line reports, so its row can be updated in
     /// place as the child works instead of a new line per event.
@@ -249,6 +252,7 @@ impl ChatLine {
             tool_name: None,
             tool_result: None,
             is_expanded: None,
+            full: false,
             tool_calls: Vec::new(),
             compaction: None,
         }
@@ -265,6 +269,7 @@ impl ChatLine {
             tool_name: None,
             tool_result: None,
             is_expanded: None,
+            full: false,
             tool_calls: Vec::new(),
             compaction: None,
         }
@@ -275,7 +280,7 @@ impl ChatLine {
 struct SettledRenderCache {
     lines: SettledLines,
     /// Beside `lines`, see `RowOwners`.
-    owners: std::sync::Arc<Vec<Option<usize>>>,
+    owners: std::sync::Arc<Vec<Option<Click>>>,
     boundary: usize,
     width: usize,
     expansion: ReasoningExpansion,
@@ -285,13 +290,29 @@ struct SettledRenderCache {
 /// on it opens or folds: a thought or a tool call. `None` for every other row.
 #[derive(Default)]
 struct RowOwners {
-    settled: std::sync::Arc<Vec<Option<usize>>>,
-    live: Vec<Option<usize>>,
+    settled: std::sync::Arc<Vec<Option<Click>>>,
+    live: Vec<Option<Click>>,
 }
 
 /// Shared, not copied: a long session has tens of thousands of rows, and
 /// copying them each frame cost as much as the whole history.
 pub type SettledLines = std::sync::Arc<Vec<RenderLine>>;
+
+/// What a click on a transcript row reaches: a block's header, which folds
+/// or opens it, or the cut of a preview, which shows the whole block. The
+/// body of an open block reaches nothing — it is text to read, and a click
+/// there used to fold pages of thought away by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Click {
+    Fold(usize),
+    Expand(usize),
+}
+
+/// The rows of an opened block shown before the cut. A long thought or a
+/// chatty tool used to pour hundreds of rows into the transcript and push
+/// the conversation off the screen; a preview keeps the box to a glance,
+/// and the cut answers a click with the whole block.
+pub const BLOCK_PREVIEW_ROWS: usize = 20;
 
 #[derive(Default)]
 pub struct ChatView {
@@ -1222,6 +1243,24 @@ fn render_subagent_answer_card(folded: &str, answer: &str, width: usize) -> Vec<
     lines
 }
 
+/// A tool card longer than a glance shows its head, the cut, and its last
+/// row; the cut answers a click with the whole card, and the header folds it
+/// all back. A card already shown in full, or one that fits, passes as is.
+fn cap_tool_card(mut card: Vec<RenderLine>, full: bool) -> Vec<RenderLine> {
+    if full || card.len() <= BLOCK_PREVIEW_ROWS + 2 {
+        return card;
+    }
+    let footer = card.pop();
+    let hidden = card.len().saturating_sub(BLOCK_PREVIEW_ROWS);
+    card.truncate(BLOCK_PREVIEW_ROWS);
+    let note = crate::i18n::tr_fill("… {n} more lines · click to show all", &[("n", &hidden.to_string())]);
+    card.push((LineKind::Tool, format!("  \x1b[38;2;140;145;160m{}\x1b[0m", clip_ansi(&note, 90))));
+    if let Some(footer) = footer {
+        card.push(footer);
+    }
+    card
+}
+
 fn render_single_tool_card(
     call: &ToolCallRecord,
     width: usize,
@@ -1475,7 +1514,7 @@ impl ChatView {
         // Where each line's rows start, in settled or live, for `RowOwners`.
         let mut starts: Vec<(bool, usize, usize)> = Vec::new();
 
-        let push_reasoning = |target: &mut Vec<RenderLine>, text: &str, secs: Option<u64>, is_streaming: bool, is_expanded: bool, stage: &str| {
+        let push_reasoning = |target: &mut Vec<RenderLine>, text: &str, secs: Option<u64>, is_streaming: bool, is_expanded: bool, full: bool, stage: &str| {
             if !is_expanded {
                 let chevron = "\x1b[38;2;120;125;140m›\x1b[0m";
                 let text_styled = if is_streaming {
@@ -1541,16 +1580,30 @@ impl ChatView {
                 let inner_w = box_w.saturating_sub(6).max(15);
                 // Tabs as spaces before the rows are measured and padded.
                 let safe_text: Vec<String> = trimmed_text.lines().map(terminal_safe).collect();
+                let mut body: Vec<RenderLine> = Vec::new();
                 for chunk in wrap(&safe_text.join("\n"), inner_w) {
                     let styled_chunk = md(&chunk);
                     let vis_len = visible_width(&styled_chunk);
                     let pad = " ".repeat(inner_w.saturating_sub(vis_len));
                     if chunk.is_empty() {
                         let empty_pad = " ".repeat(inner_w);
-                        target.push((LineKind::Reasoning, format!("{border_color}│{reset}  {empty_pad}  {border_color}│{reset}")));
+                        body.push((LineKind::Reasoning, format!("{border_color}│{reset}  {empty_pad}  {border_color}│{reset}")));
                     } else {
-                        target.push((LineKind::Reasoning, format!("{border_color}│{reset}  {}{pad}  {border_color}│{reset}", styled_chunk)));
+                        body.push((LineKind::Reasoning, format!("{border_color}│{reset}  {}{pad}  {border_color}│{reset}", styled_chunk)));
                     }
+                }
+                // The preview: a thought runs to hundreds of rows, and opening
+                // one poured them all into the transcript. The cut answers a
+                // click with the whole block; the header still folds it all.
+                let hidden = body.len().saturating_sub(BLOCK_PREVIEW_ROWS);
+                if hidden > 0 && !full {
+                    target.extend(body.drain(..BLOCK_PREVIEW_ROWS));
+                    let note = crate::i18n::tr_fill("… {n} more lines · click to show all", &[("n", &hidden.to_string())]);
+                    let note = clip_ansi(&note, inner_w);
+                    let pad = " ".repeat(inner_w.saturating_sub(visible_width(&note)));
+                    target.push((LineKind::Reasoning, format!("{border_color}│{reset}  {note}{pad}  {border_color}│{reset}")));
+                } else {
+                    target.append(&mut body);
                 }
                 let bot_dashes = box_w.saturating_sub(2);
                 target.push((
@@ -1673,7 +1726,7 @@ impl ChatView {
                 // server that interleaves may still add to it.
                 let answer_begun = self.streaming.is_some_and(|a| a > i && !self.lines[a].text.trim().is_empty());
                 let is_streaming = self.streaming_reasoning == Some(i) && !answer_begun;
-                push_reasoning(target, &line.text, line.reasoning_secs, is_streaming, is_expanded, &stage);
+                push_reasoning(target, &line.text, line.reasoning_secs, is_streaming, is_expanded, line.full, &stage);
                 continue;
             }
 
@@ -1705,7 +1758,7 @@ impl ChatView {
                         );
                         turn_reasoning_stages.push(stage.clone());
                         let is_streaming = self.streaming == Some(i);
-                        push_reasoning(target, &think_text, line.reasoning_secs, is_streaming, is_expanded, &stage);
+                        push_reasoning(target, &think_text, line.reasoning_secs, is_streaming, is_expanded, line.full, &stage);
                     }
                     if answer.is_empty() {
                         continue;
@@ -1736,7 +1789,7 @@ impl ChatView {
                         // The call in flight waits while an approval or question card is up.
                         let waiting = self.awaiting_user && self.open_tool == Some(i);
                         for call in &line.tool_calls {
-                            let card_lines = render_single_tool_card(call, width, waiting, None);
+                            let card_lines = cap_tool_card(render_single_tool_card(call, width, waiting, None), line.full);
                             for cl in card_lines {
                                 target.push(cl);
                             }
@@ -1753,7 +1806,7 @@ impl ChatView {
                             deleted: 0,
                             diff: None,
                         };
-                        let card_lines = render_single_tool_card(&synthetic_call, width, false, Some(&line.text));
+                        let card_lines = cap_tool_card(render_single_tool_card(&synthetic_call, width, false, Some(&line.text)), line.full);
                         for cl in card_lines {
                             target.push(cl);
                         }
@@ -1826,15 +1879,31 @@ impl ChatView {
             }
         }
         let owners_of = |rows: &[RenderLine], settled_rows: bool| {
-            let mut owners = vec![None; rows.len()];
+            let mut owners: Vec<Option<Click>> = vec![None; rows.len()];
             let marks: Vec<(usize, usize)> = starts.iter().filter(|(s, ..)| *s == settled_rows).map(|(_, at, i)| (*at, *i)).collect();
             for (k, (at, i)) in marks.iter().enumerate() {
                 let end = marks.get(k + 1).map_or(rows.len(), |(next, _)| *next);
                 let foldable = matches!(self.lines[*i].kind, LineKind::Reasoning | LineKind::Tool | LineKind::ToolError | LineKind::Assistant);
+                if !foldable || rows[*at].1.trim().is_empty() {
+                    continue;
+                }
+                // The header is the whole control: a click there folds or
+                // opens. The cut of a preview opens the block the rest of
+                // the way; the body of an open block is text to read. Only
+                // a header of a block kind counts — an answer that happens
+                // to open a span answers no click.
+                if matches!(rows[*at].0, LineKind::Reasoning | LineKind::Tool | LineKind::ToolError) {
+                    owners[*at] = Some(Click::Fold(*i));
+                }
                 for row in *at..end.min(rows.len()) {
-                    // Only the rows of the thought or the call, not an answer beside it.
-                    if foldable && matches!(rows[row].0, LineKind::Reasoning | LineKind::Tool | LineKind::ToolError) && !rows[row].1.trim().is_empty() {
-                        owners[row] = Some(*i);
+                    let plain = strip_ansi(&rows[row].1);
+                    let is_cut = plain
+                        .trim_start()
+                        .trim_start_matches('│')
+                        .trim_start()
+                        .starts_with('\u{2026}');
+                    if matches!(rows[row].0, LineKind::Reasoning | LineKind::Tool | LineKind::ToolError) && is_cut {
+                        owners[row] = Some(Click::Expand(*i));
                     }
                 }
             }
@@ -1883,23 +1952,41 @@ impl ChatView {
     }
 
     /// Opens or folds the thought or tool call drawn on `row` (settled rows, then
-    /// live, as the last `render_split` returned them). False when that row is
-    /// neither.
-    pub fn toggle_row(&mut self, row: usize, expansion: impl Into<ReasoningExpansion>) -> bool {
+    /// Folds or opens the block at line `i`, as a click on its header does.
+    /// A block folded again loses its shown-everything mark: a fresh open is
+    /// a glance, and the cut offers the rest.
+    pub fn toggle_line(&mut self, i: usize, expansion: impl Into<ReasoningExpansion>) -> bool {
+        // No kind check here: a thought lifted out of an answer's own
+        // `<think>` lives on an assistant line, and the owner map is what
+        // already says this line answers a click.
         let expansion = expansion.into();
-        let Some(i) = self.owner_at(row) else { return false };
         let last_user_idx = self.lines.iter().rposition(|l| l.kind == LineKind::User).unwrap_or(0);
         let Some(line) = self.lines.get_mut(i) else { return false };
         let shown = line.is_expanded.unwrap_or(expansion.all || (expansion.last && i >= last_user_idx));
         line.is_expanded = Some(!shown);
+        if !shown {
+            line.full = false;
+        }
         *self.settled_cache.lock() = SettledRenderCache::default();
         true
     }
 
-    /// The message a rendered row belongs to, when a click on it would reach
-    /// one — the same map the fold reads. A row of a thought or a tool call
-    /// has an owner; an answer beside them does not.
-    pub fn owner_at(&self, row: usize) -> Option<usize> {
+    /// Shows every row of a block the preview cut short. True when there was
+    /// something left to show.
+    pub fn show_full(&mut self, i: usize) -> bool {
+        let Some(line) = self.lines.get_mut(i) else { return false };
+        if line.full || !line.is_expanded.unwrap_or(false) {
+            return false;
+        }
+        line.full = true;
+        *self.settled_cache.lock() = SettledRenderCache::default();
+        true
+    }
+
+    /// What a click on a rendered row reaches, if anything — the same map the
+    /// hover reads. A block's header and a preview's cut answer; the body of
+    /// an open block and every answer beside a block do not.
+    pub fn owner_at(&self, row: usize) -> Option<Click> {
         let owners = self.row_owners.lock();
         match row.checked_sub(owners.settled.len()) {
             None => owners.settled.get(row).copied().flatten(),
@@ -2751,16 +2838,24 @@ hm".into()));
         let first_thought = before.iter().position(|t| t.contains("Thought:")).expect("a folded thought");
         // The answer next to it is not a card.
         let answer = before.iter().position(|t| t.contains("answer 1")).unwrap();
-        assert!(!v.toggle_row(answer, ReasoningExpansion::none()));
+        assert!(v.owner_at(answer).is_none(), "an answer answers no click");
 
-        assert!(v.toggle_row(first_thought, ReasoningExpansion::none()));
+        let fold = |v: &mut ChatView, row: usize| -> bool {
+            match v.owner_at(row) {
+                Some(Click::Fold(i)) => v.toggle_line(i, ReasoningExpansion::none()),
+                _ => false,
+            }
+        };
+        assert!(fold(&mut v, first_thought), "the header is a click target");
         let after = rows(&v);
         assert!(after.iter().any(|t| t.contains("details of turn 1")), "{after:#?}");
         assert!(!after.iter().any(|t| t.contains("details of turn 2")), "the other thought opened too");
 
-        // A second click folds it again.
-        let opened = after.iter().position(|t| t.contains("details of turn 1")).unwrap();
-        assert!(v.toggle_row(opened, ReasoningExpansion::none()));
+        // The body of an open block is text to read: a click there folds
+        // nothing. Only the header closes it again.
+        let body_row = after.iter().position(|t| t.contains("details of turn 1")).unwrap();
+        assert!(v.owner_at(body_row).is_none(), "the body answers no click");
+        assert!(fold(&mut v, first_thought));
         assert!(!rows(&v).iter().any(|t| t.contains("details of turn 1")));
     }
 
@@ -3069,14 +3164,17 @@ hm".into()));
         };
         assert!(!frame(&v).contains("Second line."), "folded to begin with");
 
-        // owners_of only marks Reasoning | Tool | ToolError | Assistant rows, so
-        // this is the part that has to work rather than be assumed.
-        assert!(v.toggle_row(row, ReasoningExpansion::default()), "the folded card is a click target");
+        // The header of the card is the whole control; the body of the open
+        // card answers no click.
+        let Some(Click::Fold(i)) = v.owner_at(row) else { panic!("the folded card's header is a click target") };
+        assert!(v.toggle_line(i, ReasoningExpansion::default()), "the folded card opens");
         let opened = frame(&v);
         assert!(opened.contains("Found it in the retry loop."), "{opened}");
         assert!(opened.contains("Second line."), "{opened}");
 
-        assert!(v.toggle_row(row, ReasoningExpansion::default()), "the opened card folds again");
+        let body = opened.lines().position(|t| t.contains("Second line.")).expect("the body is on screen");
+        assert!(v.owner_at(body).is_none(), "the body of an open card answers no click");
+        assert!(v.toggle_line(i, ReasoningExpansion::default()), "the opened card folds again");
         assert!(!frame(&v).contains("Second line."), "the click closed it again");
     }
 
@@ -3392,6 +3490,42 @@ hm".into()));
         chat.push_user("Followup question");
         chat.push_line(LineKind::Assistant, "Followup answer");
         assert_eq!(chat.last_assistant_text(), Some("Followup answer".into()));
+    }
+
+    #[test]
+    fn a_long_thought_opens_to_a_preview_with_a_cut_that_answers() {
+        let mut v = ChatView::default();
+        v.push_user("hi");
+        let long_thought = vec!["строка размышления о мире и его устройстве"; 40].join("\n");
+        v.push_line(LineKind::Reasoning, long_thought);
+        v.push_line(LineKind::Assistant, "the answer");
+
+        let rows = |v: &ChatView| -> Vec<String> {
+            let (settled, live) = v.render_split(100, ReasoningExpansion::none());
+            settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect()
+        };
+        // Folded first; the header opens the preview.
+        let folded = rows(&v);
+        let header = folded.iter().position(|t| t.contains("Thought:")).expect("the thought is folded");
+        let Some(Click::Fold(i)) = v.owner_at(header) else { panic!("the header answers") };
+        assert!(v.toggle_line(i, ReasoningExpansion::none()));
+
+        let opened = rows(&v);
+        let cut = opened.iter().position(|t| t.contains("more lines")).expect("the preview is cut");
+        let shown_body = cut - header - 1;
+        assert_eq!(shown_body, BLOCK_PREVIEW_ROWS, "the preview shows its share, not the hundreds");
+        // The cut opens the block the rest of the way; body rows answer nothing.
+        assert!(matches!(v.owner_at(cut), Some(Click::Expand(_))), "the cut is a click target");
+        assert!(v.owner_at(cut - 1).is_none(), "the body answers no click");
+        assert!(v.show_full(i));
+        let full = rows(&v);
+        assert!(!full.iter().any(|t| t.contains("more lines")), "the whole block is on screen");
+        assert!(full.iter().any(|t| t.contains("строка размышления")), "{full:?}");
+
+        // Folding again forgets the shown-everything: a fresh open is a glance.
+        assert!(v.toggle_line(i, ReasoningExpansion::none()));
+        assert!(v.toggle_line(i, ReasoningExpansion::none()));
+        assert!(rows(&v).iter().any(|t| t.contains("more lines")), "a fresh open is a preview again");
     }
 
     #[test]
