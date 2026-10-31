@@ -1581,7 +1581,7 @@ mod tests {
         // The tenth row answers to the 0 key, and OpenCode Go, the first
         // cloud preset, answers to 9.
         assert!(rendered.contains("9. OpenCode Go"), "{rendered}");
-        assert!(rendered.contains("0. Anthropic"), "{rendered}");
+        assert!(rendered.contains("0. AgentRouter"), "{rendered}");
         assert!(rendered.contains("more below"), "{rendered}");
     }
 

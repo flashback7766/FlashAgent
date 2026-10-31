@@ -79,6 +79,10 @@ pub struct Endpoint {
     /// The context window to run models with, where the server lets the
     /// client choose (Ollama's `num_ctx`). `None` leaves it to the client.
     pub context_window: Option<usize>,
+    /// A User-Agent of the provider's own choosing: some gateways serve only
+    /// the clients they know and refuse the rest before the key. It rides
+    /// every request as a header, over the agent's own name.
+    pub user_agent: Option<String>,
 }
 
 impl Endpoint {
@@ -89,11 +93,17 @@ impl Endpoint {
             url: url.trim().trim_end_matches('/').to_string(),
             api_key: api_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()),
             context_window: None,
+            user_agent: None,
         }
     }
 
     pub fn with_context_window(mut self, tokens: Option<usize>) -> Self {
         self.context_window = tokens.filter(|&n| n > 0);
+        self
+    }
+
+    pub fn with_user_agent(mut self, agent: Option<String>) -> Self {
+        self.user_agent = agent.map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
         self
     }
 
