@@ -1,5 +1,23 @@
 # Changelog
 
+## b620 — errors speak the provider's language, not JSON
+
+Seen live: a Go model refused with a note about regions, wrapped in two
+layers of JSON, and the transcript printed the dump.
+
+- **The provider's own sentence is dug out of any shape.** `error.message`, a
+  bare `error` string, `detail` (FastAPI's validation list included),
+  `errors[].message`, a `message` two levels deep — the first readable one
+  wins, and a gateway's "Upstream request failed:" wrapper is stripped. The
+  sentence becomes the headline; the raw body keeps its dim line under it,
+  for the transcript and the bug report.
+- **The known situations grew.** The status code is read where the server
+  named it, so "5000 tokens" no longer reads as a 500; a key the server
+  never saw ("Missing API key.", "requires a credential") joins the key
+  advice; a model gated by region or workspace policy quotes the provider's
+  instruction instead of inventing one; "no endpoints found" and "does not
+  exist" join the missing-model advice.
+
 ## b619 — the voice example is no longer a turn the model goes on about
 
 Seen live: every model, on the first message of a fresh conversation, offered
