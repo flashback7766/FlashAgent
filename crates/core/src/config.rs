@@ -285,6 +285,7 @@ impl<'de> Deserialize<'de> for ProviderProfile {
         let mut profile = ProviderProfile::new(name, protocol, url);
         profile.api_key = text("api_key").map(str::to_string);
         profile.model = text("model").unwrap_or_default().to_string();
+        profile.user_agent = text("user_agent").map(str::to_string);
         profile.context_window = value.get("context_window").and_then(|v| v.as_u64()).filter(|&n| n > 0).map(|n| n as usize);
         Ok(profile)
     }
@@ -1391,7 +1392,8 @@ mod tests {
     fn providers_survive_a_save_and_load_and_keys_stay_where_they_were_put() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let cfg = two_providers();
+        let mut cfg = two_providers();
+        cfg.providers[0].user_agent = Some("flashagent/test-provider".into());
         cfg.save_to(&path).unwrap();
         let loaded = AppConfig::load_from(&path).unwrap();
         assert_eq!(loaded.providers, cfg.providers);

@@ -23,6 +23,9 @@ const OPTIONAL_FIELDS: [&str; 16] = [
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Learned {
+    /// Learned only from an explicit refusal of Chat Completions, per model.
+    pub(crate) responses: bool,
+    pub(crate) responses_dropped: Vec<&'static str>,
     fields: Option<Fields>,
     dropped: Vec<&'static str>,
     /// Newer OpenAI models take `max_completion_tokens` and refuse `max_tokens`.
@@ -150,6 +153,7 @@ fn host_of(url: &str) -> Option<&str> {
 /// A URL with a path is taken as written.
 pub(crate) fn api_base(client: &Client) -> String {
     let base = client.base_url();
+    let base = base.strip_suffix("/responses").unwrap_or(&base).to_string();
     let has_path = base.split_once("://").map_or(base.as_str(), |(_, rest)| rest).contains('/');
     if has_path { base } else { format!("{base}/v1") }
 }
@@ -176,6 +180,10 @@ pub(crate) async fn stream(
     tools: &[ToolSpec],
     options: &TurnOptions,
 ) -> Result<EventStream, LlmError> {
+    let use_responses = client.learned.read().responses || client.base_url().ends_with("/responses");
+    if use_responses {
+        return crate::responses::stream(client, messages, tools, options).await;
+    }
     // A 400 often means an optional field was rejected. Up to
     // MAX_ADAPTIVE_RETRIES times: learn the preset list if the error names one,
     // else drop fields (All -> NoExtraSampling -> Standard).
@@ -199,6 +207,14 @@ pub(crate) async fn stream(
         }
         let status = resp.status().as_u16();
         let body_text = resp.text().await.unwrap_or_default();
+        // A refused request generated nothing, so switching the wire format
+        // here cannot repeat a streamed tool call. Never infer this from a
+        // model name, a 5xx, or an answer that was already accepted.
+        if matches!(status, 400 | 404 | 405 | 422) && crate::responses::required_by(&body_text) {
+            client.learned.write().responses = true;
+            drop(busy);
+            return crate::responses::stream(client, messages, tools, options).await;
+        }
         if status == 402 && adaptive_retries < MAX_ADAPTIVE_RETRIES {
             if let Some(cap) = affordable_tokens(&body_text).filter(|c| learned.token_cap.is_none_or(|old| *c < old)) {
                 learned.token_cap = Some(cap);
@@ -653,6 +669,9 @@ fn apply_listing(
     };
 
     let mut models = crate::thinking::parse_server_models(val);
+    if host_of(&client.base_url()).is_some_and(|h| h.eq_ignore_ascii_case("agentrouter.org")) {
+        crate::thinking::fill_agentrouter_metadata(&mut models);
+    }
     if let Some(extra) = extra_v0 {
         models = crate::thinking::merge_server_models(models, crate::thinking::parse_server_models(extra));
     }
